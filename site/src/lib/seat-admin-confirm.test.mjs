@@ -30,8 +30,8 @@ test("the workspace grant leads with the decision; the full lists are under Show
   const visible = parts.filter((node) => node !== more && !node.hidden);
   assert.deepEqual(visible.map((node) => Object.keys(node.dataset)[0] ?? node.className), ["seatAdminScopeName", "seatAdminSummary", "seatAdminLater", "sa-field", "sa-confirm__end-note"]);
   assert.equal(visible[0].textContent, "Workspace: Rivera household", "a single eligible workspace is said as text");
-  assert.equal(visible[1].textContent, workspaceAdminSummary("Atlas"));
-  assert.equal(visible[2].textContent, workspaceAdminLater("Atlas", copy.deferred.length));
+  assert.equal(visible[1].textContent, workspaceAdminSummary());
+  assert.equal(visible[2].textContent, workspaceAdminLater(copy.deferred.length));
   assert.ok(visible[3].textContent.startsWith("End date"));
   assert.equal(visible[4].textContent, "Admin access stays on until you remove it or retire this agent.");
   // The chooser is still there and still carries the value; it is only out of sight.
@@ -54,8 +54,8 @@ test("several workspaces keep the chooser in view; the count of later powers fol
   const parts = body(dialog).children;
   assert.equal(parts[0].hidden, false, "the chooser shows when there is a choice");
   assert.ok(!parts.some((node) => "seatAdminScopeName" in node.dataset));
-  assert.equal(workspaceAdminLater("Atlas", 5), "This grant also includes 5 permissions that aren’t available yet. If they’re enabled for this grant while it’s active, Atlas can use them without another approval.");
-  assert.equal(workspaceAdminLater("Atlas", 1), "This grant also includes 1 permission that isn’t available yet. If it’s enabled for this grant while it’s active, Atlas can use it without another approval.");
+  assert.equal(workspaceAdminLater(5), "This grant also includes 5 permissions that aren’t available yet. If they’re enabled for this grant while it’s active, this agent can use them without another approval.");
+  assert.equal(workspaceAdminLater(1), "This grant also includes 1 permission that isn’t available yet. If it’s enabled for this grant while it’s active, this agent can use it without another approval.");
 });
 
 test("the organization grant keeps its layout until its own change", () => {
@@ -76,8 +76,8 @@ test("the summary is tied to the fixed lists: it reflects Available now, and the
     "Cancel member invitations you created",
     "Create new agent seats you own in this workspace",
   ]);
-  const summary = workspaceAdminSummary("Atlas");
-  assert.equal(summary, "Atlas can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. Atlas can also remove eligible members, which removes their agents and Lists & docs access from this workspace.");
+  const summary = workspaceAdminSummary();
+  assert.equal(summary, "This agent can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. It can also remove eligible members, which removes their agents and Lists & docs access from this workspace.");
   // The limits the security reviewer asked to keep in view: "member" on invitations, and what removing a member takes with it.
   assert.match(summary, /cancel member invitations you created/); assert.match(summary, /removes their agents and Lists & docs access/);
   // Nothing from the deferred or excluded lists is promised as available now.

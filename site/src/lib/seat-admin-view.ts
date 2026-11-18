@@ -136,17 +136,19 @@ export interface SeatAdminConfirmationState {
 let nextConfirmationId = 0;
 
 /** What a workspace admin can do today: the "Available now" list of the fixed copy in two sentences, in the security
- * reviewer's words. It keeps "member" on invitations and says what removing a member takes with it. The list itself
- * stays verbatim under Show permissions; a test fails if that list changes without this summary being reread. */
-export function workspaceAdminSummary(agentName: string): string {
-  return `${agentName} can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. ${agentName} can also remove eligible members, which removes their agents and Lists & docs access from this workspace.`;
+ * reviewer's words. It keeps "member" on invitations and says what removing a member takes with it. The title already
+ * names the agent, so the sentences say "This agent" and "It": a long name said three times pushed the end date out of
+ * view on a narrow phone. The list itself stays verbatim under Show permissions; a test fails if that list changes
+ * without this summary being reread. */
+export function workspaceAdminSummary(): string {
+  return "This agent can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. It can also remove eligible members, which removes their agents and Lists & docs access from this workspace.";
 }
 /** The grant also records permissions that are not switched on yet. That is said beside the decision, with their count
  * from the fixed list. "If": a release can leave this grant ineligible, and an action may never become available. */
-export function workspaceAdminLater(agentName: string, count: number): string {
+export function workspaceAdminLater(count: number): string {
   return count === 1
-    ? `This grant also includes 1 permission that isn’t available yet. If it’s enabled for this grant while it’s active, ${agentName} can use it without another approval.`
-    : `This grant also includes ${count} permissions that aren’t available yet. If they’re enabled for this grant while it’s active, ${agentName} can use them without another approval.`;
+    ? "This grant also includes 1 permission that isn’t available yet. If it’s enabled for this grant while it’s active, this agent can use it without another approval."
+    : `This grant also includes ${count} permissions that aren’t available yet. If they’re enabled for this grant while it’s active, this agent can use them without another approval.`;
 }
 
 /** Append dialog inside the app's token scope, then call open(). One instance per intent.
@@ -204,11 +206,11 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
     sections.push(section);
   }
   if (decisionFirst) {
-    const can = element(doc, "p", "sa-confirm__line", workspaceAdminSummary(options.agentName));
+    const can = element(doc, "p", "sa-confirm__line", workspaceAdminSummary());
     can.dataset.seatAdminSummary = "";
     body.append(can);
     if (copy.deferred.length) {
-      const later = element(doc, "p", "sa-confirm__later", workspaceAdminLater(options.agentName, copy.deferred.length));
+      const later = element(doc, "p", "sa-confirm__later", workspaceAdminLater(copy.deferred.length));
       later.dataset.seatAdminLater = "";
       body.append(later);
     }
