@@ -70,8 +70,9 @@ INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${ws}','Stamp
 INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES('${ws}','${owner}','owner');`;
 
   // 20261118000004 files each new signal at commit with a deferred trigger, and this drill alters swarm.signals
-  // after inserting some: its own rollback takes the conversations away first.
-  runSql(`${repoSql('deploy/release-proofs/conversations/20261118000004-rollback.sql')}
+  // after inserting some: its own rollback takes the conversations away first, after step 2a's (20261118000005).
+  runSql(`${repoSql('deploy/release-proofs/conversations-2a/20261118000005-rollback.sql')}
+${repoSql('deploy/release-proofs/conversations/20261118000004-rollback.sql')}
 ${fixture}
 CREATE TEMP TABLE before_stamp AS
   SELECT p.oid::regprocedure::text AS signature, pg_get_functiondef(p.oid) AS definition, p.proowner, p.prosecdef, p.proconfig, ${acl('p.proacl')} AS acl

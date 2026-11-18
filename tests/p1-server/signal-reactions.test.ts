@@ -242,10 +242,14 @@ test("people and agents add and remove emojis on a public message, each once, an
   assert.deepEqual((await reactionsSeenBy(owner.id, message)).map((r) => r.emoji),
     ["\u{1F440}", "\u{1F440}", "\u{1F6E0}️"]);
 
-  // Each change tells the workspace's tabs which message moved, and nothing private.
-  const sent = (await frames(workspaceTopic(), since)).filter((p) => p.signal_id === message);
-  assert.ok(sent.length >= 5, `a frame per change on the workspace topic: ${JSON.stringify(sent)}`);
-  for (const payload of sent) assert.deepEqual(Object.keys(payload).sort(), ["created_at", "signal_id", "v"]);
+  // Each change tells every reader's own topic that something moved, with no id (20261118000005), and the
+  // workspace topic hears nothing.
+  for (const person of [owner, other]) {
+    const sent = await frames(memberTopic(person.id), since);
+    assert.ok(sent.length >= 6, `the post and a frame per change on each reader's topic: ${JSON.stringify(sent)}`);
+    for (const payload of sent) assert.deepEqual(payload, { v: 1 });
+  }
+  assert.deepEqual(await frames(workspaceTopic(), since), []);
 });
 
 test("what a reaction may carry: one emoji, an agent's ack, a known shortcode", async () => {
@@ -368,7 +372,10 @@ test("a private message: only those it is addressed to react, and only their top
   const since2 = new Date();
   assert.equal((await react(agentA.token, toAgent, "\u{1F440}", { source: "ack" })).status, 200);
   assert.equal((await react(agentB.token, toAgent, "\u{1F440}")).status, 404);
-  assert.ok((await frames(memberTopic(owner.id), since2)).length >= 1, "the addressed agent's owner reads it, and hears it");
+  // The owner reads it (today's read rule admits an agent's owner), but hears nothing: since 20261118000005 a
+  // 1:1's frames go to its people only, and ownership is never membership. The sender hears it.
+  assert.equal((await frames(memberTopic(owner.id), since2)).length, 0, "the addressed agent's owner hears nothing");
+  assert.ok((await frames(memberTopic(other.id), since2)).length >= 1, "its sender, a member, hears it");
   const seenBySibling = await sql.begin(async (tx) => {
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner.id, role: "authenticated", agent_principal_id: agentB.principal })}, true)`;
     await tx.unsafe("SET LOCAL ROLE authenticated");

@@ -3794,15 +3794,17 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   const [{ n: afterOpenRealtime }] = await sql<{ n: number }[]>`
     SELECT count(*)::int AS n FROM realtime.messages WHERE topic = ${topic}
   `;
-  assert.equal(afterOpenRealtime, baselineRealtime + 1, "open-channel post still broadcasts on workspace Realtime topic");
+  // Since 20261118000005 an open-channel post is announced on each reader's own topic, never the shared one.
+  assert.equal(afterOpenRealtime, baselineRealtime, "nothing reaches the workspace Realtime topic");
   const realtimePayloads = await sql<{ event: string; extension: string; payload: Record<string, unknown> }[]>`
-    SELECT event, extension, payload FROM realtime.messages WHERE topic = ${topic} ORDER BY inserted_at DESC LIMIT 1
+    SELECT event, extension, payload FROM realtime.messages WHERE topic = ${`cswarm-member:${ws}:${outsiderC.id}`}
+    ORDER BY inserted_at DESC LIMIT 1
   `;
   assert.equal(realtimePayloads[0]?.event, "signal");
   assert.equal(realtimePayloads[0]?.extension, "broadcast");
-  const broadcastSignalId = (realtimePayloads[0]?.payload?.signal_id as string | undefined) ??
-    ((realtimePayloads[0]?.payload?.payload as Record<string, unknown> | undefined)?.signal_id as string | undefined);
-  assert.equal(broadcastSignalId, openPingId, "open-channel Realtime frame carries openPing signal_id");
+  const openFrame = (realtimePayloads[0]?.payload?.payload as Record<string, unknown> | undefined) ?? realtimePayloads[0]?.payload;
+  assert.deepEqual(Object.keys(openFrame ?? {}).filter((key) => key !== "id"), ["v"],
+    `the poster's own topic hears a bare frame for ${openPingId}`);
 
   // 2. swarm_read.agent_wake_path (while privInboundAsk is unacked & unleased):
   // personA sees agentX's unobserved #lock delivery; ownerB & outsiderC see 0 rows!
@@ -5992,9 +5994,11 @@ test("a private channel's message reaches each person in it on their own Realtim
   await post(personA.jwt, { channel: lockSlug, body: "After the workspace removal" });
   assert.deepEqual(await frames(), expected({ [personA.id]: 6, [personD.id]: 3, [outsiderC.id]: 1 }));
 
-  // An open channel still announces on the shared topic and on no person's.
+  // An open channel announces on the own topic of every live person in the workspace (20261118000005), and
+  // never on the shared topic: not the one removed from the workspace, whose socket may still be open.
   await post(personA.jwt, { channel: openSlug, body: "Open post" });
-  assert.deepEqual(await frames(), expected({ [personA.id]: 6, [personD.id]: 3, [outsiderC.id]: 1 }, shared + 1));
+  assert.deepEqual(await frames(),
+    expected({ [personA.id]: 7, [personD.id]: 4, [outsiderC.id]: 1, [ownerB.id]: 1 }, shared));
 
   // Who may read a member topic. Each topic below holds at least one row, so a count of 0 is a refusal.
   const claimsOf = (jwt: string) =>
