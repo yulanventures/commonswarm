@@ -89,6 +89,8 @@ test('the empty view tells a person how lists are made, in plain words', () => {
     recoverDraft: async () => { throw new Error('not used'); },
   }).getState());
   assert.match(html, /No lists or docs yet\. Ask an agent: “Create a CommonSwarm list called Groceries\.”/);
+  // With nothing to select, the view does not also ask the person to select something.
+  assert.doesNotMatch(html, /Select a list, doc or file to read it\./);
   assert.match(html, /<p class="hh-eyebrow">Lists &amp; docs<\/p>/);
   assert.doesNotMatch(html, /Household objects<\/p>|Approved operations|retained history/);
 });
