@@ -8,7 +8,16 @@ struct Workspace: Decodable, Hashable, Identifiable {
 
 struct Conversation: Hashable, Identifiable {
     enum Destination: Hashable { case general, channel(UUID, String), person(UUID), agent(UUID) }
-    let id: Destination
+    enum ID: Hashable { case general, channel(UUID), person(UUID), agent(UUID) }
+    let destination: Destination
+    var id: ID {
+        switch destination {
+        case .general: .general
+        case .channel(let uuid, _): .channel(uuid)
+        case .person(let uuid): .person(uuid)
+        case .agent(let uuid): .agent(uuid)
+        }
+    }
     let name: String
     let symbol: String
     var isDirect: Bool {
@@ -31,6 +40,8 @@ struct Post: Encodable {
     let stream = ["kind": "workspace"]
     let command: [String: String?]
 
+    var body: String? { command["body"] ?? nil }
+
     init(id: UUID, workspace: UUID, destination: Conversation.Destination, body: String) {
         command_id = id
         workspace_id = workspace
@@ -52,6 +63,7 @@ struct Post: Encodable {
 enum APIError: Error { case refused(Int), invalidResponse }
 
 struct ConversationAPI {
+    static let pageSize = 50
     let origin: URL
     let publicKey: String
     let session: HumanSession
@@ -91,16 +103,16 @@ struct ConversationAPI {
         async let agents: [Agent] = rows("agent_principals", ["select": "principal_id,name", "workspace_id": filter, "revoked_at": "is.null"])
         let (channelRows, peopleRows, agentRows) = try await (channels, people, agents)
         let dms = peopleRows.filter { $0.user_id != session.userID }.map {
-            Conversation(id: .person($0.user_id), name: $0.display_name ?? "Member", symbol: "person.crop.circle")
-        } + agentRows.map { Conversation(id: .agent($0.principal_id), name: $0.name, symbol: "cpu") }
-        return [Conversation(id: .general, name: "#general", symbol: "number")] + channelRows.map {
-            Conversation(id: .channel($0.channel_id, $0.slug), name: "#" + $0.slug, symbol: $0.visibility == "private" ? "lock" : "number")
+            Conversation(destination: .person($0.user_id), name: $0.display_name ?? "Member", symbol: "person.crop.circle")
+        } + agentRows.map { Conversation(destination: .agent($0.principal_id), name: $0.name, symbol: "cpu") }
+        return [Conversation(destination: .general, name: "#general", symbol: "number")] + channelRows.map {
+            Conversation(destination: .channel($0.channel_id, $0.slug), name: "#" + $0.slug, symbol: $0.visibility == "private" ? "lock" : "number")
         } + dms.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     func history(_ workspace: UUID, _ destination: Conversation.Destination, before: Message? = nil) async throws -> [Message] {
         var query = ["select": "id,from,from_kind,body,created_at", "workspace_id": "eq." + workspace.uuidString,
-                     "order": "created_at.desc,id.desc", "limit": "50"]
+                     "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {
         case .general:

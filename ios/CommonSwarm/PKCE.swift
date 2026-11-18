@@ -92,6 +92,8 @@ fileprivate struct TokenResponse: Decodable {
 @MainActor
 final class HumanSession {
     nonisolated let userID: UUID
+    private struct DraftKey: Hashable { let workspace: UUID; let conversation: Conversation.ID }
+    private var drafts: [DraftKey: Composer] = [:]
     private var accessToken: String?
     private let transport = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
     var isActive: Bool { accessToken != nil }
@@ -111,7 +113,16 @@ final class HumanSession {
         return response
     }
 
+    func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
+        let key = DraftKey(workspace: workspace, conversation: conversation)
+        if let draft = drafts[key] { return draft }
+        let draft = Composer()
+        drafts[key] = draft
+        return draft
+    }
+
     func signOut() {
+        drafts.removeAll()
         accessToken = nil
         transport.invalidateAndCancel()
     }
