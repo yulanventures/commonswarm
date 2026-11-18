@@ -461,10 +461,26 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__i
   min-inline-size: 44px; min-block-size: 44px; padding: 8px 10px; border: 0; border-radius: 5px;
   color: var(--cs-ink); background: transparent; font: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item:is(:hover, [aria-current="page"]) { background: var(--cs-selected); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item:hover { background: var(--cs-selected); }
+/* The workspace you are in is marked by a tick and a heavier name, not by a fill: the fill is what hovering looks
+   like, and a mark that is only a colour is no mark for someone who cannot tell the two greys apart. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item[aria-current="page"] { font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item[aria-current="page"]::after {
+  content: ""; flex: none; inline-size: 16px; block-size: 16px; background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item[aria-current="page"]::after { forced-color-adjust: none; background: ButtonText; }
+}
 /* Signed in, each row ends in its workspace's settings gear. The list widens so a name keeps room beside it on a narrow rail. */
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__list:has(> .cs-workspace-picker__row) { min-inline-size: max(100%, 15rem); }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__row { display: flex; align-items: stretch; gap: 2px; min-inline-size: 0; }
+/* Switching and settings are two different things: a hairline stands between the name and its gear. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__row { display: flex; align-items: stretch; gap: 9px; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings { position: relative; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings::before {
+  content: ""; position: absolute; inset-block: 10px; inset-inline-start: -5px; border-inline-start: 1px solid var(--cs-line);
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__row > .cs-workspace-picker__item { flex: 1 1 auto; min-inline-size: 0; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings {
   display: inline-grid; place-items: center; flex: none; box-sizing: border-box;
@@ -503,8 +519,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail > [data-workspace-pic
 
 /* Channels C1. The picker's last entry is New workspace (it left the rail). */
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new {
-  display: flex; align-items: center; min-inline-size: 44px; min-block-size: 44px; padding: 8px 10px; margin-block-start: 2px;
-  border-block-start: 1px solid var(--cs-line); border-radius: 5px; color: var(--cs-ink); text-decoration: none;
+  position: relative; display: flex; align-items: center; min-inline-size: 44px; min-block-size: 44px; padding: 8px 10px; margin-block-start: 7px;
+  border-radius: 5px; color: var(--cs-ink); text-decoration: none;
+}
+/* The workspaces are one group and New workspace is another: a straight rule between them, the popover's full width. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new::before {
+  content: ""; position: absolute; inset: -4px -4px auto; border-block-start: 1px solid var(--cs-line); pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new:hover { background: var(--cs-selected); }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
