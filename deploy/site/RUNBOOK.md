@@ -129,6 +129,7 @@ also refuses local validator bytes that differ from the build receipt.
 
 3. Create `/srv/commonswarm/site/releases` and give the SSH deploy user write access to `/srv/commonswarm/site`.
 4. Copy `deploy/site/commonswarm-site.caddy` to `/etc/caddy/sites/commonswarm-site.caddy`. Validate and reload Caddy with the box's normal admin procedure.
+   Before copying a changed file, run `deploy/site/check-site-caddy.sh /path/to/caddy` with a Caddy binary of the box's pinned version. It runs the rules on a loopback port with a temporary folder, touches no running server, and fails if any address answers with the wrong status, type, body or cache header.
 5. The original cutover read local `site/.env`; current releases use the explicit public JSON and H0 input described above.
 6. Keep `site-staging.commonswarm.com` proxied to the box until the production cutover is complete.
 

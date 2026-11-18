@@ -21,11 +21,22 @@ test("the built not-found page works from any address and stays out of the sitem
   assert.doesNotMatch(await read("../dist/sitemap.xml"), /\/404/u);
 });
 
-test("the web server serves that page with status 404 and keeps the plain answer when it is missing", async () => {
+test("the web server serves that page with status 404, only to page requests, and keeps the plain answer otherwise", async () => {
   const caddy = await read("../../deploy/site/commonswarm-site.caddy");
   const errors = caddy.slice(caddy.indexOf("handle_errors {"));
-  assert.match(errors, /@notFoundPage \{\s*expression \{http\.error\.status_code\} == 404 \|\| \{http\.error\.status_code\} == 400\s*file \/404\.html\s*\}/u);
+  const matcher = errors.match(/@notFoundPage \{\s*expression `([^`]+)`\s*file \/404\.html\s*\}/u)?.[1];
+  assert.ok(matcher, "the page matcher is one expression plus the file check");
+  assert.match(matcher, /\{http\.error\.status_code\} == 404 \|\| \{http\.error\.status_code\} == 400/u);
+  // A missing script, document or data file must get the plain answer, never HTML: the matcher reads the
+  // original address, leaves out the asset folders, and takes an extension only when it is .html.
+  assert.match(matcher, /!\{http\.request\.orig_uri\.path\}\.matches\("\^\/\(_astro\|fonts\)\/"\)/u);
+  assert.match(matcher, /\{http\.request\.orig_uri\.path\}\.matches\("\\\\\.html\?\/\?\$"\) \|\| !\{http\.request\.orig_uri\.path\}\.matches\("\\\\\.\[\^\/\.\]\+\/\?\$"\)/u);
+  // The same two tests, run here on addresses, so the rule's meaning is pinned and not only its text.
+  const asksForPage = path => !/^\/(_astro|fonts)\//u.test(path) && (/\.html?\/?$/u.test(path) || !/\.[^/.]+\/?$/u.test(path));
+  for (const path of ["/nope", "/nope/", "/guides/missing", "/old-page.html", "/v1.2/guide", "/api.md/extra"]) assert.ok(asksForPage(path), path);
+  for (const path of ["/missing.js", "/docs/missing.md", "/missing.md/", "/missing.txt", "/missing.json", "/missing.xml", "/missing.png",
+    "/install.sh", "/_astro/missing.Zz99.js", "/_astro/", "/_astro/nodots", "/fonts/nodots", "/.env"]) assert.ok(!asksForPage(path), path);
   assert.match(errors, /handle @notFoundPage \{[\s\S]*?rewrite \* \/404\.html\s*file_server \{\s*status 404\s*\}/u);
   assert.ok(errors.indexOf("handle @notFoundPage") < errors.indexOf("handle @notFound {"), "the page is tried before the plain answer");
-  assert.match(errors, /handle @notFound \{[\s\S]*?respond <<BODY[\s\S]*?BODY 404/u);
+  assert.match(errors, /handle @notFound \{\s*header Content-Type "text\/plain; charset=utf-8"\s*respond <<BODY[\s\S]*?BODY 404/u);
 });
