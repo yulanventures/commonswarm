@@ -127,9 +127,15 @@ also refuses local validator bytes that differ from the build receipt.
    /etc/caddy/certs/commonswarm.com.key
    ```
 
+   The site block also requires a client certificate from the edge. Confirm its trust pool exists and is readable by the Caddy service:
+
+   ```text
+   /etc/caddy/aop/commonswarm.com/ca.pem
+   ```
+
 3. Create `/srv/commonswarm/site/releases` and give the SSH deploy user write access to `/srv/commonswarm/site`.
 4. Copy `deploy/site/commonswarm-site.caddy` to `/etc/caddy/sites/commonswarm-site.caddy`. Validate and reload Caddy with the box's normal admin procedure.
-   Before copying a changed file, run `deploy/site/check-site-caddy.sh /path/to/caddy` with a Caddy binary of the box's pinned version. It runs the rules on a loopback port with a temporary folder, touches no running server, and fails if any address answers with the wrong status, type, body or cache header.
+   Before copying a changed file, run `deploy/site/check-site-caddy.sh /path/to/caddy` with a Caddy binary of the box's pinned version. It runs the rules on a loopback port with a temporary folder, touches no running server, and fails if any address answers with the wrong status, type, body or cache header. It needs `curl` and `openssl` on the machine that runs it: it also runs the TLS block on its own listener with throwaway certificates, and fails unless a connection without a trusted client certificate is refused. Without `openssl` the check fails; it never passes with that rule untested. Every listener it starts is bound to `127.0.0.1`, which it verifies before serving.
 5. The original cutover read local `site/.env`; current releases use the explicit public JSON and H0 input described above.
 6. Keep `site-staging.commonswarm.com` proxied to the box until the production cutover is complete.
 

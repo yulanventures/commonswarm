@@ -1,7 +1,15 @@
 # site-staging.commonswarm.com follows the zone rule <service>-staging and lets the full path through Cloudflare
 # be checked with parity-check.mjs before commonswarm.com and www move (HezLead approved the naming rule).
 https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commonswarm.com {
-	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+	# The origin answers only requests that present a client certificate signed by the pool below
+	# (the edge in front of it does); anything reaching the box directly is refused at the handshake.
+	# Paths and settings only: the certificate, key and trust pool live on the box.
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key {
+		client_auth {
+			mode require_and_verify
+			trust_pool file /etc/caddy/aop/commonswarm.com/ca.pem
+		}
+	}
 	root * /srv/commonswarm/site/current
 
 	route {
