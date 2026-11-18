@@ -320,3 +320,20 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice { min-block-size: 44px; font-size: 16px; }
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice input { inline-size: 20px; block-size: 20px; min-block-size: 0; }
 }
+
+/* More: one quiet row that opens the rest (clean-up, move, the workspace ID, Close workspace). */
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-more {
+  margin-block-start: 16px;
+  border-block-start: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-more > summary {
+  display: flex;
+  align-items: center;
+  min-block-size: 44px;
+  color: var(--k-shell-secondary);
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-more > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

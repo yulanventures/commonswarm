@@ -177,9 +177,18 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
+  /* What a person comes here for stays in view: the name, who is in it, and who may create channels. Everything else
+     is one press away under More: clean-up, moving the workspace, its ID, and closing it. More starts closed, so the
+     one action that cannot be undone is never the first thing on screen. */
+  const more = document.createElement("details");
+  more.className = "dashboard__workspace-more";
+  more.dataset.workspaceMore = "";
+  const moreSummary = document.createElement("summary");
+  moreSummary.textContent = "More";
+  more.append(moreSummary, cleanup);
   root.replaceChildren(titleRow, counts);
   if (options.channelPolicy) root.append(channelPolicyControl(root, options.channelPolicy));
-  root.append(cleanup);
+  root.append(more);
   if (options.moveDestinations?.length && options.onMove) {
     const form = document.createElement("form");
     form.className = "dashboard__workspace-move";
@@ -235,11 +244,11 @@ export function renderWorkspaceSettings(
       }
     });
     form.append(label, move, error);
-    root.append(form);
+    more.append(form);
   }
-  // The workspace ID is for support and for setting up an agent by hand, so it sits after the settings a person
-  // came here to change, still one press from copied, and before the one action that cannot be undone.
-  root.append(identity, danger);
+  // The workspace ID is for support and for setting up an agent by hand. Close workspace is last, with its typed
+  // confirmation beside it.
+  more.append(identity, danger);
   return { confirmInput: input, closeButton: button };
 }
 
