@@ -40,7 +40,13 @@ test("Connected apps DOM uses textContent, durable rereads, and no browser owner
   assert.match(source, /revoke\.textContent = "Disconnect app";/u);
   assert.match(source, /revoke\.textContent = "Remove agent";/u);
   assert.match(source, /"Approved workspaces"/u);
-  assert.match(source, /`Agents using this connection \(\$\{connection\.seats\.length\}\/10\)`/u);
+  // The list keeps removed agents and the server counts the limit its own way, so the label carries no fraction.
+  assert.match(source, /seatsTitle\.textContent = "Agents on this connection";/u);
+  assert.doesNotMatch(source, /seats\.length\}\/10/u);
+  // A result says only what changed: access through this connection, and for one agent, which one and where.
+  assert.match(source, /`\$\{connection\.clientHost\} disconnected\. Its agents can no longer use this connection\.`/u);
+  assert.match(source, /`\$\{seat\.name\} removed from \$\{seat\.workspaceName\} on this connection\.`/u);
+  assert.doesNotMatch(source, /agents are stopped|other agents are unchanged/u);
   assert.doesNotMatch(source, /Revoke connection|Consented workspaces|hosted seats are stopped|Revoking \$\{/u);
   assert.match(source, /\{ revoked: "Disconnected", ended: "Ended", pending: "Pending", active: "Active" \}\[connection\.status\]/u);
   assert.doesNotMatch(source, /innerHTML\s*=.*connected/iu);

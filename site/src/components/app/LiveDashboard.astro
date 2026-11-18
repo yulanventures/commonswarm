@@ -10953,7 +10953,9 @@ import "../../styles/kylon-command-palette.css";
         }
         const seatsTitle = document.createElement("p");
         seatsTitle.className = "dashboard__connected-app-label";
-        seatsTitle.textContent = `Agents using this connection (${connection.seats.length}/10)`;
+        /* No count beside the label: the list keeps removed agents, and the limit of ten is counted on the server
+           by a rule this page cannot repeat exactly, so any fraction here could be wrong. */
+        seatsTitle.textContent = "Agents on this connection";
         const seatList = document.createElement("ul");
         seatList.className = "dashboard__connected-app-seats";
         if (connection.seats.length === 0) {
@@ -10993,7 +10995,7 @@ import "../../styles/kylon-command-palette.css";
                   .find((entry) => entry.grantId === connection.grantId)?.seats
                   .find((entry) => entry.seatId === seat.seatId);
                 if (!durable?.revoked) throw new Error("The agent does not show as removed yet. Reload before trying again.");
-                renderConnectedApps(`${seat.name} is removed. The other agents are unchanged.`);
+                renderConnectedApps(`${seat.name} removed from ${seat.workspaceName} on this connection.`);
               } catch (error) {
                 connectedAppsStatus(readableError(error), true);
                 revoke.disabled = false;
@@ -11027,7 +11029,7 @@ import "../../styles/kylon-command-palette.css";
               if (connectedApps.find((entry) => entry.grantId === connection.grantId)?.status !== "revoked") {
                 throw new Error("The app does not show as disconnected yet. Reload before trying again.");
               }
-              renderConnectedApps(`${connection.clientHost} is disconnected. All of its agents are stopped.`);
+              renderConnectedApps(`${connection.clientHost} disconnected. Its agents can no longer use this connection.`);
             } catch (error) {
               connectedAppsStatus(readableError(error), true);
               revoke.disabled = false;
