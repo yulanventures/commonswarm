@@ -83,6 +83,35 @@
     ]
   },
   {
+    "id": "dialog.image-viewer",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": ".dashboard__message .hm-extras__image:not([data-preview-state])"
+      },
+      {
+        "click": ".dashboard__message .hm-extras__image"
+      },
+      {
+        "waitFor": "dialog[data-image-viewer][open][data-state=\"\"]"
+      }
+    ],
+    "ready": "dialog[data-image-viewer][open][data-state=\"\"] [data-viewer-close]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_picture"
+    ],
+    "frame": [
+      "dialog[data-image-viewer][open][data-state=\"\"] [data-viewer-zoom]",
+      "dialog[data-image-viewer][open][data-state=\"\"] [data-viewer-download]",
+      "dialog[data-image-viewer][open][data-state=\"\"] [data-viewer-close]"
+    ]
+  },
+  {
     "id": "app.chat.jump-present",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",

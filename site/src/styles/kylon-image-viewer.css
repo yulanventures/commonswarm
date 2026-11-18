@@ -1,0 +1,147 @@
+/* The chat picture viewer (lib/image-viewer.ts): one picture over the whole window. Dark in both themes, so the
+   picture is the only bright thing; its colours are its own and not the shell's. Three controls, each 44px. */
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  inline-size: 100vw;
+  block-size: 100dvh;
+  max-inline-size: none;
+  max-block-size: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  overflow: hidden;
+  /* Pulling a fitted picture down lets the conversation show through as it goes. */
+  background: rgb(14 14 16 / calc(.95 - var(--cs-viewer-pull, 0) * .55));
+  color: #fff;
+  font-family: var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer::backdrop { background: transparent; }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-block-size: 56px;
+  padding: max(6px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) 6px max(16px, env(safe-area-inset-left));
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__name {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(255 255 255 / .86);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__button {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 44px;
+  block-size: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__button > svg {
+  inline-size: 20px;
+  block-size: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__button:hover,
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__button[aria-pressed="true"] { background: rgb(255 255 255 / .14); }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer :is(.cs-viewer__button, .cs-viewer__note > button):focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+/* The stage takes every touch itself: nothing behind it scrolls and the page never zooms. */
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__stage > * { grid-area: 1 / 1; }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__image {
+  display: block;
+  max-inline-size: none;
+  max-block-size: none;
+  transform-origin: center;
+  cursor: zoom-in;
+  -webkit-user-drag: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-zoomed] .cs-viewer__image { cursor: grab; }
+/* Painted only once it has loaded, as in the conversation. */
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer:not([data-state=""]) .cs-viewer__image { visibility: hidden; }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-state="loading"] .cs-viewer__stage::before {
+  content: "";
+  grid-area: 1 / 1;
+  inline-size: min(60%, 20rem);
+  aspect-ratio: 16 / 10;
+  border-radius: 8px;
+  background: #fff;
+  opacity: .05;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__note {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  color: rgb(255 255 255 / .8);
+  font-size: 14px;
+  line-height: 20px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__note[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__note > button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__note > button::before {
+  content: "\00b7";
+  margin-inline-end: 6px;
+  color: rgb(255 255 255 / .8);
+  font-weight: 400;
+}
+@media (prefers-reduced-motion: no-preference) {
+  live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer[open] { animation: cs-viewer-in 120ms ease-out; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-easing] .cs-viewer__image { transition: transform 150ms ease-out; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-state="loading"] .cs-viewer__stage::before {
+    animation: cs-viewer-wait 1.2s ease-in-out 400ms infinite alternate;
+  }
+}
+@keyframes cs-viewer-in { from { opacity: 0; } }
+@keyframes cs-viewer-wait { to { opacity: .12; } }
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer { background: Canvas; color: CanvasText; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-viewer__name { color: CanvasText; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-viewer :is(.cs-viewer__button, .cs-viewer__note > button) { border: 1px solid ButtonText; color: ButtonText; background: ButtonFace; }
+}

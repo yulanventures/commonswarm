@@ -1084,14 +1084,16 @@ test('replying from a stream row preserves the agent ownership label and the roo
   runInContext('threadReplyRoot=null; syncComposerPlacement()', context);
   assert.deepEqual(marked(), [], 'the direct reset-state projection also clears the old root');
 });
-test('chat pictures and file cards each open their own attachment through its signed link', async () => {
+test('a file card opens its own attachment through its signed link; a picture opens in the viewer and signs nothing', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const signed: string[] = [], opened: string[] = [], previews: string[] = [];
+  const viewed: { file: string; trigger: unknown }[] = [];
   const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras, signalHasEnded,
     canPreviewChatAttachment, homeAskAnswered, window: { requestAnimationFrame() {}, location: { assign: (url: unknown) => opened.push(String(url)) } },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
     freshAttachmentDownload: async (fileId: string) => { signed.push(fileId); return { url: `https://storage.test/${fileId}`, contentWarning: 'untrusted' }; },
     loadAttachmentPreview: (_image: RowNode, _holder: RowNode, attachment: { file_id: string }) => { previews.push(attachment.file_id); },
+    openChatPicture: (attachment: { file_id: string }, trigger: RowNode) => { viewed.push({ file: attachment.file_id, trigger }); },
     setComposerStatus: () => { throw new Error('no download may fail here'); }, readableError: String,
   });
   runInContext(`
@@ -1120,8 +1122,12 @@ test('chat pictures and file cards each open their own attachment through its si
   const click = async (node: RowNode) => { Reflect.apply(node.handlers.get('click')!, node, [{ preventDefault() {}, stopPropagation() {} }]); await new Promise(done => setImmediate(done)); };
   await click(cards[1]!);
   await click(pictures[0]!);
-  assert.deepEqual(signed, ['report', 'shot'], 'each link signs its own attachment, not the one at the same index');
-  assert.deepEqual(opened, ['https://storage.test/report', 'https://storage.test/shot'], 'the browser opens the signed URL itself');
+  assert.deepEqual(signed, ['report'], 'the file card signs its own attachment, not the one at the same index; the picture signs nothing');
+  assert.deepEqual(opened, ['https://storage.test/report'], 'the browser opens the file card\'s signed URL itself, and never the picture\'s');
+  assert.equal(viewed.length, 1, 'a press on the picture opens the viewer once');
+  assert.equal(viewed[0]!.file, 'shot', 'with its own attachment');
+  assert.equal(viewed[0]!.trigger, pictures[0], 'and the picture itself, so focus can return to it');
+  assert.equal(pictures[0]!.getAttribute('aria-haspopup'), 'dialog');
 });
 test('reactions sit under the message and before its tools; Add reaction joins Reply in thread in the footer', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag), createElementNS: (_namespace: string, tag: string) => new RowNode(tag) };

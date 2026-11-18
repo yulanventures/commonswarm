@@ -69,6 +69,7 @@ import "../../styles/kylon-channel-management.css";
 import "../../styles/kylon-agent-page.css";
 import "../../styles/kylon-chat-empty.css";
 import "../../styles/kylon-command-palette.css";
+import "../../styles/kylon-image-viewer.css";
 
 ---
 
@@ -9855,6 +9856,42 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    /**
+     * A press on a chat picture opens it in the app's viewer, never as a download; Download is a button inside it.
+     * The viewer's code is fetched the first time one is opened. If it cannot be fetched (a tab left open across a
+     * release), the file opens as it did before the viewer existed. When the viewer closes, focus returns to the
+     * picture that opened it, or to the same picture in its new row if the conversation was redrawn meanwhile.
+     */
+    let chatPictureOpening = false;
+    const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
+      if (chatPictureOpening || one("[data-image-viewer]")) return;
+      const { file_id: fileId, version_n: version } = attachment;
+      const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
+      const download = (): void => {
+        void freshAttachmentDownload(fileId, version).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error"));
+      };
+      chatPictureOpening = true;
+      void import("../../lib/image-viewer").then(({ openImageViewer }) => {
+        openImageViewer(app, {
+          name: attachment.name,
+          link: async () => {
+            const cached = attachmentPreviewUrls.get(fileId, version, Date.now());
+            if (cached) return cached;
+            const signedAt = Date.now();
+            const signed = await freshAttachmentDownload(fileId, version);
+            attachmentPreviewUrls.remember(fileId, version, signed, signedAt);
+            return signed.url;
+          },
+          forget: () => attachmentPreviewUrls.forget(fileId, version),
+          download,
+        }, () => {
+          const back = trigger.isConnected ? trigger
+            : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(fileId)}"]`);
+          back?.focus({ preventScroll: true });
+        });
+      }, download).finally(() => { chatPictureOpening = false; });
+    };
+
     const renderMessageAttachments = (body: HTMLElement, signal: Signal): void => {
       const attachments = signal.attachments ?? [];
       if (attachments.length === 0) return;
@@ -10455,7 +10492,11 @@ import "../../styles/kylon-command-palette.css";
             const pictures = (signal.attachments ?? []).filter(pictured);
             for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>(".hm-extras__image")).entries()) {
               const attachment = pictures[index]; const image = link.querySelector<HTMLImageElement>("img"); if (!attachment || !image) continue;
-              link.addEventListener("click", openAttachment(attachment));
+              link.setAttribute("aria-haspopup", "dialog");
+              link.addEventListener("click", (event) => {
+                event.preventDefault(); event.stopPropagation();
+                if (!sampleMode) openChatPicture(attachment, link);
+              });
               if (!sampleMode) loadAttachmentPreview(image, link, attachment);
             }
             const files = (signal.attachments ?? []).filter(file => !pictured(file));
