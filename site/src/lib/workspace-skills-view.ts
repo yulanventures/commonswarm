@@ -16,7 +16,10 @@ export interface WorkspaceSkillsViewData {
 const esc = escapeMessageHtml;
 
 export function renderWorkspaceSkillsHtml(data: WorkspaceSkillsViewData): string {
-  const countText = `${data.skills.length}/${data.cap}`;
+  // How many of the allowed skills exist, said once there is at least one. The line that used to sit here ("Hints,
+  // never gates · 0/20 · 60d expiry") spoke to the people who built Skills, not to the people who use them.
+  const countHtml = data.skills.length > 0 ? `
+      <p class="hh-skills-count" data-skills-count>${data.skills.length} of ${data.cap}</p>` : '';
   const suggestionsHtml = data.can_edit && data.suggestions.length > 0
     ? `<div class="hh-skills-suggestions" data-skills-suggestions>
         <h4>Suggested from recent tasks</h4>
@@ -75,8 +78,7 @@ export function renderWorkspaceSkillsHtml(data: WorkspaceSkillsViewData): string
     : '';
 
   return `<header>
-      <p class="hh-eyebrow">Hints, never gates · ${esc(countText)} · ${data.ttl_days}d expiry</p>
-      <h3>Skills</h3>
+      <h3>Skills</h3>${countHtml}
     </header>
     ${noticeHtml}
     ${suggestionsHtml}
