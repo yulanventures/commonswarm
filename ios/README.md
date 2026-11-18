@@ -1,6 +1,6 @@
 # CommonSwarm for iOS
 
-Open `CommonSwarm.xcodeproj` in Xcode. For a simulator walkthrough, start `node ios/Development/mock.mjs` from the repository root, run a Debug build and tap **Continue with email**. Use the synthetic address `reader@example.test` and fixture code `012345`. The fixture listens on Mac loopback port 8765 and contains a synthetic workspace, channel and agent. Signing out or closing the app clears the in-memory user session.
+Open `CommonSwarm.xcodeproj` in Xcode. For a simulator walkthrough, start `node ios/Development/mock.mjs` from the repository root, run a Debug build and tap **Continue with email**. Use the synthetic address `reader@example.test` and fixture code `012345`. The fixture listens on Mac loopback port 8765 and contains a synthetic workspace, channel and agent. The app saves the refresh token in its private iOS Keychain item and silently renews the session at launch. The access token lives in memory. Sign out removes the saved login. Restarting the simulator fixture invalidates its synthetic sessions.
 
 Run `ios/Development/verify.sh` on the Mac to check stock email-code login into the existing fixture account, the native PKCE exchange, callback validation, read and post adapters, and the wire fixture used by the existing TypeScript server suite. The script launches a fresh loopback fixture on an ephemeral port. Build locally with `xcodebuild -project ios/CommonSwarm.xcodeproj -scheme CommonSwarm -configuration Debug -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`.
 
@@ -11,3 +11,12 @@ Each login owns an ephemeral transport. Sign-out retires the credential and canc
 For a design walkthrough, run `node ios/Development/mock.mjs --review`. The workspace picker includes **Simulator workspace** and **Second workspace**. In the first workspace, `#general` holds 130 messages. The third page request fails once. Retry loads the remaining 30. A DM with exactly the text `Uncertain send` is recorded once and returns a temporary error on the first attempt. Switch workspaces and return. The first retry receives a pre-receipt refusal and keeps “Delivery unconfirmed”. The next retry confirms the original message. The long private channel name exercises truncation and the accessibility label.
 
 The `HistoryUI` shared scheme exercises the reader’s screen position. Start a fresh `--review` fixture, then run `xcodebuild test -project ios/CommonSwarm.xcodeproj -scheme HistoryUI -destination 'platform=iOS Simulator,id=<UDID>' -parallel-testing-enabled NO` on the designated simulator. The XCTest records before/after screenshots and requires the first visible body to stay within two points on both a normal prepend and Retry. Follow the workstation’s one-simulator and cleanup rules.
+
+
+## Updating an installed USB build
+
+Keep the same signing team and bundle identifier (`com.commonswarm.ios`). Install the signed app directly over its existing copy with `xcrun devicectl device install app --device "$device_udid" "$app_bundle"`. If the signature or identifier differs, stop and correct the build. Preserve the installed app and its data.
+
+The first update from a memory-only build requires one sign-in. For the phone witness, have the owner open a workspace after that sign-in. Install a newer signed build in place, open it, and confirm the workspace loads without asking for a code. Record the two build numbers and the outcome only.
+
+Run `ios/Development/verify-upgrade.sh <simulator-udid>` on an already booted, dedicated simulator with the fixture port free. The check signs in on build 2 and installs build 3 over it. It checks silent launch into authenticated content, a temporary service failure, refresh-token rotation, and explicit sign-out across a relaunch.

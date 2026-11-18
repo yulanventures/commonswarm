@@ -5,7 +5,8 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
 
 @main
 struct CommonSwarmApp: App {
-    var body: some Scene { WindowGroup { SessionView() } }
+    @StateObject private var auth = SignIn()
+    var body: some Scene { WindowGroup { SessionView(auth: auth) } }
 }
 
 private struct WindowAnchor: UIViewRepresentable {
@@ -39,19 +40,26 @@ struct Deployment {
 }
 
 private struct SessionView: View {
-    @StateObject private var auth = SignIn()
+    @ObservedObject var auth: SignIn
     @ViewState private var window: UIWindow?
 
     var body: some View {
         Group {
-            if let session = auth.session, let deployment = Deployment.current {
+            if auth.startup == .waiting || auth.startup == .restoring {
+                ProgressView("Restoring sign-in")
+            } else if auth.startup == .retryRestore {
+                RetryView(text: "Couldn’t restore sign-in", action: auth.restore)
+            } else if auth.startup == .retrySignOut {
+                RetryView(text: "Couldn’t finish signing out") { auth.signOut() }
+            } else if let session = auth.session, let deployment = Deployment.current {
                 WorkspacesView(api: ConversationAPI(origin: deployment.origin, publicKey: deployment.publicKey, session: session),
                                signOut: auth.signOut)
                     .id(session.userID)
             } else {
                 SignInView(auth: auth, deployment: Deployment.current, window: window)
             }
-        }.background(WindowAnchor { window = $0 }.frame(width: 0, height: 0))
+        }.task { await auth.restore() }
+        .background(WindowAnchor { window = $0 }.frame(width: 0, height: 0))
     }
 }
 

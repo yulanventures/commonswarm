@@ -17,7 +17,8 @@ const channel = "00000000-0000-4000-8000-000000000004";
 const secondWorkspace = "00000000-0000-4000-8000-000000000005";
 const longChannel = "00000000-0000-4000-8000-000000000006";
 const verify = process.argv[2] === "--verify";
-const review = verify || process.argv[2] === "--review";
+const upgrade = process.argv[2] === "--upgrade";
+const review = verify || upgrade || process.argv[2] === "--review";
 const workspaces = [{ workspace_id: workspace, name: "Simulator workspace" }];
 const channels = [{ channel_id: channel, slug: "mobile", visibility: "open" }];
 if (review) {
@@ -35,6 +36,8 @@ function recordEmailRequest(url, body) {
 const receipts = new Map();
 const refuseNextLookup = new Set();
 const sessions = new Set();
+const refreshTokens = new Set();
+let refreshAttempts = 0;
 let heldPost;
 let notifyPost;
 const postReceived = new Promise(resolve => { notifyPost = resolve; });
@@ -55,6 +58,9 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
+    if (upgrade && req.method === "GET" && url.pathname === "/fixture/upgrade-stage") {
+      return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
+    }
     if (verify && req.method === "GET" && url.pathname.startsWith("/fixture/")) {
       if (url.pathname === "/fixture/wait-for-post") {
         await postReceived;
@@ -90,7 +96,9 @@ const server = createServer(async (req, res) => {
     const issueSession = () => {
       const session = randomBytes(32).toString("hex");
       sessions.add(session);
-      return reply(200, { access_token: session, user: { id: me } });
+      const refresh = randomBytes(32).toString("hex");
+      refreshTokens.add(refresh);
+      return reply(200, { access_token: session, refresh_token: refresh, expires_in: 3600, user: { id: me } });
     };
     if (req.method === "POST" && url.pathname === "/auth/v1/otp") {
       if (body.create_user !== false || url.search) return reply(400, {});
@@ -112,6 +120,13 @@ const server = createServer(async (req, res) => {
       if (!pending || pending.expires <= Date.now() || typeof body.code_verifier !== "string" ||
           createHash("sha256").update(body.code_verifier).digest("base64url") !== pending.challenge) return reply(400, {});
       codes.delete(body.auth_code);
+      return issueSession();
+    }
+    if (req.method === "POST" && url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
+      if (upgrade && ++refreshAttempts === 2) {
+        return reply(503, {});
+      }
+      if (!refreshTokens.delete(body.refresh_token)) return reply(400, { error_code: "refresh_token_not_found" });
       return issueSession();
     }
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});

@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 enum SignInError: Error {
-    case invalidCallback, unavailable, refused, rateLimited, emailSignupDisabled
+    case invalidCallback, unavailable, refused, rateLimited, emailSignupDisabled, sessionEnded
 }
 
 enum BrowserProvider: String {
@@ -65,11 +65,11 @@ struct SignInAttempt {
         return code
     }
 
-    func exchange(code: String, at origin: URL, publicKey: String) async throws -> HumanSession {
+    func exchange(code: String, at origin: URL, publicKey: String) async throws -> LoginTokens {
         let url = origin.appending(path: "auth/v1/token")
             .appending(queryItems: [URLQueryItem(name: "grant_type", value: "pkce")])
         let data = try await AuthRequest.post(["auth_code": code, "code_verifier": verifier], to: url, publicKey: publicKey)
-        return try await HumanSession.decode(data)
+        return try LoginTokens(data)
     }
 }
 
@@ -90,17 +90,17 @@ struct EmailCodeAPI {
         }
     }
 
-    func verify(email: String, code: String) async throws -> HumanSession {
+    func verify(email: String, code: String) async throws -> LoginTokens {
         let data = try await AuthRequest.post(["email": email, "token": code, "type": "email"],
                                               to: origin.appending(path: "auth/v1/verify"), publicKey: publicKey)
-        return try await HumanSession.decode(data)
+        return try LoginTokens(data)
     }
 }
 
 private enum AuthRequest {
     private struct Rejection: Decodable { let error_code: String }
 
-    static func post(_ body: some Encodable, to url: URL, publicKey: String) async throws -> Data {
+    static func post(_ body: some Encodable, to url: URL, publicKey: String, refreshing: Bool = false) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(publicKey, forHTTPHeaderField: "apikey")
@@ -110,6 +110,11 @@ private enum AuthRequest {
         defer { transport.finishTasksAndInvalidate() }
         let (data, response) = try await transport.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode
+        if refreshing, status == 400,
+           let code = (try? JSONDecoder().decode(Rejection.self, from: data))?.error_code,
+           ["refresh_token_not_found", "refresh_token_already_used", "session_not_found", "session_expired", "user_banned"].contains(code) {
+            throw SignInError.sessionEnded
+        }
         if status == 429 { throw SignInError.rateLimited }
         if status == 422, (try? JSONDecoder().decode(Rejection.self, from: data))?.error_code == "otp_disabled" {
             throw SignInError.emailSignupDisabled
@@ -129,12 +134,35 @@ final class NoRedirect: NSObject, URLSessionTaskDelegate {
     }
 }
 
-fileprivate struct TokenResponse: Decodable {
-    struct User: Decodable { let id: UUID }
-    let user: User
-    let access_token: String
-}
+struct LoginTokens {
+    let userID: UUID
+    let accessToken: String
+    let refreshToken: String
+    let expiresAt: Date
 
+    init(_ data: Data) throws {
+        struct Response: Decodable {
+            struct User: Decodable { let id: UUID }
+            let user: User
+            let access_token, refresh_token: String
+            let expires_in: Int
+        }
+        let response = try JSONDecoder().decode(Response.self, from: data)
+        guard !response.access_token.isEmpty, !response.refresh_token.isEmpty, response.expires_in > 0 else {
+            throw SignInError.refused
+        }
+        userID = response.user.id
+        accessToken = response.access_token
+        refreshToken = response.refresh_token
+        expiresAt = Date().addingTimeInterval(TimeInterval(response.expires_in))
+    }
+
+    static func refresh(_ token: String, at origin: URL, publicKey: String) async throws -> Self {
+        let url = origin.appending(path: "auth/v1/token")
+            .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")])
+        return try Self(await AuthRequest.post(["refresh_token": token], to: url, publicKey: publicKey, refreshing: true))
+    }
+}
 
 // All adapters for this login share one transport. Sign-out both closes it and
 // withdraws the credential, including from callers retained by a pending UI task.
@@ -143,23 +171,20 @@ final class HumanSession {
     nonisolated let userID: UUID
     private struct DraftKey: Hashable { let workspace: UUID; let conversation: Conversation.ID }
     private var drafts: [DraftKey: Composer] = [:]
-    private var accessToken: String?
+    private var bearer: (() async throws -> String)?
     private let transport = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
-    var isActive: Bool { accessToken != nil }
+    var isActive: Bool { bearer != nil }
 
-    fileprivate static func decode(_ data: Data) throws -> HumanSession {
-        let result = try JSONDecoder().decode(TokenResponse.self, from: data)
-        guard !result.access_token.isEmpty else { throw SignInError.refused }
-        return HumanSession(result)
-    }
-
-    private init(_ response: TokenResponse) {
-        userID = response.user.id
-        accessToken = response.access_token
+    init(userID: UUID, bearer: @escaping () async throws -> String) {
+        self.userID = userID
+        self.bearer = bearer
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        guard let accessToken else { throw CancellationError() }
+        guard let bearer else { throw CancellationError() }
+        let accessToken = try await bearer()
+        guard isActive else { throw CancellationError() }
+        try Task.checkCancellation()
         var authorized = request
         authorized.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
         let response = try await transport.data(for: authorized)
@@ -178,7 +203,7 @@ final class HumanSession {
 
     func signOut() {
         drafts.removeAll()
-        accessToken = nil
+        bearer = nil
         transport.invalidateAndCancel()
     }
 

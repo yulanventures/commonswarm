@@ -7,6 +7,14 @@ final class SignIn: ObservableObject {
     @Published private(set) var pending = false
     @Published private(set) var failed = false
 
+    enum Startup { case waiting, restoring, ready, retryRestore, retrySignOut }
+    @Published private(set) var startup = Startup.waiting
+    private let deployment = Deployment.current
+    private var tokens: LoginTokens?
+    private var rotation: Task<Void, Error>?
+    // GoTrue may already have rotated before a temporary device-storage error.
+    private var awaitingSave: LoginTokens?
+
     private var browser: ASWebAuthenticationSession?
     private var deadline: Task<Void, Never>?
     private var exchange: Task<Void, Never>?
@@ -20,7 +28,7 @@ final class SignIn: ObservableObject {
     }
 
     func start(_ provider: BrowserProvider, origin: URL, publicKey: String, window: ASPresentationAnchor) {
-        guard !pending else { return }
+        guard startup == .ready, session == nil, !pending else { return }
         guard let attempt = try? SignInAttempt(provider: provider) else { failed = true; return }
         let id = UUID()
         let expires = ContinuousClock.now.advanced(by: .seconds(300))
@@ -52,7 +60,7 @@ final class SignIn: ObservableObject {
                         let result = try await attempt.exchange(code: code, at: origin, publicKey: publicKey)
                         guard self.current == id else { return }
                         guard ContinuousClock.now < expires else { self.finish(failed: true); return }
-                        self.session = result
+                        try self.accept(result)
                         self.finish()
                     } catch {
                         if self.current == id { self.finish(failed: true) }
@@ -82,14 +90,99 @@ final class SignIn: ObservableObject {
         self.failed = failed
     }
 
-    func completeEmailSignIn(_ result: HumanSession) {
-        finish()
-        session = result
+    func restore() async {
+        guard startup == .waiting || startup == .retryRestore else { return }
+        guard let deployment else { startup = .ready; return }
+        startup = .restoring
+        if UserDefaults.standard.bool(forKey: signOutMarker) {
+            signOut()
+            return
+        }
+        do {
+            guard let saved = try RefreshKeychain(origin: deployment.origin).read() else {
+                startup = .ready
+                return
+            }
+            try await rotate(saved, deployment)
+            startup = .ready
+        } catch {
+            if startup == .restoring { startup = .retryRestore }
+        }
     }
+
+    func completeEmailSignIn(_ result: LoginTokens) throws {
+        guard startup == .ready, session == nil, !pending else { throw SignInError.unavailable }
+        try accept(result)
+        finish()
+    }
+
+    private func accept(_ result: LoginTokens) throws {
+        guard let deployment else { throw SignInError.unavailable }
+        try RefreshKeychain(origin: deployment.origin).save(SavedLogin(userID: result.userID, refreshToken: result.refreshToken))
+        tokens = result
+        if session == nil {
+            session = HumanSession(userID: result.userID) { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.bearer()
+            }
+        }
+    }
+
+    private func bearer() async throws -> String {
+        guard let deployment, let tokens else { throw CancellationError() }
+        if tokens.expiresAt.timeIntervalSinceNow <= 30 {
+            try await rotate(SavedLogin(userID: tokens.userID, refreshToken: tokens.refreshToken), deployment)
+        }
+        guard let current = self.tokens else { throw CancellationError() }
+        return current.accessToken
+    }
+
+    // All windows and API calls share one rotation. A cancelled reader cannot cancel its siblings.
+    private func rotate(_ saved: SavedLogin, _ deployment: Deployment) async throws {
+        if let rotation { return try await rotation.value }
+        let task = Task {
+            defer { if !Task.isCancelled { rotation = nil } }
+            do {
+                let result: LoginTokens
+                if let awaitingSave {
+                    result = awaitingSave
+                } else {
+                    result = try await LoginTokens.refresh(saved.refreshToken, at: deployment.origin, publicKey: deployment.publicKey)
+                }
+                try Task.checkCancellation()
+                guard result.userID == saved.userID else { throw SignInError.sessionEnded }
+                awaitingSave = result
+                try accept(result)
+                awaitingSave = nil
+            } catch SignInError.sessionEnded {
+                try Task.checkCancellation()
+                signOut()
+                throw SignInError.sessionEnded
+            }
+        }
+        rotation = task
+        try await task.value
+    }
+
+    private var signOutMarker: String { "signOutPending." + (deployment?.origin.absoluteString ?? "") }
 
     func signOut() {
         finish()
+        rotation?.cancel()
+        rotation = nil
+        awaitingSave = nil
+        tokens = nil
         session?.signOut()
         session = nil
+        guard let deployment else { startup = .ready; return }
+        // A failed Keychain deletion must still honor sign-out after a relaunch.
+        UserDefaults.standard.set(true, forKey: signOutMarker)
+        do {
+            try RefreshKeychain(origin: deployment.origin).remove()
+            UserDefaults.standard.removeObject(forKey: signOutMarker)
+            startup = .ready
+        } catch {
+            startup = .retrySignOut
+        }
     }
 }

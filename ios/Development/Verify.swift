@@ -42,7 +42,8 @@ enum Verify {
 
         let wrong = try? await other.exchange(code: code, at: origin, publicKey: "local-fixture")
         try expect(wrong == nil, "wrong verifier refused")
-        let session = try await attempt.exchange(code: code, at: origin, publicKey: "local-fixture")
+        let browserTokens = try await attempt.exchange(code: code, at: origin, publicKey: "local-fixture")
+        let session = HumanSession(userID: browserTokens.userID) { browserTokens.accessToken }
         let replay = try? await attempt.exchange(code: code, at: origin, publicKey: "local-fixture")
         try expect(replay == nil, "code consumed")
         let api = ConversationAPI(origin: origin, publicKey: "local-fixture", session: session)
@@ -161,7 +162,8 @@ enum Verify {
         try await emailAPI.send(to: "unknown@example.test")
         try await emailAPI.send(to: email)
         try expect((try? await emailAPI.verify(email: email, code: "999999")) == nil, "wrong email code refused")
-        let fresh = try await emailAPI.verify(email: email, code: "012345")
+        let emailTokens = try await emailAPI.verify(email: email, code: "012345")
+        let fresh = HumanSession(userID: emailTokens.userID) { emailTokens.accessToken }
         try expect(fresh.userID == session.userID, "email signs into the existing account")
         try expect((try? await emailAPI.verify(email: email, code: "012345")) == nil, "email code consumed")
         let freshAPI = ConversationAPI(origin: origin, publicKey: "local-fixture", session: fresh)
