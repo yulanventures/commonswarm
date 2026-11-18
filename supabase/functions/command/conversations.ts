@@ -388,3 +388,28 @@ export async function departedGroupMember(
       ${users}::uuid[], ${agents}::uuid[]) AS name`;
   return row?.name ?? null;
 }
+
+/**
+ * A replayed conversation answer, after the stored command's conversation is checked again: the stored
+ * answer while the caller may still open that conversation; otherwise exactly the fresh hidden-id refusal,
+ * except that the caller's own completed leave stays acknowledged, with nothing about the conversation.
+ */
+export async function reauthorizedConversationReplay(
+  tx: Sql,
+  workspaceId: string,
+  actor: ConversationActor,
+  kind: ConversationCommandKind,
+  stored: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  const conversation = stored.conversation !== null && typeof stored.conversation === "object"
+    ? (stored.conversation as Record<string, unknown>).conversation_id
+    : stored.conversation_id;
+  if (typeof conversation !== "string" || !UUID_RE.test(conversation)) return null;
+  const [row] = await tx<{ visible: boolean }[]>`
+    SELECT swarm.conversation_visible(${workspaceId}::uuid, ${actor.kind}, ${actor.id}::uuid, ${conversation}::uuid) AS visible`;
+  if (row?.visible === true) return null;
+  if (kind === "conversation_leave") {
+    return { status: 200, body: { status: "accepted", ok: true, event_ids: [], conversation_id: conversation } };
+  }
+  return { status: NOT_FOUND.status, body: { error: NOT_FOUND.error, message: NOT_FOUND.message } };
+}

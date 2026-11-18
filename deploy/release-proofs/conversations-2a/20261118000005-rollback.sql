@@ -17,6 +17,7 @@ DROP TRIGGER IF EXISTS channels_sync_creator_member ON swarm.channels;
 DROP TRIGGER IF EXISTS human_channel_reads_follow_conversation ON swarm.human_channel_reads;
 DROP TRIGGER IF EXISTS agent_channel_reads_follow_conversation ON swarm.agent_channel_reads;
 DROP TRIGGER IF EXISTS channel_preferences_follow_conversation ON swarm.channel_preferences;
+DROP TRIGGER IF EXISTS channel_members_lock_conversation ON swarm.channel_members;
 
 -- Step 1's filer and its commit-time trigger function, from 20261118000004.
 CREATE OR REPLACE FUNCTION swarm.file_conversation_signal(p_workspace uuid, p_signal uuid) RETURNS void
@@ -229,6 +230,8 @@ CREATE TRIGGER signals_wake_workspace
   FOR EACH ROW
   EXECUTE FUNCTION swarm.wake_workspace_signal();
 
+DROP FUNCTION IF EXISTS swarm.conversation_private_member_lock();
+DROP FUNCTION IF EXISTS swarm.conversation_visible(uuid, text, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.conversation_preferences_follow();
 DROP FUNCTION IF EXISTS swarm.conversation_reads_follow();
 DROP FUNCTION IF EXISTS swarm.conversation_creator_joins();
