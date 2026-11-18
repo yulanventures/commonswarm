@@ -77,10 +77,13 @@ function localEnvironment(): Local {
   return parsed as Local;
 }
 
-async function createUser(label: string): Promise<Person> {
+/** A signed-in person. Their name comes from the sign-in identity, as in production: every command of theirs
+ * sets swarm.users.display_name from it. */
+async function createUser(label: string, name: string): Promise<Person> {
   const email = `${label}-${randomUUID()}@example.test`;
   const password = `T-${randomBytes(24).toString("base64url")}!`;
-  const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+  const created = await admin.auth.admin.createUser({ email, password, email_confirm: true,
+    user_metadata: { full_name: name } });
   assert.ifError(created.error);
   assert.ok(created.data.user);
   const client = createClient(local.API_URL, local.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -165,10 +168,12 @@ before(async () => {
   await awaitFunctionRunning({ url: `${local.API_URL}/functions/v1/command`, fetcher: fetch,
     timeoutMs: 30_000, sleep: (ms) => delay(ms), now: () => Date.now(),
     diagnostics: () => "local command function was not ready", cliState });
-  [ann, ben, cat, dee] = [await createUser("c2a-ann"), await createUser("c2a-ben"), await createUser("c2a-cat"),
-    await createUser("c2a-dee")];
+  [ann, ben, cat, dee] = [await createUser("c2a-ann", "Ann"), await createUser("c2a-ben", "Ben"),
+    await createUser("c2a-cat", "Cat"), await createUser("c2a-dee", "Dee")];
   workspace = randomUUID();
   await sql.begin(async (tx) => {
+    // The rows the workspace and memberships reference, before anyone's first command; the same names as the
+    // sign-in identity, which each command writes again.
     await tx`INSERT INTO swarm.users (user_id, display_name)
       VALUES (${ann.id}::uuid, 'Ann'), (${ben.id}::uuid, 'Ben'), (${cat.id}::uuid, 'Cat'), (${dee.id}::uuid, 'Dee')`;
     await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Conv2a', ${ann.id}::uuid)`;
