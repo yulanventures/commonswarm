@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { renderAdminConsentPage } from '../src/admin-interaction-page.js';
+import { renderAdminConsentPage, FULL_ACCOUNT_WARNING, CHOSEN_COMPROMISE_WARNING, WORKER_READ_WARNING } from '../src/admin-interaction-page.js';
+import { createAdminManifest } from '../src/admin-consent.js';
+import { adminConsentOptions } from '../src/admin-policy.generated.js';
 
 // Parse actual hosted HTML with the standard-library HTML parser, without a
 // browser, service, or synthetic DOM that supplies its own accessibility state.
@@ -119,4 +121,168 @@ test('admin choice screen says what Full account reaches, keeps one submit, and 
   const limited = htmlTree(choiceScreen({ policy: { verification: { publisher_identity: 'P', verification_version: 1 }, approval: { owner_user_id: 'o' },
     metadata: { client_name: 'C' }, fullAccountEligible: false, resourceScopes: ['admin:read'] } }));
   assert.deepEqual(elements(limited).filter(node => node.tag === 'input' && node.attrs.name === 'mode').map(node => node.attrs.value), ['granular']);
+});
+
+// The confirmation screen (a summary is ready): three facts in view, every exact line folded before the decision.
+const RW1 = '20000000-0000-4000-8000-000000000001';
+const RW2 = '20000000-0000-4000-8000-000000000002';
+// Full account takes every permission that can be granted today.
+const REVIEW_OPTIONS = adminConsentOptions().filter(option => option.available);
+const REVIEW_SCOPES = REVIEW_OPTIONS.map(option => option.scope);
+function confirmation(mode, given = {}) {
+  const overrides = { ...given };
+  const policy = { verification: { publisher_identity: 'Northwind Tools', verification_version: 3, client_id: 'https://ops.example/oauth.json' },
+    approval: { owner_user_id: 'owner-1' }, metadata: { client_name: 'Northwind <Ops>' }, fullAccountEligible: true, resourceScopes: REVIEW_SCOPES };
+  const selection = mode === 'full_account' ? { mode, workspace_ids: [RW1, RW2] }
+    : { mode, scope_names: overrides.scopes ?? ['admin:read', 'seats:create'], workspace_ids: [RW1] };
+  delete overrides.scopes;
+  const manifest = createAdminManifest(selection, policy, Date.UTC(2026, 10, 18, 22));
+  manifest.connection_id = 'connection-1';
+  return renderAdminConsentPage({ uid: 'review', version: 2, csrfToken: 'csrf', issuanceState: 'open', scriptNonce: 'nonce-1',
+    user: { userId: 'owner-1', displayName: 'Alex' }, policy, workspaces: [{ id: RW1, name: 'One' }, { id: RW2, name: 'Two' }],
+    params: { client_id: 'https://ops.example/oauth.json', redirect_uri: 'https://ops.example/callback' },
+    receipt: { manifest }, summary: { token: 'summary-token', digest: 'a'.repeat(64), secondToken: 'second-token' }, ...overrides });
+}
+
+test('admin confirmation leads with who, where, what and until, and keeps the decision together', () => {
+  const html = confirmation('full_account');
+  const tree = htmlTree(html);
+  assert.equal(text(one(tree, node => node.tag === 'h1')), 'Give Northwind <Ops> full account access?');
+  assert.deepEqual(elements(tree).filter(node => node.attrs.class === 'admin-lead').map(text),
+    ['Signed in as Alex', 'Verified publisher Northwind Tools, from ops.example']);
+  const facts = one(tree, node => node.tag === 'dl' && node.attrs.class === 'admin-facts');
+  const rows = elements(facts).filter(node => node.tag === 'dt').map(text);
+  assert.deepEqual(rows, ['Where', 'What it may do', 'In workspaces it creates', 'Until']);
+  const values = elements(facts).filter(node => node.tag === 'dd').map(text);
+  // The reach sentence is the one this screen has always used, with the chosen workspaces named.
+  assert.equal(values[0], 'Existing and future workspaces you own, plus selected shared workspaces. Selected workspaces: One, Two');
+  assert.equal(values[1], REVIEW_OPTIONS.map(option => option.label).join(', '));
+  assert.ok(values[1].startsWith('Read-only, Invite members, ') && values[1].endsWith(', Create workspaces'));
+  assert.equal(values[2], 'The same permissions');
+  // (The text helper trims the zone's leading space; the page keeps it.)
+  assert.match(values[3], /^2026-12-18T22:00:00\.000Z ?\(UTC\)\. Renewal requires your approval again\. You can revoke it in \/app\.$/u);
+  // Order: facts, the exact list, the warning, then the form with the confirmation, destination, state and buttons.
+  const order = elements(tree);
+  const exact = one(tree, node => node.tag === 'details');
+  const warning = one(tree, node => node.attrs.id === 'full-account-warning');
+  const form = one(tree, node => node.tag === 'form');
+  assert.ok(order.indexOf(facts) < order.indexOf(exact) && order.indexOf(exact) < order.indexOf(warning) && order.indexOf(warning) < order.indexOf(form));
+  assert.ok(!('open' in exact.attrs), 'the exact list starts folded');
+  assert.equal(text(one(exact, node => node.tag === 'summary')), 'Exact permissions and limits');
+  assert.equal(text(warning), FULL_ACCOUNT_WARNING);
+  // The decision: same fields and values, one unticked required confirmation that points at the warning.
+  const inputs = elements(form).filter(node => node.tag === 'input');
+  assert.deepEqual(inputs.map(node => [node.attrs.name, node.attrs.value]), [['csrf_token', 'summary-token'],
+    ['summary_digest', 'a'.repeat(64)], ['selection_version', '2'], ['second_token', 'second-token'], ['confirm_full_account', 'yes']]);
+  const confirm = inputs.at(-1);
+  assert.ok('required' in confirm.attrs && !('checked' in confirm.attrs));
+  assert.equal(confirm.attrs['aria-describedby'], 'full-account-warning');
+  assert.equal(text(one(form, node => node.tag === 'label')), 'I confirm this exact full account summary');
+  assert.equal(form.attrs.action, '/interaction/review/consent');
+  assert.ok(text(form).includes('After you approve, you return to ops.example'));
+  assert.equal(text(one(form, node => node.attrs.class === 'admin-state')),
+    'Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in /app.');
+  assert.deepEqual(elements(form).filter(node => node.tag === 'button').map(text), ['Confirm full account access']);
+  const cancel = one(form, node => node.tag === 'a' && text(node) === 'Cancel');
+  assert.equal(cancel.attrs.href, 'https://commonswarm.com/app');
+  // Only this page's own form: the page's form policy allows no form to another site.
+  assert.deepEqual(elements(tree).filter(node => node.tag === 'form').map(node => node.attrs.action), ['/interaction/review/consent']);
+  // The local-time script needs exactly one of each target.
+  assert.equal(order.filter(node => node.attrs.id === 'local-expiry').length, 1);
+  assert.equal(order.filter(node => node.attrs.id === 'expiry-zone').length, 1);
+  assert.match(html, /<script nonce="nonce-1">/u);
+  assert.doesNotMatch(confirmation('full_account', { scriptNonce: undefined }), /<script/u);
+  // While admin connections are closed, the screen says so beside the button.
+  assert.equal(text(one(htmlTree(confirmation('full_account', { issuanceState: 'closed' })), node => node.attrs.class === 'admin-state')),
+    'Admin connections are not available yet. Reviewing a selection does not connect the client.');
+});
+
+test('admin confirmation keeps every exact line, folded in one place', () => {
+  for (const mode of ['full_account', 'granular']) {
+    const tree = htmlTree(confirmation(mode));
+    const exact = text(one(tree, node => node.tag === 'details'));
+    const full = mode === 'full_account';
+    for (const line of [
+      'Named connection: Admin connection connection-1',
+      'Signed in as Alex (owner-1)',
+      'Client name (supplied by the client): Northwind <Ops>',
+      'Client ID: https://ops.example/oauth.json', 'HTTPS client host: ops.example', 'Authorization returns to: ops.example',
+      'Independently verified publisher: Northwind Tools; active verification 3. Approved by account owner owner-1.',
+      'Read-only — read metadata', 'Create seats — create seat', 'Create seats — provision seat',
+      'Manage members — unavailable', 'Billing — unavailable',
+      'Admin delegation — unavailable; this connection cannot create admin grants',
+      'Seat targets: Your own seats; seats created by this connection; named seats: None.',
+      'Recipients: None. Recipient connections: None.',
+      'Transports: local, hosted_mcp. Maximum member role: member.',
+      'Worker content permissions: None. Workers depend on this grant; replacement or revocation ends dependent access.',
+      `Permissions in newly created workspaces: ${full ? [...REVIEW_SCOPES].sort().join(', ') : 'None'}`,
+      'Creation limits', 'Workspaces created', 'Renew seats limits', 'Renewals in total',
+      'Worker grant kinds: timeboxed. Existing worker principals: None.',
+      'Access ends (UTC): 2026-12-18T22:00:00.000Z.',
+      'Refresh cannot extend this deadline: 2026-12-18T22:00:00.000Z.',
+    ]) assert.ok(exact.includes(line), `${mode}: ${line}`);
+    assert.equal(exact.includes('Invite members — invite member'), full);
+  }
+});
+
+// One witness per kind of grant: the reach line and the warning say what that grant can do, and nothing more.
+const reachAndWarning = (html) => {
+  const tree = htmlTree(html);
+  const facts = one(tree, node => node.tag === 'dl' && node.attrs.class === 'admin-facts');
+  const warning = one(tree, node => node.attrs.class === 'admin-warning');
+  return { tree, rows: elements(facts).filter(node => node.tag === 'dt').map(text),
+    values: elements(facts).filter(node => node.tag === 'dd').map(text), warning: text(warning), warningId: warning.attrs.id };
+};
+
+test('a limited grant (read and invite in one workspace) claims no workspace creation, future reach or workers', () => {
+  const { tree, rows, values, warning, warningId } = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'invites:create'] }));
+  assert.equal(text(one(tree, node => node.tag === 'h1')), 'Give Northwind <Ops> these permissions?');
+  assert.deepEqual(rows, ['Where', 'What it may do', 'Until']);
+  assert.equal(values[0], 'Only the selected workspaces. Selected workspaces: One');
+  assert.equal(values[1], 'Read-only, Invite members');
+  assert.equal(warning, CHOSEN_COMPROMISE_WARNING);
+  assert.equal(warningId, 'grant-warning');
+  // Nothing in view says what this grant cannot do. (The exact list still names every limit.)
+  const inView = elements(tree).filter(node => ['h1', 'dd', 'dt'].includes(node.tag) || node.attrs.class === 'admin-warning').map(text).join(' ');
+  assert.doesNotMatch(inView, /create workspaces|future|newly created|Workers|change seats/iu);
+  const form = one(tree, node => node.tag === 'form');
+  assert.deepEqual(elements(form).filter(node => node.tag === 'input').map(node => node.attrs.name), ['csrf_token', 'summary_digest', 'selection_version']);
+  assert.deepEqual(elements(form).filter(node => node.tag === 'button').map(text), ['Confirm chosen permissions']);
+});
+
+test('a chosen grant that can create seats says its workers may read; one that can create workspaces keeps that reach', () => {
+  const seats = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'seats:create'] }));
+  assert.equal(seats.values[0], 'Only the selected workspaces. Selected workspaces: One');
+  assert.equal(seats.values[1], 'Read-only, Create seats');
+  assert.equal(seats.warning, `${WORKER_READ_WARNING} ${CHOSEN_COMPROMISE_WARNING}`);
+  assert.doesNotMatch(seats.warning, /create workspaces|future/iu);
+  // The control: with Create workspaces chosen, the reach names newly created workspaces and what applies there.
+  const creates = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'workspaces:create'] }));
+  assert.deepEqual(creates.rows, ['Where', 'What it may do', 'In workspaces it creates', 'Until']);
+  assert.equal(creates.values[0], 'Only the selected workspaces and expressly approved newly created workspaces. Selected workspaces: One');
+  assert.equal(creates.values[1], 'Read-only, Create workspaces');
+  assert.equal(creates.values[2], 'The same permissions');
+  assert.equal(creates.warning, CHOSEN_COMPROMISE_WARNING);
+  assert.equal(text(one(creates.tree, node => node.tag === 'h2')), 'Chosen permissions');
+});
+
+test('a full-account grant keeps its warning, its reach into future workspaces and its separate confirmation', () => {
+  const { tree, rows, values, warning, warningId } = reachAndWarning(confirmation('full_account'));
+  assert.deepEqual(rows, ['Where', 'What it may do', 'In workspaces it creates', 'Until']);
+  assert.equal(values[0], 'Existing and future workspaces you own, plus selected shared workspaces. Selected workspaces: One, Two');
+  assert.equal(warning, FULL_ACCOUNT_WARNING);
+  assert.equal(warningId, 'full-account-warning');
+  const confirm = one(tree, node => node.tag === 'input' && node.attrs.name === 'confirm_full_account');
+  assert.equal(confirm.attrs['aria-describedby'], 'full-account-warning');
+  assert.ok('required' in confirm.attrs && !('checked' in confirm.attrs));
+});
+
+test('the screen for an app that cannot have admin access is unchanged', () => {
+  const html = renderAdminConsentPage({ uid: 'refused', user: { userId: 'owner-1' }, csrfToken: 'csrf', version: 0,
+    params: { client_id: 'https://ops.example/oauth.json', redirect_uri: 'https://ops.example/callback' }, policy: { metadata: { client_name: 'Ops' } } });
+  const tree = htmlTree(html);
+  assert.equal(text(one(tree, node => node.tag === 'h1')), 'Review admin access');
+  assert.ok(html.includes('This client is unverified. Admin access is unavailable.'));
+  assert.deepEqual(elements(tree).filter(node => node.tag === 'button').map(text), ['Cancel and return to /app']);
+  assert.equal(elements(tree).filter(node => node.tag === 'details').length, 0);
 });

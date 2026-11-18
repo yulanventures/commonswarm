@@ -3,6 +3,12 @@ import { escapeHtml as e, renderConsentDestination, BRAND_MARK, CONSENT_STYLES }
 
 export const FULL_ACCOUNT_WARNING = "This client can create workspaces and change seats and invitations within these limits. That includes future workspaces you own. Workers it creates may read workspace messages and files. If the client or agent host is compromised, someone else can use this access until it expires or you revoke it.";
 
+// Chosen permissions get a warning that claims only what that grant can do. The full-account text above says
+// the client can create workspaces and reach future ones, which a chosen grant often cannot.
+export const CHOSEN_COMPROMISE_WARNING = "If this app or its host is compromised, someone else could use the access listed above until it expires or you revoke it.";
+export const WORKER_READ_WARNING = "Workers it creates may read workspace messages and files.";
+const WORKER_CAPABILITIES = ["admin_create_seat", "admin_provision_seat"];
+
 const LIMIT_LABELS = {
   workspaces: "Workspaces created", live_seats: "Live seats", total_seats: "Seats created in total",
   invitations: "Invitations", live_agent_invitations: "Live agent invitations",
@@ -36,8 +42,10 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
     <p>${verified ? `Independently verified publisher: ${e(policy.verification.publisher_identity)}; active verification ${e(policy.verification.verification_version)}. Approved by account owner ${e(policy.approval.owner_user_id)}.` : "This client is unverified. Admin access is unavailable."}</p>`;
   const issuanceLine = issuanceState === "open" ? "Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in /app." : "Admin connections are not available yet. Reviewing a selection does not connect the client.";
   const choosing = verified && !manifest;
-  // The choice screen leads with who is asking and whose account answers; every other state keeps the full lines.
-  const identity = choosing
+  const reviewing = !!(manifest && summary);
+  // The choice and confirmation screens lead with who is asking and whose account answers; on the confirmation
+  // the full lines move into its exact list. Every other state keeps the full lines.
+  const identity = choosing || reviewing
     ? `<p class="admin-lead">Signed in as <strong>${e(user.displayName || user.email || user.userId)}</strong></p>
     <p class="admin-lead">Verified publisher <strong>${e(policy.verification.publisher_identity)}</strong>, from <strong>${e(new URL(params.client_id).host)}</strong></p>`
     : technical;
@@ -69,31 +77,59 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
       ${notAvailable.length ? `<p>Not available yet: ${notAvailable.map(e).join(", ")}.</p>` : ""}
       ${notRequested.length ? `<p>Not asked for by this app: ${notRequested.map(e).join(", ")}.</p>` : ""}
       ${technical}</details></form>`;
-  } else if (manifest && summary) {
+  } else if (reviewing) {
+    // The confirmation. Three facts in view (where, what, until), then every exact line folded in one place
+    // before the decision, then the warning and the decision together. Nothing that was on this screen is
+    // dropped: the exact list holds each line it showed. Field names, tokens and the digest are unchanged.
+    const full = manifest.mode === "full_account";
     const expiry = new Date(manifest.expires_at);
-    form = `<section aria-labelledby="summary"><h2 id="summary">${manifest.mode === "full_account" ? "Full account" : "Chosen permissions"}</h2>
+    const created = manifest.created_workspace_policy.scope_names;
+    // Reach, from the grant itself: future workspaces only for a full account, and newly created ones only
+    // when this grant carries permissions into workspaces it creates.
+    const coverage = manifest.workspace_selector === "owned_and_selected" ? "Existing and future workspaces you own, plus selected shared workspaces"
+      : created.length ? "Only the selected workspaces and expressly approved newly created workspaces" : "Only the selected workspaces";
+    const warning = full ? FULL_ACCOUNT_WARNING
+      : [WORKER_CAPABILITIES.some(name => selectedCapabilities.has(name)) ? WORKER_READ_WARNING : "", CHOSEN_COMPROMISE_WARNING].filter(Boolean).join(" ");
+    // Built from the same granted capability list as the exact lines, so the two cannot disagree.
+    const granted = options.filter(o => o.capability_names.some(name => selectedCapabilities.has(name))).map(o => o.label);
+    const createdLabels = created.map(scope => options.find(o => o.scope === scope)?.label ?? scope);
+    const sameAsGranted = createdLabels.length === granted.length && createdLabels.every(label => granted.includes(label));
+    form = `<section aria-labelledby="summary"><h2 id="summary">${full ? "Full account" : "Chosen permissions"}</h2>
+      <dl class="admin-facts">
+      <dt>Where</dt><dd>${coverage}. Selected workspaces: ${words(manifest.workspace_ids.map(id => workspaces.find(w => w.id === id)?.name ?? id))}</dd>
+      <dt>What it may do</dt><dd>${words(granted)}</dd>
+      ${created.length ? `<dt>In workspaces it creates</dt><dd>${sameAsGranted ? "The same permissions" : words(createdLabels)}</dd>` : ""}
+      <dt>Until</dt><dd><time id="local-expiry" datetime="${expiry.toISOString()}">${e(expiry.toISOString())}</time><span id="expiry-zone"> (UTC)</span>. Renewal requires your approval again. You can revoke it in /app.</dd>
+      </dl>
+      <details class="admin-more"><summary>Exact permissions and limits</summary>
       <p>Named connection: Admin connection ${e(manifest.connection_id)}</p>
-      <p>Coverage: ${manifest.workspace_selector === "owned_and_selected" ? "Existing and future workspaces you own, plus selected shared workspaces" : "Only the selected workspaces and expressly approved newly created workspaces"}.</p>
-      <p>Selected workspaces: ${words(manifest.workspace_ids.map(id => workspaces.find(w => w.id === id)?.name ?? id))}</p>
+      ${technical}
       <ul>${capabilities}${unavailable}<li>Billing — unavailable</li><li>Admin delegation — unavailable; this connection cannot create admin grants</li></ul>
       <p>Seat targets: ${manifest.target_rules.own_seats ? "Your own seats" : "No own seats"}; ${manifest.target_rules.grant_created_seats ? "seats created by this connection" : "no grant-created seats"}; named seats: ${words(manifest.target_rules.seat_ids)}.</p>
       <p>Recipients: ${words(manifest.target_rules.recipient_user_ids)}. Recipient connections: ${words(manifest.target_rules.recipient_connection_ids)}.</p>
       <p>Transports: ${words(manifest.target_rules.transports)}. Maximum member role: ${e(manifest.role_ceiling)}.</p>
       <p>Worker content permissions: ${words(manifest.worker_scope_ceiling)}. Workers depend on this grant; replacement or revocation ends dependent access.</p>
-      <p>Permissions in newly created workspaces: ${words(manifest.created_workspace_policy.scope_names)}</p>
+      <p>Permissions in newly created workspaces: ${words(created)}</p>
       <h3>Creation limits</h3>${limits(manifest.issuance_limits)}<h3>Renew seats limits</h3>${limits(manifest.renewal_limits)}
       <p>Worker grant kinds: ${words(manifest.renewal_limits.grant_kinds)}. Existing worker principals: ${words(manifest.renewal_limits.principal_ids)}.</p>
-      <p>Access ends on <time id="local-expiry" datetime="${expiry.toISOString()}">${e(expiry.toISOString())}</time><span id="expiry-zone"> (UTC)</span>; UTC: ${e(expiry.toISOString())}. Renewal requires your approval again. You can revoke it in /app.</p>
+      <p>Access ends (UTC): ${e(expiry.toISOString())}.</p>
       <p>Refresh cannot extend this deadline: ${e(new Date(manifest.refresh_deadline).toISOString())}.</p>
-      <p id="full-account-warning">${e(FULL_ACCOUNT_WARNING)}</p></section>
+      </details>
+      <p id="${full ? "full-account-warning" : "grant-warning"}" class="admin-warning">${e(warning)}</p></section>
       <form method="post" action="/interaction/${encodeURIComponent(uid)}/consent">
         <input type="hidden" name="csrf_token" value="${e(summary.token)}">
         <input type="hidden" name="summary_digest" value="${e(summary.digest)}">
         <input type="hidden" name="selection_version" value="${e(version)}">
-        ${manifest.mode === "full_account" ? `<input type="hidden" name="second_token" value="${e(summary.secondToken)}"><label><input type="checkbox" name="confirm_full_account" value="yes" aria-describedby="full-account-warning" required> I confirm this exact full account summary</label>` : ""}
+        ${full ? `<input type="hidden" name="second_token" value="${e(summary.secondToken)}"><label><input type="checkbox" name="confirm_full_account" value="yes" aria-describedby="full-account-warning" required> <span>I confirm this exact full account summary</span></label>` : ""}
         ${destination}
-        <button type="submit">${manifest.mode === "full_account" ? "Confirm full account access" : "Confirm chosen permissions"}</button></form>`;
+        <p class="admin-state">${issuanceLine}</p>
+        <div class="admin-actions"><button type="submit">${full ? "Confirm full account access" : "Confirm chosen permissions"}</button>
+        <a class="admin-quiet" href="https://commonswarm.com/app">Cancel</a></div></form>`;
   }
+  const clientName = e(policy?.metadata?.client_name ?? "Unnamed client");
+  const heading = choosing ? `${clientName} wants admin access`
+    : reviewing ? `Give ${clientName} ${manifest.mode === "full_account" ? "full account access" : "these permissions"}?`
+    : "Review admin access";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Review CommonSwarm admin access</title>
     <style>${CONSENT_STYLES}
 .admin-stack label{display:block;margin:.7rem 0}
@@ -119,10 +155,18 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
 .admin-quiet{display:inline-flex;align-items:center;min-height:44px;padding:0 6px;color:var(--link);font-weight:700}
 .admin-more{margin-top:22px;border-top:1px solid var(--hair);color:var(--muted);font-size:14px}
 .admin-more summary{display:flex;align-items:center;min-height:44px;color:var(--ink);font-size:16px;font-weight:700;cursor:pointer}
+.admin-more summary::after{content:"";flex:none;width:8px;height:8px;margin:0 4px 4px 12px;border:solid currentColor;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.admin-more[open] summary::after{margin-bottom:-4px;transform:rotate(-135deg)}
 .admin-more p{margin:0 0 10px;overflow-wrap:anywhere}
+.admin-facts{margin:14px 0 0}
+.admin-facts dd{margin:0 0 14px;overflow-wrap:anywhere}
+.admin-more :is(ul,dl){margin:0 0 10px}
+.admin-more ul{padding-left:20px}
+.admin-more h3{margin:14px 0 6px;font-size:14px;color:var(--ink)}
+.admin-warning{margin-top:18px;padding:14px 16px;border:1px solid var(--hair);border-radius:12px;background:var(--soft);color:var(--ink)}
 .admin-stack :is(input,button,summary,a):focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 </style></head>
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Admin access</span></header>
-    <div class="card admin-stack"><h1>${choosing ? `${e(policy?.metadata?.client_name ?? "Unnamed client")} wants admin access` : "Review admin access"}</h1>${identity}${choosing ? "" : `<p>${issuanceLine}</p>`}${form}${choosing ? "" : '<form method="get" action="https://commonswarm.com/app" class="admin-cancel"><button type="submit">Cancel and return to /app</button></form>'}</div></main>
+    <div class="card admin-stack"><h1>${heading}</h1>${identity}${choosing || reviewing ? "" : `<p>${issuanceLine}</p>`}${form}${choosing || reviewing ? "" : '<form method="get" action="https://commonswarm.com/app" class="admin-cancel"><button type="submit">Cancel and return to /app</button></form>'}</div></main>
     ${manifest && scriptNonce ? `<script nonce="${e(scriptNonce)}">const expiry=document.getElementById("local-expiry");expiry.textContent=new Date(expiry.dateTime).toLocaleString();document.getElementById("expiry-zone").textContent=" (your local time)";</script>` : ""}</body></html>`;
 }
