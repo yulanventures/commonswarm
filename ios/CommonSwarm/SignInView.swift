@@ -73,7 +73,7 @@ struct SignInView: View {
 
 private struct EmailSignInView: View {
     let api: EmailCodeAPI
-    let signedIn: (HumanSession) -> Void
+    let signedIn: (LoginTokens) throws -> Void
     @Environment(\.dismiss) private var dismiss
     @ViewState private var email = ""
     @ViewState private var sentTo: String?
@@ -158,7 +158,7 @@ private struct EmailSignInView: View {
                 let session = try await api.verify(email: sentTo, code: code)
                 try Task.checkCancellation()
                 code = ""
-                signedIn(session)
+                try signedIn(session)
             } catch {
                 if !Task.isCancelled {
                     message = errorText(error, fallback: "Couldn’t verify the code. Try again or request a new one.")

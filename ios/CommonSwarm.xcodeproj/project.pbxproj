@@ -12,12 +12,22 @@
 			isa = PBXTargetDependency;
 			target = 700000000000000000007001;
 		};
+		0000000000000000000DB007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 700000000000000000007001;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXFileReference section */
 		F0000000000000000000F001 /* CommonSwarm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CommonSwarm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0000000000000000000DA002 /* HistoryUITests.xctest */ = {
 			path = HistoryUITests.xctest;
+			isa = PBXFileReference;
+			explicitFileType = wrapper.cfbundle;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		0000000000000000000DB002 /* SessionStorageTests.xctest */ = {
+			path = SessionStorageTests.xctest;
 			isa = PBXFileReference;
 			explicitFileType = wrapper.cfbundle;
 			sourceTree = BUILT_PRODUCTS_DIR;
@@ -33,6 +43,11 @@
 		0000000000000000000DA001 /* HistoryUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = HistoryUITests;
+			sourceTree = "<group>";
+		};
+		0000000000000000000DB001 /* SessionStorageTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SessionStorageTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -53,6 +68,7 @@
 			children = (
 				A0000000000000000000A002 /* CommonSwarm */,
 				0000000000000000000DA001 /* HistoryUITests */,
+				0000000000000000000DB001 /* SessionStorageTests */,
 				A0000000000000000000A003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -62,6 +78,7 @@
 			children = (
 				F0000000000000000000F001 /* CommonSwarm.app */,
 				0000000000000000000DA002 /* HistoryUITests.xctest */,
+				0000000000000000000DB002 /* SessionStorageTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -103,6 +120,18 @@
 			name = HistoryUITests;
 			buildRules = ();
 		};
+		0000000000000000000DB008 /* SessionStorageTests */ = {
+			dependencies = (0000000000000000000DB007);
+			buildConfigurationList = 0000000000000000000DB005;
+			productReference = 0000000000000000000DB002;
+			productType = com.apple.product-type.bundle.unit-test;
+			productName = SessionStorageTests;
+			isa = PBXNativeTarget;
+			fileSystemSynchronizedGroups = (0000000000000000000DB001);
+			buildPhases = (0000000000000000000DB006);
+			name = SessionStorageTests;
+			buildRules = ();
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -135,6 +164,7 @@
 			projectRoot = "";
 			targets = (
 				0000000000000000000DA008 /* HistoryUITests */,
+				0000000000000000000DB008 /* SessionStorageTests */,
 				700000000000000000007001 /* CommonSwarm */,
 			);
 		};
@@ -159,6 +189,12 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		0000000000000000000DA006 /* PBXSourcesBuildPhase */ = {
+			buildActionMask = 2147483647;
+			isa = PBXSourcesBuildPhase;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0000000000000000000DB006 /* PBXSourcesBuildPhase */ = {
 			buildActionMask = 2147483647;
 			isa = PBXSourcesBuildPhase;
 			files = ();
@@ -199,7 +235,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -225,7 +261,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -260,6 +296,20 @@
 			};
 			name = Debug;
 		};
+		0000000000000000000DB003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.commonswarm.session-storage-tests;
+				CODE_SIGN_STYLE = Automatic;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CommonSwarm.app/CommonSwarm";
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				PRODUCT_NAME = SessionStorageTests;
+			};
+			name = Debug;
+		};
 		0000000000000000000DA004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -270,6 +320,20 @@
 				TEST_TARGET_NAME = CommonSwarm;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				PRODUCT_NAME = HistoryUITests;
+			};
+			name = Release;
+		};
+		0000000000000000000DB004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.commonswarm.session-storage-tests;
+				CODE_SIGN_STYLE = Automatic;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CommonSwarm.app/CommonSwarm";
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				PRODUCT_NAME = SessionStorageTests;
 			};
 			name = Release;
 		};
@@ -299,6 +363,12 @@
 			defaultConfigurationName = Debug;
 			isa = XCConfigurationList;
 			buildConfigurations = (0000000000000000000DA003, 0000000000000000000DA004);
+		};
+		0000000000000000000DB005 /* XCConfigurationList */ = {
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+			isa = XCConfigurationList;
+			buildConfigurations = (0000000000000000000DB003, 0000000000000000000DB004);
 		};
 /* End XCConfigurationList section */
 
