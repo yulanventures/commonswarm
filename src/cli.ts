@@ -393,8 +393,6 @@ import {
 import {
   renderedBroadcastIds,
   reportRenderedBroadcasts,
-  reportSeenReactions,
-  seenAckTargets,
 } from "./cloud/agent-signal-receipts.js";
 import { observeSurfacedDeliveries, surfacedDeliveryIds } from "./cloud/delivery-observation.js";
 import {
@@ -5666,7 +5664,6 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       failed: (error) => { watchFailure = error; controller.abort(); },
     });
     const retryNotices = createArrivalRetryNoticePolicy();
-    let renderedBearer = selected.bearer;
     const cursorStore = fileArrivalCursorStore({
       target: cloud,
       workspaceId: selected.selectedWorkspace,
@@ -5726,7 +5723,6 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         const token = selected.session
           ? await selected.session.bearer()
           : selected.bearer;
-        renderedBearer = token;
         return await readAgentSignalPage(
           cloud,
           { kind: "agent", token },
@@ -5758,47 +5754,13 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         );
         if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
       },
-      afterEmitBatch: async (signals) => {
-        /* The arrival lines are written: observe those deliveries (check's unclaimed ack), so the
-         * roster sees this seat picking up. In the background, bounded and never fatal: the watch
-         * loop does not wait for it, and a failure leaves the delivery for the next check. The
-         * agent's own notes (the attended canary among them) are left for check, and a seat with a
-         * running listener leaves every row for the listener to lease and its session to surface. */
-        const observeBearer = renderedBearer;
-        void (async () => {
-          try {
-            const listener = await readListenerStatusIfPresent(listenerPaths({
-              profileId: cloud.profileId, workspaceId: selected.selectedWorkspace, principalId,
-            }));
-            if (LISTENER_RUNNING_STATES.includes(listener?.state ?? "stopped")) return;
-          } catch { return; }
-          await observeSurfacedDeliveries({
-            target: cloud,
-            fetcher: selected.fetcher,
-            credential: observeBearer,
-            workspaceId: selected.selectedWorkspace,
-            signalIds: surfacedDeliveryIds(signals, principalId, { excludeOwn: true }),
-            signal: controller.signal,
-          });
-        })();
-        // 👀 on the arrivals just printed that reach this agent, beside the broadcast seen report.
-        await Promise.all([
-          reportRenderedBroadcasts(
-            cloud,
-            renderedBearer,
-            selected.selectedWorkspace,
-            renderedBroadcastIds(signals),
-            httpClient.fetch,
-          ),
-          reportSeenReactions(
-            cloud,
-            renderedBearer,
-            selected.selectedWorkspace,
-            seenAckTargets(signals, principalId),
-            httpClient.fetch,
-          ),
-        ]);
-      },
+      /* No acknowledgement here. The watcher writes arrival lines to its own stdout, which runs in the
+       * background: nothing proves the agent's session read them (a host can keep a background task
+       * asleep, or drop its output). So it never observes a delivery, marks a message 👀 or reports a
+       * broadcast seen. The session acknowledges what it actually read, through `cswarm check`, a
+       * foreground `cswarm inbox`, a reply or a reaction; a `cswarm listen` listener acknowledges what
+       * its host session was handed. Until then the delivery stays waiting, which is what the roster
+       * should show. */
       onRetry: (_error, delayMs) => {
         const notice = retryNotices.failure(Date.now(), delayMs);
         if (notice !== null) {
