@@ -80,8 +80,12 @@ const notesOf = (host: AgentHost): string[] => [
     </header>
 
     <section class="hm-ahp__section hm-ahp__yours" data-ahp-yours aria-labelledby="ahp-yours-title" hidden>
-      <h2 class="hm-ahp__step-title" id="ahp-yours-title">Already yours</h2>
-      <div data-ahp-existing-list></div>
+      {/* Open on entry, so the person's own agents and their Add buttons are easy to find. Picking an app
+          folds it to this heading, which brings the sentence to paste into view; it reopens on a press. */}
+      <details class="hm-ahp__fold" data-ahp-yours-fold open>
+        <summary><h2 class="hm-ahp__step-title" id="ahp-yours-title">Already yours</h2></summary>
+        <div data-ahp-existing-list></div>
+      </details>
     </section>
 
     <section class="hm-ahp__section" aria-label="App">
@@ -285,7 +289,10 @@ const notesOf = (host: AgentHost): string[] => [
       if (this.dataset.wired === "true") return;
       this.dataset.wired = "true";
       for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
-        chip.addEventListener("click", () => this.showHost(chip.dataset.ahpHost ?? ""));
+        chip.addEventListener("click", () => {
+          this.showHost(chip.dataset.ahpHost ?? "");
+          this.#foldYours(chip);
+        });
       }
       this.#nameInput()?.addEventListener("input", () => {
         this.#error("");
@@ -380,10 +387,23 @@ const notesOf = (host: AgentHost): string[] => [
       this.#show("form");
       const approveStatus = this.querySelector<HTMLElement>("[data-ahp-approve-status]");
       if (approveStatus) approveStatus.textContent = "";
+      const fold = this.querySelector<HTMLDetailsElement>("[data-ahp-yours-fold]");
+      if (fold) fold.open = true;
       const next = hostId ?? lastHost(addAgentStore(), this.#viewerId);
       this.#hostId = "";
       if (next && this.#chip(next)) this.showHost(next);
       else this.#render();
+    }
+
+    /* The person picked an app: fold "Already yours" to its heading so the sentence and Copy come into view.
+       Only a press on an app does this. An app chosen for them on entry (the last one used) leaves the list
+       open. Folding changes nothing else: the chosen app, the typed name and focus stay as they are. */
+    #foldYours(chip: HTMLElement): void {
+      const fold = this.querySelector<HTMLDetailsElement>("[data-ahp-yours-fold]");
+      if (!fold?.open) return;
+      fold.open = false;
+      // The list above just got shorter; keep the app that was pressed on screen.
+      chip.scrollIntoView({ block: "nearest" });
     }
 
     showHost(id: string): void {
