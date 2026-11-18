@@ -49,8 +49,8 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
         { grantId: "org-unknown", principalId: "a1", level: "organization", organizationId: null, workspaceIds: [], expiresAt: null, state: "active" },
         { grantId: "mine-4", principalId: "a1", level: "workspace", workspaceIds: ["w1"], expiresAt: null, state: "ended" }] };`, context); },
     endSeatAdmin: async (_session: unknown, commandId: string, grantId: string) => { ends.push({ commandId, grantId }); return io.end ? io.end() : { kind: "accepted" }; },
-    buildSeatAdminEndConfirmation: (_doc: unknown, opts: { confirm(): void; cancel(): void; agentName: string; level: string; coverage: string[] }) => {
-      calls.push(`ask:${opts.agentName}:${opts.level}:${opts.coverage.join("|")}`);
+    buildSeatAdminEndConfirmation: (_doc: unknown, opts: { confirm(): void; cancel(): void; agentName: string; level: string; coverage: string[]; restoredBy?: string }) => {
+      calls.push(`ask:${opts.agentName}:${opts.level}:${opts.coverage.join("|")}`); calls.push(`restoredBy:${opts.restoredBy}`);
       // "hold": the question stays open; the test presses End access later through io.held.
       return { dialog: { remove() {} }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
     },
@@ -256,4 +256,13 @@ test("a Remove answered after its dialog closed is settled, but starts no read a
   refused.run("closeRosterDialog(); dialogOpen = true"); await refused.run("loadPeopleAdminAccess()");
   answer({ kind: "refused", message: "Only its owner can end this." }); await settle(); await settle();
   assert.deepEqual(plain(refused.run<any>("currentPeopleAdminAccess()")).notices, {}, "a refusal that arrives late is not shown on the reopened dialog's row");
+});
+
+test("the question says who can give the access again: you for a grant you gave, the agent's owner for anyone else's", async () => {
+  const p = await page();
+  p.io.all = async () => [grant(1, { giverId: "u1" }), grant(2, { giverId: "u2" })];
+  await p.run("loadPeopleAdminAccess()"); p.io.confirm = false; p.calls.length = 0;
+  p.run("endPeopleAdminGrant('g1', {})"); p.run("endPeopleAdminGrant('g2', {})");
+  assert.deepEqual(p.calls.filter(call => call.startsWith("restoredBy")), ["restoredBy:you", "restoredBy:owner"],
+    "an owner ending another member's grant is not told they can turn it back on");
 });

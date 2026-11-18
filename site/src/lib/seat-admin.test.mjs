@@ -17,7 +17,7 @@ import {
   seatAdminGrantStateLabel,
   seatAdminRemovalReceipt,
 } from "./seat-admin.ts";
-import { seatAdminEndQuestion } from "./seat-admin-view.ts";
+import { seatAdminEndConsequence, seatAdminEndQuestion } from "./seat-admin-view.ts";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_USER_ID = "22222222-2222-4222-8222-222222222222";
@@ -459,4 +459,9 @@ test("nonActiveSeatAdminGrantMessage returns explicit notices for expired, downg
   assert.match(nonActiveSeatAdminGrantMessage("expired"), /already expired/i);
   assert.match(nonActiveSeatAdminGrantMessage("downgraded"), /already removed/i);
   assert.match(nonActiveSeatAdminGrantMessage("ended"), /already ended/i);
+});
+
+test("the end confirmation never promises the person something they cannot do", () => {
+  assert.equal(seatAdminEndConsequence("you"), "It stays off until you turn it on again.");
+  assert.equal(seatAdminEndConsequence("owner"), "Only the agent’s owner can grant this access again.");
 });

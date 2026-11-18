@@ -3152,6 +3152,32 @@
     }
   },
   {
+    "id": "dialog.people-admins-end.own",
+    "kind": "dialog",
+    "path": "/app?w={adminsWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsOwnGrant}\"]",
+        "click": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsOwnGrant}\"]"
+      }
+    ],
+    "ready": "dialog.sa-confirm[data-seat-admin-end=\"workspace\"][open]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_admin_grants"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
     "id": "app.people.agents-error",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
