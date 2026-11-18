@@ -3136,6 +3136,12 @@
       },
       {
         "click": "dialog[data-channel-dialog][open] [data-channel-settings-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-channel-dialog][open] [data-channel-settings-more][open] [data-channel-settings-archive]"
+      },
+      {
+        "scroll": "dialog[data-channel-dialog][open] [data-channel-rename-submit]"
       }
     ],
     "ready": "dialog[data-channel-dialog][open] [data-channel-settings-more][open] [data-channel-settings-archive]",
