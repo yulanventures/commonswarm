@@ -1,7 +1,7 @@
 /**
  * The accessibility floor for public pages, checked on the built site (design status goal 6).
  *
- * Every page the sitemap lists, plus the not-found page, is loaded at a phone and a desktop width in light and dark,
+ * Every page the sitemap lists except /app, plus the not-found page, is loaded at a phone and a desktop width in light and dark,
  * and axe-core must report nothing serious or critical. Lesser findings are printed, not failed, so the floor can be
  * raised on purpose rather than by accident.
  *
@@ -33,7 +33,10 @@ test("public pages have no serious or critical accessibility findings at phone a
   const dist = fileURLToPath(new URL("../dist/", import.meta.url));
   const axeSource = await readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
   const sitemap = await readFile(join(dist, "sitemap.xml"), "utf8");
-  const pages = [...sitemap.matchAll(/<loc>https:\/\/commonswarm\.com(\/[^<]*)<\/loc>/gu)].map(([, path]) => path!);
+  // /app is the app, not a public page: without a session its shell is in a state no person sees, and its controls
+  // belong to the signed-in check that the workspace fixture will carry.
+  const pages = [...sitemap.matchAll(/<loc>https:\/\/commonswarm\.com(\/[^<]*)<\/loc>/gu)].map(([, path]) => path!)
+    .filter(path => path !== "/app/");
   assert.ok(pages.length >= 10, `the sitemap should list the public pages, got ${pages.length}`);
   pages.push("/404.html");
 
