@@ -113,7 +113,11 @@ test("the stable reference and Caddy source retain their route invariants", asyn
   assert.match(caddyfile, /header @javascript Content-Type "application\/javascript; charset=utf-8"/);
   assert.match(caddyfile, /header @manifest Content-Type "application\/manifest\+json; charset=utf-8"/);
   assert.match(caddyfile, /header @xml Content-Type "application\/xml"/);
-  assert.doesNotMatch(caddyfile, /immutable|max-age=31536000/i);
+  // Long-lived caching exists only for Astro's content-hashed assets (#529): exactly this rule, and
+  // nowhere else in the file.
+  const hashedRule = /^\t\t@hashed path \/_astro\/\*\n\t\theader @hashed Cache-Control "public, max-age=31536000, immutable"\n/m;
+  assert.match(caddyfile, hashedRule);
+  assert.doesNotMatch(caddyfile.replace(hashedRule, ""), /max-age=31536000|Cache-Control "[^"]*immutable/i);
   assert.equal(inventory.artifacts.some((file) => file.startsWith("_astro/")), false);
   assert.equal(inventory.routes.some((route) => /^\/_astro\/.+\.[A-Za-z0-9]+$/.test(route.path)), false);
   assert.deepEqual(
