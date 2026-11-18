@@ -58,6 +58,17 @@ const literal = JSON.stringify([
   ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'SELECT', false],
   ['swarm_command', 'FUNCTION', 'swarm.signal_reactable(uuid,uuid)', 'EXECUTE', false],
+  // Conversations step 2a (20261118000005): the command edge calls these ten definers and nothing else of it.
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_join(uuid,text,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_leave(uuid,text,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_invite(uuid,text,uuid,uuid,uuid[],uuid[])', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_remove(uuid,text,uuid,uuid,text,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_mark_read(uuid,text,uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_set_notify(uuid,text,uuid,uuid,text,boolean,integer)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_post_route(uuid,text,uuid,uuid,uuid[],uuid[])', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_prefile(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])', 'EXECUTE', false],
   // A person's channel read position: mark_channel_read writes it forward, never back.
   ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'SELECT', false],

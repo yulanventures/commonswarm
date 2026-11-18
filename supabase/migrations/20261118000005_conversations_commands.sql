@@ -1017,20 +1017,24 @@ CREATE TRIGGER agent_principals_conversation_upkeep
   AFTER INSERT OR UPDATE OF revoked_at ON swarm.agent_principals
   FOR EACH ROW EXECUTE FUNCTION swarm.conversation_agent_upkeep();
 
--- A public channel's creator is its first member.
+-- A public channel's creator is its first member. On the channel's insert, after its conversation exists
+-- (trigger names fire in order: channels_sync_conversation, then this), so the backfill, which makes
+-- conversations for channels that already exist, adds nobody this way.
 CREATE FUNCTION swarm.conversation_creator_joins() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
-  IF swarm.actor_can_access_channel(NEW.workspace_id, NULL, NEW.created_by_kind, NEW.created_by_principal) THEN
-    PERFORM swarm.conversation_member_join(NEW.conversation_id, NEW.workspace_id, NEW.created_by_kind,
+  IF EXISTS (SELECT 1 FROM swarm.conversations AS c
+      WHERE c.conversation_id = NEW.channel_id AND c.workspace_id = NEW.workspace_id AND c.kind = 'public_channel')
+    AND swarm.actor_can_access_channel(NEW.workspace_id, NULL, NEW.created_by_kind, NEW.created_by_principal) THEN
+    PERFORM swarm.conversation_member_join(NEW.channel_id, NEW.workspace_id, NEW.created_by_kind,
       NEW.created_by_principal);
   END IF;
   RETURN NULL;
 END;
 $$;
-CREATE TRIGGER conversations_creator_joins
-  AFTER INSERT ON swarm.conversations
-  FOR EACH ROW WHEN (NEW.kind = 'public_channel') EXECUTE FUNCTION swarm.conversation_creator_joins();
+CREATE TRIGGER channels_sync_creator_member
+  AFTER INSERT ON swarm.channels
+  FOR EACH ROW WHEN (NEW.visibility = 'open') EXECUTE FUNCTION swarm.conversation_creator_joins();
 
 -- Every write of today's read positions, from any writer, is copied forward into conversation_reads.
 -- A position with no message (a person's "through now", an agent's "through now" marker id) is kept

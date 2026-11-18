@@ -597,7 +597,7 @@ export type WorkspaceSignalsSubscription = FeedPushSubscription;
 
 /**
  * Subscribe one signed-in member to the private workspace signal topic and to
- * their own member topic, where their private channels are announced.
+ * their own member topic, where everything they can read is announced.
  * Captures the workspace id before session and setAuth awaits.
  */
 export async function subscribeWorkspaceSignals(

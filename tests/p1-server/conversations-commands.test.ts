@@ -115,8 +115,12 @@ const opened = async (bearer: string, members: Row[], extra: Row = {}): Promise<
 const deliveredTo = async (signal: string) => (await sql<{ a: string }[]>`
   SELECT recipient_agent_principal_id::text AS a FROM swarm.signal_deliveries WHERE signal_id = ${signal}::uuid ORDER BY 1`)
   .map((r) => r.a);
-const filed = async (signal: string) => (await sql<{ conversation: string; audience: string }[]>`
-  SELECT conversation_id::text AS conversation, audience FROM swarm.conversation_signals WHERE signal_id = ${signal}::uuid`)[0];
+/** A plain object: postgres.js rows are not plain for a strict deepEqual. */
+const filed = async (signal: string) => {
+  const [row] = await sql<{ conversation: string; audience: string }[]>`
+    SELECT conversation_id::text AS conversation, audience FROM swarm.conversation_signals WHERE signal_id = ${signal}::uuid`;
+  return row ? { ...row } : undefined;
+};
 
 async function makeAgent(owner: Person, label: string): Promise<Agent> {
   const id = randomUUID();
