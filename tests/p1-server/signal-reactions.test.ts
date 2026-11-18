@@ -281,6 +281,9 @@ test("a reactor holds at most 64 emojis on one message, and re-adding one it hol
 });
 
 test("a private channel: only its members react or see reactions, and leaving it ends both", { timeout: 60_000 }, async () => {
+  // Every frame the outsider's own topic has ever had, counted before the channel exists: since 20261118000005
+  // a public message's frames reach that topic too, so a look-back window would catch the last test's.
+  const outsiderAt = (await frames(memberTopic(other.id), new Date(0))).length;
   const slug = `lock-${randomBytes(4).toString("hex")}`;
   const created = await send(owner.jwt, { kind: "channel_create", slug, visibility: "private",
     members: [{ kind: "agent", id: agentA.principal }] });
@@ -308,7 +311,8 @@ test("a private channel: only its members react or see reactions, and leaving it
   // Pushes go to the channel's people, never to the workspace topic.
   assert.equal((await frames(workspaceTopic(), since)).some((p) => p.signal_id === message), false);
   assert.ok((await frames(memberTopic(owner.id), since)).length >= 2, "the member's own topic hears it");
-  assert.equal((await frames(memberTopic(other.id), since)).length, 0, "an outsider's topic hears nothing");
+  assert.equal((await frames(memberTopic(other.id), new Date(0))).length, outsiderAt,
+    "an outsider's topic hears nothing: not the post, not a reaction");
 
   const removed = await send(owner.jwt, { kind: "channel_member_remove", channel_id: lockId,
     member: { kind: "agent", id: agentA.principal } });

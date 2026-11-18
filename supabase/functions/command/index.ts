@@ -809,6 +809,17 @@ interface WorkspaceDecideCtx {
 }
 
 interface StoredResponse {
+  /* Conversations (step 2a): what a conversation command answered (conversationReplayFields). */
+  conversation?: Record<string, unknown>;
+  created?: boolean;
+  conversation_id?: string;
+  kind?: string;
+  changed?: boolean;
+  members_added?: unknown[];
+  read_through_at?: string | null;
+  notify_level?: string;
+  starred?: boolean;
+  star_rank?: number | null;
   org_id?: string;
   from_org_id?: string;
   ok: boolean;
@@ -865,7 +876,7 @@ interface StoredResponse {
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
   members?: ChannelMemberRecord[];
-  channel_id?: string;
+  channel_id?: string | null;
   left?: boolean;
   preference?: ChannelPreferenceRecord;
   preferences?: ChannelPreferenceRecord[];
@@ -4207,6 +4218,34 @@ function storedResponse(value: unknown): StoredResponse {
           error: entry.error as string,
         })),
       }
+      : {}),
+    // Conversations (step 2a): a conversation command's answer replays exactly as it was given.
+    ...conversationReplayFields(response),
+  };
+}
+
+/** The fields a conversation command stores (conversations.ts), kept only for its own stored answers: one
+ * that names a conversation. Everything else in a stored response is unchanged by them. */
+function conversationReplayFields(response: Record<string, unknown>): Partial<StoredResponse> {
+  const conversation = record(response.conversation);
+  if (conversation === null && typeof response.conversation_id !== "string") return {};
+  return {
+    ...(conversation !== null ? { conversation } : {}),
+    ...(typeof response.created === "boolean" ? { created: response.created } : {}),
+    ...(typeof response.conversation_id === "string" ? { conversation_id: response.conversation_id } : {}),
+    ...(typeof response.kind === "string" ? { kind: response.kind } : {}),
+    ...(response.channel_id === null || typeof response.channel_id === "string"
+      ? { channel_id: response.channel_id as string | null }
+      : {}),
+    ...(typeof response.changed === "boolean" ? { changed: response.changed } : {}),
+    ...(Array.isArray(response.members_added) ? { members_added: response.members_added } : {}),
+    ...(typeof response.read_through_at === "string" || response.read_through_at === null
+      ? { read_through_at: response.read_through_at as string | null }
+      : {}),
+    ...(typeof response.notify_level === "string" ? { notify_level: response.notify_level } : {}),
+    ...(typeof response.starred === "boolean" ? { starred: response.starred } : {}),
+    ...(typeof response.star_rank === "number" || response.star_rank === null
+      ? { star_rank: response.star_rank as number | null }
       : {}),
   };
 }
