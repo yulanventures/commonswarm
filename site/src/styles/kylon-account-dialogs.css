@@ -139,10 +139,30 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
   margin-block: 0;
 }
 /* The card shows what is saved; the controls open from one quiet action under it. */
-live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date [data-end-date-edit] {
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date button[data-end-date-edit][data-end-date-field] {
   justify-self: start;
   min-block-size: 44px;
   padding-inline: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--k-shell-secondary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* Open: the tick box and the date take the full width; Save and Cancel sit side by side under them, equal in size. */
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px 12px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date form > :is(label, [data-end-date-check]) {
+  grid-column: 1 / -1;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date form > button:is([data-end-date-save], [data-end-date-cancel])[data-end-date-field] {
+  inline-size: 100%;
+  min-block-size: 44px;
+  text-decoration: none;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date h3 {
   margin-block-start: 8px;

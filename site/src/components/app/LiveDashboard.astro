@@ -6448,7 +6448,7 @@ import "../../styles/kylon-command-palette.css";
       const check = document.createElement("button"); check.type = "button"; check.textContent = "Check saved end date";
       check.className = "dashboard__text-button"; check.dataset.endDateCheck = "";
       const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancel";
-      cancel.className = "dashboard__text-button"; cancel.dataset.endDateCancel = ""; cancel.hidden = !collapsed;
+      cancel.className = "dashboard__button dashboard__button--secondary"; cancel.dataset.endDateCancel = ""; cancel.hidden = !collapsed;
       for (const [field, control] of [["toggle", toggle], ["value", date], ["save", save], ["check", check], ["edit", edit], ["cancel", cancel]] as const) {
         control.dataset.endDateField = field; control.dataset.pdFocus = `${options.key}:${field}`;
       }
