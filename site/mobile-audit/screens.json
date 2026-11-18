@@ -3060,7 +3060,7 @@
         "press": "Enter"
       }
     ],
-    "ready": "live-dashboard:has([data-jump-present][hidden]):has(:is([data-composer-input], [data-feed-list] .dashboard__message[data-signal-id]):focus) [data-composer]:not([hidden]) [data-composer-input]",
+    "ready": "live-dashboard:has([data-jump-present][hidden]):has([data-feed-list] .dashboard__message[data-signal-id]:focus) [data-composer]:not([hidden]) [data-composer-input]",
     "states": [
       "dense"
     ],
