@@ -1008,7 +1008,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     // an end date. So the list shows "granted by you" beside "granted by <name>", and Remove can be pictured both for the
     // viewer's own grant and for a grant on another person's agent, which the viewer can end but not give again. The other
     // person's rows can only come from the owner's read of every grant, so the list screen proves that read. One effect
-    // outside this workspace: the viewer's account-wide Admin access list (dialog.admin-history) gains this one grant.
+    // outside this workspace: the viewer's Admin access list gains this one grant under "Show my whole account". The
+    // dialog.admin-history screens open scoped to the main workspace, so their first view is unchanged. No grant is given
+    // to an agent in the main workspace: dialog.admin-access and dialog.people-admin-access need Atlas's switch off there.
     try {
       const adminsWorkspace = randomUUID();
       const invited = ok("create_workspace admins", await command(owner.token, { kind: "create_workspace", workspace_id: adminsWorkspace, name: "Workshop", org_id: workspace }, null))
