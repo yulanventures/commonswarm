@@ -1,6 +1,8 @@
 # People & agents dialog: redesign
 
-**Approved by the owner on Nov 18, 2026 (13:39 UTC):** "go with your recommendations". The three decisions and their answers are at the end. Two parts have already shipped: #501 (the Invites tab and Cancel, in today's dialog) and #502 (declining an invitation you received).
+**Approved by the owner on Nov 18, 2026 (13:39 UTC):** "go with your recommendations". The three decisions and their answers are at the end.
+
+**Built the same day.** What shipped, where it differs from this page, and what is left are in [What shipped](#what-shipped) at the end. The sections in between are the design as approved.
 
 ## What is wrong today
 
@@ -88,3 +90,36 @@ Taps are counted from the open dialog to the control. A confirmation, where ther
 1. **Four tabs (People, Agents, Invites, Admins), opening on Agents.** Yes.
 2. **No separate Delete for invites.** Yes: Cancel or Decline ends the invite and removes it from the list; the server keeps its history record.
 3. **Admins shows all admin access in the workspace to an owner**, not only the viewer's own agents. Yes. This needs a small new server read and a security review.
+
+## What shipped
+
+All on Nov 18, 2026.
+
+| Step | PR |
+|---|---|
+| Invites tab in the old dialog, who and when on every row, Cancel for connect codes | #501 |
+| Decline an invitation you received | #502 |
+| Older layout and its tests deleted | #514 |
+| Tabs People, Agents, Invites, opening on Agents | #528 |
+| One line per agent row | #545 |
+| Loading, empty and could-not-load with Retry on every tab | #563 |
+| Invite form inside the dialog | #570 |
+| Server read of every admin grant in a workspace, for its owners | #516 |
+| Admins tab | #576 |
+
+Smaller fixes along the way: keyboard focus after a confirmation and across a redraw (#517, #556).
+
+### Where it differs from the design above
+
+- **Changing a role on the Admins tab.** The design said roles are "changed right there". A person's row on Admins opens their profile, where the role is changed; the tab stays on Admins.
+- **Giving admin access from the Admins tab.** The table says "Give or remove ... 2: Admins, the button". Only Remove is on the tab. Giving admin access is still done from the agent's profile.
+- **The row's one button.** The design listed New key, Reconnect, Allow and Cancel. Rows carry New key, Resume and "Allow Lists & docs" (the full words, so a person can see what one tap grants); Cancel is on invite rows.
+- **A non-owner's Admins tab** lists only the admin access they gave, under a heading that says so. Only an owner sees everything.
+- **The tab is remembered** for the page session, not across visits.
+- **An invite link shown in the dialog** is cleared when the dialog closes or the workspace reloads. The invite stays pending in the list.
+
+### Not done
+
+- **One module and one stylesheet.** The logic that was added lives in `site/src/lib/people/`, but the main view is still one file, its styles are still spread over several stylesheets, and the dashboard still holds the wiring.
+- **Reading only the changed rows after an action.** An action still reloads the workspace. Security review of the invite form and the Admins tab relies on that reload ending the workspace's current load, so changing it needs its own review.
+- **Listing invites an agent sent for you.** Deferred, as the table above says: nothing in production can create one.
