@@ -108,6 +108,9 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
    *  must become visible: the proof that the real rows come back. The handler is removed and anything still waiting is
    *  let through before the page closes, also when the capture fails. Not available on `alone` screens. */
   fault?: { request: string; recover: { click?: string; expect: string } };
+  /** A request this capture must never send: `request` is a part of its URL and `body` a text its body contains (a command's
+   *  kind, for example). Watched from before the page loads to the end of the witnesses; one match is a capture error. */
+  never?: { request: string; body: string };
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
    *  as after a deploy; the page's navigation itself is served unchanged. */
   newBuild?: true;
@@ -904,6 +907,13 @@ async function main(): Promise<void> {
           const page = await (screen.noJs ? noScript : screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
           const realtimeJoins = watchRealtimeJoins(page);
           let fault: Fault | null = null;
+          let forbidden = 0;
+          if (screen.never) {
+            const never = screen.never;
+            page.on("request", (request: { url(): string; postData(): string | null }) => {
+              if (request.url().includes(never.request) && (request.postData() ?? "").includes(never.body)) forbidden += 1;
+            });
+          }
           try {
             if (screen.fault) {
               if (screen.alone) throw new Error("fault is not available on an alone screen");
@@ -962,6 +972,10 @@ async function main(): Promise<void> {
               if (screen.fault.recover.click) await page.click(fill(screen.fault.recover.click, seed.ids), { timeout: 8_000 });
               await page.waitForSelector(fill(screen.fault.recover.expect, seed.ids), { state: "visible", timeout: 30_000 });
               entry.fault = { ...fault.counts, recovered: true };
+            }
+            if (screen.never) {
+              entry.never = { ...screen.never, sent: forbidden };
+              if (forbidden > 0) throw new Error(`the capture sent ${forbidden} request(s) it must never send (${screen.never.body})`);
             }
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);

@@ -1448,20 +1448,26 @@
   {
     "id": "app.lists-approval",
     "kind": "view",
-    "path": "/app?w={approvalWorkspace}&v=lists",
+    "path": "/app?w={approvalWorkspace}&v=people",
     "setup": [
       {
-        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{approvalSetupAgent}",
+        "click": "#pd-agent-{approvalSetupAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]"
+      },
+      {
+        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"]",
         "settle": true
       },
       {
-        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"]",
         "settle": true
       }
     ],
-    "ready": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
-    "status": "pending",
-    "reason": "Since #460 the approval card shows only on a landing from the People dialog's Allow, and that Allow now approves in place whenever the agent has a live connection and Lists access is confirmed. The seed has exactly that, so no step reaches the card without submitting an approval. Needs a seeded own agent with no live connection in {approvalWorkspace}: its Allow lands here and approves nothing.",
+    "ready": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"]",
     "states": [
       "dense"
     ],
@@ -1469,8 +1475,15 @@
       "seed_lists_approval"
     ],
     "frame": [
-      "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval"
-    ]
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"]",
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"] strong",
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"] .dashboard__approval-choices",
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-approval-agent=\"{approvalAgent}\"] button.dashboard__button--primary"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_approve_connection"
+    }
   },
   {
     "id": "dialog.public-menu",
