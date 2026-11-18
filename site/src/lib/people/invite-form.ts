@@ -34,10 +34,13 @@ export function buildPeopleInviteForm(doc: Document, draft: PeopleInviteDraft, o
   const label = el(doc, "label", "", "Their email"); label.htmlFor = "pd-invite-email";
   const input = el(doc, "input", ""); input.id = "pd-invite-email"; input.type = "text"; input.inputMode = "email"; input.autocomplete = "off";
   input.setAttribute("autocapitalize", "off"); input.spellcheck = false; input.value = draft.email; input.readOnly = draft.busy;
-  input.dataset.pdFocus = "invite-email"; input.setAttribute("aria-describedby", "pd-invite-note");
+  input.dataset.pdFocus = "invite-email"; input.setAttribute("aria-describedby", "pd-invite-note pd-invite-sharing");
   input.addEventListener("input", () => on.input(input.value));
   const note = el(doc, "p", "pd-muted pd-invite-note",
-    "The link works only for this email. They will see everything shared here, including earlier messages, lists and files."); note.id = "pd-invite-note";
+    "The link works only for this email. They can read earlier messages, lists and files shared in this workspace."); note.id = "pd-invite-note";
+  // Plain text for now: saying it only when it applies needs a read of the setting that this page does not have.
+  const sharing = el(doc, "p", "pd-muted pd-invite-note",
+    "Invites work only when workspace sharing in Lists & docs is set to ‘Me and people I invite’."); sharing.id = "pd-invite-sharing";
   const actions = el(doc, "div", "pd-invite-form-actions");
   const submit = el(doc, "button", "pd-invite-submit", draft.busy ? "Creating a private link…" : "Create invite link"); submit.type = "submit";
   // Busy is said, not disabled: a disabled button would drop keyboard focus in the middle of the request.
@@ -48,7 +51,7 @@ export function buildPeopleInviteForm(doc: Document, draft: PeopleInviteDraft, o
   actions.append(submit, cancel);
   const error = el(doc, "p", "pd-error", draft.error); error.setAttribute("role", "alert"); error.hidden = !draft.error; error.dataset.peopleInviteError = "";
   form.addEventListener("submit", (event) => { event.preventDefault(); if (!draft.busy) on.submit(); });
-  form.append(label, input, note, actions, error); return form;
+  form.append(label, input, note, sharing, actions, error); return form;
 }
 
 /** The invite just made: its one-use link, Copy, and Done. */

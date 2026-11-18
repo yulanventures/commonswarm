@@ -406,6 +406,9 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
   assert.equal(state.tab, "invites", "the form lives on the Invites tab");
   assert.equal(byFocus("page-invite"), undefined, "the form stands where the button was");
   const input = () => byFocus("invite-email"); const form = () => find(node => node.tag === "form");
+  assert.ok(find(node => node.tag === "p" && node.textContent === "Invites work only when workspace sharing in Lists & docs is set to ‘Me and people I invite’."),
+    "the form says which sharing setting an invite needs, before the link is made");
+  assert.ok(find(node => node.tag === "p" && node.textContent.endsWith("shared in this workspace.")), "and what the invited person can read is scoped to this workspace");
   input().value = "  mei@  "; input().events.get("input")();
   paint(); assert.equal(input().value, "  mei@  ", "a redraw keeps what was typed");
   await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
