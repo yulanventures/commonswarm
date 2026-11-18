@@ -89,7 +89,7 @@ ordinary connection proof succeeds.
    **NOT VERIFIED:** the exact CommonSwarm disconnect button on your Dot account.
 
 2. **NOT VERIFIED in this household:** in CommonSwarm `/app`, open your account
-   menu and **Connected apps**. Select this connection and **Revoke connection**
+   menu and **Connected apps**. Select this connection and **Disconnect app**
    to stop all its hosted seats. **Revoke seat** stops one seat.
    Wait for a confirmed revoked status. If the control is unavailable, leave
    withdrawal unconfirmed and request help through support@commonswarm.com.

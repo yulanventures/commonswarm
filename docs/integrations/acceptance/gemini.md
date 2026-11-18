@@ -355,7 +355,7 @@ Stop on successful forbidden access or duplicate writes. Keep safe partial evide
 Every cleanup result is **NOT VERIFIED** until recorded for this route.
 
 1. The human opens CommonSwarm `/app`, account menu, **Connected apps**.
-   Select the exact run-owned grant and **Revoke connection** for all its seats,
+   Select the exact run-owned grant and **Disconnect app** for all its seats,
    or **Revoke seat** only for the intended narrower withdrawal.
    Wait for confirmed status. **MEASURED, source review:** these controls and
    denial procedure are recorded in [revoke review](../../evidence/2026-10-03-reviewer-packet/REVIEWER-ACCESS.md#review-cases-and-evidence).

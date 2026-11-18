@@ -109,9 +109,9 @@ export async function loadConnectedApps(
   return groupConnectedApps(connections.data ?? [], seats.data ?? [], workspaceNames);
 }
 
-function accepted(status: number, body: Record<string, unknown>, target: string): void {
+function accepted(status: number, body: Record<string, unknown>, action: string): void {
   if (status !== 200 || body.status !== "accepted" || body.ok !== true) {
-    throw new Error(`CommonSwarm did not revoke ${target} (${String(body.reason ?? body.error ?? status)}).`);
+    throw new Error(`CommonSwarm did not ${action} (${String(body.reason ?? body.error ?? status)}).`);
   }
 }
 
@@ -125,9 +125,9 @@ export async function revokeConnectedAppGrant(
     commandId,
     { kind: "revoke_hosted_mcp_grant", grant_id: connection.grantId },
     { workspace_id: connection.homeWorkspaceId, stream: { kind: "workspace" } },
-    "CommonSwarm lost the revocation result. Reload Connected apps before trying again.",
+    "CommonSwarm lost the result of disconnecting the app. Reload Connected apps before trying again.",
   );
-  accepted(result.status, result.body, "the connection");
+  accepted(result.status, result.body, "disconnect the app");
 }
 
 export async function revokeConnectedAppSeat(
@@ -144,7 +144,7 @@ export async function revokeConnectedAppSeat(
       seat_id: seat.seatId,
     },
     { workspace_id: seat.workspaceId, stream: { kind: "workspace" } },
-    "CommonSwarm lost the seat revocation result. Reload Connected apps before trying again.",
+    "CommonSwarm lost the result of removing the agent. Reload Connected apps before trying again.",
   );
-  accepted(result.status, result.body, "the hosted seat");
+  accepted(result.status, result.body, "remove the agent");
 }

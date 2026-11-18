@@ -118,7 +118,7 @@ supported idle wake claim. [Hosted catalog](../../evidence/2026-10-03-reviewer-p
    profile when withdrawing that route.
 
 2. **NOT VERIFIED in this household:** for remote MCP, open your account menu
-   in CommonSwarm `/app`, then **Connected apps**. Choose **Revoke connection**
+   in CommonSwarm `/app`, then **Connected apps**. Choose **Disconnect app**
    for all its seats, or **Revoke seat** for one. Wait for confirmed revoked
    status. If controls are unavailable, leave withdrawal unconfirmed and request
    help through support@commonswarm.com.
