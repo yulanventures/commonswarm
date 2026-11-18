@@ -127,8 +127,7 @@ test("New workspace and role controls wrap, support native forms, and keep confi
         assert.ok(encoded, `builder interactions must complete at ${width}px, dark=${dark}: ${stdout.match(/data-fixture-error="([^"]*)"/)?.[1] ?? "no result"}`);
         const measured = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
 
-        // preservedOnRefusal is measured but not asserted: in the one layout a refused change for one person replaces another person's unsaved choice. Tracked separately.
-        for (const key of ["initialDisabled", "noDefault", "enabled", "previewPlain", "cancelled", "escapeSavesNothing", "preservedOnSuccess", "backKeepsAlert"]) assert.equal(measured[key], true, `${key}`);
+        for (const key of ["initialDisabled", "noDefault", "enabled", "previewPlain", "cancelled", "escapeSavesNothing", "preservedOnSuccess", "preservedOnRefusal", "backKeepsAlert"]) assert.equal(measured[key], true, `${key}`);
         const hostile = '<img src=x onerror="document.title=1">';
         assert.deepEqual(measured.changes, [hostile]); assert.deepEqual(measured.creations, [{name:hostile,purpose:"shared"}]);
 
