@@ -1301,6 +1301,7 @@ import "../../styles/kylon-command-palette.css";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
   import { renderPeopleDialog, withdrawConfirmText, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
+  import { peopleAdminCoverage, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
@@ -1659,6 +1660,7 @@ import "../../styles/kylon-command-palette.css";
     hasFreshInteractiveSession,
     nonActiveSeatAdminGrantMessage,
     readMySeatAdminGrants,
+    readWorkspaceAdminGrants,
     readSeatAdminReauthIntent,
     readSeatAdminStatus,
     resolveSeatAdminPanelModel,
@@ -7382,6 +7384,7 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    window.addEventListener("commonswarm:seat-admin-changed", () => { if (peopleDialogOpen() && peopleAdminEnding.size === 0) void loadPeopleAdminAccess(); });
     window.addEventListener("commonswarm:seat-admin-changed", () => {
       if (session && !sampleMode && seatAdminStatusState.phase === "loaded" && seatAdminStatusState.status.enabled) {
         void refreshSeatAdminState(true);
@@ -7482,7 +7485,7 @@ import "../../styles/kylon-command-palette.css";
       const detail = peopleDetailHost();
       const endDateFocus = connectionDateFocus(detail);
       settlePeopleDialogInvite();
-      const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
+      const model: PeopleDialogModel = { ...peopleDialogModel(), adminAccess: currentPeopleAdminAccess() }; peopleDialogState.query = rosterFilter;
       if (peopleDialogState.selected === null && session && !sampleMode) {
         const reauth = readSeatAdminReauthIntent(session.user.id);
         if (
@@ -7536,6 +7539,7 @@ import "../../styles/kylon-command-palette.css";
         },
         reloadInvites: reloadPeopleInvites, reload: reloadPeopleRoster,
         createInvite: createPeopleDialogInvite, forgetInvite: erasePeopleDialogInvite, currentInviteLink: peopleDialogInviteLink,
+        reloadAdminAccess: loadPeopleAdminAccess, endAdmin: endPeopleAdminGrant,
         confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
           if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
           const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
@@ -7675,6 +7679,105 @@ import "../../styles/kylon-command-palette.css";
       pendingAgentsLoadFailed = nextPending.failed || !invitesSettled || !statusesSettled;
       renderPendingAccess();
       if (peopleDialogOpen()) (one<HTMLElement>('[data-tab-retry="invites"]') ?? one<HTMLElement>('[data-pd-focus="tab-invites"]'))?.focus({ preventScroll: true });
+    };
+    /* People & agents, the Admins tab: the admin access given to agents in the open workspace. An owner reads every
+       grant on record for it (swarm_read.workspace_seat_admin_grants); anyone else sees only what they gave, from their
+       own grants. Agent admin access is off by default: until seat_admin_status says it is on, nothing here is read
+       and the tab lists people only. Held per account and workspace, so a switch never shows another one's rows. */
+    let peopleAdminAccess: { key: string; access: PeopleAdminAccess | undefined } = { key: "", access: undefined };
+    let peopleAdminGeneration = 0;
+    const peopleAdminEnding = new Set<string>();
+    const peopleAdminKey = (): string => session && activeWorkspaceId && !sampleMode ? `${session.user.id}:${activeWorkspaceId}` : "";
+    const currentPeopleAdminAccess = (): PeopleAdminAccess | undefined => {
+      const key = peopleAdminKey();
+      return key && peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
+    };
+    /** The viewer's own grants that concern this workspace, named from its roster. */
+    const ownPeopleAdminGrants = (workspaceId: string, userId: string): PeopleAdminGrant[] =>
+      seatAdminGrantsState.phase !== "loaded" ? [] : seatAdminGrantsState.grants.flatMap((grant) => {
+        const agent = agents.find((entry) => entry.principalId.toLowerCase() === grant.principalId.toLowerCase());
+        const here = grant.level === "organization" || grant.workspaceIds.some((id) => id.toLowerCase() === workspaceId.toLowerCase());
+        if (!agent || grant.state !== "active" || !here) return [];
+        return [{ grantId: grant.grantId.toLowerCase(), principalId: grant.principalId.toLowerCase(), agentName: agent.name, giverId: userId.toLowerCase(),
+          giverName: null, level: grant.level, expiresAt: grant.expiresAt, mayEnd: true }];
+      });
+    const loadPeopleAdminAccess = async (): Promise<void> => {
+      const value = session, workspaceId = activeWorkspaceId, key = peopleAdminKey();
+      if (!value || !workspaceId || !key) return;
+      const generation = ++peopleAdminGeneration;
+      const current = (): boolean => generation === peopleAdminGeneration && key === peopleAdminKey();
+      const before = peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
+      if (seatAdminStatusState.phase !== "loaded") await refreshSeatAdminState(true);
+      if (!current()) return;
+      // Off, or not known to be on: no section and no read.
+      if (seatAdminStatusState.phase !== "loaded" || !seatAdminStatusState.status.enabled) {
+        peopleAdminAccess = { key, access: undefined };
+        if (peopleDialogOpen()) renderDialogRoster();
+        return;
+      }
+      peopleAdminAccess = { key, access: before ? { ...before, read: before.read === "failed" ? "pending" : before.read } : { read: "pending", all: false, grants: [] } };
+      if (peopleDialogOpen()) renderDialogRoster();
+      let next: PeopleAdminAccess;
+      try {
+        const owner = members.find((member) => member.userId === value.user.id)?.role === "owner";
+        const all = owner ? await readWorkspaceAdminGrants(value, workspaceId) : null;
+        if (!current()) return;
+        if (all) next = { read: "ready", all: true, grants: all };
+        else {
+          if (seatAdminGrantsState.phase !== "loaded") await refreshSeatAdminState(true);
+          if (!current()) return;
+          if (seatAdminGrantsState.phase !== "loaded") throw new Error("Admin access could not load.");
+          next = { read: "ready", all: false, grants: ownPeopleAdminGrants(workspaceId, value.user.id) };
+        }
+      } catch {
+        if (!current()) return;
+        next = { read: "failed", all: before?.all ?? false, grants: before?.grants ?? [] };
+      }
+      // A refusal shown on a row stays until its grant is gone.
+      const notices = Object.fromEntries(Object.entries(before?.notices ?? {}).filter(([grantId]) => next.grants.some((grant) => grant.grantId === grantId)));
+      peopleAdminAccess = { key, access: { ...next, notices } };
+      if (peopleDialogOpen()) renderDialogRoster();
+    };
+    /** Remove on an Admins row: the same question, command and per-grant command id as the agent profile's switch. */
+    const endPeopleAdminGrant = (grantId: string, opener: HTMLButtonElement): void => {
+      const value = session, key = peopleAdminKey();
+      const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId);
+      const grant = currentPeopleAdminAccess()?.grants.find((entry) => entry.grantId === grantId && entry.mayEnd);
+      if (!value || !key || !workspace || !grant || peopleAdminEnding.has(grantId)) return;
+      const say = (text: string): void => {
+        if (peopleAdminAccess.key !== key || !peopleAdminAccess.access) return;
+        const notices = { ...(peopleAdminAccess.access.notices ?? {}) };
+        if (text) notices[grantId] = text; else delete notices[grantId];
+        peopleAdminAccess = { key, access: { ...peopleAdminAccess.access, notices } };
+      };
+      const send = async (): Promise<void> => {
+        peopleAdminEnding.add(grantId); say("");
+        const commandId = seatAdminRemoveCommandIds.get(grantId) ?? uuid();
+        seatAdminRemoveCommandIds.set(grantId, commandId);
+        const outcome = await endSeatAdmin(value, commandId, grantId);
+        // An unknown outcome keeps its command id, so pressing Remove again repeats the same command.
+        if (outcome.kind !== "unknown") seatAdminRemoveCommandIds.delete(grantId);
+        // The agent's own profile and the account's Admin access list read their state again; this tab reads its own below.
+        if (outcome.kind === "accepted") window.dispatchEvent(new CustomEvent("commonswarm:seat-admin-changed"));
+        peopleAdminEnding.delete(grantId);
+        if (key !== peopleAdminKey()) return;
+        if (outcome.kind !== "accepted") say(outcome.message);
+        await loadPeopleAdminAccess();
+        if (key !== peopleAdminKey()) return;
+        if (outcome.kind === "accepted") {
+          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = `Admin access removed from ${grant.agentName}.`;
+        }
+        if (peopleDialogOpen()) (one<HTMLElement>(`[data-pd-focus="end-admin-${grantId}"]`) ?? one<HTMLElement>("#pd-admin-access-title"))?.focus({ preventScroll: true });
+      };
+      disposeSeatAdminDialog();
+      const ending = buildSeatAdminEndConfirmation(document, {
+        agentName: grant.agentName, level: grant.level, coverage: [peopleAdminCoverage(grant, workspace.name)],
+        confirm: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); void send(); },
+        cancel: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); },
+      });
+      activeSeatAdminEndDialog = ending;
+      app.append(ending.dialog);
+      ending.open(opener);
     };
     /** Retry on People or Agents: the whole workspace load again. It owns the read state, the page behind the dialog and the version guards. */
     const reloadPeopleRoster = async (): Promise<void> => {
@@ -7820,6 +7923,7 @@ import "../../styles/kylon-command-palette.css";
       window.history.replaceState(window.history.state, "", modalUrl.pathname + modalUrl.search + modalUrl.hash);
       focusPeoplePage();
       if (!sampleMode) void loadHouseholdConnections();
+      if (!sampleMode) void loadPeopleAdminAccess();
     };
     const focusPeoplePage = (): void => {
       const focus = () => {

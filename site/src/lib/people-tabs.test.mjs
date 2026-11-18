@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { peopleSearchLabel, peopleSearchResult, peopleTab, peopleTabAction, peopleTabOf, peopleTabs } from "./people/tabs.ts";
 
-const model = (overrides = {}) => ({ people: ["ana", "sam"], agents: ["atlas", "harbor", "ledger"], invites: ["mei"], sample: false, ...overrides });
+const model = (overrides = {}) => ({ people: [{ role: "owner" }, { role: "member" }], agents: ["atlas", "harbor", "ledger"], invites: ["mei"], sample: false, ...overrides });
 
 test("the dialog opens on Agents, keeps a tab that exists, and never opens Invites in the sample workspace", () => {
   assert.equal(peopleTab(model(), undefined), "agents");
-  for (const tab of ["people", "agents", "invites"]) assert.equal(peopleTab(model(), tab), tab);
-  for (const unknown of ["all", "admins", "", null, 3]) assert.equal(peopleTab(model(), unknown), "agents", String(unknown));
+  for (const tab of ["people", "agents", "invites", "admins"]) assert.equal(peopleTab(model(), tab), tab);
+  assert.equal(peopleTab(model({ sample: true }), "admins"), "agents", "the sample workspace has no Admins tab");
+  for (const unknown of ["all", "members", "", null, 3]) assert.equal(peopleTab(model(), unknown), "agents", String(unknown));
   assert.equal(peopleTab(model({ sample: true }), "invites"), "agents");
   assert.equal(peopleTab(model({ sample: true }), "people"), "people");
 });
@@ -15,8 +16,10 @@ test("the dialog opens on Agents, keeps a tab that exists, and never opens Invit
 test("each tab carries its own count, and exactly one is selected", () => {
   const tabs = peopleTabs(model(), "invites");
   assert.deepEqual(tabs.map((tab) => [tab.id, tab.label, tab.count, tab.selected]),
-    [["people", "People", 2, false], ["agents", "Agents", 3, false], ["invites", "Invites", 1, true]]);
-  assert.deepEqual(tabs.map((tab) => tab.name), ["People, 2", "Agents, 3", "Invites, 1 waiting"]);
+    [["people", "People", 2, false], ["agents", "Agents", 3, false], ["invites", "Invites", 1, true], ["admins", "Admins", 1, false]]);
+  assert.deepEqual(tabs.map((tab) => tab.name), ["People, 2", "Agents, 3", "Invites, 1 waiting", "Admins, 1"]);
+  assert.equal(peopleTabs(model({ adminAccess: { read: "ready", grants: [{}, {}] } }), "admins")[3].count, 3, "Admins counts the people who can manage and the grants given to agents");
+  assert.equal(peopleTabs(model({ adminAccess: { read: "pending", grants: [] } }), "admins")[3].count, null, "and shows no count until both have arrived");
   assert.deepEqual(peopleTabs(model({ sample: true }), "invites").map((tab) => [tab.id, tab.selected]), [["people", false], ["agents", true]],
     "the sample workspace has no Invites tab and falls back to Agents");
 });
@@ -38,10 +41,10 @@ test("a person lives on People and an agent on Agents; search names what it sear
 test("a tab shows no count until one is known", () => {
   const empty = { people: [], agents: [], invites: [], sample: false };
   const counts = (model) => peopleTabs(model, "agents").map((tab) => tab.count);
-  assert.deepEqual(counts({ ...empty, read: "pending" }), [null, null, null]);
-  assert.deepEqual(counts({ ...empty, read: "failed" }), [null, null, 0], "invites have their own read");
-  assert.deepEqual(counts({ ...empty, pendingFailed: true }), [0, 0, null]);
-  assert.deepEqual(counts({ ...empty, agents: [{}], read: "failed" }), [null, 1, 0], "what did arrive is counted");
-  assert.deepEqual(counts(empty), [0, 0, 0]);
+  assert.deepEqual(counts({ ...empty, read: "pending" }), [null, null, null, null]);
+  assert.deepEqual(counts({ ...empty, read: "failed" }), [null, null, 0, null], "invites have their own read");
+  assert.deepEqual(counts({ ...empty, pendingFailed: true }), [0, 0, null, 0]);
+  assert.deepEqual(counts({ ...empty, agents: [{}], read: "failed" }), [null, 1, 0, null], "what did arrive is counted");
+  assert.deepEqual(counts(empty), [0, 0, 0, 0]);
   assert.equal(peopleTabs({ ...empty, read: "pending" }, "agents")[1].name, "Agents");
 });

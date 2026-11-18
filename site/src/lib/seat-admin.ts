@@ -6,6 +6,7 @@
  * fails, or returns {enabled: false}, the Admin panel stays hidden and never
  * calls my_seat_admin_grants as a feature probe.
  */
+import { parseWorkspaceAdminGrants, type PeopleAdminGrant } from "./people/admins";
 import type { Session } from "@supabase/supabase-js";
 import { deployment, postCommand } from "./commonswarm";
 import { buildSeatAdminEndConfirmation } from "./seat-admin-view";
@@ -423,6 +424,27 @@ export async function readSeatAdminStatus(
   } catch {
     return { ok: false, code: "network_error", message: "Could not check agent admin availability." };
   }
+}
+
+/** Every agent admin grant on record for a workspace, for one of its owners. Null: the server says the viewer is not
+ * a live owner there. Throws when the read fails or its answer is not what the read promises. */
+export async function readWorkspaceAdminGrants(session: Session, workspaceId: string): Promise<PeopleAdminGrant[] | null> {
+  const d = deployment();
+  if (!d) throw new Error("No CommonSwarm deployment is configured.");
+  const response = await fetch(`${d.url}/rest/v1/rpc/workspace_seat_admin_grants`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      apikey: d.anonKey,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "accept-profile": "swarm_read",
+      "content-profile": "swarm_read",
+    },
+    body: JSON.stringify({ p_workspace_id: workspaceId }),
+  });
+  if (!response.ok) throw new Error("Admin access could not load.");
+  return parseWorkspaceAdminGrants(await response.json());
 }
 
 export async function readMySeatAdminGrants(

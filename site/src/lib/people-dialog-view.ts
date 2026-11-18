@@ -11,6 +11,7 @@ import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } f
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
 import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
+import { peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminPeople, type PeopleAdminAccess } from "./people/admins";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -26,7 +27,9 @@ export type PeopleDialogInvite = PeopleInvite;
 /** `workspaceName` is the viewer's name for this workspace; it is used only in the role refusal copy. */
 export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean; workspaceName?: string;
   /** The read that brings people and agents. Absent means ready. */
-  read?: PeopleRead }
+  read?: PeopleRead;
+  /** Admin access given to agents, for the Admins tab. Absent: the tab lists people only. */
+  adminAccess?: PeopleAdminAccess }
 export type PeopleDialogRole = PeopleDialogPerson["role"];
 /** The role-change action the builder emits. Integration maps it to the `change_role` command. */
 export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; role: PeopleDialogRole }
@@ -101,6 +104,10 @@ export interface PeopleDialogCallbacks {
   /** The link the integration holds for this dialog right now. Copy asks at the click, and copies only when it is
    *  the same link the block shows. */
   currentInviteLink?: () => string;
+  /** Reads the admin access given to agents again after a failed load. */
+  reloadAdminAccess?: () => Promise<void> | void;
+  /** Asks to end one grant of admin access. The integration confirms and sends the command; a refusal comes back in `adminAccess.notices`. */
+  endAdmin?: (grantId: string, opener: HTMLButtonElement) => void;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -330,7 +337,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (type === "agent") { const agent = model.agents.find((candidate) => candidate.id === id); if (agent) state.collapsed.delete(agent.ownerId); }
     state.selected = state.selected?.id === id && state.selected.type === type ? null : { type, id };
     // Opening an agent from a person's profile (or the reverse) moves to its tab, so Back lands on its row.
-    if (state.selected) state.tab = peopleTabOf(type);
+    // A person opened from Admins stays there: their row is on that tab too.
+    if (state.selected && !(state.tab === "admins" && type === "person")) state.tab = peopleTabOf(type);
     callbacks.render(); detail.scrollTop = 0;
     if (state.selected) detail.scrollIntoView?.({ block: "nearest" });
     (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: false });
@@ -428,10 +436,12 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   // People lists a person when their own name matches; Agents keeps a matching owner's whole group.
   const shownPeople = groups.filter(({ person }) => !needle || person.name.toLocaleLowerCase().includes(needle));
   const shownAgents = groups.reduce((count, group) => count + group.agents.length, other.length);
+  const shownAdmins = peopleAdminPeople(shownPeople.map(({ person }) => person));
+  const shownGrants = (model.adminAccess?.grants ?? []).filter((grant) => !needle || grant.agentName.toLocaleLowerCase().includes(needle));
   // Attention stays on each agent's own row (its pill, its sentence and its one next action), not in a summary.
   if (needle) {
     const result = node(doc, "p", "pd-roster-result pd-muted",
-      peopleSearchResult(tab, tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : invites.length));
+      peopleSearchResult(tab, tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : tab === "invites" ? invites.length : shownAdmins.length + shownGrants.length));
     result.setAttribute("role", "status"); host.append(result);
   }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
@@ -615,7 +625,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       head.append(face, copy);
     }
     // People: one row per person. Agents: each owner's agents under a short heading, the viewer's own first.
-    if (tab === "people") { element.append(head); return element; }
+    if (tab === "people" || tab === "admins") { element.append(head); return element; }
     const title = node(doc, "h3", "pd-group-title", !person ? "Other agents" : person.own ? "Yours" : `${peopleFirstName(person.name)}’s`);
     if (!person) title.append(node(doc, "span", "pd-sr-only", ". Their owner is no longer a member"));
     const list = node(doc, "ul", "pd-agents-list"); if (person) list.id = `pd-group-${person.id}`;
@@ -625,7 +635,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   };
   // Every tab answers the same four ways: its rows, loading, empty, or could not load with Retry.
   const view = peopleTabView({ tab, read: model.sample ? "ready" : model.read ?? "ready", invitesFailed: model.pendingFailed,
-    shown: tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : invites.length, searching: !!needle });
+    shown: tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : tab === "invites" ? invites.length : shownAdmins.length + shownGrants.length, searching: !!needle });
   const tabNote = (): HTMLElement | null => {
     if (!view.message) return null;
     const note = node(doc, "p", "pd-muted pd-tab-state", view.message); note.dataset.tabState = view.state;
@@ -639,6 +649,42 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   };
   if (tab !== "invites") { const note = tabNote(); if (note) grid.append(note); }
   if (tab === "people") shownPeople.forEach(({ person, agents }) => grid.append(card(person, agents)));
+  // Admins: the people who can manage the workspace, then the admin access given to agents.
+  if (tab === "admins") {
+    if (shownAdmins.length) { const title = node(doc, "h3", "pd-muted pd-group-title", "Owners and admins"); grid.append(title); }
+    shownAdmins.forEach((person) => grid.append(card(person, [])));
+    const access = model.adminAccess;
+    if (access && !model.sample) {
+      const section = node(doc, "section", "pd-admin-access"); section.dataset.adminAccess = access.all ? "all" : "own";
+      const title = node(doc, "h3", "pd-muted pd-group-title", peopleAdminHeading(access)); title.id = "pd-admin-access-title"; title.tabIndex = -1;
+      section.setAttribute("aria-labelledby", title.id); section.append(title);
+      const line = (text: string, state: string, alert = false) => { const note = node(doc, "p", "pd-muted pd-tab-state", text); note.dataset.adminAccessState = state;
+        note.setAttribute("role", alert ? "alert" : "status"); return note; };
+      if (access.read === "pending" && !access.grants.length) section.append(line("Loading…", "loading"));
+      if (access.read === "failed") { const note = line(access.grants.length ? "This list may be out of date." : "Admin access could not load.", "error", true);
+        if (callbacks.reloadAdminAccess) { const retry = button(doc, "Retry", async (opener) => {
+            if (opener.disabled) return; opener.disabled = true; opener.setAttribute("aria-busy", "true");
+            try { await callbacks.reloadAdminAccess?.(); } finally { if (opener.isConnected) { opener.disabled = false; opener.removeAttribute("aria-busy"); } }
+          }); retry.dataset.tabRetry = "admin-access"; retry.dataset.pdFocus = "retry-admin-access"; note.append(doc.createTextNode(" "), retry); }
+        section.append(note); }
+      if (access.read === "ready" && !access.grants.length) section.append(line(peopleAdminEmpty(access), "empty"));
+      const viewerId = model.people.find((person) => person.own)?.id ?? "";
+      const list = node(doc, "ul", "pd-admin-grants");
+      for (const grant of shownGrants) {
+        // Drawn from the read's own names: the agent may no longer be in this workspace's roster.
+        const row = node(doc, "li", "pd-admin-grant"); row.dataset.adminGrant = grant.grantId; row.dataset.adminLevel = grant.level;
+        const symbol = node(doc, "span", "pd-orb", (grant.agentName.trim()[0] ?? "?").toUpperCase()); symbol.setAttribute("aria-hidden", "true");
+        const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", grant.agentName); name.title = grant.agentName;
+        copy.append(name, node(doc, "span", "pd-muted", peopleAdminDetail(grant, viewerId))); row.append(symbol, copy);
+        const said = access.notices?.[grant.grantId] ?? "";
+        const notice = node(doc, "p", "pd-error", said); notice.setAttribute("role", "alert"); notice.hidden = !said; notice.dataset.adminGrantNotice = "";
+        if (grant.mayEnd && callbacks.endAdmin) { const remove = button(doc, "Remove", (opener) => callbacks.endAdmin?.(grant.grantId, opener), "pd-danger-button");
+          remove.dataset.endAdmin = grant.grantId; remove.dataset.pdFocus = `end-admin-${grant.grantId}`; remove.setAttribute("aria-label", `Remove admin access: ${grant.agentName}`); row.append(remove); }
+        row.append(notice); list.append(row);
+      }
+      section.append(list); grid.append(section);
+    }
+  }
   if (tab === "agents") {
     [...groups].sort((a, b) => Number(b.person.own) - Number(a.person.own)).forEach(({ person, agents }) => { if (agents.length) grid.append(card(person, agents)); });
     if (other.length) grid.append(card(null, other));
