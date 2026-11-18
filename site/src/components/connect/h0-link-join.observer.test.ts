@@ -343,6 +343,7 @@ test("pagehide forgets a shown join invite, and flag off adds no handler", () =>
       addEventListener: (name: string, listener: () => void) => void;
       click: () => void;
       removeAttribute: () => void;
+      closest: () => null;
     }>();
     const listeners = new Map<string, Array<() => void>>();
     const page = {
@@ -374,6 +375,7 @@ test("pagehide forgets a shown join invite, and flag off adds no handler", () =>
             addEventListener: (name, listener) => { handlers.set(name, listener); },
             click: () => { handlers.get("click")?.(); },
             removeAttribute: () => {},
+            closest: () => null,
           };
           nodes.set(selector, node);
         }
@@ -927,4 +929,127 @@ test("a failed invite-module import shows a plain error", async () => {
   assert.match(wire, /void module\.startJoinRevoke\(api\)/);
   assert.match(wire, /api\.formError\(message\)/);
   assert.equal(wire.includes("void joining?.then"), false);
+});
+
+/** The real component class in a vm with stand-in nodes: one shared disclosure around the prompt, a clipboard the
+ *  test answers by hand, and a count of selections made. Each mint shows the next paste in `pastes`. */
+function promptPanel(pastes: string[]) {
+  const script = CONNECT.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+  const runnable = ts.transpileModule(script.slice(script.indexOf("class AgentConnectElement")), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const disclosure = { open: false,
+    setAttribute(name: string) { if (name === "open") this.open = true; },
+    removeAttribute(name: string) { if (name === "open") this.open = false; } };
+  type Node = { textContent: string; hidden: boolean; disabled: boolean; addEventListener: (name: string, listener: () => void) => void;
+    click: () => void; removeAttribute: () => void; setAttribute: () => void; closest: (selector: string) => typeof disclosure | null };
+  const nodes = new Map<string, Node>();
+  const listeners = new Map<string, Array<() => void>>();
+  const page = {
+    addEventListener(name: string, listener: () => void) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); },
+    dispatchEvent(event: { type: string }) { for (const listener of listeners.get(event.type) ?? []) listener(); },
+    clearInterval() {}, clearTimeout() {}, setTimeout() { return 0; },
+    getSelection: () => ({ removeAllRanges() {}, addRange() { state.selections += 1; }, toString: () => "" }),
+  };
+  const state = { selections: 0, writes: [] as Array<{ text: string; refuse: () => void; accept: () => void }> };
+  let elementClass: new () => { dataset: { state: string }; connectedCallback: () => void };
+  class ElementFixture {
+    dataset = { state: "loading" };
+    isConnected = true;
+    querySelector(selector: string) {
+      let node = nodes.get(selector);
+      if (!node) {
+        const handlers = new Map<string, () => void>();
+        node = { textContent: "", hidden: false, disabled: false,
+          addEventListener: (name, listener) => { handlers.set(name, listener); },
+          click: () => { handlers.get("click")?.(); }, removeAttribute: () => {}, setAttribute: () => {},
+          closest: (wanted) => selector === '[data-slot="prompt"]' && wanted === "details" ? disclosure : null };
+        nodes.set(selector, node);
+      }
+      return node;
+    }
+    toggleAttribute() {}
+    dispatchEvent() { return true; }
+  }
+  let minted = 0;
+  vm.runInNewContext(runnable, {
+    HTMLElement: ElementFixture,
+    CustomEvent: class { constructor(readonly type: string) {} },
+    customElements: { get: () => undefined, define: (_name: string, value: typeof elementClass) => { elementClass = value; } },
+    h0LinkJoinEnabled: true,
+    loadLinkJoin: () => ({
+      startJoinMint: (api: { showInvite: (value: unknown) => void }) => api.showInvite({
+        paste: pastes[Math.min(minted++, pastes.length - 1)], inviteId: JOIN_ID, documentUrl: "https://example.test/agent", lead: "Invite ready", withheld: false }),
+    }),
+    callLinkJoin: (module: unknown, action: (value: unknown) => void) => action(module),
+    concealJoinInvite, dismissShownJoin, shownJoinAfterRevoke,
+    deployment: () => null,
+    window: page,
+    document: { createRange: () => ({ selectNodeContents() {} }) },
+    navigator: { clipboard: { writeText: (text: string) => new Promise<void>((accept, refuse) => { state.writes.push({ text, accept, refuse: () => refuse(new Error("refused")) }); }) } },
+  });
+  const element = new elementClass!();
+  element.connectedCallback();
+  const node = (selector: string) => nodes.get(selector)!;
+  return { element, disclosure, state, node, mint: () => node('[data-action="mint-join"]').click(), leave: () => page.dispatchEvent({ type: "pagehide" }) };
+}
+const settled = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("a reused panel never shows a new prompt in a disclosure the last one left open", () => {
+  const panel = promptPanel(["first-secret-paste", "second-secret-paste"]);
+  panel.mint();
+  assert.equal(panel.node('[data-slot="prompt"]').textContent, "first-secret-paste");
+  assert.equal(panel.disclosure.open, false, "a prompt starts folded");
+  panel.disclosure.open = true; // the person opened it to read
+  panel.leave(); // the receipt ends
+  assert.equal(panel.node('[data-slot="prompt"]').textContent, "");
+  assert.equal(panel.disclosure.open, false, "ending a receipt folds the disclosure");
+  panel.disclosure.open = true; // left open while empty, however that happened
+  panel.mint();
+  assert.equal(panel.node('[data-slot="prompt"]').textContent, "second-secret-paste");
+  assert.equal(panel.disclosure.open, false, "a new credential is shown folded");
+});
+
+test("a clipboard refusal that returns after the prompt changed opens and selects nothing", async () => {
+  const panel = promptPanel(["first-secret-paste", "second-secret-paste"]);
+  panel.mint();
+  panel.node('[data-action="copy"]').click();
+  assert.deepEqual(panel.state.writes.map(write => write.text), ["first-secret-paste"], "Copy writes the prompt shown at the click");
+  panel.leave();
+  panel.mint(); // a replacement prompt is now shown, folded
+  panel.state.writes[0]!.refuse();
+  await settled();
+  assert.equal(panel.disclosure.open, false, "the late refusal must not open the replacement");
+  assert.equal(panel.state.selections, 0, "nor select it");
+  assert.equal(panel.node('[data-slot="copy-status"]').textContent, "", "nor say it was selected");
+
+  // Control: a refusal for the prompt still on screen keeps its fallback, which has to open the disclosure to select.
+  panel.node('[data-action="copy"]').click();
+  assert.equal(panel.state.writes[1]!.text, "second-secret-paste");
+  panel.state.writes[1]!.refuse();
+  await settled();
+  assert.equal(panel.disclosure.open, true);
+  assert.equal(panel.state.selections, 1);
+  assert.match(panel.node('[data-slot="copy-status"]').textContent, /selected/u);
+});
+
+test("a late clipboard success for a retired prompt does not mark the replacement as copied", async () => {
+  const panel = promptPanel(["first-secret-paste", "second-secret-paste"]);
+  panel.mint();
+  panel.node('[data-action="copy"]').click();
+  panel.leave();
+  panel.mint();
+  panel.state.writes[0]!.accept();
+  await settled();
+  assert.notEqual(panel.node('[data-slot="copy-label"]').textContent, "Copied");
+  assert.equal(panel.node('[data-slot="copy-status"]').textContent, "");
+});
+
+test("the model warning sits above Copy and Use a setup file", () => {
+  const html = template(CONNECT);
+  const warning = html.indexOf("The prompt or setup file can expose a secret to the model. Share it only with the assistant you intend to connect.");
+  assert.ok(warning !== -1, "the warning is in the markup");
+  assert.ok(warning < html.indexOf('data-action="copy"') && warning < html.indexOf('data-action="download-connection"'));
+  assert.ok(html.indexOf('data-action="download-connection"') < html.indexOf('<details class="ac__show">'), "both buttons come before the folded prompt");
 });

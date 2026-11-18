@@ -79,7 +79,7 @@ const {
     <div class="ac__result-copy">
       <h2 class="ac__result-title">Your agent prompt is ready.</h2>
       <p class="ac__result-lead">
-        Paste it into your assistant. This page closes it when the agent first connects.
+        Copy it before you leave this screen. This page closes it when the agent first connects.
       </p>
     </div>
 
@@ -93,7 +93,7 @@ const {
           stroke-linecap="round"
           stroke-linejoin="round"></path>
       </svg>
-      <span>Keep it private: it carries a secret. Copy it before you leave this screen.</span>
+      <span>The prompt or setup file can expose a secret to the model. Share it only with the assistant you intend to connect.</span>
     </p>
 
     <button class="ac__btn ac__btn--primary ac__btn--copy" type="button" data-action="copy">
@@ -174,6 +174,8 @@ const {
 
     /** Held only between the mint returning and the reader clearing the screen. */
     #prompt: string | null = null;
+    /** Counts every change of the shown prompt; a Copy remembers the count it started under. */
+    #promptEpoch = 0;
     #connection: string | null = null;
     #filePrompt: string | null = null;
     #connectionName = "cswarm-connection.json";
@@ -246,6 +248,12 @@ const {
 
     #text(slot: string, value: string) {
       const node = this.#q<HTMLElement>(`[data-slot="${slot}"]`);
+      if (slot === "prompt" && node && node.textContent !== value) {
+        // The disclosure belongs to one prompt. Whenever the shown prompt is cleared or replaced, fold it
+        // again and retire any Copy still waiting on the old one, so a new credential never appears already open.
+        this.#promptEpoch += 1;
+        node.closest("details")?.removeAttribute("open");
+      }
       if (node) node.textContent = value;
     }
 
@@ -911,10 +919,15 @@ const {
     async #copy(quiet = false) {
       if (!this.#prompt) return;
       const button = this.#q<HTMLButtonElement>('[data-action="copy"]');
+      // The clipboard answers later. By then this prompt may have been cleared or replaced, and the answer
+      // must never act on a different one.
+      const prompt = this.#prompt;
+      const epoch = this.#promptEpoch;
+      const stillThisPrompt = () => epoch === this.#promptEpoch && this.#prompt === prompt;
       try {
         await navigator.clipboard.writeText(this.#prompt);
       } catch {
-        if (quiet) return;
+        if (quiet || !stillThisPrompt()) return;
         // Clipboard access can be refused outright (permissions, or a non-secure origin). The
         // honest fallback is to select the text so the reader's own copy shortcut works.
         const pre = this.#q<HTMLElement>('[data-slot="prompt"]');
@@ -930,6 +943,7 @@ const {
         this.#text("copy-status", "Your browser wouldn't let the page copy. It's selected — press ⌘C or Ctrl+C.");
         return;
       }
+      if (!stillThisPrompt()) return;
       this.#text("copy-label", "Copied");
       button?.setAttribute("data-copied", "");
       this.#text("copy-status", "Copied. Paste the whole prompt into your AI assistant.");

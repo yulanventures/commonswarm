@@ -30,6 +30,8 @@ class FakeNode {
   addEventListener() {}
   setAttribute() {}
   removeAttribute() {}
+  // Real elements can always be asked for an ancestor; the prompt asks for its disclosure.
+  closest(): null { return null; }
 }
 
 interface Fixture {
