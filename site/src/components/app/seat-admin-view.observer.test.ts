@@ -259,7 +259,7 @@ test("seat admin view keeps confirmation explicit, grants independent and action
     const root = resolve(import.meta.dirname, "../../..");
     const bundle = await build({ stdin: { contents: script, resolveDir: root, loader: "ts" }, bundle: true, write: false, format: "iife", platform: "browser",
       define: { "import.meta.env": JSON.stringify({}) } });
-    const styles = await Promise.all(["kylon-tokens.css", "carbon-theme.css", "kylon-people-profile.css", "kylon-seat-admin.css"].map(name => readFile(join(root, "src/styles", name), "utf8")));
+    const styles = await Promise.all(["kylon-tokens.css", "carbon-theme.css", "people-dialog.css", "kylon-seat-admin.css"].map(name => readFile(join(root, "src/styles", name), "utf8")));
     const fixture = join(directory, "index.html");
     const chrome = await findChrome();
     for (const theme of ["light", "dark"]) {
