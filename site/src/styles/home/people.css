@@ -440,7 +440,6 @@ section.pd-page[data-people-page] .pd-page-back {
   color: var(--home-ink-muted); font-size: 15px; font-weight: 600; text-decoration: none;
 }
 section.pd-page[data-people-page] .pd-page-back:hover { color: var(--home-ink); }
-section.pd-page[data-people-page] .pd-page-back-icon { flex: none; }
 section.pd-page[data-people-page] .pd-page-title-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
 section.pd-page[data-people-page] .pd-page-title-row h1 {
   margin: 0; min-inline-size: 0; overflow-wrap: anywhere;
@@ -465,7 +464,6 @@ section.pd-page[data-people-page] .pd-page-search {
 }
 
 /* Columns: the roster (flex 999 1 520px) and the side column (1 1 320px), 28px apart; they stack when narrow. */
-section.pd-page[data-people-page] .pd-page-columns { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px 28px; }
 section.pd-page[data-people-page] .pd-page-main { display: flex; flex: 999 1 520px; flex-direction: column; gap: 16px; min-inline-size: 0; }
 section.pd-page[data-people-page] .pd-page-side { display: flex; flex: 1 1 320px; flex-direction: column; gap: 16px; min-inline-size: 0; }
 section.pd-page[data-people-page] .pd-member-grid { display: flex; flex-direction: column; gap: 16px; }
@@ -494,11 +492,6 @@ section.pd-page[data-people-page] .pd-person-copy { display: flex; flex: 1; flex
 section.pd-page[data-people-page] .pd-person-name {
   min-inline-size: 0; overflow-wrap: anywhere;
   color: var(--home-ink); font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: normal;
-}
-section.pd-page[data-people-page] .pd-you { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
-section.pd-page[data-people-page] .pd-person-sub { flex: 1 0 100%; color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; }
-section.pd-page[data-people-page] .pd-role-pill {
-  padding: 5px 12px; border-radius: var(--radius-pill); background: var(--home-ink); color: var(--home-canvas); font-size: 13px; font-weight: 700; line-height: 1.45;
 }
 /* Role control on the card: the same select, Save and question. Save shows once the choice differs (or while saving). */
 section.pd-page[data-people-page] .pd-person-head .hm-role,
@@ -638,19 +631,13 @@ section.pd-page[data-people-page] .pd-invite-symbol {
 section.pd-page[data-people-page] .pd-invite .pd-agent-copy { display: grid; flex: 1 1 220px; gap: 0; min-inline-size: 0; }
 section.pd-page[data-people-page] .pd-invite strong { font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; }
 section.pd-page[data-people-page] .pd-invite .pd-muted { font-size: 13px; text-wrap: pretty; }
-section.pd-page[data-people-page] .pd-page-note { margin: 0; color: var(--home-ink-muted); font-size: 14px; text-wrap: pretty; }
 
 /* Side column: the selected person's or agent's details (the dialog's detail pane, as a card), then Roles. */
-section.pd-page[data-people-page] .pd-side-card,
 section.pd-page[data-people-page] .pd-detail {
   box-sizing: border-box; min-inline-size: 0; padding: 16px 20px 18px; overflow: visible;
   border: 1px solid var(--home-card-border); border-radius: 18px; background: var(--home-card);
   box-shadow: var(--home-card-shadow);
 }
-section.pd-page[data-people-page] .pd-side-card h2 { margin: 0; font-family: var(--home-font-display); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.45; }
-section.pd-page[data-people-page] .pd-roles-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 0; font-size: 15px; }
-section.pd-page[data-people-page] .pd-roles-list dt { display: inline; margin-inline-end: 0.3em; font-weight: 700; }
-section.pd-page[data-people-page] .pd-roles-list dd { display: inline; margin: 0; color: var(--home-ink-muted); }
 section.pd-page[data-people-page] .pd-detail { flex: none; padding-block-start: 6px; }
 section.pd-page[data-people-page] .pd-detail-top { display: flex; justify-content: flex-end; margin: 0 -10px -6px 0; }
 section.pd-page[data-people-page] .pd-close-detail { display: grid; place-items: center; inline-size: 44px; min-block-size: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--home-ink); cursor: pointer; }

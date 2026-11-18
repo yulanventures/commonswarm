@@ -21,7 +21,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-
   font: 600 14px/1.5 var(--k-shell-font); white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-line { display: flex; flex-wrap: wrap; gap: 4px 6px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-sub,.pd-agent-app,.pd-muted) { color: var(--k-shell-secondary); font: 400 12px/1.5 var(--k-shell-font); overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-agent-app,.pd-muted) { color: var(--k-shell-secondary); font: 400 12px/1.5 var(--k-shell-font); overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-initials,.pd-orb) { flex: 0 0 30px; inline-size: 30px; block-size: 30px; font: 600 12px/1 var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue="0"] { background: var(--home-blue); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-initials[data-hue] { color: var(--home-on-person); }
@@ -206,11 +206,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-action
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-actions > .pd-page-primary { border-color: var(--cs-accent); background: var(--cs-accent); color: var(--cs-on-accent); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-primary:hover:not(:disabled) { background: var(--cs-accent-hover); border-color: var(--cs-accent-hover); }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles summary { display: flex; align-items: center; min-block-size: 44px; padding: 6px; cursor: pointer; color: var(--k-shell-secondary); }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list { display: grid; gap: 8px; margin: 8px 6px; font-size: 12px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list dt { display: block; font-weight: 600; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-roles-list dd { display: block; margin: 0; color: var(--k-shell-secondary); }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-note { margin: 8px 6px; font-size: 12px; color: var(--k-shell-secondary); overflow-wrap: anywhere; }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search { font-size: 16px; }
 }
@@ -220,9 +215,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page] {
   display: block; min-inline-size: 0; color: var(--k-shell-ink); font: 400 14px/1.6 var(--k-shell-font);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-page-side { display: block; min-inline-size: 0; max-inline-size: 52rem; margin-inline: auto; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty { display: grid; align-content: center; gap: 8px; min-block-size: 55dvh; padding: 24px; text-align: center; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty h2 { margin: 0; font: 600 20px/1.4 var(--k-shell-font); letter-spacing: -.3px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty p { margin: 0; color: var(--k-shell-secondary); }
 /* Keep the proven normal-flow detail: the route owns scrolling, never the outer frame. */
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail {
   position: static; flex: none; inline-size: auto; min-inline-size: 0; padding: 8px 8px 32px;
@@ -446,7 +438,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > * { padding-inline: 12px; font-size: 15px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > :hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > .pd-member-remove { color: var(--home-danger); }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty { display: none; }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] { max-inline-size: none; margin: 0; padding: 8px 0 24px; border: 0; border-radius: 0; box-shadow: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search { font-size: 16px; }
