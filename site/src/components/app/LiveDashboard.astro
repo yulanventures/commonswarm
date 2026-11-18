@@ -7597,9 +7597,8 @@ import "../../styles/kylon-command-palette.css";
       const held = peopleDialogInvite;
       if (!held) return;
       if (!dialogInviteCurrent(held, peopleDialogInviteScope())) { erasePeopleDialogInvite(); return; }
-      // Only a list that was read counts; a failed read leaves the last one in place.
-      const next = settleDialogInvite(held, pendingInvites.map((invite) => invite.invitationId));
-      if (next) peopleDialogInvite = next; else erasePeopleDialogInvite();
+      // Only a list read after the invite was accepted counts; a failed read leaves the earlier list in place.
+      if (!settleDialogInvite(held, pendingInvites)) erasePeopleDialogInvite();
     };
     /** The link to show and to copy: this dialog's current receipt, or nothing. */
     const peopleDialogInviteLink = (): string => dialogInviteLink(peopleDialogInvite, peopleDialogInviteScope());
@@ -7619,19 +7618,24 @@ import "../../styles/kylon-command-palette.css";
       if (invalid) return { error: invalid };
       const asked = { form, userId: value.user.id, workspaceId, generation: requestVersion };
       peopleDialogInviteCleared = null;
-      let madeId = "";
+      let madeId = "", retired = false;
       const outcome = await createMemberInvite(email, {
         accepted: (receipt) => {
-          const held = bindDialogInvite(receipt, asked, peopleDialogInviteScope());
+          const held = bindDialogInvite(receipt, asked, peopleDialogInviteScope(), pendingInvites);
           if (held) { peopleDialogInvite = held; madeId = held.invitationId; }
           else peopleDialogInviteCleared = { userId: asked.userId, workspaceId: asked.workspaceId, invitationId: receipt.invitationId, email: receipt.email, why: "closed" };
         },
+        // The list read after acceptance has landed: if it leaves this invite out, the link goes now.
+        listApplied: () => { retired = !!madeId && !!peopleDialogInvite && !settleDialogInvite(peopleDialogInvite, pendingInvites); settlePeopleDialogInvite(); },
       });
       if (outcome.status === "error") return { error: outcome.message };
-      if (outcome.status === "stale") return { error: "This workspace reloaded before the link arrived, so no link is shown. If the invite is in the list below, cancel it and create another." };
+      if (outcome.status === "stale") return { error: "The workspace reloaded before we could confirm the invite. Check the list below before trying again. If the invite appears and you need a new link, cancel it first." };
+      // Made, and already used, cancelled or expired by the time the list was read: a different fact from a link that
+      // is merely not shown, so it has its own sentence.
+      if (retired) return { error: "Invite created, but it is no longer pending, so its link is not shown." };
       return madeId && peopleDialogInvite?.invitationId === madeId
         ? { madeId }
-        : { error: "The invite was made, but its link was cleared. If it is in the list below, cancel it and create another." };
+        : { error: "Invite created. Its link is no longer shown here. If you need a new link, cancel the invite when it appears below, then create another." };
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction,
       mayFocus: () => boolean = () => true): Promise<void> => {
@@ -14557,7 +14561,7 @@ import "../../styles/kylon-command-palette.css";
         }
         if (error && ownsInviteSubmit() && (outcome.status === "error" || (outcome.status === "made" && !outcome.listed))) {
           // An invite that was made stays made: only the list is reported, under the link.
-          error.textContent = outcome.status === "error" ? outcome.message : "The invite was made. The list of invites could not refresh.";
+          error.textContent = outcome.status === "error" ? outcome.message : "Invite created. The invite list couldn’t refresh.";
           error.hidden = false;
         }
       } finally {

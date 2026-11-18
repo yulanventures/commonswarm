@@ -20,16 +20,18 @@ export interface DialogInviteReceipt extends InviteReceipt {
   form: object;
   userId: string;
   generation: number;
-  /** A read of the invite list has shown this invite. Only then can its absence mean it is gone. */
-  listed: boolean;
+  /** The invite list as it stood when the invite was accepted: a snapshot from before the create, which cannot show
+   *  it. Any other list was read after acceptance. */
+  before: readonly unknown[];
 }
 
 /** An accepted answer becomes the dialog's receipt only if the form that asked is still the one on screen, in the same
  *  account, workspace and generation. Otherwise the link is dropped here and never stored. */
-export function bindDialogInvite(receipt: InviteReceipt, asked: Omit<DialogInviteScope, "open" | "form"> & { form: object }, now: DialogInviteScope): DialogInviteReceipt | null {
+export function bindDialogInvite(receipt: InviteReceipt, asked: Omit<DialogInviteScope, "open" | "form"> & { form: object }, now: DialogInviteScope,
+  before: readonly unknown[]): DialogInviteReceipt | null {
   if (!now.open || now.form !== asked.form || !asked.userId || now.userId !== asked.userId || now.workspaceId !== asked.workspaceId
     || now.generation !== asked.generation || receipt.workspaceId !== asked.workspaceId || !receipt.link || !receipt.invitationId) return null;
-  return { ...receipt, form: asked.form, userId: asked.userId, generation: asked.generation, listed: false };
+  return { ...receipt, form: asked.form, userId: asked.userId, generation: asked.generation, before };
 }
 
 /** The receipt still belongs to what is on screen. */
@@ -42,17 +44,20 @@ export function dialogInviteLink(held: DialogInviteReceipt | null, now: DialogIn
   return dialogInviteCurrent(held, now) ? held.link : "";
 }
 
-/** After the invite list was read: an invite the list has shown and no longer shows was cancelled, used or expired, and
- *  its receipt goes with it. One the list has not shown yet is kept; the list may simply not have caught up. */
-export function settleDialogInvite(held: DialogInviteReceipt, listedIds: readonly string[]): DialogInviteReceipt | null {
-  if (listedIds.includes(held.invitationId)) return held.listed ? held : { ...held, listed: true };
-  return held.listed ? null : held;
+/** The pending list shows only invites that still work: a used, cancelled or expired one is left out. So once a list
+ *  read after acceptance leaves this invite out, its link is retired, the first such read included. Only the
+ *  snapshot from before the create is no evidence; a read that failed leaves that snapshot in place, and the link with it. */
+export function settleDialogInvite(held: DialogInviteReceipt, list: readonly { invitationId: string }[]): DialogInviteReceipt | null {
+  if (list === held.before) return held;
+  return list.some((invite) => invite.invitationId === held.invitationId) ? held : null;
 }
 
-/** What the Invites tab says after a link was cleared without its invite being cancelled. */
+/** What the Invites tab says after a link stopped being shown while its invite stayed pending. The invite still works
+ *  for anyone who already copied the link, so cancelling is only for someone who needs a new one; and the tab says the
+ *  invite is listed only once a read of the list has shown it. */
 export function dialogInviteNotice(cleared: { email: string; why: "reloaded" | "closed" }, stillListed: boolean): string {
-  const when = cleared.why === "reloaded" ? "when this workspace reloaded" : "when its form was closed";
-  return stillListed
-    ? `The link for ${cleared.email} was cleared ${when}. The invite is still in the list below. Cancel it and create another if you need a new link.`
-    : `The link for ${cleared.email} was cleared ${when}. If the invite is in the list below, cancel it and create another.`;
+  const why = cleared.why === "reloaded" ? "because the workspace reloaded" : "because the invite form closed";
+  return `The link for ${cleared.email} is no longer shown here ${why}. ${stillListed
+    ? "The invite is still listed below. If you need a new link, cancel it and create another."
+    : "If you need a new link, cancel the invite when it appears below, then create another."}`;
 }

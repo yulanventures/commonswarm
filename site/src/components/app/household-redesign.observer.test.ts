@@ -433,8 +433,8 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
   byFocus("invite-done").click();
   assert.equal(forgotten, 1, "Done tells the integration to forget the link"); assert.equal(state.invite, null);
   renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks,
-    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", inviteNotice: "The link for mei@example.test was cleared when this workspace reloaded." } });
-  assert.ok(find(node => node.dataset?.peopleInviteNotice !== undefined && node.textContent.startsWith("The link for mei@example.test was cleared")),
+    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", inviteNotice: "The link for mei@example.test is no longer shown here because the workspace reloaded." } });
+  assert.ok(find(node => node.dataset?.peopleInviteNotice !== undefined && node.textContent.startsWith("The link for mei@example.test is no longer shown here")),
     "a cleared link is said at the top of the Invites tab");
 });
 
