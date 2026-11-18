@@ -12,8 +12,11 @@ import {
   readSeatAdminReauthIntent,
   resolveSeatAdminPanelModel,
   saveSeatAdminReauthIntent,
+  seatAdminGrantCoverage,
+  seatAdminGrantStateLabel,
   seatAdminRemovalReceipt,
 } from "./seat-admin.ts";
+import { seatAdminEndQuestion } from "./seat-admin-view.ts";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_USER_ID = "22222222-2222-4222-8222-222222222222";
@@ -109,6 +112,54 @@ test("parseSeatAdminGrants normalizes expired active rows, accepts downgraded ro
   assert.equal(rows[1].state, "downgraded");
   assert.equal(rows[1].endReason, "owner_downgrade");
   assert.equal(rows[1].level, "organization");
+});
+
+test("grant history: who ended it, in words; the machine reason stays in the data", () => {
+  const base = { principal_id: AGENT_ID, level: "workspace", organization_id: null, scope_names: ["role:workspace_admin"],
+    workspace_ids: [WORKSPACE_ID], registry_version: 3, created_at: "2026-11-01T00:00:00.000Z" };
+  const ended = (patch) => ({ ...base, grant_id: WS_GRANT_ID, expires_at: null, state: "downgraded",
+    ended_at: "2026-11-17T21:04:00.000Z", end_reason: "owner_downgrade", ...patch });
+  const rows = parseSeatAdminGrants({ grants: [
+    ended({ ended_by: USER_ID.toUpperCase() }),
+    ended({ grant_id: ORG_GRANT_ID, ended_by: OTHER_USER_ID }),
+    ended({ ended_by: null }),
+    ended({ ended_by: "not-a-user" }),
+    ended({ state: "expired", end_reason: "expired", expires_at: "2026-11-16T08:00:00.000Z", ended_at: "2026-11-16T08:00:00.000Z" }),
+    ended({ state: "active", end_reason: null, ended_at: null, expires_at: "2026-11-15T12:00:00.000Z" }),
+  ] }, Date.parse("2026-11-18T00:00:00.000Z"));
+  assert.ok(rows);
+  assert.deepEqual(rows.map(r => r.endedBy), [USER_ID, OTHER_USER_ID, null, null, null, null]);
+  assert.deepEqual(rows.map(r => seatAdminGrantStateLabel(r, USER_ID)), [
+    "Ended Nov 17, 2026 by you",
+    "Ended Nov 17, 2026 by another owner",
+    "Ended Nov 17, 2026",
+    "Ended Nov 17, 2026",
+    "Expired Nov 16, 2026",
+    "Expired Nov 15, 2026",
+  ]);
+  assert.equal(seatAdminGrantStateLabel(rows[0], OTHER_USER_ID), "Ended Nov 17, 2026 by another owner", "another viewer");
+  assert.equal(rows[0].endReason, "owner_downgrade", "the machine reason is kept");
+  assert.ok(!seatAdminGrantStateLabel(rows[0], USER_ID).includes("owner_downgrade"));
+});
+
+test("the end confirmation names the grant's level and what it covers", () => {
+  assert.equal(seatAdminEndQuestion("Atlas", "workspace", ["Studio"]), "End workspace admin access for Atlas in Studio?");
+  assert.equal(seatAdminEndQuestion("Atlas", "organization", ["Acme"]), "End organization admin access for Atlas in Acme?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", ["Studio"]), "End scoped admin access for Atlas in Studio?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", ["Studio", "Ops", "Lab"]), "End scoped admin access for Atlas in 3 workspaces?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", Array.from({ length: 10 }, (_, i) => `Workspace ${i}`)),
+    "End scoped admin access for Atlas in 10 workspaces?");
+  assert.equal(seatAdminEndQuestion("Atlas", "workspace", []), "End workspace admin access for Atlas?");
+  const [org, scoped] = parseSeatAdminGrants({ grants: [
+    { grant_id: ORG_GRANT_ID, principal_id: AGENT_ID, level: "organization", organization_id: ORG_1, scope_names: ["role:organization_admin"],
+      workspace_ids: [], registry_version: 3, expires_at: null, state: "active", created_at: "2026-11-01T00:00:00.000Z", ended_at: null, end_reason: null },
+    { grant_id: WS_GRANT_ID, principal_id: AGENT_ID, level: "scoped", organization_id: null, scope_names: ["admin:read", "invites:create"],
+      workspace_ids: [WORKSPACE_ID], registry_version: 3, expires_at: null, state: "active", created_at: "2026-11-01T00:00:00.000Z", ended_at: null, end_reason: null },
+  ] });
+  const names = { workspacesById: new Map([[WORKSPACE_ID, "Studio"]]), organizationsById: new Map([[ORG_1, "Acme"]]) };
+  assert.deepEqual(seatAdminGrantCoverage(org, names), ["Acme"]);
+  assert.deepEqual(seatAdminGrantCoverage(scoped, names), ["Studio"]);
+  assert.deepEqual(seatAdminGrantCoverage(scoped, {}), [`Workspace ${WORKSPACE_ID}`]);
 });
 
 test("hasFreshInteractiveSession mirrors fresh-auth.ts interactive AMR methods and rejects refreshed iat alone", () => {

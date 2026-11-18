@@ -37,6 +37,7 @@
 .sa-confirm .sa-field { display: grid; min-inline-size: 0; gap: 6px; color: var(--k-shell-ink); font-weight: 500; }
 .sa-confirm .sa-select { box-sizing: border-box; inline-size: 100%; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; padding: 8px 32px 8px 12px; border: 1px solid var(--k-shell-control); border-radius: 6px; background-color: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 16px/1.5 var(--k-shell-font); text-overflow: ellipsis; }
 .sa-confirm .sa-select:disabled { opacity: .7; }
+.sa-confirm__line { margin: 0; color: var(--k-shell-ink); overflow-wrap: anywhere; }
 .sa-confirm__end-note { margin: -12px 0 0; color: var(--k-shell-secondary); font-size: 13px; overflow-wrap: anywhere; }
 .sa-confirm__notice { margin: 0; padding: 12px 20px; border-block-start: 1px solid var(--k-shell-line); color: var(--k-shell-ink); overflow-wrap: anywhere; }
 .sa-confirm__footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-block-start: 1px solid var(--k-shell-line); }

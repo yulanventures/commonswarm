@@ -903,14 +903,17 @@ async function handle(
       return json(403, { error: "transport_unavailable" });
     }
     // An agent's own admin access (seat admin PR 4), after the ordinary admission above and under the final credential
-    // fence: off, {enabled:false}; on, only this credential's own active, unexpired grants. The workspace only admits the
-    // read; the grants are the principal's wherever they apply, and commands re-decide coverage.
+    // fence: off, {enabled:false}; on, only this credential's own active, unexpired grants, plus its own recently ended
+    // ones. The workspace only admits the read; the grants are the principal's wherever they apply, and commands
+    // re-decide coverage.
     if (body.resource === "seat_admin_self") {
       if (agent.is_revoked) return json(403, { error: "forbidden" });
       if (!seatAdminEnabled) return json(200, { enabled: false });
       // The workspace this read already admitted: the helper takes no lock beyond the admission's own.
-      const [row] = await tx<{ grants: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants`;
-      return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [] });
+      const [row] = await tx<{ grants: unknown; ended: unknown }[]>`SELECT
+        swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants,
+        swarm.agent_seat_admin_self_ended(${tokenHash!}, ${body.workspace_id}::uuid) AS ended`;
+      return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [], ended: row?.ended ?? [] });
     }
     if (isMemoryRead(body) && !brainMemoryEnabled) {
       return json(404, { error: "memory_unavailable", message: "Workspace memory isn't turned on here." });

@@ -26,7 +26,18 @@ export interface SeatAdminGrant {
   capability_names: string[];
   expires_at: string | null;
 }
-export type SeatAdminSelf = { enabled: false } | { enabled: true; registry_version: number; grants: SeatAdminGrant[] };
+/** One of this agent's own grants that ended: by its owner, by another owner of a covered target, or at its end date. */
+export interface SeatAdminEndedGrant {
+  grant_id: string;
+  level: "workspace" | "organization" | "scoped";
+  workspace_ids: string[];
+  organization_id: string | null;
+  state: string;
+  end_reason: string;
+  ended_at: string;
+  ended_by: "owner" | "another_owner" | null;
+}
+export type SeatAdminSelf = { enabled: false } | { enabled: true; registry_version: number; grants: SeatAdminGrant[]; ended: SeatAdminEndedGrant[] };
 
 export const SEAT_ADMIN_VERBS = ["rename-workspace", "set-lead", "add-agent", "remove-agent", "remove-member", "revoke-invitation", "rename-organization"] as const;
 export type SeatAdminVerb = (typeof SEAT_ADMIN_VERBS)[number];
@@ -65,16 +76,31 @@ export async function readSeatAdminSelf(target: CloudTarget, token: string, work
   const value = await response.json() as Record<string, unknown>;
   if (value.enabled === false) return { enabled: false };
   if (value.enabled !== true || !Array.isArray(value.grants)) throw new Error("Admin access read returned an invalid answer.");
-  return { enabled: true, registry_version: Number(value.registry_version), grants: value.grants as SeatAdminGrant[] };
+  // A server without the ended list answers with the active grants alone.
+  const ended = Array.isArray(value.ended) ? value.ended as SeatAdminEndedGrant[] : [];
+  return { enabled: true, registry_version: Number(value.registry_version), grants: value.grants as SeatAdminGrant[], ended };
+}
+
+/** "2026-11-17T21:04:09.123Z" as "2026-11-17 21:04Z"; anything else as given. */
+function endedAt(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return value;
+  const iso = new Date(time).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
+}
+
+export function seatAdminEndedLine(grant: SeatAdminEndedGrant): string {
+  const by = grant.ended_by === "owner" ? " by the owner" : grant.ended_by === "another_owner" ? " by another owner" : "";
+  return `Ended ${endedAt(grant.ended_at)}${by} (${grant.end_reason}): ${grant.level} grant ${grant.grant_id.slice(0, 8)}`;
 }
 
 export function seatAdminStatusLines(self: SeatAdminSelf): string[] {
   if (!self.enabled) return ["Admin access is off."];
-  if (self.grants.length === 0) return ["No admin access."];
-  return self.grants.map(grant => {
+  const active = self.grants.length === 0 ? ["No admin access."] : self.grants.map(grant => {
     const where = grant.level === "organization" ? `organization ${grant.organization_id}` : `workspaces ${grant.workspace_ids.join(", ")}`;
     return `${grant.level} · ${where} · ${grant.expires_at === null ? "no end date" : `ends ${grant.expires_at}`}`;
   });
+  return [...active, ...(self.ended ?? []).map(seatAdminEndedLine)];
 }
 
 function uuidArgument(value: string | undefined, label: string): string {

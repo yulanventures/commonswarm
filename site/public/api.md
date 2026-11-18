@@ -800,6 +800,10 @@ the web app; otherwise the answer is `401 human_confirmation_required`. With the
 off, `grant_seat_admin` is `404 seat_admin_unavailable`, while `end_seat_admin` still
 works, so a grant can always be ended. Success returns `seat_admin_grant`.
 
+Only `end_seat_admin` from the grantor or a live owner of a covered workspace or
+organization, or the grant's own end date, ends a grant; the database refuses any other
+end. The grant keeps who ended it.
+
 An agent with a live grant creates a new agent seat that its grantor owns with
 `create_agent_seat`, sent with its own agent token on the workspace stream:
 
@@ -838,8 +842,10 @@ Reads:
   the switch is off; otherwise `enabled`, `registry_version` and `agents` (the person's
   own agents, with what each may be granted and its active grants).
 - `{ "resource": "seat_admin_self", "workspace_id": "<uuid>" }`, an **agent** token:
-  `{"enabled": false}`, or `enabled`, `registry_version` and `grants` (this agent's own
-  active, unexpired grants).
+  `{"enabled": false}`, or `enabled`, `registry_version`, `grants` (this agent's own
+  active, unexpired grants) and `ended` (at most 10 of its own ended grants, newest
+  first, each with `state`, `end_reason`, `ended_at` and `ended_by`: `owner`,
+  `another_owner`, or `null` for an expiry).
 
 ## Rate limits
 

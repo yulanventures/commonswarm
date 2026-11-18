@@ -265,3 +265,103 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
     dispose() { opener = null; if (dialog.open) dialog.close(); dialog.remove(); },
   };
 }
+
+export interface SeatAdminEndConfirmationOptions {
+  agentName: string;
+  /** The grant being ended: its level and what it actually covers (workspace or organization names). */
+  level: SeatAdminLevel;
+  coverage: readonly string[];
+  /** A scoped grant's own scope names, shown so the person sees exactly what ends. */
+  scopeNames?: readonly string[];
+  confirm: () => void;
+  cancel?: () => void;
+}
+
+const LEVEL_WORDS: Record<SeatAdminLevel, string> = { workspace: "workspace", organization: "organization", scoped: "scoped" };
+
+/** "Studio", "Studio and Ops", "A, B and C". */
+function names(list: readonly string[]): string {
+  if (list.length <= 1) return list[0] ?? "";
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+const named = (coverage: readonly string[]) => coverage.filter(name => name.trim() !== "");
+
+/** The question the end confirmation asks, naming the grant's level and coverage. More than one workspace is
+ * counted, not listed, so the heading stays short; the names go in the dialog body. */
+export function seatAdminEndQuestion(agentName: string, level: SeatAdminLevel, coverage: readonly string[]): string {
+  const list = named(coverage);
+  const where = list.length > 1 ? `${list.length} workspaces` : list[0] ?? "";
+  return `End ${LEVEL_WORDS[level]} admin access for ${agentName}${where ? ` in ${where}` : ""}?`;
+}
+
+/** Turning admin access off asks first. Keep (the initial focus), Escape and closing send nothing; End access
+ * calls confirm once and closes. Append inside the app's token scope, then call open(). */
+export function buildSeatAdminEndConfirmation(doc: Document, options: SeatAdminEndConfirmationOptions) {
+  const id = `seat-admin-end-${++nextConfirmationId}`;
+  const dialog = element(doc, "dialog", "sa-confirm");
+  dialog.dataset.seatAdminEnd = options.level;
+  dialog.setAttribute("aria-labelledby", `${id}-title`);
+  dialog.setAttribute("aria-describedby", `${id}-body`);
+  const form = element(doc, "form", "sa-confirm__form");
+  const header = element(doc, "header", "sa-confirm__header");
+  const title = element(doc, "h2", "", seatAdminEndQuestion(options.agentName, options.level, options.coverage));
+  title.id = `${id}-title`;
+  header.append(title);
+  // The details scroll inside the body; the heading and both actions stay in view.
+  const body = element(doc, "div", "sa-confirm__body");
+  body.id = `${id}-body`;
+  const coverage = named(options.coverage);
+  const scopes = options.level === "scoped" ? options.scopeNames ?? [] : [];
+  if (coverage.length > 1) {
+    const where = element(doc, "p", "sa-confirm__line", `Workspaces: ${names(coverage)}`);
+    where.dataset.seatAdminEndWorkspaces = "";
+    body.append(where);
+  }
+  if (scopes.length) {
+    const scopeLine = element(doc, "p", "sa-confirm__line", `Scopes: ${scopes.join(", ")}`);
+    scopeLine.dataset.seatAdminEndScopes = "";
+    body.append(scopeLine);
+  }
+  if (coverage.length > 1 || scopes.length) {
+    // Scrollable details are reachable from the keyboard too.
+    body.tabIndex = 0;
+    body.setAttribute("role", "region");
+    body.setAttribute("aria-label", "Admin access being ended");
+  }
+  body.append(element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again."));
+  const footer = element(doc, "footer", "sa-confirm__footer");
+  const keep = action(doc, "Keep", () => { close(); options.cancel?.(); });
+  const end = element(doc, "button", "sa-button sa-button--primary", "End access");
+  end.type = "submit";
+  end.dataset.seatAdminEndConfirm = "";
+  footer.append(keep, end);
+  form.append(header, body, footer);
+  dialog.append(form);
+  let opener: HTMLElement | null = null;
+  let done = false;
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (done) return;
+    done = true;
+    end.disabled = true;
+    close();
+    options.confirm();
+  });
+  function close(): void {
+    if (dialog.open) dialog.close();
+    if (opener?.isConnected && !opener.closest("[inert], [hidden]")) opener.focus({ preventScroll: true });
+    opener = null;
+  }
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); options.cancel?.(); });
+  return {
+    dialog,
+    open(from?: HTMLElement) {
+      opener = from ?? (doc.activeElement instanceof HTMLElement ? doc.activeElement : null);
+      dialog.showModal();
+      keep.focus({ preventScroll: true });
+    },
+    close,
+    dispose() { opener = null; if (dialog.open) dialog.close(); dialog.remove(); },
+  };
+}

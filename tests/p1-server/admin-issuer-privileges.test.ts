@@ -94,6 +94,11 @@ const literal = JSON.stringify([
   ['swarm_read', 'FUNCTION', 'swarm_read.my_seat_admin_status()', 'EXECUTE', false],
   // Seat admin PR 4: an agent's own active grants, from its verified credential only.
   ['swarm_read', 'FUNCTION', 'swarm.agent_seat_admin_self(bytea,uuid)', 'EXECUTE', false],
+  // And its own ended grants, from the same credential check.
+  ['swarm_read', 'FUNCTION', 'swarm.agent_seat_admin_self_ended(bytea,uuid)', 'EXECUTE', false],
+  // Seat admin ends: an owner's end only with its same-transaction end_seat_admin record; an expiry only once due.
+  ['swarm_command', 'FUNCTION', 'swarm.end_seat_admin_grant(uuid,uuid,text,timestampwithtimezone)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.expire_seat_admin_grant(uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.remove_local_agents_for_member(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.revoke_hosted_seat_membership(uuid,uuid,uuid)', 'EXECUTE', false],
