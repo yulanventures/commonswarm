@@ -1125,7 +1125,31 @@
         "press": "ControlOrMeta+k"
       }
     ],
-    "ready": "dialog[data-command-palette][open] [data-command-palette-input]",
+    "ready": "dialog[data-command-palette][open] [data-command-palette-group=\"start\"] [data-command-palette-item=\"action:people\"]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "dialog.command-palette.search",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "press": "ControlOrMeta+k"
+      },
+      {
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
+      },
+      {
+        "type": "[data-command-palette-input]",
+        "text": "a"
+      },
+      {
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-group=\"teammate\"]"
+      }
+    ],
+    "ready": "dialog[data-command-palette][open] [data-command-palette-group=\"teammate\"] [data-command-palette-item]",
     "states": [
       "dense"
     ]

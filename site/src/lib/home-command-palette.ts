@@ -24,6 +24,8 @@ export interface CommandPaletteItem {
   badge?: string;
   keywords: string[];
   action: CommandPaletteAction;
+  /** A heading that replaces the category's own: the start list groups by purpose, not by kind. */
+  section?: string;
 }
 
 export interface CommandPaletteAgentInput {
@@ -260,6 +262,39 @@ export function buildCommandPaletteItems(
   return items;
 }
 
+const START_PLACES = 5;
+const START_ACTIONS = ["action:new-channel", "action:connect-agent", "action:todos", "action:files", "action:people"];
+
+/**
+ * What the palette shows before anything is typed: a few places to go, then a few things to start. Not the roster:
+ * every person, channel and action is a keystroke away. Places are where this person has recently been, newest
+ * first, never the place they are in now; when that is fewer than five, the workspace's channels fill the rest in
+ * their own order.
+ */
+export function commandPaletteStart(
+  items: readonly CommandPaletteItem[],
+  recent: readonly string[],
+  current: string | null = null,
+): CommandPaletteItem[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const places: CommandPaletteItem[] = [];
+  const add = (item: CommandPaletteItem | undefined): void => {
+    if (!item || item.id === current || places.length >= START_PLACES || places.includes(item)) return;
+    if (item.category === "teammate" || item.category === "channel") places.push(item);
+  };
+  for (const id of recent) add(byId.get(id));
+  for (const item of items) if (item.category === "channel") add(item);
+  return [
+    ...places.map((item) => ({ ...item, section: "Jump to" })),
+    ...START_ACTIONS.flatMap((id) => { const item = byId.get(id); return item ? [{ ...item, section: "Actions" }] : []; }),
+  ];
+}
+
+/** The remembered places with `id` moved to the front. */
+export function rememberPalettePlace(recent: readonly string[], id: string, limit = 8): string[] {
+  return [id, ...recent.filter((other) => other !== id)].slice(0, limit);
+}
+
 export function filterCommandPaletteItems(
   items: readonly CommandPaletteItem[],
   rawQuery: string,
@@ -291,7 +326,9 @@ export function filterCommandPaletteItems(
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.map((entry) => entry.item);
+  // Each kind's matches stay together, the best match's kind first, so a heading never appears twice.
+  const kinds = [...new Set(scored.map((entry) => entry.item.category))];
+  return kinds.flatMap((kind) => scored.filter((entry) => entry.item.category === kind).map((entry) => entry.item));
 }
 
 export function renderCommandPaletteList(
@@ -311,18 +348,19 @@ export function renderCommandPaletteList(
     return;
   }
 
-  let currentCategory: CommandPaletteCategory | null = null;
+  let currentGroup: string | null = null;
   let currentGroupList: HTMLUListElement | null = null;
 
   items.forEach((item, index) => {
-    if (item.category !== currentCategory || !currentGroupList) {
-      currentCategory = item.category;
+    const group = item.section ?? CATEGORY_TITLES[item.category];
+    if (group !== currentGroup || !currentGroupList) {
+      currentGroup = group;
       const section = doc.createElement("section");
       section.className = "cp-group";
-      section.dataset.commandPaletteGroup = item.category;
+      section.dataset.commandPaletteGroup = item.section ? "start" : item.category;
       const heading = doc.createElement("h3");
       heading.className = "cp-group__title";
-      heading.textContent = CATEGORY_TITLES[item.category];
+      heading.textContent = group;
       currentGroupList = doc.createElement("ul");
       currentGroupList.className = "cp-group__list";
       section.append(heading, currentGroupList);
