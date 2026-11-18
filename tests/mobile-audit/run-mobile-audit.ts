@@ -148,6 +148,8 @@ const STARTER: Screen[] = [
 /** Overlay roots the generic rules cannot recognise, counted only while shown. */
 const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
+  // The recipient's profile, opened by Enter from the message Jump to present landed on.
+  "app.chat.jump-present.recipient.enter": ["[data-entity-panel]:not([hidden])"],
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
@@ -385,6 +387,11 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
   // All channels: each row's link changes colour on hover and focus, never size.
   "dialog.all-channels": [{ name: "directory-rows", rows: "dialog[data-channel-directory][open] a.cm-directory-copy", max: 3, focus: true }],
+  // Jump to present changes colour on hover and focus, never size, in a channel and in a DM.
+  "app.chat.jump-present": [{ name: "jump-present", rows: "[data-jump-present]:not([hidden]) button", max: 1, focus: true,
+    require: ["[data-jump-present-button]"] }],
+  "app.chat.dm.jump-present": [{ name: "jump-present", rows: "[data-jump-present]:not([hidden]) button", max: 1, focus: true,
+    require: ["[data-jump-present-button]"] }],
   // Decision cards: hovering a card's message or focusing its first option row must not move anything.
   "app.catchup.choice": [{ name: "catchup-choice", rows: "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you]",
     prefer: '[data-needs-you="{message.choiceOpen}"]', require: ['[data-needs-you="{message.choiceOpen}"]'], max: 1, focus: true,
