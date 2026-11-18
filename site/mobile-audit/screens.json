@@ -2309,6 +2309,64 @@
     ]
   },
   {
+    "id": "dialog.admin-history.account",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "waitFor": "admin-delegations dialog[open][data-admin-state=\"ready\"]",
+        "settle": true
+      },
+      {
+        "waitFor": "admin-delegations dialog[open] [data-admin-scope-switch]",
+        "click": "admin-delegations dialog[open] [data-admin-scope-switch]"
+      },
+      {
+        "waitFor": "admin-delegations dialog[open][data-admin-state=\"ready\"] [data-admin-seat-grants] [data-admin-seat-remove]",
+        "settle": true
+      }
+    ],
+    "ready": "admin-delegations dialog[open][data-admin-state=\"ready\"] [data-admin-seat-grants] [data-admin-seat-remove]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_admin_grants"
+    ],
+    "frame": [
+      "admin-delegations dialog[open] [data-admin-scope-name]",
+      "admin-delegations dialog[open][data-admin-state=\"ready\"] [data-admin-seat-grants] [data-admin-seat-remove]"
+    ]
+  },
+  {
     "id": "dialog.admin-history.history",
     "kind": "dialog",
     "path": "/app?w={workspace}",
