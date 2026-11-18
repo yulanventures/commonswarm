@@ -31,6 +31,9 @@ invite-onramp[data-kylon-onramp] {
   --home-focus-ring: var(--k-shell-ring);
   color-scheme: var(--k-shell-scheme);
   background: var(--k-shell-surface);
+  /* The column is narrower than the page, and the page behind it is painted from the Home canvas, a
+     different dark. The column's own surface is spread to every edge, so page and column are one colour. */
+  box-shadow: 0 0 0 100vmax var(--k-shell-surface);
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp] {
   color: var(--k-shell-secondary);
@@ -40,7 +43,9 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] :is(.invi
   font-size: 14px; line-height: 22px;
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__brand-link {
+  color: var(--k-shell-ink);
   font: 600 17px/24px var(--k-shell-font);
+  letter-spacing: -0.3px;
 }
 invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__title {
   font: 600 28px/36px var(--k-shell-font);
