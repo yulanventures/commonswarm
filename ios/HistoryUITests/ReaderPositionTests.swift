@@ -73,5 +73,11 @@ final class ReaderPositionTests: XCTestCase {
             XCTAssertTrue(retry.waitForNonExistence(timeout: 5))
             XCTAssertFalse(older.exists)
         }
+        try tap("Jump to latest")
+        let newest = app.staticTexts["History message 130"]
+        let atBottom = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            newest.exists && newest.isHittable && !self.app.buttons["Jump to latest"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [atBottom], timeout: 5), .completed)
     }
 }
