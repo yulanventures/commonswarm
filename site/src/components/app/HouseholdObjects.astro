@@ -18,6 +18,20 @@ const { state } = Astro.props;
   /* Skills: the count sits on the heading's line, quieter than the heading, in Lists & docs and in the dialog. */
   .household-skills > header { display: flex; align-items: baseline; gap: 8px; }
   .household-skills > header .hh-skills-count { margin: 0; color: var(--text-muted, #626773); font-size: .8rem; }
+  /* Add skill and each suggestion open on demand; their headings are a full touch target. */
+  .household-skills details > summary { padding-block: 11px; cursor: pointer; }
+  /* A suggestion's title shows that it opens: the disclosure marker is drawn, whatever the list reset says. */
+  .household-skills .hh-skills-suggestions summary { display: list-item; list-style: disclosure-closed inside; }
+  .household-skills .hh-skills-suggestions details[open] > summary { list-style-type: disclosure-open; }
+  .household-skills .hh-skills-add { margin-block: 16px 0; }
+  /* Add skill is drawn as the button it is. */
+  .household-skills .hh-skills-add > summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; list-style: none;
+    border: 1px solid var(--border-interactive, var(--border, #ccc9c2)); border-radius: 8px; font-weight: 600; }
+  .household-skills .hh-skills-add > summary::-webkit-details-marker { display: none; }
+  .household-skills details > summary:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+  .household-skills .hh-skills-add .hh-editor { margin: 4px 0 12px; }
+  .household-skills .hh-skills-suggestions { margin-block-start: 24px; }
+  .household-skills .hh-skills-suggestions li > details > p { margin: 4px 0 8px; }
   .household-skills .hh-skills-rule { margin: 0; color: var(--text-muted, #626773); font-size: .8rem; font-weight: 400; }
   .household-objects .hh-status { min-height: 1.6em; border-bottom: 1px solid var(--border, #ccc9c2); padding-bottom: 16px; }
   .household-objects .hh-layout { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 3fr); gap: 32px; }

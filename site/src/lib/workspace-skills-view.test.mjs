@@ -34,3 +34,34 @@ test("the builders' shorthand is gone in every state", () => {
     assert.doesNotMatch(renderWorkspaceSkillsHtml(data), /Hints, never gates|hh-eyebrow|d expiry|\d+\/20/);
   }
 });
+
+const suggestion = (id) => ({ suggestion_id: id, title: `Checklist ${id}`, when_to_use: "When handling a boiler visit", body: "Verify the quote before marking it done." });
+
+test("saved skills and Add skill come first; suggestions follow as titles with their instructions on demand", () => {
+  const html = renderWorkspaceSkillsHtml({ ...base, skills: [skill("a")], suggestions: [suggestion("s1"), suggestion("s2")] });
+  const at = (needle) => { const index = html.indexOf(needle); assert.ok(index >= 0, needle); return index; };
+  assert.ok(at("data-skills-list") < at("data-skills-add") && at("data-skills-add") < at("data-skills-suggestions"), "list, then Add skill, then suggestions");
+  // Add skill is closed until asked for; its three fields are inside it, each with a name for assistive technology.
+  assert.match(html, /<details class="hh-skills-add" data-skills-add>\s*<summary>Add skill<\/summary>\s*<form class="hh-editor" data-skill-form>/);
+  for (const label of ['aria-label="Title"', 'aria-label="When to use"', 'aria-label="Procedure or pitfall"']) assert.ok(html.includes(label), label);
+  // One title per suggestion; its instructions are inside a closed disclosure, and Keep and Dismiss stay in view.
+  assert.match(html, /<details data-suggestion-more="s1">\s*<summary><strong>Checklist s1<\/strong><\/summary>\s*<div><small>When handling a boiler visit<\/small><\/div>\s*<p>Verify the quote before marking it done\.<\/p>\s*<\/details>\s*<div>\s*<button type="button" data-skill-action="keep"/);
+  assert.equal((html.match(/data-suggestion-more=/g) ?? []).length, 2);
+  // What the person opened stays open across a redraw.
+  const reopened = renderWorkspaceSkillsHtml({ ...base, suggestions: [suggestion("s1"), suggestion("s2")], add_open: true, open_suggestions: ["s2"] });
+  assert.match(reopened, /data-skills-add open>/); assert.match(reopened, /data-suggestion-more="s2" open>/); assert.match(reopened, /data-suggestion-more="s1">/);
+});
+
+test("only a read that answered may say there are no skills; a failed read offers Retry", () => {
+  const failed = renderWorkspaceSkillsHtml({ ...base, load: "failed" });
+  assert.match(failed, /role="alert" data-skills-failed>Could not load workspace skills\.<\/p>\s*<div><button type="button" data-skill-action="retry">Retry<\/button>/);
+  for (const absent of ["data-skills-empty", "data-skill-form", "data-skills-suggestions"]) assert.ok(!failed.includes(absent), absent);
+  const loading = renderWorkspaceSkillsHtml({ ...base, load: "loading" });
+  assert.match(loading, /data-skills-loading>Loading skills…/); assert.ok(!loading.includes("data-skills-empty") && !loading.includes("data-skill-form"));
+  // No access to Lists & docs here: the notice alone, with no empty claim and no form that cannot save.
+  const none = renderWorkspaceSkillsHtml({ ...base, load: "unavailable", notice: "Choose Lists & docs access in this workspace to view and edit shared skills." });
+  assert.match(none, /data-skills-notice>Choose Lists &amp; docs access/); assert.ok(!none.includes("data-skills-empty") && !none.includes("data-skill-form"));
+  // A read that answered, and an older caller that passes no load state, do say it.
+  assert.match(renderWorkspaceSkillsHtml({ ...base, load: "ready" }), /data-skills-empty>No shared skills yet\./);
+  assert.match(renderWorkspaceSkillsHtml(base), /data-skills-empty>No shared skills yet\./);
+});
