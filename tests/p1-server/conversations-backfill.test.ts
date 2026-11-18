@@ -1,6 +1,7 @@
 /** Conversations, step 1 (20261118000004): the backfill, against real Postgres. The fixture is written
  * the way the database looked before the migration: inside its transaction the filing, #general and
- * channel triggers are off, so nothing is filed and no conversation exists until the backfill runs. */
+ * channel triggers are off, and so are step 2a's membership and read-mark triggers (20261118000005), so
+ * nothing is filed and no conversation exists until the backfill runs. */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
@@ -19,6 +20,12 @@ let firstRun: { general: number; filed: number; members: number; reads: number; 
 const triggers = [
   ["swarm.signals", "signals_settle_conversation"], ["swarm.signal_recipients", "signal_recipients_settle_conversation"],
   ["swarm.workspaces", "workspaces_create_general"], ["swarm.channels", "channels_sync_conversation"],
+  ["swarm.channels", "channels_sync_creator_member"], ["swarm.memberships", "memberships_conversation_upkeep"],
+  ["swarm.agent_workspace_memberships", "agent_workspace_memberships_apply_conversations"],
+  ["swarm.agent_principals", "agent_principals_apply_conversations"],
+  ["swarm.human_channel_reads", "human_channel_reads_follow_conversation"],
+  ["swarm.agent_channel_reads", "agent_channel_reads_follow_conversation"],
+  ["swarm.channel_preferences", "channel_preferences_follow_conversation"],
 ] as const;
 
 async function legacy(tx: Tx, key: string, row: {
@@ -205,13 +212,13 @@ test("the backfill is idempotent, moves read marks only forward, and catches up 
   await sql`SELECT swarm.conversations_backfill()`;
   assert.equal(await mark(), was + 60_000, "an earlier one never moves it back");
 
-  // Someone who joins after the migration is in #general's membership after the next run (the step 2
-  // release); a member who has left keeps their row and is not added back.
+  // Someone who joins later is in #general at once (step 2a's trigger); a member who has left keeps their row
+  // and the backfill does not add them back.
   const erin = randomUUID();
   await sql`INSERT INTO auth.users (id, aud, role, email) VALUES (${erin}::uuid, 'authenticated', 'authenticated', ${`bf-${erin}@example.test`})`;
   await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${erin}::uuid, 'erin')`;
   await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${ws}::uuid, ${erin}::uuid, 'member')`;
-  assert.equal((await members(sql, g)).users.includes(erin), false);
+  assert.equal((await members(sql, g)).users.includes(erin), true);
   await sql`UPDATE swarm.conversation_members SET left_at = statement_timestamp()
     WHERE conversation_id = ${rooms.read}::uuid AND member_user_id = ${people.carol}::uuid`;
   await sql`SELECT swarm.conversations_backfill()`;

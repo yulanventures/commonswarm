@@ -439,6 +439,7 @@ test("new function owners and agent_delivery_read_context execute privileges mat
         'rotate_wake_id',
         'wake_agent_delivery',
         'wake_workspace_signal',
+        'send_signal_frames',
         'agent_delivery_read_context'
       )
     ORDER BY p.proname
@@ -447,7 +448,10 @@ test("new function owners and agent_delivery_read_context execute privileges mat
   assert.equal(byName.get("wake_topic_authorized"), "swarm_admin");
   assert.equal(byName.get("rotate_wake_id"), "postgres");
   assert.equal(byName.get("wake_agent_delivery"), "postgres");
-  assert.equal(byName.get("wake_workspace_signal"), "postgres");
+  // 20261118000005 retired the workspace-topic emitter; people's frames are sent by send_signal_frames, owned
+  // by postgres for the same reason (it may write realtime.messages).
+  assert.equal(byName.has("wake_workspace_signal"), false);
+  assert.equal(byName.get("send_signal_frames"), "postgres");
   assert.equal(byName.get("agent_delivery_read_context"), "swarm_admin");
 
   const checkFuncExec = async (role: string, fnSig: string) => {

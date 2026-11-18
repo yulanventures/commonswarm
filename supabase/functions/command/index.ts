@@ -214,6 +214,20 @@ import {
   parseMarkChannelReadCommand,
   personCanAccessChannel,
 } from "./channel-reads.ts";
+import {
+  applyConversationCommand,
+  CONVERSATION_COMMAND_KINDS,
+  type ConversationCommand,
+  type ConversationMember,
+  departedGroupMember,
+  isConversationCommandKind,
+  isConversationLeaveKind,
+  parseConversationCommand,
+  prefileConversationPost,
+  reauthorizedConversationReplay,
+  routeConversationPost,
+  storedConversationId,
+} from "./conversations.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -392,6 +406,10 @@ interface SignalCommand {
   /* Who a public message names. Present only when non-empty; never beside a
    * recipient or in_reply_to (chatSignalShapeProblem). */
   mentions?: SignalRecipient[];
+  /* Conversations (step 2a): the conversation the message is posted to. The handler turns it into
+   * today's fields (a channel, or a 1:1's or group's address set by the route rule) before anything
+   * else reads the command, and drops it. */
+  conversation_id?: string;
 }
 
 /** Roster R1b: the ask's own sender re-raises an open ask. Everything else is server-derived. */
@@ -602,6 +620,7 @@ type ValidatedCommand =
   | SignalsSeenCommand
   | ReactionCommand
   | MarkChannelReadCommand
+  | ConversationCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -793,6 +812,17 @@ interface WorkspaceDecideCtx {
 }
 
 interface StoredResponse {
+  /* Conversations (step 2a): what a conversation command answered (conversationReplayFields). */
+  conversation?: Record<string, unknown>;
+  created?: boolean;
+  conversation_id?: string;
+  kind?: string;
+  changed?: boolean;
+  members_added?: unknown[];
+  read_through_at?: string | null;
+  notify_level?: string;
+  starred?: boolean;
+  star_rank?: number | null;
   org_id?: string;
   from_org_id?: string;
   ok: boolean;
@@ -849,7 +879,7 @@ interface StoredResponse {
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
   members?: ChannelMemberRecord[];
-  channel_id?: string;
+  channel_id?: string | null;
   left?: boolean;
   preference?: ChannelPreferenceRecord;
   preferences?: ChannelPreferenceRecord[];
@@ -1378,6 +1408,7 @@ const COMMAND_KINDS = [
   SIGNALS_SEEN_KIND,
   ...REACTION_COMMAND_KINDS,
   "mark_channel_read",
+  ...CONVERSATION_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2282,6 +2313,10 @@ function validateCommand(
     return parseMarkChannelReadCommand(cmd);
   }
 
+  if (isConversationCommandKind(cmd.kind)) {
+    return parseConversationCommand(cmd);
+  }
+
   if (cmd.kind === SIGNALS_SEEN_KIND) {
     const valid = exactKeys(cmd, ["kind", "signal_ids"]) &&
       Array.isArray(cmd.signal_ids) &&
@@ -2922,6 +2957,28 @@ function validateCommand(
     if (Object.hasOwn(cmd, "mentions") && !chatMentionsEnabled) {
       return { ok: false, status: 400, reason: "mentions are not enabled on this deployment" };
     }
+    /* Conversations (step 2a): conversation_id is where the message goes, so it stands in for every
+     * other address. Only `to` may come with it: in a group, the agents an agent's post wakes. */
+    const hasConversation = Object.hasOwn(cmd, "conversation_id");
+    if (hasConversation) {
+      if (!(typeof cmd.conversation_id === "string" && UUID_RE.test(cmd.conversation_id))) {
+        return { ok: false, status: 400, reason: "conversation_id is the id of the conversation to post in, as a UUID." };
+      }
+      if (
+        ["channel", "expected_channel_id", "thread_root_id", "broadcast_to_channel", "parent_signal_id", "reply_status"]
+          .some((key) => Object.hasOwn(cmd, key)) ||
+        cmd.to_user_id !== null || (cmd.to_agent_principal_id ?? null) !== null || (cmd.in_reply_to ?? null) !== null
+      ) {
+        return {
+          ok: false,
+          status: 400,
+          error: "conversation_address",
+          reason: "conversation_id says where the message goes, so it takes no channel, thread_root_id, " +
+            "broadcast_to_channel, to_user_id, to_agent_principal_id or in_reply_to. In a group, an agent names " +
+            "the agents to wake in to.",
+        };
+      }
+    }
     const modernShape =
       Object.hasOwn(cmd, "to_agent_principal_id") ||
       Object.hasOwn(cmd, "in_reply_to");
@@ -3039,6 +3096,7 @@ function validateCommand(
       ...optionalKeys,
       ...chatKeys,
       ...(expectedChannelId === undefined ? [] : ["expected_channel_id"]),
+      ...(hasConversation ? ["conversation_id"] : []),
       ...parentKeys,
       ...(hasReplyStatus ? ["reply_status"] : []),
     ]);
@@ -3159,6 +3217,7 @@ function validateCommand(
             : { broadcast_to_channel: broadcastToChannel as boolean }),
           ...(addressedByList ? { to: recipients! } : {}),
           ...(mentions.length > 0 ? { mentions } : {}),
+          ...(hasConversation ? { conversation_id: (cmd.conversation_id as string).toLowerCase() } : {}),
         },
       }
       : {
@@ -4162,6 +4221,34 @@ function storedResponse(value: unknown): StoredResponse {
           error: entry.error as string,
         })),
       }
+      : {}),
+    // Conversations (step 2a): a conversation command's answer replays exactly as it was given.
+    ...conversationReplayFields(response),
+  };
+}
+
+/** The fields a conversation command stores (conversations.ts), kept only for its own stored answers: one
+ * that names a conversation. Everything else in a stored response is unchanged by them. */
+function conversationReplayFields(response: Record<string, unknown>): Partial<StoredResponse> {
+  const conversation = record(response.conversation);
+  if (conversation === null && typeof response.conversation_id !== "string") return {};
+  return {
+    ...(conversation !== null ? { conversation } : {}),
+    ...(typeof response.created === "boolean" ? { created: response.created } : {}),
+    ...(typeof response.conversation_id === "string" ? { conversation_id: response.conversation_id } : {}),
+    ...(typeof response.kind === "string" ? { kind: response.kind } : {}),
+    ...(response.channel_id === null || typeof response.channel_id === "string"
+      ? { channel_id: response.channel_id as string | null }
+      : {}),
+    ...(typeof response.changed === "boolean" ? { changed: response.changed } : {}),
+    ...(Array.isArray(response.members_added) ? { members_added: response.members_added } : {}),
+    ...(typeof response.read_through_at === "string" || response.read_through_at === null
+      ? { read_through_at: response.read_through_at as string | null }
+      : {}),
+    ...(typeof response.notify_level === "string" ? { notify_level: response.notify_level } : {}),
+    ...(typeof response.starred === "boolean" ? { starred: response.starred } : {}),
+    ...(typeof response.star_rank === "number" || response.star_rank === null
+      ? { star_rank: response.star_rank as number | null }
       : {}),
   };
 }
@@ -12767,6 +12854,8 @@ interface SignalPlacement {
    * decides it.
    */
   untilCeiling: string | null;
+  /** Conversations (step 2a): the 1:1 or group the edge files this message in, after its recipients. */
+  conversationId?: string;
   /**
    * Did the CALLER name this horizon, or is it a per-kind default?
    *
@@ -13191,6 +13280,10 @@ async function postSignal(
         ${position}
       )
     `;
+  }
+  // Last, after every recipient row: the database checks this filing by the route rule at commit.
+  if (placement.conversationId !== undefined) {
+    await prefileConversationPost(tx, route.workspaceId, signal.id, placement.conversationId);
   }
   return { status: "inserted", signal: {
     id: signal.id,
@@ -16663,6 +16756,8 @@ async function handleTransaction(
       (CHANNEL_COMMAND_KINDS as readonly string[]).includes(
         validation.command.kind,
       );
+    // Conversation commands likewise: membership and read marks grant nothing a scope would gate.
+    const isConversationCommand = isConversationCommandKind(validation.command.kind);
     const isTouchPresence = validation.command.kind === TOUCH_PRESENCE_KIND;
     if (isTouchPresence && auth.agent === null) {
       return { status: 403, body: { error: "forbidden" } };
@@ -16732,6 +16827,7 @@ async function handleTransaction(
       !isModelDeclare &&
       !isFeedback &&
       !isChannelCommand &&
+      !isConversationCommand &&
       !isDeliveryCommand &&
       !isSeenCommand &&
       !isFileCommand &&
@@ -17009,6 +17105,21 @@ async function handleTransaction(
               ...(await optionalWakeForPrincipal(tx, auth.agent.principal_id)),
             },
           };
+        }
+        /* A stored conversation answer, or a post to a conversation (its signal names the members it went
+         * to), replays only while the caller may still open that conversation; the replay row above keeps
+         * its tags either way. */
+        const replayedConversation = !matches
+          ? undefined
+          : isConversationCommandKind(kind)
+          ? storedConversationId(record(existing.response) ?? {})
+          : command.kind === "post_signal"
+          ? command.conversation_id
+          : undefined;
+        if (replayedConversation !== undefined) {
+          const reauthorized = await reauthorizedConversationReplay(tx, route.workspaceId, authActorIdentity(auth),
+            replayedConversation, isConversationLeaveKind(kind));
+          if (reauthorized !== null) return reauthorized.status === 404 ? reauthorized : decided(reauthorized);
         }
         return matches
           ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
@@ -17314,6 +17425,47 @@ async function handleTransaction(
       };
     }
 
+    if (isConversationCommandKind(command.kind)) {
+      const outcome = await applyConversationCommand(
+        tx, route.workspaceId, authActorIdentity(auth), command as ConversationCommand,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: outcome.status === 404 ? "authz" : "domain", reason: outcome.reason, detail: ignoredIdentity, hash,
+          channelIds: outcome.audit_channel_ids,
+        });
+        const refusal: HttpResult = { status: outcome.status, body: { error: outcome.error, message: outcome.message } };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const response: StoredResponse = { ok: true, event_ids: [], ...outcome.response };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash, channelIds: outcome.audit_channel_ids,
+      });
+      // The body a replay answers too (replayResult): nothing beside the stored response.
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
+
     if ((CHANNEL_COMMAND_KINDS as readonly string[]).includes(command.kind)) {
       const outcome = await applyChannelCommand(
         tx,
@@ -17432,6 +17584,68 @@ async function handleTransaction(
     }
 
     if (command.kind === "post_signal") {
+      /* Conversations (step 2a). conversation_id becomes today's fields here, before anything else reads
+       * the command (the request hash above is of the request as sent): #general posts as an unfiled
+       * message, a channel by its slug pinned to its id, and a 1:1 or group with the address set of the
+       * route rule (swarm.conversation_post_route), filed in that conversation after its recipients
+       * (placement.conversationId). The database checks the same rule again at commit. */
+      let conversationPrefile: string | null = null;
+      if (command.conversation_id !== undefined) {
+        const conversationId = command.conversation_id;
+        const routed = await routeConversationPost(tx, route.workspaceId, authActorIdentity(auth), conversationId,
+          (command.to ?? []) as ConversationMember[]);
+        const direct = routed.ok && (routed.kind === "dm" || routed.kind === "group_dm");
+        const problem = !routed.ok
+          ? routed
+          : direct && (command.mentions?.length ?? 0) > 0
+          ? { status: 400, error: "conversation_mentions", reason: "conversation_mentions",
+            message: "A message in a direct message or group is for its members, so it takes no mentions." }
+          : direct && command.signal_kind === "working-on"
+          ? { status: 400, error: "conversation_working_on", reason: "conversation_working_on",
+            message: "A working-on update is for everyone. Post it in a channel or #general." }
+          : !direct && command.to !== undefined
+          ? { status: 400, error: "conversation_address", reason: "conversation_address",
+            message: "to names the agents a group message wakes. In a channel or #general, mention them instead." }
+          : null;
+        if (problem !== null) {
+          await insertAudit(tx, {
+            auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+            outcome: problem.status === 404 ? "authz" : "domain", reason: problem.reason, hash,
+            ...(routed.ok && "channel_id" in routed ? { channelIds: [routed.channel_id] } : {}),
+          });
+          const refusal: HttpResult = { status: problem.status, body: { error: problem.error, message: problem.message } };
+          return problem.status === 404 ? refusal : decided(refusal);
+        }
+        delete command.conversation_id;
+        if (routed.ok && (routed.kind === "public_channel" || routed.kind === "private_channel")) {
+          command.channel = normalizeChannelSlug(routed.slug);
+          command.expected_channel_id = routed.channel_id;
+        } else if (routed.ok && (routed.kind === "dm" || routed.kind === "group_dm")) {
+          command.to = routed.to;
+          conversationPrefile = conversationId;
+        }
+      } else if (
+        command.channel === undefined && command.thread_root_id == null && (command.in_reply_to ?? null) === null
+      ) {
+        /* Today's addressed post outside any channel files in the 1:1 or group of its set. If that set's
+         * group has someone who left, the database refuses it at commit; say why now, without a name: the
+         * composer can change recipients, and has no new-group action. */
+        const recipients: ConversationMember[] = command.to ?? [
+          ...(command.to_user_id ? [{ kind: "user" as const, id: command.to_user_id }] : []),
+          ...(command.to_agent_principal_id ? [{ kind: "agent" as const, id: command.to_agent_principal_id }] : []),
+        ];
+        const departed = recipients.length >= 2
+          ? await departedGroupMember(tx, route.workspaceId, authActorIdentity(auth), recipients)
+          : null;
+        if (departed !== null) {
+          await insertAudit(tx, {
+            auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+            outcome: "domain", reason: "conversation_member_left", hash,
+          });
+          return decided({ status: 409, body: { error: "conversation_member_left",
+            message: "Someone left this group. Choose different recipients to send this message." } });
+        }
+      }
       /* A reply to a choice ask takes the same per-ask lock answer_choice holds, so a typed reply
        * and a click can't both count as the first answer. Other posts are untouched. */
       if (typeof command.in_reply_to === "string") {
@@ -17946,6 +18160,7 @@ async function handleTransaction(
           untilMs: requestedUntilMs,
           untilCeiling: rootUntil === null ? null : rootUntil.toISOString(),
           untilExplicit: command.until_ms !== undefined,
+          ...(conversationPrefile === null ? {} : { conversationId: conversationPrefile }),
         },
         hostedSeatCapability,
       );

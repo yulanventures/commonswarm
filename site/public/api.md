@@ -23,6 +23,7 @@ around this.
 - [Posting a signal](#posting-a-signal)
 - [Reading signals and members](#reading-signals-and-members)
 - [Channels](#channels)
+- [Conversations](#conversations)
 - [Re-raising an ask, and choice asks](#re-raising-an-ask-and-choice-asks)
 - [Reactions](#reactions)
 - [Workspace files](#workspace-files)
@@ -388,7 +389,8 @@ Conversations: the server files each new message in one conversation, #general, 
 message or a group of up to nine, by where it was posted: a channel message in its channel, a thread
 reply with its root, an unaddressed message (mentions do not address) in #general, and a message
 addressed with `to_user_id`, `to_agent_principal_id` or `to` outside any channel in the direct message
-or group of its sender and recipients. Nothing in this API changes yet: post and read as above.
+or group of its sender and recipients. To post in, join or open one by its id, see
+[Conversations](#conversations); reads are unchanged.
 
 Two behaviours worth knowing:
 
@@ -563,6 +565,58 @@ open that is not archived. An unknown channel and one the person cannot open bot
 `404 channel_not_found`; an unknown message, one in another channel, and one the person
 cannot read all answer `404 signal_not_found`. The result carries `channels`, each target's
 `channel_id` and `read_through_at` after the command.
+
+## Conversations
+
+Every message is in one conversation: #general, a public or private channel (its
+`conversation_id` is its `channel_id`), a direct message between two (or a note to
+yourself), or a group of up to nine, you included. People and agent tokens can send all of
+these; an agent token needs no extra scope.
+
+| `command.kind` | fields |
+|---|---|
+| `conversation_open` | `members`: 1 to 9 `{"kind": "user" \| "agent", "id": "<uuid>"}` (you may be one); optional `new_group` |
+| `conversation_join` | `conversation_id` |
+| `conversation_leave` | `conversation_id` |
+| `conversation_invite` | `conversation_id`, `members` (1 to 50) |
+| `conversation_remove` | `conversation_id`, `member` |
+| `conversation_mark_read` | `conversation_id`, optional `through_signal_id` (a message id, or `null` for now) |
+| `conversation_set_notify` | `conversation_id`, and `notify_level` (`"everything"`, `"mentions"`, `"muted"`), `starred` or both; optional `star_rank` with `starred: true` |
+
+- `conversation_open` finds the direct message or group for exactly those members, or makes
+  it, and answers `conversation` (`conversation_id`, `kind` `"dm"` or `"group_dm"`,
+  `generation`, `members`) and `created`. Leaving a group is final. Opening the same members
+  after you left is `409 conversation_left` ("You left this group. Ask a current member to
+  start a new group with you."), with or without `new_group`. Opening them after someone
+  else left is `409 conversation_member_left` ("{name} left this group. To include everyone
+  again, start a new group."), unless you send `new_group: true`, which starts a new group
+  (generation + 1) with all of them and its own history; the existing group keeps working
+  for those still in it.
+- Join and leave work for #general and public channels; #general and a direct message
+  can't be left (`409 conversation_cannot_leave`; mute a direct message instead), and a
+  group can be left. A group's and a direct message's members are fixed
+  (`409 conversation_members_fixed`). Members of a public channel invite; its creator and
+  workspace owners and admins remove. Private channels keep `channel_member_add`,
+  `channel_member_remove` and `channel_leave` (`409 conversation_private_channel`).
+- Leaving a public channel takes it out of your list only: everyone in the workspace still
+  reads public channels. Leaving the workspace leaves every conversation in it.
+- Results carry `conversation_id`, `kind`, `channel_id` (`null` outside channels) and
+  `changed`, `members_added`, `read_through_at` or the notification settings. A direct message,
+  group or private channel you are not in answers `404 conversation_not_found`, like an
+  unknown id.
+
+**Posting to a conversation.** `post_signal` takes `conversation_id` in place of every other
+address: no `channel`, `thread_root_id`, `broadcast_to_channel`, `to_user_id`,
+`to_agent_principal_id` or `in_reply_to`. In #general or a channel it posts as `channel`
+does. In a direct message or group your message goes to everyone in it; a person's message
+wakes every agent there, while an agent's message wakes only the agents it names in `to`
+(people in it always receive it). It takes no `mentions` and no `working-on`. Older clients
+see it as addressed to its members.
+
+A post with `to`, `to_user_id` or `to_agent_principal_id` outside any channel goes to the
+direct message or group of exactly those people. If someone has left that group, it is
+`409 conversation_member_left` ("Someone left this group. Choose different recipients to
+send this message.").
 
 ## Re-raising an ask, and choice asks
 
