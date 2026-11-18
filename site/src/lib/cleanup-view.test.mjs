@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { cleanupAgentRows, cleanupFileRows, confirmNames, summaryText } from "./cleanup-view.ts";
+import { cleanupAgentRows, cleanupFileRows, confirmNameLines, summaryText } from "./cleanup-view.ts";
 
 const now = Date.parse("2026-11-04T12:00:00Z");
 const day = 86_400_000;
@@ -35,8 +35,8 @@ test("file rows: live only, filtered by age and by uploaders no longer here, old
 });
 
 test("confirmations name up to 20 items, and results count every outcome class", () => {
-  assert.equal(confirmNames(["a", "b"]), "a, b");
-  assert.match(confirmNames(Array.from({ length: 25 }, (_, i) => `n${i}`)), /n19, and 5 more$/);
+  assert.deepEqual(confirmNameLines(["a", "b"]), ["a", "b"]);
+  assert.deepEqual(confirmNameLines(Array.from({ length: 25 }, (_, i) => `n${i}`)).slice(-2), ["n19", "and 5 more"]);
   const results = new Map([["1", "accepted"], ["2", "already_done"], ["3", "unknown"], ["4", "refused"], ["5", "not_attempted"]]);
   assert.equal(summaryText(results), "1 done · 1 already done · 1 refused · 1 outcome unknown · 1 not started");
 });
@@ -99,7 +99,8 @@ test("a switch mid-run scrubs at once, starts nothing more and never repaints fr
 test("the confirmation names its final action, keeps the names and consequence in view, and opens on Back", async () => {
   const { mountCleanup, confirmAction } = await import("./cleanup-view.ts");
   assert.equal(confirmAction("remove_agent", 1), "Remove 1 agent"); assert.equal(confirmAction("remove_agent", 3), "Remove 3 agents");
-  assert.equal(confirmAction("tombstone_file", 1), "Tombstone 1 file"); assert.equal(confirmAction("tombstone_file", 12), "Tombstone 12 files");
+  assert.equal(confirmAction("tombstone_file", 1), "Remove 1 file"); assert.equal(confirmAction("tombstone_file", 12), "Remove 12 files");
+
   const root = new FakeNode(fakeDoc, "div");
   let sent = 0;
   mountCleanup(root, {
@@ -118,12 +119,19 @@ test("the confirmation names its final action, keeps the names and consequence i
   assert.equal(go.textContent, "Remove 2 agents", "the button says what it will do, and to how many");
   assert.notEqual(go.textContent, "Confirm");
   assert.equal(fakeDoc.focused, back, "the keyboard starts on the way out, not on the action");
-  assert.ok(confirm.textContent.includes("Agent 0") && confirm.textContent.includes("Agent 1"), "the names stay in view");
+  assert.equal(go.dataset.tone, "danger", "the action is drawn as destructive");
+  const tabs = root.all().find((node) => node.children.some((child) => typeof child !== "string" && child.dataset.cleanupTab !== undefined));
+  assert.equal(tabs.hidden, true, "the tabs are out of the way during the confirmation");
+  // Each chosen name has a line of its own.
+  const nameList = confirm.children.find((child) => child.tag === "ul");
+  assert.deepEqual(nameList.children.map((line) => line.textContent), ["Agent 0", "Agent 1"]);
   assert.ok(confirm.textContent.includes("Removes each agent from this workspace."), "so does what it does");
   // Back sends nothing and returns to the list.
   back.fire("click");
   await flush();
   assert.equal(confirm.hidden, true); assert.equal(sent, 0);
+  assert.equal(tabs.hidden, false, "the tabs come back with the list");
+  assert.equal(fakeDoc.focused, find(root, "cleanupAct"), "Back returns the keyboard to the button that opened the confirmation");
 });
 
 test("a delayed file list from a disposed mount never paints, and a new mount starts clean", async () => {
