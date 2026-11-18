@@ -82,6 +82,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
   margin-block-end: 16px;
   color: var(--k-shell-secondary);
 }
+/* The three consequences sit with the apps they are about: one to a line, and only when an app is listed. */
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-apps-rules > p { margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog]:not(:has(.dashboard__connected-app)) .dashboard__connected-apps-rules { display: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app {
   gap: 8px;
   margin: 0;

@@ -1063,14 +1063,20 @@ import "../../styles/kylon-command-palette.css";
   >
     <header class="dashboard__workspace-details-dialog-head">
       <div>
-        <p class="dashboard__eyebrow">Account</p>
         <h2 id="dashboard-connected-apps-title">Connected apps</h2>
       </div>
       <button class="dashboard__icon-button" type="button" data-connected-apps-close aria-label="Close Connected apps" title="Close Connected apps">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
       </button>
     </header>
-    <p class="dashboard__connected-apps-intro">Apps you approved with your CommonSwarm sign-in, such as Claude or Muse. Disconnecting an app ends access for all of its agents. Removing one agent keeps the others. Removing CommonSwarm inside the other app does not end its access here.</p>
+    <p class="dashboard__connected-apps-intro">Apps you approved with your CommonSwarm sign-in, such as Claude or Muse.</p>
+    {/* What Disconnect and Remove agent do, one consequence to a line. Shown with the apps they apply to, so an
+        account with nothing connected is not told how to disconnect (kylon-account-dialogs.css). */}
+    <div class="dashboard__connected-apps-intro dashboard__connected-apps-rules">
+      <p>Disconnecting an app ends access for all of its agents.</p>
+      <p>Removing one agent keeps the others.</p>
+      <p>Removing CommonSwarm inside the other app does not end its access here.</p>
+    </div>
     <p class="dashboard__connected-apps-status" data-connected-apps-status role="status" aria-live="polite"></p>
     <div data-connected-apps-list></div>
     <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
