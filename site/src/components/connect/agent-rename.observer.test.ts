@@ -274,11 +274,11 @@ function people(agents: PeopleDialogAgent[], options: { sample?: boolean; rename
   const root = dom.root("section"), detail = dom.root("section");
   const model: PeopleDialogModel = { people: [{ id: "alex", name: "Alex Rivera", role: "owner", own: true, mayRemove: false },
     { id: "sam", name: "Sam Lee", role: "member", own: false, mayRemove: true }], agents, invites: [], sample: options.sample === true, pendingFailed: false, workspaceName: "Home" };
-  const state: PeopleDialogState = { selected: null, collapsed: new Set(), showAllAttention: false, query: "" };
+  const state: PeopleDialogState = { selected: null, query: "" };
   const sent: Array<[string, string]> = [], actions: Array<[string, string]> = [];
   const answers: Array<(outcome: RenameOutcome) => void> = [];
   const callbacks: PeopleDialogCallbacks = {
-    render: () => renderPeopleDialog(root as never, detail as never, model, state, callbacks, { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } }),
+    render: () => renderPeopleDialog(root as never, detail as never, model, state, callbacks, { page: { homeLabel: "Home", homeHref: "/app" } }),
     action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {}, confirm: () => {},
     ...(options.rename === false ? {} : { rename: options.renameWith ?? ((id: string, name: string) => { sent.push([id, name]); return new Promise<RenameOutcome>(resolve => answers.push(resolve)); }) }),
   };

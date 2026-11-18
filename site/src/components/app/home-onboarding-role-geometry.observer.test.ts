@@ -75,11 +75,11 @@ test("New workspace and role controls wrap, support native forms, and keep confi
           const owner = {id:'tom',name:'Tom',role:'owner',own:true,mayRemove:false};
           const model = { people:[owner, {id:'nikki',name:'Nikki',role:'member',own:false,mayRemove:true},
             {id:'sam',name:'Sam',role:'member',own:false,mayRemove:true}], agents:[], invites:[], sample:false,pendingFailed:false,workspaceName:'Home' };
-          const state = {selected:null,collapsed:new Set(),showAllAttention:false,query:''};
+          const state = {selected:null,query:''};
           const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail');
           let resolveSave, rejectSave;
           const saves = [];
-          const layout = {layout:'page',page:{homeLabel:'Home',homeHref:'#'}};
+          const layout = { page:{homeLabel:'Home',homeHref:'#'}};
           const callbacks = { render:() => People.renderPeopleDialog(roster, detail, model, state, callbacks, layout), action:async()=>{}, confirm:()=>{},
             changeRole: change => { saves.push(change); return new Promise((resolve,reject) => {resolveSave=resolve;rejectSave=reject;}); } };
           People.renderPeopleDialog(roster, detail, model, state, callbacks, {...layout, focus:{kind:'person',id:'tom'}}); outer.showModal();

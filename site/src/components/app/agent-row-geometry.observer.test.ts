@@ -50,10 +50,10 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
           status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
         const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
-        const state = { selected: null, collapsed: new Set(), showAllAttention: false, query: '' };
+        const state = { selected: null, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [];
-        const callbacks = { render: () => PeopleView.renderPeopleDialog(roster, detail, model, state, callbacks, {layout:'page',page:{homeLabel:'Home',homeHref:'#'}}), action: () => {}, saveModel: async (_id, value) => { modelValues.push(value); },
+        const callbacks = { render: () => PeopleView.renderPeopleDialog(roster, detail, model, state, callbacks, { page:{homeLabel:'Home',homeHref:'#'}}), action: () => {}, saveModel: async (_id, value) => { modelValues.push(value); },
           confirm: (action, _id, opener) => PeopleView.showPeopleConfirmation(confirm, action, agent, opener, async () => {}, () => "The result is unknown. Reload to check.") };
         callbacks.render(); outer.showModal();
         roster.querySelector('#pd-agent-agent').click();
@@ -76,8 +76,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const pageDetail = document.createElement('section'); pageDetail.className = 'pd-detail'; pageDetail.dataset.peopleDetail = ''; pageDetail.hidden = true;
         const pageConfirm = document.createElement('dialog'); pageConfirm.className = 'pd-confirm'; pageConfirm.dataset.peopleConfirm = '';
         frame.append(pageRoot); app.append(frame, pageDetail, pageConfirm); document.querySelector('main.dashboard').replaceWith(app);
-        const pageRows = [], commits = [], pageState = {selected:null,collapsed:new Set(),showAllAttention:false,query:''};
-        const pageCallbacks = { render: () => PeopleView.renderPeopleDialog(pageRoot,pageDetail,model,pageState,pageCallbacks,{layout:'page',page:{homeLabel:'Controlled local geometry',homeHref:'#'}}),
+        const pageRows = [], commits = [], pageState = {selected:null,query:''};
+        const pageCallbacks = { render: () => PeopleView.renderPeopleDialog(pageRoot,pageDetail,model,pageState,pageCallbacks,{ page:{homeLabel:'Controlled local geometry',homeHref:'#'}}),
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
           confirm: (action,id,opener) => PeopleView.showPeopleConfirmation(pageConfirm,action,model.agents.find(item => item.id === id),opener,
             async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.') };

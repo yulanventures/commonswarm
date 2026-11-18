@@ -36,7 +36,7 @@ export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; r
 /** Open the dialog with one person or one agent selected. */
 export interface PeopleDialogFocus { kind: "person" | "agent"; id: string }
 /** Role drafts, outcomes, pending saves and initial focus are builder-owned and optional. */
-export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string;
+export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; query: string;
   /** The open tab. The page builder settles it (Agents by default; no Invites in the sample workspace). */
   tab?: PeopleTab;
   roleDraft?: { userId: string; role: PeopleDialogRole; confirming: boolean; error?: string } | null; roleReceipt?: { userId: string; text: string } | null;
@@ -76,10 +76,6 @@ export interface PeopleDialogOptions {
   focus?: PeopleDialogFocus;
   /** The tint used for an agent everywhere else in the app; null is neutral (its owner left). Without tintFor: position in the agent list. */
   tintFor?: (agentId: string) => 0 | 1 | 2 | 3 | null;
-  /** The one layout: a roster with search, filters and actions in `root`, and the selected profile beside it.
-   * Accepted so existing callers need no change; it selects nothing. Was: "page" builds one context roster and a main profile
-   * into `root`; the real shell can project that roster without cloning its controls. */
-  layout?: "page";
   page?: PeopleDialogPage;
 }
 export type PeopleDialogAction = "resume" | "new-key" | "remove-agent" | "turn-off-key" | "withdraw" | "remove-person" | "cancel-invite" | "connected-apps" | "allow";
@@ -233,8 +229,8 @@ export function peopleRoleFinishSave(state: PeopleDialogState, userId: string, s
 export function peopleDialogApplyFocus(model: PeopleDialogModel, state: PeopleDialogState, focus: PeopleDialogFocus): boolean {
   const key = `${focus.kind}:${focus.id}`;
   if (state.focusApplied === key) return false;
-  if (focus.kind === "person") { if (!model.people.some((person) => person.id === focus.id)) return false; state.collapsed.delete(focus.id); }
-  else { const agent = model.agents.find((candidate) => candidate.id === focus.id); if (!agent) return false; state.collapsed.delete(agent.ownerId); }
+  if (focus.kind === "person") { if (!model.people.some((person) => person.id === focus.id)) return false; }
+  else if (!model.agents.some((candidate) => candidate.id === focus.id)) return false;
   state.selected = { type: focus.kind, id: focus.id }; state.tab = peopleTabOf(focus.kind); state.focusApplied = key; return true;
 }
 const validTint = (value: unknown): value is 0 | 1 | 2 | 3 => value === 0 || value === 1 || value === 2 || value === 3;
@@ -334,7 +330,6 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   root.append(pageRoot);
   const select = (type: "agent" | "person", id: string) => {
     host.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]").forEach(menu => { menu.open = false; });
-    if (type === "agent") { const agent = model.agents.find((candidate) => candidate.id === id); if (agent) state.collapsed.delete(agent.ownerId); }
     state.selected = state.selected?.id === id && state.selected.type === type ? null : { type, id };
     // Opening an agent from a person's profile (or the reverse) moves to its tab, so Back lands on its row.
     // A person opened from Admins stays there: their row is on that tab too.
