@@ -7601,7 +7601,10 @@ import "../../styles/kylon-command-palette.css";
     const reloadPeopleRoster = async (): Promise<void> => {
       const workspaceId = activeWorkspaceId, tab = peopleDialogState.tab ?? "agents";
       if (!workspaceId || sampleMode) return;
-      await reloadPeopleDialog(workspaceId, "", "", undefined, () => false);
+      const loading = reloadPeopleDialog(workspaceId, "", "", undefined, () => false);
+      // The load has started and cleared the lists: say so, instead of leaving the old line under a busy button.
+      if (homePeopleReadState === "pending" && peopleDialogOpen()) { renderDialogRoster(); one<HTMLElement>(`[data-pd-focus="tab-${tab}"]`)?.focus({ preventScroll: true }); }
+      await loading;
       if (activeWorkspaceId !== workspaceId || !peopleDialogOpen()) return;
       // Retry is gone once the read succeeds; focus then goes to the tab it was on.
       (one<HTMLElement>(`[data-tab-retry="${tab}"]`) ?? one<HTMLElement>(`[data-pd-focus="tab-${tab}"]`))?.focus({ preventScroll: true });
