@@ -5,13 +5,17 @@ import { defineConfig } from "astro/config";
 const SITE_ORIGIN = "https://commonswarm.com";
 
 /** @type {import("astro").Astro.Integration} */
+// The sitemap lists pages meant to be found. Left out: the not-found page (it answers every wrong
+// address), the OAuth test callbacks (already noindex), and two doors that hold no content of their
+// own: /start forwards to /app, and /invite means something only with a link's token.
+const NOT_LISTED = [/^404(\/|\.html)?$/u, /^oauth\//u, /^start\/?$/u, /^invite\/?$/u];
+
 const sitemap = {
   name: "commonswarm-sitemap",
   hooks: {
     "astro:build:done": async ({ pages, dir }) => {
       const urls = pages
-        // The not-found page answers every wrong address; it is not a page to list.
-        .filter(({ pathname }) => !/^404(\/|\.html)?$/u.test(pathname))
+        .filter(({ pathname }) => !NOT_LISTED.some((pattern) => pattern.test(pathname)))
         .map(({ pathname }) => new URL(pathname, SITE_ORIGIN).href)
         .sort()
         .map((url) => `  <url><loc>${url}</loc></url>`)
