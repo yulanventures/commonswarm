@@ -1,6 +1,7 @@
 ---
 import Base from "./Base.astro";
 import AboutCommonSwarm from "../components/seo/AboutCommonSwarm.astro";
+import "../styles/public-theme.css";
 import "../styles/seo.css";
 
 interface Props {
@@ -42,7 +43,7 @@ const pages = [
 const related = pages.filter((page) => page.href !== path);
 ---
 
-<Base title={title} description={description} path={path}>
+<Base title={title} description={description} path={path} publicLook>
   <script slot="head" type="application/ld+json" set:html={JSON.stringify(structuredData)} />
 
   <article class="seo-page">

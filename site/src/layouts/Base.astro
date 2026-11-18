@@ -135,6 +135,8 @@ interface Props {
    * dashboard supplies its own authenticated navigation instead.
    */
   signedIn?: boolean;
+  /** The page wears the homepage's look (public-theme.css), so it preloads the same text face. */
+  publicLook?: boolean;
 }
 
 const {
@@ -149,6 +151,7 @@ const {
   bareHeader = false,
   bareFooter = false,
   signedIn = false,
+  publicLook = false,
 } = Astro.props;
 
 const origin = (Astro.site ?? new URL(FALLBACK_ORIGIN)).origin;
@@ -156,7 +159,7 @@ const canonical = new URL(path, origin).href;
 const ogImageUrl = new URL(ogImage, origin).href;
 const isHome = path === "/";
 const isAppShell = path === "/app" || path === "/invite";
-const fontPreloads = isHome
+const fontPreloads = isHome || publicLook
   ? ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/dm-sans-latin.woff2"]
   : isAppShell
     ? ["/fonts/inter-latin.woff2", "/fonts/jetbrains-mono-latin.woff2"]

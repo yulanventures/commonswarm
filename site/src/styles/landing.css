@@ -1,37 +1,4 @@
 /* Homepage only. Editable product illustrations use live text, no screenshot assets or external requests. */
-:root:is([data-home], :has(main .lp-home)) {
-  --lp-paper: #f8f7f3;
-  --lp-ink: #2c2c42;
-  --lp-muted: #636275;
-  --lp-line: #dcdbe3;
-  --lp-accent: #65518b;
-  --lp-surface: #ffffff;
-  --lp-sage: #ebe5f4;
-  --lp-peach: #f7e9dc;
-  --lp-blue: #e5eee2;
-  --lp-shadow: 44 44 66;
-  --bg: var(--lp-paper);
-  --elev-0: var(--lp-paper);
-  --elev-1: var(--lp-surface);
-  --text: var(--lp-ink);
-  --text-muted: var(--lp-muted);
-  --accent: var(--lp-accent);
-  --focus: #57427d;
-  --accent-hover: #57427d;
-  --accent-bright: #57427d;
-  --font-sans: "DM Sans", "DM Sans Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, sans-serif;
-  --font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  color-scheme: light;
-  background: var(--lp-paper);
-}
-:root:is([data-home], :has(main .lp-home)) body { background: var(--lp-paper); color: var(--lp-ink); }
-:root:is([data-home], :has(main .lp-home)) .hdr { background: color-mix(in srgb, var(--lp-paper) 95%, transparent); border-bottom: 1px solid var(--lp-line); backdrop-filter: blur(14px); }
-:root:is([data-home], :has(main .lp-home)) .hdr__inner { max-width: 1248px; min-height: 82px; }
-:root:is([data-home], :has(main .lp-home)) .hdr__cta, :root:is([data-home], :has(main .lp-home)) .mnav__cta { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; box-shadow: none; }
-:root:is([data-home], :has(main .lp-home)) :is(.hdr__cta,.mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
-:root:is([data-home], :has(main .lp-home)) .hdr__progress { display: none; }
-:root:is([data-home], :has(main .lp-home)) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
 .lp-home { font-family: var(--font-sans); line-height: 1.5; }
 .lp-home *, .lp-home *::before, .lp-home *::after { box-sizing: border-box; }
 .lp-home :is(h1,h2,h3,h4,p,figure) { margin: 0; }
@@ -261,7 +228,6 @@
   .lp-connection-options > a { gap: 14px; }
 }
 @media (max-width: 620px) {
-  :root:is([data-home], :has(main .lp-home)) .hdr__inner { min-height: 66px; }
   .lp-container { width: calc(100% - 36px); }
   .lp-hero { padding-top: 47px; }
   .lp-hero h1 { font-size: clamp(36px, 10.5vw, 62px); letter-spacing: -.045em; }
@@ -329,33 +295,13 @@
   .lp-close h2 { font-size: clamp(37px, 10.8vw, 44px); }
 }
 @media (prefers-color-scheme: dark) {
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) {
-    --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
-    --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
-    --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
-    color-scheme: dark;
-  }
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-button,
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .hdr__cta,
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .mnav__cta { color: #2c2c42 !important; }
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .hdr__cta:hover,
-  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .mnav__cta:hover,
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-button { color: #2c2c42 !important; }
   :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
   :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-connections { background: #18151f; }
   :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
   :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-shopping input { accent-color: #cdb9ee; }
 }
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) {
-    --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
-    --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
-    --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
-    color-scheme: dark;
-  }
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-button,
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .hdr__cta,
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .mnav__cta { color: #2c2c42 !important; }
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .hdr__cta:hover,
-  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .mnav__cta:hover,
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-button { color: #2c2c42 !important; }
   :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
   :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-connections { background: #18151f; }
   :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
