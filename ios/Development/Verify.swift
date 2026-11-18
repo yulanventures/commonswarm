@@ -158,6 +158,26 @@ enum Verify {
 
         let emailAPI = EmailCodeAPI(origin: origin, publicKey: "local-fixture")
         let email = "reader@example.test"
+        let timeoutMessage = "Sending the code took too long. Try again."
+        let addressMessage = "Couldn’t send a code. Check the address and try again."
+        let retryMessage = "Couldn’t send a code. Try again."
+        for (address, expected) in [
+            ("slow@example.test", timeoutMessage),
+            ("invalid-address", addressMessage),
+            ("blocked@example.test", addressMessage),
+            ("bad-request@example.test", retryMessage),
+            ("server@example.test", retryMessage),
+            ("limited@example.test", "Too many attempts. Wait a moment and try again.")
+        ] {
+            do {
+                try await emailAPI.send(to: address)
+            } catch {
+                try expect(EmailCodeAPI.sendFailureMessage(for: error) == expected, "send-code feedback for " + address)
+                continue
+            }
+            throw Failure.mismatch("expected send failure for " + address)
+        }
+        try expect(EmailCodeAPI.sendFailureMessage(for: URLError(.timedOut)) == timeoutMessage, "client timeout feedback")
         try await emailAPI.send(to: "unknown@example.test")
         try await emailAPI.send(to: email)
         try expect((try? await emailAPI.verify(email: email, code: "999999")) == nil, "wrong email code refused")
