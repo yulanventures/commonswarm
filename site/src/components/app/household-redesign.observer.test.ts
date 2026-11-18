@@ -380,7 +380,7 @@ test("the People page puts Allow Lists & docs on an own seat's row, one click ea
   const rowAllow = () => dom.root.descendants().find(node => node.tag === "button" && node.attributes["data-row-allow-agent-access"] === principal);
   paint();
   assert.ok(rowAllow(), "an own seat not yet allowed has the action on its row");
-  assert.equal(rowAllow()!.textContent, "Allow Lists & docs");
+  assert.equal(rowAllow()!.textContent, "Allow");
   assert.equal(rowAllow()!.attributes["aria-label"], "Allow Lists & docs: Muse");
   rowAllow()!.click();
   assert.deepEqual(actions, [["allow", principal]], "one click sends the allow action");
