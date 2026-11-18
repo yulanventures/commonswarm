@@ -78,11 +78,10 @@ import "../../styles/kylon-command-palette.css";
 
   <div class="dashboard__root">
     <section class="dashboard__loading" data-panel="loading" role="status" aria-live="polite" aria-busy="true">
-      <span class="dashboard__spinner" aria-hidden="true"></span>
+      {/* One calm mark and one line, stacked in the middle: a row of spinner, label and placeholder bars
+          did not fit a phone (the spinner left the screen and the label wrapped). */}
+      <span class="dashboard__loading-mark" aria-hidden="true"><Wordmark markOnly markSize={44} /></span>
       <span data-loading-label>Opening CommonSwarm…</span>
-      <div class="dashboard__loading-skeleton" aria-hidden="true">
-        <Skeleton variant="text" lines={2} width="14rem" />
-      </div>
     </section>
 
     <section
@@ -17079,30 +17078,42 @@ import "../../styles/kylon-command-palette.css";
     overflow: hidden;
   }
 
+  /* Startup. Sized by the small viewport (100svh), so the mark does not move when a phone's address bar
+   * slides away; the page behind it still fills the dynamic viewport. Padding keeps it clear of a notch
+   * or home indicator. Nothing here is wider than the screen, so the page never zooms out to fit it. */
   .dashboard__loading {
+    box-sizing: border-box;
     min-block-size: 100svh;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: var(--s-3);
+    gap: var(--s-4);
+    padding: max(var(--s-6), env(safe-area-inset-top)) max(var(--s-5), env(safe-area-inset-right))
+      max(var(--s-6), env(safe-area-inset-bottom)) max(var(--s-5), env(safe-area-inset-left));
     color: var(--text-muted);
     font-size: var(--t-sm);
+    text-align: center;
+    text-wrap: balance;
   }
 
-  .dashboard__spinner {
-    display: inline-block;
-    inline-size: 1rem;
-    block-size: 1rem;
-    flex: none;
-    border: 2px solid var(--border-strong);
-    border-block-start-color: var(--accent);
-    border-radius: 50%;
-    animation: dashboard-spin 700ms linear infinite;
+  .dashboard__loading-mark {
+    display: inline-flex;
+    color: var(--text);
+    animation: dashboard-breathe 1.6s ease-in-out infinite alternate;
   }
 
-  @keyframes dashboard-spin {
+  .dashboard__loading [data-loading-label] {
+    max-inline-size: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  @keyframes dashboard-breathe {
+    from {
+      opacity: 1;
+    }
     to {
-      transform: rotate(1turn);
+      opacity: 0.4;
     }
   }
 
@@ -21430,8 +21441,8 @@ import "../../styles/kylon-command-palette.css";
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .dashboard__spinner {
-      animation-duration: 1.4s;
+    .dashboard__loading-mark {
+      animation: none;
     }
 
     .dashboard__button,
