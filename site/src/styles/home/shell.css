@@ -364,6 +364,8 @@
 .hm-ws-nav__link[aria-current="page"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }
 
 /* Organization identity uses the same small initial tile in the rail and both menus. */
+/* The account button's tile shows the person's initials without making them part of the button's text. */
+.dashboard__user-trigger-mark::before { content: attr(data-initials); }
 .dashboard__org-mark {
   display: inline-grid; place-items: center; flex: none; inline-size: 26px; block-size: 26px;
   border-radius: 7px; background: var(--home-rail-raised); color: var(--home-accent-text);
