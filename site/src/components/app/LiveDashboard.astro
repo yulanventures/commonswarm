@@ -2354,7 +2354,7 @@ import "../../styles/kylon-command-palette.css";
         // Only rows the app will actually read again wait for that read; a settled receipt is never re-read.
         const owed = new Set(signalIds);
         const epoch = ++seenAckEpoch;
-        for (const signal of browserDeliveryReceiptCandidates(signals.filter(row => owed.has(row.id)), deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER)) {
+        for (const signal of browserDeliveryReceiptCandidates(receiptRows().filter(row => owed.has(row.id)), deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER)) {
           seenAwaitingRead.set(signal.id, epoch);
         }
         syncReceiptMarkers();
@@ -10216,6 +10216,15 @@ import "../../styles/kylon-command-palette.css";
      * Visible rows load first. New off-screen rows follow newest-first, while later ticks
      * revisit the stalest active rows. This keeps a 25-message page from turning one
      * two-second feed tick into a 25-request burst without starving old active receipts. */
+    /** The rows receipts are read for: the loaded page and, in an open Direct Message, that conversation's own history,
+     *  which the feed shows beside the page. A history row outside the page had no reader, so its receipt never loaded. */
+    const receiptRows = (): Signal[] => {
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      if (!dm || !directHistory || directHistory.workspaceId !== activeWorkspaceId || directHistory.viewerId !== session?.user.id ||
+          directHistory.partner.kind !== dm.kind || directHistory.partner.id !== dm.id) return signals;
+      const loaded = new Set(signals.map(row => row.id));
+      return [...signals, ...directHistory.rows.filter(row => !loaded.has(row.id))];
+    };
     const visibleReceiptSignalIds = (): Set<string> => {
       const viewport = one<HTMLElement>(".dashboard__feed-view");
       if (!viewport) return new Set();
@@ -10241,7 +10250,7 @@ import "../../styles/kylon-command-palette.css";
         visibleReceiptTimer = undefined;
         if (!activeWorkspaceId || sampleMode) return;
         const onScreen = visibleReceiptSignalIds();
-        if (signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+        if (receiptRows().some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
           void refreshDeliveryReceipts(activeWorkspaceId, requestVersion);
         }
       }, 150);
@@ -10258,7 +10267,7 @@ import "../../styles/kylon-command-palette.css";
       if (deliveryReceiptRefreshOwner === owner) { deliveryReceiptRefreshAgain = true; return; }
       const now = Date.now();
       const candidates = browserDeliveryReceiptCandidates(
-        signals,
+        receiptRows(),
         deliveryReceiptCache,
         visibleReceiptSignalIds(),
         now,
@@ -10299,7 +10308,8 @@ import "../../styles/kylon-command-palette.css";
           }
         }
         // A row the app will no longer re-read (its receipt settled meanwhile) waits for nothing.
-        const rereadable = new Set(browserDeliveryReceiptCandidates(signals.filter(row => seenAwaitingRead.has(row.id)),
+        const rows = receiptRows();
+        const rereadable = new Set(browserDeliveryReceiptCandidates(rows.filter(row => seenAwaitingRead.has(row.id)),
           deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER).map(signal => signal.id));
         for (const id of [...seenAwaitingRead.keys()]) if (!rereadable.has(id)) seenAwaitingRead.delete(id);
         /* At most BROWSER_RECEIPT_REQUESTS_PER_TICK rows are read per pass, and with push connected the next pass may be a
@@ -10307,7 +10317,7 @@ import "../../styles/kylon-command-palette.css";
            such row leaves that set after one read (a failed read is cached too), so this always ends. Rows that are only
            due again by cadence wait for the next pass as before. */
         const onScreen = visibleReceiptSignalIds();
-        if (rereadable.size > 0 || signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+        if (rereadable.size > 0 || rows.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
           deliveryReceiptRefreshAgain = true;
         }
         if (changed && !addAgentViewOpen()) renderFeed();
