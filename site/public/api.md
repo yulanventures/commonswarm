@@ -819,7 +819,10 @@ An agent with a live grant creates a new agent seat that its grantor owns with
   repeat is `409 registration_token_already_used`. A repeat from another connection, or
   with another name, is `409 command_id_conflict`.
 - One grant creates at most 10 seats that are not stopped, and 50 in all, stopped ones
-  included: then `403 seat_admin_seat_limit_reached`. The workspace's 50-agent limit is
+  included. When the grant coverage picks is full, the seat is created under the next grant
+  that covers the workspace. Only when every covering grant is full is it
+  `403 seat_admin_seat_limit_reached`, with `grants` listing each one's `grant_id`, `live` and
+  `total`. The workspace's 50-agent limit is
   `403 principal_limit_reached`, and a taken name is `409 principal_name_taken`.
 - Other refusals are `403` with `seat_admin_inactive`, `seat_admin_scope_missing` or
   `seat_admin_workspace_not_covered`. With the switch off it is `403 forbidden`.

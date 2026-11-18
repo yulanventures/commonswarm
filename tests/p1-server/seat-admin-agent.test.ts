@@ -812,7 +812,8 @@ test("create a seat, replayed after the grant ends or expires: refused, and no c
   refused(await createSeat("Expired grant seat", { commandId: expiringId }), "seat_admin_inactive", "replay after expiry");
   refused(await createSeat("After expiry seat"), "seat_admin_inactive", "a new call after expiry");
   const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens t
-    JOIN swarm.agent_principals p USING (principal_id) WHERE p.name IN ('Ended grant seat', 'Expired grant seat') AND t.revoked_at IS NULL`;
+    JOIN swarm.agent_principals p USING (principal_id) WHERE p.workspace_id = ${workspace}::uuid
+      AND p.name IN ('Ended grant seat', 'Expired grant seat') AND t.revoked_at IS NULL`;
   assert.equal(live, 2, "each seat keeps its one first credential");
 });
 
@@ -832,6 +833,45 @@ test("create a seat: 10 live per grant, and a revoked seat frees a live slot; a 
   } finally {
     await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp() WHERE principal_id = ANY(${prior}::uuid[]) AND revoked_at IS NULL`;
     await endGrant(grantId);
+  }
+});
+
+test("create a seat: a full grant passes the seat to another covering grant; refused only when all are full, naming each", async () => {
+  // Coverage tries the workspace grant first, then the organization grant (the same workspace's organization).
+  const wsGrant = await grant();
+  const orgGrant = await grant({ level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspace });
+  const prior = await priorSeats(wsGrant, 10, false);
+  const made: string[] = [];
+  try {
+    const moved = await createSeat("Seat under the second grant");
+    accepted(moved, "the workspace grant is full, the organization grant has room");
+    const [row] = (await agentHistory()).filter((h) => h.action === "create_agent_seat" && h.outcome === "accepted")
+      .slice(-1);
+    assert.equal(row!.seat_admin_grant_id, orgGrant, "the seat counts under the grant that had room");
+    made.push(String(row!.target_id));
+
+    made.push(...await priorSeats(orgGrant, 9, false));
+    const over = await createSeat("Seat with every grant full");
+    refused(over, "seat_admin_seat_limit_reached", "both grants full");
+    assert.deepEqual(over.body.limit, { live: 10, total: 50 });
+    assert.deepEqual(over.body.grants, [{ grant_id: wsGrant, live: 10, total: 10 }, { grant_id: orgGrant, live: 10, total: 10 }]);
+    assert.match(String(over.body.message), new RegExp(`${wsGrant} has 10 of 10 live and 10 of 50 in all; ${orgGrant} has 10 of 10 live`));
+    const [audit] = await sql<{ detail: string }[]>`SELECT detail FROM swarm.audit_log
+      WHERE command_kind = 'create_agent_seat' AND workspace_id = ${workspace}::uuid AND outcome = 'quota'
+      ORDER BY audit_id DESC LIMIT 1`;
+    assert.match(audit!.detail, new RegExp(`seat_admin grant=${wsGrant} `), "the refusal is audited under the first covering grant");
+
+    // A seat freed under the first grant is used again before the second.
+    await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp() WHERE principal_id = ${prior[0]!}::uuid`;
+    accepted(await createSeat("Seat back under the first grant"), "a revoked seat frees the first grant");
+    const [back] = (await agentHistory()).filter((h) => h.action === "create_agent_seat" && h.outcome === "accepted").slice(-1);
+    assert.equal(back!.seat_admin_grant_id, wsGrant);
+    made.push(String(back!.target_id));
+  } finally {
+    await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp()
+      WHERE principal_id = ANY(${[...prior, ...made]}::uuid[]) AND revoked_at IS NULL`;
+    await endGrant(wsGrant);
+    await endGrant(orgGrant);
   }
 });
 

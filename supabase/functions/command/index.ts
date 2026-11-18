@@ -6977,16 +6977,35 @@ async function seatAdminCreateAgentSeat(tx:Sql,body:RequestBody,auth:AuthContext
   // Per-grant ceilings. The plan holds the grantor's admin account row FOR UPDATE; re-taking it here names the lock this
   // count relies on, held through the accepted history append below.
   await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${grantor}::uuid FOR UPDATE`;
-  const [created]=await tx<{live:number;total:number}[]>`SELECT count(*)::int AS total,
-      count(*) FILTER (WHERE p.revoked_at IS NULL)::int AS live
-    FROM (SELECT DISTINCT e.event->'payload'->>'target_id' AS target FROM swarm.admin_events e
-      WHERE e.owner_user_id=${grantor}::uuid AND e.event->>'type'='AdminActionRecorded'
-        AND e.event->'payload'->>'action'=${kind} AND e.event->'payload'->>'outcome'='accepted'
-        AND e.event->'payload'->>'seat_admin_grant_id'=${authorized.grant.grant_id}
-        AND e.event->'payload'->>'target_id' IS NOT NULL) c
-    LEFT JOIN swarm.agent_principals p ON p.principal_id::text=c.target`;
-  const limit=seatAdminSeatCeilingRefusal({live:created?.live ?? 0,total:created?.total ?? 0});
-  if(limit) return refuse(403,limit,authorized,hash,null,{limit:{...SEAT_ADMIN_SEATS_PER_GRANT}});
+  const createdUnder=async(grantId:string)=>{
+    const [created]=await tx<{live:number;total:number}[]>`SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE p.revoked_at IS NULL)::int AS live
+      FROM (SELECT DISTINCT e.event->'payload'->>'target_id' AS target FROM swarm.admin_events e
+        WHERE e.owner_user_id=${grantor}::uuid AND e.event->>'type'='AdminActionRecorded'
+          AND e.event->'payload'->>'action'=${kind} AND e.event->'payload'->>'outcome'='accepted'
+          AND e.event->'payload'->>'seat_admin_grant_id'=${grantId}
+          AND e.event->'payload'->>'target_id' IS NOT NULL) c
+      LEFT JOIN swarm.agent_principals p ON p.principal_id::text=c.target`;
+    return {live:created?.live ?? 0,total:created?.total ?? 0};
+  };
+  // The ceiling is per grant: a full grant passes the seat to the next grant that covers it, in coverage order, and
+  // the seat is refused only when every covering grant is full. The refusal names each full grant and its counts.
+  const full:{grant_id:string;live:number;total:number}[]=[];
+  const first=authorized;
+  for(;;) {
+    const created=await createdUnder(authorized.grant.grant_id);
+    if(!seatAdminSeatCeilingRefusal(created)) break;
+    full.push({grant_id:authorized.grant.grant_id,...created});
+    const next=await authorizeSeatAdminAction(tx,{principal_id:actor,grantor_user_id:grantor,kind:seatAdminCapability(kind),
+      workspace_id:workspace,capabilities:seatAdminRequiredCapabilities(kind),exclude_grant_ids:full.map(g=>g.grant_id)});
+    if(!next.ok) {
+      const named=full.map(g=>`${g.grant_id} has ${g.live} of ${SEAT_ADMIN_SEATS_PER_GRANT.live} live and ${g.total} of `
+        +`${SEAT_ADMIN_SEATS_PER_GRANT.total} in all`).join('; ');
+      return refuse(403,'seat_admin_seat_limit_reached',first,hash,null,{limit:{...SEAT_ADMIN_SEATS_PER_GRANT},grants:full,
+        message:`${SEAT_ADMIN_REFUSAL_COPY.seat_admin_seat_limit_reached} Every grant that covers this workspace is full: ${named}.`});
+    }
+    authorized=next.value;
+  }
   // Then the workspace's own ceiling and name, in the order create_agent_principal uses: ceiling, name lock, hosted
   // reservation, exact name.
   const live=await lockAndCountLivePrincipals(tx,workspace);
