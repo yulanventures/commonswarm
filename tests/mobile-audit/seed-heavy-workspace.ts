@@ -1003,9 +1003,11 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } else if (ready) note("seed_lists_approval", "the Sprout or Fern agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_approval", error); }
     // The Admins tab with grants on record (app.people.admins.grants, dialog.people-admins-end), in a workspace of its own so
-    // no other capture changes. Three grants, written as the grant command writes them: the owner's workspace grant with an
-    // end date, the owner's organization grant with none, and a workspace grant whose grantor is the admin person. That
-    // last one is set directly here to picture "granted by <name>"; the product lets only an agent's owner grant.
+    // no other capture changes. Three grants, written as the grant command writes them: a workspace grant with an end date,
+    // an organization grant with none, and a second workspace grant. All three name the admin person as grantor, set
+    // directly here (the product lets only an agent's owner grant), for two reasons: the viewer's own account-wide Admin
+    // access list (dialog.admin-history) stays as it was, and only the owner's read of every grant can return these rows,
+    // so the screen proves that read and cannot be satisfied by the list of what the viewer gave.
     try {
       const adminsWorkspace = randomUUID();
       const ready = ok("create_workspace admins", await command(owner.token, { kind: "create_workspace", workspace_id: adminsWorkspace, name: "Workshop", org_id: workspace }, null))
@@ -1028,10 +1030,10 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
               ${expires ? sql.unsafe(expires) : null})`;
           return grantId;
         };
-        const ownGrant = await grant(owner.id, quill, "workspace", "statement_timestamp() + interval '30 days'");
-        await grant(owner.id, quill, "organization", null);
+        const listed = await grant(adminPerson.id, quill, "workspace", "statement_timestamp() + interval '30 days'");
+        await grant(adminPerson.id, quill, "organization", null);
         await grant(adminPerson.id, ledger, "workspace", null);
-        Object.assign(ids, { adminsWorkspace, adminsGrant: ownGrant });
+        Object.assign(ids, { adminsWorkspace, adminsGrant: listed });
         steps.push("seed_admin_grants");
       } else if (ready) note("seed_admin_grants", "the Workshop agents or its organization were not found");
     } catch (error) { note("seed_admin_grants", error); }

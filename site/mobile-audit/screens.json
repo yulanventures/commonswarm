@@ -2739,11 +2739,11 @@
         "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
       },
       {
-        "waitFor": "[data-people-context] [data-end-admin=\"{adminsGrant}\"]",
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]",
         "settle": true
       }
     ],
-    "ready": "[data-people-context] [data-end-admin=\"{adminsGrant}\"]",
+    "ready": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]",
     "states": [
       "dense"
     ],
@@ -2752,7 +2752,7 @@
     ],
     "frame": [
       "[data-people-context] #pd-admin-access-title",
-      "[data-people-context] [data-end-admin=\"{adminsGrant}\"]"
+      "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]"
     ],
     "never": {
       "request": "/functions/v1/command",
@@ -2769,8 +2769,8 @@
         "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
       },
       {
-        "waitFor": "[data-people-context] [data-end-admin=\"{adminsGrant}\"]",
-        "click": "[data-people-context] [data-end-admin=\"{adminsGrant}\"]"
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]",
+        "click": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]"
       }
     ],
     "ready": "dialog.sa-confirm[data-seat-admin-end=\"workspace\"][open]",
