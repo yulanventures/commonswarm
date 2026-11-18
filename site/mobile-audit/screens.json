@@ -1486,6 +1486,33 @@
     }
   },
   {
+    "id": "app.people.allow-row",
+    "kind": "view",
+    "path": "/app?w={approvalWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+        "scroll": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_lists_approval"
+    ],
+    "frame": [
+      "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+      "dialog[data-roster-dialog][open] #pd-agent-{approvalSetupAgent}"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_approve_connection"
+    }
+  },
+  {
     "id": "dialog.public-menu",
     "kind": "dialog",
     "path": "/",

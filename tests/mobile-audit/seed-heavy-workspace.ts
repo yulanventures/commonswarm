@@ -959,19 +959,20 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     } catch (error) { note("seed_todo_offer", error); }
     // The Lists & docs agent approval (app.lists-approval), in a workspace of its own so no other capture changes: one own local
     // agent with a live connection (device, run, renewal grant and token rows, as the p1-server household fixtures build) and
-    // no Lists approval yet, so the approvals list shows its card. A second own agent, Fern, has no connection at all: the
+    // no Lists approval yet, so the approvals list shows its card. A second own agent, Fern (given a long name, so its People
+    // row shows the Allow action beside a name that has to be cut), has no connection at all: the
     // People dialog's Allow approves a connected agent in place, and only an agent without a connection lands on Lists
     // (the setup fallback), where Sprout's card is. Pressing Fern's Allow therefore reaches the card and approves nothing.
     try {
       const approvalWorkspace = randomUUID();
       const ready = ok("create_workspace approval", await command(owner.token, { kind: "create_workspace", workspace_id: approvalWorkspace, name: "Garden projects", org_id: workspace }, null))
         && ok("create_agent_principal approval", await command(owner.token, { kind: "create_agent_principal", name: "Sprout", model: "claude-opus-5-5" }, approvalWorkspace))
-        && ok("create_agent_principal approval setup", await command(owner.token, { kind: "create_agent_principal", name: "Fern", model: "claude-opus-5-5" }, approvalWorkspace))
+        && ok("create_agent_principal approval setup", await command(owner.token, { kind: "create_agent_principal", name: "Fern Greenhouse Watering & Seedling Schedules Agent", model: "claude-opus-5-5" }, approvalWorkspace))
         && ok("household_permissions approval", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, approvalWorkspace));
       const [agent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
         WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Sprout' AND transport = 'local'` : [];
       const [setupAgent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
-        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Fern' AND transport = 'local'` : [];
+        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Fern Greenhouse Watering & Seedling Schedules Agent' AND transport = 'local'` : [];
       if (agent && setupAgent) {
         const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
         await sql.begin(async (tx) => {
