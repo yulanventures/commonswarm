@@ -2363,6 +2363,74 @@
     ]
   },
   {
+    "id": "app.people.invite-form",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-pd-focus=\"page-invite\"]",
+        "click": "[data-people-context] [data-pd-focus=\"page-invite\"]"
+      },
+      {
+        "waitFor": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+      "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-submit\"]"
+    ]
+  },
+  {
+    "id": "app.people.invite-form.error",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-pd-focus=\"page-invite\"]",
+        "click": "[data-people-context] [data-pd-focus=\"page-invite\"]"
+      },
+      {
+        "waitFor": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "type": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "text": "mei@"
+      },
+      {
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-error]:not([hidden])",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-people-invite-error]:not([hidden])",
+    "states": [
+      "error"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+      "[data-people-context] [data-people-invite-error]:not([hidden])"
+    ]
+  },
+  {
     "id": "app.people.agents-error",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
