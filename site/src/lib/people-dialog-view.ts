@@ -8,6 +8,7 @@ import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
 import { buildPeoplePage } from "./people-page";
 import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
+import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -28,7 +29,9 @@ export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; r
 /** Open the dialog with one person or one agent selected. */
 export interface PeopleDialogFocus { kind: "person" | "agent"; id: string }
 /** Role drafts, outcomes, pending saves and initial focus are builder-owned and optional. */
-export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string; filter?: "all" | "people" | "agents" | "invites";
+export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string;
+  /** The open tab. The page builder settles it (Agents by default; no Invites in the sample workspace). */
+  tab?: PeopleTab;
   roleDraft?: { userId: string; role: PeopleDialogRole; confirming: boolean; error?: string } | null; roleReceipt?: { userId: string; text: string } | null;
   roleRefusal?: { userId: string; name: string; text: string } | null;
   /** One entry per person whose role change is in flight. The entry object is the save's identity. */
@@ -206,7 +209,7 @@ export function peopleDialogApplyFocus(model: PeopleDialogModel, state: PeopleDi
   if (state.focusApplied === key) return false;
   if (focus.kind === "person") { if (!model.people.some((person) => person.id === focus.id)) return false; state.collapsed.delete(focus.id); }
   else { const agent = model.agents.find((candidate) => candidate.id === focus.id); if (!agent) return false; state.collapsed.delete(agent.ownerId); }
-  state.selected = { type: focus.kind, id: focus.id }; state.focusApplied = key; return true;
+  state.selected = { type: focus.kind, id: focus.id }; state.tab = peopleTabOf(focus.kind); state.focusApplied = key; return true;
 }
 const validTint = (value: unknown): value is 0 | 1 | 2 | 3 => value === 0 || value === 1 || value === 2 || value === 3;
 
@@ -294,6 +297,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     host.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]").forEach(menu => { menu.open = false; });
     if (type === "agent") { const agent = model.agents.find((candidate) => candidate.id === id); if (agent) state.collapsed.delete(agent.ownerId); }
     state.selected = state.selected?.id === id && state.selected.type === type ? null : { type, id };
+    // Opening an agent from a person's profile (or the reverse) moves to its tab, so Back lands on its row.
+    if (state.selected) state.tab = peopleTabOf(type);
     callbacks.render(); detail.scrollTop = 0;
     if (state.selected) detail.scrollIntoView?.({ block: "nearest" });
     (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: false });
@@ -301,7 +306,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const back = () => { const selected = state.selected;
     const missingRow = selected && !doc.getElementById(`pd-${selected.type}-${selected.id}`);
     state.selected = null;
-    if (missingRow) state.filter = "all";
+    if (missingRow) state.tab = peopleTabOf(selected.type);
     if (missingRow && state.query && options.page?.onQuery) options.page.onQuery(""); else callbacks.render();
     if (selected) (doc.getElementById(`pd-${selected.type}-${selected.id}`) ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc))?.focus({ preventScroll: false }); };
   const actionButton = (action: PeopleDialogAction, agent: PeopleDialogAgent, text: string, notice: HTMLElement, hook?: string) => {
@@ -386,11 +391,15 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     return holder;
   };
   const { groups, other, invites } = peopleDialogGroups(model, state.query);
+  const tab: PeopleTab = state.tab ?? "agents";
+  const needle = state.query.trim().toLocaleLowerCase();
+  // People lists a person when their own name matches; Agents keeps a matching owner's whole group.
+  const shownPeople = groups.filter(({ person }) => !needle || person.name.toLocaleLowerCase().includes(needle));
+  const shownAgents = groups.reduce((count, group) => count + group.agents.length, other.length);
   // Attention stays on each agent's own row (its pill, its sentence and its one next action), not in a summary.
-  if (state.query.trim() || (state.filter && state.filter !== "all" && state.filter !== "invites")) {
-    const people = state.filter === "agents" || state.filter === "invites" ? 0 : groups.length;
-    const agents = state.filter === "people" || state.filter === "invites" ? 0 : groups.reduce((count, group) => count + group.agents.length, other.length);
-    const result = node(doc, "p", "pd-roster-result pd-muted", `${people} ${people === 1 ? "person" : "people"} · ${agents} ${agents === 1 ? "agent" : "agents"} · ${invites.length} pending ${invites.length === 1 ? "invitation or key" : "invitations or keys"}${!people && !agents && !invites.length ? ". No matches. Try another name." : ""}`);
+  if (needle) {
+    const result = node(doc, "p", "pd-roster-result pd-muted",
+      peopleSearchResult(tab, tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : invites.length));
     result.setAttribute("role", "status"); host.append(result);
   }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
@@ -570,21 +579,26 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       copy.append(node(doc, "h3", "pd-person-name", "Other agents"), node(doc, "span", "pd-sr-only", "Their owner is no longer a member"));
       head.append(face, copy);
     }
-    if (state.filter !== "agents") element.append(head);
+    // People: one row per person. Agents: each owner's agents under a short heading, the viewer's own first.
+    if (tab === "people") { element.append(head); return element; }
+    const title = node(doc, "h3", "pd-group-title", !person ? "Other agents" : person.own ? "Yours" : `${peopleFirstName(person.name)}’s`);
+    if (!person) title.append(node(doc, "span", "pd-sr-only", ". Their owner is no longer a member"));
     const list = node(doc, "ul", "pd-agents-list"); if (person) list.id = `pd-group-${person.id}`;
+    title.id = `pd-group-title-${person?.id ?? "other"}`; list.setAttribute("aria-labelledby", title.id);
     agents.forEach((agent) => list.append(agentRow(agent)));
-    if (state.filter !== "people") element.append(list);
-    if (!agents.length) element.append(node(doc, "p", "pd-empty-person pd-sr-only", "No agents added yet.")); return element;
+    element.append(title, list); return element;
   };
-  const invitesOnly = state.filter === "invites" && !model.sample;
-  if (!invitesOnly) groups.forEach(({ person, agents }) => {
-    if (state.filter !== "agents" || agents.length) grid.append(card(person, agents));
-  });
-  if (other.length && !invitesOnly && state.filter !== "people") grid.append(card(null, other));
+  if (tab === "people") shownPeople.forEach(({ person, agents }) => grid.append(card(person, agents)));
+  if (tab === "agents") {
+    [...groups].sort((a, b) => Number(b.person.own) - Number(a.person.own)).forEach(({ person, agents }) => { if (agents.length) grid.append(card(person, agents)); });
+    if (other.length) grid.append(card(null, other));
+    if (!shownAgents && !needle) { const none = node(doc, "p", "pd-muted pd-tab-empty", "No agents yet."); none.dataset.tabEmpty = "agents"; grid.append(none); }
+  }
   host.append(grid);
   // Invited: every invite says who made it and when, and every one the viewer may end has Cancel.
   const invited = node(doc, "section", "dashboard__roster-dialog-pending pd-invited"); invited.dataset.dialogAccessSection = "";
-  invited.hidden = model.sample || (!invitesOnly && !invites.length && !model.pendingFailed); invited.setAttribute("aria-labelledby", "dashboard-roster-pending-title");
+  const invitesOnly = tab === "invites" && !model.sample;
+  invited.hidden = !invitesOnly; invited.setAttribute("aria-labelledby", "dashboard-roster-pending-title");
   const invitedTitle = node(doc, "h3", "pd-muted", "Invited · "); invitedTitle.id = "dashboard-roster-pending-title"; invitedTitle.tabIndex = -1;
   const count = node(doc, "span", "", String(invites.length)); count.dataset.dialogAccessCount = ""; invitedTitle.append(count);
   const inviteList = node(doc, "ul", "pd-invite-list"); inviteList.dataset.dialogAccessList = "";

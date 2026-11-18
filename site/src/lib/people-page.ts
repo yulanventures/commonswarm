@@ -1,4 +1,5 @@
 import type { PeopleDialogModel, PeopleDialogPage, PeopleDialogState } from "./people-dialog-view";
+import { peopleSearchLabel, peopleTab, peopleTabAction, peopleTabs } from "./people/tabs";
 
 /** Page-only composition. The dialog renderer and all authority callbacks remain their owners. */
 export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: PeopleDialogState,
@@ -20,34 +21,32 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
   });
   const title = make("h1", "", "People & agents"); title.id = "pd-page-title"; title.tabIndex = -1;
   const titleRow = make("div", "pd-page-title-row"); titleRow.append(title, back); head.append(titleRow);
+  const tab = peopleTab(model, state.tab); state.tab = tab;
+  // Tabs first, then the open tab's search and its one main action.
+  const tabs = make("div", "pd-page-filters"); tabs.setAttribute("role", "group"); tabs.setAttribute("aria-label", "Show");
+  for (const info of peopleTabs(model, tab)) {
+    const choice = make("button", "", info.label); choice.type = "button"; choice.dataset.pdFocus = `tab-${info.id}`; choice.dataset.peopleTab = info.id;
+    choice.setAttribute("aria-pressed", String(info.selected)); choice.setAttribute("aria-label", info.name);
+    const count = make("span", "pd-filter-count", String(info.count)); count.dataset.tabCount = info.id;
+    choice.append(doc.createTextNode(" "), count);
+    choice.addEventListener("click", () => { state.tab = info.id; render(); }); tabs.append(choice);
+  }
+  head.append(tabs);
   if (nav.onQuery) {
     const search = make("input", "dashboard__roster-dialog-search pd-page-search"); search.type = "search";
-    search.value = state.query; search.placeholder = "Find people and agents"; search.autocomplete = "off"; search.spellcheck = false;
-    search.setAttribute("aria-label", "Find people and agents"); search.dataset.pdFocus = "page-search";
+    search.value = state.query; search.placeholder = peopleSearchLabel(tab); search.autocomplete = "off"; search.spellcheck = false;
+    search.setAttribute("aria-label", peopleSearchLabel(tab)); search.dataset.pdFocus = "page-search";
     search.addEventListener("input", () => nav.onQuery?.(search.value)); head.append(search);
   }
-  const filters = make("div", "pd-page-filters"); filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "Show roster");
-  // The sample workspace has no invites to show, so it has no Invites filter.
-  const choices = [["all", "Members"], ["people", "People"], ["agents", "Agents"], ...(model.sample ? [] : [["invites", "Invites"]])] as Array<[NonNullable<PeopleDialogState["filter"]>, string]>;
-  if (model.sample && state.filter === "invites") state.filter = "all";
-  for (const [value, label] of choices) {
-    const filter = make("button", "", label); filter.type = "button"; filter.dataset.pdFocus = `filter-${value}`;
-    filter.setAttribute("aria-pressed", String((state.filter ?? "all") === value));
-    if (value === "invites" && model.invites.length) {
-      const count = make("span", "pd-filter-count", String(model.invites.length)); count.dataset.invitesCount = "";
-      filter.append(" ", count); filter.setAttribute("aria-label", `Invites, ${model.invites.length} waiting`);
-    }
-    filter.addEventListener("click", () => { state.filter = value; render(); }); filters.append(filter);
-  }
-  head.insertBefore(filters, head.querySelector("input"));
   const host = make("div", "pd-page-main");
   const actions = make("div", "pd-page-actions");
-  if (nav.invite && !model.sample && model.people.some(person => person.own && person.role !== "member")) {
-    const invite = make("button", "pd-page-primary", "Add people"); invite.type = "button";
+  const action = peopleTabAction(tab, { sample: model.sample, mayInvite: model.people.some(person => person.own && person.role !== "member") });
+  if (action === "invite" && nav.invite) {
+    const invite = make("button", "pd-page-primary", "Invite a person"); invite.type = "button";
     invite.dataset.peoplePageInvite = ""; invite.dataset.pdFocus = "page-invite";
     invite.addEventListener("click", () => nav.invite?.()); actions.append(invite);
   }
-  if (nav.addAgentHref && !model.sample) {
+  if (action === "add-agent" && nav.addAgentHref) {
     const add = make("a", "pd-page-secondary", "Add an agent"); add.href = nav.addAgentHref;
     add.dataset.peoplePageAddAgent = ""; add.dataset.pdFocus = "page-add-agent";
     if (nav.navigate) add.addEventListener("click", event => {

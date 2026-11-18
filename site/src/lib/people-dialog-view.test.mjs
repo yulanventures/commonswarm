@@ -144,11 +144,13 @@ test("focus opens one person or one agent once, and ignores a target that is not
   const state = fresh();
   assert.equal(peopleDialogApplyFocus(data, state, { kind: "agent", id: "Dot" }), true);
   assert.deepEqual(state.selected, { type: "agent", id: "Dot" }); assert.deepEqual([...state.collapsed], ["tom"]);
+  assert.equal(state.tab, "agents", "an agent link opens the Agents tab");
   state.selected = null; assert.equal(peopleDialogApplyFocus(data, state, { kind: "agent", id: "Dot" }), false); assert.equal(state.selected, null);
   state.focusApplied = null; assert.equal(peopleDialogApplyFocus(data, state, { kind: "person", id: "tom" }), true);
   assert.deepEqual(state.selected, { type: "person", id: "tom" }); assert.deepEqual([...state.collapsed], []);
+  assert.equal(state.tab, "people", "a person link opens the People tab");
   for (const focus of [{ kind: "person", id: "Dot" }, { kind: "agent", id: "mei" }, { kind: "agent", id: "absent" }]) {
-    const other = fresh(); assert.equal(peopleDialogApplyFocus(data, other, focus), false); assert.equal(other.selected, null); assert.equal(other.focusApplied, undefined);
+    const other = fresh(); assert.equal(peopleDialogApplyFocus(data, other, focus), false); assert.equal(other.selected, null); assert.equal(other.focusApplied, undefined); assert.equal(other.tab, undefined);
   }
 });
 test("a person has one role save in flight, and a superseded completion is dropped", () => {
