@@ -4086,24 +4086,6 @@
             "proxy_operation": "check"
           }
         },
-        "src/cloud/agent-check.ts:requestTimeoutMs": {
-          "class": "network-api",
-          "scope": "per-request",
-          "endpoints": [
-            "/functions/v1/command"
-          ],
-          "citation": "src/cloud/agent-check.ts:367",
-          "detail": "Ceiling for one observation request in check (AGENT_CHECK_TIMEOUT_MS), inside the check's own deadline.",
-          "operation": {
-            "name": "check-observe",
-            "class": "not-run",
-            "writes": [
-              "unclaimed delivery observations"
-            ],
-            "removes": [],
-            "reason": "Unclaimed delivery observation writes delivery state on the command edge."
-          }
-        },
         "src/cloud/delivery-observation.ts:SURFACED_OBSERVATION_BUDGET_MS": {
           "class": "network-api",
           "scope": "whole-operation",
