@@ -289,7 +289,7 @@ test('the screen for an app that cannot have admin access is unchanged', () => {
 
 test('the admin refusal page has a heading, the reason, the ordinary way forward and the way back', () => {
   const reasons = {
-    unauthorized_client: 'Admin access needs an app whose publisher CommonSwarm has verified, and your approval as the account owner. This app does not have both yet.',
+    unauthorized_client: 'CommonSwarm couldn’t confirm that this app is eligible for admin access to your account.',
     dpop_required: 'This app cannot prove possession of its access key, so it cannot be given admin access.',
   };
   for (const [code, reason] of Object.entries(reasons)) {
@@ -298,7 +298,7 @@ test('the admin refusal page has a heading, the reason, the ordinary way forward
     assert.equal(text(one(tree, node => node.tag === 'title')), 'Admin access unavailable');
     assert.equal(text(one(tree, node => node.tag === 'h1')), 'Admin access is not available for this app');
     const paragraphs = elements(tree).filter(node => node.tag === 'p').map(text);
-    assert.deepEqual(paragraphs, [reason, 'You can still connect it the ordinary way: add CommonSwarm as a connector in the app and choose which workspaces it may use.']);
+    assert.deepEqual(paragraphs, [reason, 'To connect without admin access, add CommonSwarm as a connector in the app and choose which workspaces it may use.']);
     // One way out, a plain link; no form, no script, nothing from the request.
     const links = elements(tree).filter(node => node.tag === 'a');
     assert.deepEqual(links.map(node => [text(node), node.attrs.href]), [['Return to CommonSwarm', 'https://commonswarm.com/app']]);

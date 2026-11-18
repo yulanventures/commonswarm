@@ -22,13 +22,15 @@ function limits(values) {
 }
 function words(value) { return value.length ? value.map(e).join(", ") : "None"; }
 /**
- * The page shown when an app asks for admin access it cannot have: it is not verified and approved, or it
- * cannot prove possession of its access key. Same frame as the other connector pages, a heading that says
+ * The page shown when an app asks for admin access it cannot have. The general reason does not diagnose:
+ * the same refusal happens when verification and approval are on record but the app's current details
+ * cannot be confirmed, so it must not tell someone their approval is missing. The other reason is that the
+ * app cannot prove possession of its access key. Same frame as the other connector pages, a heading that says
  * what happened, the way forward (an ordinary connection), and the way back. Fixed text only.
  */
 const ADMIN_REFUSALS = {
   dpop_required: "This app cannot prove possession of its access key, so it cannot be given admin access.",
-  unauthorized_client: "Admin access needs an app whose publisher CommonSwarm has verified, and your approval as the account owner. This app does not have both yet.",
+  unauthorized_client: "CommonSwarm couldn’t confirm that this app is eligible for admin access to your account.",
 };
 export function renderAdminRefusedPage(code) {
   // Own keys only: a code such as "constructor" must not reach an inherited property.
@@ -43,7 +45,7 @@ export function renderAdminRefusedPage(code) {
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Admin access</span></header>
     <div class="card admin-refused"><h1>Admin access is not available for this app</h1>
     <p>${e(reason)}</p>
-    <p class="admin-refused-next">You can still connect it the ordinary way: add CommonSwarm as a connector in the app and choose which workspaces it may use.</p>
+    <p class="admin-refused-next">To connect without admin access, add CommonSwarm as a connector in the app and choose which workspaces it may use.</p>
     <a href="https://commonswarm.com/app">Return to CommonSwarm</a></div></main></body></html>`;
 }
 
