@@ -44,10 +44,11 @@ after(async () => { await sql?.end({ timeout: 5 }); });
 
 type Message = {
   from: string; fromKind?: "user" | "agent"; toUser?: string; toAgent?: string;
-  recipients?: Array<{ user?: string; agent?: string }>; channel?: string; root?: string;
+  recipients?: Array<{ user?: string; agent?: string }>; channel?: string; root?: string; mentionAgent?: string;
 };
 
-/** A message as the edge writes it: the scalar recipient, then one recipient row per `to` entry. */
+/** A message as the edge writes it, in one transaction: the scalar recipient, one recipient row per `to`
+ * entry, and its mention (swarm.signal_mentions accepts rows only from the transaction that created the signal). */
 async function message(m: Message): Promise<string> {
   const id = randomUUID();
   await sql.begin(async (tx) => {
@@ -59,6 +60,10 @@ async function message(m: Message): Promise<string> {
     for (const [position, r] of (m.recipients ?? []).entries()) {
       await tx`INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, recipient_agent_principal_id, position)
         VALUES (${id}::uuid, ${workspace}::uuid, ${r.user ?? null}::uuid, ${r.agent ?? null}::uuid, ${position})`;
+    }
+    if (m.mentionAgent) {
+      await tx`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_agent_principal_id, position)
+        VALUES (${id}::uuid, ${workspace}::uuid, ${m.mentionAgent}::uuid, 0)`;
     }
   });
   return id;
@@ -91,9 +96,7 @@ test("direct messages are filed by their founding set, both directions in one co
   const agentReply = await message({ from: agentB, fromKind: "agent", toUser: alice });
   const selfNote = await message({ from: agentA, fromKind: "agent", toAgent: agentA });
   const general = await message({ from: alice });
-  const mention = await message({ from: alice });
-  await sql`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_agent_principal_id, position)
-    VALUES (${mention}::uuid, ${workspace}::uuid, ${agentB}::uuid, 0)`;
+  const mention = await message({ from: alice, mentionAgent: agentB });
   const channelId = randomUUID();
   await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
     VALUES (${channelId}::uuid, ${workspace}::uuid, ${`dm-${channelId.slice(0, 6)}`}, ${alice}::uuid, 'user', statement_timestamp())`;
