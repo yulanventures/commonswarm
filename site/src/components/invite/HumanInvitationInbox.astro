@@ -109,8 +109,8 @@ import "../../styles/kylon-invitation-inbox.css";
       <div class="human-invitations__row-confirm" data-row-confirm hidden>
         <p data-row-question></p>
         <div class="human-invitations__row-actions">
-          <button class="human-invitations__button human-invitations__button--quiet" type="button" data-row-keep>Keep it</button>
           <button class="human-invitations__button" type="button" data-row-decline-confirm>Decline invitation</button>
+          <button class="human-invitations__button human-invitations__button--quiet" type="button" data-row-keep>Keep it</button>
         </div>
       </div>
     </li>
@@ -218,6 +218,25 @@ import "../../styles/kylon-invitation-inbox.css";
     flex: 1 1 100%;
     display: grid;
     gap: var(--s-2);
+  }
+
+  /*
+   * A second tap where Decline was must never land on Decline invitation (Designer review of #502).
+   * The two answers are stacked at full width with Keep it last, and the question is at least one
+   * button tall. A card that grows upward (the corner card) puts Keep it where Review and Decline
+   * were; one that grows downward (the card above the create form, or a scrolling list) puts the
+   * question there.
+   */
+  .human-invitations__row-confirm p {
+    min-block-size: 2.75rem;
+  }
+
+  .human-invitations__row-confirm .human-invitations__row-actions {
+    display: grid;
+  }
+
+  .human-invitations__row-confirm .human-invitations__button {
+    inline-size: 100%;
   }
 
   :is(.human-invitations__row-actions, .human-invitations__row-confirm)[hidden] {
@@ -640,7 +659,8 @@ import "../../styles/kylon-invitation-inbox.css";
           item.querySelector('[data-row-question]')!.textContent='Decline the invitation to '+row.workspace_name+'? '+row.inviter_display_name+' can invite you again.';
           const back=()=>{confirmingId='';paint();rowOf(row.invitation_id)?.querySelector<HTMLElement>('[data-row-decline]')?.focus({preventScroll:true});};
           /* The safe choice takes focus first, as in the other confirmations. */
-          decline.addEventListener('click',()=>{confirmingId=row.invitation_id;paint();keep.focus({preventScroll:true});});
+          /* No preventScroll: when the list is at its height limit, Keep it scrolls into view at the bottom, where the buttons were. */
+          decline.addEventListener('click',()=>{confirmingId=row.invitation_id;paint();keep.focus();});
           keep.addEventListener('click',back);
           item.querySelector<HTMLElement>('[data-row-confirm]')!.addEventListener('keydown',event=>{
             if(event.key!=='Escape' || lastView?.busy)return;
