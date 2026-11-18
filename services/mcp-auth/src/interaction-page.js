@@ -223,6 +223,18 @@ input:disabled,input:disabled+span{cursor:default}
 .workspace-pick:has(input:disabled),.home-choice:has(input:disabled){cursor:default}
 .workspace-empty{padding:16px;color:var(--muted);font-size:15px}
 .picker-foot{display:flex;justify-content:space-between;gap:12px;margin-top:8px;padding:0 4px;font-size:13px;color:var(--muted)}
+.reach{font-size:15px;color:var(--muted);text-wrap:pretty}
+.reach strong{color:var(--ink)}
+.home-needed{margin-top:8px;padding:0 4px;font-size:14px;font-weight:700;color:var(--ink)}
+.home-needed:empty{display:none}
+/* Home is asked only when it is a real choice: two or more workspaces ticked. With one, that one is Home.
+   The page script sets data-home-auto ("choose" with two or more ticked, "one" otherwise) and keeps the Home
+   that is sent in step with what is shown, so this only applies while that script runs; without it every
+   Home choice stays in view, as before. (:has() cannot be nested, so the count comes from the script.) */
+@supports selector(:has(*)){
+  html[data-home-auto] .workspace-choice .home-choice{display:none}
+  html[data-home-auto="choose"] .workspace-choice:has(.workspace-pick input:checked) .home-choice{display:inline-flex}
+}
 .picker-selected::before{content:counter(chosen) " selected";font-weight:700;color:var(--ink)}
 form[action$="/consent"]>.warning{background:var(--soft);border:1px solid var(--hair)}
 form[action$="/consent"]>.warning svg{margin-top:2px}
@@ -327,7 +339,7 @@ export function renderConsentPage({
       : "";
     return `<li class="workspace-choice">
       ${hidden}<label class="workspace-pick"><input type="checkbox" name="workspace_ids" value="${escapeHtml(workspace.id)}"${checked}${fixed}> <span>${escapeHtml(workspace.name)}</span></label>
-      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed}> Home workspace</label>
+      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed} aria-label="Home workspace for ${escapeHtml(workspace.name)}"> Home workspace</label>
     </li>`;
   }).join("");
   const lockedHome = selectionLocked && homeWorkspaceId !== null
@@ -335,9 +347,8 @@ export function renderConsentPage({
     : "";
   const longList = choices.length > LONG_WORKSPACE_LIST;
   const countText = `${choices.length} workspace${choices.length === 1 ? "" : "s"}${longList ? " · scroll for more" : ""}`;
-  const pickerHelp = selectionLocked
-    ? "These choices are locked because this connection has already started."
-    : "Check each workspace this app may reach. If you select more than one workspace, choose one of them as Home workspace.";
+  // Unlocked, the legend and the rows say what to do; the Home choice appears on its own when it is needed.
+  const pickerHelp = selectionLocked ? "These choices are locked because this connection has already started." : "";
   const emptyRow = choices.length === 0
     ? `<li class="workspace-empty">You have no workspaces to choose from. Create one in CommonSwarm first.</li>`
     : "";
@@ -365,32 +376,25 @@ ${CONSENT_STYLES}
       ${client.badge}
     </div>
     <h1 id="consent-title">${client.heading}</h1>
-    <p class="lede">This app is asking to connect to your CommonSwarm account. Choose where it can work, then allow the connection.</p>
     <div class="app-facts">${client.facts}</div>
     ${client.warning}
   </section>
   ${renderAccount(identity, csrfToken, selectionLocked ? null : switchAccount)}
-  <section class="scope" aria-labelledby="scope-title">
-    <h2 id="scope-title">What this connection can do</h2>
-    <ul>
-      <li><span class="scope-icon">${ICONS.workspaces}</span><span>Reach only the workspaces you select below.</span></li>
-      <li><span class="scope-icon">${ICONS.seats}</span><span>This connection can create up to <strong>10 hosted seats</strong> across the selected workspaces.</span></li>
-      <li><span class="scope-icon">${ICONS.revoke}</span><span>You can revoke the whole connection or one seat later in <strong>/app → Connected apps</strong>.</span></li>
-    </ul>
-  </section>
   ${progressMarkup}
   ${validationError ? `<p class="error" role="alert">${escapeHtml(validationError)}</p>` : ""}
   <form method="post" action="/interaction/${encodeURIComponent(interactionUid)}/consent">
     <input type="hidden" name="selection_version" value="${escapeHtml(selectionVersion)}">
     <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">
     ${lockedHome}
-    <fieldset><legend>Select at least one workspace</legend>
-      <p class="picker-help">${pickerHelp}</p>
+    <fieldset><legend>${selectionLocked ? "Selected workspaces" : "Select at least one workspace"}</legend>
+      ${pickerHelp ? `<p class="picker-help">${pickerHelp}</p>` : ""}
       <ul class="workspace-list${longList ? " is-long" : ""}">${workspaceRows}${emptyRow}</ul>
       <p class="picker-foot"><span>${countText}</span><span class="picker-selected" aria-hidden="true"></span></p>
+      <p class="home-needed" role="status" data-text="Choose which one is Home."></p>
     </fieldset>
     <p class="warning">${ICONS.chat}<span><strong>Before you continue:</strong> ${CONSENT_WARNING}</span></p>
     ${renderConsentDestination({ clientName: clientDisplay.declaredName, redirectUri, metadataHost: clientDisplay.metadataHost })}
+    <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> across them. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>
   </div>
