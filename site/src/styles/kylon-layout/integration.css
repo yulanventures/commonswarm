@@ -414,14 +414,11 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
     grid-column: 1 / -1; justify-self: start;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { justify-self: start; }
-  /* The description's button keeps a real 44px box around its text line: equal padding and negative margin, as the
-     author buttons in the feed do, and only as wide as its text. The header's lower padding holds the part below the
-     line, so the box never reaches the tab bar. */
+  /* The description's button has a 44px box of its own under the first line, only as wide as its text: the text at
+     the top and the rest of the box below it, inside the header. The lead's box and this one share an edge and never
+     overlap, and this one ends before the tab bar. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > button.hm-channel-description {
-    padding-block: 12px; margin-block: -12px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header:has(.hm-ws-header__copy > button.hm-channel-description) {
-    padding-block-end: 12px;
+    padding-block: 0 24px;
   }
 }
 
