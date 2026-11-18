@@ -9,14 +9,14 @@ const skill = (id) => ({ skill_id: id, title: `Skill ${id}`, when_to_use: "When 
 
 test("the Skills heading stands alone when there are no skills", () => {
   const html = renderWorkspaceSkillsHtml(base);
-  assert.match(html, /<header>\s*<h3>Skills<\/h3>\s*<\/header>/);
+  assert.match(html, /<header>\s*<h3 tabindex="-1" data-skills-heading>Skills<\/h3>\s*<\/header>/);
   assert.match(html, /No shared skills yet\./);
   assert.doesNotMatch(html, /data-skills-count/);
 });
 
 test("with skills, the count is said in plain words under the heading", () => {
   const html = renderWorkspaceSkillsHtml({ ...base, skills: [skill("a"), skill("b"), skill("c")] });
-  assert.match(html, /<h3>Skills<\/h3>\s*<p class="hh-skills-count" data-skills-count>3 of 20<\/p>/);
+  assert.match(html, /<h3 tabindex="-1" data-skills-heading>Skills<\/h3>\s*<p class="hh-skills-count" data-skills-count>3 of 20<\/p>/);
 });
 
 test("the rule that removes a skill is said in full beside Add skill, only to someone who can add one", () => {

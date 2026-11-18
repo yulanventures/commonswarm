@@ -100,7 +100,7 @@ export function renderWorkspaceSkillsHtml(data: WorkspaceSkillsViewData): string
     : '';
 
   return `<header>
-      <h3>Skills</h3>${countHtml}
+      <h3 tabindex="-1" data-skills-heading>Skills</h3>${countHtml}
     </header>
     ${noticeHtml}
     ${failedHtml}
@@ -139,14 +139,36 @@ export function mountWorkspaceSkills(
   const FIELDS = ['[data-skill-input-title]', '[data-skill-input-when]', '[data-skill-input-body]'] as const;
   /* A redraw replaces the markup. What the person has typed into Add skill is put back, so a refused save, reading a
      skill or a notice never wipes it. A saved skill clears it. */
+  /* Where the keyboard is, as a selector that still means the same thing after a redraw: a field, a button with its
+     action and target, or the heading of something that opens. */
+  const focusKey = (): string | null => {
+    const active = doc.activeElement;
+    if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
+    const field = FIELDS.find((selector) => active.matches(selector));
+    if (field) return field;
+    if (active.matches('button[data-skill-action]')) {
+      const target = active.dataset.skillTarget;
+      return `button[data-skill-action="${active.dataset.skillAction}"]${target ? `[data-skill-target="${CSS.escape(target)}"]` : ''}`;
+    }
+    if (active.matches('[data-skills-add] > summary')) return '[data-skills-add] > summary';
+    const suggestion = active.matches('summary') ? active.closest<HTMLElement>('[data-suggestion-more]')?.dataset.suggestionMore : undefined;
+    if (suggestion) return `[data-suggestion-more="${CSS.escape(suggestion)}"] > summary`;
+    return '[data-skills-heading]';
+  };
+  /* A redraw replaces the markup. What the person has typed into Add skill is put back, so a refused save, reading a
+     skill or a notice never wipes it; a saved skill clears it. The keyboard is put back too: on the same control when
+     it is still there (a refused save stays in the form), and on the Skills heading when it is gone (after Retry, or
+     after a row was deleted, kept or dismissed), so focus never falls out of the view. */
   const paint = (clearDraft = false) => {
     if (disposed) return;
     const draft = clearDraft ? null : FIELDS.map((field) => container.querySelector<HTMLInputElement | HTMLTextAreaElement>(field)?.value ?? '');
+    const key = focusKey();
     container.innerHTML = renderWorkspaceSkillsHtml(state);
     if (draft) FIELDS.forEach((field, index) => {
       const input = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(field);
       if (input && draft[index]) input.value = draft[index]!;
     });
+    if (key) (container.querySelector<HTMLElement>(key) ?? container.querySelector<HTMLElement>('[data-skills-heading]'))?.focus({ preventScroll: true });
   };
 
   const refresh = async (notice = '', opened?: WorkspaceSkillView | null, clearDraft = false) => {
