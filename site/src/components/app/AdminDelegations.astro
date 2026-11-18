@@ -45,7 +45,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       </section>
     </div>
     <div data-admin-pane-body="clients" hidden>
-      <p data-admin-clients-account hidden>Client approvals belong to your whole account. <button type="button" data-admin-clients-switch>Show my whole account</button></p>
+      <p data-admin-clients-account hidden>Client approvals belong to your whole account.</p>
       <section aria-labelledby="admin-clients-title" data-admin-client-section>
         <h3 id="admin-clients-title">Verified clients and your approvals</h3>
         <p data-admin-gate role="status">Checking admin connection availability…</p>
@@ -69,7 +69,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   import type { Session } from "@supabase/supabase-js";
   import { client, currentSession, uuid, CommandOutcomeUnknown, myOrganizations, myWorkspaces } from "../../lib/commonswarm";
   import { loadAdminRecovery, revokeAdminGrant, changeAdminClientApproval, readAdminIssuanceGate, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView, type AdminClientView, type AdminWorkerView, type AdminCoverageView } from "../../lib/admin-delegations";
-  import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList } from "../../lib/seat-admin";
+  import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList, seatAdminGrantLive } from "../../lib/seat-admin";
 
   import { adminGateNotice, adminApprovalParts, adminClientAction, adminGrantLines, adminGrantSummary, adminRenewalDiff, ADMIN_SITE_RENEWAL_GUIDANCE, type AdminSitePolicy } from "../../lib/admin-delegations-view";
   const root = document.querySelector<HTMLElement>("admin-delegations");
@@ -85,7 +85,16 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     // True once a read has answered, so "nothing here" is never said while loading or after a refusal.
     let loaded = false, seatActive = 0, seatPast = 0;
     let workspaceNames = new Map<string, string>();
+    // Each agent read and each names read carries a ticket. A refused or foreign read, or a change of person, takes a
+    // new ticket, so a result still on its way is dropped and never redraws rows that were just cleared.
+    let seatEpoch = 0, namesTicket = 0;
     const openMore = new Set<string>();
+    const forgetNames = (): void => { ++namesTicket; workspaceNames = new Map(); };
+    const clearSeats = (): void => {
+      ++seatEpoch; seatBusy = false;
+      one("[data-admin-seat-grants]").replaceChildren(); one("[data-admin-past-seat-grants]").replaceChildren();
+      one<HTMLElement>("[data-admin-seat-section]").hidden = true; one<HTMLElement>("[data-admin-seat-retry]").hidden = true;
+    };
     let grants: AdminGrantView[] = [], actions: AdminActionView[] = [];
     let clients: AdminClientView[] = [], workers: AdminWorkerView[] = [], coverage: AdminCoverageView[] = [];
     let clientsBefore: string | null = null, workersBefore: string | null = null, coverageBefore: string | null = null;
@@ -154,8 +163,10 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     const render = (): void => {
       const grantRoot = one<HTMLElement>("[data-admin-grants]"); grantRoot.replaceChildren();
       const pastRoot = one<HTMLElement>("[data-admin-past-grants]"); pastRoot.replaceChildren();
+      const perClient = new Map<string, number>();
+      for (const g of grants) perClient.set(g.client_id, (perClient.get(g.client_id) ?? 0) + 1);
       for (const g of grants) {
-        const summary = adminGrantSummary(g, policy, workspaceNames);
+        const summary = adminGrantSummary(g, policy, workspaceNames, Date.now(), (perClient.get(g.client_id) ?? 0) > 1);
         const card = document.createElement("article"); card.dataset.mode = g.mode;
         // The row carries the decision: who holds the grant, whether it is active, its reach, what it may do, when it ends.
         card.append(text("h4", g.client_id));
@@ -199,7 +210,8 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       const clientRoot = one<HTMLElement>("[data-admin-clients]"); clientRoot.replaceChildren();
       one<HTMLElement>("[data-admin-client-section]").hidden = scope !== "account";
       one<HTMLElement>("[data-admin-clients-account]").hidden = scope === "account";
-      if (!clients.length) clientRoot.append(text("p", "No verified clients are visible in this view."));
+      const answered = loaded && !busy;
+      if (answered && scope === "account" && !clients.length && clientsBefore === null) clientRoot.append(text("p", "No verified clients are visible in this view."));
       for (const c of clients) {
         const card = document.createElement("article"); card.append(text("h4", c.client_id));
         const approval = adminApprovalParts(c);
@@ -248,7 +260,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         clientRoot.append(card);
       }
       const dependencies = one<HTMLElement>("[data-admin-dependencies]"); dependencies.replaceChildren();
-      if (!workers.length && !coverage.length) dependencies.append(text("p", "No workspace coverage or worker dependencies are visible in this page."));
+      if (answered && !workers.length && !coverage.length) dependencies.append(text("p", "No workspace coverage or worker dependencies are visible in this page."));
       for (const row of coverage) {
         const parent = grants.find(g => g.grant_id === row.grant_id);
         dependencies.append(text("p", `Workspace ${row.workspace_id} · Grant ${row.grant_id}${parent?.state === "revoked" ? " · stopped" : " · effective at last read"}.`));
@@ -258,7 +270,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         dependencies.append(text("p", `Worker ${row.principal_id} · Workspace ${row.workspace_id} · Grant ${row.grant_id} · ${parent?.state === "revoked" ? "stopped" : row.state}${row.revoked_at ? ` · stopped ${row.revoked_at}` : ""}.`));
       }
       const actionRoot = one<HTMLOListElement>("[data-admin-actions]"); actionRoot.replaceChildren();
-      if (!actions.length) actionRoot.append(text("li", "No admin actions are visible in this view."));
+      if (answered && !actions.length) actionRoot.append(text("li", "No admin actions are visible in this view."));
       for (const a of actions) {
         const card = document.createElement("li"); card.dataset.outcome = a.outcome;
         card.append(text("strong", `${a.action.replaceAll("_", " ")} · ${a.outcome}`));
@@ -350,12 +362,15 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         // A refused/foreign projection must not leave previously rendered private rows behind.
         grants = []; actions = []; clients = []; workers = []; coverage = [];
         grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null;
+        // The agent rows and the workspace names go too, and any read of them still on its way is dropped.
+        clearSeats(); seatActive = seatPast = -1; forgetNames(); scopeLine();
         busy = false; loaded = false; dialog.dataset.adminState = "refused"; render(); status(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
       }
     };
     const loadSeatAdmin = async (): Promise<void> => {
       if (!session) return;
-      const ownSession = session, at = generation, selected = scope === "workspace" ? workspaceId : null;
+      const ownSession = session, at = generation, epoch = ++seatEpoch, selected = scope === "workspace" ? workspaceId : null;
+      const stale = (): boolean => generation !== at || seatEpoch !== epoch || session?.user.id !== ownSession.user.id;
       const section = one<HTMLElement>("[data-admin-seat-section]");
       const retry = one<HTMLElement>("[data-admin-seat-retry]");
       const container = one<HTMLElement>("[data-admin-seat-grants]");
@@ -363,8 +378,14 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       // Not known until this read answers, so neither view says "nothing here" meanwhile.
       seatActive = seatPast = -1; syncEmpty();
       const statusResult = await readSeatAdminStatus(ownSession);
-      if (generation !== at || session?.user.id !== ownSession.user.id) return;
-      if (!statusResult.ok || !statusResult.status.enabled) {
+      if (stale()) return;
+      if (!statusResult.ok) {
+        // A read that failed is not an answer of "none": say what happened and offer Retry.
+        container.replaceChildren(text("p", statusResult.message)); pastContainer.replaceChildren();
+        section.hidden = false; retry.hidden = false;
+        return;
+      }
+      if (!statusResult.status.enabled) {
         section.hidden = true;
         retry.hidden = true;
         container.replaceChildren(); pastContainer.replaceChildren();
@@ -377,7 +398,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         myOrganizations().catch(() => []),
         myWorkspaces().catch(() => []),
       ]);
-      if (generation !== at || session?.user.id !== ownSession.user.id) return;
+      if (stale()) return;
       if (!grantsResult.ok) {
         container.replaceChildren(text("p", grantsResult.message)); pastContainer.replaceChildren();
         section.hidden = false;
@@ -394,11 +415,16 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         if (ws.id && ws.name?.trim()) workspacesById.set(ws.id.toLowerCase(), ws.name.trim());
         if (ws.orgId && ws.orgName?.trim()) organizationsById.set(ws.orgId.toLowerCase(), ws.orgName.trim());
       }
-      const filtered = selected
-        ? grantsResult.grants.filter(g => g.workspaceIds.includes(selected.toLowerCase()) || g.level === "organization")
+      // A workspace view lists the grants that reach this workspace: its own, and those of the organization it is in.
+      // An organization grant for some other organization does not belong here.
+      const selectedId = selected?.toLowerCase() ?? null;
+      const selectedOrg = selectedId ? workspaces.find(ws => ws.id?.toLowerCase() === selectedId)?.orgId?.toLowerCase() ?? null : null;
+      const filtered = selectedId
+        ? grantsResult.grants.filter(g => g.workspaceIds.includes(selectedId) || (g.level === "organization" && selectedOrg !== null && g.organizationId === selectedOrg))
         : grantsResult.grants;
-      // Agents that hold admin access now are in the opening list; ended and expired grants are under Past grants.
-      const current = filtered.filter(g => g.state === "active"), past = filtered.filter(g => g.state !== "active");
+      // Placement follows the server's state, never this device's clock: what the server calls active is in the opening
+      // list with its action; ended and expired grants are under Past grants.
+      const current = filtered.filter(seatAdminGrantLive), past = filtered.filter(g => !seatAdminGrantLive(g));
       const options: Parameters<typeof renderSeatAdminHistoryList>[2] = {
         agentsByPrincipalId,
         workspacesById,
@@ -444,17 +470,19 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       section.hidden = current.length === 0;
       seatActive = current.length; seatPast = past.length; syncEmpty();
     };
-    const open = (view: "account" | "workspace" = "account"): void => {
+    const open = (view: "account" | "workspace" = "account", wanted?: Pane): void => {
       if (!session) return;
       scope = view === "workspace" && workspaceId ? "workspace" : "account";
       clear();
       // A fresh opening starts on who has access now; changing scope keeps the view the person is reading.
-      if (!dialog.open) { showPane("access"); dialog.showModal(); }
+      // The history link asks for History; every other door starts on Access.
+      if (wanted) showPane(wanted); else if (!dialog.open) showPane("access");
+      if (!dialog.open) dialog.showModal();
       scopeLine();
-      const ownerId = session.user.id;
+      const ownerId = session.user.id, ticket = ++namesTicket;
       // Names for the scope line and for each grant's reach; ids are shown until they arrive, and if they never do.
       void myWorkspaces().then(rows => {
-        if (session?.user.id !== ownerId) return;
+        if (ticket !== namesTicket || session?.user.id !== ownerId) return;
         workspaceNames = new Map(rows.filter(row => row.id && row.name?.trim()).map(row => [row.id.toLowerCase(), row.name.trim()]));
         scopeLine(); if (!busy) render();
       }).catch(() => {});
@@ -469,8 +497,6 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     for (const collection of ["clients", "workers", "coverage"] as const) one(`[data-admin-more-${collection}]`).addEventListener("click", () => { void load(collection); });
     for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-pane]")) button.addEventListener("click", () => showPane(button.dataset.adminPane === "history" ? "history" : button.dataset.adminPane === "clients" ? "clients" : "access"));
     one("[data-admin-scope-switch]").addEventListener("click", () => open(scope === "account" ? "workspace" : "account"));
-    // Its own line disappears once the account is showing, so the keyboard goes to the view's button.
-    one("[data-admin-clients-switch]").addEventListener("click", () => { open("account"); one<HTMLButtonElement>("[data-admin-pane=clients]").focus?.(); });
     document.addEventListener("click", event => {
       const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-admin-access-open]") : null;
       if (button) {
@@ -480,20 +506,24 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       }
     });
     window.addEventListener("commonswarm:admin-access-open", event => {
-      const detail = (event as CustomEvent<{ scope?: "account" | "workspace" } | undefined>).detail;
-      open(detail?.scope === "workspace" ? "workspace" : "account");
+      const detail = (event as CustomEvent<{ scope?: "account" | "workspace"; view?: "history" } | undefined>).detail;
+      open(detail?.scope === "workspace" ? "workspace" : "account", detail?.view === "history" ? "history" : undefined);
     });
     window.addEventListener("commonswarm:workspace-selected", event => {
       const detail = (event as CustomEvent<{ workspaceId: string | null; sample?: boolean }>).detail;
       workspaceId = detail.sample ? null : detail.workspaceId;
       clear(); if (dialog.open) open(scope); else scopeLine(); void indicator();
     });
+    // A link to ?admin=history opens History for the whole account, once, as soon as the person's session is known.
+    let wantsHistory = false;
+    try { wantsHistory = new URLSearchParams(window.location.search).get("admin") === "history"; } catch { /* ignore */ }
+    const openFromLink = (): void => { if (wantsHistory && session) { wantsHistory = false; open("account", "history"); } };
     const auth = client();
     auth?.auth.onAuthStateChange((_event, next) => {
       const changed = session?.user.id !== next?.user.id;
       session = next; root.hidden = !session;
-      if (changed) { clear(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
-      if (session) window.setTimeout(() => { void indicator(); }, 0);
+      if (changed) { clear(); forgetNames(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
+      if (session) window.setTimeout(() => { void indicator(); openFromLink(); }, 0);
     });
     const initialGeneration = generation;
     void currentSession().then(next => {
@@ -501,9 +531,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       session = next; root.hidden = !next;
       if (next) {
         void indicator();
-        try {
-          if (new URLSearchParams(window.location.search).get("admin") === "history") open("account");
-        } catch { /* ignore */ }
+        openFromLink();
       }
     }).catch(() => { if (generation === initialGeneration) root.hidden = true; });
     // Human-facing status refresh, independent of the delegated runtime being online.

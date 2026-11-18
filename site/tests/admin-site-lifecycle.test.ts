@@ -126,12 +126,29 @@ test("admin-site-lifecycle a grant's row carries the decision: state, reach, per
   const revoked = adminGrantSummary({ ...grant, state: "revoked", reason_code: "owner_revoked" }, policy, new Map(), now);
   assert.equal(revoked.past, true);
   assert.equal(revoked.lines[0]!.split(" · ")[0], "Revoked");
-  assert.ok(revoked.lines.includes(`It was set to end ${end}`)); assert.equal(revoked.lines.at(-1), "Reason: owner_revoked");
-  const expired = adminGrantSummary({ ...grant, state: "expired", expires_at: at }, policy, new Map(), now);
+  assert.ok(revoked.lines.includes(`It was set to end ${end}`)); assert.equal(revoked.lines.at(-1), "Revoked by the owner");
+  // The site's own revoke and withdraw reasons read in plain words; an unknown or missing one says so. The code stays behind More.
+  const reason = (reason_code: string | null) => adminGrantSummary({ ...grant, state: "revoked", reason_code }, policy, new Map(), now).lines.at(-1);
+  assert.equal(reason("human_revoked"), "Revoked by the owner"); assert.equal(reason("human_withdrawn"), "The owner withdrew this client's approval");
+  assert.equal(reason("something_new"), "Reason unavailable"); assert.equal(reason(null), "Reason unavailable");
+  assert.ok(adminGrantLines({ ...grant, state: "revoked", reason_code: "something_new" }, policy, now).includes("Reason: something_new."));
+  const expired = adminGrantSummary({ ...grant, state: "expired", expires_at: at, refresh_deadline: at }, policy, new Map(), now);
   assert.equal(expired.past, true); assert.equal(expired.lines[0]!.split(" · ")[0], "Expired"); assert.ok(expired.lines.some(line => line.startsWith("Ended ")));
-  // This device's clock never takes the action away: a grant the server calls active stays current, marked expired.
-  const clock = adminGrantSummary({ ...grant, state: "active", expires_at: at }, policy, new Map(), now);
-  assert.equal(clock.past, false); assert.equal(clock.lines[0]!.split(" · ")[0], "Expired");
+  // This device's clock never takes the action away: a grant the server calls active stays current and says the clock disagrees.
+  const clockEnd = `${new Date(at).toLocaleString()} (${zone})`;
+  const clock = adminGrantSummary({ ...grant, state: "active", expires_at: at, refresh_deadline: at }, policy, new Map(), now);
+  assert.equal(clock.past, false); assert.equal(clock.lines[0]!.split(" · ")[0], "Active");
+  assert.ok(clock.lines.includes(`Its end time, ${clockEnd}, has passed on this device`));
+  // Access ends at the earlier server deadline, so that is the end time shown.
+  const early = "2030-01-02T03:04:00.000Z";
+  assert.equal(adminGrantSummary({ ...grant, refresh_deadline: early }, policy, new Map(), now).lines.at(-1), `Ends ${new Date(early).toLocaleString()} (${zone})`);
+  assert.equal(adminGrantSummary({ ...grant, refresh_deadline: null }, policy, new Map(), now).lines.at(-1), `Ends ${end}`);
+  // A workspace whose access was withdrawn is not counted in the reach; it is named apart.
+  const part = adminGrantSummary({ ...selected, withdrawn_workspace_ids: [foreign] }, policy, new Map([[owner, "Rivera household"]]), now);
+  assert.ok(part.lines.includes("Workspaces: Rivera household")); assert.ok(part.lines.includes(`Access withdrawn: ${foreign}`));
+  // Two grants for the same client are told apart by their connection before the action; a lone grant carries no id.
+  assert.ok(adminGrantSummary(grant, policy, new Map(), now, true).lines[1]!.startsWith(`Connection ${grant.connection_id.slice(0, 8)} · granted `));
+  assert.ok(!adminGrantSummary(grant, policy, new Map(), now).lines.some(line => line.startsWith("Connection ")));
   // Suspended is not past: it can resume, so it stays in the opening list with its action.
   assert.equal(adminGrantSummary({ ...grant, state: "suspended" }, policy, new Map(), now).past, false);
   // A client's approval: who verified it and whether it is approved up front; ids and events behind More, none lost.
@@ -153,8 +170,12 @@ class ViewElement {
   private listeners = new Map<string, () => void>();
   get textContent(): string { return this.content + this.children.map(child => child.textContent).join(""); }
   set textContent(value: string) { this.content = value; this.children = []; }
+  // The shared agent list builds its rows through the container's own document.
+  ownerDocument = { createElement: () => new ViewElement() };
+  querySelector(): null { return null; }
+  querySelectorAll(): ViewElement[] { return []; }
   append(...children: ViewElement[]): void { this.children.push(...children); }
-  replaceChildren(): void { this.content = ""; this.children = []; }
+  replaceChildren(...children: ViewElement[]): void { this.content = ""; this.children = children; }
   setAttribute(): void {}
   addEventListener(event: string, callback: () => void): void { this.listeners.set(event, callback); }
   click(): void { this.listeners.get("click")?.(); }
@@ -210,6 +231,48 @@ async function componentView(fetcher: typeof fetch) {
   await settle(() => ["ready", "refused"].includes(one("dialog").dataset.adminState ?? ""));
   return one;
 }
+
+test("admin-site-lifecycle agent rows follow the server's state, and a refused read clears them and drops a read still on its way", async () => {
+  const agent = "55555555-5555-4555-8555-555555555555";
+  let refuse = false, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const one = await componentView(async (url, options) => {
+    if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
+    if (String(url).includes("/rpc/my_seat_admin_grants")) {
+      // After the refusal, the agent read is still on its way when the main read is refused.
+      if (refuse) await held;
+      // The server calls this grant active; its end time is long past on any device clock.
+      return Response.json({ grants: [{ grant_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", principal_id: agent, level: "workspace", organization_id: null,
+        scope_names: ["role:workspace_admin"], workspace_ids: [owner], expires_at: "2020-01-01T00:00:00.000Z", state: "active", created_at: at, ended_at: null }] });
+    }
+    const body = JSON.parse(String(options?.body));
+    if (body.resource === "seat_admin_status") return Response.json({ enabled: true, registry_version: 3,
+      agents: [{ principal_id: agent, name: "Atlas", eligible: { workspace: [owner], organization: [] }, active_grant_ids: [] }] });
+    return Response.json({ ...fixture, grants: refuse ? [{ ...grant, owner_user_id: foreign }] : [grant], clients: [], workers: [], coverage: [], actions: [] });
+  });
+  const turn = async (until: () => boolean) => { for (let i = 0; i < 200 && !until(); ++i) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const current = one("[data-admin-seat-grants]"), past = one("[data-admin-past-seat-grants]");
+  await turn(() => current.children.length > 0 || past.children.length > 0);
+  // A fast device clock does not file a server-active grant under Past grants or take its action away.
+  assert.equal(current.children.length, 1); assert.equal(past.children.length, 0);
+  assert.equal(current.children[0]!.dataset.adminSeatState, "expired", "the row still records what this device computed");
+  assert.ok(current.children[0]!.children.some(child => child.textContent === "Remove admin access"));
+  assert.ok(current.children[0]!.textContent.includes("has passed on this device"));
+
+  refuse = true;
+  one("[data-admin-refresh]").click();
+  await turn(() => one("dialog").dataset.adminState === "refused");
+  assert.equal(one("dialog").dataset.adminState, "refused");
+  assert.equal(current.children.length, 0, "a refused read clears the agent rows too");
+  assert.equal(one("[data-admin-seat-section]").hidden, true);
+  // The agent read that was already on its way now answers. It must not draw anything.
+  release();
+  for (let i = 0; i < 50; ++i) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(current.children.length, 0, "a late agent read does not repopulate cleared rows");
+  assert.equal(past.children.length, 0);
+  // Nothing claims "none" after a refusal.
+  assert.equal(one("[data-admin-empty]").hidden, true); assert.equal(one("[data-admin-clients]").children.length, 0);
+});
 
 test("admin-site-lifecycle renders owned dependencies and plain renewal labels, then clears foreign rows", async () => {
   for (const collection of ["workers", "coverage"] as const) {

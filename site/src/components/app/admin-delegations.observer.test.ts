@@ -128,7 +128,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       const historyEntryVisible = !!one("#hm-ws-menu-trigger") && !one("#hm-ws-menu-trigger").hidden
         && !!one("#hm-ws-menu") && !one("#hm-ws-menu").hidden
         && !!door && !door.hidden && door.dataset.adminAccessScope === "workspace"
-        && door.textContent === "Admin access and history"
+        && door.textContent === "Admin access"
         && one("[data-admin-indicator]").hidden;
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);

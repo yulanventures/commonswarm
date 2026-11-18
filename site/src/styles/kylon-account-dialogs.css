@@ -195,6 +195,22 @@ admin-delegations[data-kylon-account] > dialog [data-admin-status]:empty {
   min-block-size: 0;
   margin: 0;
 }
+/* Destructive actions sit on a row's own surface, where the theme's danger colour falls under 4.5:1 for small text.
+   These reach it: #b91c1c on the light surface, #f87171 on the dark one. */
+admin-delegations[data-kylon-account] {
+  --k-admin-danger-text: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) admin-delegations[data-kylon-account] {
+    --k-admin-danger-text: #f87171;
+  }
+}
+:root[data-theme="dark"] admin-delegations[data-kylon-account] {
+  --k-admin-danger-text: #f87171;
+}
+admin-delegations[data-kylon-account][data-kylon-account] > dialog :is(article, li) button[data-tone="danger"]:is(:enabled, :hover:enabled) {
+  color: var(--k-admin-danger-text);
+}
 /* A row: the holder, then the facts the decision needs, then its action with what the action does. */
 admin-delegations[data-kylon-account] > dialog article > p {
   margin-block: 2px;

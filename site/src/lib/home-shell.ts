@@ -243,7 +243,7 @@ export function workspaceNavItems(vm: Pick<WorkspaceShellVM, "pane" | "hrefs" | 
 }
 
 /**
- * Wiki, then Workspace settings and Admin access and history only where allowed. A sample renders
+ * Wiki, then Workspace settings and Admin access only where allowed. A sample renders
  * no doors (UI-SPEC 2 and 3.3), so its menu is empty and the ⋯ button is left out.
  */
 export function workspaceMenuItems(vm: Pick<WorkspaceShellVM, "sample" | "menu">): { item: WorkspaceMenuItem; label: string }[] {
@@ -251,7 +251,7 @@ export function workspaceMenuItems(vm: Pick<WorkspaceShellVM, "sample" | "menu">
   return [
     { item: "wiki" as const, label: "Wiki" },
     ...(vm.menu.settings ? [{ item: "settings" as const, label: "Workspace settings" }] : []),
-    ...(vm.menu.adminAccess ? [{ item: "admin-access" as const, label: "Admin access and history" }] : []),
+    ...(vm.menu.adminAccess ? [{ item: "admin-access" as const, label: "Admin access" }] : []),
   ];
 }
 
@@ -399,7 +399,7 @@ function channelDescription(doc: Document, vm: WorkspaceShellVM, callbacks: Shel
   return description;
 }
 
-/** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access and history. */
+/** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access. */
 export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks, idPrefix: string, options: { account?: boolean } = {}): HTMLElement {
   const wrap = node(doc, "div", "hm-menu");
   const trigger = node(doc, "button", "hm-menu__trigger", "⋯");

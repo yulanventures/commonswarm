@@ -43,7 +43,7 @@ test("the nav is Chat, To-dos, Lists, Files as links, with To-dos left out while
 
 test("the ⋯ menu offers Wiki, and the management doors only where allowed", () => {
   assert.deepEqual(workspaceMenuItems({ sample: false, menu: { settings: true, adminAccess: true } }).map((entry) => entry.label),
-    ["Wiki", "Workspace settings", "Admin access and history"]);
+    ["Wiki", "Workspace settings", "Admin access"]);
   assert.deepEqual(workspaceMenuItems({ sample: false, menu: { settings: true, adminAccess: false } }).map((entry) => entry.item), ["wiki", "settings"]);
   assert.deepEqual(workspaceMenuItems({ sample: false, menu: { settings: false, adminAccess: true } }).map((entry) => entry.item), ["wiki", "admin-access"]);
   assert.deepEqual(workspaceMenuItems({ sample: false, menu: { settings: false, adminAccess: false } }).map((entry) => entry.item), ["wiki"]);
