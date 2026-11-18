@@ -69,8 +69,11 @@ struct ConversationAPI {
     let session: HumanSession
 
     private func request(_ path: String, _ query: [String: String] = [:]) -> URLRequest {
-        let url = origin.appending(path: path).appending(queryItems: query.map { URLQueryItem(name: $0.key, value: $0.value) })
-        var request = URLRequest(url: url)
+        var components = URLComponents(url: origin.appending(path: path), resolvingAgainstBaseURL: false)!
+        components.queryItems = query.isEmpty ? nil : query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        // PostgREST decodes a literal plus as a space, including the UTC offset in a cursor.
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        var request = URLRequest(url: components.url!)
         request.setValue(publicKey, forHTTPHeaderField: "apikey")
         return request
     }

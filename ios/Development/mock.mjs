@@ -32,7 +32,7 @@ const address = (command) => command.channel ? command.expected_channel_id : com
 if (review) {
   for (let i = 130; i > 0; i--) {
     messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
-      created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), fixtureDestination: "general", workspace });
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString().replace("Z", "+00:00"), fixtureDestination: "general", workspace });
   }
 }
 const server = createServer(async (req, res) => {
