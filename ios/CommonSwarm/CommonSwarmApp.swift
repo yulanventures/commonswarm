@@ -176,6 +176,42 @@ private struct DirectoryView: View {
     }
 }
 
+// Align the same point in the row and viewport after prepending history.
+private struct HistoryAnchor: Equatable {
+    let id: UUID
+    let top: CGFloat
+    let alignment: CGFloat
+}
+
+private struct HistoryAnchorKey: PreferenceKey {
+    static let defaultValue: HistoryAnchor? = nil
+    static func reduce(value: inout HistoryAnchor?, nextValue: () -> HistoryAnchor?) {
+        guard let next = nextValue() else { return }
+        if let previous = value, previous.top <= next.top { return }
+        value = next
+    }
+}
+
+private struct HistoryRowPosition: View {
+    let id: UUID
+    var body: some View {
+        GeometryReader { geometry in
+            let viewport = geometry.bounds(of: .scrollView(axis: .vertical))
+            Color.clear.preference(key: HistoryAnchorKey.self, value: viewport.flatMap { bounds in
+                let top = -bounds.minY
+                let room = bounds.height - geometry.size.height
+                // Use the first row lying fully in the viewport, even when the Retry control is above it.
+                guard room != 0 else {
+                    return top == 0 ? HistoryAnchor(id: id, top: top, alignment: 0) : nil
+                }
+                let alignment = top / room
+                guard (0...1).contains(alignment) else { return nil }
+                return HistoryAnchor(id: id, top: top, alignment: alignment)
+            })
+        }
+    }
+}
+
 private struct HistoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
@@ -183,7 +219,9 @@ private struct HistoryView: View {
     let directory: [Conversation]
     @ObservedObject var draft: Composer
     @StateObject private var history = MessageHistory()
-    @ViewState private var visibleMessage: UUID?
+    @ViewState private var readingAnchor: HistoryAnchor?
+    @ViewState private var restoreAnchor: HistoryAnchor?
+    @ViewState private var restoreGeneration = 0
     @ViewState private var scrollToLatest = 0
     @Environment(\.colorScheme) private var appearance
 
@@ -207,11 +245,17 @@ private struct HistoryView: View {
                                 }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
-                            }.id(message.id)
+                            }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }
                 }.scrollTargetLayout().padding()
-            }.scrollPosition(id: $visibleMessage, anchor: .top)
+            }
+            .onPreferenceChange(HistoryAnchorKey.self) { readingAnchor = $0 }
+            .onChange(of: restoreGeneration) {
+                if let anchor = restoreAnchor {
+                    reader.scrollTo(anchor.id, anchor: UnitPoint(x: 0.5, y: anchor.alignment))
+                }
+            }
             .onChange(of: scrollToLatest) {
                 if let id = history.messages?.last?.id { reader.scrollTo(id, anchor: .bottom) }
             }
@@ -243,8 +287,16 @@ private struct HistoryView: View {
 
     private func load(_ request: MessageHistory.Page = .latest, afterSend: Bool = false) async {
         let firstLoad = history.messages == nil
-        let loaded = await history.load(request, api: api, workspace: workspace.id, destination: item.destination)
-        if loaded && (firstLoad || afterSend) { scrollToLatest += 1 }
+        var before: HistoryAnchor?
+        let loaded = await history.load(request, api: api, workspace: workspace.id, destination: item.destination) {
+            before = readingAnchor
+        }
+        guard loaded else { return }
+        if firstLoad || afterSend { scrollToLatest += 1 }
+        else if let before {
+            restoreAnchor = before
+            restoreGeneration += 1
+        }
     }
 
     private func send() async {

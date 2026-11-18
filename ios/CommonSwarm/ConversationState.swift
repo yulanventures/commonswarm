@@ -51,7 +51,7 @@ final class MessageHistory: ObservableObject {
 
     @discardableResult
     func load(_ request: Page, api: ConversationAPI, workspace: UUID,
-              destination: Conversation.Destination) async -> Bool {
+              destination: Conversation.Destination, beforePrepend: () -> Void = {}) async -> Bool {
         let id = UUID()
         requestID = id
         let current = messages ?? []
@@ -83,6 +83,7 @@ final class MessageHistory: ObservableObject {
                 let page = try await api.history(workspace, destination, before: before)
                 try Task.checkCancellation()
                 guard id == requestID, api.session.isActive else { return false }
+                beforePrepend()
                 messages = page.filter { !known.contains($0.id) } + current
                 hasOlder = page.count == ConversationAPI.pageSize
                 retry = nil
