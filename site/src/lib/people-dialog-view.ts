@@ -279,6 +279,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const appliedFocus = options.focus ? peopleDialogApplyFocus(model, state, options.focus) : false;
   const tintOf = (agent: PeopleDialogAgent) => { if (!options.tintFor) return model.agents.indexOf(agent) % 4; const tint = options.tintFor(agent.id); return validTint(tint) ? tint : null; };
   const active = doc.activeElement as HTMLElement | null;
+  // The role question is rebuilt with everything else. If a refresh redraws it while it is open, the keyboard stays on
+  // the button it was on instead of jumping back to the first one.
+  const roleConfirmKept = active?.closest("dialog[data-role-confirm]") && active.hasAttribute("data-confirm-role") ? "[data-confirm-role]" : null;
+  const focusRoleConfirm = (confirm: HTMLDialogElement) => ((roleConfirmKept ? confirm.querySelector<HTMLButtonElement>(`${roleConfirmKept}:not(:disabled)`) : null)
+    ?? confirm.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? confirm).focus({ preventScroll: true });
   const hadFocus = !!active && (root.contains(active) || detail.contains(active));
   const refocusPrincipal = active?.closest<HTMLElement>("[data-agent-row]")?.dataset.agentRow;
   const focusKey = active && (root.contains(active) || detail.contains(active)) ? active.dataset.pdFocus : undefined;
@@ -702,7 +707,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const roles = callbacks.changeRole ? peopleDialogRoleOptions(model, person.id) : [];
       if (roles.length) { const control = roleControl(person, roles); detail.append(control);
         const confirm = control.querySelector<HTMLDialogElement>("dialog[data-role-confirm]");
-        if (confirm && !confirm.open) { confirm.showModal(); (confirm.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? confirm).focus({ preventScroll: true }); } }
+        if (confirm && !confirm.open) { confirm.showModal(); focusRoleConfirm(confirm); } }
       detail.append(node(doc, "h3", "pd-section-title", "Agents in this space")); const agents = model.agents.filter((agent) => agent.ownerId === person.id);
       const list = node(doc, "ul", "pd-person-agents"); agents.forEach((agent) => { const entry = node(doc, "li"); entry.append(button(doc, agent.name, () => select("agent", agent.id))); list.append(entry); }); detail.append(list);
       if (!agents.length) detail.append(node(doc, "p", "pd-muted", "No agents added yet."));
@@ -717,7 +722,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (active?.isConnected && !focusWithinDetail && !root.contains(active)) active.focus({ preventScroll: true });
   }
   { const confirm = root.querySelector<HTMLDialogElement>("dialog[data-role-confirm]");
-    if (confirm && !confirm.open && confirm.isConnected) { confirm.showModal(); (confirm.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? confirm).focus({ preventScroll: true }); } }
+    if (confirm && !confirm.open && confirm.isConnected) { confirm.showModal(); focusRoleConfirm(confirm); } }
   if (focusKey && !root.querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
     (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc))?.focus({ preventScroll: true });
     if (doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); } }
