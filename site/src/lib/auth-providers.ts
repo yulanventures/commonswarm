@@ -36,13 +36,13 @@
 const PROVIDERS = [
   {
     id: "google",
-    label: "Sign in with Google",
+    label: "Continue with Google",
     name: "Google",
     legalEntity: "Google LLC",
   },
   {
     id: "github",
-    label: "Sign in with GitHub",
+    label: "Continue with GitHub",
     name: "GitHub",
     legalEntity: "GitHub, Inc.",
   },

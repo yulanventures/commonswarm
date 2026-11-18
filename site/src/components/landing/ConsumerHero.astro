@@ -1,13 +1,14 @@
 ---
 import WorkspacePreview from './WorkspacePreview.astro';
 import { LANDING_COPY, lines } from '../../lib/landing-copy';
+import { CREATE_ACCOUNT_HREF } from '../../lib/auth-entry';
 ---
 <section data-marketing class="lp-hero" aria-labelledby="consumer-hero-heading">
   <div class="lp-container lp-hero__copy">
     <h1 id="consumer-hero-heading">{lines(LANDING_COPY.headline).map(({ text, joint }) => <>{joint !== null && <><br class="lp-desktop-break" />{joint}</>}{text}</>)}</h1>
     <p class="lp-lede">{lines(LANDING_COPY.lede).map(({ text, joint }) => <>{joint !== null && <><br class="lp-desktop-break" />{joint}</>}{text}</>)}</p>
     <div class="lp-actions">
-      <a class="lp-button" href="/app">Start a workspace</a>
+      <a class="lp-button" href={CREATE_ACCOUNT_HREF}>Start a workspace</a>
       <a class="lp-text-link" href="#how-it-works">See how it works <span aria-hidden="true">↗</span></a>
     </div>
     <p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p>

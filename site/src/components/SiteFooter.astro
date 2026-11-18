@@ -77,6 +77,7 @@
 import { CLI_VERSION_LINE } from "../lib/release.ts";
 
 import Wordmark from "./Wordmark.astro";
+import { CREATE_ACCOUNT_HREF } from "../lib/auth-entry";
 
 const REPO = "https://github.com/yulanventures/commonswarm";
 
@@ -117,7 +118,7 @@ const COLUMNS = [
        * still /download — URL churn is not worth it — but nothing visible says "download"
        * or "the CLI" any more, so one destination now has one name. */
       { href: "/download", label: "Install" },
-      { href: "/app", label: "Sign up" },
+      { href: CREATE_ACCOUNT_HREF, label: "Sign up" },
       { href: "/app", label: "Log in" },
     ],
   },

@@ -1,4 +1,6 @@
 ---
+import { CREATE_ACCOUNT_HREF } from "../../lib/auth-entry";
+
 interface Props {
   runtime?: "standard" | "grok-bot" | "claude-connector";
 }
@@ -41,7 +43,7 @@ const { runtime = "standard" } = Astro.props;
     </p>
   )}
   <p class="about-swarm__proof">Open free tier.</p>
-  <a class="btn btn--primary" href="/app">Sign up</a>
+  <a class="btn btn--primary" href={CREATE_ACCOUNT_HREF}>Sign up</a>
 </aside>
 
 <script>
