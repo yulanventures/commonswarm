@@ -14,7 +14,7 @@ jobs:
           python3 .github/dialog-inventory/prompt.py
           python3 -m http.server 8888 --bind 127.0.0.1 --directory shots >/tmp/dialog-server.log 2>&1 &
           for size in 390x844 1280x800; do
-            xvfb-run -a -s "-screen 0 ${size}x24" bash .github/dialog-inventory/grab.sh "$size"
+            xvfb-run -a -s "-screen 0 1600x1000x24" bash .github/dialog-inventory/grab.sh "$size"
           done
       - uses: actions/upload-artifact@v4
         with:
