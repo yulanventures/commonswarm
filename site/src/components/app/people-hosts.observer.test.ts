@@ -36,6 +36,8 @@ async function observePeopleModal() {
     if (!visible(row())) {
       const back = one<HTMLButtonElement>("[data-people-profile-back]");
       check(visible(back), "selected phone profile has no visible Back to People"); back!.click();
+      // Back from a person's profile lands on the People tab; agents are on theirs.
+      if (!visible(row())) one<HTMLButtonElement>('[data-pd-focus="tab-agents"]')?.click();
     }
     await wait("agent row visible", () => visible(row())); row().click();
     await wait("selected agent", () => visible(one("#pd-detail-title")));

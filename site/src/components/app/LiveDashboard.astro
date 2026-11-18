@@ -7703,7 +7703,8 @@ import "../../styles/kylon-command-palette.css";
         layout.closeNavigation(false);
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
         rosterFilter = "";
-        peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
+        // The tab is not reset: the dialog reopens on the tab last used in this page session (Agents the first time).
+        peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
         peopleDialogState.rename = null; peopleDialogState.reconnect = null;
         dialog.showModal();
       }
