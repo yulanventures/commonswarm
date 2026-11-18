@@ -15,6 +15,9 @@ const { state } = Astro.props;
   .household-objects h2 { font-family: var(--font-display); font-size: clamp(1.4rem, 3vw, 2rem); margin: 0 0 12px; }
   .household-objects h3, .household-objects h4 { margin: 0 0 12px; }
   .household-objects .hh-eyebrow { color: var(--text-muted, #626773); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; }
+  /* Skills: the count sits on the heading's line, quieter than the heading, in Lists & docs and in the dialog. */
+  .household-skills > header { display: flex; align-items: baseline; gap: 8px; }
+  .household-skills > header .hh-skills-count { margin: 0; color: var(--text-muted, #626773); font-size: .8rem; }
   .household-objects .hh-status { min-height: 1.6em; border-bottom: 1px solid var(--border, #ccc9c2); padding-bottom: 16px; }
   .household-objects .hh-layout { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 3fr); gap: 32px; }
   .household-objects nav ul { list-style: none; padding: 0; margin: 0; }
