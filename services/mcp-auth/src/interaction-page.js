@@ -313,8 +313,9 @@ export function renderSignInPage({ interactionUid, providers, selectAccount = fa
 
 export function renderDifferentAccountPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Start again</title><style>${CONSENT_STYLES}</style></head><body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header><div class="card">
-    <h1>You signed in as a different account; start again</h1><p>Start a new connection from your app.</p></div></main></body></html>`;
+    <meta name="color-scheme" content="light dark"><title>You signed in with a different account</title><style>${CONSENT_STYLES}</style></head>
+    <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header><div class="card">
+    <h1>You signed in with a different account</h1><p>Open the app you were connecting and start a new connection.</p></div></main></body></html>`;
 }
 
 export function renderConsentResultPage({ completed = false, clientName, restartUrl } = {}) {
