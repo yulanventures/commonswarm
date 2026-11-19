@@ -32,6 +32,7 @@ import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from 
 import { runPictureChecks, type PictureCheck } from "./picture-check.js";
 import { runPaletteChecks, type PaletteCheck } from "./palette-check.js";
 import { freezeControlProblem, type FreezeCount } from "./freeze-control.js";
+import { inShard, ownsRunChecks, parseShard } from "./shard.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -73,7 +74,16 @@ const BOOT_RETRIES = 2;
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
 type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; abort(code?: string): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
-const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
+/** One slice of the full matrix, when the workflow splits it across parallel jobs (shard.ts). A focused run is never
+ *  sharded: it names its own screens. */
+const SHARD = (() => {
+  const shard = parseShard(process.env.MOBILE_AUDIT_SHARD);
+  if (shard && DIAGNOSTIC) throw new Error("MOBILE_AUDIT_SHARD splits the full matrix; a focused run (MOBILE_AUDIT_SCREENS) is not sharded");
+  return shard;
+})();
+let manifestIds: string[] | null = null;
+const sharded = (id: string) => inShard(manifestIds ??= screens().map(screen => screen.id), id, SHARD);
+const diagnosed = (id: string, size: string) => sharded(id) && (!DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size)));
 
 /** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
  *  (with option), press, scroll, storage, fault, dispatch, wait, settle.
@@ -1114,7 +1124,8 @@ async function main(): Promise<void> {
       }
       // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
-      for (const [viewport, theme, desktop] of PICTURE_PROFILES) {
+      // The picture and palette checks are once per run: in a sharded full run, shard 1 does them.
+      for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PICTURE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
@@ -1132,7 +1143,7 @@ async function main(): Promise<void> {
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
       // Command palette keyboard check, on a desktop and on a phone: the selected row stays inside the results pane.
-      for (const [viewport, theme, desktop] of PALETTE_PROFILES) {
+      for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PALETTE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general) { palette.push({ viewport: size, theme, checks: [], error: "general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
@@ -1181,13 +1192,14 @@ async function main(): Promise<void> {
       palette: { runs: palette.length, checks: palette.reduce((n, r) => n + r.checks.length, 0),
         failedChecks: palette.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: palette.filter(r => r.error).length } };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures, palette,
-      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}) }, null, 2));
+      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}),
+      ...(SHARD ? { shard: `${SHARD.index + 1}/${SHARD.count}` } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
-    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === PICTURE_PROFILES.length ? 0 : 1);
-    paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === PALETTE_PROFILES.length ? 0 : 1);
+    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === (ownsRunChecks(SHARD) ? PICTURE_PROFILES.length : 0) ? 0 : 1);
+    paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === (ownsRunChecks(SHARD) ? PALETTE_PROFILES.length : 0) ? 0 : 1);
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -1209,7 +1221,8 @@ async function main(): Promise<void> {
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
-// 105 minutes. The full matrix took about 70 on 2026-11-14 (twelve viewport batches with hover witnesses, then the
+// 105 minutes, for one job. Since 2026-11-19 the workflow splits the full matrix into parallel shards (shard.ts), each
+// well inside this; an unsharded full run (local, or an older workflow) may no longer fit. The full matrix took about 70 on 2026-11-14 (twelve viewport batches with hover witnesses, then the
 // desktop hover pass and the picture check) and grows with every screen. The workflow job cap (120) must stay
 // above this plus the install and build before it.
 test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 105 * 60_000 }, async () => {

@@ -68,11 +68,12 @@ permissions:
 
 jobs:
   suite:
-    name: ${{ matrix.suite }}${{ matrix.shard > 0 && format(' ({0}/3)', matrix.shard) || '' }}
+    name: ${{ matrix.suite }}${{ matrix.shard > 0 && format(' ({0}/{1})', matrix.shard, matrix.of) || '' }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
+        # The full mobile-audit matrix (no screens named) runs as six parallel shards; a focused capture stays one job.
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3}]' || inputs.suite == 'mobile-audit' && inputs.audit_screens == '' && inputs.audit_sizes == '' && '[{"suite":"mobile-audit","shard":1,"of":6},{"suite":"mobile-audit","shard":2,"of":6},{"suite":"mobile-audit","shard":3,"of":6},{"suite":"mobile-audit","shard":4,"of":6},{"suite":"mobile-audit","shard":5,"of":6},{"suite":"mobile-audit","shard":6,"of":6}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 120 || 30 }}
     steps:
@@ -471,11 +472,18 @@ jobs:
           # A focused run: only these screens and sizes. Passed as environment, never pasted into the script.
           MOBILE_AUDIT_SCREENS: ${{ inputs.audit_screens }}
           MOBILE_AUDIT_SIZES: ${{ inputs.audit_sizes }}
+          # A full run is split across parallel jobs: this job captures every n-th manifest screen (tests/mobile-audit/shard.ts).
+          MOBILE_AUDIT_SHARD: ${{ matrix.shard > 0 && format('{0}/{1}', matrix.shard, matrix.of) || '' }}
         run: |
           set -euo pipefail
           # An older commit's runner ignores the list and would capture everything under a "focused" label.
           if [ -n "${MOBILE_AUDIT_SCREENS}${MOBILE_AUDIT_SIZES}" ] && ! grep -q 'MOBILE_AUDIT_SCREENS' tests/mobile-audit/run-mobile-audit.ts; then
             echo "this commit's capture runner cannot take a screen list; rebase it onto main or run the full matrix" >&2
+            exit 1
+          fi
+          # An older runner ignores the shard and would capture the whole matrix in every shard, past the time limit.
+          if [ -n "${MOBILE_AUDIT_SHARD}" ] && ! grep -q 'MOBILE_AUDIT_SHARD' tests/mobile-audit/run-mobile-audit.ts; then
+            echo "this commit's capture runner cannot split the full matrix; rebase it onto main or name the screens to capture" >&2
             exit 1
           fi
           npm run build:command-core
@@ -491,7 +499,8 @@ jobs:
         if: ${{ !cancelled() && matrix.suite == 'mobile-audit' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: mobile-audit-report
+          # One report per shard; a focused run keeps the single name.
+          name: mobile-audit-report${{ matrix.shard > 0 && format('-{0}', matrix.shard) || '' }}
           path: ${{ runner.temp }}/mobile-audit
           if-no-files-found: warn
       - name: p1-cli suite
@@ -587,6 +596,10 @@ jobs:
             context="server suite / mobile-audit (focused)"
             count="$(printf '%s' "$AUDIT_SCREENS" | tr ',' '\n' | grep -c '[^[:space:]]' || true)"
             description="dispatch run ${GITHUB_RUN_ID}: ${state}, ${count} screen(s)"
+          fi
+          # The full matrix runs as shards of one job; the suite result above already covers all of them (any failed shard fails it).
+          if [ "$SUITE" = mobile-audit ] && [ -z "${AUDIT_SCREENS}${AUDIT_SIZES}" ]; then
+            description="dispatch run ${GITHUB_RUN_ID}: ${state}, full matrix in 6 shards"
           fi
           gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
             -f state="$state" -f context="$context" \
