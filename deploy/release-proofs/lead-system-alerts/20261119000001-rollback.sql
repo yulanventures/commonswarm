@@ -21,10 +21,17 @@ DROP FUNCTION IF EXISTS swarm.sync_quiet_agent_alerts(interval);
 DROP FUNCTION IF EXISTS swarm.escalate_due_system_alerts();
 DROP FUNCTION IF EXISTS swarm.record_hosted_seat_refused_alerts(text, uuid);
 DROP FUNCTION IF EXISTS swarm.record_system_alert(uuid, text, uuid, uuid, integer, timestamptz, interval);
+DROP FUNCTION IF EXISTS swarm.system_alert_wake_targets(uuid, uuid, uuid, uuid, boolean);
 DROP FUNCTION IF EXISTS swarm.system_alert_claims_can_read(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_actor_can_resolve(uuid, uuid, uuid, text, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.system_alert_agent_is_current_lead(uuid, uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.system_alert_pick_lead(uuid, uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.system_alert_candidate_is_eligible(uuid, uuid, uuid, uuid, boolean);
+DROP TRIGGER IF EXISTS channels_sync_conversation_frames ON swarm.channels;
+DROP TRIGGER IF EXISTS channel_members_lock_agent_frames ON swarm.channel_members;
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_channel_frames();
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_agent_member_frames();
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_scopes(uuid[], uuid[]);
 DROP FUNCTION IF EXISTS swarm.system_alert_lock_scope(uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.system_alert_fix_hint(text);
 

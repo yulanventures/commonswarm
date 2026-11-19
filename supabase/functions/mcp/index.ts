@@ -242,7 +242,7 @@ async function seatCapability(
   }) as unknown as HostedSeatCapability | null;
 }
 
-async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
+export async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
   try {
     return await executeToolCall(call);
   } catch (error) {

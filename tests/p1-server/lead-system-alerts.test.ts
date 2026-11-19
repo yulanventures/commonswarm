@@ -5,7 +5,7 @@
  * pg_cron schedule, and CLI/client end-to-end delivery.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -470,17 +470,17 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   assert.ok(afterReroute!.routed_at.getTime() > new Date(wsLeadCursorAt).getTime(), "routed_at must advance on reroute");
   const wsLeadAfterCursor = await readResource(wsLead.token, {
     resource: "signals", workspace_id: workspace, inbox: true, about: null, kind: null, since: null,
-    after_created_at: wsLeadCursorAt, after_id: "00000000-0000-0000-0000-000000000000",
+    after_created_at: wsLeadCursorAt, after_id: "00000000-0000-4000-8000-000000000000",
     limit: 20, include_stale: false,
   });
-  assert.equal(wsLeadAfterCursor.status, 200);
+  assert.equal(wsLeadAfterCursor.status, 200, JSON.stringify(wsLeadAfterCursor.body));
   assert.ok(
     (wsLeadAfterCursor.body.signals as Row[]).some((s) => s.id === beforeReroute!.alert_id),
     "rerouted alert must appear after backup lead's existing inbox cursor",
   );
 });
 
-test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404 AND identical audit_log visibility for non-member admin, with authorized control", { timeout: 90_000 }, async () => {
+test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404, identical audit_log visibility, and zero lock wait under contention for non-member admin", { timeout: 90_000 }, async () => {
   const quietSeat = await agentOf(owner.id, "quiet-audit");
   const leadPriv = await agentOf(owner.id, "lead-audit-priv");
   await setPresence(leadPriv, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
@@ -530,6 +530,39 @@ test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 
   assert.deepEqual(adminAuditHidden, adminAuditUnknown, "non-member admin must see identical audit rows for hidden vs unknown alert");
   assert.equal(adminAuditHidden.length, 1);
 
+  // Lock-contention witness (C2): hold exclusive locks on privCh conversation, conversation-frames,
+  // AND privAlertId row. While locks are held, non-member wsAdmin probing hidden vs unknown ID MUST
+  // return uniform 404 immediately (read-only precheck BEFORE locks -> zero wait, never lock timeout).
+  let scopeLocked!: () => void;
+  const scopeLockedReady = new Promise<void>((r) => { scopeLocked = r; });
+  let releaseScope!: () => void;
+  const scopeReleaseGate = new Promise<void>((r) => { releaseScope = r; });
+  const holderTx = sql.begin(async (tx) => {
+    await tx`SELECT 1 FROM swarm.conversations WHERE conversation_id = ${privCh.id}::uuid FOR UPDATE`;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`conversation-frames:${workspace}:${privCh.id}`}, 0))`;
+    await tx`SELECT 1 FROM swarm.system_alerts WHERE alert_id = ${privAlertId}::uuid FOR UPDATE`;
+    scopeLocked();
+    await scopeReleaseGate;
+  });
+  await scopeLockedReady;
+  try {
+    const markLocked1 = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
+    const lockedUnknown = await send(wsAdmin.jwt, { kind: "resolve_system_alert", alert_id: randomUUID(), note: "locked-probe" });
+    const auditLockedUnknown = await auditRowsFor(wsAdmin.id, markLocked1);
+
+    const markLocked2 = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
+    const lockedHidden = await send(wsAdmin.jwt, { kind: "resolve_system_alert", alert_id: privAlertId, note: "locked-probe" });
+    const auditLockedHidden = await auditRowsFor(wsAdmin.id, markLocked2);
+
+    assert.equal(lockedUnknown.status, 404);
+    assert.equal(lockedHidden.status, 404, "hidden private alert must refuse before taking locks, never returning lock timeout");
+    assert.deepEqual(lockedHidden.body, lockedUnknown.body);
+    assert.deepEqual(auditLockedHidden, auditLockedUnknown);
+  } finally {
+    releaseScope();
+    await holderTx;
+  }
+
   // Authorized control: leadPriv resolves (and retries/conflicts, including after removal) ->
   // hidden from non-member wsAdmin in swarm_read.audit_log, visible to member owner!
   const mark3 = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
@@ -546,7 +579,30 @@ test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 
   assert.equal(functionLogs.includes(secretNote), false, "resolution note stays out of general logs");
 });
 
-test("Condition 4: real-socket bare wake control, concurrent public-to-private conversion serializes wake and resolve, and resolve-vs-escalation race", { timeout: 90_000 }, async () => {
+async function waitForBlockedBy(holderPid: number, queryPattern: string, label: string, timeoutMs = 8_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await sql<{ pid: number; wait_event_type: string | null; wait_event: string | null; query: string }[]>`
+      SELECT pid, wait_event_type, wait_event, query
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND wait_event_type = 'Lock'
+        AND ${holderPid}::int = ANY(pg_blocking_pids(pid))
+        AND query ILIKE ${`%${queryPattern}%`}
+    `;
+    if (rows.length > 0) return;
+    await delay(25);
+  }
+  const diag = await sql`
+    SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers, left(query, 120) AS q
+    FROM pg_stat_activity
+    WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+  `;
+  throw new Error(`${label}: expected query matching "${queryPattern}" to block on pid ${holderPid}; active=${JSON.stringify(diag)}`);
+}
+
+test("Condition 4: real-socket bare wake control, served conversion lock-order race, multi-scope workspace-removal race, and resolve-vs-escalation race", { timeout: 120_000 }, async () => {
   const quietSeat = await agentOf(owner.id, "quiet-c4");
   const controlLead = await agentOf(owner.id, "ctrl-lead-c4");
   await setPresence(wsLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
@@ -559,21 +615,36 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
   })).status, 200);
   const ctrlSock = await subscribeWakeSocket(controlLead.wakeId);
   try {
-    await sql`
+    const [ctrlAlert] = await sql<{ id: string | null }[]>`
       SELECT swarm.record_system_alert(
         ${workspace}::uuid, 'agent_quiet', ${quietSeat.principal}::uuid, ${ctrlCh.id}::uuid,
         1, statement_timestamp() - interval '15 minutes', interval '30 minutes'
-      )
+      ) AS id
     `;
+    assert.ok(ctrlAlert?.id, "control alert must be recorded");
+    const [ctrlRow] = await sql<Row[]>`
+      SELECT alert_id, routed_lead_principal_id, escalated_at FROM swarm.system_alerts WHERE alert_id = ${ctrlAlert.id}::uuid
+    `;
+    assert.equal(ctrlRow!.routed_lead_principal_id, controlLead.principal, "control alert must route to controlLead");
     const deadline = Date.now() + 15_000;
     while (ctrlSock.frames.length === 0 && Date.now() < deadline) await delay(50);
-    assert.ok(ctrlSock.frames.length >= 1, "authorized lead socket must receive wake frame");
+    const queuedFrames = await sql<Row[]>`
+      SELECT topic, event, payload FROM realtime.messages WHERE topic = ${`cswarm-wake:${controlLead.wakeId}`}
+    `;
+    assert.ok(
+      ctrlSock.frames.length >= 1,
+      `authorized lead socket must receive wake frame (alert=${JSON.stringify(ctrlRow)}, queued=${JSON.stringify(queuedFrames)})`,
+    );
     assert.deepEqual(ctrlSock.frames[0], { v: 1 }, "wake frame must carry minimal {v:1} only");
   } finally {
     await ctrlSock.close();
   }
 
-  // 2. Held public-to-private conversion (holding canonical locks) serializes BOTH alert wake AND resolve!
+  // 2. Served channel_update conversion lock sequence:
+  //    channel-access -> UPDATE swarm.channels (triggers channels_sync_conversation on conversations(ch)
+  //    THEN channels_sync_conversation_frames on conversation-frames(ws, ch)).
+  //    Start BOTH record_system_alert (.execute()) AND served resolve_system_alert eagerly, prove BOTH
+  //    genuinely reach pg_stat_activity Lock wait behind conversion BEFORE releasing conversion!
   const convCh = await createChannel(owner, "conv-race");
   const preAlertId = (await sql<{ id: string }[]>`
     SELECT swarm.record_system_alert(
@@ -584,17 +655,18 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
   const secondQuiet = await agentOf(owner.id, "quiet-c4-b");
   const wsLeadSock = await subscribeWakeSocket(wsLead.wakeId);
   try {
+    let holderPid = 0;
     let lockHeld!: () => void;
     const locked = new Promise<void>((r) => { lockHeld = r; });
     let allowCommit!: () => void;
     const commitGate = new Promise<void>((r) => { allowCommit = r; });
 
-    // Hold canonical channel locks while converting convCh to private WITHOUT wsLead.
+    // Exact served channel_update lock order: channel-access -> UPDATE swarm.channels -> channel_members.
     const conversionTx = sql.begin(async (tx) => {
-      await tx`SELECT 1 FROM swarm.conversations WHERE conversation_id = ${convCh.id}::uuid FOR UPDATE`;
+      const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      holderPid = pid;
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-access:${workspace}:${convCh.id}`}, 0))`;
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`conversation-frames:${workspace}:${convCh.id}`}, 0))`;
-      await tx`UPDATE swarm.channels SET visibility = 'private' WHERE channel_id = ${convCh.id}::uuid`;
+      await tx`UPDATE swarm.channels SET visibility = 'private' WHERE workspace_id = ${workspace}::uuid AND channel_id = ${convCh.id}::uuid`;
       await tx`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, added_by_kind, added_by_principal)
         VALUES (${workspace}::uuid, ${convCh.id}::uuid, 'user', ${owner.id}::uuid, 'user', ${owner.id}::uuid)
         ON CONFLICT DO NOTHING`;
@@ -603,21 +675,24 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
     });
     await locked;
 
-    // Launch concurrent alert creation + wsLead resolve WHILE conversion holds the channel lock.
+    // Eagerly dispatch BOTH concurrent writers while conversion holds served locks.
     const concurrentAlert = sql<{ id: string }[]>`
       SELECT swarm.record_system_alert(
         ${workspace}::uuid, 'agent_quiet', ${secondQuiet.principal}::uuid, ${convCh.id}::uuid,
         1, statement_timestamp() - interval '15 minutes', interval '30 minutes'
       ) AS id
-    `;
+    `.execute();
     const concurrentResolve = send(wsLead.token, {
       kind: "resolve_system_alert", alert_id: preAlertId, note: "late resolve during conversion",
     });
-    await delay(150);
+
+    await waitForBlockedBy(holderPid, "record_system_alert", "concurrent alert during served conversion");
+    await waitForBlockedBy(holderPid, "resolve_system_alert", "concurrent resolve during served conversion");
+
     allowCommit();
     const [, [newAlertRow], resolveRes] = await Promise.all([conversionTx, concurrentAlert, concurrentResolve]);
 
-    // After conversion committed: wsLead is refused on resolve (404), new alert routed NULL, ZERO wake frame!
+    // Zero deadlock; after conversion commits: wsLead refused on resolve (404), new alert routed NULL, ZERO wake frame!
     assert.equal(resolveRes.status, 404, "concurrent resolve must be refused once conversion removes wsLead");
     const [newAlert] = await sql<Row[]>`
       SELECT routed_lead_principal_id FROM swarm.system_alerts WHERE alert_id = ${newAlertRow!.id}::uuid
@@ -629,7 +704,64 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
     await wsLeadSock.close();
   }
 
-  // 3. Resolve racing escalation against the same row lock: resolve commits first -> escalation skips it!
+  // 3. Multi-scope workspace-removal race: workspace removal triggers swarm.conversation_lock_workspace
+  //    (locking ALL conversations in conversation_id ASC order) while sync_quiet_agent_alerts touches
+  //    multiple channels + #general + due escalation in one pass. Verify real lock wait + ZERO deadlock!
+  const msCh1 = await createChannel(owner, "multi-scope-1");
+  const msCh2 = await createChannel(owner, "multi-scope-2");
+  const msLead = await agentOf(owner.id, "ms-lead");
+  const msQuiet = await agentOf(owner.id, "ms-quiet");
+  await setPresence(msLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(msQuiet, { watcherAgoSec: 600, lastCommandAgoSec: 900 });
+  assert.equal((await send(owner.jwt, {
+    kind: "set_channel_lead", channel_id: msCh1.id, lead_mode: "agent", principal_id: msLead.principal,
+  })).status, 200);
+  assert.equal((await send(owner.jwt, {
+    kind: "set_channel_lead", channel_id: msCh2.id, lead_mode: "agent", principal_id: msLead.principal,
+  })).status, 200);
+  await enqueueWaitingDelivery({ senderUserId: member.id, recipientAgent: msQuiet, channelId: msCh1.id, ageMinutes: 25 });
+  await enqueueWaitingDelivery({ senderUserId: member.id, recipientAgent: msQuiet, channelId: msCh2.id, ageMinutes: 20 });
+  await enqueueWaitingDelivery({ senderUserId: member.id, recipientAgent: msQuiet, channelId: null, ageMinutes: 15 });
+
+  let msHolderPid = 0;
+  let msLocked!: () => void;
+  const msLockedReady = new Promise<void>((r) => { msLocked = r; });
+  let msAllowCommit!: () => void;
+  const msCommitGate = new Promise<void>((r) => { msAllowCommit = r; });
+  const removalTx = sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    msHolderPid = pid;
+    // Revoking workspace seat triggers agent_workspace_memberships_apply_conversations ->
+    // swarm.conversation_lock_workspace(workspace) in conversation_id ASC order!
+    await tx`
+      UPDATE swarm.agent_workspace_memberships
+      SET revoked_at = statement_timestamp()
+      WHERE workspace_id = ${workspace}::uuid
+        AND principal_id = ${msLead.principal}::uuid
+    `;
+    msLocked();
+    await msCommitGate;
+  });
+  await msLockedReady;
+
+  const multiScopeTimer = sql<{ res: Row }[]>`
+    SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes') AS res
+  `.execute();
+  await waitForBlockedBy(msHolderPid, "sync_quiet_agent_alerts", "multi-scope timer racing workspace removal");
+  msAllowCommit();
+  const [, [timerResult]] = await Promise.all([removalTx, multiScopeTimer]);
+  assert.ok(Number(timerResult!.res.synced) >= 3, "multi-scope timer must complete without deadlock after workspace removal");
+  const msAlerts = await sql<Row[]>`
+    SELECT channel_id, routed_lead_principal_id
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid AND affected_principal_id = ${msQuiet.principal}::uuid
+  `;
+  assert.equal(msAlerts.length, 3);
+  for (const row of msAlerts) {
+    assert.notEqual(row.routed_lead_principal_id, msLead.principal, "removed workspace lead must NOT receive multi-scope route");
+  }
+
+  // 4. Resolve racing escalation against the same row lock: verify real lock wait in pg_stat_activity!
   const raceSeat = await agentOf(owner.id, "race-seat-c4");
   const raceAlertId = (await sql<{ id: string }[]>`
     SELECT swarm.record_system_alert(
@@ -639,11 +771,14 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
   `)[0]!.id;
   await sql`UPDATE swarm.system_alerts SET escalate_after = opened_at, escalated_at = NULL WHERE alert_id = ${raceAlertId}::uuid`;
 
+  let resolveHolderPid = 0;
   let resolveLocked!: () => void;
   const lockedRow = new Promise<void>((r) => { resolveLocked = r; });
   let allowResolveCommit!: () => void;
   const commitResolveGate = new Promise<void>((r) => { allowResolveCommit = r; });
   const resolveTx = sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    resolveHolderPid = pid;
     const [r] = await tx<{ res: Row }[]>`
       SELECT swarm.resolve_system_alert(
         ${workspace}::uuid, ${raceAlertId}::uuid, 'agent', ${wsLead.principal}::uuid, ${owner.id}::uuid, 'Fixed during race'
@@ -654,21 +789,25 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
     return r!.res;
   });
   await lockedRow;
-  const escPromise = sql<{ n: number }[]>`SELECT swarm.escalate_due_system_alerts() AS n`;
-  await delay(150);
+  const escPromise = sql<{ n: number }[]>`SELECT swarm.escalate_due_system_alerts() AS n`.execute();
+  await waitForBlockedBy(resolveHolderPid, "escalate_due_system_alerts", "escalation racing resolve row lock");
   allowResolveCommit();
   const [resOutcome, [escCount]] = await Promise.all([resolveTx, escPromise]);
   assert.equal((resOutcome as Row).outcome, "resolved");
   assert.equal(escCount!.n, 0, "resolved row must not escalate when racing timer");
 });
 
-test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & reconnected seat excluded), pinned roles, pg_cron timer, and CLI/client end-to-end flow", { timeout: 90_000 }, async () => {
-  // 1. Pinned roles: direct table writes and internal producer EXECUTE refused; reader helper works.
+test("Condition 5 & Delivery: pinned roles, unclaimed vs serving hosted replacement, served MCP refusal producer, real pg_cron tick to owner inbox, and CLI/client end-to-end flow", { timeout: 120_000 }, async () => {
+  // 1. Pinned roles: direct table writes and internal producer EXECUTE refused (isolated per tx).
   const expectDeniedAs = async (role: string, run: (tx: postgres.TransactionSql) => Promise<unknown>, label: string) => {
-    await sql.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL ROLE ${role}`);
-      await assert.rejects(() => run(tx), (err: { code?: string }) => err.code === "42501", `${role}: ${label}`);
-    });
+    await assert.rejects(
+      () => sql.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${role}`);
+        await run(tx);
+      }),
+      (err: { code?: string }) => err.code === "42501",
+      `${role}: ${label}`,
+    );
   };
   for (const role of ["authenticated", "swarm_read", "swarm_command"]) {
     await expectDeniedAs(
@@ -680,6 +819,7 @@ test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & re
     await expectDeniedAs(role, (tx) => tx`SELECT swarm.sync_quiet_agent_alerts()`, "sync_quiet_agent_alerts");
     await expectDeniedAs(role, (tx) => tx`SELECT swarm.escalate_due_system_alerts()`, "escalate_due_system_alerts");
     await expectDeniedAs(role, (tx) => tx`SELECT swarm.system_alert_lock_scope(${workspace}::uuid, NULL)`, "system_alert_lock_scope");
+    await expectDeniedAs(role, (tx) => tx`SELECT swarm.system_alert_lock_scopes(ARRAY[${workspace}::uuid], ARRAY[NULL::uuid])`, "system_alert_lock_scopes");
   }
   for (const role of ["authenticated", "swarm_read"]) {
     await expectDeniedAs(
@@ -696,7 +836,9 @@ test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & re
 
   // 2. Grant-scoped hosted seat refusal:
   //    - strandedSeat has a live seat on retiredGrant in `workspace` AND an unrelated membership in `otherWorkspace`
-  //    - reconnectedSeat was on retiredGrant in `workspace` BUT already has a live replacement grant in `workspace`
+  //    - reconnectedSeat was on retiredGrant in `workspace` AND first has ONLY an UNCLAIMED replacement
+  //      grant (grant + workspace consent + grant_agents, NO seat/handle -> MUST STILL alert!),
+  //      then gets a live replacement seat + handle (actively serving -> MUST suppress!).
   const strandedSeat = await agentOf(owner.id, "hosted-stranded");
   const reconnectedSeat = await agentOf(owner.id, "hosted-reconnected");
   const retiredGrantId = randomUUID();
@@ -728,7 +870,7 @@ test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & re
       await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
         VALUES (${randomUUID()}::uuid, ${retiredGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${seat.principal}::uuid, ${seat.name}, statement_timestamp())`;
     }
-    // Live replacement grant serving reconnectedSeat in workspace
+    // Step 2a: Eligible UNCLAIMED replacement grant for reconnectedSeat (NO hosted_mcp_seats/handles yet!)
     await tx`INSERT INTO swarm.hosted_mcp_grants (
         grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
         selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at
@@ -744,13 +886,30 @@ test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & re
       VALUES (${replacementGrantId}::uuid, ${reconnectedSeat.principal}::uuid, ${owner.id}::uuid)`;
   });
 
-  // Truncated / wrong-owner / ambiguous -> 0; exact grant -> 1 alert (strandedSeat in workspace ONLY!).
+  // Truncated / wrong-owner -> 0; unclaimed replacement MUST NOT suppress (both seats alert!).
   assert.equal((await sql<{ n: number }[]>`SELECT swarm.record_hosted_seat_refused_alerts(${retiredProviderId.slice(0, 8)}, ${owner.id}::uuid) AS n`)[0]!.n, 0);
   assert.equal((await sql<{ n: number }[]>`SELECT swarm.record_hosted_seat_refused_alerts(${retiredProviderId}, ${wsAdmin.id}::uuid) AS n`)[0]!.n, 0);
+  const [unclaimedRecorded] = await sql<{ n: number }[]>`
+    SELECT swarm.record_hosted_seat_refused_alerts(${retiredProviderId}, ${owner.id}::uuid) AS n
+  `;
+  assert.equal(unclaimedRecorded!.n, 2, "unclaimed replacement grant (no live seat/handle) must NOT suppress hosted_seat_refused");
+
+  // Step 2b: Now give reconnectedSeat a live seat + handle on replacementGrant (actually serving!).
+  // Clear prior open hosted_seat_refused rows and re-run -> MUST record 1 (strandedSeat ONLY!).
+  await sql`DELETE FROM swarm.system_alerts WHERE kind = 'hosted_seat_refused' AND affected_principal_id IN (${strandedSeat.principal}::uuid, ${reconnectedSeat.principal}::uuid)`;
+  const replSeatId = randomUUID();
+  const replHandle = `seat_${randomBytes(18).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+      VALUES (${replSeatId}::uuid, ${replacementGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${reconnectedSeat.principal}::uuid, ${`${reconnectedSeat.name}-v2`}, statement_timestamp())`;
+    await tx`INSERT INTO swarm.hosted_mcp_seat_handles (handle, seat_id, grant_id, workspace_id, principal_id, created_at)
+      VALUES (${replHandle}, ${replSeatId}::uuid, ${replacementGrantId}::uuid, ${workspace}::uuid, ${reconnectedSeat.principal}::uuid, statement_timestamp())`;
+  });
+
   const [hostedRecorded] = await sql<{ n: number }[]>`
     SELECT swarm.record_hosted_seat_refused_alerts(${retiredProviderId}, ${owner.id}::uuid) AS n
   `;
-  assert.equal(hostedRecorded!.n, 1, "only strandedSeat in grant-approved workspace; reconnected seat and unrelated workspace excluded");
+  assert.equal(hostedRecorded!.n, 1, "only strandedSeat in grant-approved workspace; actively serving replacement seat and unrelated workspace excluded");
   const hostedAlerts = await sql<Row[]>`
     SELECT workspace_id, affected_principal_id FROM swarm.system_alerts
     WHERE kind = 'hosted_seat_refused'
@@ -760,30 +919,137 @@ test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & re
     { ws: workspace, p: strandedSeat.principal },
   ]);
 
-  // 3. pg_cron schedule registered & end-to-end client/CLI flow (owner escalated inbox + lead read & resolve).
-  const [cronJob] = await sql<{ jobname: string; schedule: string; active: boolean; command: string }[]>`
-    SELECT jobname, schedule, active, command FROM cron.job WHERE jobname = 'swarm-sync-system-alerts'
+  // 3. Served MCP refusal producer witness: invoke supabase/functions/mcp/index.ts executeTool on a
+  //    retired refresh-family grant against real Postgres -> must refuse tool AND record alert!
+  const servedSeat = await agentOf(owner.id, "hosted-served-refusal");
+  const servedGrantId = randomUUID();
+  const servedSeatId = randomUUID();
+  const servedProviderId = `pg_srv_${randomBytes(12).toString("hex")}`;
+  const servedHandle = `seat_${randomBytes(18).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    await tx`UPDATE swarm.agent_principals SET transport = 'hosted_mcp', turn_only = true WHERE principal_id = ${servedSeat.principal}::uuid`;
+    await tx`INSERT INTO swarm.hosted_mcp_grants (
+        grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
+        selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at
+      ) VALUES (
+        ${servedGrantId}::uuid, ${servedProviderId}, ${owner.id}::uuid, ${workspace}::uuid, 'client-a',
+        'https://mcp.commonswarm.com/mcp', ARRAY[${workspace}::uuid], ${digest},
+        'ref-srv', 'active', statement_timestamp(), statement_timestamp()
+      )`;
+    await tx`INSERT INTO swarm.hosted_mcp_grant_workspaces (
+        grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at
+      ) VALUES (${servedGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${digest}, ${randomUUID()}::uuid, statement_timestamp())`;
+    await tx`INSERT INTO swarm.hosted_mcp_grant_agents (grant_id, principal_id, owner_user_id)
+      VALUES (${servedGrantId}::uuid, ${servedSeat.principal}::uuid, ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+      VALUES (${servedSeatId}::uuid, ${servedGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${servedSeat.principal}::uuid, ${servedSeat.name}, statement_timestamp())`;
+    await tx`INSERT INTO swarm.hosted_mcp_seat_handles (handle, seat_id, grant_id, workspace_id, principal_id, created_at)
+      VALUES (${servedHandle}, ${servedSeatId}::uuid, ${servedGrantId}::uuid, ${workspace}::uuid, ${servedSeat.principal}::uuid, statement_timestamp())`;
+    // Retire the OAuth refresh family so the signed access token triggers hosted_seat_forbidden -> hosted_seat_refused!
+    await tx`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at)
+      VALUES (${servedProviderId}, statement_timestamp())`;
+  });
+  const mcpUrl = new URL("../../supabase/functions/mcp/index.ts", import.meta.url).href;
+  const mcpHarness = join(envDir!, "mcp-refusal-harness.ts");
+  writeFileSync(mcpHarness, `
+    import { executeTool } from ${JSON.stringify(mcpUrl)};
+    const input = JSON.parse(await new Response(Deno.stdin.readable).text());
+    try {
+      await executeTool({
+        name: "whoami",
+        arguments: { seat: input.handle },
+        token: {
+          subject: input.ownerId,
+          providerGrantId: input.providerGrantId,
+          expiresAt: Math.floor(Date.now() / 1000) + 300,
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      console.log(JSON.stringify({ refused: false }));
+    } catch (err) {
+      console.log(JSON.stringify({ refused: true, code: (err as { code?: string })?.code ?? String(err) }));
+    }
+    Deno.exit(0);
+  `);
+  const mcpRun = spawnSync(
+    "deno",
+    ["run", "--no-lock", "--config", "supabase/functions/mcp/deno.json", "--allow-env", "--allow-net", "--allow-read", mcpHarness],
+    {
+      cwd: process.cwd(),
+      input: JSON.stringify({ handle: servedHandle, ownerId: owner.id, providerGrantId: servedProviderId }),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        SWARM_ENV: "test",
+        SWARM_MCP_PUBLIC_ENABLED: "1",
+        SWARM_DATABASE_URL: local.DB_URL,
+        SUPABASE_DB_URL: local.DB_URL,
+        SUPABASE_URL: local.API_URL,
+        SUPABASE_ANON_KEY: local.ANON_KEY,
+        SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY,
+      },
+    },
+  );
+  assert.equal(mcpRun.status, 0, `mcp refusal harness failed: stdout=${mcpRun.stdout} stderr=${mcpRun.stderr}`);
+  const mcpLines = mcpRun.stdout.trim().split("\n").filter(Boolean);
+  const mcpOutcome = JSON.parse(mcpLines[mcpLines.length - 1]!) as { refused: boolean; code?: string };
+  assert.equal(mcpOutcome.refused, true, `served MCP call on retired family must be refused: ${JSON.stringify(mcpOutcome)}`);
+  const servedAlertRows = await sql<Row[]>`
+    SELECT alert_id, kind, workspace_id, affected_principal_id
+    FROM swarm.system_alerts
+    WHERE kind = 'hosted_seat_refused' AND affected_principal_id = ${servedSeat.principal}::uuid
+  `;
+  assert.equal(servedAlertRows.length, 1, "served MCP refusal must record hosted_seat_refused alert in swarm.system_alerts");
+
+  // 4. Real scheduled pg_cron tick -> authorized owner_alert_inbox + CLI/client end-to-end flow!
+  const [cronJob] = await sql<{ jobid: number; jobname: string; schedule: string; active: boolean; command: string }[]>`
+    SELECT jobid, jobname, schedule, active, command FROM cron.job WHERE jobname = 'swarm-sync-system-alerts'
   `;
   assert.ok(cronJob, "swarm-sync-system-alerts pg_cron job must be scheduled");
   assert.equal(cronJob.schedule, "*/2 * * * *");
   assert.equal(cronJob.active, true);
   assert.match(cronJob.command, /swarm\.sync_quiet_agent_alerts/);
 
-  // Timer tick -> lead reads via readSystemAlerts -> escalates after threshold -> owner reads via
-  // readSystemAlerts(escalatedOnly:true) (admin excluded!) -> lead resolves via ThinCommandClient!
-  const cliTarget = { url: local.API_URL, anonKey: local.ANON_KEY };
+  const cliTarget = { profileId: "lead-alerts-test", url: local.API_URL, anonKey: local.ANON_KEY };
   const leadVisible = await readSystemAlerts(cliTarget, wsLead.token, workspace);
   const targetAlert = leadVisible.alerts.find((a) => a.affected_principal_id === strandedSeat.principal);
   assert.ok(targetAlert, "lead must see hosted_seat_refused alert via readSystemAlerts");
 
+  // Backdate escalate_after and let the REAL pg_cron background worker run cronJob.command on a 1s tick!
   await sql`UPDATE swarm.system_alerts SET escalate_after = opened_at WHERE alert_id = ${targetAlert.alert_id}::uuid`;
-  assert.equal((await sql<{ n: number }[]>`SELECT swarm.escalate_due_system_alerts() AS n`)[0]!.n, 1);
-  assert.equal((await sql<{ n: number }[]>`SELECT swarm.escalate_due_system_alerts() AS n`)[0]!.n, 0);
+  const testJobName = `swarm-alerts-tick-${randomBytes(4).toString("hex")}`;
+  const [{ testJobId }] = await sql<{ testJobId: number }[]>`
+    SELECT cron.schedule(${testJobName}, '1 second', ${cronJob.command}) AS "testJobId"
+  `;
+  try {
+    const tickDeadline = Date.now() + 12_000;
+    let ticked = false;
+    while (Date.now() < tickDeadline) {
+      const [run] = await sql<{ status: string }[]>`
+        SELECT status FROM cron.job_run_details
+        WHERE jobid = ${testJobId} AND status = 'succeeded'
+        ORDER BY start_time DESC LIMIT 1
+      `;
+      if (run) {
+        ticked = true;
+        break;
+      }
+      await delay(200);
+    }
+    assert.equal(ticked, true, "real pg_cron worker must execute the scheduled alert sync command");
+  } finally {
+    await sql`SELECT cron.unschedule(${testJobName}) WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = ${testJobName})`;
+  }
 
+  // Real pg_cron tick escalated targetAlert -> visible in owner_alert_inbox (admin excluded)!
   const ownerEscalated = await readSystemAlerts(cliTarget, owner.jwt, workspace, { escalatedOnly: true });
-  assert.ok(ownerEscalated.alerts.some((a) => a.alert_id === targetAlert.alert_id));
+  assert.ok(ownerEscalated.alerts.some((a) => a.alert_id === targetAlert.alert_id), "real pg_cron tick must escalate due alert to owner inbox");
   const adminEscalated = await readSystemAlerts(cliTarget, wsAdmin.jwt, workspace, { escalatedOnly: true });
   assert.equal(adminEscalated.alerts.length, 0, "admin must NOT receive escalated_only owner inbox alerts");
+
+  // Repeated escalation is idempotent (0 additional escalations).
+  assert.equal((await sql<{ n: number }[]>`SELECT swarm.escalate_due_system_alerts() AS n`)[0]!.n, 0);
 
   const cmdClient = new ThinCommandClient(cliTarget);
   const resolved = await cmdClient.sendResolveSystemAlert({

@@ -83,7 +83,7 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   const commandEdge = readFileSync("supabase/functions/command/index.ts", "utf8");
 
   assert.equal(HUMAN_ONLY_COMMANDS.has(RESOLVE_SYSTEM_ALERT_KIND as never), false);
-  assert.match(commandEdge, /RESOLVE_SYSTEM_ALERT_KIND/);
+  assert.match(commandEdge, /"resolve_system_alert"/);
 
   for (const kind of SYSTEM_ALERT_KINDS) {
     assert.match(migration, new RegExp(`'${kind}'`));
@@ -104,9 +104,13 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*sync_quiet_agent_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*escalate_due_system_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*system_alert_lock_scope[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
-  // Canonical scope lock order & bare {"v": 1} wake frames.
-  assert.match(migration, /'channel-access:'/);
+  // Canonical scope lock order (NO channel-access inversion), multi-scope pre-lock, read-only resolve precheck & bare {"v": 1} wake frames.
+  assert.doesNotMatch(migration, /'channel-access:'/);
   assert.match(migration, /'conversation-frames:'/);
+  assert.match(migration, /CREATE FUNCTION swarm\.system_alert_lock_scopes\(/);
+  assert.match(migration, /CREATE FUNCTION swarm\.system_alert_actor_can_resolve\(/);
+  assert.match(migration, /CREATE TRIGGER channels_sync_conversation_frames/);
+  assert.match(migration, /CREATE TRIGGER channel_members_lock_agent_frames/);
   assert.doesNotMatch(migration, /'alert_id', NEW\.alert_id/);
   // Owner alert inbox requires role='owner' and rejects agent claims.
   assert.match(migration, /v_claims \? 'agent_principal_id'/);

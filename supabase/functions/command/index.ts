@@ -208,7 +208,6 @@ import {
 } from "./channel-lead.ts";
 import {
   parseResolveSystemAlertCommand,
-  RESOLVE_SYSTEM_ALERT_KIND,
   type ResolveSystemAlertCommand,
 } from "./system-alerts.ts";
 import {
@@ -1407,7 +1406,7 @@ const COMMAND_KINDS = [
   "submit_feedback",
   "post_signal",
   "reraise_ask",
-  RESOLVE_SYSTEM_ALERT_KIND,
+  "resolve_system_alert",
   "memory_save",
   "memory_forget",
   "ask_choice",
@@ -2804,7 +2803,7 @@ function validateCommand(
     };
   }
 
-  if (cmd.kind === RESOLVE_SYSTEM_ALERT_KIND) {
+  if (cmd.kind === "resolve_system_alert") {
     return parseResolveSystemAlertCommand(cmd);
   }
 
@@ -17027,7 +17026,7 @@ async function handleTransaction(
         /* A choice ask posts one ask, so it needs post_signal like any ask. answer_choice is a
          * person's command and never reaches an agent credential path with a scope. */
         !auth.agent.scopes.includes(
-          validation.command.kind === "reraise_ask" || validation.command.kind === RESOLVE_SYSTEM_ALERT_KIND ||
+          validation.command.kind === "reraise_ask" || validation.command.kind === "resolve_system_alert" ||
             validation.command.kind === "memory_save" ||
             validation.command.kind === "memory_forget" || validation.command.kind === "ask_choice" ||
             /* A reaction is visible content on a message, like a post. */
@@ -17192,7 +17191,7 @@ async function handleTransaction(
         AND command_id = ${commandId}
       LIMIT 1
     `;
-    const existing = choiceKind || kind === RESOLVE_SYSTEM_ALERT_KIND ? undefined : existingRows[0];
+    const existing = choiceKind || kind === "resolve_system_alert" ? undefined : existingRows[0];
     if (existing) {
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
@@ -17749,7 +17748,7 @@ async function handleTransaction(
       }, hostedSeatCapability);
     }
 
-    if (command.kind === RESOLVE_SYSTEM_ALERT_KIND) {
+    if (command.kind === "resolve_system_alert") {
       return await resolveSystemAlert(tx, route, auth, command, {
         commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
       });
