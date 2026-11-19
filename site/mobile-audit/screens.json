@@ -873,7 +873,7 @@
   {
     "id": "app.chat.waiting-panel.todos",
     "kind": "view",
-    "path": "/app?w={offerWorkspace}&c={channel.general}",
+    "path": "/app?w={offerWorkspace}&c=general",
     "setup": [
       {
         "media": "(width <= 52rem)",

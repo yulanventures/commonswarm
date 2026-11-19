@@ -255,9 +255,9 @@ live-dashboard.dashboard[data-kylon-shell] :is(.cs-waiting-card__retry, .cs-wait
   min-inline-size: 44px;
   min-block-size: 44px;
   padding: 0 14px;
-  border: 1px solid var(--k-shell-line);
+  border: 1px solid color-mix(in srgb, var(--k-shell-control) 45%, var(--k-shell-line));
   border-radius: 6px;
-  background: var(--k-shell-surface);
+  background: var(--k-shell-subtle);
   color: var(--k-shell-ink);
   font: 500 13px/1.3 var(--k-shell-font);
   text-decoration: none;
