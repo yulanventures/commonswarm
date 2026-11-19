@@ -146,6 +146,10 @@ async function createAgent(owner: Person, name: string, ws: string = workspace):
   const hash = createHash("sha256").update(rawToken).digest();
   await sql.begin(async (tx) => {
     await tx`
+      INSERT INTO swarm.devices (device_id, user_id, label)
+      VALUES (${deviceId}::uuid, ${owner.id}::uuid, ${name})
+    `;
+    await tx`
       INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
       VALUES (${principalId}::uuid, ${ws}::uuid, ${owner.id}::uuid, ${`${name}-${principalId.slice(0, 6)}`})
     `;
