@@ -30,15 +30,6 @@ struct ConversationMembersView: View {
         labels[choice.id].map { choice.name + " · " + $0 } ?? choice.name
     }
 
-    private func memberLabel(_ choice: MemberChoice) -> some View {
-        Label {
-            VStack(alignment: .leading) {
-                Text(choice.name)
-                if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
-            }
-        } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
-    }
-
     private var retryTitle: String {
         guard let change = edit.pending else { return "Retry" }
         let refs: [MemberRef]
@@ -73,7 +64,7 @@ struct ConversationMembersView: View {
                             error = nil
                         } label: {
                             HStack {
-                                memberLabel(member)
+                                MemberChoiceLabel(choice: member, detail: labels[member.id])
                                 Spacer()
                                 if picked { Image(systemName: "checkmark") }
                             }.frame(minHeight: 44).contentShape(Rectangle())
@@ -83,7 +74,7 @@ struct ConversationMembersView: View {
                     if row.kind == .general && members.isEmpty { Text("Everyone in this workspace") }
                     ForEach(members) { member in
                         HStack {
-                            memberLabel(member)
+                            MemberChoiceLabel(choice: member, detail: labels[member.id])
                             Spacer()
                             if access.remove && member.id != MemberRef(kind: .user, id: api.session.userID) {
                                 Button { edit.retire(); error = nil; removing = member } label: { Text("Remove").frame(minHeight: 44).contentShape(Rectangle()) }
