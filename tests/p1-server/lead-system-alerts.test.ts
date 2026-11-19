@@ -1167,10 +1167,10 @@ test("Condition 5 & Delivery: pinned roles, unclaimed vs serving hosted replacem
   const mcpUrl = new URL("../../supabase/functions/mcp/index.ts", import.meta.url).href;
   const mcpHarness = join(envDir!, "mcp-refusal-harness.ts");
   writeFileSync(mcpHarness, `
-    import { executeTool } from ${JSON.stringify(mcpUrl)};
+    import { executeHostedTool } from ${JSON.stringify(mcpUrl)};
     const input = JSON.parse(await new Response(Deno.stdin.readable).text());
     try {
-      await executeTool({
+      await executeHostedTool({
         name: "whoami",
         arguments: { seat: input.handle },
         token: {

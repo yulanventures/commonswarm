@@ -242,7 +242,7 @@ async function seatCapability(
   }) as unknown as HostedSeatCapability | null;
 }
 
-export async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
+async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
   try {
     return await executeToolCall(call);
   } catch (error) {
@@ -748,5 +748,7 @@ export async function handleRequest(request: Request): Promise<Response> {
   }
   return response;
 }
+
+export { executeTool as executeHostedTool };
 
 if (import.meta.main) Deno.serve(handleRequest);
