@@ -1580,6 +1580,7 @@ import "../../styles/kylon-image-viewer.css";
     channelUnread,
     ConversationsUnsupportedError,
     ConversationUnavailableError,
+    SendRetiredError,
     SessionIdentityMismatch,
     listConversations,
     OversightAuthRefusedError,
@@ -2107,6 +2108,8 @@ import "../../styles/kylon-image-viewer.css";
     let conversationSessionEpoch = 0;
     /** Conversations evicted in this session (`${workspaceId}:${conversationId}`) so held sends cannot restore them. */
     const evictedConversationIds = new Set<string>();
+    /** Sticky Step 2b capability per (`${userId}:${workspaceId}`): once confirmed, never downgrade to legacy. */
+    const modernConversationsConfirmed = new Set<string>();
     /** Reading-position anchor captured before Retry/Load older so the visible message never shifts pixels. */
     let pendingLoadOlderAnchor: { signalId: string; topInScroller: number } | null = null;
     /** A `?dm=<id>` that returned 404 conversation_not_found or lost access (uniform unavailable state). */
@@ -8297,9 +8300,12 @@ import "../../styles/kylon-image-viewer.css";
         teardownAgentOversight();
       }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
-      /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
+      /* Any navigation leaves a Direct Message; flush outgoing draft BEFORE clearing DM scope so popstate/Back never bleeds drafts. */
+      const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
+      if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -8334,9 +8340,13 @@ import "../../styles/kylon-image-viewer.css";
         else await openWorkspace(route.workspaceId);
       } else if (route.view === "chat") {
         applyChannelFromUrl(route.workspaceId);
+        if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
+        if (typeof syncComposerAddress === "function") syncComposerAddress();
         if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
         syncChannelUrl();
         if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
+      } else {
+        if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
       }
       if (navigation !== homeNavigation) return;
       /* Back from New workspace to the workspace still open behind it reopens nothing, so the panel turns here. */
@@ -13309,20 +13319,6 @@ import "../../styles/kylon-image-viewer.css";
           }
         }
         const pinnedSessionEpoch = conversationSessionEpoch;
-        if (workspaceId !== activeWorkspaceId || (session?.user.id ?? "") !== pinnedUserId) return;
-        let result;
-        try {
-          result = await readConversationHistory(workspaceId, convId, {
-            ...(beforeCursor ? { before: beforeCursor } : {}),
-            limit: 50,
-            includeMentions: true,
-            includeReactions: true,
-            expectedUserId: pinnedUserId,
-          });
-        } catch (error) {
-          if (error instanceof SessionIdentityMismatch) return;
-          throw error;
-        }
         const stillMatches = () => {
           if (
             pinnedSessionEpoch !== conversationSessionEpoch ||
@@ -13335,7 +13331,23 @@ import "../../styles/kylon-image-viewer.css";
           const nowTarget = activeConversationHistoryTarget();
           return nowTarget.mode === "conversation" && nowTarget.conversationId === convId;
         };
-        if ((reset && histGen !== conversationHistoryGeneration) || !stillMatches()) return;
+        const readStillAlive = () => (!reset || histGen === conversationHistoryGeneration) && stillMatches();
+        if (!readStillAlive()) return;
+        let result;
+        try {
+          result = await readConversationHistory(workspaceId, convId, {
+            ...(beforeCursor ? { before: beforeCursor } : {}),
+            limit: 50,
+            includeMentions: true,
+            includeReactions: true,
+            expectedUserId: pinnedUserId,
+            isAlive: readStillAlive,
+          });
+        } catch (error) {
+          if (error instanceof SessionIdentityMismatch) return;
+          throw error;
+        }
+        if (!readStillAlive()) return;
         const liveState = conversationHistory && conversationHistory.conversationId === convId
           ? conversationHistory
           : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
@@ -13478,7 +13490,19 @@ import "../../styles/kylon-image-viewer.css";
             conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
             ? conversationHistory.nextAfter
             : null;
-          if (workspaceId !== activeWorkspaceId || (session?.user.id ?? "") !== pinnedUserId) return;
+          const refreshStillAlive = () => {
+            const nowTarget = activeConversationHistoryTarget();
+            return (
+              pinnedSessionEpoch === conversationSessionEpoch &&
+              histGen === conversationHistoryGeneration &&
+              version === requestVersion &&
+              workspaceId === activeWorkspaceId &&
+              (session?.user.id ?? "") === pinnedUserId &&
+              nowTarget.mode === "conversation" &&
+              nowTarget.conversationId === convId
+            );
+          };
+          if (!refreshStillAlive()) return;
           let result;
           try {
             result = await readConversationHistory(workspaceId, convId, {
@@ -13487,21 +13511,13 @@ import "../../styles/kylon-image-viewer.css";
               includeMentions: true,
               includeReactions: true,
               expectedUserId: pinnedUserId,
+              isAlive: refreshStillAlive,
             });
           } catch (error) {
             if (error instanceof SessionIdentityMismatch) return;
             throw error;
           }
-          const nowTarget = activeConversationHistoryTarget();
-          if (
-            pinnedSessionEpoch !== conversationSessionEpoch ||
-            histGen !== conversationHistoryGeneration ||
-            version !== requestVersion ||
-            workspaceId !== activeWorkspaceId ||
-            (session?.user.id ?? "") !== pinnedUserId ||
-            nowTarget.mode !== "conversation" ||
-            nowTarget.conversationId !== convId
-          ) return;
+          if (!refreshStillAlive()) return;
           const liveState = conversationHistory && conversationHistory.conversationId === convId &&
             conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
             ? conversationHistory
@@ -16069,6 +16085,7 @@ import "../../styles/kylon-image-viewer.css";
       workspaceConversations = rows;
       conversationsReadState = "ready";
       conversationsReadError = "";
+      if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
       // Reconcile authoritative omission even while the active conversation's first history page is still loading.
       const requestedDmId = activeDmConversationId ??
         (conversationHistory && conversationHistory.conversation?.kind && isDirectKind(conversationHistory.conversation.kind)
@@ -17671,26 +17688,31 @@ import "../../styles/kylon-image-viewer.css";
         conversationsReadState = "pending";
         if (render) renderChannelBlocked();
       }
+      const listStillAlive = (): boolean =>
+        generation === conversationsGeneration &&
+        workspaceId === activeWorkspaceId &&
+        (session?.user.id ?? "") === pinnedUserId;
       let rows: ConversationSummary[];
       try {
-        rows = await listConversations(workspaceId, true, pinnedUserId);
+        rows = await listConversations(workspaceId, true, pinnedUserId, listStillAlive);
       } catch (error) {
         if (error instanceof SessionIdentityMismatch) return;
-        if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId || (session?.user.id ?? "") !== pinnedUserId) return;
-        if (error instanceof ConversationsUnsupportedError) {
+        if (!listStillAlive()) return;
+        const confirmedModern = modernConversationsConfirmed.has(`${pinnedUserId}:${workspaceId}`);
+        if (error instanceof ConversationsUnsupportedError && !confirmedModern) {
           conversationsReadState = "unsupported";
           conversationsReadError = "";
           if (render) renderChannelBlocked();
           return;
         }
-        if (workspaceConversations === null && conversationsReadState !== "unsupported") {
-          conversationsReadState = "failed";
+        if ((workspaceConversations === null && conversationsReadState !== "unsupported") || confirmedModern) {
+          conversationsReadState = workspaceConversations === null ? "failed" : conversationsReadState;
           conversationsReadError = readableError(error) || "Couldn't check channel membership.";
           if (render) renderChannelBlocked();
         }
         return;
       }
-      if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId || (session?.user.id ?? "") !== pinnedUserId) return;
+      if (!listStillAlive()) return;
       commitWorkspaceConversations(workspaceId, pinnedUserId, rows, render);
     };
 
@@ -20708,10 +20730,11 @@ import "../../styles/kylon-image-viewer.css";
       /* THIS SEND NOW OWNS THE FLAG, and its own settle is the only thing that may lower it.
          See `composerSendToken` where it is declared for what went wrong when the screen's
          generation was asked that question instead. */
-      const sendUserId = session?.user.id ?? "";
+      const sendSession = session;
+      const sendUserId = sendSession?.user.id ?? "";
+      const sendSessionEpoch = typeof conversationSessionEpoch !== "undefined" ? conversationSessionEpoch : 0;
       const sendToken = ++composerSendToken;
       // C1: Capture initiating session & login/workspace/viewGen pin SYNCHRONOUSLY at Send!
-      const sendSession = session;
       const sendMulti = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
       const sendPinned = sendMulti && sendSession
         ? pinAccountContext({ userId: sendSession.user.id, workspaceId })
@@ -20722,11 +20745,19 @@ import "../../styles/kylon-image-viewer.css";
         setComposerStatus("Your active account or workspace changed. Confirm again before sending.", "error");
         return;
       }
-      const sendStillAuthorized = (): boolean =>
+      const sendStillAuthorized = (requireSameScope = false): boolean =>
         composerSendToken === sendToken &&
         workspaceId === activeWorkspaceId &&
         (sampleMode || (session?.user.id ?? "") === sendUserId) &&
-        (placementConversationId === null || !evictedConversationIds.has(`${workspaceId}:${placementConversationId}`));
+        (!requireSameScope || (typeof conversationSessionEpoch === "undefined" || sendSessionEpoch === conversationSessionEpoch)) &&
+        (placementConversationId === null || !evictedConversationIds.has(`${workspaceId}:${placementConversationId}`)) &&
+        (sampleMode || isStep2bDmPost || typeof channelMembershipSendRefusal !== "function" ||
+          channelMembershipSendRefusal({
+            channelId: placementChannelId,
+            generalId: GENERAL_CHANNEL_ID,
+            conversations: typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+            conversationsReadState: typeof conversationsReadState !== "undefined" ? conversationsReadState : "unsupported",
+          }) === null);
       setComposerSending(true);
       visualMentions.set(pendingId, rowMentions);
       /* The pending row draws its mentions at once, from what this send is about to store. */
@@ -20757,8 +20788,9 @@ import "../../styles/kylon-image-viewer.css";
           if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
             throw new AuthRecoveryRequired();
           }
-          if (!sendStillAuthorized()) {
-            throw new ConversationUnavailableError(CONVERSATION_UNAVAILABLE_TEXT);
+          const uploadStillAlive = () => sendStillAuthorized(true);
+          if (!sendSession || !sendStillAuthorized(attachmentSnapshot.length > 0)) {
+            throw new SendRetiredError();
           }
           if (attachmentSnapshot.length > 0 && (isStep2bDmPost ||
             (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
@@ -20777,18 +20809,21 @@ import "../../styles/kylon-image-viewer.css";
               if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
                 throw new AuthRecoveryRequired();
               }
+              if (!uploadStillAlive()) {
+                throw new SendRetiredError();
+              }
               setComposerStatus(
                 `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
                 "posting",
               );
-              return uploadBrowserAttachment(sendSession!, workspaceId, attachment.intent, sendPinned);
+              return uploadBrowserAttachment(sendSession, workspaceId, attachment.intent, sendPinned, { isAlive: uploadStillAlive });
             },
           }));
           if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
             throw new AuthRecoveryRequired();
           }
-          if (!sendStillAuthorized()) {
-            throw new ConversationUnavailableError(CONVERSATION_UNAVAILABLE_TEXT);
+          if (!sendStillAuthorized(attachmentSnapshot.length > 0)) {
+            throw new SendRetiredError();
           }
         }
         setComposerStatus("Posting message…", "posting");
@@ -20820,6 +20855,7 @@ import "../../styles/kylon-image-viewer.css";
               attachmentRefs,
               placement,
               sendPinned,
+              { isAlive: () => sendStillAuthorized(attachmentSnapshot.length > 0) },
             );
         /* THE SEND'S OWN STORAGE IS FINISHED FIRST, before the guard below, because it is not
            about the screen. The guard exists so a send that outlived its workspace cannot
@@ -20970,6 +21006,17 @@ import "../../styles/kylon-image-viewer.css";
         const sameLogin = sampleMode || (session?.user.id ?? "") === sendUserId;
         const boxIsStillThisSends =
           composerSendToken === sendToken && workspaceId === activeWorkspaceId && sameLogin && !wasEvicted;
+        if (!landed && caught instanceof SendRetiredError) {
+          if (wasEvicted && sendDraftKey) clearComposerDraft(sendDraftKey);
+          signals = signals.filter((signal) => signal.id !== pendingId);
+          visualMentions.delete(pendingId);
+          signalMentionRows.delete(pendingId);
+          deliveryReceiptCache.delete(pendingId);
+          for (const attachment of attachmentSnapshot) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          return;
+        }
         if (!boxIsStillThisSends) {
           if (wasEvicted && sendDraftKey) clearComposerDraft(sendDraftKey);
           signals = signals.filter((signal) => signal.id !== pendingId);

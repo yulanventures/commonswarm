@@ -2554,6 +2554,7 @@ export async function uploadBrowserAttachment(
   workspaceId: string,
   intent: BrowserAttachmentUploadIntent,
   pinned?: PinnedAccountContext | null,
+  options?: { isAlive?: () => boolean },
 ): Promise<BrowserSignalAttachmentRef> {
   const assertPinned = (): void => {
     if (pinned && !pinned.isCurrent(workspaceId)) {
@@ -2562,6 +2563,11 @@ export async function uploadBrowserAttachment(
   };
   assertPinned();
   if (intent.committed) return intent.committed;
+  const isAlive = options?.isAlive;
+  const assertAlive = (): void => {
+    if (isAlive && !isAlive()) throw new SendRetiredError();
+  };
+  assertAlive();
   if (!intent.created) {
     const created = await postCommand(
       session,
@@ -2577,8 +2583,13 @@ export async function uploadBrowserAttachment(
       { workspace_id: workspaceId, stream: { kind: "workspace" } },
       `CommonSwarm lost the upload-slot result for ${intent.name}. Retry this message to check the same request.`,
       pinned,
+      isAlive ? { isAlive } : undefined,
     );
     assertPinned();
+    assertAlive();
+    if (created.status === 0 && created.body.error === "operation_retired") {
+      throw new SendRetiredError();
+    }
     if (created.status !== 200 || created.body.status !== "accepted") {
       throw browserFileRefusal(created.status, created.body, `CommonSwarm did not start ${intent.name}.`);
     }
@@ -2599,6 +2610,7 @@ export async function uploadBrowserAttachment(
   assertPinned();
   const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
+  assertAlive();
   if (!intent.uploaded) {
     let putResponse: Response;
     try {
@@ -2618,8 +2630,10 @@ export async function uploadBrowserAttachment(
   }
 
   assertPinned();
+  assertAlive();
   const sha256 = await browserSha256(intent.file);
   assertPinned();
+  assertAlive();
   const committed = await postCommand(
     session,
     intent.commitCommandId,
@@ -2632,8 +2646,13 @@ export async function uploadBrowserAttachment(
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     `CommonSwarm lost the commit result for ${intent.name}. Retry this message to check the same request.`,
     pinned,
+    isAlive ? { isAlive } : undefined,
   );
   assertPinned();
+  assertAlive();
+  if (committed.status === 0 && committed.body.error === "operation_retired") {
+    throw new SendRetiredError();
+  }
   if (committed.status !== 200 || committed.body.status !== "accepted") {
     throw browserFileRefusal(committed.status, committed.body, `CommonSwarm did not commit ${intent.name}.`);
   }
@@ -3681,6 +3700,13 @@ export class ConversationUnavailableError extends Error {
   }
 }
 
+export class SendRetiredError extends Error {
+  constructor() {
+    super("Message send retired after destination or session change.");
+    this.name = "SendRetiredError";
+  }
+}
+
 /** Posts ONE browser-authored signal to the whole To: set, or to the workspace when it is empty. */
 export async function postBrowserSignal(
   session: Session,
@@ -3692,6 +3718,7 @@ export async function postBrowserSignal(
   attachments: readonly BrowserSignalAttachmentRef[] = [],
   placement: BrowserSignalPlacement = {},
   pinned?: PinnedAccountContext | null,
+  options?: { isAlive?: () => boolean },
 ): Promise<Signal> {
   if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   const { status, body } = await postCommand(
@@ -3701,8 +3728,12 @@ export async function postBrowserSignal(
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the signal result. Refresh the feed before posting it again.",
     pinned,
+    options?.isAlive ? { isAlive: options.isAlive } : undefined,
   );
   if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
+  if (status === 0 && body.error === "operation_retired") {
+    throw new SendRetiredError();
+  }
   if (status !== 200 || body.status !== "accepted") {
     if (status === 404 && body.error === "conversation_not_found") {
       throw new ConversationUnavailableError(
@@ -5336,17 +5367,18 @@ export async function listConversations(
   workspaceId: string,
   includeArchived = false,
   expectedUserId?: string,
+  isAlive?: () => boolean,
 ): Promise<ConversationSummary[]> {
   const request = buildListConversationsRequest(workspaceId, includeArchived);
   let result: { status: number; body: Record<string, unknown> };
   try {
-    result = await postConversationRead(request, "conversations", expectedUserId);
+    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
   } catch (error) {
     // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
     // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
-    // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
+    // re-entering postConversationRead so currentSession(), isAlive(), and requestDeadline() are rechecked fresh.
     if (!(error instanceof TypeError)) throw error;
-    result = await postConversationRead(request, "conversations", expectedUserId);
+    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
   }
   const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
@@ -5358,13 +5390,14 @@ export async function listConversations(
 export async function readConversationHistory(
   workspaceId: string,
   conversationId: string,
-  options: ConversationHistoryOptions & { expectedUserId?: string } = {},
+  options: ConversationHistoryOptions & { expectedUserId?: string; isAlive?: () => boolean } = {},
 ): Promise<ConversationHistoryResult<Signal>> {
-  const { expectedUserId, ...reqOptions } = options;
+  const { expectedUserId, isAlive, ...reqOptions } = options;
   const { status, body } = await postConversationRead(
     buildConversationHistoryRequest(workspaceId, conversationId, reqOptions),
     "conversation history",
     expectedUserId,
+    isAlive,
   );
   return parseConversationHistoryResponse(status, body, browserSignalFromRow);
 }

@@ -731,16 +731,16 @@ export type ConversationsListOutcome =
 
 const UNSUPPORTED_CONVERSATIONS_READ_ERRORS = new Set([
   "invalid_request",
+  "unknown_resource",
   "invalid_resource",
   "unsupported_resource",
-  "not_found",
 ]);
 
 /**
  * Classifies a `POST /functions/v1/read` (`resource: "conversations"`) response.
  * Only an explicit pre-Step-2b not-supported refusal selects `"unsupported"`.
- * An empty 200, malformed 200 (missing `conversations` array), or any transient/unexpected error
- * returns `"failed"` so the UI shows Retry and never exposes the legacy composer.
+ * A bare 404, generic `not_found`, empty/malformed 200, or any transient/unexpected error
+ * returns `"failed"` so the UI shows Retry (fail-closed, read-only) and never downgrades to legacy.
  */
 export function parseConversationsListOutcome(
   status: number,
@@ -757,7 +757,7 @@ export function parseConversationsListOutcome(
     return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
   }
   const code = typeof body.error === "string" ? body.error : "";
-  if (status === 404 || (status === 400 && UNSUPPORTED_CONVERSATIONS_READ_ERRORS.has(code))) {
+  if ((status === 400 || status === 404) && UNSUPPORTED_CONVERSATIONS_READ_ERRORS.has(code)) {
     return { status: "unsupported", message: errorSentence(body, `Conversations read unavailable (HTTP ${status}).`) };
   }
   return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };

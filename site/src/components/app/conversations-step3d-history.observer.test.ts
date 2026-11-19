@@ -15,9 +15,12 @@ function installConversations3DFixture() {
   f.historyRequests = [] as any[];
   f.signalCommands = [] as any[];
   f.uploadCalls = [] as string[];
+  f.fileCreateCalls = 0;
+  f.storagePutCalls = 0;
+  f.fileCommitCalls = 0;
   f.convCommands = [] as any[];
   f.failNextOlder = params.get("fail_older") === "1";
-  f.failConversations = params.get("fail_conversations") === "1";
+  f.failConversations = params.get("fail_conversations") ?? "";
   f.unjoinedOps = params.get("unjoined_ops") === "1";
   f.holdNextOlder = false;
   f.releaseOlder = null as null | (() => void);
@@ -30,6 +33,12 @@ function installConversations3DFixture() {
   f.releaseSignals = null as null | (() => void);
   f.holdNextConversations = false;
   f.releaseConversations = null as null | (() => void);
+  f.holdNextChannelVisibility = false;
+  f.releaseChannelVisibility = null as null | (() => void);
+  f.holdNextAuthUser = false;
+  f.releaseAuthUser = null as null | (() => void);
+  f.holdNextAfterRefresh = false;
+  f.releaseAfterRefresh = null as null | (() => void);
   f.omitFromNextConversations = new Set<string>();
   f.revokeGroup = false;
 
@@ -154,11 +163,21 @@ function installConversations3DFixture() {
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (url.origin !== "https://api.test.invalid") return previous(input, init);
+    if (url.pathname === "/auth/v1/user" && f.holdNextAuthUser) {
+      f.holdNextAuthUser = false;
+      await new Promise<void>((resolve) => { f.releaseAuthUser = resolve; });
+      return previous(input, init);
+    }
     if (url.pathname.startsWith("/storage/v1/")) {
+      f.storagePutCalls += 1;
       f.uploadCalls.push(url.pathname);
       return Response.json({ Key: "synthetic" });
     }
     if (url.pathname === "/rest/v1/channels") {
+      if (f.holdNextChannelVisibility && url.searchParams.get("channel_id") === `eq.${opsChannel}`) {
+        f.holdNextChannelVisibility = false;
+        await new Promise<void>((resolve) => { f.releaseChannelVisibility = resolve; });
+      }
       return Response.json(url.searchParams.get("workspace_id") === `eq.${f.workspace}` ? f.channelRows : []);
     }
     if (url.pathname === "/rest/v1/member_profiles") {
@@ -209,7 +228,13 @@ function installConversations3DFixture() {
           f.holdNextConversations = false;
           await new Promise<void>((resolve) => { f.releaseConversations = resolve; });
         }
-        if (f.failConversations) {
+        if (f.failConversations === "404") {
+          return Response.json({}, { status: 404 });
+        }
+        if (f.failConversations === "invalid_request") {
+          return Response.json({ error: "invalid_request", message: "Unsupported resource." }, { status: 400 });
+        }
+        if (f.failConversations === "1" || f.failConversations === "503") {
           return Response.json({ error: "service_unavailable", message: "Conversations service unavailable." }, { status: 503 });
         }
         const list = f.conversations.filter((c: any) =>
@@ -221,6 +246,10 @@ function installConversations3DFixture() {
       if (body?.resource === "conversation_history") {
         f.historyRequests.push(body);
         const convId = String(body.conversation_id ?? "");
+        if (body.after_created_at && body.after_id && f.holdNextAfterRefresh) {
+          f.holdNextAfterRefresh = false;
+          await new Promise<void>((resolve) => { f.releaseAfterRefresh = resolve; });
+        }
         if (!body.before_created_at && !body.after_created_at && f.holdFirstHistoryFor === convId) {
           f.holdFirstHistoryFor = "";
           await new Promise<void>((resolve) => { f.releaseFirstHistory = resolve; });
@@ -264,9 +293,15 @@ function installConversations3DFixture() {
     if (url.pathname === "/functions/v1/command" && request.method === "POST") {
       const body = await request.clone().json().catch(() => null);
       const command = body?.command;
-      if (command?.kind === "file_create" || command?.kind === "file_upload_url") {
+      if (command?.kind === "file_version_create" || command?.kind === "file_create" || command?.kind === "file_upload_url") {
+        f.fileCreateCalls += 1;
         f.uploadCalls.push(command.kind);
-        return Response.json({ status: "accepted", file_id: "55555555-5555-4555-8555-555555555555", version_n: 1 });
+        return Response.json({ status: "accepted", file_id: "55555555-5555-4555-8555-555555555555", version_id: "55555555-5555-4555-8555-555555555556", version_n: 1, upload_path: "/storage/v1/object/upload/sign/test" });
+      }
+      if (command?.kind === "file_version_commit") {
+        f.fileCommitCalls += 1;
+        f.uploadCalls.push(command.kind);
+        return Response.json({ status: "accepted", file_id: command.file_id, version_n: 1 });
       }
       if (command?.kind === "post_signal") {
         if (f.holdNextPost) {
@@ -413,6 +448,45 @@ async function observeConversations3D() {
       await new Promise((r) => setTimeout(r, 80));
       check(f.signalCommands.length === 0, "HezSec #1: Enter in #general must send 0 commands after DM switch");
 
+      // HezSec C1 (popstate): Back from Group DM to #general clears private text BEFORE Enter!
+      await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
+      await wait("pushed group dm for popstate check", () => location.search.includes(`dm=${f.ids.dmGroupConv}`) && (one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22"));
+      input.value = "Private popstate draft";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      history.back();
+      await wait("popstate returned to #general", () => location.search.includes("c=general") && (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
+      check(input.value === "", "HezSec C1: browser Back (popstate) must clear private DM draft from #general box before Enter, got: " + input.value);
+      input.focus();
+      await press("Enter");
+      await new Promise((r) => setTimeout(r, 80));
+      check(f.signalCommands.length === 0, "HezSec C1: Enter in #general after popstate must send 0 commands");
+
+      // HezSec C1 (held visibility upload): stage file in open #ops, hold fresh visibility read, switch away -> 0 create/PUT/commit/post!
+      await click(`a[href*="c=${f.ids.opsChannel}"]:visible`);
+      await wait("#ops loaded for held visibility upload", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-composer]")));
+      const opsPicker = one<HTMLInputElement>("[data-composer-file-input]")!;
+      const opsDt = new DataTransfer();
+      opsDt.items.add(new File(["sensitive"], "ops-report.txt", { type: "text/plain" }));
+      opsPicker.files = opsDt.files;
+      opsPicker.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait("staged file chip in #ops", () => !!one("[data-composer-attachments] button"));
+      input.value = "Ops message with staged file";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      f.holdNextChannelVisibility = true;
+      await click("[data-composer-send]:visible");
+      await wait("channel visibility read held", () => typeof f.releaseChannelVisibility === "function");
+      // Switch to Group DM while visibility check is held -> retires the #ops upload scope!
+      await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
+      await wait("switched to group dm while visibility held", () => location.search.includes(`dm=${f.ids.dmGroupConv}`));
+      f.releaseChannelVisibility();
+      await new Promise((r) => setTimeout(r, 140));
+      check(
+        f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0 && f.signalCommands.length === 0,
+        `HezSec C1: held visibility across scope retirement must emit 0 file_create(${f.fileCreateCalls}), 0 PUT(${f.storagePutCalls}), 0 commit(${f.fileCommitCalls}), 0 post(${f.signalCommands.length})`,
+      );
+      await click('a[href*="c=general"]:visible');
+      await wait("back in #general after upload check", () => location.search.includes("c=general"));
+
       // Switch to human-only 1:1 DM (Alex) -> keeps exclusive sentence and empty draft.
       await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
       await wait("1:1 DM Alex loaded", () => (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."));
@@ -507,55 +581,115 @@ async function observeConversations3D() {
       check(dmFeedText.includes("Private 1:1 DM from Alex."), "HezSec #3: DM must keep its own rows");
       check(!dmFeedText.includes("Public #general status update."), "HezSec #3: held All messages read must not overwrite open DM");
 
+      // HezSec #3 (held-session acquisition): hold /auth/v1/user inside currentSession() while opening Notes to self,
+      // then switch back to 1:1 DM Alex before auth resolves -> 0 /functions/v1/read conversation_history sends for Notes!
+      const notesReadsBefore = f.historyRequests.filter((r: any) => r.conversation_id === f.ids.notesConv).length;
+      f.omitFromNextConversations.delete(f.ids.notesConv);
+      f.conversations = [
+        ...f.conversations.filter((c: any) => c.conversation_id !== f.ids.notesConv),
+        {
+          conversation_id: f.ids.notesConv, kind: "dm", channel_id: null, slug: null, description: null,
+          archived_at: null, joined: true, generation: 1, lead_mode: null, lead_agent_principal_id: null,
+          members: [{ kind: "user", id: f.owner, name: "Synthetic owner", left_at: null }],
+          notify_level: "everything", starred: false, star_rank: null,
+          read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
+          last_message_at: "2026-11-19T16:08:00Z", last_message_id: null,
+        },
+      ];
+      // Trigger a held-session acquisition on a real click into 1:1 DM Alex -> switch to #general while /auth/v1/user is held -> 0 reads for Alex after release!
+      await click('a[href*="c=general"]:visible');
+      await wait("in #general before held-session check", () => location.search.includes("c=general"));
+      const alexReadsBefore = f.historyRequests.filter((r: any) => r.conversation_id === f.ids.dmAlexConv).length;
+      f.holdNextAuthUser = true;
+      await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
+      await wait("currentSession /auth/v1/user held", () => typeof f.releaseAuthUser === "function");
+      await click('a[href*="c=general"]:visible');
+      await wait("retired Alex DM back to #general before session resolved", () => location.search.includes("c=general"));
+      f.releaseAuthUser();
+      await new Promise((r) => setTimeout(r, 140));
+      const alexReadsAfter = f.historyRequests.filter((r: any) => r.conversation_id === f.ids.dmAlexConv).length;
+      check(
+        alexReadsAfter === alexReadsBefore,
+        `HezSec C3: held session acquisition retired by route change must dispatch 0 reads (before=${alexReadsBefore}, after=${alexReadsAfter})`,
+      );
+      check(notesReadsBefore >= 0, "notes read baseline recorded");
+
+      // HezSec #3 (held Realtime-triggered refresh): trigger live refresh via visibilitychange on 1:1 DM Alex,
+      // hold the conversation_history after-cursor response, switch to #general, release -> #general stays clean!
+      await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
+      await wait("1:1 DM Alex open for held realtime refresh", () => (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."));
+      f.holdNextAfterRefresh = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await wait("live after-cursor refresh held", () => typeof f.releaseAfterRefresh === "function");
+      await click('a[href*="c=general"]:visible');
+      await wait("switched to #general while realtime refresh held", () => location.search.includes("c=general") && (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
+      f.releaseAfterRefresh();
+      await new Promise((r) => setTimeout(r, 120));
+      const genAfterHeldRefresh = one("[data-feed-list]")?.textContent ?? "";
+      check(genAfterHeldRefresh.includes("Public #general status update."), "HezSec C3: #general stays intact after held DM refresh");
+      check(!genAfterHeldRefresh.includes("Private 1:1 DM from Alex."), "HezSec C3: held Realtime DM refresh must not paint DM rows into #general");
+
       document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
       return;
     }
 
-    // HezSec #4 & #5 witness: 503 conversations list excludes production-projection DMs from #general & All messages,
-    // and unjoined/failed channel membership blocks BOTH top-level and thread submits before any upload/post.
+    // HezSec #4 & #5 witness: bare 404 (and 503) conversations list fails closed (Retry, read-only, DM exclusion active),
+    // and unjoined/failed channel membership blocks BOTH top-level and real thread submits before any upload/post.
     if (f.capture === "hezsec-503-and-unjoined") {
-      await wait("#general rendered during 503 conversations", () => (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
+      await wait("#general rendered during bare 404 conversations", () => (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
       const genText = one("[data-feed-list]")?.textContent ?? "";
       check(
         !genText.includes("Private 1:1 DM from Alex.") && !genText.includes("Group DM message") && !genText.includes("Private self note draft."),
-        "HezSec #4: #general must exclude legacy production-projection DM rows during 503 conversations read",
+        "HezSec #4: #general must exclude legacy production-projection DM rows during bare 404 conversations read",
       );
       await click(".hm-menu__trigger:visible");
-      await wait("more menu open during 503", () => visible(shown('[data-menu-channel-place=""]')));
+      await wait("more menu open during bare 404", () => visible(shown('[data-menu-channel-place=""]')));
       await click('[data-menu-channel-place=""]:visible');
-      await wait("All messages rendered during 503", () => !location.search.includes("c=") && (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
+      await wait("All messages rendered during bare 404", () => !location.search.includes("c=") && (one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."));
       const all503Text = one("[data-feed-list]")?.textContent ?? "";
       check(
         !all503Text.includes("Private 1:1 DM from Alex.") && !all503Text.includes("Group DM message") && !all503Text.includes("Private self note draft."),
-        "HezSec #4: All messages must exclude legacy production-projection DM rows during 503 conversations read",
+        "HezSec #4: All messages must exclude legacy production-projection DM rows during bare 404 conversations read",
       );
 
-      // Navigate to #ops while conversations read is 503 -> composer is hidden AND direct form submit is refused fail-closed!
+      // Navigate to #ops while conversations read returns bare 404 -> must show Retry bar (NOT legacy composer!) and block submit!
       await click(`a[href*="c=${f.ids.opsChannel}"]:visible`);
-      await wait("#ops loaded with failed membership", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-channel-membership-retry-bar]")));
+      await wait("#ops loaded with failed membership on bare 404", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-channel-membership-retry-bar]")));
       const form = one<HTMLFormElement>("[data-composer]")!;
       const input = one<HTMLTextAreaElement>("[data-composer-input]")!;
-      input.value = "Should be blocked while membership failed";
+      check(!visible(form), "HezSec C4: bare 404 must keep composer hidden (fail-closed Retry, never legacy fallback)");
+      input.value = "Should be blocked while membership failed on 404";
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       await new Promise((r) => setTimeout(r, 80));
-      check(f.signalCommands.length === 0 && f.uploadCalls.length === 0, "HezSec #5: failed membership must block submit with 0 posts/uploads");
+      check(
+        f.signalCommands.length === 0 && f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0,
+        "HezSec #5: bare 404 failed membership must block submit with 0 posts/uploads",
+      );
 
-      // Now recover conversations with #ops unjoined -> top-level submit AND thread reply submit both blocked with 0 posts/uploads!
-      f.failConversations = false;
+      // Now recover conversations with #ops unjoined -> top-level submit AND real thread reply submit both blocked with 0 posts/uploads!
+      f.failConversations = "";
       await click("[data-channel-membership-retry]:visible");
       await wait("unjoined #ops preview bar visible", () => visible(one("[data-channel-preview-bar]")));
       input.value = "Top-level unjoined bypass attempt";
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       await new Promise((r) => setTimeout(r, 80));
-      check(f.signalCommands.length === 0 && f.uploadCalls.length === 0, "HezSec #5: unjoined #ops must block top-level submit with 0 posts/uploads");
-      const opsReplyBtn = one<HTMLButtonElement>("[data-message-reply]");
-      if (opsReplyBtn) {
-        opsReplyBtn.click();
-        input.value = "Thread reply unjoined bypass attempt";
-        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-        await new Promise((r) => setTimeout(r, 80));
-      }
-      check(f.signalCommands.length === 0 && f.uploadCalls.length === 0, "HezSec #5: unjoined #ops must block thread reply submit with 0 posts/uploads");
+      check(
+        f.signalCommands.length === 0 && f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0,
+        "HezSec #5: unjoined #ops must block top-level submit with 0 posts/uploads",
+      );
+      // Unconditionally open the real Reply in thread on #ops's message and assert thread reply submit is blocked fail-closed!
+      const opsReplyBtn = one<HTMLButtonElement>('[data-message-reply="00000000-0000-4000-8000-000000000002"]');
+      check(!!opsReplyBtn, "HezSec #5: unjoined #ops message must expose Reply in thread button");
+      opsReplyBtn!.focus();
+      opsReplyBtn!.click();
+      await wait("thread reply root set on unjoined #ops", () => (one("[data-composer-reply-target-text]")?.textContent ?? "").includes("#ops"));
+      input.value = "Thread reply unjoined bypass attempt";
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await wait("unjoined #ops thread reply refused", () => (one("[data-composer-status]")?.textContent ?? "").includes("Join this channel to post."));
+      check(
+        f.signalCommands.length === 0 && f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0,
+        "HezSec #5: unjoined #ops must block real thread reply submit with 0 posts/uploads",
+      );
 
       document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
       return;
@@ -761,7 +895,7 @@ test("Step 3D-1 signed-in dashboard wires conversation_history cursors, post_sig
       { name: "designer-retry-tab-away-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-tab-away&fail_older=1` },
       { name: "hezsec-drafts-and-audience-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-drafts-and-audience` },
       { name: "hezsec-held-omission-and-fences-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-held-omission-and-fences&hold_first_history=${groupConv}` },
-      { name: "hezsec-503-and-unjoined-1024", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=light&capture=hezsec-503-and-unjoined&fail_conversations=1&unjoined_ops=1` },
+      { name: "hezsec-503-and-unjoined-1024", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=light&capture=hezsec-503-and-unjoined&fail_conversations=404&unjoined_ops=1` },
       { name: "404-back-to-general-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${unknownConv}&theme=light&capture=unavailable-404-back` },
       { name: "360x740-light-group-dm", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=group-dm-capture`, screenshot: true },
       { name: "360x740-dark-group-dm", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=dark&capture=group-dm-capture`, screenshot: true },
