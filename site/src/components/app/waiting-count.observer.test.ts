@@ -33,36 +33,34 @@ function installWaitingFixture() {
   // uncounted-one-*: the overview leaves the fifth workspace out; the ninth has its question.
   // uncounted-none-*: the overview leaves the fifth workspace out; nothing waits anywhere it did count.
   // batch-51-*: workspace 1 has 51 choice questions; 1..50 are in #other and #51 is alone in #general.
-  // truncated-queue-*: workspace 1 has 105 questions (truncated at 100), all 100 returned in #other.
+  // batch-101-*: workspace 1 has 101 choice questions; 1..100 are in #other and #101 is alone in #general (paged via decision_queue_page).
+  // truncated-queue-*: workspace 1 has 105 questions (truncated at 100), server lacks decision_queue_page, all 100 returned in #other.
   const batch51 = scenario.startsWith("batch-51");
+  const batch101 = scenario.startsWith("batch-101");
   const truncatedQueue = scenario.startsWith("truncated-queue");
+  const multiBatch = batch51 || batch101 || truncatedQueue;
   const ask51 = askIdAt(51);
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, question,
-    asked: !scenario.startsWith("uncounted-none") && !batch51 && !truncatedQueue,
+  const ask101 = askIdAt(101);
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
-    if (batch51) {
-      return Array.from({ length: 51 }, (_, i) => i + 1)
-        .filter(n => !f.answeredIds.includes(askIdAt(n)))
-        .map(n => ({
-          signal_id: askIdAt(n),
-          from: { kind: "agent" as const, id: agent, name: "Scout" },
-          body: n === 51 ? "Approve question fifty-one in general?" : "Other channel question " + n + "?",
-          created_at: recent, until, reraised: null,
-        }));
-    }
-    if (truncatedQueue) {
-      return Array.from({ length: 100 }, (_, i) => i + 1).map(n => ({
+    const count = batch51 ? 51 : batch101 ? 101 : truncatedQueue ? 100 : 0;
+    if (!count) return [];
+    const baseMs = Date.now() - 3600_000;
+    return Array.from({ length: count }, (_, i) => i + 1)
+      .filter(n => !f.answeredIds.includes(askIdAt(n)))
+      .map(n => ({
         signal_id: askIdAt(n),
         from: { kind: "agent" as const, id: agent, name: "Scout" },
-        body: "Queued question " + n + "?",
-        created_at: recent, until, reraised: null,
+        body: (batch51 && n === 51) ? "Approve question fifty-one in general?"
+          : (batch101 && n === 101) ? "Approve question one-hundred-and-one in general?"
+          : "Other channel question " + n + "?",
+        created_at: new Date(baseMs + n * 1000).toISOString(), until, reraised: null,
       }));
-    }
-    return [];
   };
   const number = (id: unknown) => ids.indexOf(String(id)) + 1;
   const network = window.fetch.bind(window);
@@ -76,8 +74,8 @@ function installWaitingFixture() {
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
-          const asks = id === ids[0] && (batch51 || truncatedQueue)
-            ? ws1Asks().map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: recent, until }))
+          const asks = id === ids[0] && multiBatch
+            ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
             : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           return {
             workspace_id: id, name: "Workspace " + number(id), role: "owner", last_seen_at: recent, new_messages: 0, content: null,
@@ -89,19 +87,33 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/decision_queue") {
       const id = body?.p_workspace_id; f.log.push("queue:" + number(id));
-      if (id === ids[0] && (batch51 || truncatedQueue)) {
+      if (id === ids[0] && multiBatch) {
         const asks = ws1Asks();
+        const total = truncatedQueue ? 105 : asks.length;
+        const page = asks.slice(0, 100);
         return Response.json({ workspace_id: id, generated_at: new Date().toISOString(),
-          total: truncatedQueue ? 105 : asks.length, truncated: truncatedQueue, asks });
+          total, truncated: truncatedQueue || asks.length > 100, asks: page });
       }
       return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: open(id) ? 1 : 0, truncated: false,
         asks: open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent, name: "Scout" }, body: question,
           created_at: recent, until, reraised: null }] : [] });
     }
+    if (url.pathname === "/rest/v1/rpc/decision_queue_page") {
+      const id = body?.p_workspace_id; f.log.push("queue_page:" + number(id));
+      if (id === ids[0] && batch101) {
+        const asks = ws1Asks();
+        const afterAt = body?.p_after_created_at;
+        const afterId = body?.p_after_id;
+        const rest = asks.filter(a => a.created_at > afterAt || (a.created_at === afterAt && a.signal_id > afterId));
+        return Response.json({ workspace_id: id, generated_at: new Date().toISOString(),
+          total: asks.length, truncated: rest.length > 100, asks: rest.slice(0, 100) });
+      }
+      return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
+    }
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
-      if (body?.p_workspace_id === ids[0] && (batch51 || truncatedQueue)) {
+      if (body?.p_workspace_id === ids[0] && multiBatch) {
         f.choiceBatchSizes.push(reqIds.length);
         return Response.json({ asks: reqIds.map(sigId => ({ signal_id: sigId, multi: false,
           options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
@@ -112,14 +124,14 @@ function installWaitingFixture() {
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
     }
-    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (batch51 || truncatedQueue)) {
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && multiBatch) {
       const idFilter = url.searchParams.get("id") ?? "";
       const match = idFilter.match(/^in\.\(([^)]+)\)$/);
       if (match) {
         const reqIds = match[1]!.split(",").map(s => s.trim()).filter(Boolean);
         return Response.json(reqIds.map(sigId => ({
           id: sigId,
-          channel_id: batch51 && sigId === ask51 ? null : otherChannel,
+          channel_id: (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
           to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
         })));
       }
@@ -134,7 +146,7 @@ function installWaitingFixture() {
       f.log.push("answer");
       return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id } });
     }
-    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (batch51 || truncatedQueue)) {
+    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && multiBatch) {
       return Response.json([{ channel_id: otherChannel, slug: "other", title: "Other", kind: "public", archived_at: null }]);
     }
     if (url.pathname === "/rest/v1/rpc/channel_unread") return Response.json({ workspace_id: body?.p_workspace_id ?? ids[0],
@@ -239,6 +251,26 @@ async function observeWaitingCount() {
       await wait(() => f.answers.length === 1 && !card51() && shown(panel()?.querySelector("[data-waiting-status]")) &&
         panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent", "answering question 51 removes card and shows Sent");
       await wait(() => count() === "50", "top bar updates from 51 to 50 after answering question 51");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("batch-101")) {
+      await wait(() => shown(control()) && count() === "99+" && f.log.includes("queue_page:1"), "top bar counts 99+ and decision_queue_page ran for page 2");
+      check(f.choiceBatchSizes.length >= 3 && f.choiceBatchSizes[0] === 50 && f.choiceBatchSizes[1] === 50 && f.choiceBatchSizes[2] === 1,
+        "ask_choices must batch all 101 asks in 50+50+1: " + JSON.stringify(f.choiceBatchSizes));
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card101 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-card="${f.ask101}"]`) ?? null;
+      await wait(() => shown(card101()), "question 101 appears in This channel (#general) while 1..100 stay unanswered");
+      const scope = panel()!.querySelector<HTMLSelectElement>("[data-waiting-scope]")!;
+      check(scope.value === "channel" && scope.options[0]!.textContent === "This channel (1)" && scope.options[1]!.textContent === "All channels (99+)",
+        "unexpected scope labels for 101-question queue: " + Array.from(scope.options).map(o => o.textContent).join(" | "));
+      card101()!.querySelector<HTMLButtonElement>('button[data-decision-option="yes"]')!.click();
+      await wait(() => f.answers.length === 1 && f.answers[0].command.signal_id === f.ask101 && !card101() &&
+        shown(panel()?.querySelector("[data-waiting-status]")) && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent",
+        "answering question 101 from its channel sends answer_choice, removes card, and shows Sent");
+      await wait(() => scope.options[0]!.textContent === "This channel (0)" && panel()?.querySelector('[data-waiting-state="empty"]'),
+        "after answering question 101, This channel cleanly reads 0 while 1..100 stay open in All channels");
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -369,7 +401,7 @@ test("Waiting on you: an uncounted workspace makes the count a minimum, never ze
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
 
-test("Waiting on you: pages past 50 choice asks and keeps truncated (>100) channel counts incomplete with a path to remaining questions", { timeout: 180_000 }, async () => {
-  const outcomes = await runWaitingScenarios(["batch-51-desktop", "truncated-queue-desktop"]);
+test("Waiting on you: pages past 50 and 100 choice asks and keeps unpaged truncated queues incomplete", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["batch-51-desktop", "batch-101-desktop", "truncated-queue-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

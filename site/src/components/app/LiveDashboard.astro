@@ -6605,7 +6605,7 @@ import "../../styles/kylon-image-viewer.css";
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
-          const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+          const askIds = (queue?.asks ?? []).map(ask => ask.signal_id);
           const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
             new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
