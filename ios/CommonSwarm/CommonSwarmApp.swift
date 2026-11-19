@@ -321,7 +321,7 @@ struct HistoryView: View {
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                if !recipientDetails.isEmpty {
+                if draft.access == .joined && !recipientDetails.isEmpty {
                     Text(recipientDetails.joined(separator: "\n")).font(.subheadline)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal).padding(.vertical, 4).background(.bar)
@@ -333,7 +333,7 @@ struct HistoryView: View {
                     ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
                 }
             }
-        }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle(draft.access == .unavailable ? "Conversation unavailable" : item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
     }
 
