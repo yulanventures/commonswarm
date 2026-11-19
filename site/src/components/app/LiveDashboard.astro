@@ -9878,8 +9878,9 @@ import "../../styles/kylon-image-viewer.css";
 
     /**
      * A press on a chat picture opens it in the app's viewer, never as a download; Download is a button inside it.
-     * The viewer's code is fetched the first time one is opened. When the viewer closes, focus returns to the picture
-     * that opened it, or to the same picture in its new row if the conversation was redrawn meanwhile.
+     * The viewer's code is fetched the first time one is opened. A message with several pictures opens on the one
+     * pressed and the viewer steps between them. When it closes, focus returns to the picture last shown, or to the
+     * same picture in its new row if the conversation was redrawn meanwhile.
      *
      * If the viewer's code cannot be fetched (a dropped connection, or a tab left open across a release), nothing is
      * downloaded and the reader stays where they are: the picture says "Couldn't open picture" with Retry, and the
@@ -9889,17 +9890,23 @@ import "../../styles/kylon-image-viewer.css";
     let chatPictureOpening = false;
     const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
       if (chatPictureOpening || document.querySelector("dialog[open]")) return;
-      const { file_id: fileId, version_n: version } = attachment;
       const openedFeed = feedIdentity();
       const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
       const slot = trigger.parentElement;
       slot?.querySelector("[data-picture-open-failed]")?.remove();
+      /* Every picture on the same message, in order, so the viewer can step between them. Each link carries its own
+         file, version and name; the one pressed is where the viewer opens. */
+      const links = Array.from(trigger.closest(".hm-extras__images")?.querySelectorAll<HTMLElement>(".hm-extras__image") ?? []);
+      const at = links.indexOf(trigger);
+      const files = (at < 0 ? [trigger] : links).map(link => link === trigger
+        ? { fileId: attachment.file_id, version: attachment.version_n, name: attachment.name }
+        : { fileId: link.dataset.streamImage ?? "", version: Number(link.dataset.streamImageVersion), name: link.title });
       chatPictureOpening = true;
       void loadImageViewer().then(({ openImageViewer }) => {
         // Another dialog (e.g. People) or a navigation may have arrived while the viewer module was loading.
         if (document.querySelector("dialog[open]") || feedIdentity() !== openedFeed) return;
-        openImageViewer(app, {
-          name: attachment.name,
+        openImageViewer(app, files.map(({ fileId, version, name }) => ({
+          name,
           link: async () => {
             const cached = attachmentPreviewUrls.get(fileId, version, Date.now());
             if (cached) return cached;
@@ -9912,9 +9919,11 @@ import "../../styles/kylon-image-viewer.css";
           download: () => {
             void freshAttachmentDownload(fileId, version).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error"));
           },
-        }, () => {
-          const back = trigger.isConnected ? trigger
-            : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(fileId)}"]`);
+        })), Math.max(0, at), (shown) => {
+          // Focus goes back to the picture last shown: its own link, or the same picture in its new row after a redraw.
+          const link = at < 0 ? trigger : links[shown] ?? trigger;
+          const back = link.isConnected ? link
+            : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(files[shown]?.fileId ?? attachment.file_id)}"]`);
           back?.focus({ preventScroll: true });
         });
       }, () => {

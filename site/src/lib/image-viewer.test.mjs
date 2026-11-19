@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FITTED, clampView, closeUpScale, fittedSize, maxScale, openImageViewer, zoomAbout } from "./image-viewer.ts";
+import { FITTED, clampView, closeUpScale, fittedSize, maxScale, openImageViewer, slideTarget, zoomAbout } from "./image-viewer.ts";
 
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
@@ -42,7 +42,7 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   const makeNode = (tag) => {
     const listeners = [];
     const node = {
-      tagName: tag.toUpperCase(), className: "", dataset: {}, hidden: false, open: false, children: [],
+      tagName: tag.toUpperCase(), className: "", classList: { add() {} }, dataset: {}, hidden: false, open: false, children: [],
       style: { removeProperty() {}, setProperty() {} },
       setAttribute() {}, toggleAttribute() {}, removeAttribute() {},
       append(...kids) { this.children.push(...kids); this.firstElementChild = this.children[0]; },
@@ -63,7 +63,7 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   const win = { matchMedia: () => ({ matches: true }), addEventListener() {}, removeEventListener() {} };
   const doc = { defaultView: win, activeElement: null, createElement: makeNode, createElementNS: (_ns, tag) => makeNode(tag) };
   const host = { ownerDocument: doc, append() {} };
-  const dialog = openImageViewer(host, { name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} }, () => {});
+  const dialog = openImageViewer(host, [{ name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} }], 0, () => {});
   assert.equal(dialog.open, true);
   // Trailing events from the keystroke that opened the dialog must be cancelled before they can click autofocused Close.
   assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, true, "trailing Enter keypress is cancelled");
@@ -74,4 +74,18 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   assert.equal(dialog.dispatch("keydown", { key: "Enter", repeat: false }).defaultPrevented, false);
   assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, false, "keypress after keydown inside viewer is allowed");
   assert.equal(dialog.dispatch("keyup", { key: " " }).defaultPrevented, false, "keyup after keydown inside viewer is allowed");
+});
+
+test("a sideways slide goes to the neighbour that way, and nowhere when it is short or there is none", () => {
+  // Sliding left brings the next picture in; sliding right, the previous.
+  assert.equal(slideTarget(1, 3, -120), 2);
+  assert.equal(slideTarget(1, 3, 120), 0);
+  // Short slides stay.
+  assert.equal(slideTarget(1, 3, -63), 1);
+  assert.equal(slideTarget(1, 3, 63), 1);
+  // No neighbour that way: the first has no previous, the last no next, and a single picture has neither.
+  assert.equal(slideTarget(0, 3, 200), 0);
+  assert.equal(slideTarget(2, 3, -200), 2);
+  assert.equal(slideTarget(0, 1, -200), 0);
+  assert.equal(slideTarget(0, 1, 200), 0);
 });

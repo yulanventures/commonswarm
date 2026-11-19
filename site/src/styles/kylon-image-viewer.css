@@ -96,6 +96,22 @@ live-dashboard.dashboard[data-kylon-shell] .cs-viewer__image {
   -webkit-user-drag: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-zoomed] .cs-viewer__image { cursor: grab; }
+/* Previous and Next, on a message with several pictures: at the stage's two sides, over the picture's margins. A dark
+   disc under each, so the arrow reads on any picture. The one with nowhere to go is dimmed and cannot be pressed. */
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step {
+  place-self: center start;
+  z-index: 1;
+  margin-inline: max(8px, env(safe-area-inset-left));
+  border-radius: 50%;
+  background: rgb(14 14 16 / .55);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step[data-viewer-next] {
+  place-self: center end;
+  margin-inline: max(8px, env(safe-area-inset-right));
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step:hover { background: rgb(60 60 64 / .8); }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step:disabled { opacity: .35; cursor: default; }
+live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step:disabled:hover { background: rgb(14 14 16 / .55); }
 /* Painted only once it has loaded, as in the conversation. */
 live-dashboard.dashboard[data-kylon-shell] .cs-viewer:not([data-state=""]) .cs-viewer__image { visibility: hidden; }
 live-dashboard.dashboard[data-kylon-shell] .cs-viewer[data-state="loading"] .cs-viewer__stage::before {
@@ -147,4 +163,5 @@ live-dashboard.dashboard[data-kylon-shell] .cs-viewer__note > button::before {
   live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer { background: Canvas; color: CanvasText; }
   live-dashboard.dashboard[data-kylon-shell] .cs-viewer__name { color: CanvasText; }
   live-dashboard.dashboard[data-kylon-shell] .cs-viewer :is(.cs-viewer__button, .cs-viewer__note > button) { border: 1px solid ButtonText; color: ButtonText; background: ButtonFace; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-viewer__step:disabled { border-color: GrayText; color: GrayText; opacity: 1; }
 }

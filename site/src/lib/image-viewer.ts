@@ -8,6 +8,10 @@
  * (or Ctrl and the wheel, which is what a trackpad pinch sends) zooms about the fingers; a drag or the wheel pans
  * while zoomed; `+`, `-`, `0` and the arrow keys do the same from the keyboard. Escape, Close, a press beside a fitted
  * picture, or a one-finger swipe down from fitted size closes it. Finishing a pan or a pinch never does.
+ *
+ * A message with several pictures opens on the one pressed and offers the others: Previous and Next, the left and
+ * right arrow keys while the picture is fitted (they pan while it is zoomed), and a one-finger swipe sideways from
+ * fitted size. Closing returns focus to the picture last shown.
  */
 import { chatImagePreviewFailure } from "./chat-image-preview";
 
@@ -21,6 +25,15 @@ export const FITTED: View = { scale: 1, x: 0, y: 0 };
 const SLOP = 6;
 /** How far down a fitted picture must be pulled for letting go to close the viewer. */
 const PULL_TO_CLOSE = 96;
+/** How far sideways a fitted picture must be slid for letting go to show its neighbour. */
+const SLIDE_TO_STEP = 64;
+
+/** The picture a sideways slide of `dx` ends on: the next for a slide to the left, the previous for one to the right,
+ *  and the same one when the slide is short or there is no neighbour that way. */
+export function slideTarget(index: number, count: number, dx: number): number {
+  if (Math.abs(dx) < SLIDE_TO_STEP) return index;
+  return Math.min(count - 1, Math.max(0, index + (dx < 0 ? 1 : -1)));
+}
 
 /** The picture's size when all of it fits the stage. A small picture is not blown up. */
 export function fittedSize(natural: Size, stage: Size): Size {
@@ -65,12 +78,17 @@ export interface PictureSource {
 const ICONS = {
   zoomIn: "M13 13l4 4M14 8.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0zM8.5 6.2v4.6M6.2 8.5h4.6",
   zoomOut: "M13 13l4 4M14 8.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0zM6.2 8.5h4.6",
+  previous: "M12 4.5L6.5 10l5.5 5.5",
+  next: "M8 4.5l5.5 5.5L8 15.5",
   download: "M10 3v9M6.5 8.8L10 12.3l3.5-3.5M4 15.5h12",
   close: "M5 5l10 10M15 5L5 15",
 } as const;
 
-/** Opens the viewer inside `host` and returns its dialog. `closed` runs once it has gone, to put focus back. */
-export function openImageViewer(host: HTMLElement, source: PictureSource, closed: () => void): HTMLDialogElement {
+/** Opens the viewer inside `host` on `sources[start]` and returns its dialog. `closed` runs once it has gone, with the
+ *  index of the picture last shown, to put focus back on it. */
+export function openImageViewer(host: HTMLElement, sources: readonly PictureSource[], start: number, closed: (index: number) => void): HTMLDialogElement {
+  let index = Math.min(sources.length - 1, Math.max(0, start));
+  let source = sources[index]!;
   const doc = host.ownerDocument, win = doc.defaultView!;
   const calm = win.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string): HTMLElementTagNameMap[K] => {
@@ -88,22 +106,25 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
   };
 
   const dialog = el("dialog", "cs-viewer");
-  dialog.dataset.imageViewer = ""; dialog.tabIndex = -1; dialog.setAttribute("aria-label", source.name);
+  dialog.dataset.imageViewer = ""; dialog.tabIndex = -1;
   const bar = el("header", "cs-viewer__bar");
-  const name = el("p", "cs-viewer__name"); name.textContent = source.name;
+  // The name says which picture this is, and with several, which of how many. It is announced when it changes.
+  const name = el("p", "cs-viewer__name"); name.setAttribute("aria-live", "polite");
   const zoom = control("Zoom", "viewerZoom", ICONS.zoomIn); zoom.setAttribute("aria-pressed", "false");
   const download = control("Download", "viewerDownload", ICONS.download);
   const close = control("Close", "viewerClose", ICONS.close); close.autofocus = true;
   bar.append(name, zoom, download, close);
   const stage = el("div", "cs-viewer__stage"); stage.dataset.viewerStage = "";
   const image = el("img", "cs-viewer__image");
-  image.alt = source.name; image.draggable = false; image.decoding = "async"; image.referrerPolicy = "no-referrer";
+  image.draggable = false; image.decoding = "async"; image.referrerPolicy = "no-referrer";
+  const previous = control("Previous picture", "viewerPrevious", ICONS.previous); previous.classList.add("cs-viewer__step");
+  const next = control("Next picture", "viewerNext", ICONS.next); next.classList.add("cs-viewer__step");
   const note = el("p", "cs-viewer__note"); note.hidden = true;
   const said = el("span", ""); said.textContent = "Couldn't load image";
   const retry = el("button", ""); retry.type = "button"; retry.textContent = "Retry";
-  retry.setAttribute("aria-label", `Retry loading ${source.name}`);
   note.append(said, retry);
   stage.append(image, note);
+  if (sources.length > 1) stage.append(previous, next);
   dialog.append(bar, stage);
 
   let view = FITTED;
@@ -146,8 +167,30 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
   let failures = 0;
   const show = (state: "loading" | "failed" | ""): void => { dialog.dataset.state = state; note.hidden = state !== "failed"; };
   const load = async (): Promise<void> => {
+    const asked = source;
     show("loading");
-    try { image.src = await source.link(); } catch { show("failed"); }
+    // A link that arrives after the reader has moved to another picture belongs to nobody.
+    try { const link = await asked.link(); if (asked === source) image.src = link; } catch { if (asked === source) show("failed"); }
+  };
+  /** Show `sources[to]`: named, fitted, and loading from its own link. */
+  const present = (to: number): void => {
+    index = to; source = sources[index]!;
+    name.textContent = sources.length > 1 ? `${source.name}, ${index + 1} of ${sources.length}` : source.name;
+    dialog.setAttribute("aria-label", source.name);
+    image.alt = source.name;
+    retry.setAttribute("aria-label", `Retry loading ${source.name}`);
+    previous.disabled = index === 0; next.disabled = index === sources.length - 1;
+    natural = null; view = FITTED; failures = 0;
+    image.removeAttribute("src"); image.style.width = ""; image.style.height = "";
+    draw();
+    void load();
+  };
+  /** Step to a neighbour. A step taken from a control that then goes away (the last picture has no Next) keeps focus in the viewer. */
+  const step = (by: number): void => {
+    const to = Math.min(sources.length - 1, Math.max(0, index + by));
+    if (to === index) return;
+    present(to);
+    if (doc.activeElement instanceof HTMLButtonElement && doc.activeElement.disabled) (by > 0 ? previous : next).focus({ preventScroll: true });
   };
   image.addEventListener("load", () => {
     natural = { w: image.naturalWidth, h: image.naturalHeight };
@@ -167,7 +210,7 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
   // Pointers. One finger pans a zoomed picture or pulls a fitted one down to close; two pinch. A gesture that has
   // pinched can no longer close the viewer, whatever its last finger does.
   const points = new Map<number, Point>();
-  let gesture: { kind: "pan" | "pinch" | "pull" | "none"; from: View; at: Point; span: number; moved: boolean; pinched: boolean; pull: number } | null = null;
+  let gesture: { kind: "pan" | "pinch" | "pull" | "none"; from: View; at: Point; span: number; moved: boolean; pinched: boolean; pull: number; slide: number } | null = null;
   let pressedOn: EventTarget | null = null;
   let lastTap: { at: number; point: Point } | null = null;
   const pair = (): { at: Point; span: number } => {
@@ -178,10 +221,10 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
     const pinched = gesture?.pinched ?? false, moved = gesture?.moved ?? false;
     if (points.size >= 2) {
       const { at, span } = pair();
-      gesture = { kind: "pinch", from: view, at, span, moved: true, pinched: true, pull: 0 };
+      gesture = { kind: "pinch", from: view, at, span, moved: true, pinched: true, pull: 0, slide: 0 };
     } else {
       const [at] = [...points.values()] as [Point];
-      gesture = { kind: zoomed() ? "pan" : touch && !pinched ? "pull" : "none", from: view, at, span: 1, moved, pinched, pull: 0 };
+      gesture = { kind: zoomed() ? "pan" : touch && !pinched ? "pull" : "none", from: view, at, span: 1, moved, pinched, pull: 0, slide: 0 };
     }
   };
   stage.addEventListener("pointerdown", (event) => {
@@ -205,9 +248,11 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
     if (Math.hypot(dx, dy) > SLOP) gesture.moved = true;
     if (gesture.kind === "pan") set({ scale: gesture.from.scale, x: gesture.from.x + dx, y: gesture.from.y + dy });
     else if (gesture.kind === "pull" && gesture.moved) {
+      // One finger on a fitted picture: down pulls it shut; sideways slides to a neighbour, when there is one that way.
       gesture.pull = dy > 0 && dy > Math.abs(dx) ? dy : 0;
+      gesture.slide = !gesture.pull && Math.abs(dx) > Math.abs(dy) && slideTarget(index, sources.length, dx < 0 ? -SLIDE_TO_STEP : SLIDE_TO_STEP) !== index ? dx : 0;
       dialog.removeAttribute("data-easing");
-      image.style.transform = `translate3d(0, ${gesture.pull}px, 0)`;
+      image.style.transform = `translate3d(${gesture.slide}px, ${gesture.pull}px, 0)`;
       dialog.style.setProperty("--cs-viewer-pull", String(Math.min(1, gesture.pull / 320)));
     }
   });
@@ -221,7 +266,8 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
     if (!ended) return;
     const lifted = event.type === "pointerup";
     if (lifted && ended.kind === "pull" && ended.pull > PULL_TO_CLOSE) { dialog.close(); return; }
-    set(view, { ease: ended.kind === "pull" && ended.pull > 0, settle: true });
+    if (lifted && ended.kind === "pull" && slideTarget(index, sources.length, ended.slide) !== index) { lastTap = null; step(ended.slide < 0 ? 1 : -1); return; }
+    set(view, { ease: ended.kind === "pull" && (ended.pull > 0 || ended.slide !== 0), settle: true });
     if (!lifted || ended.moved || ended.pinched) { lastTap = null; return; }
     if (lastTap && event.timeStamp - lastTap.at < 320 && Math.hypot(point.x - lastTap.point.x, point.y - lastTap.point.y) < 28) {
       lastTap = null;
@@ -250,6 +296,12 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
     if (!keyInside && event.repeat) { event.preventDefault(); return; }
     keyInside = true;
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    // The arrow keys pan a zoomed picture. On a fitted one, left and right go to the neighbouring picture.
+    if (!zoomed() && sources.length > 1 && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      step(event.key === "ArrowLeft" ? -1 : 1);
+      return;
+    }
     const pan = zoomed() ? ({ ArrowLeft: [80, 0], ArrowRight: [-80, 0], ArrowUp: [0, 80], ArrowDown: [0, -80] } as Record<string, [number, number]>)[event.key] : undefined;
     const next = event.key === "+" || event.key === "=" ? zoomAbout(view, view.scale * 1.5, { x: 0, y: 0 })
       : event.key === "-" ? zoomAbout(view, view.scale / 1.5, { x: 0, y: 0 })
@@ -267,17 +319,19 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
   }, true);
 
   zoom.addEventListener("click", () => toggle({ x: 0, y: 0 }));
+  previous.addEventListener("click", () => step(-1));
+  next.addEventListener("click", () => step(1));
   download.addEventListener("click", () => source.download());
   close.addEventListener("click", () => dialog.close());
   win.addEventListener("resize", layout);
   dialog.addEventListener("close", () => {
     win.removeEventListener("resize", layout);
     dialog.remove();
-    closed();
+    closed(index);
   });
 
   host.append(dialog);
   dialog.showModal();
-  void load();
+  present(index);
   return dialog;
 }
