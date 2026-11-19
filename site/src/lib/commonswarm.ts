@@ -4427,13 +4427,13 @@ export async function listConversations(
     buildListConversationsRequest(workspaceId, includeArchived),
     "conversations",
   );
-  if (status === 400 || status === 404 || (status === 200 && !Array.isArray(body.conversations))) {
+  if (status === 400 || status === 404) {
     throw new ConversationsUnsupportedError(
       typeof body.message === "string" ? body.message : `Conversations read unavailable (HTTP ${status}).`,
     );
   }
-  if (status !== 200) {
-    throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load conversations (HTTP ${status}).`);
+  if (status !== 200 || !Array.isArray(body.conversations)) {
+    throw new Error(typeof body.message === "string" ? body.message : "Couldn't check channel membership.");
   }
   return parseConversationsListResponse(body);
 }

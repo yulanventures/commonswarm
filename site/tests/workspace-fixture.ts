@@ -68,8 +68,11 @@ function installWorkspaceFixture() {
     if (url.pathname === "/rest/v1/rpc/channel_unread") return Response.json({ workspace_id: workspace, generated_at: recent, channels: [] });
     if (url.pathname === "/rest/v1/rpc/decision_queue") return Response.json({ workspace_id: workspace, generated_at: recent, total: 0, truncated: false, asks: [] });
     if (url.pathname.startsWith("/rest/v1/")) return Response.json([]);
-    if (url.pathname === "/functions/v1/read") return Response.json(body?.resource === "seat_admin_status" ? { enabled: false }
-      : body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    if (url.pathname === "/functions/v1/read") {
+      if (body?.resource === "conversations") return Response.json({ error: "unsupported_resource" }, { status: 400 });
+      return Response.json(body?.resource === "seat_admin_status" ? { enabled: false }
+        : body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    }
     f.unexpected.push(request.method + " " + url.pathname);
     return Response.json({ error: "unexpected_fixture_request" }, { status: 404 });
   };
