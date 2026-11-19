@@ -5490,6 +5490,7 @@ import "../../styles/kylon-image-viewer.css";
     let oversightHistoryGen = 0;
     let oversightState: OversightPanelState | null = null;
     let oversightAgentName = "";
+    let oversightDeniedFallbackId: string | null = null;
 
     const loadOversightModule = (): Promise<OversightModule> => {
       if (oversightMod) return Promise.resolve(oversightMod);
@@ -5507,6 +5508,7 @@ import "../../styles/kylon-image-viewer.css";
         ? oversightMod.teardownOversightState(oversightState, oversightGen)
         : null;
       oversightAgentName = "";
+      oversightDeniedFallbackId = null;
       for (const slot of all<HTMLElement>("[data-oversight-slot]")) {
         slot.replaceChildren();
         slot.hidden = true;
@@ -5551,42 +5553,68 @@ import "../../styles/kylon-image-viewer.css";
 
     const restoreOversightFocusKey = (slotEl: HTMLElement, key: string | null): void => {
       if (!key) return;
+      const isVisible = (el: HTMLElement | null): el is HTMLElement =>
+        !!el && !el.closest("[hidden]") && el.getClientRects().length > 0;
+      const pickVisible = (...selectors: string[]): HTMLElement | null => {
+        for (const selector of selectors) {
+          const el = slotEl.querySelector<HTMLElement>(selector);
+          if (isVisible(el)) return el;
+        }
+        return null;
+      };
       let target: HTMLElement | null = null;
       if (key.startsWith("conv:")) {
         const id = key.slice(5);
-        target =
-          slotEl.querySelector<HTMLElement>(`[data-oversight-conv="${CSS.escape(id)}"]`) ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+        target = pickVisible(
+          `[data-oversight-conv="${CSS.escape(id)}"]`,
+          "[data-oversight-conv]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
       } else if (key === "load-older") {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-load-older]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-back]");
+        target = pickVisible(
+          "[data-oversight-load-older]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
       } else if (key === "detail-title") {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-back]");
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
       } else if (key === "back") {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-back]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]");
+        target = pickVisible(
+          "[data-oversight-back]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
       } else if (key === "retry-list") {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-retry-list]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+        target = pickVisible(
+          "[data-oversight-retry-list]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
       } else if (key === "retry-history") {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-retry-history]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]");
+        target = pickVisible(
+          "[data-oversight-retry-history]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "list-title") {
+        target = pickVisible("[data-oversight-list-title]");
       } else {
-        target =
-          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
-          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
       }
-      if (target && !target.closest("[hidden]") && target.getClientRects().length > 0) {
-        target.focus({ preventScroll: true });
-      }
+      target?.focus({ preventScroll: true });
     };
 
     const renderOversightSlot = (explicitFocusKey?: string | null): void => {
@@ -5627,8 +5655,13 @@ import "../../styles/kylon-image-viewer.css";
           onPhoneBack: () => {
             if (!isOversightPinLive(pin) || !oversightState) return;
             const prevId = oversightState.selectedId;
+            const targetId =
+              prevId && oversightState.conversations.some(c => c.conversationId === prevId)
+                ? prevId
+                : oversightDeniedFallbackId;
+            oversightDeniedFallbackId = null;
             oversightState = { ...oversightState, phoneDetailOpen: false };
-            renderOversightSlot(prevId ? `conv:${prevId}` : null);
+            renderOversightSlot(targetId ? `conv:${targetId}` : "list-title");
           },
         },
       );
@@ -5698,7 +5731,12 @@ import "../../styles/kylon-image-viewer.css";
       if (!result.ok) {
         if (result.code === "conversation_not_found") {
           oversightHistoryGen += 1;
+          const removedIdx = oversightState.conversations.findIndex(c => c.conversationId === conversationId);
           oversightState = oversightMod.retireRefusedOversightConversation(oversightState, conversationId);
+          oversightDeniedFallbackId =
+            removedIdx >= 0
+              ? (oversightState.conversations[Math.min(removedIdx, oversightState.conversations.length - 1)]?.conversationId ?? null)
+              : null;
         } else if (loadingOlder) {
           oversightState = { ...oversightState, loadingOlder: false, olderError: result.message };
         } else {

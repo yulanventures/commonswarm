@@ -39,6 +39,7 @@ function installOversightFixture() {
   const personalDmAlex = "99990000-0000-4000-8000-000000000010";
   const oversightDmAlex = "bbbb1111-1111-4111-8111-111111111111";
   const oversightGroup = "bbbb2222-2222-4222-8222-222222222222";
+  const oversightThird = "bbbb4444-4444-4444-8444-444444444444";
   const scoutDm = "bbbb3333-3333-4333-8333-333333333333";
 
   f.ids = {
@@ -50,6 +51,7 @@ function installOversightFixture() {
     personalDmAlex,
     oversightDmAlex,
     oversightGroup,
+    oversightThird,
     scoutDm,
   };
 
@@ -287,7 +289,35 @@ function installOversightFixture() {
           await new Promise<void>(resolve => setTimeout(resolve, 260));
         }
         const pid = String(body.agent_principal_id ?? "").toLowerCase();
-        if (pid === ownedLead) return Response.json({ conversations: leadOversightList });
+        if (pid === ownedLead) {
+          if (f.oversightMode === "phone_denied_back_escape") {
+            return Response.json({
+              conversations: [
+                ...leadOversightList,
+                {
+                  conversation_id: oversightThird,
+                  kind: "dm",
+                  channel_id: null,
+                  slug: null,
+                  description: null,
+                  archived_at: null,
+                  joined: true,
+                  generation: 1,
+                  lead_mode: null,
+                  lead_agent_principal_id: null,
+                  members: [
+                    { kind: "agent", id: ownedLead, name: "Lead", left_at: null },
+                    { kind: "agent", id: ownedScout, name: "Scout", left_at: null },
+                  ],
+                  read_only: true,
+                  last_message_at: "2026-11-19T14:10:00Z",
+                  last_message_id: "55555555-5555-4555-8555-555555555520",
+                },
+              ],
+            });
+          }
+          return Response.json({ conversations: leadOversightList });
+        }
         if (pid === ownedScout) return Response.json({ conversations: scoutOversightList });
         return Response.json(
           { error: "conversation_not_found", message: "This conversation isn't available in this workspace." },
@@ -296,7 +326,7 @@ function installOversightFixture() {
       }
       if (body?.resource === "conversation_oversight_history") {
         f.oversightHistoryReads.push(body);
-        if (f.oversightMode === "history_404") {
+        if (f.oversightMode === "history_404" || f.oversightMode === "phone_denied_back_escape") {
           return Response.json(
             { error: "conversation_not_found", message: "This conversation isn't available in this workspace." },
             { status: 404 },
@@ -607,6 +637,38 @@ async function observeOversight() {
       return;
     }
 
+    // Designer phone focus witness (360px): after a denied history read, Back and Escape return focus to the nearest remaining row, and to the list heading when none remain.
+    if (f.oversightMode === "phone_denied_back_escape") {
+      await wait("three oversight rows ready", () => visible(one<HTMLElement>(`[data-oversight-conv="${f.ids.oversightThird}"]`)));
+      // 1. Deny first row (Alex) -> Back returns focus to nearest remaining row (Alex and Scout):
+      await click(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`);
+      await wait("Alex denied on phone", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("isn't available in this workspace") && visible(one("[data-oversight-back]")));
+      await click("[data-oversight-back]");
+      await wait("Back returned to phone list", () => one<HTMLElement>("[data-oversight-panel]")?.dataset.oversightPhoneDetail === "false");
+      check(
+        document.activeElement?.getAttribute("data-oversight-conv") === f.ids.oversightGroup,
+        "Back after denied history must focus nearest remaining row (Alex and Scout), got: " + document.activeElement?.outerHTML.slice(0, 180),
+      );
+      // 2. Deny second row (Alex and Scout) -> Escape returns focus to nearest remaining row (Scout):
+      await click(`[data-oversight-conv="${f.ids.oversightGroup}"]`);
+      await wait("Group denied on phone", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("isn't available in this workspace") && one<HTMLElement>("[data-oversight-panel]")?.dataset.oversightPhoneDetail === "true");
+      await key("Escape");
+      await wait("Escape returned to phone list", () => one<HTMLElement>("[data-oversight-panel]")?.dataset.oversightPhoneDetail === "false");
+      check(
+        document.activeElement?.getAttribute("data-oversight-conv") === f.ids.oversightThird,
+        "Escape after denied history must focus nearest remaining row (Scout), got: " + document.activeElement?.outerHTML.slice(0, 180),
+      );
+      // 3. Deny last remaining row (Scout) -> zero rows remain, focus lands on list heading (never body):
+      await click(`[data-oversight-conv="${f.ids.oversightThird}"]`);
+      await wait("Last row denied on phone", () => !one("[data-oversight-conv]") && (one("[data-oversight-panel]")?.textContent ?? "").includes("isn't available in this workspace"));
+      check(
+        document.activeElement?.hasAttribute("data-oversight-list-title") === true,
+        "Denying the last remaining row must focus list heading, got: " + document.activeElement?.outerHTML.slice(0, 180),
+      );
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "phone_denied_back_escape" });
+      return;
+    }
+
     // Condition 1b witness: held success for A arriving after A -> B -> A fresh denial is discarded by history generation.
     if (f.oversightMode === "aba_held_then_deny") {
       await wait("first request for A held", () => f.heldHistoryA === true);
@@ -828,6 +890,7 @@ test("Step 3D-3 signed-in read-only agent oversight UI enforces isolation, curso
       { name: "human-signin-refusal-older-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=human_signin_older` },
       { name: "desktop-enter-row-focus-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=desktop_enter_row_focus` },
       { name: "older-load-no-focus-steal-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=older_no_focus_steal` },
+      { name: "phone-denied-back-escape-focus-360", width: 360, height: 740, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=phone_denied_back_escape` },
       { name: "held-success-after-aba-denial-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=aba_held_then_deny` },
       { name: "nav-retire-before-await-reenter-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=nav_retire_reenter` },
       { name: "held-session-list-guard-1024", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&oversight_mode=held_session_list` },

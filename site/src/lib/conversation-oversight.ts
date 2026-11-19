@@ -290,6 +290,8 @@ export function renderOversightPanel(
   const header = el(doc, "header", "cs-oversight__head");
   const title = el(doc, "h2", "cs-oversight__title", `${vm.agentName}’s conversations`);
   title.id = "cs-oversight-title";
+  title.tabIndex = -1;
+  title.dataset.oversightListTitle = "";
   const badge = el(doc, "span", "cs-oversight__badge", "Read-only");
   badge.dataset.oversightBadge = "";
   header.append(title, badge);

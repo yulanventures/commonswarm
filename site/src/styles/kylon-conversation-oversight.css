@@ -116,6 +116,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row[aria-current="true
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row:focus-visible,
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__action:focus-visible,
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__back:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__title:focus-visible,
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-title:focus-visible {
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px;
