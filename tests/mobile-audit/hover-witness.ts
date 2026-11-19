@@ -309,6 +309,15 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     let up = row.parentElement;
     for (let i = 1; up && up !== document.body && i <= 6; i += 1, up = up.parentElement) note(`ancestor ${i} ${describe(up)}`, up);
     for (const selector of ["[data-feed-filter]", "[data-feed-more]", "[data-composer]"]) note(selector, document.querySelector(selector));
+    // The channel header and each of its parts: a header item that changes width can re-wrap the title and move every
+    // row below by a line. Only the visible header is noted (a phone and a desktop each have one).
+    const header = [...document.querySelectorAll(".hm-ws-header, .cs-org-phone-bar")].find(el => el.getClientRects().length > 0) ?? null;
+    note("header", header);
+    if (header) {
+      for (const selector of [".hm-ws-header__copy", "h1", ".hm-lead-pill", ".hm-channel-description", ".hm-ws-header__actions"]) note(`header ${selector}`, header.querySelector(selector));
+      const actions = header.querySelector(".hm-ws-header__actions");
+      for (const [i, child] of [...(actions?.children ?? [])].entries()) note(`header action ${i + 1} ${describe(child)}`, child);
+    }
     w.__auditHoverRest = { tracked, rects: second, scroll: scrollOf(row.parentElement), context };
     return { tracked: tracked.length, measured: second.filter(r => r.length > 0).length, drift };
   }
