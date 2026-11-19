@@ -191,7 +191,7 @@ BEGIN
   FROM swarm.conversations AS c
   WHERE c.conversation_id IN (
     SELECT DISTINCT conv.conversation_id
-    FROM pg_catalog.unnest(p_workspaces, p_channels) AS s(ws_id, ch_id)
+    FROM unnest(p_workspaces, p_channels) AS s(ws_id, ch_id)
     JOIN swarm.conversations AS conv
       ON conv.workspace_id = s.ws_id
      AND CASE
@@ -205,7 +205,7 @@ BEGIN
 
   FOR v_rec IN
     SELECT DISTINCT s.ws_id, s.ch_id
-    FROM pg_catalog.unnest(p_workspaces, p_channels) AS s(ws_id, ch_id)
+    FROM unnest(p_workspaces, p_channels) AS s(ws_id, ch_id)
     WHERE s.ws_id IS NOT NULL
       AND s.ch_id IS NOT NULL
     ORDER BY s.ws_id ASC, s.ch_id ASC

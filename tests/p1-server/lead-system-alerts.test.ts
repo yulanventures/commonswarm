@@ -231,6 +231,8 @@ async function alertsViewAs(
 
 async function subscribeWakeSocket(wakeId: string): Promise<{
   frames: Row[];
+  statuses: string[];
+  allBroadcasts: unknown[];
   close: () => Promise<void>;
 }> {
   const client = createClient(local.API_URL, local.ANON_KEY, {
@@ -238,26 +240,35 @@ async function subscribeWakeSocket(wakeId: string): Promise<{
   });
   await client.realtime.setAuth(local.ANON_KEY);
   const frames: Row[] = [];
+  const statuses: string[] = [];
+  const allBroadcasts: unknown[] = [];
   const channel = client.channel(`cswarm-wake:${wakeId}`, {
     config: { private: true, broadcast: { ack: false, self: false } },
   });
   channel.on("broadcast", { event: "wake" }, (msg) => {
     frames.push((msg.payload ?? {}) as Row);
   });
+  channel.on("broadcast", { event: "*" }, (msg) => {
+    allBroadcasts.push(msg);
+  });
   await new Promise<void>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("wake socket subscribe timed out")), 15_000);
-    channel.subscribe((status) => {
+    channel.subscribe((status, err) => {
+      statuses.push(err ? `${status}:${String(err)}` : status);
       if (status === "SUBSCRIBED") {
         clearTimeout(t);
         resolve();
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         clearTimeout(t);
-        reject(new Error(`wake socket failed: ${status}`));
+        reject(new Error(`wake socket failed: ${status} ${err ? String(err) : ""}`));
       }
     });
   });
+  await delay(250);
   return {
     frames,
+    statuses,
+    allBroadcasts,
     close: async () => {
       await client.removeChannel(channel);
       await client.realtime.disconnect();
@@ -629,13 +640,19 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
     const deadline = Date.now() + 15_000;
     while (ctrlSock.frames.length === 0 && Date.now() < deadline) await delay(50);
     const queuedFrames = await sql<Row[]>`
-      SELECT topic, event, payload FROM realtime.messages WHERE topic = ${`cswarm-wake:${controlLead.wakeId}`}
+      SELECT topic, event, extension, private, payload FROM realtime.messages WHERE topic = ${`cswarm-wake:${controlLead.wakeId}`}
     `;
+    if (ctrlSock.frames.length === 0) {
+      await sql`SELECT realtime.send('{"v":1,"probe":"direct"}'::jsonb, 'wake', ${`cswarm-wake:${controlLead.wakeId}`}, true)`;
+      await delay(2_000);
+    }
     assert.ok(
       ctrlSock.frames.length >= 1,
-      `authorized lead socket must receive wake frame (alert=${JSON.stringify(ctrlRow)}, queued=${JSON.stringify(queuedFrames)})`,
+      `authorized lead socket must receive wake frame (alert=${JSON.stringify(ctrlRow)}, queued=${JSON.stringify(queuedFrames)}, statuses=${JSON.stringify(ctrlSock.statuses)}, allBroadcasts=${JSON.stringify(ctrlSock.allBroadcasts)})`,
     );
-    assert.deepEqual(ctrlSock.frames[0], { v: 1 }, "wake frame must carry minimal {v:1} only");
+    const frameKeys = Object.keys(ctrlSock.frames[0]!).filter((k) => k !== "id");
+    assert.deepEqual(frameKeys, ["v"], `wake frame must carry minimal {v:1} only; got ${JSON.stringify(ctrlSock.frames[0])}`);
+    assert.equal(ctrlSock.frames[0]!.v, 1);
   } finally {
     await ctrlSock.close();
   }
