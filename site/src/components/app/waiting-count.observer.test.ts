@@ -376,8 +376,9 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     for (const scenario of scenarios) {
       // A phone (390 x 844) draws the control in the shell's top bar; a desktop (1280 x 800) in the workspace header.
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
+      const channelParam = (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue")) ? "&c=general" : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
-        "http://127.0.0.1:" + address.port + "/app?w=aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+        "http://127.0.0.1:" + address.port + "/app?w=aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa" + channelParam + "&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-waiting-observation="([^"]*)"/)?.[1];
       outcomes[scenario] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"))
         : { error: "the rendered app did not finish the observation: " + stdout.slice(0, 400) };

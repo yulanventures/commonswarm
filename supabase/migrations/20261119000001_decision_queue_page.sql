@@ -13,6 +13,7 @@ DECLARE
  claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
  viewer uuid;
  read_at timestamptz := statement_timestamp();
+ anchor_created_at timestamptz;
  total integer;
  has_more boolean;
  rows jsonb;
@@ -29,6 +30,14 @@ BEGIN
  IF (p_after_created_at IS NULL) <> (p_after_id IS NULL) THEN
   RAISE EXCEPTION 'decision_queue_cursor_invalid' USING ERRCODE = '22023';
  END IF;
+ -- Resolve exact microsecond created_at from the viewer-visible anchor row when present so
+ -- millisecond-precision JS/client timestamps never repeat the page boundary row.
+ IF p_after_id IS NOT NULL THEN
+  SELECT s.created_at INTO anchor_created_at
+  FROM swarm_read.signals s
+  WHERE s.workspace_id = p_workspace_id AND s.id = p_after_id;
+  anchor_created_at := coalesce(anchor_created_at, p_after_created_at);
+ END IF;
  WITH open_asks AS MATERIALIZED (
   -- swarm_read.signals applies the viewer's normal visibility gate.
   SELECT s.id, s."from", s.from_kind, s.body, s.created_at, s.until
@@ -40,8 +49,8 @@ BEGIN
    AND NOT swarm.ask_answered(s.workspace_id, s.id)
  ), page_probe AS MATERIALIZED (
   SELECT * FROM open_asks
-  WHERE p_after_created_at IS NULL
-   OR (created_at, id) > (p_after_created_at, p_after_id)
+  WHERE anchor_created_at IS NULL
+   OR (created_at, id) > (anchor_created_at, p_after_id)
   ORDER BY created_at, id
   LIMIT 101
  ), page AS (
