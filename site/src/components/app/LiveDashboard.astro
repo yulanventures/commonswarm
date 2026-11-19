@@ -6435,12 +6435,13 @@ import "../../styles/kylon-image-viewer.css";
             } else {
               waitingPanelFailedWorkspaces.delete(workspace.id);
             }
-            if (anyFailed || anyTruncated) {
+            if (anyFailed || (todosFallback && todosTruncated)) {
               counted.set(workspace.id, null);
             } else {
               const overviewTodoCount = detail.needsYou.filter(item => item.kind === "todo" || item.kind === "request").length;
               const baseCount = homeNeedsYouCount({ workspace, state: "ready", detail });
-              counted.set(workspace.id, Math.max(0, baseCount - overviewTodoCount + panelTodos.length));
+              const knownTodoTotal = todosQueue ? todosQueue.total : panelTodos.length;
+              counted.set(workspace.id, Math.max(0, baseCount - overviewTodoCount + knownTodoTotal));
             }
             if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
           }
