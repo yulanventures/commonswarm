@@ -369,9 +369,17 @@ live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__tabs 
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__tab[aria-selected="true"] { font-weight: 600; text-decoration: underline; }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-block-end: 8px; }
 /* Filter: one quiet row, closed on entry. Open, its controls wrap under it. While a filter is on, its value follows the word. */
-live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > summary { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; min-block-size: 44px;
-  color: var(--k-shell-secondary); cursor: pointer; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > summary { flex: 1 0 100%; display: block; position: relative; box-sizing: border-box; min-block-size: 44px; padding-block: 11px; padding-inline-start: 20px;
+  list-style: none; color: var(--k-shell-secondary); cursor: pointer; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > summary::-webkit-details-marker { display: none; }
+/* The same drawn arrow as other disclosures: right when closed, down when open. */
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > summary::before { content: ""; position: absolute; inset-inline-start: 2px; inset-block-start: calc(11px + .45em);
+  inline-size: 7px; block-size: 7px; border-inline-end: 2px solid currentColor; border-block-end: 2px solid currentColor; transform: rotate(-45deg); }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters[open] > summary::before { transform: rotate(45deg); }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filter-active { color: var(--k-shell-ink); }
+/* Open: the age chooser takes the row, the uploader choice sits under it as one line with its box. */
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > .cleanup__age { flex: 1 1 100%; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__filters > .cleanup__gone { flex: 1 1 100%; display: flex; align-items: center; gap: 10px; min-block-size: 44px; }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__list { list-style: none; margin: 0; padding: 0; max-block-size: min(50vh, 28rem); overflow-y: auto; }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__row label { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: start; padding-block: 8px; min-block-size: 44px; }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__row input { inline-size: 20px; block-size: 20px; margin-block-start: 2px; }
