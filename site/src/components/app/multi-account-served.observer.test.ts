@@ -590,7 +590,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
             audience: [{ display_name: "Host", role: "owner" }],
             disclosure: "Messages and shared lists in Family Cabin.",
             expires_at: Date.now() + 86_400_000,
-            preview_digest: `digest-${actorId}`,
+            preview_digest: createHash("sha256").update(`served-preview:${actorId}`).digest("hex"),
             consent_version: HOUSEHOLD_JOIN_CONSENT_VERSION,
           });
           return;
@@ -645,18 +645,64 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
 
+    const waitForAppReady = async (
+      p: Awaited<ReturnType<typeof context.newPage>>,
+      expectedEmail?: string,
+    ): Promise<void> => {
+      await p.waitForSelector('[data-panel="channel"]:not([hidden])', { timeout: 15_000 });
+      await p.waitForSelector("[data-kylon-live-layout]", { timeout: 15_000 });
+      await p.waitForSelector("[data-user-menu-trigger]:visible", { timeout: 15_000 });
+      if (expectedEmail) {
+        await p.waitForFunction(
+          (want: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === want,
+          expectedEmail,
+          { timeout: 15_000 },
+        );
+      }
+    };
+    const openAccountMenu = async (p: Awaited<ReturnType<typeof context.newPage>>): Promise<void> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const isOpen = await p.evaluate(() => {
+          const menu = document.querySelector<HTMLElement>("[data-user-menu]");
+          return Boolean(menu && !menu.hidden);
+        });
+        if (!isOpen) {
+          await p.click("[data-user-menu-trigger]");
+        }
+        try {
+          await p.waitForSelector("[data-user-menu]:not([hidden])", { timeout: 2_000 });
+          return;
+        } catch {
+          // Retry if a concurrent layout.sync() closed overlays during initial mount.
+        }
+      }
+      await p.waitForSelector("[data-user-menu]:not([hidden])", { timeout: 5_000 });
+    };
+    const clickAccountMenuItem = async (
+      p: Awaited<ReturnType<typeof context.newPage>>,
+      selector: string,
+    ): Promise<void> => {
+      await openAccountMenu(p);
+      await p.waitForSelector(`${selector}:visible`, { timeout: 10_000 });
+      try {
+        await p.click(selector, { timeout: 5_000 });
+      } catch {
+        await openAccountMenu(p);
+        await p.waitForSelector(`${selector}:visible`, { timeout: 10_000 });
+        await p.click(selector, { timeout: 5_000 });
+      }
+    };
+
     // ── FLOW 1 (C6 + Designer): Served /app sign-in A -> Add account Google PKCE redirect -> B promoted ──
     await page.goto(`${origin}/app`);
     await page.waitForSelector('[data-panel="signed-out"]:not([hidden])');
     await page.fill("#dashboard-email", userA.email);
     await page.fill("#dashboard-password", "pw-a");
     await page.click("[data-password-signin]");
-    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await waitForAppReady(page, userA.email);
 
     // Open desktop account menu -> Add account -> Google provider redirect through mock IdP & callback!
-    await page.click("[data-user-menu-trigger]");
-    await page.waitForSelector("[data-add-account-open]:visible");
-    await page.click("[data-add-account-open]");
+    await clickAccountMenuItem(page, "[data-add-account-open]");
     await page.waitForSelector("[data-add-account-dialog][open]");
     nextProviderUser = userB;
     const pkceBeforeApp = pkceExchanges;
@@ -666,12 +712,12 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       { regKey: accountsStorageKey(originHash), uidB: userB.id },
       { timeout: 15_000 },
     );
-    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await waitForAppReady(page, userB.email);
     assert.equal(pkceExchanges, pkceBeforeApp + 1, "served /app must complete real HTTP S256 PKCE provider exchange");
 
     // Verify URL scrubbed, 2 accounts owned, provider tokens stripped from storage!
-    const afterProvider = await page.evaluate((hash: string) => {
-      const reg = localStorage.getItem(`commonswarm:auth:v1:${hash}:accounts`) ?? "";
+    const afterProvider = await page.evaluate((regKey: string) => {
+      const reg = localStorage.getItem(regKey) ?? "";
       const allValues: string[] = [];
       for (let i = 0; i < localStorage.length; i += 1) {
         const k = localStorage.key(i)!;
@@ -682,13 +728,13 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         reg,
         leakedProvider: allValues.some((v) => v.includes("secret-provider-tok") || v.includes("secret-provider-refresh")),
       };
-    }, originHash);
+    }, accountsStorageKey(originHash));
     assert.equal(new URL(afterProvider.href).search, "", "callback query params must be scrubbed on served /app");
     assert.equal(afterProvider.leakedProvider, false, "provider_token & provider_refresh_token must be stripped");
     assert.ok(afterProvider.reg.includes(userA.id) && afterProvider.reg.includes(userB.id), "both A and B owned");
 
     // Verify Designer #3 cues: Current label, "3 waiting" for inactive Account A, full emails readable, active sub-label on sign-out items!
-    await page.click("[data-user-menu-trigger]");
+    await openAccountMenu(page);
     await page.waitForSelector("[data-account-switcher]:visible");
     await page.waitForFunction(
       () => (document.querySelector<HTMLElement>("[data-user-menu]")?.innerText ?? "").includes("3 waiting"),
@@ -702,7 +748,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.ok(menuText.includes("Sign out on this device"), "multi-account sign-out label shown");
 
     // ── FLOW 2 (C3 + Designer #1/#2): Submitted email captured while held + Escape focus return ──
-    await page.click("[data-add-account-open]");
+    await clickAccountMenuItem(page, "[data-add-account-open]");
     await page.waitForSelector("[data-add-account-dialog][open]");
     resetOtpGate(true);
     await page.fill("#add-account-email", "submitted@example.test");
@@ -762,16 +808,19 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterEscape.activeIsTrigger, true, "Escape from Add account must return focus to desktop account trigger");
     assert.equal(afterEscape.attemptKeys.length, 0, "Escape must retire staging attempt cleanly");
 
-    // ── FLOW 2b (Designer 245c13fc keyboard focus): 1280px Enter switch + 360px phone Escape & Enter switch ──
-    // Desktop 1280px: from workspace chat, switch accounts with Enter -> focus MUST return to [data-user-menu-trigger] (not body)!
+    // ── FLOW 2b (Designer 245c13fc/94b7ba0c keyboard focus): 1280px Enter switch + 360px phone Escape & Enter switch ──
+    // Desktop 1280px: from workspace chat, switch accounts with Enter -> focus MUST return to [data-user-menu-trigger] (not body/composer)!
     await page.goto(`${origin}/app?w=${sharedWs}`);
+    await waitForAppReady(page, userB.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
-    await page.click("[data-user-menu-trigger]");
+    await openAccountMenu(page);
     await page.waitForSelector(`[data-account-switch="${userA.id}"]:visible`);
     await page.focus(`[data-account-switch="${userA.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
-      (emailA: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailA,
+      (emailA: string) =>
+        (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailA &&
+        Boolean(document.activeElement?.hasAttribute("data-user-menu-trigger")),
       userA.email,
       { timeout: 15_000 },
     );
@@ -785,7 +834,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(
       desktopAfterSwitch.isDesktopTrigger,
       true,
-      `1280px Enter switch from workspace chat must restore focus to desktop account trigger (got ${desktopAfterSwitch.tag})`,
+      `1280px Enter switch from workspace chat must retain focus on desktop account trigger (got ${desktopAfterSwitch.tag})`,
     );
 
     // Phone 360px: Escape from Add account and Sign out all MUST return focus to More button (not account tile),
@@ -835,7 +884,9 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.focus(`[data-menu-account-switch="${userB.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
-      (emailB: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailB,
+      (emailB: string) =>
+        (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailB &&
+        Boolean(document.activeElement?.matches('button[aria-label="Open navigation"]')),
       userB.email,
       { timeout: 15_000 },
     );
@@ -850,14 +901,14 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       `360px Enter switch from workspace chat must restore focus to Open navigation (got ${phoneAfterSwitch.activeLabel})`,
     );
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.waitForSelector("[data-user-menu-trigger]:visible", { timeout: 10_000 });
+    await waitForAppReady(page, userB.email);
 
     // ── FLOW 3 (C1): Real LiveDashboard.astro composer Send handler across same-workspace A->B & A->B->A ──
     // Case 3a0: Hold named-channel #ops ("open") visibility read across same-workspace A -> B -> 0 file_version_create, 0 PUT, 0 commit, 0 post!
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userA.id}"]`);
-    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
+    await waitForAppReady(page, userA.email);
     await page.goto(`${origin}/app?w=${sharedWs}&c=${opsChannelId}`);
+    await waitForAppReady(page, userA.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
     commandsSent.length = 0;
     putCount = 0;
@@ -876,8 +927,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.fill("[data-composer-input]", "held visibility A->B message");
     await page.click("[data-composer-send]");
     await channelVisibilityHeldPromise;
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userB.id}"]`);
+    await clickAccountMenuItem(page, `[data-account-switch="${userB.id}"]`);
     (releaseChannelVisibility as (() => void) | null)?.();
     await page.waitForTimeout(100);
     resetChannelVisibilityGate(false);
@@ -889,10 +939,10 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(putCount, 0, "held named-channel visibility read across A->B must issue 0 PUTs");
 
     // Case 3a1: Unchanged #ops ("open") control reaches upload & post after that exact same visibility response!
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userA.id}"]`);
-    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
+    await waitForAppReady(page, userA.email);
     await page.goto(`${origin}/app?w=${sharedWs}&c=${opsChannelId}`);
+    await waitForAppReady(page, userA.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
     commandsSent.length = 0;
     putCount = 0;
@@ -919,11 +969,9 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       ],
     );
 
-    // Switch back to Account A and navigate to the workspace chat composer.
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userA.id}"]`);
-    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    // Navigate to the workspace chat composer as Account A.
     await page.goto(`${origin}/app?w=${sharedWs}`);
+    await waitForAppReady(page, userA.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
 
     // Case 3a: Hold file_version_create across same-workspace A -> B!
@@ -939,17 +987,17 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.click("[data-composer-send]");
     await fileCreateHeldPromise;
     // Switch to Account B while file_version_create is in flight!
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userB.id}"]`);
+    await clickAccountMenuItem(page, `[data-account-switch="${userB.id}"]`);
     (releaseFileCreate as (() => void) | null)?.();
     await page.waitForTimeout(100);
     assert.equal(putCount, 0, "real composer Send must issue 0 PUTs after same-workspace A->B");
     assert.equal(commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"), false);
 
     // Case 3b: Hold file_version_create across same-workspace A -> B -> A!
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userA.id}"]`);
+    await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
+    await waitForAppReady(page, userA.email);
     await page.goto(`${origin}/app?w=${sharedWs}`);
+    await waitForAppReady(page, userA.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
     commandsSent.length = 0;
     putCount = 0;
@@ -962,10 +1010,9 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.fill("[data-composer-input]", "held A->B->A message");
     await page.click("[data-composer-send]");
     await fileCreateHeldPromise;
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userB.id}"]`);
-    await page.click("[data-user-menu-trigger]");
-    await page.click(`[data-account-switch="${userA.id}"]`);
+    await clickAccountMenuItem(page, `[data-account-switch="${userB.id}"]`);
+    await waitForAppReady(page, userB.email);
+    await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
     (releaseFileCreate as (() => void) | null)?.();
     await page.waitForTimeout(100);
     assert.equal(putCount, 0, "real composer Send must issue 0 PUTs after same-workspace A->B->A");
@@ -973,6 +1020,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
 
     // Case 3c: Unchanged-account control succeeds end-to-end!
     await page.goto(`${origin}/app?w=${sharedWs}`);
+    await waitForAppReady(page, userA.email);
     await page.waitForSelector("[data-composer]:not([hidden])");
     commandsSent.length = 0;
     putCount = 0;
@@ -1012,8 +1060,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       if (removed) localStorage.removeItem(`commonswarm:auth:v1:${hash}:login:${removed.loginId}`);
     }, { regKey: accountsStorageKey(originHash), hash: originHash, removedUserId: userA.id });
 
-    await page.click("[data-user-menu-trigger]");
-    await page.click("[data-user-menu] [data-signout]");
+    await clickAccountMenuItem(page, "[data-user-menu] [data-signout]");
     await page.waitForTimeout(150);
     assert.equal(revokedTokens.includes(tokenB), false, "real [data-signout] after peer removal of A must NEVER revoke B");
     assert.equal(liveTokens.has(tokenB), true, "Account B token must remain live");
@@ -1056,33 +1103,18 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       // Now sign in Account B in a peer tab and remove Account A -> triggers forced teardown + fallback to B on /invite!
       const peerTab = await inviteCtx.newPage();
       await peerTab.goto(`${origin}/app`);
-      await peerTab.waitForSelector('[data-panel="channel"]:not([hidden])');
-      await peerTab.click("[data-user-menu-trigger]");
-      await peerTab.click("[data-add-account-open]");
+      await waitForAppReady(peerTab, userA.email);
+      await clickAccountMenuItem(peerTab, "[data-add-account-open]");
       await peerTab.waitForSelector("[data-add-account-dialog][open]");
       await peerTab.fill("#add-account-email", userB.email);
       await peerTab.fill("#add-account-password", "pw-b");
       await peerTab.click("[data-add-account-password-submit]");
-      await peerTab.waitForFunction(
-        (emailB: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailB,
-        userB.email,
-        { timeout: 15_000 },
-      );
+      await waitForAppReady(peerTab, userB.email);
       // Switch peer tab back to A, wait for A to finish rendering, and sign A out so /invite falls back to B!
-      await peerTab.click("[data-user-menu-trigger]");
-      await peerTab.click(`[data-account-switch="${userA.id}"]`);
-      await peerTab.waitForFunction(
-        (emailA: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailA,
-        userA.email,
-        { timeout: 15_000 },
-      );
-      await peerTab.click("[data-user-menu-trigger]");
-      await peerTab.click("[data-user-menu] [data-signout]");
-      await peerTab.waitForFunction(
-        (emailB: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailB,
-        userB.email,
-        { timeout: 15_000 },
-      );
+      await clickAccountMenuItem(peerTab, `[data-account-switch="${userA.id}"]`);
+      await waitForAppReady(peerTab, userA.email);
+      await clickAccountMenuItem(peerTab, "[data-user-menu] [data-signout]");
+      await waitForAppReady(peerTab, userB.email);
       await peerTab.close();
 
       // Back on /invite: review MUST reset, name Account B, and keep Join blocked until fresh role + consent!
