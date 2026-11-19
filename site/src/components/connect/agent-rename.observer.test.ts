@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
-import { agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, reconnectPrompt, takenAgentName } from "../../lib/agent-hosts";
+import { agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, openDestination, reconnectPrompt, takenAgentName } from "../../lib/agent-hosts";
 import { buildAgentRenameField, RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
 import { renderPeopleDialog, type PeopleDialogAgent, type PeopleDialogCallbacks, type PeopleDialogModel, type PeopleDialogState } from "../../lib/people-dialog-view";
 
@@ -133,7 +133,7 @@ function picker(extra?: (el: any) => any[]) {
     window: { setTimeout: () => 0, clearTimeout() {}, getSelection: () => null },
     CSS: { escape: (value: string) => value },
     navigator: { clipboard: { writeText: async () => {} } },
-    agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, takenAgentName, buildAgentRenameField,
+    agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, openDestination, takenAgentName, buildAgentRenameField,
     addAgentStore: () => null, lastHost: () => "", rememberLastHost() {},
   });
   runInContext(PICKER_SCRIPT, context);
@@ -317,6 +317,52 @@ test("Add an agent: Already yours is a fold that starts open, and only a press o
   const showHost = script.slice(script.indexOf("    showHost(id: string): void {"), script.indexOf("    showHost(id: string): void {") + 700);
   assert.doesNotMatch(showHost.slice(0, showHost.indexOf("\n    }\n")), /foldYours|yours-fold/);
   assert.match(script, /chip\.addEventListener\("click", \(\) => \{\s*this\.showHost\(chip\.dataset\.ahpHost \?\? ""\);\s*this\.#foldYours\(chip\);/);
+});
+
+test("Add an agent: the open action shows its host destination, and returning to the form collapses opened setup steps", () => {
+  let openWrap: any, openLink: any, openDest: any, claudeSetup: any, waitingSetup: any;
+  const p = picker(el => {
+    const claude = el("button", { ahpHost: "claude", ahpRoute: "connector", ahpOpenHref: "https://claude.ai/", ahpOpenLabel: "Open Claude" }, [el("span", { ahpHostName: "" })]);
+    const muse = el("button", { ahpHost: "muse", ahpRoute: "connector" }, [el("span", { ahpHostName: "" })]);
+    openLink = el("a", { ahpOpen: "" });
+    openDest = el("span", { ahpOpenDest: "" });
+    openWrap = el("div", { ahpOpenWrap: "" }, [openLink, openDest]);
+    claudeSetup = el("details", { ahpSetup: "claude" }); claudeSetup.open = false;
+    waitingSetup = el("details", { ahpSetup: "chatgpt", ahpSetupOpen: "true" }); waitingSetup.open = true;
+    return [claude, muse, openWrap, claudeSetup, waitingSetup];
+  });
+  p.element.dispatchEvent = () => true;
+  p.element.showHost("claude");
+  assert.equal(openWrap.hidden, false);
+  assert.equal(openLink.hidden, false);
+  assert.equal(openLink.href, "https://claude.ai/");
+  assert.equal(openLink.textContent, "Open Claude");
+  assert.equal(openDest.hidden, false);
+  assert.equal(openDest.textContent, "claude.ai");
+  assert.equal(claudeSetup.hidden, false);
+  assert.equal(claudeSetup.open, false);
+
+  // Switching to an app without an open link hides both the link and destination.
+  p.element.showHost("muse");
+  assert.equal(openWrap.hidden, true);
+  assert.equal(openLink.hidden, true);
+  assert.equal(openDest.hidden, true);
+  assert.equal(openDest.textContent, "");
+
+  // Opening a connector's setup steps and returning to the form folds them back; a waiting host stays open.
+  p.element.showHost("claude");
+  claudeSetup.open = true;
+  waitingSetup.open = false;
+  p.element.reset("claude");
+  assert.equal(claudeSetup.open, false, "returning to the form collapses opened connector setup steps");
+  assert.equal(waitingSetup.open, true, "a waiting host stays open so its status remains visible");
+});
+
+test("Add an agent: setup disclosure names the chosen app and external step links carry their destination", () => {
+  const markup = PICKER.slice(0, PICKER.indexOf("<script>"));
+  assert.match(markup, /<div class="hm-ahp__open-row" data-ahp-open-wrap hidden>\s*<a class="hm-ahp__link" target="_blank" rel="noopener noreferrer" aria-describedby="ahp-open-dest" data-ahp-open hidden><\/a>\s*<span class="hm-ahp__open-dest" id="ahp-open-dest" data-ahp-open-dest hidden><\/span>\s*<\/div>/);
+  assert.match(markup, /<summary>\{route\(host\) === "waiting" \? `\$\{host\.name\} status` : `Set up \$\{host\.name\}`\}<\/summary>/);
+  assert.match(markup, /<span class="hm-ahp__open-dest" data-ahp-step-dest>\{openDestination\(step\.link\.href\)\}<\/span>/);
 });
 
 const agent = (id: string, overrides: Partial<PeopleDialogAgent> = {}): PeopleDialogAgent => ({
