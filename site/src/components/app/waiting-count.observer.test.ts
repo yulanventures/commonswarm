@@ -152,41 +152,49 @@ async function observeWaitingCount() {
       check(!shown(phoneCopy()), "the phone copy is displayed on a desktop");
       check(deskCopy()!.parentElement!.lastElementChild === deskCopy(), "the header control is not the last thing in the header's actions");
     }
-    const headerBox = control()!.getBoundingClientRect();
-    // 2. The control opens Catch up, whose Needs you list holds the question with its choices.
+    // 2. In a channel view, the control opens the Waiting on you right column (desktop) or modal sheet (phone)
+    //    starting in This channel without leaving Workspace 1's chat.
     control()!.click();
-    const card = () => document.querySelector<HTMLElement>(`[data-home-catchup] .hm-catchup-needs-list [data-needs-you="${f.ask}"]`);
+    const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+    const sheet = () => document.querySelector<HTMLDialogElement>("dialog#cs-waiting-sheet");
+    const switchAll = () => panel()?.querySelector<HTMLButtonElement>('[data-waiting-switch-scope="all"]') ?? null;
+    await wait(
+      () => route("w") === f.ids[0] && route("v") === null && (f.phone ? !!sheet()?.open : shown(panel())) && shown(switchAll()),
+      "Waiting on you opens in This channel and offers Show all workspaces",
+    );
+    check(control()!.getAttribute("aria-expanded") === "true", "control aria-expanded is not true when open");
+    if (f.phone) {
+      check(panel()!.parentElement === sheet(), "phone panel is not inside the modal dialog sheet");
+    } else {
+      check(!sheet()?.open, "desktop opened the phone modal sheet instead of the right column");
+    }
+    // Switching to All workspaces lists the ninth workspace's question with its choices right in the card.
+    switchAll()!.click();
+    const card = () => panel()?.querySelector<HTMLElement>(`[data-waiting-card="${f.ask}"]`) ?? null;
     const options = () => Array.from(card()?.querySelectorAll<HTMLButtonElement>("button[data-decision-option]") ?? []);
-    await wait(() => route("v") === "catchup" && shown(card()) && options().length === 2, "Catch up lists the question with its choices");
-    check(card()!.dataset.needsWorkspace === f.ids[8] && card()!.textContent!.includes(f.question), "the card is not the ninth workspace's question: " + card()!.textContent);
+    await wait(() => shown(card()) && options().length === 2, "Waiting on you lists the ninth workspace's question with its choices");
+    check(card()!.dataset.waitingWorkspace === f.ids[8] && card()!.textContent!.includes(f.question), "the card is not the ninth workspace's question: " + card()!.textContent);
     check(options().map(option => option.dataset.decisionOption).join() === "yes,no", "the card's choices are not the stored ones");
     check(f.answers.length === 0, "an answer was sent before a choice was clicked");
-    // On a desktop the count stays in the same top-right place on Catch up, which has no header of its own.
-    if (!f.phone) {
-      await wait(() => shown(pageCopy()) && read(pageCopy()) === "1|Waiting on you 1", "Catch up shows the count on a desktop");
-      const pageBox = pageCopy()!.getBoundingClientRect();
-      check(Math.abs(pageBox.right - headerBox.right) <= 2 && Math.abs(pageBox.top - headerBox.top) <= 8, "the control moved between the header and Catch up: header " +
-        JSON.stringify([headerBox.right, headerBox.top]) + ", Catch up " + JSON.stringify([pageBox.right, pageBox.top]));
-    } else check(!shown(pageCopy()), "Catch up's desktop copy is displayed on a phone");
     // 3. One choice sends one answer_choice for that ask, in the ninth workspace.
     options()[0]!.click();
     await wait(() => f.answers.length > 0, "the answer reached the command endpoint");
     const sent = f.answers[0];
     check(f.answers.length === 1 && sent.workspace_id === f.ids[8] && sent.command.kind === "answer_choice" && sent.command.signal_id === f.ask &&
       sent.command.option_id === "yes", "the answer names the wrong workspace, ask or option: " + JSON.stringify(f.answers));
-    // 4. Catch up reads again: the card is gone once all nine are checked, not only while they reload.
-    await wait(() => !document.querySelector(`[data-needs-you="${f.ask}"]`) &&
-      document.querySelector("[data-home-catchup] .hm-catchup-subline")?.textContent === "Nothing needs you right now.", "the answered question left the list");
-    // 5. The count follows. A phone keeps the control on Catch up; a desktop shows it again in workspace one's header.
-    if (!f.phone) {
-      await wait(() => shown(pageCopy()) && read(pageCopy()) === "0|Waiting on you 0", "Catch up's own count reads zero after the answer");
-      const back = document.querySelector<HTMLAnchorElement>(`[data-home-catchup] a.hm-catchup-card[data-workspace-id="${f.ids[0]}"]`);
-      check(back, "Catch up has no link to workspace one"); back!.click();
-      await wait(() => route("w") === f.ids[0] && route("v") === null && shown(control()), "back on workspace one's chat");
+    // 4. The card leaves immediately, Sent is announced, and the panel settles on Nothing waiting on you.
+    await wait(() => !panel()?.querySelector(`[data-waiting-card="${f.ask}"]`) &&
+      panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent" &&
+      panel()?.querySelector(".cs-waiting-panel__state-text")?.textContent === "Nothing waiting on you.", "the answered question left the panel and announced Sent");
+    // 5. Closing on phone returns focus to the channel header Waiting on you control.
+    if (f.phone) {
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !sheet()?.open && document.activeElement === control(), "closing phone sheet returned focus to header control");
     }
+    // 6. The top-bar count updates to zero.
     await wait(() => shown(control()) && count() === "0", "the count reads zero after the answer");
     check(name() === "Waiting on you 0", "the control's name did not follow the count");
-    check(f.answers.length === 1 && !document.querySelector(`[data-needs-you="${f.ask}"]`), "the question came back or was answered twice");
+    check(f.answers.length === 1 && !document.querySelector(`[data-waiting-card="${f.ask}"]`), "the question came back or was answered twice");
     document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
   } catch (error) {
     document.documentElement.dataset.waitingObservation = JSON.stringify({ error: String(error), scenario: f.scenario, steps, unexpected: f.unexpected });
