@@ -3830,6 +3830,144 @@
             "reason": "The app's authenticated browser Wiki reader is not a CLI operation."
           }
         },
+        "site/src/lib/multi-account.ts:REMOTE_LOGOUT_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/logout"
+          ],
+          "citation": "site/src/lib/multi-account.ts:63,2796-2809",
+          "detail": "Best-effort remote local-session revocation deadline during multi-account sign-out.",
+          "operation": {
+            "name": "browser-multi-account-logout",
+            "class": "not-run",
+            "writes": [
+              "session revocation state"
+            ],
+            "removes": [],
+            "reason": "POST /auth/v1/logout revokes a live human session.",
+            "proxy": "No fair read-only proxy exists for session revocation."
+          }
+        },
+        "site/src/lib/multi-account.ts:VERIFY_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/user",
+            "/auth/v1/token"
+          ],
+          "citation": "site/src/lib/multi-account.ts:64,965-966,1027,2349,2784",
+          "detail": "Browser multi-account session verification and fenced auth-fetch deadline.",
+          "operation": {
+            "name": "browser-multi-account-verify",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Requires an authenticated browser multi-account session token.",
+            "proxy": "No fair read-only proxy exists without a human browser session."
+          }
+        },
+        "site/src/lib/multi-account.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/multi-account.ts:965",
+          "detail": "Per-request AbortSignal.timeout(VERIFY_TIMEOUT_MS) combined with caller signal in fenced auth fetch.",
+          "operation": {
+            "name": "browser-multi-account-fetch-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of VERIFY_TIMEOUT_MS."
+          }
+        },
+        "site/src/lib/multi-account.ts:AbortSignal.timeout#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/multi-account.ts:966",
+          "detail": "Per-request AbortSignal.timeout(VERIFY_TIMEOUT_MS) in fenced auth fetch when no caller signal is present.",
+          "operation": {
+            "name": "browser-multi-account-fetch-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of VERIFY_TIMEOUT_MS."
+          }
+        },
+        "site/src/lib/multi-account.ts:AbortSignal.timeout#3": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/multi-account.ts:2349",
+          "detail": "Per-request AbortSignal.timeout(VERIFY_TIMEOUT_MS) checking live session user via GET /auth/v1/user.",
+          "operation": {
+            "name": "browser-multi-account-verify-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of VERIFY_TIMEOUT_MS."
+          }
+        },
+        "site/src/lib/multi-account.ts:AbortSignal.timeout#4": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/multi-account.ts:2784",
+          "detail": "Per-request AbortSignal.timeout(VERIFY_TIMEOUT_MS) reading verified user profile via GET /auth/v1/user.",
+          "operation": {
+            "name": "browser-multi-account-verify-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of VERIFY_TIMEOUT_MS."
+          }
+        },
+        "site/src/lib/multi-account.ts:AbortSignal.timeout#5": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/auth/v1/logout"
+          ],
+          "citation": "site/src/lib/multi-account.ts:2806",
+          "detail": "Per-request AbortSignal.timeout(REMOTE_LOGOUT_TIMEOUT_MS) for best-effort remote local logout.",
+          "operation": {
+            "name": "browser-multi-account-logout-site",
+            "class": "not-run",
+            "writes": [
+              "session revocation state"
+            ],
+            "removes": [],
+            "reason": "Use of REMOTE_LOGOUT_TIMEOUT_MS."
+          }
+        },
+        "site/src/lib/multi-account.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/auth/v1/token",
+            "/auth/v1/user"
+          ],
+          "citation": "site/src/lib/multi-account.ts:1027",
+          "detail": "Whole-operation bounded race timer rejecting with MultiAccountAuthRecoveryRequired after VERIFY_TIMEOUT_MS.",
+          "operation": {
+            "name": "browser-multi-account-bounded-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of VERIFY_TIMEOUT_MS."
+          }
+        },
         "src/listener/hook.ts:setTimeout": {
           "class": "network-api",
           "scope": "whole-operation",
