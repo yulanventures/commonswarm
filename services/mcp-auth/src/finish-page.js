@@ -47,7 +47,7 @@ export function finishPaths(interactionUid) {
 }
 
 function expiryText(clientDisplay) {
-  return `Return link expired. Return to ${clientDisplay.primary} and start a new connection.`;
+  return `Open ${clientDisplay.primary} and start a new connection.`;
 }
 
 function shell({ clientDisplay, title, content, script = "" }) {
@@ -57,7 +57,9 @@ function shell({ clientDisplay, title, content, script = "" }) {
 <title>${title}</title>${script}<style>${CONSENT_STYLES}
 .finish p,.finish a,.finish button,.finish dd{overflow-wrap:anywhere}
 .finish section>*+*{margin-top:14px}
+.finish #finish-status{color:var(--ink)}
 .finish #finish-status:empty{display:none}
+.finish #finish-page:focus-visible{outline:3px solid var(--focus);outline-offset:6px;border-radius:10px}
 .finish-summary{margin:16px 0 0;padding:4px 16px;border-radius:14px;background:var(--soft);border:1px solid var(--hair)}
 .finish-row{display:grid;grid-template-columns:minmax(118px,auto) minmax(0,1fr);gap:2px 16px;align-items:baseline;padding:11px 0;border-top:1px solid var(--hair);font-size:15px}
 .finish-row:first-child{border-top:0}
@@ -111,7 +113,7 @@ export function renderFinishPage({ interactionUid, clientDisplay, identity, work
   const workspaces = workspaceNames.length ? workspaceNames.map(escapeHtml).join(", ")
     : `${workspaceCount} workspace${workspaceCount === 1 ? "" : "s"}`;
   return shell({ clientDisplay, title: "Connected", script: `<script src="${FINISH_TIMER_PATH}" nonce="${nonce}" defer></script>`, content: `
-<section id="finish-page" data-connected-path="${paths.connectedPath}" data-finish-path="${paths.finishPath}" data-deadline="${deadline}" data-remaining-ms="${Math.max(0, deadline - Date.now())}" data-expiry-text="${escapeHtml(expiryText(clientDisplay))}" aria-live="polite" aria-atomic="true" tabindex="-1">
+<section id="finish-page" aria-labelledby="finish-title" data-connected-path="${paths.connectedPath}" data-finish-path="${paths.finishPath}" data-deadline="${deadline}" data-remaining-ms="${Math.max(0, deadline - Date.now())}" data-expiry-text="${escapeHtml(expiryText(clientDisplay))}" aria-live="polite" aria-atomic="true" tabindex="-1">
 <h1 id="finish-title">Connected</h1><p id="finish-status" class="lede"></p>
 <dl class="finish-summary">
 <div class="finish-row"><dt>Account</dt><dd>${name}${email}</dd></div>
@@ -124,5 +126,9 @@ export function renderFinishPage({ interactionUid, clientDisplay, identity, work
 }
 
 export function renderFinishExpiredPage({ clientDisplay }) {
-  return shell({ clientDisplay, title: "Return link expired", content: `<h1>Return link expired</h1><p class="lede">${escapeHtml(expiryText(clientDisplay))}</p>` });
+  return shell({
+    clientDisplay,
+    title: "Return link expired",
+    content: `<section id="finish-page" aria-labelledby="finish-title" tabindex="0"><h1 id="finish-title">Return link expired</h1><p id="finish-status" class="lede">${escapeHtml(expiryText(clientDisplay))}</p></section>`,
+  });
 }
