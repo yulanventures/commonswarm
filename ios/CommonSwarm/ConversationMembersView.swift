@@ -8,14 +8,14 @@ struct ConversationMembersView: View {
     @Environment(\.dismiss) private var dismiss
     @SwiftUI.State private var access = MemberAccess.readOnly
     @SwiftUI.State private var choices: [MemberChoice] = []
-    @SwiftUI.State private var selected: [MemberRef] = []
+    @SwiftUI.State private var edit = MemberEditIntent()
+    @SwiftUI.State private var loaded = false
     @SwiftUI.State private var removing: MemberChoice?
     @SwiftUI.State private var adding = false
     @SwiftUI.State private var query = ""
     @SwiftUI.State private var error: String?
     @SwiftUI.State private var busy = false
-    @SwiftUI.State private var pending: MemberChange?
-    @SwiftUI.State private var commandID = UUID()
+
 
     private var members: [MemberChoice] {
         (row.members ?? []).filter { $0.left_at == nil }.map {
@@ -23,38 +23,71 @@ struct ConversationMembersView: View {
         }
     }
 
+    private var labels: [MemberRef: String] { MemberChoice.disambiguators(choices + members) }
+    private var destination: String { row.item(viewer: api.session.userID, labels: labels).name }
+
+    private func display(_ choice: MemberChoice) -> String {
+        labels[choice.id].map { choice.name + " · " + $0 } ?? choice.name
+    }
+
+    private func memberLabel(_ choice: MemberChoice) -> some View {
+        Label {
+            VStack(alignment: .leading) {
+                Text(choice.name)
+                if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
+            }
+        } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
+    }
+
+    private var retryTitle: String {
+        guard let change = edit.pending else { return "Retry" }
+        let refs: [MemberRef]
+        let action: String
+        switch change {
+        case .add(let items): refs = items; action = "Retry adding "
+        case .remove(let item): refs = [item]; action = "Retry removing "
+        }
+        let names = refs.map { ref in
+            (choices + members).first(where: { $0.id == ref }).map(display) ?? ref.id.uuidString
+        }
+        return action + names.joined(separator: ", ") + (action == "Retry adding " ? " to " : " from ") + destination
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 if let error {
                     Text(error)
-                    Button("Retry") {
-                        Task { if let pending { await submit(pending) } else { await load() } }
+                    Button(retryTitle) {
+                        Task { await retry() }
                     }.disabled(busy)
                 }
-                if adding {
+                if !loaded { if error == nil { ProgressView() } }
+                else if adding {
                     TextField("Find a member", text: $query)
                     let existing = Set(members.map(\.id))
                     ForEach(choices.filter { !existing.contains($0.id) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }) { member in
-                        let picked = selected.contains(member.id)
+                        let picked = edit.selected.contains(member.id)
                         Button {
-                            if picked { selected.removeAll { $0 == member.id } } else { selected.append(member.id) }
+                            edit.toggle(member.id)
+                            error = nil
                         } label: {
                             HStack {
-                                Label(member.name, systemImage: member.id.kind == .agent ? "cpu" : "person")
+                                memberLabel(member)
                                 Spacer()
                                 if picked { Image(systemName: "checkmark") }
                             }.frame(minHeight: 44).contentShape(Rectangle())
-                        }.accessibilityAddTraits(picked ? .isSelected : []).disabled(busy || (!picked && selected.count >= 50))
+                        }.accessibilityAddTraits(picked ? .isSelected : []).disabled(busy || (!picked && edit.selected.count >= 50))
                     }
                 } else {
+                    if row.kind == .general && members.isEmpty { Text("Everyone in this workspace") }
                     ForEach(members) { member in
                         HStack {
-                            Label(member.name, systemImage: member.id.kind == .agent ? "cpu" : "person")
+                            memberLabel(member)
                             Spacer()
                             if access.remove && member.id != MemberRef(kind: .user, id: api.session.userID) {
-                                Button { removing = member } label: { Text("Remove").frame(minHeight: 44).contentShape(Rectangle()) }
-                                    .buttonStyle(.borderless).accessibilityLabel("Remove " + member.name).disabled(busy)
+                                Button { edit.retire(); error = nil; removing = member } label: { Text("Remove").frame(minHeight: 44).contentShape(Rectangle()) }
+                                    .buttonStyle(.borderless).accessibilityLabel("Remove " + display(member) + " from " + destination).disabled(busy)
                             }
                         }
                     }
@@ -65,19 +98,21 @@ struct ConversationMembersView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(adding ? "Cancel" : "Done") {
-                        if adding { adding = false; selected = []; query = "" } else { dismiss() }
+                        edit.cancel()
+                        error = nil
+                        if adding { adding = false; query = ""; Task { await load() } } else { dismiss() }
                     }.disabled(busy)
                 }
                 if access.add {
                     ToolbarItem(placement: .confirmationAction) {
                         Button(adding ? "Add" : "Add members") {
-                            if adding { Task { await submit(.add(selected)) } } else { adding = true }
-                        }.disabled(busy || (adding && selected.isEmpty))
+                            if adding { edit.begin(.add(edit.selected)); Task { await retry() } } else { edit.cancel(); error = nil; adding = true }
+                        }.disabled(busy || (adding && edit.selected.isEmpty))
                     }
                 }
             }
-            .alert("Remove " + (removing?.name ?? "member") + "?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { member in
-                Button("Remove", role: .destructive) { Task { await submit(.remove(member.id)) } }
+            .alert("Remove " + (removing.map(display) ?? "member") + " from " + destination + "?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { member in
+                Button("Remove", role: .destructive) { edit.begin(.remove(member.id)); Task { await retry() } }
                 Button("Cancel", role: .cancel) {}
             }
         }.task { await load() }.interactiveDismissDisabled(busy)
@@ -85,27 +120,30 @@ struct ConversationMembersView: View {
 
     private func load() async {
         do {
+            guard let rows = try await api.conversationList(workspace), let current = rows.first(where: { $0.id == row.id }),
+                  current.access != .unavailable else { dismiss(); return }
+            row = current
             access = try await api.memberAccess(workspace: workspace, row: row)
-            if access.add { choices = try await api.memberChoices(workspace) }
+            choices = try await api.memberChoices(workspace)
+            loaded = true
             error = nil
-        } catch { access = .readOnly; self.error = "Couldn’t load membership controls." }
+        } catch { loaded = false; access = .readOnly; self.error = "Couldn’t load membership controls." }
     }
 
-    private func submit(_ change: MemberChange) async {
+    private func retry() async {
         guard !busy else { return }
+        guard let change = edit.pending else { await load(); return }
         busy = true
         defer { busy = false }
-        if pending != change { pending = change; commandID = UUID() }
         do {
-            try await api.changeMembers(change, workspace: workspace, row: row, commandID: commandID)
+            try await api.changeMembers(change, workspace: workspace, row: row, commandID: edit.commandID)
             guard let fresh = try await api.conversationList(workspace), let current = fresh.first(where: { $0.id == row.id }) else {
                 throw APIError.invalidResponse
             }
             try Task.checkCancellation()
             updated(fresh)
             row = current
-            pending = nil
-            selected = []
+            edit.cancel()
             adding = false
             query = ""
             await load()

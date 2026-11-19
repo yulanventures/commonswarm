@@ -72,3 +72,26 @@ extension ConversationAPI {
         guard result.status == "accepted", priv || result.conversation_id == row.id else { throw APIError.invalidResponse }
     }
 }
+
+struct MemberEditIntent {
+    private(set) var selected: [MemberRef] = []
+    private(set) var pending: MemberChange?
+    private(set) var commandID = UUID()
+
+    mutating func toggle(_ member: MemberRef) {
+        retire()
+        if selected.contains(member) { selected.removeAll { $0 == member } } else { selected.append(member) }
+    }
+
+    mutating func cancel() {
+        retire()
+        selected = []
+    }
+
+    mutating func retire() { pending = nil; commandID = UUID() }
+
+    mutating func begin(_ change: MemberChange) {
+        if case .add(let refs) = change, refs != selected || refs.isEmpty { return }
+        if pending != change { commandID = UUID(); pending = change }
+    }
+}
