@@ -126,6 +126,11 @@ export interface SignalQuery {
    */
   after?: SignalCursor;
   /**
+   * Independent strict keyset lower bound for the open_system_alerts
+   * reconciliation feed (inbox reads only).
+   */
+  alertAfter?: SignalCursor;
+  /**
    * Oldest-first order. Follow catch-up uses this so a backlog larger than
    * --limit is drained page by page instead of truncated to the newest page.
    * One-shot inbox/feed keep the default (newest first).
@@ -162,6 +167,10 @@ export interface AgentSignalPage {
   pendingDeliveryCount: number | null;
   /** Optional wake join hint. 0.1.57 servers omit it. */
   wake?: WakeHint;
+  /** Open system alerts routed to this lead seat, cursor-independent for late-commit reconciliation. */
+  openSystemAlerts?: SignalRecord[];
+  /** True when more open_system_alerts pages follow after the last row in openSystemAlerts. */
+  openSystemAlertsHasMore?: boolean;
 }
 
 /** Bounded CLI wait window for inbox --wait / ask --wait (seconds). */
@@ -490,6 +499,26 @@ function parseSignalReactions(
   return { ...(reactions === undefined ? {} : { reactions }), ...(reaction === undefined ? {} : { reaction }) };
 }
 
+function parseSignalSystemAlert(
+  value: unknown,
+): { system_alert?: { alert_id: string; kind: string; affected_principal_id: string } } {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new SignalMalformedError("signal read returned a malformed system_alert marker");
+  }
+  const row = value as Record<string, unknown>;
+  if (typeof row.kind !== "string" || row.kind.trim().length === 0) {
+    throw new SignalMalformedError("signal read returned a malformed system_alert kind");
+  }
+  return {
+    system_alert: {
+      alert_id: checkedUuid(row.alert_id, "system_alert alert_id"),
+      kind: row.kind,
+      affected_principal_id: checkedUuid(row.affected_principal_id, "system_alert affected_principal_id"),
+    },
+  };
+}
+
 function parseSignalRecipients(
   value: unknown,
 ): { recipients?: SignalRecipientRef[] } {
@@ -698,6 +727,7 @@ export function parseSignalRecord(
     ...parseSignalRecipients(row.recipients),
     ...parseSignalMentions(row.mentions),
     ...parseSignalReactions(row.reactions, row.reaction),
+    ...parseSignalSystemAlert(row.system_alert),
   };
 }
 
@@ -1349,6 +1379,12 @@ async function agentSignalPage(
               after_id: query.after?.id ?? null,
             }
             : {}),
+          ...(includeOptional && query.alertAfter !== undefined
+            ? {
+              alert_after_created_at: query.alertAfter.created_at,
+              alert_after_id: query.alertAfter.id,
+            }
+            : {}),
           limit: query.limit,
           include_stale: query.includeStale ?? false,
           /* Each row's mentions, as stored. Without it the edge names this agent in to_agent on an
@@ -1427,6 +1463,12 @@ async function agentSignalPage(
   } catch {
     throw plainMalformedError("signal read returned a malformed wake hint");
   }
+  const rawOpenAlerts = (body as Record<string, unknown>).open_system_alerts;
+  const openSystemAlerts = Array.isArray(rawOpenAlerts)
+    ? parseSignalRows(rawOpenAlerts, parseOptions).signals
+    : undefined;
+  const openSystemAlertsHasMore =
+    (body as Record<string, unknown>).open_system_alerts_has_more === true;
   return {
     signals: sortSignals(
       rowsAfterCursor(parsedRows.signals, query.after),
@@ -1441,6 +1483,8 @@ async function agentSignalPage(
     malformedRows: parsedRows.malformedRows,
     pendingDeliveryCount,
     ...(wake === undefined ? {} : { wake }),
+    ...(openSystemAlerts === undefined ? {} : { openSystemAlerts }),
+    ...(openSystemAlertsHasMore ? { openSystemAlertsHasMore: true } : {}),
   };
 }
 
@@ -1971,6 +2015,7 @@ function normalizedSignalQuery(query: SignalQuery): SignalQuery {
     throw new Error("in_reply_to must be a signal UUID");
   }
   const after = checkedAfter(query.after);
+  const alertAfter = checkedAfter(query.alertAfter);
   return {
     ...query,
     workspaceId: query.workspaceId.toLowerCase(),
@@ -1980,6 +2025,7 @@ function normalizedSignalQuery(query: SignalQuery): SignalQuery {
     limit: checkedLimit(query.limit),
     since: checkedSince(query.since),
     ...(after === undefined ? {} : { after }),
+    ...(alertAfter === undefined ? {} : { alertAfter }),
     ascending: query.ascending === true || after !== undefined,
     includeStale: query.includeStale ?? false,
   };
@@ -2337,18 +2383,23 @@ export function renderSignals(
      * Worse than absent. The line already carries a uuid — the AUTHOR's — so a reader following
      * the obvious cue pastes the wrong one and gets a refusal that looks like their mistake.
      * Shown only for kinds that can BE replied to, so every other row stays quiet. */
-    const replyable = signal.kind === "ask" && signal.reaction === undefined;
+    const replyable = signal.kind === "ask" && signal.reaction === undefined && signal.system_alert === undefined;
     // A message the workspace or channel reads is answered in its thread, as the hook and an arrival say.
     const threadRoot = publicReplyThreadRoot(signal);
-    const idHint = !replyable ? ""
+    const idHint = signal.system_alert !== undefined
+      ? ` — resolve with: cswarm alert resolve ${signal.system_alert.alert_id} "<note>"`
+      : !replyable ? ""
       : threadRoot === null ? ` — reply with: cswarm reply ${signal.id}`
       : ` — reply with: cswarm reply ${threadRoot} --thread`;
     const bodyClipped = signal.body.length > SIGNAL_BODY_DISPLAY_MAX;
     const displayedBody = bodyClipped
       ? signal.body.slice(0, SIGNAL_BODY_DISPLAY_MAX)
       : signal.body;
+    const tag = signal.system_alert !== undefined
+      ? "system-alert"
+      : signal.reaction === undefined ? signal.kind : "reaction";
     lines.push(
-      `- [${signal.reaction === undefined ? signal.kind : "reaction"}]${replyStatus} ${author} — ${
+      `- [${tag}]${replyStatus} ${author} — ${
         relativeAge(signal.created_at, now)
       } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}${chainHop}: ${
         JSON.stringify(displayedBody)

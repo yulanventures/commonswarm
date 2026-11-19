@@ -5,8 +5,8 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
-import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
-import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
+import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, showPeopleConfirmation } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -153,7 +153,7 @@ test("approving an agent uses the independent server command without changing th
   assert.match(approve, /approvalUntil\(/);
   assert.match(approve, /await loadHouseholdConnections\(\)/);
   assert.match(script, /for \(const operation of CONTENT_OPERATIONS\)/);
-  assert.match(script, /CONTENT_OPERATION_LABELS\[operation\]/);
+  assert.match(script, /APPROVAL_CHOICE_LABELS\[operation\]/);
 });
 
 test("every household result is dropped once its workspace, account, version or generation moved on", () => {
@@ -221,7 +221,12 @@ test("creation asks for purpose without a default and states the owner's Editor 
 test("active approvals expose Save and withdrawal in both places, owned agents only in the dialog", () => {
   const cards = section(script, "const renderAgentApprovals", "const connectionReads");
   assert.match(cards, /input.checked = approval \? approval.operations.includes\(operation\) : true/);
-  assert.match(cards, /allow.textContent = approval \? "Save" : "Allow"/);
+  assert.match(cards, /allow.textContent = approval \? "Save" : editor \? "Allow" : "Allow read access"/);
+  // Reading has no box: it is a sentence, it is skipped in the loop, and it is always the first thing sent.
+  assert.match(cards, /included\.textContent = READ_ACCESS_INCLUDED;/);
+  assert.match(cards, /if \(operation === "read"\) continue;/);
+  assert.match(cards, /const operations = \["read", \.\.\.\[\.\.\.choices\.querySelectorAll<HTMLInputElement>\("\[data-approval-operation\]"\)\]/);
+  assert.doesNotMatch(cards, /input\.disabled/);
   assert.match(cards, /withdraw.textContent = "Withdraw access"/);
   assert.match(cards, /approvalDescription\(approval\)/);
   const model = section(script, "const peopleDialogModel", "const syncPeopleDialogLayout");
@@ -232,12 +237,14 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /"pd-quiet-link"/);
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
-  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, true\)/,
-    "the dialog's nested confirmation suppresses the card's native confirmation");
+  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, questionId \?\? uuid\(\)\)/);
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
-  assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, hosted\)\)/);
+  assert.doesNotMatch(script, /window\.confirm/, "no browser prompt anywhere on the page");
+  const askPeople = section(script, "const confirmPeopleDialogAction = ", "/** Open above the current view");
+  assert.match(askPeople, /const questionId = uuid\(\);\s*showPeopleConfirmation\(confirm, action, \{ \.\.\.item, workspaceName: model\.workspaceName \}/, "People & agents makes one command id per question and passes the workspace name");
+  assert.match(askPeople, /peopleDialogAction\(action, id, button, notice, questionId, pinnedKey\)/, "and every press of that question uses it");
   assert.match(cards, /const hosted = connection.kind === "hosted";/);
-  assert.match(cards, /withdrawAgent\(principalId, agentName, hosted, withdraw, status\)/,
+  assert.match(cards, /askListsWithdraw\(principalId, agentName, hosted, withdraw, status\)/,
     "a card row decides hosted from its own connection, not from a roster lookup");
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
@@ -272,7 +279,7 @@ function approvalDom() {
   const doc: any = { activeElement: null };
   class Element {
     children: Element[] = []; dataset: Record<string, string> = {}; attributes: Record<string, string> = {};
-    textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = "";
+    textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = ""; scrollTop = 0;
     ownerDocument = doc; events = new Map<string, () => void>();
     classList = {
       add: (...names: string[]) => { this.className += ` ${names.join(" ")}`; },
@@ -348,7 +355,7 @@ test("hosted and local owners use the same Allow controls and approval command; 
     f.ctx.householdConnectionsReadState = "succeeded";
     f.ctx.sampleMode = true; paint(); assert.equal(allowButton(), undefined); f.ctx.sampleMode = false;
     Object.assign(f.ctx, { document: dom.doc, one: (selector: string) => selector === "[data-household-agent-list]" ? dom.list : null,
-      householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, HOSTED_LISTS_NOTE,
+      householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, HOSTED_LISTS_NOTE,
       initials: () => "M", markAgentAvatar: () => {}, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
     const funcs = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
       ${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ renderAgentApprovals, approveAgent });`, { ...f.ctx });
@@ -356,6 +363,14 @@ test("hosted and local owners use the same Allow controls and approval command; 
     const choices = dom.list.descendants().find(node => node.tag === "fieldset");
     const allow = dom.list.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
     assert.ok(choices && !choices.hidden); assert.ok(allow && !allow.hidden);
+    // Reading is a sentence, not a box; the two real choices are named in full and start ticked, as before.
+    const boxes = () => dom.list.descendants().filter(node => node.tag === "input");
+    assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
+    assert.deepEqual(boxes().map(node => [node.value, node.checked, !!node.disabled]), [["create", true, false], ["update", true, false]]);
+    assert.equal("approvalReadOnly" in dom.list.descendants().find(node => node.tag === "li")!.dataset, false);
+    const said = dom.list.descendants().map(node => String(node.textContent ?? "").trim());
+    for (const label of ["Add new lists and docs", "Change existing lists and docs"]) assert.ok(said.includes(label), label);
+    assert.equal(said.some(text => /See lists and docs|Add new ones|Change them/.test(text)), false, "the old short labels are gone from this row");
     assert.equal(dom.list.descendants().some(node => node.textContent === HOSTED_LISTS_NOTE), kind === "hosted");
     allow.click();
     // The event starts an async command; one event-loop turn drains its resolved transport and read.
@@ -370,6 +385,40 @@ test("hosted and local owners use the same Allow controls and approval command; 
     assert.ok(dom.detail.descendants().some(node => node.tag === "button" && node.textContent === "Withdraw"));
     funcs.renderAgentApprovals();
     assert.ok(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Save"));
+    const sentOperations = () => calls.at(-1)!.body.connection.operations;
+    const press = async (text: string) => {
+      const button = dom.list.descendants().find(node => node.tag === "button" && node.textContent === text);
+      assert.ok(button, `a ${text} button`); button.click();
+      await new Promise<void>(resolve => setImmediate(resolve));
+    };
+    // A saved grant with only one optional permission keeps exactly that choice, and Save sends it with reading.
+    connection.approval = { operations: ["read", "update"], expires_at: null };
+    funcs.renderAgentApprovals();
+    assert.deepEqual(boxes().map(node => [node.value, node.checked]), [["create", false], ["update", true]]);
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read", "update"]);
+    // Either optional permission can be granted on its own alongside reading; with neither, reading alone is sent.
+    funcs.renderAgentApprovals();
+    boxes()[0].checked = true; boxes()[1].checked = false;
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read", "create"]);
+    funcs.renderAgentApprovals();
+    for (const box of boxes()) box.checked = false;
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read"]);
+    // A reader can pass on reading only: no boxes, the action says so, and reading is what is sent.
+    connection.approval = null;
+    const reader = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
+      ${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ renderAgentApprovals, approveAgent });`,
+      { ...f.ctx, householdAccess: { contentRole: "reader" } });
+    reader.renderAgentApprovals();
+    assert.deepEqual(boxes(), []);
+    // The reader's row is marked, so its longer button can take its own line on a narrow phone; an editor's is not.
+    assert.equal(dom.list.descendants().find(node => node.tag === "li")!.dataset.approvalReadOnly, "");
+    assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
+    assert.equal(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Allow"), false);
+    await press("Allow read access");
+    assert.deepEqual(sentOperations(), ["read"]);
   }
 });
 
@@ -539,6 +588,75 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "no Remove while the list is being read again");
   access = undefined; paint();
   assert.equal(all(node => node.dataset?.adminAccess !== undefined).length, 0, "with agent admin access off, the tab lists people only");
+});
+
+test("People & agents keeps its scroll position across redraws on the same tab and profile, and resets when changing tab, query, focus or selection", () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom();
+  const state: any = { selected: null, query: "", tab: "admins" };
+  const paint = (options: any = {}) => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(), state,
+    { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {} },
+    { page: { homeLabel: "Home", homeHref: "/app" }, ...options });
+  const ctx = () => dom.root.querySelector("[data-people-context]")!;
+  const side = () => dom.root.querySelector("[data-people-side]")!;
+  paint();
+  ctx().scrollTop = 178;
+  paint();
+  assert.equal(ctx().scrollTop, 178, "a background redraw on the same tab and query preserves scroll position");
+  state.query = "m"; paint();
+  assert.equal(ctx().scrollTop, 0, "typing a query resets scroll to the top of results");
+  ctx().scrollTop = 90; state.tab = "agents"; paint();
+  assert.equal(ctx().scrollTop, 0, "switching tabs resets scroll to the top");
+  ctx().scrollTop = 120; paint({ focus: { kind: "person", id: "person" } });
+  assert.equal(ctx().scrollTop, 0, "applying an initial focus target resets scroll");
+  state.selected = { type: "person", id: "person" }; paint();
+  side().scrollTop = 140; paint();
+  assert.equal(side().scrollTop, 140, "a redraw of the same open profile preserves its scroll position");
+  state.selected = { type: "agent", id: "principal" }; paint();
+  assert.equal(side().scrollTop, 0, "switching to another profile resets the detail scroll");
+});
+
+test("agent profile keeps name, status and problem fix visible, groups routine key/access/removal under More, preserves More across same-agent redraws, and returns Escape focus to the same action", () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom();
+  f.ctx.agents.push({ principalId: "other-agent", name: "Harbor", ownerUserId: "person", model: "claude-opus-5-5", transport: "local" });
+  const baseModel = f.model();
+  const atlas = { ...baseModel.agents[0], id: "principal", name: "Atlas", own: true, mayManage: true, liveKey: true, key: "Turned off. A new key can bring it back.",
+    access: { until: null }, accessReadState: "succeeded" as const,
+    status: { kind: "key-off" as const, label: "Key turned off", attention: true, sentence: "It needs a new key to connect again.", fix: { allowed: true, action: "new-key" as const } } };
+  const harbor = { ...baseModel.agents[1], id: "other-agent", name: "Harbor", own: true, mayManage: true, liveKey: true, key: "Uses a key to connect.",
+    access: null, accessReadState: "succeeded" as const,
+    status: { kind: "active" as const, label: "Active", attention: false, sentence: "", fix: { allowed: false, action: null } } };
+  const model = () => ({ ...baseModel, agents: [atlas, harbor] });
+  const state: any = { selected: { type: "agent", id: "principal" }, query: "", tab: "agents" };
+  const paint = (options: any = {}) => renderPeopleDialog(dom.root as any, dom.detail as any, model(), state,
+    { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {} },
+    { page: { homeLabel: "Home", homeHref: "/app" }, ...options });
+  const more = () => dom.detail.querySelector("[data-people-agent-more]") as any;
+  paint();
+  assert.ok(more(), "agent profile renders a More disclosure");
+  assert.notEqual(more().open, true, "More starts closed on fresh open");
+  // Name, status, and the problem-fix action (Get a new key) stay outside More.
+  const outsideMore = dom.detail.descendants().filter(node => node !== more() && !more().contains(node));
+  assert.ok(outsideMore.some(node => node.tag === "h2" && node.textContent === "Atlas"), "name stays visible outside More");
+  assert.ok(outsideMore.some(node => node.dataset?.agentStatus === "key-off"), "status chip stays visible outside More");
+  assert.ok(outsideMore.some(node => node.tag === "button" && node.textContent === "Get a new key"), "current problem fix stays visible outside More");
+  // Routine key management, Lists & docs access changes, technical details and removal sit inside More.
+  const insideMore = more().descendants();
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-withdraw-agent-access"] === "principal"), "Lists & docs Withdraw sits inside More");
+  assert.ok(insideMore.some((node: any) => node.tag === "button" && node.textContent === "New key"), "routine Key management sits inside More");
+  assert.ok(insideMore.some((node: any) => node.className?.includes("pd-technical")), "Technical details sits inside More");
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-revoke-grant"] === "principal"), "Turn off key sits inside More");
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-remove-agent"] === "principal"), "Remove sits inside More");
+  // Opening More stays open across same-agent redraws, and resets closed when switching agents or applying focus.
+  more().open = true;
+  paint();
+  assert.equal(more().open, true, "a background redraw for the same agent keeps More open");
+  state.selected = { type: "agent", id: "other-agent" };
+  paint();
+  assert.notEqual(more().open, true, "switching to another agent starts with More closed");
+  more().open = true;
+  state.focusApplied = null;
+  paint({ focus: { kind: "agent", id: "other-agent" } });
+  assert.notEqual(more().open, true, "applying an initial focus target resets More to closed");
 });
 
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
@@ -734,21 +852,29 @@ test("the Just me warning is final, names the way out, and clears when Shared is
   f.radios[1].checked = false; f.radios[0].checked = true; sync(); assert.equal(f.warning.textContent, "");
 });
 
-test("approval sends only connection consent, withdrawal uses the principal, and cancelled withdrawal sends nothing", async () => {
-  const calls: any[] = [], messages: string[] = [], confirms: string[] = [], receipt = { textContent: "" };
+test("approval sends only connection consent, withdrawal asks in the shared confirmation, and going back sends nothing", async () => {
+  const calls: any[] = [], messages: string[] = [], asked: any[] = [], receipt = { textContent: "" };
   const scope = { workspaceId: "workspace", session: { user: { id: "person" } } };
-  let current = true, confirm = true, reply: any = { status: "committed", expires_at: null };
+  let current = true, reply: any = { status: "committed", expires_at: null }, ids = 0, lose = false;
+  const dialog = {}, root = {}, title = { focused: 0, focus() { this.focused += 1; } };
   const ctx = {
     householdScope: () => scope, householdCurrent: () => current,
-    postCommand: async (_session: any, _id: string, body: any, envelope: any) => {
-      calls.push(JSON.parse(JSON.stringify({ body, envelope }))); return { status: 200, body: reply };
+    postCommand: async (_session: any, id: string, body: any, envelope: any) => {
+      calls.push(JSON.parse(JSON.stringify({ id, body, envelope })));
+      if (lose) throw new Error("The result is unknown. Reload Lists & docs to check this agent's access.");
+      return { status: 200, body: reply };
     },
-    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage, withdrawConfirmText,
-    agents: [{ principalId: "principal", transport: "local" }],
-    householdReceipts: new Map(), one: () => receipt,
-    loadHouseholdConnections: async () => messages.push("reload"), window: { confirm: (text: string) => { confirms.push(text); return confirm; } },
+    uuid: () => `command-${++ids}`, approvalUntil, accessRefusalMessage, withdrawRefusalMessage, readableError: (error: Error) => error.message,
+    agents: [{ principalId: "principal", transport: "local" }], CSS: { escape: (value: string) => value },
+    workspaces: [{ id: "workspace", name: "Herb garden" }],
+    householdReceipts: new Map(),
+    one: (selector: string) => selector === "[data-lists-confirm]" ? dialog : selector === "[data-household-agents]" ? root
+      : selector === "#dashboard-agent-approvals-title" ? title : selector === "[data-people-receipt]" ? receipt : null,
+    // The shared confirmation itself is tested with People & agents; here it records what it was asked and hands back its answer.
+    showPeopleConfirmation: (...args: any[]) => { asked.push(args); },
+    loadHouseholdConnections: async () => messages.push("reload"),
   };
-  const commands = execute(`${section(script, "const approveAgent = async", "let householdConfirms =")}; ({ approveAgent, withdrawAgent });`, ctx);
+  const commands = execute(`${section(script, "const approveAgent = async", "let householdConfirms =")}; ({ approveAgent, withdrawAgent, askListsWithdraw });`, ctx);
   const connection = { kind: "hosted", connection_id: "connection", grant_id: "grant", principal_id: "principal" };
   const button = { disabled: false }, status = { textContent: "" };
   await commands.approveAgent(connection, ["read"], button, status);
@@ -756,30 +882,59 @@ test("approval sends only connection consent, withdrawal uses the principal, and
   assert.equal(status.textContent, "Allowed until you withdraw it.");
   assert.deepEqual(messages, ["reload"]);
   assert.equal(receipt.textContent, "", "approval is announced only on its card");
-  confirm = false;
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(confirms, [withdrawConfirmText("Muse", false)], "a local agent sees the local confirm text");
-  confirm = true; reply = { status: "refused", reason: "connection_access_refused" };
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
+
+  // Withdraw on the card asks in the shared confirmation, with the agent's name and its kind.
+  const opener = { disabled: false };
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  assert.equal(asked.length, 1);
+  const [onDialog, action, item, from, commit, , , , host] = asked[0];
+  assert.equal(onDialog, dialog); assert.equal(action, "withdraw"); assert.deepEqual(JSON.parse(JSON.stringify(item)), { name: "Muse", hosted: false, workspaceName: "Herb garden" }); assert.equal(from, opener);
+  assert.equal(host.root, root, "focus goes back within the approvals, to the same agent's button");
+  host.fallback(); assert.equal(calls.length, 1, "going back, or Escape, sends nothing");
+  commands.askListsWithdraw("principal", "Muse", true, opener, status);
+  assert.deepEqual(JSON.parse(JSON.stringify(asked[1][2])), { name: "Muse", hosted: true, workspaceName: "Herb garden" }, "a hosted row asks with the hosted consequences and workspace name");
+
+  // Confirming sends one withdrawal for that agent in that workspace.
   reply = { status: "committed", withdrawn: 1 };
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.deepEqual(calls[2].body, { kind: "household_withdraw_connection", principal_id: "principal" });
+  await commit(button, status);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], { id: "command-2", body: { kind: "household_withdraw_connection", principal_id: "principal" }, envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } });
   assert.equal(status.textContent, "Withdrawn. Muse can no longer use Lists & docs here.");
-  /* The fixture's roster entry is local while the connection is hosted: the row's own flag decides. */
-  confirm = false;
-  await commands.withdrawAgent("principal", "Muse", true, button, status);
-  assert.deepEqual(confirms.at(-1), withdrawConfirmText("Muse", true), "a hosted row sees the hosted confirm text");
-  confirm = true;
-  await commands.withdrawAgent("principal", "Muse", true, button, status);
+
+  // A refusal keeps its own sentence and is thrown, so the confirmation stays open and says it.
+  reply = { status: "refused", reason: "connection_access_refused" };
+  await assert.rejects(commit(button, status), /Only the person who connected this agent/);
+  assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
+  assert.equal(button.disabled, false);
+
+  // A hosted withdrawal reports the stored approval.
+  reply = { status: "committed", withdrawn: 1 };
+  await asked[1][4](button, status);
   assert.equal(status.textContent, "Withdrawn. The stored Lists & docs approval for Muse was removed.");
   assert.equal(receipt.textContent, "", "withdrawal has no duplicate section receipt");
   assert.deepEqual(messages, ["reload", "reload", "reload"]);
+
+  // A lost answer: the question stays open, and pressing again repeats the same command, never a new one.
+  calls.length = 0; lose = true;
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  const retry = asked.at(-1)[4];
+  await assert.rejects(retry(button, status), /result is unknown/);
+  lose = false; reply = { status: "committed", withdrawn: 1 };
+  await retry(button, status);
+  assert.deepEqual(calls.map((call: any) => call.id), [calls[0].id, calls[0].id], "the retry from the same question sends the same command id");
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  await asked.at(-1)[4](button, status);
+  assert.notEqual(calls[2].id, calls[0].id, "a new question, after a fresh look, gets a new command id");
+  calls.splice(0, calls.length, {}, {}, {}, {});
+
+  // A question confirmed after the workspace changed sends nothing.
+  const reloads = messages.length;
   current = false;
+  await assert.rejects(asked[0][4](button, status), /This workspace changed/);
+  assert.equal(calls.length, 4);
   status.textContent = "other workspace";
   await commands.approveAgent(connection, ["read"], button, status);
-  assert.equal(messages.length, 3, "stale committed replies do not reload the current workspace");
+  assert.equal(messages.length, reloads, "stale committed replies do not reload the current workspace");
 });
 
 test("approval reads distinguish active permanent and local approvals from expired or missing ones", () => {
@@ -1211,4 +1366,420 @@ test("openWorkspace settles each read independently so sibling failures keep loa
     assert.equal(ctx.fileLoadError, "Could not load files. The signal feed is still available.");
     assert.ok(rendered.includes("files:0:Could not load files. The signal feed is still available."));
   }
+});
+
+test("standalone Invite someone page leads with workspace and email, drops the eyebrow, and keeps disclosure beside Create invite link", () => {
+  const invite = section(markup, 'data-channel-view="invite"', "</section>");
+  assert.doesNotMatch(invite, /dashboard__eyebrow/, "repeated Invite someone eyebrow is removed");
+  const workspaceIdx = invite.indexOf("data-invite-workspace");
+  const emailIdx = invite.indexOf('for="dashboard-invite-email"');
+  const submitIdx = invite.indexOf("data-invite-submit");
+  const hintIdx = invite.indexOf('id="dashboard-invite-email-hint"');
+  const formEndIdx = invite.indexOf("</form>");
+  const prereqIdx = invite.indexOf("dashboard__invite-prerequisite");
+  const settingIdx = invite.indexOf('data-workspace-view="objects"');
+  assert.ok(workspaceIdx > 0 && workspaceIdx < emailIdx, "workspace name precedes Their email");
+  assert.ok(emailIdx < submitIdx && submitIdx < hintIdx && hintIdx < formEndIdx, "disclosure sits beside Create invite link inside the form");
+  assert.ok(formEndIdx < prereqIdx && prereqIdx < settingIdx, "prerequisite and Open Lists & docs sit after the form");
+  const hint = section(invite, 'id="dashboard-invite-email-hint"', "</p>");
+  assert.match(hint, /email they sign in with/i);
+  assert.match(hint, /earlier messages,[\s\S]*lists and files/i);
+  assert.match(hint, /not your other workspaces/i);
+});
+
+test("turn-off-key pins the opened key, reuses one command id per question, cancels cleanly, and refuses across replacement", async () => {
+  const dom = approvalDom();
+  const doc = dom.doc as any;
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const opener: any = doc.createElement("button");
+  opener.dataset.pdFocus = "turn-off-key-principal";
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const principalId = "22222222-2222-4222-8222-222222222222";
+  const userId = "33333333-3333-4333-8333-333333333333";
+  const grant1 = "44444444-4444-4444-8444-444444444441";
+  const token1 = "55555555-5555-4555-8555-555555555551";
+  const grant2 = "44444444-4444-4444-8444-444444444442";
+  const token2 = "55555555-5555-4555-8555-555555555552";
+
+  const makeAgent = (grantId: string, tokenId: string) => ({
+    principalId, ownerUserId: userId, name: "Sprout", transport: "local",
+    work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } },
+  });
+  const makeGrant = (grantId: string, tokenId: string) => ({
+    workspaceId, principalId, ownerUserId: userId, grantId, tokenId,
+  });
+
+  let ids = 0, lose = false;
+  const revocations: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: userId } },
+    activeWorkspaceId: workspaceId,
+    agents: [makeAgent(grant1, token1)],
+    accessStatuses: [makeGrant(grant1, token1)],
+    peopleDialogModel: () => ({
+      sample: false, workspaceName: "Herb garden", people: [], invites: [],
+      agents: [{ id: principalId, name: "Sprout", hosted: false, liveKey: true, own: true, mayManage: true }],
+    }),
+    peopleDialogCanAct, homeConnectionAccess, homeConnectionTokenMatches, showPeopleConfirmation,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeAgentToken: async (_session: any, commandId: string, wsId: string, tokenId: string) => {
+      revocations.push({ commandId, wsId, tokenId });
+      if (lose) throw new Error("The result is unknown.");
+    },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => opener,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  // 1. Both cancel paths (Go back and Escape) send nothing and return focus to opener.
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  let buttons = dialog.querySelectorAll("button");
+  assert.equal(buttons[0].textContent, "Go back");
+  assert.equal(focused.at(-1), buttons[0], "Go back is focused on open");
+  buttons[0].click();
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Go back returns focus to opener");
+  assert.equal(revocations.length, 0, "Go back sends nothing");
+
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  let prevented = false, stopped = false;
+  dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented && stopped, true);
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Escape returns focus to opener");
+  assert.equal(revocations.length, 0, "Escape sends nothing");
+
+  // 2. Held question across same-agent key replacement (T1 -> T2) refuses with zero sends.
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  ctx.agents = [makeAgent(grant2, token2)];
+  ctx.accessStatuses = [makeGrant(grant2, token2)];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(revocations.length, 0, "replacement key must never be revoked by an earlier question");
+  assert.equal(dialog.open, true, "dialog stays open to show refusal");
+  assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /This key has changed/);
+  buttons[0].click();
+
+  // 3. Held question when key disappears / cannot be verified refuses with zero sends.
+  ctx.agents = [makeAgent(grant1, token1)];
+  ctx.accessStatuses = [makeGrant(grant1, token1)];
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  ctx.accessStatuses = [];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(revocations.length, 0, "unverifiable key sends nothing");
+  buttons[0].click();
+
+  // 4. One correctly targeted send + retry after lost answer reuses the same command ID and pinned token.
+  ctx.agents = [makeAgent(grant1, token1)];
+  ctx.accessStatuses = [makeGrant(grant1, token1)];
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true, "lost answer keeps question open for safe retry");
+  assert.equal(revocations.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(revocations.length, 2);
+  assert.equal(revocations[0].commandId, revocations[1].commandId, "retrying the same question reuses the same command ID");
+  assert.equal(revocations[0].tokenId, token1);
+  assert.equal(revocations[1].tokenId, token1);
+  assert.match(reloads[0].receipt, /stopped immediately for new requests/);
+});
+
+test("remove-person confirmation names the workspace, reuses one command ID, and sends nothing on cancel or stale roster", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const opener: any = doc.createElement("button");
+  opener.dataset.pdFocus = "remove-person-sam";
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Rivera household & studio — shared with everyone, including the agents";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const targetId = "33333333-3333-4333-8333-333333333333";
+
+  let ids = 0, lose = false, mayRemove = true;
+  const removals: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [{ userId: viewerId, name: "Ana Rivera" }, { userId: targetId, name: "Sam Rivera" }],
+    agents: [],
+    accessStatuses: [],
+    peopleDialogModel: () => ({
+      sample: false, workspaceName, agents: [], invites: [],
+      people: [
+        { id: viewerId, name: "Ana Rivera", role: "owner", own: true, mayRemove: false },
+        ...(ctx.members.some((m: any) => m.userId === targetId)
+          ? [{ id: targetId, name: "Sam Rivera", role: "member", own: false, mayRemove }]
+          : []),
+      ],
+    }),
+    peopleDialogCanAct, showPeopleConfirmation,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    removeWorkspaceMember: async (_session: any, commandId: string, wsId: string, memberUserId: string) => {
+      removals.push({ commandId, wsId, memberUserId });
+      if (lose) throw new Error("The result is unknown.");
+    },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => opener,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  // 1. Heading names the workspace; Go back and Escape both return focus and send nothing.
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Sam Rivera from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 2);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "keep").length, 0);
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
+    "Workspace history stays. They keep their other memberships.");
+  let buttons = dialog.querySelectorAll("button");
+  assert.equal(buttons[0].textContent, "Go back");
+  assert.equal(focused.at(-1), buttons[0], "Go back is focused on open");
+  buttons[0].click();
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Go back returns focus to opener");
+  assert.equal(removals.length, 0);
+
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  let prevented = false, stopped = false;
+  dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented && stopped, true);
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Escape returns focus to opener");
+  assert.equal(removals.length, 0);
+
+  // 2. Held question refuses with zero sends if member disappears or loses removal permission.
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  mayRemove = false;
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(removals.length, 0, "lost permission must not send removal");
+  assert.equal(dialog.open, true);
+  buttons[0].click();
+
+  mayRemove = true;
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  ctx.members = [{ userId: viewerId, name: "Ana Rivera" }];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(removals.length, 0, "already-removed person must not send removal");
+  buttons[0].click();
+
+  // 3. Confirmed removal and lost-answer retry reuse the same questionId and produce workspace-named receipt.
+  ctx.members = [{ userId: viewerId, name: "Ana Rivera" }, { userId: targetId, name: "Sam Rivera" }];
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(removals.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(removals.length, 2);
+  assert.equal(removals[0].commandId, removals[1].commandId, "retrying the same question reuses one command ID");
+  assert.equal(removals[0].wsId, workspaceId);
+  assert.equal(removals[0].memberUserId, targetId);
+  assert.equal(reloads[0].receipt, `Sam Rivera removed from ${workspaceName}. They keep their other memberships.`);
+});
+
+test("cancel-invite confirmation identifies each invite kind, keeps Go back focused, cancels with zero sends, and reuses one command ID", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt } = await import("../../lib/people-invites.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Herb garden";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const invites = [
+    { kind: "person", id: "inv-1", workspaceId, name: "mei@example.test", detail: "You invited · 2 days ago · ends in 5 days", mayCancel: true },
+    { kind: "key", id: "key-1", workspaceId, name: "Sprout", detail: "Sam’s agent · made 3 days ago · ends in 4 days", mayCancel: true },
+    { kind: "code", id: "code-1", workspaceId, name: "Connect code", detail: "Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours", mayCancel: true },
+  ];
+
+  let ids = 0, lose = false;
+  const sent: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [], agents: [], accessStatuses: [],
+    activeInvites: [...invites],
+    peopleDialogModel: () => ({ sample: false, workspaceName, people: [], agents: [], invites: ctx.activeInvites }),
+    peopleDialogCanAct, showPeopleConfirmation, cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeWorkspaceInvitation: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "person", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    revokeAgentToken: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "key", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    revokeAgentJoinCredential: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "code", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => { reloads.push({ wsId, id, receipt, action }); },
+    peopleDialogFocusTarget: () => null,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  for (const invite of invites) {
+    const opener: any = doc.createElement("button");
+    opener.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`;
+    actions.confirmPeopleDialogAction("cancel-invite", invite.id, opener);
+    assert.equal(dialog.open, true);
+    const title = dialog.querySelectorAll("h2")[0]?.textContent;
+    const context = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+    const note = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent;
+    if (invite.kind === "person") {
+      assert.equal(title, "Cancel the invitation for mei@example.test?");
+      assert.equal(context, undefined);
+      assert.equal(note, "You can send a new invitation later.");
+    } else if (invite.kind === "key") {
+      assert.equal(title, "Cancel the key for Sprout?");
+      assert.equal(context, undefined);
+      assert.equal(note, "You can create a new key later.");
+    } else {
+      assert.equal(title, "Cancel this connect code for Herb garden?");
+      assert.equal(context, invite.detail);
+      assert.equal(note, "Agents that already joined with it stay. You can make a new code later.");
+    }
+    const buttons = dialog.querySelectorAll("button");
+    assert.equal(buttons[0].textContent, "Go back");
+    assert.equal(focused.at(-1), buttons[0], `Go back focused on open for ${invite.kind}`);
+    let prevented = false, stopped = false;
+    dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+    assert.equal(prevented && stopped, true);
+    assert.equal(dialog.open, false);
+    assert.equal(focused.at(-1), opener, `Escape returns focus to the same ${invite.kind} row`);
+    assert.equal(sent.length, 0, `Escape sends nothing for ${invite.kind}`);
+  }
+
+  // Disappeared invite refuses with zero sends.
+  const codeOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("cancel-invite", "code-1", codeOpener);
+  ctx.activeInvites = invites.slice(0, 2);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 0, "missing invite sends nothing");
+  dialog.querySelectorAll("button")[0].click();
+
+  // Confirmed cancel + lost-answer retry reuses one command ID for the exact row kind.
+  ctx.activeInvites = [...invites];
+  actions.confirmPeopleDialogAction("cancel-invite", "code-1", codeOpener);
+  const buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(sent.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].commandId, sent[1].commandId, "retry reuses one command ID");
+  assert.deepEqual(sent[0], { kind: "code", commandId: sent[0].commandId, wsId: workspaceId, id: "code-1" });
+  assert.equal(reloads[0].receipt, "Connect code canceled.");
+
+  // Two connect codes with identical creator, displayed times, capacity and use count stay distinguishable and each sends only its own ID.
+  const idA = "11111111-1111-4111-8111-111111111111";
+  const idB = "22222222-2222-4222-8222-222222222222";
+  const sameDetail = "Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours";
+  ctx.activeInvites = [
+    { kind: "code", id: idA, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+    { kind: "code", id: idB, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+  ];
+  sent.length = 0;
+  const openerA: any = doc.createElement("button");
+  const openerB: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("cancel-invite", idA, openerA);
+  const ctxA = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxA, `code 11111111 · ${sameDetail}`);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "code");
+  assert.equal(sent[0].id, idA);
+
+  actions.confirmPeopleDialogAction("cancel-invite", idB, openerB);
+  const ctxB = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxB, `code 22222222 · ${sameDetail}`);
+  assert.notEqual(ctxA, ctxB);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].kind, "code");
+  assert.equal(sent[1].id, idB);
 });

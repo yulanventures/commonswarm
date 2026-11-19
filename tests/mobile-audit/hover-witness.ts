@@ -73,7 +73,7 @@ const MARK_ROWS = (spec: { rows: string; prefer?: string; first: string[]; max: 
       const target = el.querySelector("[data-target-kind]");
       return {
         index,
-        key: (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")),
+        key: (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")),
         preferred: preferred.includes(el),
         targetKind: target?.getAttribute("data-target-kind") ?? null,
         authorKind: el.querySelector("[data-author-kind]")?.getAttribute("data-author-kind")
@@ -87,7 +87,7 @@ const MARK_ROWS = (spec: { rows: string; prefer?: string; first: string[]; max: 
 const REMARK = (arg: { index: number; key: string | null; rows: string }) => {
   if (document.querySelector(`[data-audit-hover-row="${arg.index}"]`)) return true;
   if (!arg.key) return false;
-  const again = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")) === arg.key);
+  const again = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")) === arg.key);
   if (!again) return false;
   again.setAttribute("data-audit-hover-row", String(arg.index));
   return true;
@@ -98,7 +98,7 @@ const ROW_MATCHES = (arg: { index: number; key: string | null; rows: string; sel
   // Found again by key when a rebuild replaced the marked row (as HOVER_POINT does); serialized into the page, so inline.
   let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
   if (!row && arg.key) {
-    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")) === arg.key) ?? null;
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")) === arg.key) ?? null;
     row?.setAttribute("data-audit-hover-row", String(arg.index));
   }
   return row ? arg.selectors.filter(selector => row.matches(selector)) : [];
@@ -119,12 +119,15 @@ type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; 
   rebuilt: number; scrolled: { x: number; y: number };
   /** Diagnostics, never a gate: surrounding boxes that changed since rest, and what holds focus. */
   context: Array<{ label: string; replaced?: true; dx?: number; dy?: number; dw?: number; dh?: number; text?: number; children?: number }>;
-  active: string };
+  active: string;
+  /** Real overlap regressions while hovered/focused: hover tools covering message text, or grouped gutter time
+   *  crowding the person-cue edge / carrying a stray tooltip. Non-empty fails the hover witness. */
+  hoverCover?: string[] };
 /**
  * phase "rest": settle the page's reads, wait for transitions, snapshot twice a frame apart (a difference is drift),
  * store. phase "early" / "late": compare with the stored rest snapshot.
  *
- * Identity is by key, not by node: each box is the row's key (data-signal-id, else data-pd-focus or data-agent-row) plus its child path, so a row the app rebuilt
+ * Identity is by key, not by node: each box is the row's key (data-signal-id, else data-pd-focus, data-agent-row, data-needs-you or data-waiting-card) plus its child path, so a row the app rebuilt
  * is found again and compared by geometry (a same-ID rebuild with identical layout is stable; a rebuild that moves
  * anything is a shift). Positions are viewport positions plus the scroll offsets of the row's scrolling ancestors:
  * the app scrolling its list is not a shift, and hover reflow absorbed by scroll anchoring still is.
@@ -171,7 +174,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     for (let n: Node = node; n !== root && n.parentNode; n = n.parentNode) path.unshift(Array.prototype.indexOf.call(n.parentNode.childNodes, n));
     return path;
   };
-  const rowByKey = (key: string) => Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")) === key) ?? null;
+  const rowByKey = (key: string) => Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")) === key) ?? null;
   // The live node for a tracked box: itself while connected, else the same path in the row rebuilt under the same key.
   const resolve = (t: Tracked): { node: Element | Text | null; rebuilt: boolean } => {
     if (t.node.isConnected) return { node: t.node, rebuilt: false };
@@ -272,7 +275,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
       row?.setAttribute("data-audit-hover-row", String(arg.index));
     }
     if (!row) return { error: "row gone" };
-    const key = (row.getAttribute("data-signal-id") ?? row.getAttribute("data-pd-focus") ?? row.getAttribute("data-agent-row"));
+    const key = (row.getAttribute("data-signal-id") ?? row.getAttribute("data-pd-focus") ?? row.getAttribute("data-agent-row") ?? row.getAttribute("data-needs-you") ?? row.getAttribute("data-waiting-card"));
     const tracked: Tracked[] = [{ node: row, who: "row", label: describe(row), rowKey: key, path: [] }];
     for (const el of Array.from(row.querySelectorAll("*")).slice(0, 400)) tracked.push({ node: el, who: "inside", label: describe(el), rowKey: key, path: pathFrom(row, el) });
     const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, { acceptNode: n => n.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
@@ -284,7 +287,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     }
     for (const other of Array.from(document.querySelectorAll(arg.rows)).slice(0, 80)) {
       if (other !== row && !row.contains(other) && !other.contains(row)) {
-        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: (other.getAttribute("data-signal-id") ?? other.getAttribute("data-pd-focus") ?? other.getAttribute("data-agent-row")), path: [] });
+        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: (other.getAttribute("data-signal-id") ?? other.getAttribute("data-pd-focus") ?? other.getAttribute("data-agent-row") ?? other.getAttribute("data-needs-you") ?? other.getAttribute("data-waiting-card")), path: [] });
       }
     }
     await new Promise(done => setTimeout(done, 300));
@@ -350,6 +353,62 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     return Math.max(Math.abs(d.dx), Math.abs(d.dy), Math.abs(d.dw), Math.abs(d.dh)) > arg.tolerance || text || children
       ? [{ label: c.label, ...d, ...(text ? { text } : {}), ...(children ? { children } : {}) }] : [];
   });
+  const hoverCover: string[] = [];
+  if (row?.classList.contains("dashboard__message")) {
+    const body = row.querySelector(":scope > .dashboard__message-body");
+    const tools = body?.querySelector(":scope > .dashboard__message-tools") ?? null;
+    if (tools && !tools.querySelector(":scope > .dashboard__message-receipt[open]")) {
+      const bar = getComputedStyle(tools).display === "contents" ? tools.querySelector(":scope > .dashboard__message-actions") : tools;
+      if (bar) {
+        const bs = getComputedStyle(bar);
+        const br = bar.getBoundingClientRect();
+        if (parseFloat(bs.opacity) > 0.5 && bs.pointerEvents !== "none" && br.width > 1 && br.height > 1) {
+          const targets = [
+            body?.querySelector(":scope > .dashboard__message-markdown"),
+            body?.querySelector(":scope > .hm-author"),
+            body?.querySelector(":scope > .dashboard__message-meta"),
+          ].filter((el): el is Element => !!el && parseFloat(getComputedStyle(el).opacity) > 0.5);
+          for (const container of targets) {
+            const tw = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, { acceptNode: n => n.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+            let covered = false;
+            for (let tn = tw.nextNode(); tn && !covered; tn = tw.nextNode()) {
+              for (const tr of rectsOf(tn as Text)) {
+                const ox = Math.min(br.right, tr.x + tr.w) - Math.max(br.left, tr.x);
+                const oy = Math.min(br.bottom, tr.y + tr.h) - Math.max(br.top, tr.y);
+                if (ox > 1 && oy > 1) {
+                  hoverCover.push(`hover tools cover ${describe(container)} (${round(ox)}x${round(oy)}px)`);
+                  covered = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (row.hasAttribute("data-stream-grouped")) {
+      const gutter = row.querySelector(":scope > .hm-message-time");
+      if (gutter) {
+        const gs = getComputedStyle(gutter);
+        if (gs.display !== "none" && parseFloat(gs.opacity) > 0.5) {
+          if (gutter.hasAttribute("title")) hoverCover.push("grouped gutter time carries title tooltip");
+          const gRects = gutter.firstChild ? rectsOf(gutter.firstChild as Text) : rectsOf(gutter);
+          const gLeft = gRects.length ? Math.min(...gRects.map(r => r.x)) : gutter.getBoundingClientRect().left;
+          const gRight = gRects.length ? Math.max(...gRects.map(r => r.x + r.w)) : gutter.getBoundingClientRect().right;
+          if (row.matches('[data-author="person"], [data-author="you"]')) {
+            const cue = getComputedStyle(row, "::before");
+            const cueInset = parseFloat(cue.insetInlineStart || cue.left) || 0;
+            const cueWidth = parseFloat(cue.borderInlineStartWidth || cue.borderLeftWidth) || 0;
+            const cueRight = row.getBoundingClientRect().left + cueInset + cueWidth;
+            if (gLeft < cueRight + 0.5) hoverCover.push(`grouped gutter time (${round(gLeft)}) overlaps person-cue edge (${round(cueRight)})`);
+          }
+          if (body && gRight > body.getBoundingClientRect().left - 2) {
+            hoverCover.push(`grouped gutter time (${round(gRight)}) crowds message body (${round(body.getBoundingClientRect().left)})`);
+          }
+        }
+      }
+    }
+  }
   return {
     shifted: shifts.length,
     shifts: shifts.sort((a, b) => Number(b.gone) - Number(a.gone) || Math.max(Math.abs(b.dx), Math.abs(b.dy), Math.abs(b.dw), Math.abs(b.dh)) - Math.max(Math.abs(a.dx), Math.abs(a.dy), Math.abs(a.dw), Math.abs(a.dh))).slice(0, 40),
@@ -360,6 +419,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     focusVisible: !!active && active !== document.body && active.matches(":focus-visible"),
     rebuilt,
     scrolled: { x: round(scrolled.x), y: round(scrolled.y) },
+    ...(hoverCover.length ? { hoverCover } : {}),
   };
 };
 
@@ -368,7 +428,7 @@ const HOVER_POINT = (arg: { index: number; key: string | null; rows: string }) =
   // The row is found again by key right here: a rebuild since rest would otherwise leave no marked row.
   let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
   if (!row && arg.key) {
-    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")) === arg.key) ?? null;
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")) === arg.key) ?? null;
     row?.setAttribute("data-audit-hover-row", String(arg.index));
   }
   if (!row) return { point: null, why: "row missing" };
@@ -391,7 +451,7 @@ const FOCUS_ROW = (arg: { index: number; key: string | null; rows: string; targe
   // Found again by key when a rebuild replaced the marked row (as HOVER_POINT does); serialized into the page, so inline.
   let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
   if (!row && arg.key) {
-    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row")) === arg.key) ?? null;
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => (el.getAttribute("data-signal-id") ?? el.getAttribute("data-pd-focus") ?? el.getAttribute("data-agent-row") ?? el.getAttribute("data-needs-you") ?? el.getAttribute("data-waiting-card")) === arg.key) ?? null;
     row?.setAttribute("data-audit-hover-row", String(arg.index));
   }
   if (!row) return null;
@@ -440,7 +500,7 @@ const QUIET_LIST = (rows: string) => new Promise<void>(done => {
 const SAME_CONTROL = (arg: { key: string | null; target: string | null; rows: string }) => {
   const active = document.activeElement;
   const row = active?.closest(arg.rows);
-  return !!active && !!row && (row.getAttribute("data-signal-id") ?? row.getAttribute("data-pd-focus") ?? row.getAttribute("data-agent-row")) === arg.key && (arg.target === null || active.matches(arg.target));
+  return !!active && !!row && (row.getAttribute("data-signal-id") ?? row.getAttribute("data-pd-focus") ?? row.getAttribute("data-agent-row") ?? row.getAttribute("data-needs-you") ?? row.getAttribute("data-waiting-card")) === arg.key && (arg.target === null || active.matches(arg.target));
 };
 const BLUR = (_: null) => { (document.activeElement as HTMLElement | null)?.blur?.(); };
 const HOVER_CAPABLE = (_: null) => matchMedia("(hover: hover)").matches;
@@ -549,6 +609,8 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const held = mode === "hover" ? early.hoverMatched && late.hoverMatched : early.focusWithin && late.focusWithin;
     if (!held) { Object.assign(entry, { outcome: "error", reason: mode === "hover" ? "hover was not held during the measurement" : "focus was lost during the measurement" }); return; }
     if (early.shifted + late.shifted > 0) entry.outcome = "shifted";
+    const cover = [...new Set([...(early.hoverCover ?? []), ...(late.hoverCover ?? [])])];
+    if (cover.length) { Object.assign(entry, { outcome: "error", reason: cover.join("; ") }); return; }
     if (preferredShot) { await shot!(`hover-${spec.name}-${mode}`); shotTaken.add(mode); }
     // Leaving must restore rest exactly as well: a failed or moved return is a failure too.
     const left = await park();

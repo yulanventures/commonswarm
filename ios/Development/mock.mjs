@@ -1,10 +1,13 @@
 // Simulator fixture. All state is synthetic and disappears when the process exits.
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
+const { client_version: expectedClientVersion } = JSON.parse(
+  readFileSync(new URL("./post-agent.json", import.meta.url), "utf8"),
+);
 let origin;
 const callbacks = new Map([
   ["github", "com.commonswarm.ios://auth/callback"],
@@ -34,6 +37,8 @@ function recordEmailRequest(url, body) {
   if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
 }
 const receipts = new Map();
+const uploads = new Map();
+const fileReceipts = new Map();
 const refuseNextLookup = new Set();
 const sessions = new Set();
 const refreshTokens = new Set();
@@ -43,12 +48,18 @@ let notifyPost;
 const postReceived = new Promise(resolve => { notifyPost = resolve; });
 let authenticatedRequests = 0;
 const messages = [];
+const file = "00000000-0000-4000-8000-000000000009";
+const fileBytes = Buffer.from("Workspace notes");
+const signedPath = "/storage/v1/object/sign/swarm-files/" + workspace + "/" + file + "/2";
+const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_type: "text/plain", size_bytes: fileBytes.length };
+
 const address = (command) => command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general";
 if (review) {
   for (let i = 130; i > 0; i--) {
     messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
       created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString().replace("Z", "+00:00"), fixtureDestination: "general", workspace });
   }
+  messages[0].attachments = [fixtureFile];
 }
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
@@ -58,6 +69,18 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
+    if (req.method === "PUT" && url.pathname.startsWith("/storage/v1/object/upload/sign/swarm-files/")) {
+      const slot = uploads.get(url.searchParams.get("token"));
+      if (!slot || slot.path !== url.pathname || req.headers.authorization || req.headers.apikey || req.headers.cookie ||
+          req.headers["content-type"] !== slot.type) return reply(403, {});
+      if (slot.digest) return reply(409, {});
+      const hash = createHash("sha256");
+      let length = 0;
+      for await (const part of req) { length += part.length; hash.update(part); }
+      if (length !== slot.size) return reply(400, {});
+      slot.digest = hash.digest("hex");
+      return reply(200, {});
+    }
     if (upgrade && req.method === "GET" && url.pathname === "/fixture/upgrade-stage") {
       return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
     }
@@ -70,7 +93,9 @@ const server = createServer(async (req, res) => {
       return reply(200, authenticatedRequests);
     }
     if (req.method === "GET" && url.pathname === "/auth/v1/authorize") {
-      const callback = callbacks.get(url.searchParams.get("provider"));
+      const provider = url.searchParams.get("provider");
+      const callback = provider === "google" && process.env.CS_FIXTURE_GOOGLE_USB === "1"
+        ? "commonswarm://auth/callback" : callbacks.get(provider);
       if (!callback) return reply(400, {});
       const redirect = new URL(url.searchParams.get("redirect_to"));
       const state = redirect.searchParams.get("state");
@@ -91,6 +116,11 @@ const server = createServer(async (req, res) => {
         if (data.length > 65_536) return reply(413, {});
       }
       body = JSON.parse(data);
+    }
+    if (req.method === "GET" && url.pathname === signedPath && url.searchParams.get("token") === "fixture") {
+      if (req.headers.apikey || req.headers.authorization) return reply(403, {});
+      res.writeHead(200, { "Content-Type": "text/plain", "Content-Length": fileBytes.length });
+      return res.end(fileBytes);
     }
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
     const issueSession = () => {
@@ -133,6 +163,32 @@ const server = createServer(async (req, res) => {
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
+      if (typeof body.client_version !== "string" || body.client_version !== expectedClientVersion) {
+        if (verify) console.error("Invalid client_version for", body.command?.kind);
+        return reply(400, { error: "invalid_request" });
+      }
+      if (body.command?.kind === "file_download_url" && body.workspace_id?.toLowerCase() === workspace &&
+          body.command.file_id?.toLowerCase() === file && body.command.version_n === 2) {
+        return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
+      }
+      const cmd = body.command;
+      if (body.workspace_id?.toLowerCase() === workspace && ["file_version_create", "file_version_commit"].includes(cmd?.kind)) {
+        if (fileReceipts.has(body.command_id)) return reply(200, fileReceipts.get(body.command_id));
+        if (cmd.kind === "file_version_create") {
+          if (uploads.has(cmd.version_id)) return reply(409, {});
+          const path = "/storage/v1/object/upload/sign/swarm-files/" + workspace + "/" + cmd.file_id.toLowerCase() + "/1";
+          uploads.set(cmd.version_id, { id: cmd.file_id, name: cmd.name, path, type: cmd.content_type, size: cmd.declared_size_bytes });
+          const receipt = { status: "accepted", file_id: cmd.file_id, version_id: cmd.version_id, version_n: 1,
+            upload_path: path + "?token=" + cmd.version_id };
+          fileReceipts.set(body.command_id, receipt);
+          return reply(200, receipt);
+        }
+        const slot = uploads.get(cmd.version_id);
+        if (!slot || slot.id !== cmd.file_id || slot.digest !== cmd.sha256) return reply(409, {});
+        const receipt = { status: "accepted", file_id: slot.id, version_n: 1, size_bytes: slot.size };
+        fileReceipts.set(body.command_id, receipt);
+        return reply(verify ? 503 : 200, verify ? {} : receipt);
+      }
       if (!workspaces.some(row => row.workspace_id === body.workspace_id?.toLowerCase()) || body.command?.kind !== "post_signal") return reply(400, {});
       if (verify && body.command.body === "held during sign-out") {
         notifyPost();
@@ -140,25 +196,35 @@ const server = createServer(async (req, res) => {
       }
       if (body.command.channel && !channels.some(row => row.slug === body.command.channel && row.channel_id === body.command.expected_channel_id)) return reply(404, {});
       if (refuseNextLookup.delete(body.command_id)) return reply(403, {});
+      const attachments = [];
+      for (const ref of cmd.attachments ?? []) {
+        const file = [...uploads.values()].find(f => f.id === ref.file_id && f.digest && ref.version_n === 1);
+        if (!file) return reply(400, {});
+        attachments.push({ file_id: file.id, version_n: ref.version_n, name: file.name,
+          content_type: file.type, size_bytes: file.size });
+      }
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        receipts.set(body.command_id, body);
-        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body,
+        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
+        receipts.set(body.command_id, { command: body.command, signal: messages[0] });
         if (review && body.command.body === "Uncertain send") {
           refuseNextLookup.add(body.command_id);
           return reply(503, {});
         }
       }
-      return reply(200, { status: "accepted" });
+      return reply(200, { status: "accepted", signal: receipts.get(body.command_id).signal });
     }
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
     const ws = workspaces.find(row => "eq." + row.workspace_id === url.searchParams.get("workspace_id")?.toLowerCase());
     if (!ws) return reply(403, {});
     switch (url.pathname) {
-      case "/rest/v1/channels": return reply(200, ws.workspace_id === workspace ? channels : []);
+      case "/rest/v1/channels": {
+        const filter = url.searchParams.get("channel_id");
+        return reply(200, ws.workspace_id === workspace ? channels.filter(c => !filter || "eq." + c.channel_id === filter.toLowerCase()) : []);
+      }
       case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }]);
       case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }]);
       case "/rest/v1/signals": {

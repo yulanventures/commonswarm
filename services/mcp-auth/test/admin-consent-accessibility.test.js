@@ -39,7 +39,7 @@ function one(tree, predicate) {
 
 test('admin consent selection escapes client names and uses the request destination including loopback', () => {
   for (const [redirectUri, destination] of [
-    ['https://callback.example:8443/private?code=hidden', 'callback.example'],
+    ['https://callback.example:8443/private?code=hidden', 'callback.example:8443'],
     ['http://localhost:4321/callback', 'a program on this computer (localhost)'],
     ['http://127.0.0.1:5432/callback', 'a program on this computer (localhost)'],
     ['http://[::1]:6543/callback', 'a program on this computer (localhost)'],

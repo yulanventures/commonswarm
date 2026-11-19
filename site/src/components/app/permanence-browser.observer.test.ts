@@ -83,6 +83,7 @@ function installConnectionFixture() {
         if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: home && !["home-mismatch", "home-matched-ended"].includes(scenario) ? [] : [f.grant] }); }
         if (body.resource === "pending_access") return Response.json({ pending: [], agents: [] });
         if (body.resource === "seat_admin_status") return Response.json({ enabled: false });
+        if (body.resource === "conversations") return Response.json({ error: "unsupported_resource" }, { status: 400 });
       }
       if (url.pathname === "/functions/v1/command") {
         const c = body.command;
@@ -241,7 +242,11 @@ async function observeConnectionApp() {
     if (f.hosted) {
       one("[data-connected-apps-open]").click();
       await wait(() => one("[data-connected-apps-dialog]").open && one("[data-connected-apps-list] [data-connection-end-date]"), "hosted mount");
-    } else await wait(() => one("[data-people-detail] [data-connection-end-date]") && (f.scenario === "absent-home" || (f.overviewReads > 0 && (["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario) || one("[data-people-detail] [data-connection-end-date] form")))), "renewal mount");
+    } else {
+      const more = one("[data-people-detail] [data-people-agent-more]") as HTMLDetailsElement | null;
+      if (more && !more.open) more.querySelector("summary")?.click();
+      await wait(() => one("[data-people-detail] [data-connection-end-date]") && (f.scenario === "absent-home" || (f.overviewReads > 0 && (["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario) || one("[data-people-detail] [data-connection-end-date] form")))), "renewal mount");
+    }
     const rootSelector = f.hosted ? "[data-connected-apps-list]" : "[data-people-detail]";
     const editor = () => one(rootSelector + " [data-connection-end-date]");
     const form = () => editor()?.querySelector("form") as HTMLFormElement;
@@ -335,7 +340,11 @@ async function observeConnectionApp() {
       // A real rerender (selecting the same agent again, or reopening the dialog) must retain the draft.
       const beforeRerender = editor();
       if (f.hosted) { one("[data-connected-apps-close]").click(); one("[data-connected-apps-open]").click(); }
-      else { one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click(); }
+      else {
+        one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click();
+        const more = one("[data-people-detail] [data-people-agent-more]") as HTMLDetailsElement | null;
+        if (more && !more.open) more.querySelector("summary")?.click();
+      }
       await wait(() => editor() && editor() !== beforeRerender && field("[data-end-date-value]")?.value === "2035-02-03T04:05", "draft across reread/rerender");
       if (f.scenario === "stale-family") {
         const oldForm = form(), oldEditor = editor();

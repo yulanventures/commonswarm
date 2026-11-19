@@ -46,11 +46,16 @@ export function buildWaitingButton(doc: Document, href: string, navigate: (href:
   const mark = doc.createElement("span"); mark.className = "hm-rail__icon"; mark.dataset.icon = "inbox"; mark.setAttribute("aria-hidden", "true");
   const label = doc.createElement("span"); label.className = "cs-waiting__label"; label.textContent = WAITING_LABEL;
   const count = doc.createElement("span"); count.className = "cs-waiting__count"; count.dataset.waitingCount = "";
-  link.append(mark, label, count);
+  link.append(mark, label, " ", count);
   link.addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     navigate(href, event);
+  });
+  link.addEventListener("keydown", (event) => {
+    if (event.key !== " " || link.getAttribute("role") !== "button") return;
+    event.preventDefault();
+    link.click();
   });
   updateWaitingButton(link, { min: 0, complete: false });
   return link;
@@ -62,4 +67,62 @@ export function updateWaitingButton(link: HTMLElement, total: WaitingTotal): voi
   // Something is waiting: the control reads as ink, not as chrome.
   link.toggleAttribute("data-waiting", total.min > 0);
   link.setAttribute("aria-label", waitingName(total));
+  link.setAttribute("aria-description", "Count across all workspaces");
+  link.title = "Waiting on you across all workspaces";
+}
+
+/** In a channel view the control toggles the Waiting on you column or phone sheet; elsewhere it stays a link to Catch up. */
+export function syncWaitingButtonToggle(link: HTMLElement, toggle: { active: boolean; expanded: boolean; controlsId: string }): void {
+  if (toggle.active) {
+    link.setAttribute("role", "button");
+    link.setAttribute("aria-expanded", String(toggle.expanded));
+    link.setAttribute("aria-controls", toggle.controlsId);
+  } else {
+    link.removeAttribute("role");
+    link.removeAttribute("aria-expanded");
+    link.removeAttribute("aria-controls");
+  }
+}
+
+export type WaitingConversation =
+  | { kind: "channel"; channelId: string }
+  | { kind: "general" }
+  | { kind: "dm"; partnerKind: "person" | "agent"; partnerId: string }
+  | { kind: "unknown" };
+
+export interface WaitingSignalPlacement {
+  channelId: string | null;
+  to: string | null;
+  toAgent: string | null;
+  threadRootId: string | null;
+  from: string;
+  fromKind: string;
+}
+
+/**
+ * Classifies where an ask lives using the same placement rule as swarm.conversation_placement:
+ * - non-null channelId -> named channel
+ * - thread reply without channelId -> its root's conversation (unknown if root wasn't read)
+ * - null channelId and unaddressed -> #general
+ * - null channelId and addressed -> direct message with the sender (never #general)
+ * - missing/failed placement lookup -> unknown (never #general)
+ */
+export function classifyAskConversation(
+  loc: WaitingSignalPlacement | null,
+  rootLoc: Pick<WaitingSignalPlacement, "channelId" | "to" | "toAgent"> | null = null,
+): WaitingConversation {
+  if (!loc) return { kind: "unknown" };
+  if (loc.channelId !== null) return { kind: "channel", channelId: loc.channelId };
+  const dmFrom = (): WaitingConversation =>
+    loc.from
+      ? { kind: "dm", partnerKind: loc.fromKind === "agent" ? "agent" : "person", partnerId: loc.from }
+      : { kind: "unknown" };
+  if (loc.threadRootId !== null) {
+    if (!rootLoc) return { kind: "unknown" };
+    if (rootLoc.channelId !== null) return { kind: "channel", channelId: rootLoc.channelId };
+    if (rootLoc.to === null && rootLoc.toAgent === null) return { kind: "general" };
+    return dmFrom();
+  }
+  if (loc.to === null && loc.toAgent === null) return { kind: "general" };
+  return dmFrom();
 }

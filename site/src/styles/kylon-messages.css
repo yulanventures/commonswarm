@@ -17,7 +17,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed {
   inline-size: 100%;
   max-inline-size: 848px;
   margin-inline: auto;
-  padding-block: 12px;
+  padding-block: 38px 12px;
+}
+@media (width <= 64rem), (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed {
+    padding-block-start: 56px;
+  }
 }
 
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day {
@@ -58,11 +63,11 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
 /* Feed scope wins the later channel turn-spacing rules. Replies and activity
  * keep their own layout; the renderer still decides which rows are grouped. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
-  padding-block: 6px 4px;
-  margin-block-start: 4px;
+  padding-block: 8px 4px;
+  margin-block-start: 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message[data-stream-grouped] {
-  padding-block: 1px 3px;
+  padding-block: 4px;
   margin-block-start: 0;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:first-child,
@@ -161,6 +166,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta :i
   flex: 1 1 0;
   flex-wrap: nowrap;
   align-items: center;
+  gap: 4px;
   min-inline-size: 0;
   max-inline-size: 100%;
   overflow: hidden;
@@ -945,7 +951,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboa
   content: "";
   position: absolute;
   inset-block: 0;
-  inset-inline-start: 16px;
+  inset-inline-start: 6px;
   border-inline-start: 1px solid var(--k-shell-control);
   pointer-events: none;
 }

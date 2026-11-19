@@ -12,7 +12,12 @@ enum BrowserProvider: String {
     var callback: URL {
         switch self {
         case .github: URL(string: "com.commonswarm.ios://auth/callback")!
-        case .google: URL(string: "https://commonswarm.com/ios/auth/callback")!
+        case .google:
+            #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+            URL(string: "commonswarm://auth/callback")!
+            #else
+            URL(string: "https://commonswarm.com/ios/auth/callback")!
+            #endif
         }
     }
 }
@@ -41,9 +46,17 @@ struct SignInAttempt {
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     }
 
+    private var challenge: String { Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8)))) }
+
+    #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+    var usbBinding: String {
+        let value = "commonswarm-google-usb-v1\n" + challenge + "\n" + state
+        return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    #endif
+
     func authorize(at origin: URL) -> URL {
         let redirect = provider.callback.appending(queryItems: [URLQueryItem(name: "state", value: state)])
-        let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
         return origin.appending(path: "auth/v1/authorize").appending(queryItems: [
             URLQueryItem(name: "provider", value: provider.rawValue),
             URLQueryItem(name: "code_challenge_method", value: "s256"),
@@ -191,6 +204,41 @@ final class HumanSession {
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()
         return response
+    }
+
+    // The signed URL authorizes only this file. Share sign-out cancellation with the app transport.
+    func downloadStorage(_ url: URL, size: Int) async throws -> Data {
+        guard isActive else { throw CancellationError() }
+        var request = URLRequest(url: url)
+        request.httpShouldHandleCookies = false
+        let data = try await Self.readStorage(request, size: size, transport: transport)
+        guard isActive else { throw CancellationError() }
+        return data
+    }
+
+    private nonisolated static func readStorage(_ request: URLRequest, size: Int, transport: URLSession) async throws -> Data {
+        let (bytes, response) = try await transport.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              response.expectedContentLength < 0 || response.expectedContentLength == size else { throw APIError.invalidResponse }
+        var result = Data()
+        result.reserveCapacity(size)
+        for try await byte in bytes {
+            guard result.count < size else { throw APIError.invalidResponse }
+            result.append(byte)
+        }
+        try Task.checkCancellation()
+        guard result.count == size else { throw APIError.invalidResponse }
+        return result
+    }
+
+    func putStorage(_ request: URLRequest, from file: URL, delegate: URLSessionTaskDelegate) async throws -> Int {
+        guard isActive else { throw CancellationError() }
+        let (_, response) = try await transport.upload(for: request, fromFile: file, delegate: delegate)
+        guard isActive else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        return http.statusCode
     }
 
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {

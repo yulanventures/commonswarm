@@ -35,7 +35,7 @@ import { agentPresenceLine } from '../../lib/agent-presence';
 import { wakePathMark } from '../../lib/wake-path';
 import { identityDisplayLabel } from '../../lib/identity-label';
 import { isTaggable } from '../../lib/mention-address';
-import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from '../../lib/household-access';
+import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED } from '../../lib/household-access';
 import { workspaceLeadLine, buildSharedCard } from '../../lib/home-side-cards';
 import type { HomeOverview } from '../../lib/home/contract';
 import { splitChoicePrompt } from '../../lib/choices';
@@ -852,7 +852,7 @@ test('People Allow lands from settled access, continues after consent, and retir
     const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
-      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey,
+      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey,
       one: (selector: string) => selector.endsWith(':checked')
         ? (nodes.get(selector)?.checked ? nodes.get(selector) : null) : nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? [objects, files]
@@ -2200,11 +2200,14 @@ test('Grokbot command palette and agent routines summary surface teammates, lead
 
 /* Workspace picker gear (Dogfood #3): the real open, render and roster-sync functions. Navigation is held so each
    step can be observed; it moves the active workspace and clears the roster at once, as openWorkspace does. */
-async function workspaceSettingsFixture() {
+async function workspaceSettingsFixture(extra: {
+  myOrganizations?: () => Promise<readonly { id: string; name: string; role: string }[]>;
+  workspaces?: { id: string; name: string; orgId?: string }[];
+} = {}) {
   const code = await dashboardFunctions(['openWorkspaceDetailsDialog', 'closeWorkspaceDetailsDialog', 'focusWorkspaceSettingsReturn',
-    'workspaceSettingsFactsKey', 'syncWorkspaceSettingsRoster', 'renderWorkspaceSettingsPanel']);
+    'workspaceSettingsFactsKey', 'syncWorkspaceSettingsRoster', 'workspaceMoveDestinations', 'renderWorkspaceSettingsPanel']);
   const calls: string[] = [];
-  const renders: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number }[] = [];
+  const renders: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number; moreOpen?: boolean; moveDestinations?: readonly { id: string; name: string }[] }[] = [];
   const dialog = { open: false, showModal() { this.open = true; calls.push('showModal'); }, close() { this.open = false; } };
   const root = {};
   const focusable = (name: string, shown: boolean) => ({ name, dataset: name.startsWith('gear:') ? { workspacePickerSettings: name.slice(5) } : {},
@@ -2217,17 +2220,19 @@ async function workspaceSettingsFixture() {
     one: (selector: string) => selector === '[data-workspace-details-popover]' ? dialog : selector === '[data-workspace-details-content]' ? root : null,
     all: (selector: string) => lists[selector] ?? [],
     layout: { closeNavigation: (restore: boolean) => calls.push(`closeNavigation:${restore}`) },
-    renderWorkspaceSettings: (_root: unknown, options: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number }) => {
+    renderWorkspaceSettings: (_root: unknown, options: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number; moreOpen?: boolean; moveDestinations?: readonly { id: string; name: string }[] }) => {
       renders.push({ workspaceId: options.workspaceId, name: options.name, canRename: options.canRename, canClose: options.canClose,
-        memberCount: options.memberCount, agentCount: options.agentCount });
+        memberCount: options.memberCount, agentCount: options.agentCount, moreOpen: options.moreOpen,
+        moveDestinations: Array.from(options.moveDestinations ?? [], dest => ({ id: dest.id, name: dest.name })) });
     },
     refreshChannelPolicy: async () => false,
-    myOrganizations: async () => [],
+    myOrganizations: extra.myOrganizations ?? (async () => []),
   });
+  const initialWorkspaces = JSON.stringify(extra.workspaces ?? [{ id: 'A', name: 'Alpha' }, { id: 'B', name: 'Beta' }, { id: 'C', name: 'Gamma' }]);
   runInContext(`
     let session={user:{id:'me'}}, sampleMode=false, activeWorkspaceId='A', homeNavigation=0, moveOrganizations=[];
     let workspaceSettingsIntent=0, workspaceSettingsReturn=null, workspaceSettingsFacts='';
-    let workspaces=[{id:'A',name:'Alpha'},{id:'B',name:'Beta'},{id:'C',name:'Gamma'}];
+    let workspaces=${initialWorkspaces};
     let members=[{userId:'me',role:'owner'}], agents=[{principalId:'a1'}];
     const rosters={A:[{userId:'me',role:'owner'}], B:[{userId:'me',role:'member'},{userId:'other',role:'owner'}], C:[{userId:'me',role:'admin'}]};
     const navigations=[];
@@ -2248,7 +2253,7 @@ test('a picker gear for another workspace closes the drawer, waits for that work
   assert.equal(f.dialog.open, false, 'nothing opens while the workspace is loading');
   await f.finish(0); await opening;
   assert.equal(f.dialog.open, true);
-  assert.deepEqual(f.renders.at(-1), { workspaceId: 'B', name: 'Beta', canRename: false, canClose: false, memberCount: 2, agentCount: 0 },
+  assert.deepEqual(f.renders.at(-1), { workspaceId: 'B', name: 'Beta', canRename: false, canClose: false, memberCount: 2, agentCount: 0, moreOpen: false, moveDestinations: [] },
     "Beta's own member role, never Alpha's owner role");
   assert.equal(f.run('workspaceSettingsReturn'), 'B');
 
@@ -2267,7 +2272,7 @@ test('the active workspace opens at once, and the header door keeps its old path
   assert.equal(f.dialog.open, true, 'no await before showModal');
   assert.deepEqual(f.calls, ['showModal'], 'no navigation and no drawer change from the header menu');
   assert.equal(f.run('navigations.length'), 0);
-  assert.deepEqual(f.renders.at(-1), { workspaceId: 'A', name: 'Alpha', canRename: true, canClose: true, memberCount: 1, agentCount: 1 });
+  assert.deepEqual(f.renders.at(-1), { workspaceId: 'A', name: 'Alpha', canRename: true, canClose: true, memberCount: 1, agentCount: 1, moreOpen: false, moveDestinations: [] });
   assert.equal(f.run('workspaceSettingsReturn'), null, 'focus return is left to the dialog');
 });
 
@@ -2311,4 +2316,246 @@ test('closing returns focus to the picker, and the app closing the dialog itself
   await g.finish(0); await again;
   g.run('closeWorkspaceDetailsDialog()');
   assert.equal(g.run('workspaceSettingsReturn'), null, 'a navigation or a finished command keeps its own focus');
+});
+
+test('organization load skips a no-op redraw and preserves More when destinations arrive', async () => {
+  const same = await workspaceSettingsFixture({
+    workspaces: [{ id: 'A', name: 'Alpha', orgId: 'org-1' }],
+    myOrganizations: async () => [{ id: 'org-1', name: 'Home', role: 'owner' }],
+  });
+  await same.run<Promise<void>>('openWorkspaceDetailsDialog()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(same.renders.length, 1, 'no second redraw when move destinations stay empty');
+  assert.equal(same.renders[0]?.moreOpen, false, 'fresh open starts with More closed');
+
+  const movable = await workspaceSettingsFixture({
+    workspaces: [{ id: 'A', name: 'Alpha', orgId: 'org-1' }],
+    myOrganizations: async () => [
+      { id: 'org-1', name: 'Home', role: 'owner' },
+      { id: 'org-2', name: 'Yulan', role: 'admin' },
+    ],
+  });
+  await movable.run<Promise<void>>('openWorkspaceDetailsDialog()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(movable.renders.length, 2, 'new eligible move destinations redraw the open panel');
+  assert.equal(movable.renders[0]?.moreOpen, false);
+  assert.equal(movable.renders[1]?.moreOpen, undefined, 'redraw omits moreOpen so an open More stays open');
+  assert.deepEqual(movable.renders[1]?.moveDestinations, [{ id: 'org-2', name: 'Yulan' }]);
+});
+
+test('keepFeedFocus identity ignores transient picture preview state across feed rebuilds', async () => {
+  const code = await dashboardFunctions(['controlIdentity']);
+  const context = createContext({});
+  runInContext(code, context);
+  const idOf = runInContext('controlIdentity', context) as (el: { tagName: string; className: string; getAttribute(n: string): string | null; attributes: { name: string; value: string }[] }) => string;
+  const link = (fileId: string, previewState?: string) => ({
+    tagName: 'A',
+    className: 'hm-extras__image',
+    getAttribute: () => null,
+    attributes: [
+      { name: 'data-stream-image', value: fileId },
+      { name: 'data-stream-image-version', value: '1' },
+      ...(previewState ? [{ name: 'data-preview-state', value: previewState }] : []),
+    ],
+  });
+  assert.equal(idOf(link('file-a')), idOf(link('file-a', 'loading')), 'a loaded picture matches its rebuilt loading copy');
+  assert.equal(idOf(link('file-a')), idOf(link('file-a', 'waiting')), 'a loaded picture matches its rebuilt waiting copy');
+  assert.notEqual(idOf(link('file-a')), idOf(link('file-b')), 'different pictures keep distinct identities');
+});
+
+test('keepFeedFocus restores rebuilt controls in the microtask and defers only missing next-frame controls', async () => {
+  const code = await dashboardFunctions(['FEED_FOCUSABLE', 'controlIdentity', 'feedIdentity', 'keepFeedFocus']);
+  class FakeHTMLElement {
+    tagName: string;
+    className: string;
+    dataset: Record<string, string>;
+    attributes: { name: string; value: string }[];
+    parent: FakeHTMLElement | null = null;
+    children: FakeHTMLElement[] = [];
+    focused = false;
+    constructor(tag: string, className: string, attrs: Record<string, string> = {}) {
+      this.tagName = tag.toUpperCase();
+      this.className = className;
+      this.dataset = {};
+      this.attributes = Object.entries(attrs).map(([name, value]) => ({ name, value }));
+      if (attrs['data-signal-id']) this.dataset.signalId = attrs['data-signal-id'];
+    }
+    append(...nodes: FakeHTMLElement[]) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+    contains(el: unknown): boolean {
+      if (el === this) return true;
+      return this.children.some(c => c.contains(el));
+    }
+    closest(selector: string): FakeHTMLElement | null {
+      if (selector === '[data-signal-id]' && this.dataset.signalId) return this;
+      return this.parent?.closest(selector) ?? null;
+    }
+    getAttribute(name: string): string | null { return this.attributes.find(a => a.name === name)?.value ?? null; }
+    querySelectorAll(selector: string): FakeHTMLElement[] {
+      const out: FakeHTMLElement[] = [];
+      const walk = (n: FakeHTMLElement) => {
+        for (const c of n.children) {
+          const matchSignal = selector.startsWith('[data-signal-id="') && c.dataset.signalId === selector.slice(17, -2);
+          const matchFocusable = selector.includes('a[href]') && (c.tagName === 'A' || c.tagName === 'BUTTON');
+          if (matchSignal || matchFocusable) out.push(c);
+          walk(c);
+        }
+      };
+      walk(this);
+      return out;
+    }
+    focus() { this.focused = true; doc.activeElement = this; }
+  }
+  class FakeHTMLInputElement extends FakeHTMLElement { type = 'text'; selectionStart = null; selectionEnd = null; }
+  const body = new FakeHTMLElement('body', '');
+  const doc: { activeElement: FakeHTMLElement | null; body: FakeHTMLElement; querySelector: () => null } = {
+    activeElement: body, body, querySelector: () => null,
+  };
+  const rafQueue: (() => void)[] = [];
+  const context = createContext({
+    HTMLElement: FakeHTMLElement,
+    HTMLInputElement: FakeHTMLInputElement,
+    CSS: { escape: (s: string) => s },
+    document: doc,
+    window: { requestAnimationFrame: (fn: () => void) => { rafQueue.push(fn); return rafQueue.length; } },
+    queueMicrotask,
+    homeRoute: { view: 'chat' }, activeWorkspaceId: 'w1', activeChannelId: 'c1', signalFilter: 'all', activeWorkspaceView: 'signals',
+    feedFocus: null, feedRenderGeneration: 0,
+  });
+  runInContext(code, context);
+  const keep = runInContext('keepFeedFocus', context) as (list: FakeHTMLElement) => void;
+
+  // 1. Synchronous control (picture link): restored in the microtask BEFORE requestAnimationFrame.
+  const list = new FakeHTMLElement('ol', '');
+  const row1 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  const pic1 = new FakeHTMLElement('a', 'hm-extras__image', { 'data-stream-image': 'f1' });
+  row1.append(pic1); list.append(row1);
+  pic1.focus();
+  keep(list);
+  // Simulate list.replaceChildren() + synchronous rebuild.
+  list.children = [];
+  doc.activeElement = body;
+  const row2 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  const pic2 = new FakeHTMLElement('a', 'hm-extras__image', { 'data-stream-image': 'f1', 'data-preview-state': 'loading' });
+  row2.append(pic2); list.append(row2);
+  await Promise.resolve();
+  assert.equal(doc.activeElement, pic2, 'picture link regains focus in the microtask with no dead-focus frame');
+  assert.equal(rafQueue.length, 0, 'no requestAnimationFrame scheduled when rebuilt control is already present');
+
+  // 2. Deferred control (Show more added next frame): defers to requestAnimationFrame, then restores.
+  const showMore1 = new FakeHTMLElement('button', 'hm-show-more', { 'aria-label': 'Show more' });
+  row2.append(showMore1);
+  showMore1.focus();
+  keep(list);
+  list.children = [];
+  doc.activeElement = body;
+  const row3 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  list.append(row3);
+  await Promise.resolve();
+  assert.equal(doc.activeElement, body, 'focus waits when deferred control is not yet in the rebuilt DOM');
+  assert.equal(rafQueue.length, 1, 'requestAnimationFrame is scheduled for deferred controls');
+  const showMore2 = new FakeHTMLElement('button', 'hm-show-more', { 'aria-label': 'Show more' });
+  row3.append(showMore2);
+  rafQueue.shift()!();
+  assert.equal(doc.activeElement, showMore2, 'deferred control regains focus once added on the next frame');
+});
+
+test('openChatPicture aborts if another dialog opens while the viewer module loads, then opens normally once it closes', async () => {
+  const code = await dashboardFunctions(['openChatPicture']);
+  let openDialog: object | null = null;
+  let currentFeed = 'chat:w1:c1';
+  let openedCount = 0;
+  let resolveLoader: ((mod: { openImageViewer: (...args: unknown[]) => void }) => void) | null = null;
+  const openImageViewer = () => { openedCount++; };
+  const context = createContext({
+    app: {},
+    document: { querySelector: (sel: string) => sel === 'dialog[open]' ? openDialog : null },
+    feedIdentity: () => currentFeed,
+    loadImageViewer: () => new Promise((resolve) => { resolveLoader = resolve; }),
+    chatPictureOpening: false,
+    attachmentPreviewUrls: { get: () => null, remember() {}, forget() {} },
+    freshAttachmentDownload: async () => ({ url: 'https://storage.test/pic' }),
+    setComposerStatus() {},
+    readableError: String,
+    one: () => null,
+    checkForNewBuild: async () => {},
+    CSS: { escape: (s: string) => s },
+  });
+  runInContext(code, context);
+  const openPic = runInContext('openChatPicture', context) as (a: { file_id: string; version_n: number; name: string }, t: unknown) => void;
+  const trigger = { isConnected: true, title: 'boiler.png', dataset: { streamImage: 'f1', streamImageVersion: '1' },
+    closest: (sel: string) => sel === '[data-signal-id]' ? { dataset: { signalId: 'sig-1' } } : { querySelectorAll: () => [trigger] },
+    parentElement: { querySelector: () => null } };
+
+  // Start opening picture while the viewer module response is held.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  assert.equal(runInContext('chatPictureOpening', context), true);
+  // Open People while the viewer module is still in flight.
+  openDialog = { id: 'dashboard-roster-dialog' };
+  // Release the viewer module response: viewer must NOT open over People, and opening lock must clear.
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 0, 'viewer does not open over an already-open dialog');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after aborting');
+
+  // Close People and press the picture again: viewer opens normally.
+  openDialog = null;
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer opens normally once the other dialog has closed');
+
+  // Navigating to another channel while the viewer module is loading also aborts cleanly.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  currentFeed = 'chat:w1:c2';
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer does not open after navigating away');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after navigation abort');
+});
+
+test('pending-access indicator on the People door is pinned out of flow and restored on shell rebuild', async () => {
+  const code = await dashboardFunctions(['syncRosterOpenButtons']);
+  const attrs = new Map<string, string>();
+  const button = {
+    title: '',
+    setAttribute(name: string, value: string) { attrs.set(name, value); },
+    toggleAttribute(name: string, force?: boolean) { if (force) attrs.set(name, ''); else attrs.delete(name); },
+  };
+  let pending = 2;
+  let memberCount = '';
+  const countedButton = {
+    title: '',
+    attrs: new Map<string, string>(),
+    querySelector(selector: string) {
+      return selector === '.hm-member-stack__count' && memberCount ? { textContent: memberCount } : null;
+    },
+    setAttribute(name: string, value: string) { this.attrs.set(name, value); },
+    toggleAttribute(name: string, force?: boolean) { if (force) this.attrs.set(name, ''); else this.attrs.delete(name); },
+  };
+  const context = createContext({
+    all: (selector: string) => selector === '[data-roster-open]' ? [button, countedButton] : [],
+    currentPendingAccessRows: () => Array.from({ length: pending }),
+  });
+  runInContext(code, context);
+  memberCount = '3';
+  runInContext('syncRosterOpenButtons()', context);
+  assert.equal(attrs.has('data-pending-access'), true, 'pending state is set when pending rows exist');
+  assert.equal(attrs.get('aria-label'), 'People & agents · 2 pending access');
+  assert.equal(button.title, '2 pending access');
+  assert.equal(countedButton.attrs.get('aria-label'), 'People & agents, 3 · 2 pending access');
+  pending = 0;
+  runInContext('syncRosterOpenButtons()', context);
+  assert.equal(attrs.has('data-pending-access'), false, 'pending state clears when no pending rows exist');
+  assert.equal(attrs.get('aria-label'), 'People & agents');
+  assert.equal(button.title, 'People & agents');
+  assert.equal(countedButton.attrs.get('aria-label'), 'People & agents, 3');
+
+  const css = await readFile(new URL('../../styles/kylon-channel.css', import.meta.url), 'utf8');
+  assert.match(css, /\[data-roster-open\]\s*\{[^}]*position:\s*relative/, 'People door establishes a positioning context');
+  const dotRule = css.match(/\[data-roster-open\]\[data-pending-access\]::after\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(dotRule, /position:\s*absolute/, 'pending-access dot is pinned out of flow so it cannot widen the header button');
+  assert.doesNotMatch(dotRule, /margin-inline-start/, 'pending-access dot adds no in-flow horizontal margin');
 });

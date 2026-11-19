@@ -36,26 +36,26 @@ const seg = (s: string) =>
    quotes — is a line that does not run when it is pasted. */
 const faqs = [
   {
-    q: "It said node wasn’t found — but I have Node",
-    a: "Almost always a version manager. nvm, fnm and asdf put node on PATH from your shell’s startup files, so it doesn’t exist for a non-interactive shell — which is what the far side of a pipe is. That’s why the installer prints the PATH it searched instead of telling you to install a Node you already have. Run it from a normal terminal window, or push it through a login shell:",
+    q: "It said node wasn’t found, but I have Node",
+    a: "Usually a version manager. nvm, fnm, and asdf put node on PATH from your shell’s startup files, so a non-interactive piped shell cannot see it. That is why the installer prints the PATH it searched. Run it from a normal terminal window, or pass it through a login shell:",
     cmd: INSTALL_CMD_LOGIN_SHELL,
     label: "login shell",
   },
   {
     q: "It installed, but my shell can’t find cswarm",
-    a: "`~/.local/bin` isn’t on your PATH. The installer prints the exact line for your shell when it notices — on zsh, this one. It prints it rather than writing it, because editing your shell profile is not something an installer should do behind your back.",
+    a: "`~/.local/bin` is not on your PATH. The installer prints the exact line for your shell when it detects this (for zsh, run the line below). It prints the line instead of editing your shell profile automatically.",
     cmd: "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zprofile && exec zsh -l",
     label: "zsh",
   },
   {
     q: "Checksum mismatch",
-    a: "Nothing was installed — the script stops before it writes anything, and prints the hash it expected next to the one it got. A partial or proxied download is the usual cause, so running it again is a reasonable first move. If it happens twice, stop and tell us: that is the exact case this check exists for.",
+    a: "Nothing was installed. The script stops before writing anything and prints both the expected and actual hashes. A partial or proxied download is the usual cause, so try running it once more. If it fails twice, stop and report it to support.",
     cmd: null,
     label: null,
   },
   {
     q: "require is not defined in ES module scope",
-    a: "You shouldn’t see this — the installer checks for it. It means cswarm ended up under a directory whose package.json declares `\"type\": \"module\"`, so Node loaded a CommonJS bundle as ESM. Install it outside that tree instead:",
+    a: "The installer checks for this before writing. It happens when cswarm lands under a folder whose package.json declares `\"type\": \"module\"`, causing Node to load a CommonJS bundle as ESM. Install it outside that directory instead:",
     cmd: INSTALL_CMD_DIR,
     label: "elsewhere",
   },

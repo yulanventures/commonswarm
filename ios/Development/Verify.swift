@@ -35,10 +35,17 @@ enum Verify {
         let google = try SignInAttempt(provider: .google)
         let (_, googleResponse) = try await browser.data(from: google.authorize(at: origin))
         guard let location = (googleResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
-              let googleURL = URL(string: location) else { throw Failure.mismatch("Google HTTPS callback") }
-        _ = try google.code(from: googleURL)
-        let customReturn = URL(string: location.replacingOccurrences(of: "https://commonswarm.com/ios/auth", with: "com.commonswarm.ios://auth"))!
-        try expect((try? google.code(from: customReturn)) == nil, "Google refuses custom-scheme return")
+              let googleURL = URL(string: location) else { throw Failure.mismatch("Google callback") }
+        let googleCode = try google.code(from: googleURL)
+        let otherGoogle = try SignInAttempt(provider: .google)
+        try expect((try? otherGoogle.code(from: googleURL)) == nil, "Google requires the pending state")
+        let wrongScheme = URL(string: "com.commonswarm.ios://auth/callback?" + (googleURL.query ?? ""))!
+        try expect((try? google.code(from: wrongScheme)) == nil, "Google refuses the GitHub return")
+        let tokens = try await google.exchange(code: googleCode, at: origin, publicKey: "local-fixture")
+        let googleSession = HumanSession(userID: tokens.userID) { tokens.accessToken }
+        let googleAPI = ConversationAPI(origin: origin, publicKey: "local-fixture", session: googleSession)
+        try expect(!(try await googleAPI.workspaces()).isEmpty, "Google PKCE opens an authenticated workspace")
+        googleSession.signOut()
 
         let wrong = try? await other.exchange(code: code, at: origin, publicKey: "local-fixture")
         try expect(wrong == nil, "wrong verifier refused")
@@ -56,11 +63,31 @@ enum Verify {
         let messages = try await api.history(ws.id, dm.destination)
         try expect(messages.filter { $0.body == post.command["body"] ?? nil }.count == 1, "one DM after retry")
         let general = try await api.history(ws.id, .general)
+        guard let pinned = general.flatMap({ $0.attachments ?? [] }).first else { throw Failure.mismatch("thread file") }
+        let bytes = try await api.download(pinned, workspace: ws.id)
+        try expect(String(decoding: bytes, as: UTF8.self) == "Workspace notes", "pinned attachment uses session only to grant access")
         try expect(!general.contains { $0.body == post.command["body"] ?? nil }, "DM excluded from general")
         guard let channel = directory.first(where: { if case .channel = $0.id { true } else { false } }) else {
             throw Failure.mismatch("named channel")
         }
-        try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"))
+        let upload = UploadIntent(file: try StagedFile(data: Data("Test file".utf8), name: "Notes.txt"))
+        guard let closed = directory.first(where: { $0.symbol == "lock" }) else { throw Failure.mismatch("private channel") }
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: closed.destination)
+            throw Failure.mismatch("private channel admitted an upload")
+        } catch AttachmentError.placement {}
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+            throw Failure.mismatch("fixture did not interrupt commitment")
+        } catch APIError.refused(503) {}
+        let ref = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+        try expect(ref.file_id == upload.file.id && ref.version_n == 1, "lost commit retries the original upload")
+        let postedID = try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"), attachments: [ref])
+        let channelMessages = try await api.history(ws.id, channel.destination)
+        let postedFiles = channelMessages.first { $0.id == postedID }?.attachments ?? []
+        try expect(postedFiles.count == 1 && postedFiles.first?.file_id == ref.file_id &&
+                   postedFiles.first?.version_n == ref.version_n && postedFiles.first?.name == upload.file.name,
+                   "the retried upload appears once on the confirmed message")
         let workspaces = try await api.workspaces()
         guard let second = workspaces.first(where: { $0.id != ws.id }) else { throw Failure.mismatch("second workspace") }
         let draft = session.composer(workspace: ws.id, conversation: dm.id)
@@ -71,36 +98,48 @@ enum Verify {
         try expect(session.composer(workspace: ws.id, conversation: dm.id).text == "Unsent A", "return restores draft")
         draft.text = "Uncertain send"
         guard let uncertain = draft.begin(workspace: ws.id, destination: dm.destination) else { throw Failure.mismatch("begin post") }
+        try expect(draft.text.isEmpty && draft.outgoing.first?.post.body == uncertain.body, "tap moves visible draft into pending row immediately")
+        draft.text = "Second draft"
+        guard let secondPost = draft.begin(workspace: ws.id, destination: dm.destination) else {
+            throw Failure.mismatch("a second send can start while the first is pending")
+        }
+        try expect(draft.outgoing.count == 2 && secondPost.command_id != uncertain.command_id, "independent pending messages")
+        let secondReceipt = try await api.post(secondPost)
+        draft.accepted(secondPost.command_id, signalID: secondReceipt)
+        draft.reconcile(try await api.history(ws.id, dm.destination))
+        try expect(draft.outgoing.map(\.id) == [uncertain.command_id], "out-of-order confirmation clears only its own row")
         do {
             try await api.post(uncertain)
             throw Failure.mismatch("fixture should withhold first receipt")
         } catch let error as APIError {
             guard case .refused(503) = error else { throw error }
-            draft.failed(with: error)
+            draft.failed(uncertain.command_id, with: error)
         }
-        try expect(session.composer(workspace: second.id, conversation: dm.id).submission == nil, "pending ID isolated")
+        try expect(session.composer(workspace: second.id, conversation: dm.id).outgoing.isEmpty, "pending ID isolated")
         let returnedDraft = session.composer(workspace: ws.id, conversation: dm.id)
         returnedDraft.text = "Newer typing"
-        guard let replayed = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else { throw Failure.mismatch("retry") }
+        guard let replayed = returnedDraft.retry(uncertain.command_id) else { throw Failure.mismatch("retry") }
         try expect(replayed.command_id == uncertain.command_id && replayed.body == uncertain.body, "retry preserves intent")
         do {
             try await api.post(replayed)
             throw Failure.mismatch("fixture should refuse the first receipt lookup")
         } catch let error as APIError {
             guard case .refused(403) = error else { throw error }
-            returnedDraft.failed(with: error)
+            returnedDraft.failed(uncertain.command_id, with: error)
         }
-        try expect(returnedDraft.failure == .unconfirmed, "pre-receipt 403 cannot settle an accepted post")
-        guard let finalRetry = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else {
+
+        guard let finalRetry = returnedDraft.retry(uncertain.command_id) else {
             throw Failure.mismatch("retry after refusal")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         try expect(try encoder.encode(finalRetry) == encoder.encode(uncertain), "the entire envelope survives 503 then 403")
-        try await api.post(finalRetry)
-        returnedDraft.accepted()
+        let signalID = try await api.post(finalRetry)
+        returnedDraft.accepted(finalRetry.command_id, signalID: signalID)
         try expect(returnedDraft.text == "Newer typing" && inB.text == "Unsent B", "accept retains newer and other workspace drafts")
         let delivered = try await api.history(ws.id, dm.destination)
+        returnedDraft.reconcile(delivered)
+        try expect(returnedDraft.outgoing.isEmpty, "accepted server identity replaces pending row")
         try expect(delivered.filter { $0.body == uncertain.body }.count == 1, "one post across workspace switch")
         if case .channel(let uuid, _) = channel.destination {
             let renamed = Conversation(destination: .channel(uuid, "renamed"), name: "#renamed", symbol: "number")

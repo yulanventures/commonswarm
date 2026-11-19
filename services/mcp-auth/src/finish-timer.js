@@ -32,6 +32,7 @@
     link.setAttribute("aria-disabled", "true");
     link.setAttribute("tabindex", "-1");
     pause.disabled = true;
+    page.setAttribute?.("tabindex", "0");
     if (needsFocus) page.focus();
   }
   function recheck() {

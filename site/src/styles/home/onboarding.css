@@ -769,6 +769,9 @@
   background: transparent;
 }
 
+.hm-ahp__button--text:not(:focus-visible),
+.hm-ahp__button--done:not(:focus-visible) { box-shadow: none; }
+
 :is(.hm-ahp__button--text):hover { color: var(--home-link-hover); background: transparent; }
 
 /* The blue completion pill (the canvas footer action): Done, once the agent has joined. */
@@ -847,7 +850,7 @@
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
-  min-block-size: 36px;
+  min-block-size: 44px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -954,6 +957,16 @@
   gap: 10px;
 }
 
+.hm-ahp__optional-access:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  align-self: stretch;
+  padding-block-start: 16px;
+  border-block-start: 1px solid var(--home-hairline);
+}
+
 /* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the
    title and the lead only). */
 .hm-ahp__footer {
@@ -981,6 +994,31 @@
 }
 
 .hm-ahp__link:hover { color: var(--home-ink); }
+
+.hm-ahp__open-row,
+.hm-ahp__step-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-inline-size: 0;
+}
+
+.hm-ahp__open-row[hidden],
+.hm-ahp__open-dest[hidden] { display: none; }
+
+.hm-ahp__open-row > .hm-ahp__link {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 0;
+}
+
+.hm-ahp__open-dest {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  overflow-wrap: anywhere;
+}
 
 .hm-ahp__status {
   position: absolute;

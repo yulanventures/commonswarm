@@ -31,12 +31,24 @@ struct Message: Decodable, Identifiable {
     let from_kind: String
     let body: String
     let created_at: String
+    let attachments: [MessageAttachment]?
+}
+
+struct MessageAttachment: Decodable, Hashable, Identifiable {
+    let file_id: UUID
+    let version_n: Int
+    let name: String
+    let content_type: String
+    let size_bytes: Int
+
+    var id: String { file_id.uuidString + "@" + String(version_n) }
+    var isRasterImage: Bool { ["image/png", "image/jpeg", "image/gif", "image/webp"].contains(content_type) }
 }
 
 struct Post: Encodable {
     let command_id: UUID
     let workspace_id: UUID
-    let client_version = "0.1.0"
+    let client_version = ConversationAPI.clientVersion
     let stream = ["kind": "workspace"]
     let command: [String: String?]
 
@@ -58,17 +70,46 @@ struct Post: Encodable {
         }
         command = fields
     }
+
+    func envelope(attachments: [FileReference]) -> some Encodable {
+        struct Command: Encodable {
+            let fields: [String: String?]
+            let attachments: [FileReference]
+            func encode(to encoder: Encoder) throws {
+                var result = encoder.container(keyedBy: CommandKey.self)
+                for (key, value) in fields { try result.encode(value, forKey: .init(stringValue: key)) }
+                if !attachments.isEmpty { try result.encode(attachments, forKey: .init(stringValue: "attachments")) }
+            }
+        }
+        struct Envelope: Encodable {
+            let command_id, workspace_id: UUID
+            let stream: [String: String]
+            let client_version: String
+            let command: Command
+        }
+        return Envelope(command_id: command_id, workspace_id: workspace_id, stream: stream, client_version: client_version,
+                        command: Command(fields: command, attachments: attachments))
+    }
+
+}
+
+private struct CommandKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
 }
 
 enum APIError: Error { case refused(Int), invalidResponse }
 
 struct ConversationAPI {
+    static let clientVersion = "0.1.0"
     static let pageSize = 50
     let origin: URL
     let publicKey: String
     let session: HumanSession
 
-    private func request(_ path: String, _ query: [String: String] = [:]) -> URLRequest {
+    func request(_ path: String, _ query: [String: String] = [:]) -> URLRequest {
         var components = URLComponents(url: origin.appending(path: path), resolvingAgainstBaseURL: false)!
         components.queryItems = query.isEmpty ? nil : query.map { URLQueryItem(name: $0.key, value: $0.value) }
         // PostgREST decodes a literal plus as a space, including the UTC offset in a cursor.
@@ -78,14 +119,14 @@ struct ConversationAPI {
         return request
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+    func send<T: Decodable>(_ request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
         guard (200..<300).contains(status) else { throw APIError.refused(status) }
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    private func rows<T: Decodable>(_ table: String, _ query: [String: String]) async throws -> [T] {
+    func rows<T: Decodable>(_ table: String, _ query: [String: String]) async throws -> [T] {
         var request = request("rest/v1/" + table, query)
         request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
         return try await send(request)
@@ -114,7 +155,7 @@ struct ConversationAPI {
     }
 
     func history(_ workspace: UUID, _ destination: Conversation.Destination, before: Message? = nil) async throws -> [Message] {
-        var query = ["select": "id,from,from_kind,body,created_at", "workspace_id": "eq." + workspace.uuidString,
+        var query = ["select": "id,from,from_kind,body,created_at,attachments", "workspace_id": "eq." + workspace.uuidString,
                      "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {
@@ -144,13 +185,60 @@ struct ConversationAPI {
         return Array(result.reversed())
     }
 
-    func post(_ post: Post) async throws {
-        struct Receipt: Decodable { let status: String }
+    func download(_ attachment: MessageAttachment, workspace: UUID) async throws -> Data {
+        struct Command: Encodable {
+            let kind = "file_download_url"
+            let file_id: UUID
+            let version_n: Int
+        }
+        struct Envelope: Encodable {
+            let command_id = UUID()
+            let client_version = ConversationAPI.clientVersion
+            let workspace_id: UUID
+            let stream = ["kind": "workspace"]
+            let command: Command
+        }
+        struct Grant: Decodable {
+            let status: String
+            let file_id: UUID
+            let version_n, size_bytes: Int
+            let download_path: String
+        }
+        guard attachment.version_n > 0, (1...25 * 1024 * 1024).contains(attachment.size_bytes) else {
+            throw APIError.invalidResponse
+        }
+        var req = request("functions/v1/command")
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Envelope(workspace_id: workspace,
+            command: Command(file_id: attachment.file_id, version_n: attachment.version_n)))
+        let grant: Grant = try await send(req)
+        let expected = "/storage/v1/object/sign/swarm-files/" + workspace.uuidString.lowercased() + "/"
+            + attachment.file_id.uuidString.lowercased() + "/" + String(attachment.version_n)
+        guard grant.status == "accepted", grant.file_id == attachment.file_id,
+              grant.version_n == attachment.version_n, grant.size_bytes == attachment.size_bytes,
+              let path = URLComponents(string: grant.download_path),
+              path.scheme == nil, path.host == nil, path.fragment == nil,
+              path.percentEncodedPath == expected, path.queryItems?.contains(where: { $0.name == "token" && $0.value?.isEmpty == false }) == true,
+              let url = URL(string: grant.download_path, relativeTo: origin)?.absoluteURL else {
+            throw APIError.invalidResponse
+        }
+        return try await session.downloadStorage(url, size: grant.size_bytes)
+    }
+
+    @discardableResult
+    func post(_ post: Post, attachments: [FileReference] = []) async throws -> UUID {
+        struct Receipt: Decodable {
+            struct Signal: Decodable { let id: UUID }
+            let status: String
+            let signal: Signal
+        }
         var request = request("functions/v1/command")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(post)
+        request.httpBody = try JSONEncoder().encode(post.envelope(attachments: attachments))
         let receipt: Receipt = try await send(request)
-        guard receipt.status == "accepted" else { throw SignInError.refused }
+        guard receipt.status == "accepted" else { throw APIError.invalidResponse }
+        return receipt.signal.id
     }
 }

@@ -1317,6 +1317,10 @@ test("registered native callbacks complete consent, Connected, finish and provid
       if (!target.hostname && !["http:", "https:"].includes(target.protocol)) {
         assert.match(page.body, /Choose workspaces for an app on this device \(com\.example\.app:\)/u);
         assert.match(page.body, /After you approve, you return to <strong>an app on this device \(com\.example\.app:\)<\/strong>/u);
+      } else if (target.protocol === "cursor:") {
+        assert.match(page.body, /Choose workspaces for an app on this device \(cursor:\/\/anysphere\.cursor-retrieval\)/u);
+        assert.match(page.body, /After you approve, you return to <strong>an app on this device \(cursor:\/\/anysphere\.cursor-retrieval\)<\/strong>/u);
+        assert.doesNotMatch(page.body, /\bClaude\b|user-commonswarm/u);
       }
       const source = target.protocol === "http:" ? target.origin : target.protocol;
       assert.equal(page.getHeader("content-security-policy"),

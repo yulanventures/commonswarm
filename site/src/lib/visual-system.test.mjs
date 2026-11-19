@@ -87,6 +87,23 @@ test("homepage preloads Bricolage Grotesque and DM Sans, sets root attributes ea
   assert.match(landingCss, /\.lp-home\s+:is\(h1,h2,h3\)\s*\{\s*font-family:\s*var\(--font-display\);/u);
 });
 
+test("app shell preloads only Inter and binds body and home UI fonts to Inter so sign-in avoids unused web fonts", async () => {
+  const base = await readFile(new URL("../layouts/Base.astro", import.meta.url), "utf8");
+  assert.match(base, /const isApp = path === "\/app";/u);
+  assert.match(base, /isApp\s*\?\s*\["\/fonts\/inter-latin\.woff2"\]/u);
+  assert.match(base, /data-app=\{isApp \? "" : undefined\}/u);
+
+  const kylonFont = await readFile(new URL("../styles/kylon-font.css", import.meta.url), "utf8");
+  assert.match(
+    kylonFont,
+    /:root\[data-app\]\s*\{[\s\S]*?--k-shell-font:\s*"CommonSwarm Inter"[\s\S]*?--font-sans:\s*var\(--k-shell-font\);[\s\S]*?--home-font-body:\s*var\(--k-shell-font\);[\s\S]*?\}/u,
+  );
+  assert.match(
+    kylonFont,
+    /:root\[data-app\]\s+\.dashboard__sample-notice:not\(\[hidden\]\)\s*\{[\s\S]*?font-family:\s*"Instrument Sans"/u,
+  );
+});
+
 test("app loading and empty surfaces share status live regions and Skeleton, EmptyState, and Toast primitives (D18)", async () => {
   const appPage = await readFile(new URL("../pages/app.astro", import.meta.url), "utf8");
   assert.match(appPage, /import Toast from "\.\.\/components\/ui\/Toast\.astro";/u);
@@ -301,4 +318,15 @@ test("message headers keep recipient metadata reachable alongside the name, agen
   assert.doesNotMatch(receipts, /\.dashboard__message-tools[^{]*\{[^}]*position:\s*static;/u);
   assert.match(dashboard, /row\.tabIndex = -1;/u);
   assert.match(dashboard, /hour:\s*"numeric",\s*minute:\s*"2-digit"/u);
+
+  // Grouped gutter timestamp carries no native title tooltip and sits clear of the person-cue edge;
+  // floating row tools sit above the message body so they never cover hovered text.
+  const messages = await readFile(new URL("../styles/kylon-messages.css", import.meta.url), "utf8");
+  const stream = await readFile(new URL("./home-stream.ts", import.meta.url), "utf8");
+  assert.match(stream, /gutter\.className\s*=\s*"hm-message-time"/u);
+  assert.match(stream, /gutter\.removeAttribute\("title"\)/u);
+  assert.match(channel, /\.hm-message-time\s*\{[^}]*inset:\s*7px auto auto 10px;[^}]*inline-size:\s*46px;[^}]*text-align:\s*end;[^}]*pointer-events:\s*none;/u);
+  assert.match(channel, /\.dashboard__message\s+\.dashboard__message-tools\s*\{[^}]*inset:\s*-2px 0 auto auto;\s*transform:\s*translateY\(-100%\);/u);
+  assert.match(messages, /\[data-author="you"\]\)::before\s*\{[^}]*inset-inline-start:\s*6px;/u);
+  assert.match(receipts, /:has\(> \.dashboard__message-receipt\[open\]\)\s*\{[^}]*transform:\s*none;/u);
 });

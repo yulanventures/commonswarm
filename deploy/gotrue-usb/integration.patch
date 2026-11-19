@@ -1,8 +1,22 @@
 diff --git a/internal/api/external.go b/internal/api/external.go
-index 41195d1..75d1040 100644
+index 41195d1..d9165a9 100644
 --- a/internal/api/external.go
 +++ b/internal/api/external.go
-@@ -62,6 +62,13 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+@@ -45,6 +45,13 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+ 	codeChallenge := query.Get("code_challenge")
+ 	codeChallengeMethod := query.Get("code_challenge_method")
+ 
++	googleUSB := googleUSBScheme(query.Get("redirect_to"))
++	if googleUSB {
++		if !a.googleUSBStartAllowed(r, query.Get("redirect_to"), linkingTargetUser) {
++			return "", iosUSBRefused()
++		}
++		scopes = "openid"
++	}
+ 	p, pConfig, err := a.Provider(ctx, providerType, scopes)
+ 	if err != nil {
+ 		return "", apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Unsupported provider: %+v", err).WithInternalError(err)
+@@ -62,6 +69,17 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
  	}
  
  	redirectURL := utilities.GetReferrer(r, config)
@@ -13,13 +27,39 @@ index 41195d1..75d1040 100644
 +		redirectURL = raw
 +		query.Del("redirect_to")
 +	}
++	if googleUSB {
++		redirectURL = query.Get("redirect_to")
++		query.Del("redirect_to")
++	}
  	log := observability.GetLogEntry(r).Entry
  	log.WithField("provider", providerType).Info("Redirecting to external provider")
  	if err := validatePKCEParams(codeChallengeMethod, codeChallenge); err != nil {
-@@ -138,6 +145,9 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+@@ -126,7 +144,17 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+ 	if err != nil {
+ 		return "", apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Invalid code_challenge_method").WithInternalError(err)
+ 	}
+-	if err := db.Create(flowState); err != nil {
++	if googleUSB {
++		err := db.Transaction(func(tx *storage.Connection) error {
++			if err := a.googleUSBAdmission(tx, flowState, true, ""); err != nil {
++				return err
++			}
++			return tx.Create(flowState)
++		})
++		if err != nil {
++			return "", iosUSBRefused()
++		}
++	} else if err := db.Create(flowState); err != nil {
+ 		return "", apierrors.NewInternalServerError("Error creating flow state").WithInternalError(err)
+ 	}
+ 
+@@ -138,6 +166,12 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
  
  // ExternalProviderCallback handles the callback endpoint in the external oauth provider flow
  func (a *API) ExternalProviderCallback(w http.ResponseWriter, r *http.Request) error {
++	if flow := getFlowState(r.Context()); googleUSBFlow(flow) {
++		return a.googleUSBCallback(w, r, flow)
++	}
 +	if flow := getFlowState(r.Context()); isIOSUSBFlow(flow) {
 +		return a.iosUSBCallback(w, r, flow)
 +	}
@@ -27,13 +67,26 @@ index 41195d1..75d1040 100644
  	u, err := url.Parse(rurl)
  	if err != nil {
 diff --git a/internal/api/token.go b/internal/api/token.go
-index 86dcc27..11e8d70 100644
+index 86dcc27..c3cf7ee 100644
 --- a/internal/api/token.go
 +++ b/internal/api/token.go
-@@ -253,6 +253,16 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request)
+@@ -253,6 +253,29 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request)
  	var token *AccessTokenResponse
  	err = db.Transaction(func(tx *storage.Connection) error {
  		var terr error
++		if googleUSBFlow(flowState) {
++			locked, err := models.FindFlowStateByIDForUpdate(tx, flowState.ID.String())
++			if err != nil || locked.UserID == nil || locked.UserID.String() != a.config.IOSGoogleUSBOwnerID ||
++				locked.AuthCodeIssuedAt == nil || locked.AuthCode == nil || *locked.AuthCode != params.AuthCode ||
++				locked.VerifyPKCE(params.CodeVerifier) != nil || a.googleUSBAdmission(tx, locked, false, "") != nil {
++				return iosUSBRefused()
++			}
++			owner, err := models.FindUserByID(tx, *locked.UserID)
++			if err != nil || !iosUSBEligibleUser(owner, a.requestAud(ctx, r)) {
++				return iosUSBRefused()
++			}
++			user = owner
++		}
 +		if isIOSUSBFlow(flowState) {
 +			// Serialize this single-use grant with other redeemers before issuing a session.
 +			locked, lockErr := models.FindFlowStateByIDForUpdate(tx, flowState.ID.String())
@@ -48,19 +101,20 @@ index 86dcc27..11e8d70 100644
  		if err != nil {
  			return err
 diff --git a/internal/conf/configuration.go b/internal/conf/configuration.go
-index 6772bf1..c7822e5 100644
+index 6772bf1..5857683 100644
 --- a/internal/conf/configuration.go
 +++ b/internal/conf/configuration.go
-@@ -449,6 +449,7 @@ type ReloadingConfiguration struct {
+@@ -449,6 +449,8 @@ type ReloadingConfiguration struct {
  
  // GlobalConfiguration holds all the configuration that applies to all instances.
  type GlobalConfiguration struct {
++	IOSGoogleUSBOwnerID string `json:"-" envconfig:"IOS_GOOGLE_USB_OWNER_ID"`
 +	IOSUSBOwnerID string `json:"-" envconfig:"IOS_USB_OWNER_ID"`
  	API           APIConfiguration
  	DB            DBConfiguration
  	External      ProviderConfiguration
 diff --git a/internal/utilities/request.go b/internal/utilities/request.go
-index f998874..a3595aa 100644
+index f998874..35eb774 100644
 --- a/internal/utilities/request.go
 +++ b/internal/utilities/request.go
 @@ -92,6 +92,10 @@ var decimalIPAddressPattern = regexp.MustCompile("^[0-9]+$")
@@ -68,7 +122,7 @@ index f998874..a3595aa 100644
  
  func IsRedirectURLValid(config *conf.GlobalConfiguration, redirectURL string) bool {
 +	// This scheme has a single provider-specific, code-only success handler.
-+	if strings.HasPrefix(strings.ToLower(redirectURL), "com.commonswarm.ios:") {
++	if strings.HasPrefix(strings.ToLower(redirectURL), "com.commonswarm.ios:") || strings.HasPrefix(strings.ToLower(redirectURL), "commonswarm:") {
 +		return false
 +	}
  	if redirectURL == "" {

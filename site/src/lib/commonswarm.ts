@@ -41,6 +41,35 @@ import {
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
 import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
+import {
+  buildConversationHistoryRequest,
+  buildInviteConversationCommand,
+  buildJoinConversationCommand,
+  buildLeaveConversationCommand,
+  buildListConversationsRequest,
+  buildMarkConversationReadCommand,
+  buildOpenConversationCommand,
+  buildOversightHistoryRequest,
+  buildOversightListRequest,
+  buildRemoveConversationCommand,
+  buildSetConversationNotifyCommand,
+  parseConversationActionResponse,
+  parseConversationHistoryResponse,
+  parseConversationOpenResponse,
+  parseConversationsListOutcome,
+  parseConversationsListResponse,
+  parseOversightHistoryResponse,
+  parseOversightListResponse,
+  type ConversationActionResult,
+  type ConversationHistoryOptions,
+  type ConversationHistoryResult,
+  type ConversationMemberRef,
+  type ConversationNotifyLevel,
+  type ConversationOpenResult,
+  type ConversationSummary,
+  type OversightConversationSummary,
+  type OversightHistoryResult,
+} from "./conversations.js";
 import type { ReactionActor, ReactionGroup } from "./reactions";
 import {
   MESSAGE_STATUS_BATCH,
@@ -3218,6 +3247,80 @@ export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
   return (data ?? []).map((row) => browserSignalFromRow(row as unknown as Record<string, unknown>));
 }
 
+export interface SignalLocation {
+  id: string;
+  channelId: string | null;
+  to: string | null;
+  toAgent: string | null;
+  threadRootId: string | null;
+  from: string;
+  fromKind: string;
+}
+
+/**
+ * Resolves the conversation placement columns for a small batch of signal ids in one workspace.
+ * Used by the Waiting on you channel panel so asks older than the loaded feed page distinguish
+ * named channels, #general, and direct messages without guessing on read failure.
+ */
+export async function signalLocations(
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<Map<string, SignalLocation>> {
+  const unique = [...new Set(signalIds.filter(Boolean))];
+  const out = new Map<string, SignalLocation>();
+  if (!unique.length) return out;
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const readBatch = async (ids: readonly string[]) => {
+    const rows: Array<Record<string, unknown>> = [];
+    for (let offset = 0; offset < ids.length; offset += 50) {
+      const chunk = ids.slice(offset, offset + 50);
+      const { data, error } = await readWithDeadline(
+        "signal locations",
+        (signal) =>
+          c
+            .schema("swarm_read")
+            .from("signals")
+            .select("id,channel_id,to,to_agent,thread_root_id,from,from_kind")
+            .eq("workspace_id", workspaceId)
+            .in("id", chunk)
+            .abortSignal(signal),
+      );
+      if (error) throw new Error(error.message);
+      rows.push(...((data ?? []) as Array<Record<string, unknown>>));
+    }
+    return rows;
+  };
+  const toLoc = (row: Record<string, unknown>): SignalLocation | null => {
+    if (typeof row.id !== "string") return null;
+    return {
+      id: row.id,
+      channelId: typeof row.channel_id === "string" ? row.channel_id : null,
+      to: typeof row.to === "string" ? row.to : null,
+      toAgent: typeof row.to_agent === "string" ? row.to_agent : null,
+      threadRootId: typeof row.thread_root_id === "string" ? row.thread_root_id : null,
+      from: typeof row.from === "string" ? row.from : "",
+      fromKind: typeof row.from_kind === "string" ? row.from_kind : "",
+    };
+  };
+  for (const row of await readBatch(unique)) {
+    const loc = toLoc(row);
+    if (loc) out.set(loc.id, loc);
+  }
+  const missingRoots = [...new Set(
+    [...out.values()]
+      .filter(loc => loc.channelId === null && loc.threadRootId !== null && !out.has(loc.threadRootId))
+      .map(loc => loc.threadRootId!),
+  )];
+  if (missingRoots.length) {
+    for (const row of await readBatch(missingRoots)) {
+      const loc = toLoc(row);
+      if (loc) out.set(loc.id, loc);
+    }
+  }
+  return out;
+}
+
 /**
  * The newest messages between the viewer and one teammate, by the same rule as `signalIsDirectBetween`, which the
  * screen still applies over what this returns. Narrowed in the query, so a conversation is not limited to whatever
@@ -4132,19 +4235,27 @@ export function removeReaction(session: Session, commandId: string, workspaceId:
   return postReaction("remove_reaction", session, commandId, workspaceId, signalId, emoji);
 }
 
-/** Interactive replies: the stored choices (and any answer) for up to 50 asks the signed-in person can read.
- * `null` when the read is unavailable or malformed; asks without choices simply aren't in the result. */
+/** Interactive replies: the stored choices (and any answer) for asks the signed-in person can read,
+ * paged in batches of ASK_CHOICES_BATCH (50). `null` when any batch is unavailable or malformed;
+ * asks without choices simply aren't in the result. */
 export async function askChoices(workspaceId: string, signalIds: readonly string[]): Promise<AskChoiceState[] | null> {
   const api = client();
   if (!api) throw new NoDeployment();
   if (signalIds.length === 0) return [];
-  const result = await readWithDeadline("Ask choices", signal =>
-    api.schema("swarm_read").rpc("ask_choices", {
-      p_workspace_id: workspaceId,
-      p_signal_ids: signalIds.slice(0, ASK_CHOICES_BATCH),
-    }).abortSignal(signal));
-  if (result.error) return null;
-  return parseAskChoices(result.data);
+  const out: AskChoiceState[] = [];
+  for (let offset = 0; offset < signalIds.length; offset += ASK_CHOICES_BATCH) {
+    const chunk = signalIds.slice(offset, offset + ASK_CHOICES_BATCH);
+    const result = await readWithDeadline("Ask choices", signal =>
+      api.schema("swarm_read").rpc("ask_choices", {
+        p_workspace_id: workspaceId,
+        p_signal_ids: chunk,
+      }).abortSignal(signal));
+    if (result.error) return null;
+    const parsed = parseAskChoices(result.data);
+    if (!parsed) return null;
+    out.push(...parsed);
+  }
+  return out;
 }
 
 export type AnswerChoiceResult =
@@ -4220,6 +4331,232 @@ export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
   } catch {
     return []; // An optional status read cannot hide messages already loaded.
   }
+}
+
+/** Open or find a 1:1 DM or group DM (Step 2a `conversation_open`). */
+export async function openConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  members: readonly ConversationMemberRef[],
+  newGroup = false,
+): Promise<ConversationOpenResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    buildOpenConversationCommand(members, newGroup),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  return parseConversationOpenResponse(status, body);
+}
+
+async function conversationAction(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  command: Record<string, unknown>,
+  fallbackMessage: string,
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    command,
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  return parseConversationActionResponse(status, body, fallbackMessage);
+}
+
+export async function joinConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildJoinConversationCommand(conversationId),
+    "CommonSwarm could not join that channel.",
+  );
+}
+
+export async function leaveConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildLeaveConversationCommand(conversationId),
+    "CommonSwarm could not leave that conversation.",
+  );
+}
+
+export async function inviteToConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  members: readonly ConversationMemberRef[],
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildInviteConversationCommand(conversationId, members),
+    "CommonSwarm could not add those members.",
+  );
+}
+
+export async function removeFromConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  member: ConversationMemberRef,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildRemoveConversationCommand(conversationId, member),
+    "CommonSwarm could not remove that member.",
+  );
+}
+
+export async function markConversationRead(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  throughSignalId: string | null = null,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildMarkConversationReadCommand(conversationId, throughSignalId),
+    "CommonSwarm could not mark that conversation read.",
+  );
+}
+
+export async function setConversationNotify(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean; starRank?: number | null },
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildSetConversationNotifyCommand(conversationId, change),
+    "CommonSwarm could not save those notification settings.",
+  );
+}
+
+async function postConversationRead(
+  payload: Record<string, unknown>,
+  label: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const session = await currentSession();
+  if (!session) throw new SessionExpired();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/functions/v1/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: deadline.controller.signal,
+    });
+    if (response.status === 401) throw new SessionExpired();
+    const raw = await response.json().catch(() => ({}));
+    const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    return { status: response.status, body };
+  } catch (error) {
+    if (error instanceof SessionExpired || error instanceof NoDeployment) throw error;
+    if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
+    throw error;
+  } finally {
+    deadline.clear();
+  }
+}
+
+/** Raised when the backend does not expose Step 2b `resource: "conversations"` yet. */
+export class ConversationsUnsupportedError extends Error {
+  constructor(message = "Conversations read is not available on this server.") {
+    super(message);
+    this.name = "ConversationsUnsupportedError";
+  }
+}
+
+/** Step 2b `resource: "conversations"`: sidebar and directory list for the viewer. */
+export async function listConversations(
+  workspaceId: string,
+  includeArchived = false,
+): Promise<ConversationSummary[]> {
+  const { status, body } = await postConversationRead(
+    buildListConversationsRequest(workspaceId, includeArchived),
+    "conversations",
+  );
+  const outcome = parseConversationsListOutcome(status, body);
+  if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
+  if (outcome.status === "failed") throw new Error(outcome.message);
+  return outcome.conversations;
+}
+
+/** Step 2b `resource: "conversation_history"`: cursor-paged messages for one conversation. */
+export async function readConversationHistory(
+  workspaceId: string,
+  conversationId: string,
+  options: ConversationHistoryOptions = {},
+): Promise<ConversationHistoryResult<Signal>> {
+  const { status, body } = await postConversationRead(
+    buildConversationHistoryRequest(workspaceId, conversationId, options),
+    "conversation history",
+  );
+  return parseConversationHistoryResponse(status, body, browserSignalFromRow);
+}
+
+/** Step 2b `resource: "conversation_oversight"`: read-only DMs for one owned agent. */
+export async function listOversightConversations(
+  workspaceId: string,
+  agentPrincipalId: string,
+): Promise<OversightConversationSummary[]> {
+  const { status, body } = await postConversationRead(
+    buildOversightListRequest(workspaceId, agentPrincipalId),
+    "agent conversations",
+  );
+  if (status === 404) return [];
+  if (status !== 200) {
+    throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load agent conversations (HTTP ${status}).`);
+  }
+  return parseOversightListResponse(body);
+}
+
+/** Step 2b `resource: "conversation_oversight_history"`: read-only history bound to one owned agent. */
+export async function readOversightConversationHistory(
+  workspaceId: string,
+  conversationId: string,
+  agentPrincipalId: string,
+  options: ConversationHistoryOptions = {},
+): Promise<OversightHistoryResult<Signal>> {
+  const { status, body } = await postConversationRead(
+    buildOversightHistoryRequest(workspaceId, conversationId, agentPrincipalId, options),
+    "agent conversation history",
+  );
+  return parseOversightHistoryResponse(status, body, browserSignalFromRow);
 }
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */

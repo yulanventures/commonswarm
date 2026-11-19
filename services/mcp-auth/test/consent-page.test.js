@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { createConnectionManager } from "../src/connections.js";
 import { createConsentOrchestrator } from "../src/consent.js";
-import { CONSENT_WARNING, renderConsentPage } from "../src/interaction-page.js";
+import { CONSENT_WARNING, renderConsentPage, renderConsentResultPage } from "../src/interaction-page.js";
 import { createInteractionHandler } from "../src/interactions.js";
 
 const USER = "10000000-0000-4000-8000-000000000001";
@@ -98,7 +98,7 @@ test("consent interaction serves HTML from the bound browser identity and owner 
   assert.equal(readerIdentity.userId, USER);
   assert.match(response.body, /Workspace One/u);
   assert.match(response.body, /Client name \(supplied by the client\): <strong>Registered &lt;app&gt; &amp; &quot;friends&quot;<\/strong>/u);
-  assert.match(response.body, /After you approve, you return to <strong>callback\.example<\/strong>/u);
+  assert.match(response.body, /After you approve, you return to <strong>callback\.example:8443<\/strong>/u);
   assert.match(response.body, /Client ID URL host: <strong>client\.example<\/strong>/u);
   assert.doesNotMatch(response.body, /unused\.example|state=private/u);
   assert.doesNotMatch(response.body, /oauth-state-not-rendered/u);
@@ -125,15 +125,19 @@ test("consent page escapes every untrusted label and contains the complete discl
   assert.doesNotMatch(html, /access_token|refresh_token|authorization_code|server-held-token/iu);
 });
 
-test("consent destination is prominent beside approval and describes loopback programs", () => {
+test("consent destination is prominent beside approval and describes HTTPS, loopback and native callbacks", () => {
+  assert.doesNotMatch(CONSENT_WARNING, /\bClaude\b/u);
   for (const [redirectUri, destination] of [
-    ["https://different.example:8443/private?code=hidden", "different.example"],
-    ["http://localhost:4321/callback", "a program on this computer (localhost)"],
+    ["https://different.example/private?code=hidden", "different.example"],
+    ["https://different.example:8443/private?code=hidden", "different.example:8443"],
+    ["http://localhost:4321/callback?code=hidden", "a program on this computer (localhost)"],
     ["http://127.0.0.1:5432/callback", "a program on this computer (localhost)"],
     ["http://[::1]:6543/callback", "a program on this computer (localhost)"],
+    ["cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback?code=hidden", "an app on this device (cursor://anysphere.cursor-retrieval)"],
+    ["com.example.app:/oauth/callback?code=hidden", "an app on this device (com.example.app:)"],
   ]) {
     const html = renderConsentPage({ interactionUid: "destination", redirectUri,
-      clientDisplay: { verified: false, primary: "metadata.example", declaredName: "Registered app" },
+      clientDisplay: { verified: false, primary: destination, declaredName: "Registered app" },
       identity, workspaces: [], selectionVersion: 0, csrfToken: "csrf" });
     assert.ok(html.includes(`After you approve, you return to <strong>${destination}</strong>`));
     const destinationStart = html.lastIndexOf('<p class="notice destination">');
@@ -142,7 +146,8 @@ test("consent destination is prominent beside approval and describes loopback pr
     const nearApproval = html.slice(destinationStart, approval);
     assert.ok(nearApproval.includes("Registered app"));
     assert.ok(nearApproval.includes(destination));
-    assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden/u);
+    assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden|\/private|user-commonswarm/u);
+    assert.doesNotMatch(html, /\bClaude\b/u);
   }
 });
 
@@ -370,4 +375,40 @@ test("connection manager supplies verified identity separately and preserves gra
   assert.deepEqual(calls.map(([kind]) => kind), ["grant", "seat"]);
   assert.equal(calls[0][1].identity.userId, USER);
   assert.equal(calls[1][1].workspaceId, W2);
+});
+
+test("already-approved result page keeps one return link without repeating the app name and separates fallback without a link", () => {
+  const withLink = renderConsentResultPage({
+    completed: true,
+    clientName: "Reader app",
+    restartUrl: "https://reader.example/start",
+  });
+  assert.match(withLink, /<h1>Already approved<\/h1>/u);
+  assert.match(withLink, /If your app did not finish connecting, start a new connection from that app\./u);
+  assert.match(withLink, /<a href="https:\/\/reader\.example\/start">Return to Reader app<\/a>/u);
+  assert.equal(withLink.split("Reader app").length - 1, 1);
+  assert.doesNotMatch(withLink, /You can return to|Return to CommonSwarm/u);
+
+  const withoutLink = renderConsentResultPage({
+    completed: true,
+    clientName: 'Reader <app> & "friends"',
+  });
+  assert.match(withoutLink, /<h1>Already approved<\/h1>/u);
+  assert.match(withoutLink, /Switch back to <strong>Reader &lt;app&gt; &amp; &quot;friends&quot;<\/strong> to continue\./u);
+  assert.match(withoutLink, /If it did not finish connecting, start a new connection from that app\./u);
+  assert.match(withoutLink, /<a class="provider-secondary" href="https:\/\/commonswarm\.com\/app">Return to CommonSwarm<\/a>/u);
+  assert.equal(withoutLink.split("Reader &lt;app&gt; &amp; &quot;friends&quot;").length - 1, 1);
+  assert.doesNotMatch(withoutLink, /<app>|You can return to/u);
+
+  const unnamed = renderConsentResultPage({ completed: true });
+  assert.match(unnamed, /Switch back to <strong>your app<\/strong> to continue\./u);
+  assert.match(unnamed, /<a class="provider-secondary" href="https:\/\/commonswarm\.com\/app">Return to CommonSwarm<\/a>/u);
+
+  const expired = renderConsentResultPage({
+    completed: false,
+    clientName: "Reader app",
+    restartUrl: "https://reader.example/start",
+  });
+  assert.match(expired, /<h1>Start the connection again<\/h1>/u);
+  assert.match(expired, /<a href="https:\/\/reader\.example\/start">Return to Reader app to start again<\/a>/u);
 });

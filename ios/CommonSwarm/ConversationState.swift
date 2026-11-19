@@ -4,37 +4,84 @@ import Foundation
 @MainActor
 final class Composer: ObservableObject {
     @Published var text = ""
-    @Published private(set) var sending = false
-    enum Failure { case refused, unconfirmed }
-    @Published private(set) var failure: Failure?
-    private(set) var submission: Post?
+    @Published var attachments: [UploadIntent] = []
+    var canSend: Bool {
+        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
+    }
+
+    func stage(_ file: StagedFile) throws {
+        guard attachments.count < 8 else { throw AttachmentError.count }
+        attachments.append(UploadIntent(file: file))
+    }
+
+    enum Delivery { case sending, retrying, uploadFailed, unconfirmed, refused, accepted(UUID) }
+
+    struct Outgoing: Identifiable {
+        let post: Post
+        let files: [UploadIntent]
+        let createdAt = Date()
+        var delivery: Delivery = .sending
+        var id: UUID { post.command_id }
+    }
+    @Published private(set) var outgoing: [Outgoing] = []
 
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
-        guard !sending else { return nil }
-        if submission == nil {
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 8_000 else { return nil }
-            submission = Post(id: UUID(), workspace: workspace, destination: destination, body: text)
+        guard canSend else { return nil }
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text
+        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body)
+        outgoing.append(Outgoing(post: post, files: attachments))
+        attachments = []
+        text = ""
+        return post
+    }
+
+    func retry(_ id: UUID) -> Post? {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return nil }
+        switch outgoing[i].delivery {
+        case .unconfirmed, .uploadFailed: break
+        default: return nil
         }
-        sending = true
-        return submission
+        outgoing[i].delivery = .retrying
+        return outgoing[i].post
     }
 
-    func accepted() {
-        if text == submission?.body { text = "" }
-        submission = nil
-        sending = false
-        failure = nil
+    func editRefused(_ id: UUID) {
+        guard text.isEmpty, attachments.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        switch outgoing[i].delivery {
+        case .refused, .uploadFailed: break
+        default: return
+        }
+        let row = outgoing.remove(at: i)
+        attachments = row.files
+        text = row.post.body ?? ""
     }
 
-    func failed(with error: Error) {
-        sending = false
-        // A refusal on a retry can precede receipt lookup. It cannot settle an earlier attempt.
-        if failure != .unconfirmed, case APIError.refused(let status) = error,
+    func uploadFailed(_ id: UUID) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        outgoing[i].delivery = .uploadFailed
+    }
+
+    func accepted(_ id: UUID, signalID: UUID) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        outgoing[i].delivery = .accepted(signalID)
+    }
+
+    func reconcile(_ messages: [Message]) {
+        let ids = Set(messages.map(\.id))
+        outgoing.removeAll { row in
+            if case .accepted(let id) = row.delivery { return ids.contains(id) }
+            return false
+        }
+    }
+
+    func failed(_ id: UUID, with error: Error) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        // A refusal before receipt lookup cannot settle a previous uncertain attempt.
+        if case .sending = outgoing[i].delivery, case APIError.refused(let status) = error,
            (400..<500).contains(status), status != 408 {
-            submission = nil
-            failure = .refused
+            outgoing[i].delivery = .refused
         } else {
-            failure = .unconfirmed
+            outgoing[i].delivery = .unconfirmed
         }
     }
 }

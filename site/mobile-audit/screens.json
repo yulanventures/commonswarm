@@ -826,6 +826,95 @@
     ]
   },
   {
+    "id": "app.chat.waiting-panel",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-card]:first-child [data-decision-option]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
+      }
+    ],
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child .cs-waiting-card__question",
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
+    ]
+  },
+  {
+    "id": "app.chat.waiting-panel.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+      }
+    ],
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-panel]:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+    ]
+  },
+  {
     "id": "app.chat.unread-bar",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.unread}",
@@ -1143,6 +1232,205 @@
     "frame": [
       "dialog[data-cleanup-dialog][open] [data-cleanup-go]",
       "dialog[data-cleanup-dialog][open] [data-cleanup-back]"
+    ]
+  },
+  {
+    "id": "dialog.cleanup.files",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-filter]:not([open]) ~ [data-cleanup-list] [data-cleanup-item]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list]"
+    ]
+  },
+  {
+    "id": "dialog.cleanup.files.filtered",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-age]",
+        "select": "dialog[data-cleanup-dialog][open] [data-cleanup-age]",
+        "option": "90"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]:not(:empty)",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-list] [data-cleanup-item]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_old_file"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list] [data-cleanup-item]"
+    ]
+  },
+  {
+    "id": "dialog.cleanup.files.none",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-uploader-gone]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-uploader-gone]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]:not(:empty)",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-list] .cleanup__empty",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list] .cleanup__empty"
     ]
   },
   {
@@ -1666,7 +1954,12 @@
         "scroll": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
+        "media": "(hover: hover)",
         "hover": "[data-signal-id=\"{message.groupedBroadcast}\"]"
+      },
+      {
+        "media": "(hover: none)",
+        "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-markdown"
       },
       {
         "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-reply"
@@ -1950,6 +2243,9 @@
       },
       {
         "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-agent-owner-teammate]"
+      },
+      {
+        "waitFor": "[data-channel-view=\"invite\"]:not([hidden]) [data-invite-email]:focus"
       }
     ],
     "ready": "[data-channel-view=\"invite\"]:not([hidden]) [data-invite-form]",
@@ -1958,7 +2254,11 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "invite_member"
+    }
   },
   {
     "id": "app.entity-detail",
@@ -2079,6 +2379,10 @@
         "click": "#pd-agent-{approvalSetupAgent}"
       },
       {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
         "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]",
         "click": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]"
       },
@@ -2107,6 +2411,77 @@
     "never": {
       "request": "/functions/v1/command",
       "body": "household_approve_connection"
+    }
+  },
+  {
+    "id": "dialog.lists-withdraw",
+    "kind": "dialog",
+    "path": "/app?w={withdrawWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawSetupAgent}",
+        "click": "#pd-agent-{withdrawSetupAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]"
+      },
+      {
+        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]",
+        "settle": true
+      },
+      {
+        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]",
+        "settle": true
+      },
+      {
+        "click": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]"
+      }
+    ],
+    "ready": "dialog[data-lists-confirm][open] #pd-confirm-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_lists_withdraw"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_withdraw_connection"
+    }
+  },
+  {
+    "id": "dialog.people-withdraw",
+    "kind": "dialog",
+    "path": "/app?w={withdrawWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawAgent}",
+        "click": "#pd-agent-{withdrawAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-withdraw-agent-access=\"{withdrawAgent}\"]",
+        "click": "[data-people-detail] button[data-withdraw-agent-access=\"{withdrawAgent}\"]"
+      }
+    ],
+    "ready": "dialog[data-people-confirm][open] #pd-confirm-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_lists_withdraw"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_withdraw_connection"
     }
   },
   {
@@ -2772,7 +3147,11 @@
     ],
     "requiresSeed": [
       "seed_delegated_invitation"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "\"action\":\"accept\""
+    }
   },
   {
     "id": "dialog.navigation-drawer",
@@ -3952,7 +4331,11 @@
     "requiresSeed": [
       "create_workspace",
       "pending invite"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "revoke_invitation"
+    }
   },
   {
     "id": "menu.landing-preview",
@@ -4487,6 +4870,34 @@
     ]
   },
   {
+    "id": "dialog.people-detail.more",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
+        "click": "#pd-agent-{agent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more][open] [data-remove-agent]",
+        "scroll": "[data-people-detail] [data-people-agent-more][open] [data-remove-agent]",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) [data-people-agent-more][open]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
     "id": "dialog.people-admin-access",
     "kind": "dialog",
     "path": "/app?w={workspace}&v=people",
@@ -4494,6 +4905,10 @@
       {
         "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
         "click": "#pd-agent-{agent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
       },
       {
         "waitFor": "[data-people-detail] [data-seat-admin-toggle=\"workspace\"]:not([disabled])",
@@ -4692,6 +5107,143 @@
     ],
     "frame": [
       "dialog[data-channel-directory][open] .cm-directory-row:first-child a.cm-directory-copy"
+    ]
+  },
+  {
+    "id": "app.chat.recipient.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.addressedOwn}\"] .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.addressedOwn}\"]"
+      },
+      {
+        "tap": "[data-signal-id=\"{message.addressedOwn}\"] .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      }
+    ],
+    "ready": "body:not(:has([data-reaction-picker])) [data-entity-panel]:not([hidden]) [data-entity-panel-body]:has-text(\"Atlas Research\")",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_addressed",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "app.chat.jump-present.recipient.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "focus": "[data-jump-present-button]",
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-feed-list] .dashboard__message[data-signal-id]:focus"
+      },
+      {
+        "tap": "[data-feed-list] .dashboard__message[data-signal-id]:focus .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      }
+    ],
+    "ready": "body:not(:has([data-reaction-picker])) [data-entity-panel]:not([hidden]) [data-entity-panel-body]:has-text(\"Atlas Research\")",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "app.chat.row-tools.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"] [data-reaction-add]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.unreacted}\"]"
+      },
+      {
+        "tap": "[data-signal-id=\"{message.unreacted}\"] .dashboard__message-markdown"
+      },
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"]:focus"
+      },
+      {
+        "tap": "[data-reaction-add=\"{message.unreacted}\"]"
+      }
+    ],
+    "ready": "[data-reaction-picker=\"{message.unreacted}\"] [data-reaction-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_unreacted"
     ]
   }
 ]

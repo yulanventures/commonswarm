@@ -67,6 +67,7 @@ const UNDOCUMENTED_COMMANDS: Record<string, string> = {
   rename_workspace: "web app workspace settings",
   change_role: "web app member management",
   revoke_agent_principal: "web app agent management",
+  resolve_system_alert: "lead system alerts (cswarm alert resolve); api.md updated in follow-up",
 };
 
 /** Every read resource the read function parses. */
@@ -93,6 +94,7 @@ const UNDOCUMENTED_RESOURCES: Record<string, string> = {
   renewal_grants: "cswarm and web app renewal state",
   pending_access: "web app pending-access list",
   human_invitations: "web app invitation inbox",
+  system_alerts: "lead system alerts (cswarm alerts); api.md updated in follow-up",
 };
 
 function documented(name: string): boolean {

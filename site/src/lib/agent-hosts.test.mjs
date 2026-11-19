@@ -12,6 +12,7 @@ import {
   hostSayName,
   inviteConnectFootnote,
   joinPrompt,
+  openDestination,
   reconnectPrompt,
   takenAgentName,
 } from "./agent-hosts.ts";
@@ -86,6 +87,15 @@ test("the Claude setup step prefills only the public connector name and address"
   assert.equal(encoded.searchParams.get("connectorUrl"), address);
   assert.equal(encoded.searchParams.size, 3);
   assert.equal(encoded.hash, "");
+});
+
+test("openDestination returns the host for external web links and empty for app schemes or relative routes", () => {
+  const claude = AGENT_HOSTS.find((host) => host.id === "claude");
+  assert.equal(openDestination(claude.open.href), "claude.ai");
+  assert.equal(openDestination(claudeInstallLink()), "claude.ai");
+  assert.equal(openDestination(cursorInstallLink()), "");
+  assert.equal(openDestination("/guides/grok-bot"), "");
+  assert.equal(openDestination("not a url"), "");
 });
 
 test("the Cursor link decodes to exactly the public address and nothing else", () => {

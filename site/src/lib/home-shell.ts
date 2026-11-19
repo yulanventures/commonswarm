@@ -309,14 +309,24 @@ function title(doc: Document, text: string, id: string, className: string, conte
   return heading;
 }
 
+function memberCount(vm: WorkspaceShellVM): number {
+  return vm.people.reduce((total, group) => total + 1 + group.agents.length, 0) + (vm.otherAgents?.length ?? 0);
+}
+
 /** Avatars and a measured member count share the People & agents door. */
 function memberStack(doc: Document, vm: WorkspaceShellVM): HTMLElement {
   const stack = node(doc, "span", "hm-member-stack");
   const members = orderCapsules(vm.people).flatMap(group => [group.person, ...group.agents]);
   members.push(...(vm.otherAgents ?? []));
   const faces = node(doc, "span", "hm-member-stack__faces"); faces.setAttribute("aria-hidden", "true");
-  for (const member of members.slice(0, 3)) faces.append("state" in member
-    ? agentOrb(doc, member, { size: 26, badge: false }) : personAvatar(doc, member, 24));
+  for (const member of members.slice(0, 3)) {
+    const face = "state" in member
+      ? agentOrb(doc, member, { size: 26, badge: false }) : personAvatar(doc, member, 24);
+    /* Decorative stack monograms draw through ::before so the People & agents button's only text is its count. */
+    const glyph = "state" in member ? face.children?.[0] as HTMLElement | undefined : face;
+    if (glyph?.textContent) { glyph.dataset.initial = glyph.textContent; glyph.textContent = ""; }
+    faces.append(face);
+  }
   stack.append(faces, node(doc, "span", "hm-member-stack__count", String(members.length)));
   return stack;
 }
@@ -640,9 +650,9 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   if (!vm.sample && channel && vm.channel && callbacks.channelSettings) actions.append(channelSettingsButton(doc, callbacks));
   if (doors.people) {
     const people = node(doc, "button", "hm-ws-header__people");
-    people.type = "button"; people.setAttribute("aria-label", "People & agents");
+    people.type = "button";
+    people.setAttribute("aria-label", `People & agents, ${memberCount(vm)}`);
     people.append(memberStack(doc, vm));
-    people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
     people.dataset.rosterOpen = "";
     people.addEventListener("click", () => callbacks.openPeople());
     actions.append(people);
@@ -721,16 +731,16 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   if (doors.people) {
     const button = node(doc, "button", "hm-phone-bar__people");
     button.type = "button"; button.dataset.rosterOpen = "";
-    button.setAttribute("aria-label", `People & agents: ${capsuleSubline(vm.people)}`);
+    button.setAttribute("aria-label", `People & agents, ${memberCount(vm)}`);
     button.addEventListener("click", () => callbacks.openPeople());
     people = button;
   } else {
     /* A sample shows who is here but opens nothing. */
     people = node(doc, "span", "hm-phone-bar__people hm-phone-bar__people--static");
     people.append(node(doc, "span", "hm-sr", capsuleSubline(vm.people)));
+    people.setAttribute("aria-description", `${memberCount(vm)} members`);
   }
   people.append(memberStack(doc, vm));
-  people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
   bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
   const description = vm.pane === "chat" && !vm.contextTitle ? channelDescription(doc, vm, callbacks) : null;
   if (description) bar.append(description);

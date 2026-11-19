@@ -230,7 +230,7 @@ private struct HistoryView: View {
                         Button("Load earlier messages") { Task { await load(.older(before: first)) } }.disabled(history.loadingOlder)
                     }
                     if let messages = history.messages {
-                        if messages.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
+                        if messages.isEmpty && draft.outgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
                         ForEach(messages) { message in
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -241,9 +241,49 @@ private struct HistoryView: View {
                                 }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
+                                ForEach(message.attachments ?? []) { attachment in
+                                    MessageAttachmentView(api: api, workspace: workspace.id, attachment: attachment)
+                                }
                             }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }
+                    ForEach(draft.outgoing) { row in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("You").bold()
+                                switch row.delivery {
+                                case .sending, .retrying: Text("Sending…")
+                                case .unconfirmed: Text("Delivery unconfirmed")
+                                case .uploadFailed: Text("Upload interrupted")
+                                case .refused: Text("Couldn’t send")
+                                case .accepted: Text(row.createdAt, format: .dateTime.hour().minute())
+                                }
+                            }
+                            Text(row.post.body ?? "").textSelection(.enabled)
+                            ForEach(row.files) { FileUploadProgress(intent: $0) }
+                            if case .uploadFailed = row.delivery {
+                                Button {
+                                    deliver(draft.retry(row.id))
+                                } label: {
+                                    Text("Retry upload")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                Button {
+                                    draft.editRefused(row.id)
+                                } label: {
+                                    Text("Edit message")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                            } else if case .unconfirmed = row.delivery {
+                                Button("Retry") { deliver(draft.retry(row.id)) }
+                            } else if case .refused = row.delivery {
+                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                            }
+                        }.id(row.id)
+                    }
                 }.scrollTargetLayout().padding()
             }
             .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -258,21 +298,21 @@ private struct HistoryView: View {
                 }
             }
             .onChange(of: scrollToLatest) {
-                if let id = history.messages?.last?.id { reader.scrollTo(id, anchor: .bottom) }
+                if let id = latestID { reader.scrollTo(id, anchor: .bottom) }
             }
             .refreshable { await load() }
             .overlay(alignment: .bottomTrailing) {
                 if awayFromLatest {
                     JumpToLatestButton {
-                        guard let last = history.messages?.last else { return }
-                        if reduceMotion { reader.scrollTo(last.id, anchor: .bottom) }
-                        else { withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(last.id, anchor: .bottom) } }
+                        guard let last = latestID else { return }
+                        if reduceMotion { reader.scrollTo(last, anchor: .bottom) }
+                        else { withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(last, anchor: .bottom) } }
                     }
                     .padding(.trailing, 12).padding(.bottom, 4)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ConversationComposer(draft: draft, destination: item.name, send: { Task { await send() } })
+                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: item.symbol != "lock", send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
             }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
@@ -284,29 +324,46 @@ private struct HistoryView: View {
         return directory.first { $0.id == key }?.name ?? (message.from_kind == "agent" ? "Agent" : "Member")
     }
 
-    private func load(_ request: MessageHistory.Page = .latest, afterSend: Bool = false) async {
+    private func load(_ request: MessageHistory.Page = .latest) async {
         let firstLoad = history.messages == nil
         var before: HistoryAnchor?
         let loaded = await history.load(request, api: api, workspace: workspace.id, destination: item.destination) {
             before = readingAnchor
         }
         guard loaded else { return }
-        if firstLoad || afterSend { scrollToLatest += 1 }
+        draft.reconcile(history.messages ?? [])
+        if firstLoad { scrollToLatest += 1 }
         else if let before {
             restoreAnchor = before
             restoreGeneration += 1
         }
     }
 
-    private func send() async {
-        guard let post = draft.begin(workspace: workspace.id, destination: item.destination) else { return }
-        do {
-            try await api.post(post)
-            guard api.session.isActive else { return }
-            draft.accepted()
-            await load(afterSend: true)
-        } catch {
-            if api.session.isActive { draft.failed(with: error) }
+    private var latestID: UUID? { draft.outgoing.last?.id ?? history.messages?.last?.id }
+
+    private func deliver(_ post: Post?) {
+        guard let post else { return }
+        scrollToLatest += 1
+        Task {
+            guard let row = draft.outgoing.first(where: { $0.id == post.command_id }) else { return }
+            var refs: [FileReference] = []
+            do {
+                for intent in row.files {
+                    refs.append(try await api.upload(intent, workspace: workspace.id, destination: item.destination))
+                }
+            } catch {
+                if api.session.isActive { draft.uploadFailed(post.command_id) }
+                return
+            }
+            do {
+                let signalID = try await api.post(post, attachments: refs)
+                guard api.session.isActive else { return }
+                draft.accepted(post.command_id, signalID: signalID)
+                draft.reconcile(history.messages ?? [])
+                await load()
+            } catch {
+                if api.session.isActive { draft.failed(post.command_id, with: error) }
+            }
         }
     }
 }

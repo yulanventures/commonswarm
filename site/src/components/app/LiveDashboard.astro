@@ -324,6 +324,7 @@ import "../../styles/kylon-image-viewer.css";
           <section data-home-catchup hidden></section>
           <div data-home-workspace-shell></div>
           <section class="hm-route-pane" data-home-route-pane hidden></section>
+          <div class="hm-channel-stage">
         <section class="dashboard__channel hm-frame__channel" aria-labelledby="dashboard-channel-title">
           <p class="hm-sr" role="status" data-channel-preference-status></p>
           <header class="dashboard__channel-head">
@@ -444,22 +445,8 @@ import "../../styles/kylon-image-viewer.css";
                 <span data-close-invite-label>Back to Add an agent</span>
               </button>
               <div class="dashboard__choice-copy">
-                <p class="dashboard__eyebrow">Invite someone</p>
                 <h2>Invite someone to <span data-invite-workspace>this workspace</span>.</h2>
-                <p>
-                  They sign in as themselves and connect their own agents. They will see
-                  everything shared here, including earlier messages, lists and files. They will
-                  not see your other workspaces.
-                </p>
               </div>
-              {/* Static on purpose: no read tells this page whether the workspace was set to
-                  "Me and people I invite" (household_access succeeds for personal workspaces
-                  too), and an invite to a workspace that is not shared opens as unavailable
-                  (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
-              <p class="dashboard__invite-prerequisite">
-                Invites work only in a workspace set to <strong>Me and people I invite</strong>.
-                <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
-              </p>
               <form class="dashboard__invite-form" data-invite-form novalidate>
                 <label for="dashboard-invite-email">Their email</label>
                 <input
@@ -475,7 +462,8 @@ import "../../styles/kylon-image-viewer.css";
                   Create invite link
                 </button>
                 <p class="dashboard__invite-hint" id="dashboard-invite-email-hint">
-                  The invite works only for this email, the one they sign in with.
+                  Works only for the email they sign in with. They will see earlier messages,
+                  lists and files shared here, not your other workspaces.
                 </p>
               </form>
               <div class="dashboard__invite-result" data-invite-result hidden>
@@ -492,6 +480,14 @@ import "../../styles/kylon-image-viewer.css";
                 </button>
               </div>
               <p class="dashboard__form-error" role="alert" data-invite-error hidden></p>
+              {/* Static on purpose: no read tells this page whether the workspace was set to
+                  "Me and people I invite" (household_access succeeds for personal workspaces
+                  too), and an invite to a workspace that is not shared opens as unavailable
+                  (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
+              <p class="dashboard__invite-prerequisite">
+                Invites work only in a workspace set to <strong>Me and people I invite</strong>.
+                <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
+              </p>
             </section>
 
             <section class="dashboard__connect-view" data-channel-view="connect" hidden>
@@ -659,6 +655,8 @@ import "../../styles/kylon-image-viewer.css";
               <HouseholdObjects state={emptyHousehold} />
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title" tabindex="-1">Let your agents use Lists &amp; docs</h2>
+                {/* Withdraw access asks here, in the same confirmation People & agents uses. */}
+                <dialog class="pd-confirm" data-lists-confirm></dialog>
                 <p class="dashboard__access-lead">
                   {HOSTED_LISTS_NOTE}
                   Hosted agents you connect as workspace owner inherit your Lists access unless you restrict them.
@@ -780,6 +778,8 @@ import "../../styles/kylon-image-viewer.css";
               <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-go-general>{GO_TO_GENERAL_LABEL}</button>
               <p class="dashboard__form-error" role="alert" data-channel-unarchive-error hidden></p>
             </div>
+            {/* An unjoined public channel's history stays readable; this Join bar replaces the composer until confirmed. */}
+            <div data-channel-preview hidden></div>
             <form class="dashboard__composer" data-composer hidden>
               {/* THE REPLY BAR. Hidden until a reply is in progress, so the composer at rest is
                   the bar the mobile budget was measured against. It names the message being
@@ -924,6 +924,8 @@ import "../../styles/kylon-image-viewer.css";
             </form>
           </div>
         </section>
+          <aside class="cs-waiting-panel" data-waiting-panel aria-label="Waiting on you" hidden></aside>
+          </div>
 
           <div data-home-phone-nav></div>
         </div>
@@ -1074,6 +1076,26 @@ import "../../styles/kylon-image-viewer.css";
     <footer class="cm-directory-footer" data-channel-directory-footer>
       <button class="dashboard__button dashboard__button--primary" type="button" data-channel-directory-new>New channel</button>
     </footer>
+  </dialog>
+
+  <dialog
+    class="dashboard__channel-dialog"
+    id="dashboard-group-leave-dialog"
+    data-group-leave-dialog
+    aria-labelledby="dashboard-group-leave-title"
+  >
+    <header class="cm-dialog-head">
+      <h2 id="dashboard-group-leave-title" data-group-leave-title>Leave group?</h2>
+      <button class="cm-close" type="button" data-group-leave-close aria-label="Close">×</button>
+    </header>
+    <form class="dashboard__channel-form" data-group-leave-form>
+      <p data-group-leave-body></p>
+      <p class="dashboard__form-error" role="alert" data-group-leave-error hidden></p>
+      <div class="dashboard__channel-form-actions">
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-group-leave-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--danger" type="submit" data-group-leave-confirm>Leave</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog
@@ -1261,7 +1283,7 @@ import "../../styles/kylon-image-viewer.css";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
   import { completePasswordChange, type CurrentCheck } from "../../lib/password-change-completion";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
-  import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailOrderList } from "../../lib/home-rail";
+  import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailDirectMessageRowVM, type RailDirectMessagesVM, type RailOrderList } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
@@ -1280,7 +1302,8 @@ import "../../styles/kylon-image-viewer.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
-  import { buildWaitingButton, updateWaitingButton, waitingTotal } from "../../lib/waiting-count";
+  import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
+  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1312,7 +1335,8 @@ import "../../styles/kylon-image-viewer.css";
     type CommandPaletteItem,
   } from "../../lib/home-command-palette";
   import {
-    CONTENT_OPERATION_LABELS,
+    APPROVAL_CHOICE_LABELS,
+    READ_ACCESS_INCLUDED,
     CONTENT_OPERATIONS,
     accessRefusalMessage,
     withdrawRefusalMessage,
@@ -1324,7 +1348,7 @@ import "../../styles/kylon-image-viewer.css";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
-  import { renderPeopleDialog, withdrawConfirmText, peopleDialogCanAct, showPeopleConfirmation,
+  import { renderPeopleDialog, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
@@ -1421,7 +1445,15 @@ import "../../styles/kylon-image-viewer.css";
     BROWSER_SIGNAL_COLUMNS,
     workspaceFiles,
     workspaceChannels,
+    signalLocations,
+    type SignalLocation,
     channelUnread,
+    ConversationsUnsupportedError,
+    listConversations,
+    joinConversation,
+    leaveConversation,
+    markConversationRead,
+    setConversationNotify,
     messageStatus,
     askChoices,
     signalMentions,
@@ -1567,6 +1599,16 @@ import "../../styles/kylon-image-viewer.css";
     signalInChannelView,
   } from "../../lib/channels";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
+  import { renderChannelMembershipRetryBar, renderChannelPreviewBar } from "../../lib/channel-preview-bar";
+  import {
+    GROUP_LEAVE_CONFIRM_BODY,
+    canLeaveConversation,
+    conversationTitle,
+    sortDirectConversations,
+    type ConversationMemberRef,
+    type ConversationNotifyLevel,
+    type ConversationSummary,
+  } from "../../lib/conversations";
   import { CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
     type ChannelLead } from "../../lib/channel-lead";
   import {
@@ -1575,7 +1617,7 @@ import "../../styles/kylon-image-viewer.css";
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
-  import { cancelPeopleInvite, peopleInvites, peopleInviteReceipt } from "../../lib/people-invites";
+  import { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInvites, peopleInviteReceipt, type PeopleInvite } from "../../lib/people-invites";
   import {
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
@@ -1892,6 +1934,21 @@ import "../../styles/kylon-image-viewer.css";
     /** The per-channel unread read for this workspace (C1b). `null` is unknown, never "read". */
     let channelUnreadRows: ChannelUnread[] | null = null;
     let channelUnreadGeneration = 0;
+    /** Step 2b conversations read for this workspace (`POST /functions/v1/read`, resource="conversations").
+        Distinguishes `"unsupported"` (pre-Step-2b server) from `"failed"` (transient read failure, which
+        shows Retry and never exposes the composer on a channel whose membership could not be verified). */
+    let workspaceConversations: ConversationSummary[] | null = null;
+    let conversationsReadState: "idle" | "pending" | "ready" | "unsupported" | "failed" = "idle";
+    let conversationsReadError = "";
+    let conversationsGeneration = 0;
+    let conversationsReadAt = 0;
+    let activeDmConversationId: string | null = null;
+    let mountedPreviewKey = "";
+    const channelJoinPending = new Set<string>();
+    let groupLeaveTarget: { conversationId: string; title: string; workspaceId: string } | null = null;
+    let groupLeavePending = false;
+    let groupLeaveSucceeded = false;
+    let groupLeaveReturn: { selector: string | null; element: HTMLElement | null; drawer: boolean } | null = null;
     /** Read positions (mark_channel_read). A server from before them answers 400: nothing more is sent this page. */
     let channelReadUnsupported = false;
     /** Marks on view by workspace, view and newest message: in flight or accepted, so neither is sent twice. A mark that
@@ -3853,6 +3910,7 @@ import "../../styles/kylon-image-viewer.css";
     function openEntityPanel(entity: EntityRef, trigger: HTMLElement): void {
       const panel = one<HTMLElement>("[data-entity-panel]");
       if (!panel) return;
+      if (typeof waitingSurface !== "undefined" && waitingSurface?.isOpen()) waitingSurface.close(false);
       if (!panel.contains(trigger)) entityPanelOrigin = trigger;
       selectedEntity = entity;
       panel.hidden = false;
@@ -5459,7 +5517,11 @@ import "../../styles/kylon-image-viewer.css";
         const manage = () => openRosterDialog({ kind: "agent", id });
         const pressOnPage = (key: string) => {
           if (activeWorkspaceId !== workspace.id || !peopleDialogOpen()) return;
-          all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key)?.click();
+          const button = all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key);
+          if (!button) return;
+          const more = button.closest<HTMLDetailsElement>("[data-people-agent-more]");
+          if (more) more.open = true;
+          button.click();
         };
         replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: () => { void manage(); },
           onToggleLead: nextIsLead => {
@@ -5579,11 +5641,309 @@ import "../../styles/kylon-image-viewer.css";
       ["[data-home-catchup]", "cs-waiting--page"]] as const;
     const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
-    /** Catch up, unless that is where the person already is: a second press must not reload it or add to history. */
-    const openWaiting = (href: string): void => { if (homeRoute.view !== "catchup") navigateHomeHref(href); };
+    let waitingScope: WaitingScope = "channel";
+    let waitingPanelViewer = "";
+    let waitingPanelOverviewFailed = false;
+    let waitingStatusMessage = "";
+    let waitingStatusSeq = 0;
+    let waitingStatusTimer: number | undefined;
+    const clearWaitingStatus = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusTimer = undefined;
+      if (waitingStatusMessage !== "") {
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }
+    };
+    const showWaitingSent = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusMessage = "Sent";
+      waitingStatusSeq += 1;
+      waitingStatusTimer = window.setTimeout(() => {
+        waitingStatusTimer = undefined;
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }, 5_000);
+    };
+    const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelLoadedWorkspaces = new Set<string>();
+    const waitingPanelFailedWorkspaces = new Set<string>();
+    const waitingPanelTruncatedWorkspaces = new Set<string>();
+    const waitingWorkspaceChannels = new Map<string, Map<string, string>>();
+    type WaitingChoiceTicket = { viewer: string; workspaceId: string; signalId: string };
+    const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
+    const waitingPanelErrors = new Map<string, string>();
+    const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+
+    const isWaitingChannelView = (): boolean =>
+      !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
+
+    const currentWaitingPlace = (): WaitingPlace => {
+      const ws = workspaces.find(workspace => workspace.id === activeWorkspaceId) ?? workspaces[0];
+      const workspaceId = ws?.id ?? "";
+      const workspaceName = ws?.name ?? "Workspace";
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      if (dm) {
+        const label = typeof entityName === "function" ? entityName(dm) : "Direct message";
+        return { workspaceId, workspaceName, kind: "dm", channelId: null, label, dm: { kind: dm.kind, id: dm.id } };
+      }
+      if (activeChannelId === GENERAL_CHANNEL_ID) {
+        return { workspaceId, workspaceName, kind: "general", channelId: null, label: channelLabel(GENERAL_CHANNEL_SLUG) };
+      }
+      if (activeChannelId !== null) {
+        const ch = activeChannel();
+        return {
+          workspaceId,
+          workspaceName,
+          kind: "channel",
+          channelId: activeChannelId,
+          label: ch ? channelLabel(ch.slug) : channelLabel(GENERAL_CHANNEL_SLUG),
+        };
+      }
+      return { workspaceId, workspaceName, kind: "all", channelId: null, label: ALL_MESSAGES_LABEL };
+    };
+
+    const waitingChannelName = (workspaceId: string, conversation: WaitingConversation): string => {
+      if (conversation.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
+      if (conversation.kind === "dm") return "Direct message";
+      if (conversation.kind === "unknown") return "";
+      const { channelId } = conversation;
+      if (workspaceId === activeWorkspaceId) {
+        const found = channels.find(ch => ch.channelId === channelId);
+        if (found) return channelLabel(found.slug);
+      }
+      const slug = waitingWorkspaceChannels.get(workspaceId)?.get(channelId);
+      return slug ? channelLabel(slug) : "Channel";
+    };
+
+    const allWaitingAskItems = (): WaitingAskItem[] => {
+      const items: WaitingAskItem[] = [];
+      for (const workspace of workspaces) {
+        for (const ask of waitingPanelAsks.get(workspace.id) ?? []) {
+          const draft = choiceDrafts.get(choiceDraftKey(ask.workspaceId, ask.id));
+          const error = waitingPanelErrors.get(ask.id);
+          const pending = waitingPanelTickets.has(ask.id);
+          const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
+          items.push({
+            ...ask,
+            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            choices: {
+              options: ask.choices.options,
+              multi: ask.choices.multi,
+              ...(pending ? { pending: true as const } : {}),
+              ...(error ? { error } : {}),
+              ...(draft ? { draft } : {}),
+              ...(retryable ? { retryable: true as const } : {}),
+            },
+          });
+        }
+      }
+      return items;
+    };
+
+    type WaitingPanelModule = typeof import("../../lib/waiting-panel");
+    let waitingPanelMod: WaitingPanelModule | null = null;
+    let waitingPanelModPromise: Promise<WaitingPanelModule> | null = null;
+    let waitingSurface: WaitingSurface | null = null;
+    let waitingOpenEpoch = 0;
+
+    const loadWaitingPanelModule = (): Promise<WaitingPanelModule> => {
+      if (waitingPanelMod) return Promise.resolve(waitingPanelMod);
+      waitingPanelModPromise ??= import("../../lib/waiting-panel").then(mod => {
+        waitingPanelMod = mod;
+        return mod;
+      });
+      return waitingPanelModPromise;
+    };
+
+    const ensureWaitingSurface = (mod: WaitingPanelModule): WaitingSurface => {
+      if (waitingSurface) return waitingSurface;
+      waitingSurface = mod.createWaitingSurface(app, {
+        onBeforeOpen: () => {
+          const detailsClose = one<HTMLButtonElement>("[data-channel-details-close]");
+          const frame = one<HTMLElement>(".hm-frame");
+          const detailsSheet = one<HTMLDialogElement>("#cs-channel-details-sheet");
+          if (detailsSheet?.open || (frame && !frame.hasAttribute("data-channel-details-collapsed"))) {
+            detailsClose?.click();
+          }
+          if (typeof closeEntityPanel === "function") closeEntityPanel(false);
+        },
+        onStateChange: () => {
+          syncWaitingButtons();
+        },
+      });
+      waitingSurface.setEnabled(isWaitingChannelView());
+      return waitingSurface;
+    };
+
+    app.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("[data-channel-details-toggle]") && waitingSurface?.isOpen()) {
+        waitingSurface.close(false);
+      }
+    }, true);
+
+    const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
+      waitingPanelTickets.set(item.id, ticket);
+      waitingPanelErrors.delete(item.id);
+      waitingPanelLastSubmissions.set(item.id, submission);
+      renderWaitingPanelView();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission);
+      } catch {
+        result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
+      }
+      if (waitingPanelTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingPanelTickets.delete(item.id);
+      if (result.ok) {
+        choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
+        waitingPanelErrors.delete(item.id);
+        waitingPanelLastSubmissions.delete(item.id);
+        const list = waitingPanelAsks.get(item.workspaceId);
+        if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingSent();
+        renderWaitingPanelView();
+        renderHomeRail();
+        if (item.workspaceId === activeWorkspaceId) {
+          const current = choiceRows.get(item.id);
+          if (current) {
+            choiceRows.set(item.id, {
+              ...current,
+              answer: {
+                optionId: result.optionIds[0] ?? "other",
+                optionIds: result.optionIds,
+                otherText: result.otherText,
+                byViewer: true,
+                actorUserId: ticket.viewer,
+                at: null,
+              },
+            });
+            renderFeed();
+          }
+        }
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingPanelErrors.set(item.id, result.message);
+      renderWaitingPanelView();
+    };
+
+    const renderWaitingPanelView = (): void => {
+      const container = one<HTMLElement>("[data-waiting-panel]");
+      if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
+      const place = currentWaitingPlace();
+      const allItems = allWaitingAskItems();
+      const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
+      const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
+      const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
+      const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id));
+      const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id));
+      const anyWsTruncated = workspaces.some(ws => waitingPanelTruncatedWorkspaces.has(ws.id));
+      const allFailed = waitingPanelOverviewFailed || anyWsFailed;
+      const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
+      const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const complete = waitingScope === "all" ? allLoaded : wsLoaded;
+      const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
+      const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
+      waitingPanelMod.renderWaitingPanel(
+        container,
+        {
+          scope: waitingScope,
+          place,
+          items: visibleItems,
+          counts: {
+            channel: { min: channelItems.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length, complete: wsLoaded },
+            all: { min: allItems.length, complete: allLoaded },
+          },
+          loading: waitingInFlight && !complete && !truncated,
+          complete,
+          failed: failed && !waitingInFlight,
+          truncated,
+          catchUpHref: routeHref({ view: "catchup" }),
+          statusMessage: waitingStatusMessage,
+          statusSeq: waitingStatusSeq,
+        },
+        {
+          onScopeChange: (next) => {
+            clearWaitingStatus();
+            waitingScope = next;
+            renderWaitingPanelView();
+            if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
+          },
+          onClose: () => { clearWaitingStatus(); waitingSurface?.close(true); },
+          onRetryLoad: () => {
+            waitingPanelOverviewFailed = false;
+            waitingPanelFailedWorkspaces.clear();
+            renderWaitingPanelView();
+            void refreshWaitingCounts();
+          },
+          onSubmitChoice: (item, submission) => void sendWaitingPanelChoice(item, submission),
+          onRetryChoice: (item) => {
+            const last = waitingPanelLastSubmissions.get(item.id);
+            if (last) void sendWaitingPanelChoice(item, last);
+          },
+          onDraftChoice: (item, draft) => {
+            choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onOpenCatchUp: (href) => {
+            clearWaitingStatus();
+            waitingSurface?.close(false);
+            if (homeRoute.view !== "catchup") navigateHomeHref(href);
+          },
+        },
+      );
+    };
+
+    const syncWaitingPanel = (): void => {
+      const active = isWaitingChannelView();
+      if (!active) waitingOpenEpoch += 1;
+      waitingSurface?.setEnabled(active);
+      syncWaitingButtons();
+      if (active && waitingSurface?.isOpen()) renderWaitingPanelView();
+    };
+
+    /** In a channel view, toggle the Waiting on you right column (desktop) or modal sheet (phone).
+     *  Outside chat, navigate to Catch up unless already there. */
+    const openWaiting = (href: string, event: MouseEvent): void => {
+      if (isWaitingChannelView()) {
+        const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+        if (waitingSurface?.isOpen()) {
+          waitingOpenEpoch += 1;
+          waitingSurface.close(true);
+          return;
+        }
+        const epoch = ++waitingOpenEpoch;
+        const place = currentWaitingPlace();
+        if (!waitingPanelLoadedWorkspaces.has(place.workspaceId) || waitingPanelOverviewFailed) {
+          void refreshWaitingCounts();
+        }
+        void loadWaitingPanelModule().then(mod => {
+          if (epoch !== waitingOpenEpoch || !isWaitingChannelView() || document.querySelector("dialog[open]") !== null) return;
+          const surface = ensureWaitingSurface(mod);
+          // Opening always starts in This channel; channel switches keep the desktop column open.
+          waitingScope = "channel";
+          surface.open(trigger);
+          renderWaitingPanelView();
+        });
+        return;
+      }
+      if (homeRoute.view !== "catchup") navigateHomeHref(href);
+    };
     const syncWaitingButtons = (): void => {
       const shown = !sampleMode && !!session && workspaces.length > 0;
       const total = waitingTotal(workspaces.map(workspace => workspace.id), homeOverviewCounts);
+      const channelMode = isWaitingChannelView();
+      const open = channelMode && (waitingSurface?.isOpen() ?? false);
+      const controlsId = waitingSurface?.controlsId()
+        ?? (window.matchMedia("(max-width: 52rem)").matches ? "cs-waiting-sheet" : "cs-waiting-panel");
       WAITING_HOSTS.forEach(([selector, kind], index) => {
         const host = shown ? one<HTMLElement>(selector) : null;
         if (!host) { waitingLinks[index]?.remove(); return; }
@@ -5592,6 +5952,7 @@ import "../../styles/kylon-image-viewer.css";
         if (index === 0) { if (host.nextElementSibling !== link) host.after(link); }
         else if (host.lastElementChild !== link) host.append(link);
         updateWaitingButton(link, total);
+        syncWaitingButtonToggle(link, { active: channelMode && index !== 2, expanded: open, controlsId });
       });
     };
     const refreshWaitingCounts = async (): Promise<void> => {
@@ -5600,23 +5961,50 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingInFlight) { waitingAgain = true; return; }
       waitingInFlight = true;
       const generation = ++waitingGeneration, viewer = homeViewerId();
+      if (waitingPanelViewer !== viewer) {
+        waitingPanelViewer = viewer;
+        waitingPanelAsks.clear();
+        waitingPanelLoadedWorkspaces.clear();
+        waitingPanelFailedWorkspaces.clear();
+        waitingPanelTruncatedWorkspaces.clear();
+        waitingPanelTickets.clear();
+        waitingPanelErrors.clear();
+        waitingPanelLastSubmissions.clear();
+        waitingWorkspaceChannels.clear();
+        waitingPanelOverviewFailed = false;
+      }
       const live = (): boolean => generation === waitingGeneration && homeViewerId() === viewer && homeRoute.view !== "catchup";
       try {
         const overview = await homeOverview();
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
         if (!overview || !live()) return;
+        waitingPanelOverviewFailed = false;
         const now = Date.parse(overview.generated_at);
         const rows = new Map(overview.workspaces.map(row => [row.workspace_id, row]));
         const counted = new Map<string, number | null>();
-        const countOf = (workspace: Workspace, queue: DecisionQueue, choices: ReadonlyMap<string, AskChoiceState> = new Map()): number | null =>
-          homeNeedsYouCount({ workspace, state: "ready", detail: catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices) });
+        const detailOf = (workspace: Workspace, queue: DecisionQueue, choices: ReadonlyMap<string, AskChoiceState> = new Map()) =>
+          catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices);
         const toRead: Workspace[] = [];
         for (const workspace of workspaces) {
           const row = rows.get(workspace.id);
-          if (!row) counted.set(workspace.id, null);
-          else if (row.needs_you.asks.length > 0) { counted.set(workspace.id, null); toRead.push(workspace); }
-          else counted.set(workspace.id, countOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] }));
+          if (!row) {
+            counted.set(workspace.id, null);
+            waitingPanelFailedWorkspaces.add(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
+          } else if (row.needs_you.asks.length > 0) {
+            counted.set(workspace.id, null);
+            toRead.push(workspace);
+          } else {
+            const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
+            counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
+            waitingPanelAsks.set(workspace.id, []);
+            waitingPanelLoadedWorkspaces.add(workspace.id);
+            waitingPanelFailedWorkspaces.delete(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
+          }
         }
+        // Prioritize the active workspace so "This channel" paints immediately while background workspaces finish.
+        toRead.sort((a, b) => (a.id === activeWorkspaceId ? -1 : b.id === activeWorkspaceId ? 1 : 0));
         let next = 0;
         await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
           for (;;) {
@@ -5624,17 +6012,135 @@ import "../../styles/kylon-image-viewer.css";
             const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
             // A queue that cannot be read leaves its workspace uncounted, even if it was counted before: the overview
             // says something is waiting there and this read cannot say how much.
-            if (!queue) continue;
-            const ids = queue.asks.slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
-            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : null;
-            counted.set(workspace.id, countOf(workspace, queue, new Map((choices ?? []).map(choice => [choice.signalId, choice]))));
+            if (!queue) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
+              continue;
+            }
+            const ids = queue.asks.map(ask => ask.signal_id);
+            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            if (choices === null) {
+              // A failed choices read must never become an exact zero or an empty channel.
+              counted.set(workspace.id, null);
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
+              continue;
+            }
+            const choicesMap = new Map(choices.map(choice => [choice.signalId, choice]));
+            const detail = detailOf(workspace, queue, choicesMap);
+            counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
+
+            const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
+            const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
+            const locations = new Map<string, SignalLocation>();
+            const missingIds: string[] = [];
+            for (const item of choiceNeeds) {
+              const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
+              if (liveSignal) {
+                locations.set(item.id, {
+                  id: liveSignal.id,
+                  channelId: liveSignal.channelId,
+                  to: liveSignal.to,
+                  toAgent: liveSignal.toAgent,
+                  threadRootId: liveSignal.threadRootId,
+                  from: liveSignal.from,
+                  fromKind: liveSignal.fromKind,
+                });
+                if (liveSignal.channelId === null && liveSignal.threadRootId !== null) {
+                  const liveRoot = signals.find(s => s.id === liveSignal.threadRootId);
+                  if (liveRoot) {
+                    locations.set(liveRoot.id, {
+                      id: liveRoot.id,
+                      channelId: liveRoot.channelId,
+                      to: liveRoot.to,
+                      toAgent: liveRoot.toAgent,
+                      threadRootId: liveRoot.threadRootId,
+                      from: liveRoot.from,
+                      fromKind: liveRoot.fromKind,
+                    });
+                  } else {
+                    missingIds.push(liveSignal.threadRootId);
+                  }
+                }
+              } else {
+                missingIds.push(item.id);
+              }
+            }
+            let locationReadFailed = false;
+            if (missingIds.length) {
+              try {
+                const fetched = await signalLocations(workspace.id, missingIds);
+                for (const [sigId, loc] of fetched) locations.set(sigId, loc);
+              } catch {
+                locationReadFailed = true;
+              }
+            }
+            const classified = new Map<string, WaitingConversation>();
+            let anyUnknownLocation = locationReadFailed;
+            for (const item of choiceNeeds) {
+              const loc = locations.get(item.id) ?? null;
+              const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
+              const conv = classifyAskConversation(loc, rootLoc);
+              if (conv.kind === "unknown") anyUnknownLocation = true;
+              classified.set(item.id, conv);
+            }
+            const hasNamedChannel = [...classified.values()].some(conv => conv.kind === "channel");
+            if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
+              const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+              waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
+            }
+            const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
+              const raw = askById.get(item.id);
+              if (!raw || !item.choices) return [];
+              const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
+              const split = splitChoicePrompt(raw.body);
+              const question = (split.question ?? raw.body).trim() || item.what;
+              return [{
+                id: item.id,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                conversation,
+                channelLabel: waitingChannelName(workspace.id, conversation),
+                from: item.from,
+                fromKind: raw.from.kind,
+                fromId: raw.from.id,
+                what: question,
+                when: item.when,
+                createdAt: raw.created_at,
+                until: raw.until,
+                choices: { options: item.choices.options, multi: item.choices.multi },
+              }];
+            });
+            if (!live()) return;
+            waitingPanelAsks.set(workspace.id, panelItems);
+            const queueTruncated = queue.truncated || queue.asks.length < queue.total;
+            if (queueTruncated) waitingPanelTruncatedWorkspaces.add(workspace.id);
+            else waitingPanelTruncatedWorkspaces.delete(workspace.id);
+            if (anyUnknownLocation || queueTruncated) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+            } else {
+              waitingPanelLoadedWorkspaces.add(workspace.id);
+            }
+            if (anyUnknownLocation) {
+              waitingPanelFailedWorkspaces.add(workspace.id);
+            } else {
+              waitingPanelFailedWorkspaces.delete(workspace.id);
+            }
+            if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
           }
         }));
         if (!live()) return;
         for (const [id, count] of counted) homeOverviewCounts.set(id, count);
         renderHomeRail();
+        renderWaitingPanelView();
       } catch {
         // A failed overview changes nothing: what was counted stays, and what was not stays uncounted.
+        waitingPanelOverviewFailed = true;
+        renderWaitingPanelView();
       } finally {
         waitingInFlight = false;
         if (waitingAgain) { waitingAgain = false; void refreshWaitingCounts(); }
@@ -5721,10 +6227,12 @@ import "../../styles/kylon-image-viewer.css";
       /* The Channels section belongs to the selected workspace; guarded for fixtures that render
          the rail without channel state. */
       const channelSection = typeof railChannelSection === "function" ? railChannelSection() : undefined;
+      const dmSection = typeof railDirectMessagesSection === "function" ? railDirectMessagesSection() : undefined;
       const vm = { ...mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts),
         ...(typeof activeDm !== "undefined" && activeDm ? { currentDmId: activeDm.id } : {}),
         ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}),
-        ...(channelSection ? { channels: channelSection } : {}) };
+        ...(channelSection ? { channels: channelSection } : {}),
+        ...(dmSection ? { directMessages: dmSection } : {}) };
       const archivedOpen = typeof railArchivedOpen === "boolean" && railArchivedOpen;
       const key = homeStructureKey(vm) + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}|more:${railExpanded}|archived:${archivedOpen}`;
       if (key === homeRailKey && slot.childElementCount) {
@@ -5793,12 +6301,26 @@ import "../../styles/kylon-image-viewer.css";
         toggleChannels: (expanded: boolean) => { railExpanded = expanded; writeRailExpanded(activeWorkspaceId, expanded); },
         toggleArchived: (open: boolean) => { railArchivedOpen = open; },
       } : {};
+      const dmCallbacks = dmSection ? {
+        selectConversation: (id: string) => {
+          layout.closeNavigation(false);
+          if (typeof openDirectConversation === "function") void openDirectConversation(id);
+        },
+        conversationMenu: (id: string, event: MouseEvent, button: HTMLElement) => {
+          if (typeof openConversationRowMenu === "function") openConversationRowMenu(id, event, button);
+        },
+        newDirectMessage: () => {
+          layout.closeNavigation(false);
+          if (activeWorkspaceId) void navigateHome({ view: "people", workspaceId: activeWorkspaceId }, "push");
+        },
+      } : {};
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: openRailPerson,
         openAgent: openRailAgent,
         contextMenu: railContextMenu,
         ...channelCallbacks,
+        ...dmCallbacks,
       }, { channelsExpanded: railExpanded, archivedOpen })]));
       homeRailKey = key;
     };
@@ -5866,6 +6388,7 @@ import "../../styles/kylon-image-viewer.css";
       recipients: readonly ComposerRecipient[] = [{ kind: entity.kind, id: entity.id }],
     ): Promise<void> => {
       if (!activeWorkspaceId) return;
+      if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       rememberPaletteVisit(`teammate:${entity.kind}:${entity.id}`);
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       /* A THREAD REPLY ENDS HERE. A reply left open would keep the composer posting into its
@@ -5881,8 +6404,10 @@ import "../../styles/kylon-image-viewer.css";
       void loadDirectHistory();
       syncComposerPlacement();
       renderHomeRail();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
+      const keepWaitingColumn = typeof waitingSurface !== "undefined" && (waitingSurface?.isOpen() ?? false) && !waitingSurface!.isPhone();
       const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
-      if (anchor) openEntityPanel(entity, anchor);
+      if (anchor && !keepWaitingColumn) openEntityPanel(entity, anchor);
     };
     /* For other modules (the Cmd+K palette): open a DM by principal or user id. */
     (app as HTMLElement & { openDirectMessage?: (id: string) => void }).openDirectMessage = (id: string): void => {
@@ -5952,6 +6477,16 @@ import "../../styles/kylon-image-viewer.css";
       pill.append(body);
       copy.insertBefore(pill, copy.querySelector("[data-channel-header-description]"));
     };
+    const syncRosterOpenButtons = (pendingTotal = currentPendingAccessRows().length): void => {
+      for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
+        const count = button.querySelector?.(".hm-member-stack__count")?.textContent?.trim();
+        const base = count ? `People & agents, ${count}` : "People & agents";
+        button.setAttribute("aria-label", `${base}${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
+        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
+        button.toggleAttribute("data-pending-access", pendingTotal > 0);
+        button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
+      }
+    };
     const renderHomeShell = (): void => {
       const slot = one<HTMLElement>("[data-home-workspace-shell]");
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
@@ -5988,7 +6523,7 @@ import "../../styles/kylon-image-viewer.css";
          the same way. The placement owns the name and reads the label set above. */
       syncComposerPlacement();
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); return; }
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); if (typeof syncWaitingPanel === "function") syncWaitingPanel(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
         toggleStar: () => {
@@ -6022,8 +6557,10 @@ import "../../styles/kylon-image-viewer.css";
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncChannelLeadPill();
-      // The header was rebuilt: the Waiting on you control goes back into it.
+      // The header was rebuilt: restore the Waiting on you control and pending-access state on the People door.
       syncWaitingButtons();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
+      syncRosterOpenButtons();
       syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
@@ -6042,6 +6579,7 @@ import "../../styles/kylon-image-viewer.css";
           ...(catchUpChoiceIsPending(item.id) ? { pending: true as const } : {}), ...(error ? { error } : {}) } };
       });
       const key = homeStructureKey(vm);
+      const needsKey = homeStructureKey({ needsYou: vm.needsYou, expanded: Boolean(vm.needsYouExpanded), sample: vm.sample });
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
       }
@@ -6066,8 +6604,28 @@ import "../../styles/kylon-image-viewer.css";
         const summary = view.querySelector<HTMLElement>(".hm-catchup-subline");
         if (summary) summary.textContent = vm.emptySummary;
       }
-      replaceHomeRegion(slot, "catchup", [view]);
+      // When background workspaces finish loading without changing Waiting on you, update the surrounding sections in
+      // place so interactive choice cards stay mounted with their hover, focus and typed drafts undisturbed.
+      const existingRoot = typeof slot.querySelector === "function" ? slot.querySelector<HTMLElement>(".hm-catchup") : null;
+      const existingNeeds = existingRoot?.querySelector<HTMLElement>(".hm-catchup-needs") ?? null;
+      const nextNeeds = typeof view.querySelector === "function" ? view.querySelector<HTMLElement>(".hm-catchup-needs") : null;
+      if (existingRoot && existingNeeds && nextNeeds && slot.dataset?.catchUpNeedsKey === needsKey) {
+        const syncSection = (selector: string): void => {
+          const cur = existingRoot.querySelector<HTMLElement>(selector);
+          const next = view.querySelector<HTMLElement>(selector);
+          if (cur && next) cur.replaceWith(next);
+          else if (cur && !next) cur.remove();
+          else if (!cur && next) existingRoot.append(next);
+        };
+        syncSection(".hm-catchup-header");
+        syncSection(".hm-catchup-workspaces");
+        syncSection(".hm-catchup-latest");
+        refreshHomeCatchUpTimes(slot, vm);
+      } else {
+        replaceHomeRegion(slot, "catchup", [view]);
+      }
       homeCatchUpKey = key;
+      if (slot.dataset) slot.dataset.catchUpNeedsKey = needsKey;
       renderHomeRail();
     };
     /* Waiting on you: a click on an ask's choice sends answer_choice. On success the catch-up reloads and the
@@ -6140,7 +6698,7 @@ import "../../styles/kylon-image-viewer.css";
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
-          const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+          const askIds = (queue?.asks ?? []).map(ask => ask.signal_id);
           const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
             new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
@@ -6215,7 +6773,7 @@ import "../../styles/kylon-image-viewer.css";
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       syncStandalonePage();
-      if (home) { layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
+      if (home) { if (typeof syncWaitingPanel === "function") syncWaitingPanel(); layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
         renderHomeObjectPane();
@@ -6229,6 +6787,7 @@ import "../../styles/kylon-image-viewer.css";
       else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
       else activateWorkspaceView("signals");
       syncFeedChrome();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
     };
     const focusHomeView = (): void => {
       const route = homeRoute;
@@ -6261,6 +6820,7 @@ import "../../styles/kylon-image-viewer.css";
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;
+      if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -6381,12 +6941,7 @@ import "../../styles/kylon-image-viewer.css";
      */
     const renderHeaderRoster = (pendingTotal = currentPendingAccessRows().length): void => {
       renderHomeShell();
-      for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
-        button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
-        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
-        button.toggleAttribute("data-pending-access", pendingTotal > 0);
-        button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
-      }
+      syncRosterOpenButtons(pendingTotal);
     };
 
     /*
@@ -7342,6 +7897,8 @@ import "../../styles/kylon-image-viewer.css";
         el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === intent.principalId,
       );
       if (!matchingSlot) return;
+      const more = matchingSlot.closest<HTMLDetailsElement>("[data-people-agent-more]");
+      if (more) more.open = true;
 
       clearSeatAdminReauthIntent(session.user.id);
       if (!hasFreshInteractiveSession(session.access_token)) {
@@ -7499,6 +8056,8 @@ import "../../styles/kylon-image-viewer.css";
         const toggleBtn = all<HTMLElement>("[data-seat-admin-slot]")
           .find(el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === focusAfterReconcile.principalId)
           ?.querySelector<HTMLElement>(`[data-seat-admin-toggle="${focusAfterReconcile.level}"]`);
+        const more = toggleBtn?.closest<HTMLDetailsElement>("[data-people-agent-more]");
+        if (more) more.open = true;
         toggleBtn?.focus({ preventScroll: true });
       }
       maybeResumeSeatAdminReauth();
@@ -7526,11 +8085,12 @@ import "../../styles/kylon-image-viewer.css";
         if (beforeTarget) aside.insertBefore(slotEl, beforeTarget);
         else aside.append(slotEl);
       } else {
-        const beforeTarget = host.querySelector<HTMLElement>(
+        const container = host.querySelector<HTMLElement>("[data-people-agent-more]") ?? host;
+        const beforeTarget = container.querySelector<HTMLElement>(
           ".pd-technical, .pd-danger-zone, [data-connection-end-date]",
         );
-        if (beforeTarget) host.insertBefore(slotEl, beforeTarget);
-        else host.append(slotEl);
+        if (beforeTarget && beforeTarget.parentElement === container) container.insertBefore(slotEl, beforeTarget);
+        else container.append(slotEl);
       }
       syncSeatAdminSlots();
       const lowerAgentId = agent.principalId.toLowerCase();
@@ -7746,7 +8306,11 @@ import "../../styles/kylon-image-viewer.css";
           onQuery: (value) => { rosterFilter = value; renderDialogRoster(); },
         } });
       if (peopleDialogState.selected?.type === "agent") {
-        mountRenewalEndDate(detail, peopleDialogState.selected.id);
+        const moreHost = detail.querySelector<HTMLElement>("[data-people-agent-more]") ?? detail;
+        mountRenewalEndDate(moreHost, peopleDialogState.selected.id);
+        const endDate = moreHost.querySelector<HTMLElement>("[data-connection-end-date]");
+        const beforeMeta = moreHost.querySelector<HTMLElement>(".pd-technical, .pd-danger-zone");
+        if (endDate && beforeMeta && beforeMeta.parentElement === moreHost) moreHost.insertBefore(endDate, beforeMeta);
         mountSeatAdminPanel(detail, peopleDialogState.selected.id, "people");
       }
       restoreConnectionDateFocus(detail, endDateFocus);
@@ -8071,7 +8635,7 @@ import "../../styles/kylon-image-viewer.css";
         resolve("asked");
       }));
     };
-    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
+    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
       const agent = agents.find((entry) => entry.principalId === id);
@@ -8087,9 +8651,15 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       let receipt = "";
-      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
+      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, questionId ?? uuid()); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
-      if (action === "turn-off-key" && grant && agent && homeConnectionTokenMatches(agent, grant)) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
+      if (action === "turn-off-key") {
+        if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !pinnedKey || grant.tokenId !== pinnedKey.tokenId || (grant.grantId ?? null) !== pinnedKey.grantId) {
+          throw new Error("This key has changed. Go back and check the details.");
+        }
+        await revokeAgentToken(session, questionId ?? uuid(), workspaceId, pinnedKey.tokenId);
+        receipt = `Key turned off. ${agent.name}’s key and its renewals stopped immediately for new requests.`;
+      }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
@@ -8106,7 +8676,11 @@ import "../../styles/kylon-image-viewer.css";
         if (one<HTMLElement>("[data-mention-picker]")?.hidden === false) renderMentionPicker();
         if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; } }
       if (action === "remove-person") {
-        await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`;
+        const member = members.find((entry) => entry.userId === id);
+        if (!member) throw new Error("This person is no longer in this workspace. Go back and check the list.");
+        await removeWorkspaceMember(session, questionId ?? uuid(), workspaceId, member.userId);
+        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
+        receipt = `${member.name} removed from ${workspaceName || "this workspace"}. They keep their other memberships.`;
       }
       if (action === "cancel-invite") {
         // The row decides the command: its own id, in the workspace it was read from. The server decides the rest.
@@ -8114,9 +8688,9 @@ import "../../styles/kylon-image-viewer.css";
         if (!invite || invite.workspaceId !== workspaceId) throw new Error("This invite is no longer here. Go back and check the list.");
         const value = session;
         await cancelPeopleInvite(invite, {
-          person: (invitationId) => revokeWorkspaceInvitation(value, uuid(), workspaceId, invitationId),
-          key: (tokenId) => revokeAgentToken(value, uuid(), workspaceId, tokenId),
-          code: (joinCredentialId) => revokeAgentJoinCredential(value, uuid(), workspaceId, joinCredentialId),
+          person: (invitationId) => revokeWorkspaceInvitation(value, questionId ?? uuid(), workspaceId, invitationId),
+          key: (tokenId) => revokeAgentToken(value, questionId ?? uuid(), workspaceId, tokenId),
+          code: (joinCredentialId) => revokeAgentJoinCredential(value, questionId ?? uuid(), workspaceId, joinCredentialId),
         });
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         receipt = peopleInviteReceipt(invite); }
@@ -8125,12 +8699,23 @@ import "../../styles/kylon-image-viewer.css";
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
-      const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const found = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const item = found && action === "cancel-invite" ? { ...found, detail: peopleInviteDisplayDetail(found as PeopleInvite, model.invites) } : found;
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
       const workspaceId = activeWorkspaceId, userId = session?.user.id;
-      showPeopleConfirmation(confirm, action, item, opener, async (button, notice) => {
+      let pinnedKey: { tokenId: string; grantId: string | null } | undefined;
+      if (action === "turn-off-key") {
+        const agent = agents.find((entry) => entry.principalId === id);
+        const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
+        if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !grant.tokenId) return;
+        pinnedKey = { tokenId: grant.tokenId, grantId: grant.grantId ?? null };
+      }
+      // One command id per question: pressing again after a lost answer repeats the same command, which the server
+      // answers from its receipt instead of revoking or withdrawing a second time. A new question gets a new id.
+      const questionId = uuid();
+      showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName }, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
-        await peopleDialogAction(action, id, button, notice);
+        await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
       }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
         () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
     };
@@ -8218,14 +8803,16 @@ import "../../styles/kylon-image-viewer.css";
       if(session && !sampleMode && workspace) {
         const userId=session.user.id;
         moveOrganizations=[];
-        renderWorkspaceSettingsPanel(workspace);
+        renderWorkspaceSettingsPanel(workspace, false);
         void refreshChannelPolicy(workspace.id).then(changed => {
           if (changed && session?.user.id === userId && activeWorkspaceId === workspace.id && dialog.open) renderWorkspaceSettingsPanel(workspace);
         });
         void myOrganizations().then(orgs=>{
           if(session?.user.id!==userId || activeWorkspaceId!==workspace.id || !dialog.open) return;
+          const before = workspaceMoveDestinations(workspace);
           moveOrganizations=orgs;
-          renderWorkspaceSettingsPanel(workspace);
+          const after = workspaceMoveDestinations(workspace);
+          if (JSON.stringify(before) !== JSON.stringify(after)) renderWorkspaceSettingsPanel(workspace);
         }).catch(()=>{ /* Existing settings remain usable during a failed org read. */ });
       }
       for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
@@ -8668,7 +9255,14 @@ import "../../styles/kylon-image-viewer.css";
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
       // An answer, here or anywhere, changes what is waiting.
-      if (result.ok && typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
+      if (result.ok) {
+        if (typeof waitingPanelAsks !== "undefined") {
+          const list = waitingPanelAsks.get(workspaceId);
+          if (list) waitingPanelAsks.set(workspaceId, list.filter(entry => entry.id !== signalId));
+          if (typeof renderWaitingPanelView === "function") renderWaitingPanelView();
+        }
+        if (typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
+      }
       // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
       if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
       choiceTickets.delete(signalId);
@@ -9858,24 +10452,35 @@ import "../../styles/kylon-image-viewer.css";
 
     /**
      * A press on a chat picture opens it in the app's viewer, never as a download; Download is a button inside it.
-     * The viewer's code is fetched the first time one is opened. When the viewer closes, focus returns to the picture
-     * that opened it, or to the same picture in its new row if the conversation was redrawn meanwhile.
+     * The viewer's code is fetched the first time one is opened. A message with several pictures opens on the one
+     * pressed and the viewer steps between them. When it closes, focus returns to the picture last shown, or to the
+     * same picture in its new row if the conversation was redrawn meanwhile.
      *
      * If the viewer's code cannot be fetched (a dropped connection, or a tab left open across a release), nothing is
      * downloaded and the reader stays where they are: the picture says "Couldn't open picture" with Retry, and the
      * app checks for a new release, whose notice offers the reload that a release needs.
      */
+    const loadImageViewer = () => import("../../lib/image-viewer");
     let chatPictureOpening = false;
     const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
-      if (chatPictureOpening || one("[data-image-viewer]")) return;
-      const { file_id: fileId, version_n: version } = attachment;
+      if (chatPictureOpening || document.querySelector("dialog[open]")) return;
+      const openedFeed = feedIdentity();
       const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
       const slot = trigger.parentElement;
       slot?.querySelector("[data-picture-open-failed]")?.remove();
+      /* Every picture on the same message, in order, so the viewer can step between them. Each link carries its own
+         file, version and name; the one pressed is where the viewer opens. */
+      const links = Array.from(trigger.closest(".hm-extras__images")?.querySelectorAll<HTMLElement>(".hm-extras__image") ?? []);
+      const at = links.indexOf(trigger);
+      const files = (at < 0 ? [trigger] : links).map(link => link === trigger
+        ? { fileId: attachment.file_id, version: attachment.version_n, name: attachment.name }
+        : { fileId: link.dataset.streamImage ?? "", version: Number(link.dataset.streamImageVersion), name: link.title });
       chatPictureOpening = true;
-      void import("../../lib/image-viewer").then(({ openImageViewer }) => {
-        openImageViewer(app, {
-          name: attachment.name,
+      void loadImageViewer().then(({ openImageViewer }) => {
+        // Another dialog (e.g. People) or a navigation may have arrived while the viewer module was loading.
+        if (document.querySelector("dialog[open]") || feedIdentity() !== openedFeed) return;
+        openImageViewer(app, files.map(({ fileId, version, name }) => ({
+          name,
           link: async () => {
             const cached = attachmentPreviewUrls.get(fileId, version, Date.now());
             if (cached) return cached;
@@ -9888,13 +10493,15 @@ import "../../styles/kylon-image-viewer.css";
           download: () => {
             void freshAttachmentDownload(fileId, version).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error"));
           },
-        }, () => {
-          const back = trigger.isConnected ? trigger
-            : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(fileId)}"]`);
+        })), Math.max(0, at), (shown) => {
+          // Focus goes back to the picture last shown: its own link, or the same picture in its new row after a redraw.
+          const link = at < 0 ? trigger : links[shown] ?? trigger;
+          const back = link.isConnected ? link
+            : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(files[shown]?.fileId ?? attachment.file_id)}"]`);
           back?.focus({ preventScroll: true });
         });
       }, () => {
-        if (!slot || !trigger.isConnected) return;
+        if (!slot || !trigger.isConnected || feedIdentity() !== openedFeed) return;
         const note = document.createElement("span");
         note.className = "hm-extras__image-failed"; note.dataset.pictureOpenFailed = ""; note.setAttribute("role", "alert");
         const said = document.createElement("span"); said.textContent = "Couldn't open picture";
@@ -10016,7 +10623,7 @@ import "../../styles/kylon-image-viewer.css";
        control is gone, nothing moves. */
     const FEED_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
     const controlIdentity = (el: Element): string => JSON.stringify([el.tagName, el.className, el.getAttribute("aria-label"),
-      Array.from(el.attributes).filter(a => a.name.startsWith("data-") && !a.name.startsWith("data-audit")).map(a => [a.name, a.value])]);
+      Array.from(el.attributes).filter(a => a.name.startsWith("data-") && !a.name.startsWith("data-audit") && a.name !== "data-preview-state").map(a => [a.name, a.value])]);
     const feedIdentity = (): string => JSON.stringify([homeRoute, activeWorkspaceId, activeChannelId, signalFilter, activeWorkspaceView]);
     /* Back-to-back rebuilds: the latest one owns the restore, so the restore always runs after the
        frame in which that rebuild adds its deferred controls. A remembered control survives a
@@ -10041,25 +10648,25 @@ import "../../styles/kylon-image-viewer.css";
           selection: field && field.selectionStart !== null && field.selectionEnd !== null ? [field.selectionStart, field.selectionEnd] : null };
       } else if (active !== null && active !== document.body) feedFocus = null;
       if (!feedFocus) return;
-      const restore = (): void => {
+      const restore = (deferMissing: boolean): void => {
         if (generation !== feedRenderGeneration || !feedFocus) return;
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) { feedFocus = null; return; }
+        if (feedIdentity() !== feedFocus.feed || document.querySelector("dialog[open]")) { feedFocus = null; return; }
+        const next = [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(feedFocus.id)}"]`)][feedFocus.copy];
+        const target = !next ? null : feedFocus.identity === null ? next
+          : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === feedFocus!.identity)[feedFocus.ordinal] ?? null;
+        if (!target && deferMissing) { window.requestAnimationFrame(() => restore(false)); return; }
         const pending = feedFocus;
         feedFocus = null;
-        const now = document.activeElement;
-        if (now !== null && now !== document.body) return;
-        if (feedIdentity() !== pending.feed || document.querySelector("dialog[open]")) return;
-        const next = [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(pending.id)}"]`)][pending.copy];
-        if (!next) return;
-        const target = pending.identity === null ? next
-          : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === pending.identity)[pending.ordinal] ?? null;
         target?.focus({ preventScroll: true });
         if (pending.selection && target instanceof HTMLInputElement) {
           const end = target.value.length;
           target.setSelectionRange(Math.min(pending.selection[0], end), Math.min(pending.selection[1], end));
         }
       };
-      // After the rebuild returns, then (for anything but a text field) after the frame its deferred controls are added in.
-      queueMicrotask(() => { if (feedFocus?.selection) restore(); else window.requestAnimationFrame(restore); });
+      // Restore controls already in the rebuilt DOM before the next event; defer only controls added on the next frame (Show more).
+      queueMicrotask(() => restore(true));
     };
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
@@ -10508,6 +11115,12 @@ import "../../styles/kylon-image-viewer.css";
             for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>(".hm-extras__image")).entries()) {
               const attachment = pictures[index]; const image = link.querySelector<HTMLImageElement>("img"); if (!attachment || !image) continue;
               link.setAttribute("aria-haspopup", "dialog");
+              // Prevent Enter from synthesizing a trailing keypress onto the viewer's autofocused Close button.
+              link.addEventListener("keydown", (event) => {
+                if (event.key !== "Enter" || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
+                event.preventDefault(); event.stopPropagation();
+                if (!sampleMode) openChatPicture(attachment, link);
+              });
               link.addEventListener("click", (event) => {
                 event.preventDefault(); event.stopPropagation();
                 if (!sampleMode) openChatPicture(attachment, link);
@@ -11260,6 +11873,7 @@ import "../../styles/kylon-image-viewer.css";
       channelListFailed = false;
       channelsLoaded = false;
       channelUnreadRows = null;
+      if (typeof resetConversationsState === "function") resetConversationsState();
       activeChannelId = null;
       unknownChannelId = null;
       postedSinceReset.clear();
@@ -11757,7 +12371,14 @@ import "../../styles/kylon-image-viewer.css";
       one<HTMLElement>("[data-cleanup-body]")?.replaceChildren();
     });
 
-    const renderWorkspaceSettingsPanel = (opened: Workspace): void => {
+    const workspaceMoveDestinations = (workspace: Workspace): { id: string; name: string }[] => {
+      const me = members.find((member) => member.userId === session?.user.id);
+      return !sampleMode && me?.role === "owner" && moveOrganizations.some(org => org.id === workspace.orgId && (org.role === "owner" || org.role === "admin"))
+        ? moveOrganizations.filter(org => org.id !== workspace.orgId && (org.role === "owner" || org.role === "admin")).map(org => ({ id: org.id, name: org.name }))
+        : [];
+    };
+
+    const renderWorkspaceSettingsPanel = (opened: Workspace, moreOpen?: boolean): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
       if (!root) return;
       // Callers hold the row they opened with; the list may have a newer one (a rename, a policy change).
@@ -11771,6 +12392,7 @@ import "../../styles/kylon-image-viewer.css";
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
         canRename: !sampleMode && (me?.role === "owner" || me?.role === "admin"),
+        moreOpen,
         channelPolicy: !sampleMode && session && (me?.role === "owner" || me?.role === "admin") ? {
           value: workspace.channelCreationPolicy === undefined ? "members" : workspace.channelCreationPolicy,
           onChange: async policy => {
@@ -11793,8 +12415,7 @@ import "../../styles/kylon-image-viewer.css";
           if (renamed) renderWorkspaceSettingsPanel(renamed);
           one<HTMLButtonElement>("[data-workspace-rename]")?.focus();
         },
-        moveDestinations: !sampleMode && me?.role === "owner" && moveOrganizations.some(org=>org.id===workspace.orgId && (org.role==="owner" || org.role==="admin"))
-          ? moveOrganizations.filter(org=>org.id!==workspace.orgId && (org.role==="owner" || org.role==="admin")) : [],
+        moveDestinations: workspaceMoveDestinations(workspace),
         onMove: async orgId=>{
           if(!session || sampleMode) return;
           // Keep the same command ID for a retry after an uncertain response.
@@ -12064,6 +12685,7 @@ import "../../styles/kylon-image-viewer.css";
       channelsLoaded = false;
       channelUnreadRows = null;
       channelUnreadGeneration += 1;
+      if (typeof resetConversationsState === "function") resetConversationsState();
       railArchivedOpen = false;
       railExpanded = readRailExpanded(selected.id);
       activeChannelId = null;
@@ -12109,6 +12731,14 @@ import "../../styles/kylon-image-viewer.css";
         const removedAgentsRead = removedAgentNames(selected.id);
         const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
         const claimsRead = homeWorkingOn(selected.id);
+        /* Run the initial conversations/membership read in parallel with the channel list so
+           the composer vs. preview/retry bar is settled before the first feed paint (no 72px
+           layout shift when opening a named channel). refreshConversations never throws;
+           render=false avoids painting a half-loaded rail before channels arrive. Guarded for
+           script-extracted unit tests that stub openWorkspace without conversations state. */
+        const conversationsRead = typeof refreshConversations === "function"
+          ? refreshConversations(selected.id, true, false)
+          : Promise.resolve();
         const [
           [rosterSettled, memberRosterSettled, invitesSettled, accessStatusesSettled],
           nextPending,
@@ -12136,6 +12766,7 @@ import "../../styles/kylon-image-viewer.css";
             (value) => ({ value, failed: false }),
             () => ({ value: [] as WorkspaceChannel[], failed: true }),
           ),
+          conversationsRead,
         ]);
         const nextRemovedAgents = await removedAgentsRead;
         const nextRemovedOwners = await removedOwnersRead;
@@ -12169,7 +12800,7 @@ import "../../styles/kylon-image-viewer.css";
           channelsLoaded = true;
           channelListReadAt = Date.now();
         }
-        void refreshChannelUnread(selected.id, true);
+        void refreshChannelUnread(selected.id, true, false);
         /* The URL is read ONCE per workspace open, after the channels are known: a ?c= that
            names no channel here must show an honest empty state, and the only way to tell
            that from a channel that is merely empty is to have the list. Then it is WRITTEN,
@@ -12702,32 +13333,41 @@ import "../../styles/kylon-image-viewer.css";
         const legend = document.createElement("legend");
         legend.textContent = `What ${agentName} may do`;
         choices.append(legend);
+        /* Reading always comes with an approval: a sentence, not a ticked box nobody can change. */
+        const included = document.createElement("p");
+        included.className = "dashboard__approval-included";
+        included.textContent = READ_ACCESS_INCLUDED;
+        choices.append(included);
         for (const operation of CONTENT_OPERATIONS) {
+          if (operation === "read") continue;
           /* Readers can approve reading only: the server refuses more for a reader. */
-          if (!editor && operation !== "read") continue;
+          if (!editor) continue;
           const label = document.createElement("label");
           const input = document.createElement("input");
           input.type = "checkbox";
           input.value = operation;
           input.dataset.approvalOperation = "";
           input.checked = approval ? approval.operations.includes(operation) : true;
-          input.disabled = operation === "read";
-          label.append(input, document.createTextNode(` ${CONTENT_OPERATION_LABELS[operation]}`));
+          label.append(input, document.createTextNode(` ${APPROVAL_CHOICE_LABELS[operation]}`));
           choices.append(label);
         }
         const allow = document.createElement("button");
         allow.type = "button";
         allow.className = "dashboard__button dashboard__button--primary";
-        allow.textContent = approval ? "Save" : "Allow";
+        /* A reader can only pass on reading, so their button says exactly that. */
+        allow.textContent = approval ? "Save" : editor ? "Allow" : "Allow read access";
+        /* That longer button gets its own line on a narrow phone (kylon-lists.css), so the name keeps its room. */
+        if (!approval && !editor) row.dataset.approvalReadOnly = "";
         const status = document.createElement("p");
         status.className = "dashboard__approval-status";
         status.setAttribute("role", "status");
         status.setAttribute("aria-live", "polite");
         status.textContent = householdReceipts.get(principalId) ?? (approval ? approvalDescription(approval) : "");
         allow.addEventListener("click", () => {
-          const operations = [...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
+          /* Reading is always sent; it no longer has a box to read it from. */
+          const operations = ["read", ...[...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
             .filter((input) => input.checked)
-            .map((input) => input.value);
+            .map((input) => input.value)];
           void approveAgent(connection, operations, allow, status);
         });
         /* Hosted consent uses the same controls; this note describes tool availability. */
@@ -12744,7 +13384,8 @@ import "../../styles/kylon-image-viewer.css";
           withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
           withdraw.textContent = "Withdraw access";
           withdraw.dataset.withdrawApproval = principalId;
-          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, hosted, withdraw, status); });
+          withdraw.dataset.pdFocus = `lists-withdraw-${principalId}`;
+          withdraw.addEventListener("click", () => askListsWithdraw(principalId, agentName, hosted, withdraw, status));
           row.append(withdraw);
         }
         list.append(row);
@@ -12871,6 +13512,28 @@ import "../../styles/kylon-image-viewer.css";
       return householdCurrent(scope) ? "approved" : "stale";
     };
 
+    /** Withdraw access on a Lists & docs approval asks first, in the same confirmation People & agents uses: the agent's
+        name, what stops and what stays (different for an agent in a chat app), with Go back focused. Going back sends
+        nothing and returns focus to this agent's button; confirming sends one withdrawal for this agent here. */
+    const askListsWithdraw = (principalId: string, agentName: string, hosted: boolean, opener: HTMLButtonElement, status: HTMLElement): void => {
+      const dialog = one<HTMLDialogElement>("[data-lists-confirm]"), root = one<HTMLElement>("[data-household-agents]");
+      const scope = householdScope();
+      if (!dialog || !root || !scope || opener.disabled) return;
+      const title = (): HTMLElement | null => one<HTMLElement>("#dashboard-agent-approvals-title");
+      // One command id per question, as in People & agents: a retry after a lost answer repeats the same command.
+      const questionId = uuid();
+      const workspaceName = workspaces.find((entry) => entry.id === scope.workspaceId)?.name;
+      showPeopleConfirmation(dialog, "withdraw", { name: agentName, hosted, workspaceName }, opener,
+        async (button) => {
+          // The workspace may have changed while the question was open; then nothing is sent.
+          if (!householdCurrent(scope)) throw new Error("This workspace changed. Nothing was withdrawn.");
+          await withdrawAgent(principalId, agentName, hosted, button, status, questionId);
+        },
+        readableError, undefined,
+        () => (one<HTMLElement>(`[data-household-agent-list] [data-approval-agent="${CSS.escape(principalId)}"] .dashboard__button--primary`) ?? title())?.focus({ preventScroll: true }),
+        { root, fallback: title });
+    };
+
     /** Withdrawal leaves the agent connected and is audited by the command path. */
     const withdrawAgent = async (
       principalId: string,
@@ -12878,37 +13541,40 @@ import "../../styles/kylon-image-viewer.css";
       hosted: boolean,
       button: HTMLButtonElement,
       status: HTMLElement,
-      confirmed = false,
+      commandId: string,
     ): Promise<void> => {
+      /* Called only once the person has confirmed, in the shared confirmation (from People & agents or from Lists &
+         docs). A refusal or an unknown result is thrown, so the confirmation stays open and says so. `commandId`
+         belongs to that question: a second press after a lost answer sends the same command again. */
       const scope = householdScope();
-      if (!scope || (!confirmed && button.disabled)) return;
-      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, hosted))) return;
+      if (!scope) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {
         if (householdCurrent(scope)) status.textContent = message;
       };
+      const unknown = "The result is unknown. Reload Lists & docs to check this agent's access.";
       try {
-        const result = await postCommand(
-          scope.session, uuid(),
-          { kind: "household_withdraw_connection", principal_id: principalId },
-          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
-          "The result is unknown. Reload Lists & docs to check this agent's access.",
-        );
+        let result: Awaited<ReturnType<typeof postCommand>>;
+        try {
+          result = await postCommand(
+            scope.session, commandId,
+            { kind: "household_withdraw_connection", principal_id: principalId },
+            { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+            unknown,
+          );
+        } catch (error) { settle(unknown); throw error; }
         if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
           const message = hosted ? `Withdrawn. The stored Lists & docs approval for ${agentName} was removed.` : `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
           householdReceipts.set(principalId, message);
           settle(message);
           await loadHouseholdConnections();
-        } else {
-          const refusal = withdrawRefusalMessage(result.body.reason);
-          settle(refusal);
-          if (confirmed) throw new Error(refusal);
+          return;
         }
-      } catch (error) {
-        if (confirmed) throw error;
-        settle("The result is unknown. Reload Lists & docs to check this agent's access.");
+        const refusal = withdrawRefusalMessage(result.body.reason);
+        settle(refusal);
+        throw new Error(refusal);
       } finally {
         button.disabled = false;
       }
@@ -13298,24 +13964,270 @@ import "../../styles/kylon-image-viewer.css";
       } catch { /* storage unavailable: the rail stays as the reader left it this session */ }
     };
 
+    const resetConversationsState = (): void => {
+      workspaceConversations = null;
+      conversationsReadState = "idle";
+      conversationsReadError = "";
+      conversationsGeneration += 1;
+      conversationsReadAt = 0;
+      activeDmConversationId = null;
+      mountedPreviewKey = "";
+      channelJoinPending.clear();
+      groupLeaveTarget = null;
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      groupLeaveReturn = null;
+      const leaveDialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (leaveDialog?.open) leaveDialog.close();
+      one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
+    };
+    /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
+    const conversationForChannel = (channelId: string | null): ConversationSummary | null => {
+      if (!workspaceConversations || channelId === null) return null;
+      if (channelId === GENERAL_CHANNEL_ID) return workspaceConversations.find(c => c.kind === "general") ?? null;
+      return workspaceConversations.find(c => c.channelId === channelId) ?? null;
+    };
+    /** Active unjoined public channel (Step 2b `joined: false`), or null when joined / archived / pre-Step-2b. */
+    const activeUnjoinedPublicChannel = (): ConversationSummary | null => {
+      if (sampleMode || !session || !activeChannelId || activeChannelId === GENERAL_CHANNEL_ID) return null;
+      const conv = conversationForChannel(activeChannelId);
+      return conv && conv.kind === "public_channel" && !conv.joined && conv.archivedAt === null ? conv : null;
+    };
+    const markConversationJoinedLocally = (conversationId: string): void => {
+      if (!workspaceConversations) return;
+      workspaceConversations = workspaceConversations.map(c =>
+        c.conversationId === conversationId ? { ...c, joined: true } : c,
+      );
+    };
+    const lookupConversationMemberName = (member: ConversationMemberRef): string | null => {
+      if (member.kind === "agent") return agents.find(a => a.principalId === member.id)?.name ?? null;
+      return people.get(member.id) ?? members.find(m => m.userId === member.id)?.displayName ?? null;
+    };
+    /** Step 2b Direct messages rail section; undefined until `resource: "conversations"` answers. */
+    const railDirectMessagesSection = (): RailDirectMessagesVM | undefined => {
+      if (sampleMode || !activeWorkspaceId || workspaceConversations === null ||
+        homeRoute.view === "catchup" || homeRoute.view === "new") return undefined;
+      const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null;
+      const viewerId = homeViewerId();
+      const rows: RailDirectMessageRowVM[] = sortDirectConversations(workspaceConversations).map(conv => ({
+        id: conv.conversationId,
+        kind: conv.kind === "group_dm" ? "group_dm" : "dm",
+        title: conversationTitle(conv, viewerId, lookupConversationMemberName),
+        href: routeHref({ view: "chat", workspaceId: activeWorkspaceId, dmId: conv.conversationId }),
+        current: reading && activeDmConversationId === conv.conversationId,
+        unreadCount: conv.unreadCount,
+        mentionCount: conv.mentionCount,
+        muted: conv.notifyLevel === "muted",
+        memberCount: conv.members.filter(m => !m.leftAt).length,
+      }));
+      return { rows };
+    };
+    /** Open a Step 2b DM or group DM row from the rail. */
+    const openDirectConversation = async (conversationId: string): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
+      const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
+      if (!conv || !workspaceId) return;
+      const viewerId = homeViewerId();
+      const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
+      if (conv.kind === "dm" && others.length === 1) {
+        const other = others[0]!;
+        await openDirectMessage({ kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef);
+        if (workspaceId !== activeWorkspaceId) return;
+        activeDmConversationId = conversationId;
+        renderHomeRail();
+        return;
+      }
+      activeDm = null;
+      closeEntityPanel(false);
+      if (threadReplyRoot !== null) setThreadReplyRoot(null);
+      activeChannelId = null;
+      unknownChannelId = null;
+      if (homeRoute.view !== "chat") {
+        await navigateHome({ view: "chat", workspaceId, dmId: conversationId }, "push");
+        if (workspaceId !== activeWorkspaceId) return;
+      } else {
+        window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId, dmId: conversationId }));
+      }
+      activeDmConversationId = conversationId;
+      const recipients: ComposerRecipient[] = others.map(m => ({ kind: m.kind === "agent" ? "agent" : "person", id: m.id }));
+      syncComposerAddress(recipients);
+      renderFeed();
+      renderHomeRail();
+      renderHomeShell();
+      renderChannelBlocked();
+    };
+    /** Row ⋯ menu for a Step 2b DM / group DM: Mark as read, Star, Notifications, and Leave (group DMs only). */
+    const openConversationRowMenu = (conversationId: string, event: MouseEvent, button: HTMLElement): void => {
+      const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
+      const workspaceId = activeWorkspaceId;
+      if (!conv || !session || !workspaceId || sampleMode) return;
+      const pinnedUserId = session.user.id;
+      const title = conversationTitle(conv, homeViewerId(), lookupConversationMemberName);
+      const runNotify = (change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean }): void => {
+        if (!session || session.user.id !== pinnedUserId) return;
+        void setConversationNotify(session, uuid(), workspaceId, conversationId, change).then(res => {
+          if (res.ok && workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId) {
+            void refreshConversations(workspaceId, true);
+          }
+        }).catch(() => {});
+      };
+      const items: (ContextMenuItem | null)[] = [];
+      if ((conv.unreadCount ?? 0) > 0 || (conv.mentionCount ?? 0) > 0) {
+        items.push({
+          label: MARK_AS_READ_LABEL,
+          run: () => {
+            if (!session || session.user.id !== pinnedUserId) return;
+            void markConversationRead(session, uuid(), workspaceId, conversationId, conv.lastMessageId).then(res => {
+              if (!res.ok || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+              if (workspaceConversations) {
+                workspaceConversations = workspaceConversations.map(c =>
+                  c.conversationId === conversationId ? { ...c, unreadCount: 0, mentionCount: 0 } : c,
+                );
+                renderHomeRail();
+              }
+              void refreshConversations(workspaceId, true);
+            }).catch(() => {});
+          },
+        });
+      }
+      items.push({ label: conv.starred ? "Remove star" : "Star", run: () => runNotify({ starred: !conv.starred }) });
+      items.push(null);
+      for (const [level, label] of [["everything", "All messages"], ["mentions", "Mentions only"], ["muted", "Mute"]] as const) {
+        items.push({ label, checked: conv.notifyLevel === level, run: () => runNotify({ notifyLevel: level }) });
+      }
+      if (canLeaveConversation(conv.kind)) {
+        items.push(null, {
+          label: "Leave group",
+          danger: true,
+          run: () => { openGroupLeaveDialog(conversationId, title, button); },
+        });
+      }
+      openContextMenu(event, button, items, `${title} options`);
+    };
+
+    const syncGroupLeaveDialogControls = (): void => {
+      const confirmBtn = one<HTMLButtonElement>("[data-group-leave-confirm]");
+      const cancelBtn = one<HTMLButtonElement>("[data-group-leave-cancel]");
+      const closeBtn = one<HTMLButtonElement>("[data-group-leave-close]");
+      for (const btn of [confirmBtn, cancelBtn, closeBtn]) {
+        if (!btn) continue;
+        btn.disabled = groupLeavePending;
+        if (groupLeavePending) btn.setAttribute("aria-busy", "true");
+        else btn.removeAttribute("aria-busy");
+      }
+      if (confirmBtn) confirmBtn.textContent = groupLeavePending ? "Leaving…" : "Leave";
+    };
+    const openGroupLeaveDialog = (conversationId: string, title: string, opener: HTMLElement | null = null): void => {
+      const dialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (!dialog || dialog.open || sampleMode || !session || !activeWorkspaceId) return;
+      groupLeaveReturn = channelFocusReturn(opener);
+      if (groupLeaveReturn.drawer) layout.closeNavigation(false);
+      groupLeaveTarget = { conversationId, title, workspaceId: activeWorkspaceId };
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      const heading = one<HTMLElement>("[data-group-leave-title]");
+      if (heading) heading.textContent = `Leave ${title}?`;
+      const body = one<HTMLElement>("[data-group-leave-body]");
+      if (body) body.textContent = GROUP_LEAVE_CONFIRM_BODY;
+      const error = one<HTMLElement>("[data-group-leave-error]");
+      if (error) { error.textContent = ""; error.hidden = true; }
+      syncGroupLeaveDialogControls();
+      dialog.showModal();
+      // Open on Cancel so a stray Enter never leaves the group.
+      one<HTMLButtonElement>("[data-group-leave-cancel]")?.focus({ preventScroll: true });
+    };
+    const closeGroupLeaveDialog = (): void => {
+      if (groupLeavePending) return;
+      const dialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (dialog?.open) dialog.close();
+    };
+    const groupLeaveDialogClosed = (): void => {
+      if (one<HTMLDialogElement>("[data-group-leave-dialog]")?.open) return;
+      const back = groupLeaveReturn;
+      const succeeded = groupLeaveSucceeded;
+      groupLeaveReturn = null;
+      groupLeaveTarget = null;
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      if (succeeded) {
+        focusConversationHeading();
+      } else if (back && !restoreChannelFocus(back)) {
+        focusConversationHeading();
+      }
+    };
+    const submitGroupLeave = async (): Promise<void> => {
+      const target = groupLeaveTarget;
+      if (!target || !session || sampleMode || groupLeavePending || target.workspaceId !== activeWorkspaceId) return;
+      const pinnedUserId = session.user.id;
+      groupLeavePending = true;
+      const errorEl = one<HTMLElement>("[data-group-leave-error]");
+      if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
+      syncGroupLeaveDialogControls();
+      let problem = "";
+      try {
+        const res = await leaveConversation(session, uuid(), target.workspaceId, target.conversationId);
+        if (!res.ok) problem = res.message;
+      } catch (error) {
+        problem = readableError(error);
+      }
+      groupLeavePending = false;
+      if (target.workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId || groupLeaveTarget !== target) return;
+      if (problem) {
+        syncGroupLeaveDialogControls();
+        if (errorEl) { errorEl.textContent = problem; errorEl.hidden = false; }
+        one<HTMLButtonElement>("[data-group-leave-cancel]")?.focus({ preventScroll: true });
+        return;
+      }
+      if (workspaceConversations) {
+        workspaceConversations = workspaceConversations.filter(c => c.conversationId !== target.conversationId);
+      }
+      if (activeDmConversationId === target.conversationId) {
+        signals = [];
+        // Keep activeDmConversationId set until selectChannel runs so leavingDm clears group recipients.
+        selectChannel(GENERAL_CHANNEL_ID);
+        activeDmConversationId = null;
+      } else {
+        renderHomeRail();
+      }
+      groupLeaveSucceeded = true;
+      syncGroupLeaveDialogControls();
+      one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
+      void refreshConversations(target.workspaceId, true);
+    };
+
     /** The Channels section of the rail for the workspace being read, or undefined where none is. */
     const railChannelSection = (): RailChannelsVM | undefined => {
       if (!activeWorkspaceId || homeRoute.view === "catchup" || homeRoute.view === "new") return undefined;
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
       const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null &&
-        !(typeof activeDm !== "undefined" && activeDm);
-      const muted = (id: string): boolean => channelPreferenceFor(channelUnreadRows, id)?.involvement === "muted";
+        !(typeof activeDm !== "undefined" && activeDm) && activeDmConversationId === null;
+      const muted = (id: string): boolean => {
+        const conv = conversationForChannel(id);
+        return conv ? conv.notifyLevel === "muted" : channelPreferenceFor(channelUnreadRows, id)?.involvement === "muted";
+      };
+      const unreadFor = (id: string): boolean | null => {
+        const conv = conversationForChannel(id);
+        if (conv && conv.unreadCount !== null) return conv.unreadCount > 0;
+        return channelUnreadFor(channelUnreadRows, id);
+      };
       const row = (channel: WorkspaceChannel) => ({ id: channel.channelId, slug: channel.slug, href: href(channel.channelId),
         current: reading && activeChannelId === channel.channelId,
-        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
+        unread: unreadFor(channel.channelId),
+        mentionCount: conversationForChannel(channel.channelId)?.mentionCount ?? 0,
+        manageable: viewerMayManageChannel(channel),
         muted: muted(channel.channelId) });
       const movable = (rows: RailChannelRowVM[], list: RailOrderList): RailChannelRowVM[] =>
         !sampleMode && rows.length > 1 ? rows.map(entry => ({ ...entry, reorder: list })) : rows;
       const sharedOrder = viewerWorkspaceRole() === "owner" || viewerWorkspaceRole() === "admin";
       const general = { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
         current: reading && activeChannelId === GENERAL_CHANNEL_ID,
-        unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
-      const live = liveChannels(channels);
+        unread: unreadFor(GENERAL_CHANNEL_ID),
+        mentionCount: conversationForChannel(GENERAL_CHANNEL_ID)?.mentionCount ?? 0,
+        manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
+      const allLive = liveChannels(channels);
+      const live = workspaceConversations
+        ? allLive.filter(channel => conversationForChannel(channel.channelId)?.joined !== false)
+        : allLive;
       /* A starred place is listed once, under Starred, in the viewer's own order. A star on a channel that
          has since been archived or left shows nothing. */
       const starredIds = starredViewIds(channelUnreadRows);
@@ -13618,16 +14530,86 @@ import "../../styles/kylon-image-viewer.css";
      */
     const renderChannelBlocked = (): void => {
       const block = one<HTMLElement>("[data-channel-archived]");
+      const previewHost = one<HTMLElement>("[data-channel-preview]");
       if (!block) return;
       const feedShown = app.dataset.channelView === "feed" || app.dataset.channelView === "feed-empty";
-      const archived = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        unknownChannelId === null && activeChannelArchived();
+      const inChannelFeed = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        unknownChannelId === null && !(typeof activeDm !== "undefined" && activeDm) && activeDmConversationId === null;
+      const archived = inChannelFeed && activeChannelArchived();
+      const needsMembershipCheck = !archived && inChannelFeed && !sampleMode && !!session &&
+        activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID;
+      const membershipFailed = needsMembershipCheck && workspaceConversations === null && conversationsReadState === "failed";
+      const membershipPending = needsMembershipCheck && workspaceConversations === null &&
+        (conversationsReadState === "idle" || conversationsReadState === "pending");
+      const unjoined = !archived && !membershipFailed && !membershipPending && inChannelFeed ? activeUnjoinedPublicChannel() : null;
       block.hidden = !archived;
       const unarchive = one<HTMLButtonElement>("[data-channel-unarchive]");
       if (unarchive) unarchive.hidden = !archived || !activeChannel() || !viewerMayManageChannel(activeChannel()!);
+      if (previewHost) {
+        if (membershipFailed) {
+          previewHost.hidden = false;
+          const key = `retry:${activeWorkspaceId}:${activeChannelId ?? ""}:${conversationsReadError}`;
+          if (mountedPreviewKey !== key) {
+            mountedPreviewKey = key;
+            const workspaceId = activeWorkspaceId;
+            renderChannelMembershipRetryBar(previewHost, {
+              message: conversationsReadError || "Couldn't check channel membership.",
+              onRetry: async () => {
+                if (workspaceId !== activeWorkspaceId) return;
+                await refreshConversations(workspaceId, true);
+              },
+            });
+          }
+        } else if (unjoined) {
+          previewHost.hidden = false;
+          const key = `join:${activeWorkspaceId}:${unjoined.conversationId}:${unjoined.slug ?? ""}`;
+          if (mountedPreviewKey !== key) {
+            mountedPreviewKey = key;
+            const workspaceId = activeWorkspaceId;
+            const pinnedUserId = session?.user.id ?? "";
+            const convId = unjoined.conversationId;
+            const slug = unjoined.slug ?? activeChannel()?.slug ?? "channel";
+            renderChannelPreviewBar(previewHost, {
+              slug,
+              onJoin: async () => {
+                if (!session || !workspaceId || session.user.id !== pinnedUserId) {
+                  return { ok: false, message: "Sign in to join this channel." };
+                }
+                try {
+                  const res = await joinConversation(session, uuid(), workspaceId, convId);
+                  return res.ok ? { ok: true } : { ok: false, message: res.message };
+                } catch (error) {
+                  return { ok: false, message: readableError(error) };
+                }
+              },
+              onJoined: () => {
+                if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+                markConversationJoinedLocally(convId);
+                if (mountedPreviewKey === key) {
+                  mountedPreviewKey = "";
+                  renderChannelBlocked();
+                  one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+                }
+                renderHomeRail();
+                renderChannelDirectoryDialog();
+                void refreshConversations(workspaceId, true);
+              },
+            });
+          }
+        } else {
+          previewHost.hidden = true;
+          if (mountedPreviewKey) {
+            mountedPreviewKey = "";
+            previewHost.replaceChildren();
+          }
+        }
+      }
       const composer = one<HTMLFormElement>("[data-composer]");
-      if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") composer.hidden = archived || unknownChannelId !== null;
-      if (composer && archived) {
+      const blocked = archived || membershipFailed || membershipPending || unjoined !== null;
+      if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") {
+        composer.hidden = blocked || unknownChannelId !== null;
+      }
+      if (composer && blocked) {
         composer.hidden = true;
         closeMentionPicker();
       }
@@ -13708,9 +14690,10 @@ import "../../styles/kylon-image-viewer.css";
       if (channelId !== null && next === null) return;
       rememberPaletteVisit(next === null ? "channel:__all__" : next === GENERAL_CHANNEL_ID ? "channel:general" : `channel:${channelById(channels, next)?.slug ?? ""}`);
       /* A channel row leaves a Direct Message: the feed and the composer go back to the channel. */
-      const leavingDm = !!activeDm;
+      const leavingDm = !!activeDm || activeDmConversationId !== null;
       if (leavingDm) {
         activeDm = null;
+        activeDmConversationId = null;
         syncComposerAddress([]);
         closeEntityPanel(false);
       }
@@ -13779,6 +14762,7 @@ import "../../styles/kylon-image-viewer.css";
       syncChannelUrl();
       renderChannelRail();
       renderHomeShell();
+      renderChannelBlocked();
       closeChannelDialog();
       /* returnToChannel, reached through here, is what loads the new page: it sees an
          empty signal list and fetches one under the channel now in state. */
@@ -13990,24 +14974,61 @@ import "../../styles/kylon-image-viewer.css";
       channelDirectoryRestore = restore;
       dialog.close();
     };
+    const submitChannelJoin = async (channelId: string, button: HTMLButtonElement | null): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
+      const conv = conversationForChannel(channelId);
+      if (!session || !workspaceId || !conv || channelJoinPending.has(channelId)) return;
+      channelJoinPending.add(channelId);
+      channelDirectoryErrors.delete(channelId);
+      if (button && document.activeElement === button) {
+        one<HTMLElement>(`[data-channel-directory-action="open:${CSS.escape(channelId)}"]`)?.focus({ preventScroll: true });
+      }
+      renderChannelDirectoryDialog();
+      let errorMessage = "";
+      try {
+        const res = await joinConversation(session, uuid(), workspaceId, conv.conversationId);
+        if (!res.ok) errorMessage = res.message;
+      } catch (error) {
+        errorMessage = readableError(error);
+      }
+      channelJoinPending.delete(channelId);
+      if (workspaceId !== activeWorkspaceId) return;
+      if (errorMessage) {
+        channelDirectoryErrors.set(channelId, errorMessage);
+        renderChannelDirectoryDialog();
+        return;
+      }
+      markConversationJoinedLocally(conv.conversationId);
+      renderChannelDirectoryDialog();
+      renderHomeRail();
+      renderChannelBlocked();
+      void refreshConversations(workspaceId, true);
+    };
     const renderChannelDirectoryDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-directory]");
       const list = one<HTMLElement>("[data-channel-directory-list]");
       if (!dialog?.open || !list) return;
       const query = one<HTMLInputElement>("[data-channel-directory-search]")?.value ?? "";
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
-      const row = (channel: WorkspaceChannel): DirectoryChannel => ({ id: channel.channelId, slug: channel.slug,
-        description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
-        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
+      const row = (channel: WorkspaceChannel): DirectoryChannel => {
+        const conv = conversationForChannel(channel.channelId);
+        return { id: channel.channelId, slug: channel.slug,
+          description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
+          unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
+          ...(conv ? { joined: conv.joined } : {}) };
+      };
       const rows: DirectoryChannel[] = [{ id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, description: null,
-        href: href(GENERAL_CHANNEL_ID), archived: false, unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false },
+        href: href(GENERAL_CHANNEL_ID), archived: false, unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false,
+        ...(workspaceConversations ? { joined: true } : {}) },
         ...liveChannels(channels).map(row), ...archivedChannels(channels).map(row)];
-      const key = JSON.stringify([query, rows, channelsLoaded, channelListFailed, [...channelUnarchivePending], [...channelDirectoryErrors]]);
+      const pending = new Set([...channelUnarchivePending, ...channelJoinPending]);
+      const key = JSON.stringify([query, rows, channelsLoaded, channelListFailed, [...pending], [...channelDirectoryErrors]]);
       if (key === channelDirectoryKey) return;
       channelDirectoryKey = key;
-      const count = renderChannelDirectory(list, rows, query, channelUnarchivePending, channelDirectoryErrors, {
+      const count = renderChannelDirectory(list, rows, query, pending, channelDirectoryErrors, {
         open: id => { closeChannelDirectory(false); layout.closeNavigation(false); selectChannel(id); focusConversationHeading(); },
         unarchive: (id, button) => { void submitChannelUnarchive(id, "directory", button); },
+        join: (id, button) => { void submitChannelJoin(id, button); },
       });
       const status = one<HTMLElement>("[data-channel-directory-status]");
       if (status) status.textContent = !channelsLoaded ? "Loading channels…" : channelListFailed ? CHANNELS_LOAD_FAILED : count === 0 ? "No channels found" : "";
@@ -14168,13 +15189,58 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     /**
+     * Step 2b conversations read (`POST /functions/v1/read`, resource="conversations").
+     * Distinguishes a pre-Step-2b server (`ConversationsUnsupportedError` -> `"unsupported"`, legacy fallback)
+     * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
+     */
+    const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
+      if (sampleMode || !session || !workspaceId) return;
+      const now = Date.now();
+      if (!force && now - conversationsReadAt < 15_000) return;
+      conversationsReadAt = now;
+      const generation = ++conversationsGeneration;
+      if (workspaceConversations === null && conversationsReadState === "idle") {
+        conversationsReadState = "pending";
+        if (render) renderChannelBlocked();
+      }
+      let rows: ConversationSummary[];
+      try {
+        rows = await listConversations(workspaceId, true);
+      } catch (error) {
+        if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
+        if (error instanceof ConversationsUnsupportedError) {
+          conversationsReadState = "unsupported";
+          conversationsReadError = "";
+          if (render) renderChannelBlocked();
+          return;
+        }
+        if (workspaceConversations === null) {
+          conversationsReadState = "failed";
+          conversationsReadError = readableError(error) || "Couldn't check channel membership.";
+          if (render) renderChannelBlocked();
+        }
+        return;
+      }
+      if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
+      workspaceConversations = rows;
+      conversationsReadState = "ready";
+      conversationsReadError = "";
+      if (render) {
+        renderHomeRail();
+        renderChannelBlocked();
+        renderChannelDirectoryDialog();
+      }
+    };
+
+    /**
      * The viewer's unread state per channel (C1b), re-read at workspace open, after a seen receipt
      * lands, after a channel change, and at most every 15 seconds on the live tick. A failed read
      * is unknown for every row: no dot, and nothing claims "read".
      */
     let channelUnreadReadAt = 0;
-    const refreshChannelUnread = async (workspaceId: string, force: boolean): Promise<void> => {
+    const refreshChannelUnread = async (workspaceId: string, force: boolean, includeConversations = true): Promise<void> => {
       if (sampleMode || !session || !workspaceId) return;
+      if (includeConversations) void refreshConversations(workspaceId, force);
       const now = Date.now();
       if (!force && now - channelUnreadReadAt < 15_000) return;
       channelUnreadReadAt = now;
@@ -16863,6 +17929,11 @@ import "../../styles/kylon-image-viewer.css";
     one<HTMLButtonElement>("[data-channel-directory-close]")?.addEventListener("click", () => closeChannelDirectory());
     one<HTMLInputElement>("[data-channel-directory-search]")?.addEventListener("input", renderChannelDirectoryDialog);
     one<HTMLButtonElement>("[data-channel-directory-new]")?.addEventListener("click", event => openChannelDialog("create", null, event.currentTarget as HTMLElement));
+    one<HTMLDialogElement>("[data-group-leave-dialog]")?.addEventListener("cancel", event => { if (groupLeavePending) event.preventDefault(); });
+    one<HTMLDialogElement>("[data-group-leave-dialog]")?.addEventListener("close", groupLeaveDialogClosed);
+    one<HTMLButtonElement>("[data-group-leave-cancel]")?.addEventListener("click", closeGroupLeaveDialog);
+    one<HTMLButtonElement>("[data-group-leave-close]")?.addEventListener("click", closeGroupLeaveDialog);
+    one<HTMLFormElement>("[data-group-leave-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitGroupLeave(); });
     for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
       button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
     }
@@ -16904,6 +17975,8 @@ import "../../styles/kylon-image-viewer.css";
         for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
           trigger.setAttribute("aria-expanded", "false");
         }
+        const more = one<HTMLDetailsElement>("[data-workspace-details-content] [data-workspace-more]");
+        if (more) more.open = false;
         if (dialog.open) return;
         const returnTo = workspaceSettingsReturn; workspaceSettingsReturn = null;
         if (returnTo !== null) focusWorkspaceSettingsReturn(returnTo);
@@ -19609,6 +20682,11 @@ import "../../styles/kylon-image-viewer.css";
     border: 1px solid var(--border-interactive);
     border-radius: var(--radius);
     font: inherit;
+  }
+
+  .dashboard__invite-form .dashboard__invite-hint {
+    grid-column: 1 / -1;
+    margin: 0;
   }
 
   .dashboard__invite-result {
@@ -22543,10 +23621,12 @@ import "../../styles/kylon-image-viewer.css";
   .pd-confirm::backdrop { background: color-mix(in srgb,var(--text) 24%,transparent); backdrop-filter: blur(2px); }
   .pd-confirm-icon { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 50%; color: var(--danger); background: var(--danger-dim); margin-block-end: 18px; }
   .pd-confirm h2 { font-size: 23px; line-height: 1.3; letter-spacing: -.6px; overflow-wrap: anywhere; }
+  .pd-confirm-context { margin: 8px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
   .pd-confirm-facts { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
   .pd-confirm-facts li { position: relative; padding-inline-start: 21px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
   .pd-confirm-facts li::before { content: ""; position: absolute; inset-inline-start: 0; inset-block-start: 8px; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--danger); }
   .pd-confirm-facts li.keep::before { background: var(--success); }
+  .pd-confirm-note { margin: 14px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
   .pd-alternative { margin-block-start: 20px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--canvas); }
   .pd-alternative h3 { font-size: 13px; }
   .pd-alternative p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin-block-start: 6px; }

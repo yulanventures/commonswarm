@@ -16,6 +16,22 @@ final class SignIn: ObservableObject {
     // GoTrue may already have rotated before a temporary device-storage error.
     private var awaitingSave: LoginTokens?
 
+    #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+    @Published private(set) var preparedGoogle: SignInAttempt?
+    private var preparedUntil: ContinuousClock.Instant?
+    private let handoff = URL.cachesDirectory.appending(path: "google-usb-attempt.sha256")
+
+    init() { try? FileManager.default.removeItem(at: handoff) }
+
+    func cancelGooglePreparation() { finish() }
+
+    private func clearPreparation() {
+        preparedGoogle = nil
+        preparedUntil = nil
+        try? FileManager.default.removeItem(at: handoff)
+    }
+    #endif
+
     private var browser: ASWebAuthenticationSession?
     private var deadline: Task<Void, Never>?
     private var exchange: Task<Void, Never>?
@@ -30,17 +46,51 @@ final class SignIn: ObservableObject {
 
     func start(_ provider: BrowserProvider, origin: URL, publicKey: String, window: ASPresentationAnchor) {
         guard startup == .ready, session == nil, !pending else { return }
-        guard let attempt = try? SignInAttempt(provider: provider) else { failed = true; return }
+        var expires = ContinuousClock.now.advanced(by: .seconds(300))
+        let attempt: SignInAttempt
+        do {
+            #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+            if provider == .google {
+                if let preparedGoogle, let preparedUntil {
+                    guard ContinuousClock.now < preparedUntil else { finish(failed: true); return }
+                    attempt = preparedGoogle
+                    expires = preparedUntil
+                    deadline?.cancel()
+                    clearPreparation()
+                } else {
+                    let fresh = try SignInAttempt(provider: .google)
+                    try Data(fresh.usbBinding.utf8).write(to: handoff, options: [.atomic, .completeFileProtection])
+                    preparedGoogle = fresh
+                    preparedUntil = expires
+                    failed = false
+                    deadline = Task {
+                        do { try await Task.sleep(until: expires, clock: .continuous) } catch { return }
+                        if preparedGoogle?.state == fresh.state { finish(failed: true) }
+                    }
+                    return
+                }
+            } else {
+                clearPreparation()
+                attempt = try SignInAttempt(provider: provider)
+            }
+            #else
+            attempt = try SignInAttempt(provider: provider)
+            #endif
+        } catch { finish(failed: true); return }
         let id = UUID()
-        let expires = ContinuousClock.now.advanced(by: .seconds(300))
         current = id
         presenter = Presenter(window)
         failed = false
         pending = true
         let callback: ASWebAuthenticationSession.Callback
-        switch provider {
-        case .google: callback = .https(host: "commonswarm.com", path: "/ios/auth/callback")
-        case .github: callback = .customScheme("com.commonswarm.ios")
+        let target = provider.callback
+        if target.scheme == "https", let host = target.host {
+            callback = .https(host: host, path: target.path)
+        } else if let scheme = target.scheme {
+            callback = .customScheme(scheme)
+        } else {
+            finish(failed: true)
+            return
         }
         let browser = ASWebAuthenticationSession(url: attempt.authorize(at: origin), callback: callback) {
             [weak self] url, error in
@@ -73,12 +123,15 @@ final class SignIn: ObservableObject {
         browser.presentationContextProvider = presenter
         guard browser.start() else { finish(failed: true); return }
         deadline = Task {
-            do { try await Task.sleep(for: .seconds(300)) } catch { return }
+            do { try await Task.sleep(until: expires, clock: .continuous) } catch { return }
             if current == id { finish(failed: true) }
         }
     }
 
     private func finish(failed: Bool = false) {
+        #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+        clearPreparation()
+        #endif
         current = nil
         browser?.cancel()
         browser = nil

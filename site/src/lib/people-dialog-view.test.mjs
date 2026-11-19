@@ -68,11 +68,14 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   const removed = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true });
   assert.deepEqual(removed.stops, ["Muse will lose access to this space. Its identity and every connection will end.", "This cannot be undone."]);
   assert.deepEqual(removed.stays, ["Its history stays as “Muse (removed)”.", "Its owner can connect a new agent with the same name."]);
-  assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "Muse stops when its current access ends.");
+  assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
-  assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei" }).stays[0], "History stays. Their other spaces are unaffected.");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this key?");
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei", workspaceName: "Herb garden" }).stays[0], "Workspace history stays. They keep their other memberships.");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "mei@example.test", kind: "person" }).title, "Cancel the invitation for mei@example.test?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel the key for Muse?");
+  const codeConfirm = peopleConfirmationCopy("cancel-invite", { name: "Connect code", kind: "code", workspaceName: "Herb garden", detail: "Sam made it · today" });
+  assert.equal(codeConfirm.title, "Cancel this connect code for Herb garden?");
+  assert.equal(codeConfirm.context, "Sam made it · today");
 });
 
 // Role change (UI-SPEC 3.6). Expected strings are the spec's literals, not read back from the code under test.
@@ -190,18 +193,19 @@ test("the self-change confirm is a native alertdialog with its own Escape, not a
   assert.match(source, /confirm\.showModal\(\)/);
 });
 
-test("withdraw copy for a hosted agent removes the stored approval and carries the hosted note; local copy is unchanged", async () => {
-  const { withdrawConfirmText } = await import("./people-dialog-view");
+test("withdraw copy names the agent and workspace and keeps hosted and local consequences", async () => {
   const { HOSTED_LISTS_NOTE } = await import("./agent-hosts");
-  const hosted = peopleConfirmationCopy("withdraw", { name: "Muse", hosted: true });
-  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Muse."]);
+  const hosted = peopleConfirmationCopy("withdraw", { name: "Thyme", hosted: true, workspaceName: "Herb garden" });
+  assert.equal(hosted.title, "Withdraw Thyme’s Lists & docs access in Herb garden?");
+  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Thyme."]);
   assert.deepEqual(hosted.stays, ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE]);
   assert.doesNotMatch(JSON.stringify(hosted), /no longer be able to use|allow access again/);
-  const local = peopleConfirmationCopy("withdraw", { name: "Muse" });
-  assert.deepEqual(local.stops, ["Muse will no longer be able to use Lists & docs here."]);
+  const local = peopleConfirmationCopy("withdraw", { name: "Thyme", workspaceName: "Herb garden" });
+  assert.equal(local.title, "Withdraw Thyme’s Lists & docs access in Herb garden?");
+  assert.deepEqual(local.stops, ["Thyme will no longer be able to use Lists & docs here."]);
   assert.deepEqual(local.stays, ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."]);
-  assert.equal(withdrawConfirmText("Muse", true), `Remove the stored Lists & docs approval for Muse? ${HOSTED_LISTS_NOTE}`);
-  assert.equal(withdrawConfirmText("Muse", false), "Withdraw Lists & docs access for Muse? It can no longer see or change lists and docs here until you allow it again.");
+  assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).title, "Withdraw Muse’s Lists & docs access?");
+  assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse", workspaceName: "   " }).title, "Withdraw Muse’s Lists & docs access?");
 });
 
 test('local workspace removal is scoped and only an owner can disconnect the reusable local key',()=>{
@@ -211,4 +215,33 @@ test('local workspace removal is scoped and only an owner can disconnect the reu
   assert.equal(peopleDialogCanAct(data,'remove-agent',data.agents[0].id),true);
   assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);
   data.agents[0].own=true;assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),true);
+});
+
+test("turn-off-key confirmation puts both consequences together first and follows with one quiet recovery line", () => {
+  const copy = peopleConfirmationCopy("turn-off-key", { name: "Sprout" });
+  assert.equal(copy.title, "Turn off Sprout’s key?");
+  assert.equal(copy.button, "Turn off key");
+  assert.deepEqual(copy.stops, [
+    "This key and its renewals stop immediately for new requests, in any workspace where it is used.",
+    "This key cannot be used again.",
+  ]);
+  assert.deepEqual(copy.stays, [
+    "Its identity and history stay here. Its owner can get a new key to bring it back.",
+  ]);
+});
+
+test("remove-person confirmation names the workspace, groups both consequences, and follows with one quiet note", () => {
+  const longName = "Rivera household & studio — shared with everyone, including the agents";
+  const copy = peopleConfirmationCopy("remove-person", { name: "Sam Rivera", workspaceName: longName });
+  assert.equal(copy.title, `Remove Sam Rivera from ${longName}?`);
+  assert.equal(copy.button, "Remove Sam Rivera");
+  assert.deepEqual(copy.stops, [
+    "Sam Rivera will lose membership of this workspace.",
+    "This removal cannot be undone; they would need a new invitation to join again.",
+  ]);
+  assert.deepEqual(copy.stays, [
+    "Workspace history stays. They keep their other memberships.",
+  ]);
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Sam Rivera" }).title, "Remove Sam Rivera?");
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Sam Rivera", workspaceName: "   " }).title, "Remove Sam Rivera?");
 });

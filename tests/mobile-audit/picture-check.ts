@@ -75,6 +75,11 @@ const VIEWER = () => {
   const image = dialog.querySelector("img")!, stage = dialog.querySelector("[data-viewer-stage]")!;
   const box = (node: Element) => { const r = node.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; };
   const active = document.activeElement as HTMLElement | null;
+  const nameEl = dialog.querySelector<HTMLElement>(".cs-viewer__name");
+  const posEl = dialog.querySelector<HTMLElement>("[data-viewer-position]");
+  const zoomBtn = dialog.querySelector<HTMLElement>("[data-viewer-zoom]");
+  const posRect = posEl?.getBoundingClientRect();
+  const zoomRect = zoomBtn?.getBoundingClientRect();
   return {
     state: dialog.dataset.state ?? null,
     loaded: image.complete && image.naturalWidth > 0,
@@ -83,6 +88,20 @@ const VIEWER = () => {
     image: box(image), stage: box(stage),
     zoomed: dialog.hasAttribute("data-zoomed"),
     pressed: dialog.querySelector("[data-viewer-zoom]")?.getAttribute("aria-pressed") ?? null,
+    name: nameEl?.textContent ?? null,
+    nameAtomic: nameEl?.getAttribute("aria-atomic") ?? null,
+    position: posEl && posRect ? {
+      text: posEl.textContent ?? "",
+      ok: posRect.width > 0 && posEl.scrollWidth <= posEl.clientWidth + 1
+        && posRect.left >= 0 && posRect.top >= 0 && posRect.bottom <= innerHeight
+        && (!zoomRect || posRect.right <= zoomRect.left + 0.5),
+    } : null,
+    // Previous and Next: absent for a single picture; otherwise whether each can be pressed and is a whole 44px target on screen.
+    steps: dialog.querySelector("[data-viewer-next]") ? (["previous", "next"] as const).map(key => {
+      const button = dialog.querySelector<HTMLButtonElement>(`[data-viewer-${key}]`)!;
+      const r = button.getBoundingClientRect();
+      return { key, disabled: button.disabled, ok: r.width >= 44 && r.height >= 44 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight };
+    }) : null,
     note: dialog.querySelector<HTMLElement>(".cs-viewer__note")?.checkVisibility() ? dialog.querySelector(".cs-viewer__note")!.textContent : null,
     controls: ["zoom", "download", "close"].map(key => {
       const button = dialog.querySelector(`[data-viewer-${key}]`);
@@ -145,7 +164,7 @@ type Picture = NonNullable<ReturnType<typeof PICTURE>>;
 export async function runPictureChecks(
   open: (setup: (page: any) => Promise<void>) => Promise<any>,
   shot: (page: any, label: string) => Promise<void>,
-  options: { click: boolean },
+  options: { click: boolean; openBrowse?: (setup: (page: any) => Promise<void>) => Promise<any> },
 ): Promise<{ checks: PictureCheck[]; error: string | null }> {
   const checks: PictureCheck[] = [];
   const check = (name: string, ok: boolean, detail: unknown) => { checks.push({ name, ok, detail }); };
@@ -182,7 +201,7 @@ export async function runPictureChecks(
     const unsigned = signing.picture;
     check("a picture with no link yet waits in its frame and is not painted", signing.seen && !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted,
       { seen: signing.seen, unsigned });
-    const signedLater = await until(unsignedPage, p => p.loaded);
+    const signedLater = await until(unsignedPage, p => p.loaded && p.state === null);
     check("it appears in the same frame once its link is signed", !!signedLater?.loaded && signedLater.painted && signedLater.state === null && near(unsigned?.frame ?? null, signedLater.frame), { unsigned: unsigned?.frame, loaded: signedLater });
     await unsignedPage.close();
 
@@ -203,7 +222,7 @@ export async function runPictureChecks(
     check("frame is reserved at 16:10 before the picture loads", !!frame && frame.w > 0 && Math.abs(frame.h - frame.w * 10 / 16) <= 1, frame);
     await shot(page, "picture-loading");
     release();
-    const after = await until(page, p => p.loaded);
+    const after = await until(page, p => p.loaded && p.state === null);
     check("picture loads at its real size", after?.natural?.w === AUDIT_PNG_SIZE.width && after.natural.h === AUDIT_PNG_SIZE.height, after);
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
     check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
@@ -232,6 +251,7 @@ export async function runPictureChecks(
         && opened.natural.w === AUDIT_PNG_SIZE.width && opened.natural.h === AUDIT_PNG_SIZE.height, opened);
       check("Zoom, Download and Close are 44px, on screen and reachable", !!opened && opened.controls.every(c => c.ok), opened?.controls ?? null);
       check("the viewer opens with focus on Close", opened?.focus === "close", opened?.focus ?? null);
+      check("a message with one picture offers no Previous or Next", !!opened && opened.steps === null && opened.name === "boiler-label.png", { steps: opened?.steps, name: opened?.name });
       await shot(page, "viewer-fitted");
       // A press on the picture itself does nothing: the viewer stays open and fitted.
       const mid = opened ? { x: opened.stage.x + opened.stage.w / 2, y: opened.stage.y + opened.stage.h / 2 } : { x: cx, y: cy };
@@ -249,10 +269,12 @@ export async function runPictureChecks(
         await page.mouse.move(mid.x + 700, mid.y + 700, { steps: 6 }); await page.mouse.up();
       } else {
         const cdp = await page.context().newCDPSession(page);
-        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
-        await touch("touchStart", [mid]);
-        for (let step = 1; step <= 6; step++) await touch("touchMove", [{ x: mid.x, y: mid.y + step * 60 }]);
-        await touch("touchEnd", []);
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          await touch("touchStart", [mid]);
+          for (let step = 1; step <= 6; step++) await touch("touchMove", [{ x: mid.x, y: mid.y + step * 60 }]);
+          await touch("touchEnd", []);
+        } finally { await cdp.detach().catch(() => {}); }
       }
       await page.waitForTimeout(250);
       const panned = await page.evaluate(VIEWER);
@@ -273,28 +295,30 @@ export async function runPictureChecks(
       if (!options.click && again) {
         // A phone: two fingers pinch it open, and lifting them leaves the viewer open; then one finger from fitted size pulls it shut.
         const cdp = await page.context().newCDPSession(page);
-        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
-        const at = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
-        await touch("touchStart", [{ x: at.x - 30, y: at.y }, { x: at.x + 30, y: at.y }]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x - 30 - step * 14, y: at.y }, { x: at.x + 30 + step * 14, y: at.y }]);
-        await touch("touchEnd", []);
-        await page.waitForTimeout(250);
-        const pinched = await page.evaluate(VIEWER);
-        check("a pinch zooms the picture, and lifting the fingers leaves the viewer open", !!pinched && pinched.zoomed && pinched.image.w >= again.image.w * 1.5 && overStage(pinched), pinched);
-        // One finger pulled down on a ZOOMED picture pans it; it does not close the viewer.
-        await touch("touchStart", [at]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
-        await touch("touchEnd", []);
-        await page.waitForTimeout(250);
-        const held = await page.evaluate(VIEWER);
-        check("a swipe down on a zoomed picture does not close the viewer", !!held && held.zoomed, held);
-        await page.keyboard.press("0");
-        await page.waitForTimeout(350);
-        await touch("touchStart", [at]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
-        await touch("touchEnd", []);
-        const swiped = await viewer(page, v => v === null, 5_000);
-        check("a one-finger swipe down from fitted size closes the viewer, with focus back on the picture", swiped === null && await page.evaluate(FOCUS) === "picture", { open: swiped !== null, focus: await page.evaluate(FOCUS) });
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          const at = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
+          await touch("touchStart", [{ x: at.x - 30, y: at.y }, { x: at.x + 30, y: at.y }]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x - 30 - step * 14, y: at.y }, { x: at.x + 30 + step * 14, y: at.y }]);
+          await touch("touchEnd", []);
+          await page.waitForTimeout(250);
+          const pinched = await page.evaluate(VIEWER);
+          check("a pinch zooms the picture, and lifting the fingers leaves the viewer open", !!pinched && pinched.zoomed && pinched.image.w >= again.image.w * 1.5 && overStage(pinched), pinched);
+          // One finger pulled down on a ZOOMED picture pans it; it does not close the viewer.
+          await touch("touchStart", [at]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+          await touch("touchEnd", []);
+          await page.waitForTimeout(250);
+          const held = await page.evaluate(VIEWER);
+          check("a swipe down on a zoomed picture does not close the viewer", !!held && held.zoomed, held);
+          await page.keyboard.press("0");
+          await page.waitForTimeout(350);
+          await touch("touchStart", [at]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+          await touch("touchEnd", []);
+          const swiped = await viewer(page, v => v === null, 5_000);
+          check("a one-finger swipe down from fitted size closes the viewer, with focus back on the picture", swiped === null && await page.evaluate(FOCUS) === "picture", { open: swiped !== null, focus: await page.evaluate(FOCUS) });
+        } finally { await cdp.detach().catch(() => {}); }
       } else if (again) {
         // A mouse: a double click zooms about the pointer and a second one fits again; Close returns focus to the picture.
         const at = { x: again.image.x + again.image.w / 2, y: again.image.y + again.image.h / 2 };
@@ -311,13 +335,42 @@ export async function runPictureChecks(
       }
       check("nothing navigated to the file while the viewer was used", !navigated, navigated);
       page.off("request", watch);
-      // Download is the viewer's own button, and it starts the picture's own signed file.
-      await page.keyboard.press("Enter");
-      const forDownload = await viewer(page, v => !!v && v.loaded);
-      const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
-      if (forDownload) await page.locator("[data-viewer-download]").click();
-      const path = await navigation;
-      check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`), { path, fileId: after.fileId });
+      // Download is the viewer's own button, and it starts the picture's own signed file. Activate the picture link
+      // directly and record lightweight failure-only diagnostics in case Enter does not open the viewer.
+      await page.evaluate(() => {
+        const list = document.querySelector("[data-feed-list]");
+        const trace = { activeBefore: `${document.activeElement?.tagName ?? ""}:${document.activeElement?.className ?? ""}`, keydowns: [] as string[], dialogs: 0, feedRebuilds: 0 };
+        const onKey = (e: KeyboardEvent) => { trace.keydowns.push(`${e.key}:t=${(e.target as Element | null)?.tagName ?? "?"}.${(e.target as Element | null)?.className ?? ""}:a=${document.activeElement?.tagName ?? "?"}.${document.activeElement?.className ?? ""}`); };
+        const mo = new MutationObserver((records) => {
+          for (const rec of records) {
+            if (rec.target === list) trace.feedRebuilds++;
+            for (const node of rec.addedNodes) if (node instanceof Element && node.matches?.("dialog[data-image-viewer]")) trace.dialogs++;
+          }
+        });
+        document.addEventListener("keydown", onKey, true);
+        mo.observe(document.body, { childList: true, subtree: true });
+        (window as any).__csPicTrace = { trace, stop: () => { document.removeEventListener("keydown", onKey, true); mo.disconnect(); return trace; } };
+      });
+      await page.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+      const forDownload = await viewer(page, v => !!v && v.loaded && v.state === "");
+      const openTrace = await page.evaluate(() => (window as any).__csPicTrace?.stop?.() ?? null);
+      let commandStatus: number | null = null;
+      const onCommandResponse = (response: any) => {
+        if (String(response.url()).includes("/functions/v1/command") && (response.request().postData() ?? "").includes("file_download_url")) {
+          commandStatus = response.status();
+        }
+      };
+      let path: string | null = null;
+      if (forDownload?.loaded && forDownload.state === "") {
+        page.on("response", onCommandResponse);
+        try {
+          const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
+          await page.locator("[data-viewer-download]").click();
+          path = await navigation;
+        } finally { page.off("response", onCommandResponse); }
+      }
+      check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
+        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS), openTrace }) });
     }
     await page.close();
 
@@ -347,7 +400,7 @@ export async function runPictureChecks(
         url: location.pathname + location.search,
       };
     };
-    const loadedStale = await until(stale, p => p.loaded);
+    const loadedStale = await until(stale, p => p.loaded && p.state === null);
     const staleAt = await stale.evaluate(() => location.pathname + location.search);
     await stale.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
     await stale.keyboard.press("Enter");
@@ -367,6 +420,44 @@ export async function runPictureChecks(
     check("Tab reaches that Retry, and with the viewer's code back it opens the viewer", onRetryOpen === "retry" && !!recovered2 && fitted(recovered2) && await stale.evaluate(OPEN_FAILED) === null && !strayed,
       { onRetryOpen, recovered: recovered2, strayed });
     await stale.close();
+
+    // 2a-dialog. If another dialog opens while the viewer's module is still loading, that dialog stays the only open
+    // dialog and keeps focus; once it closes, a fresh press on the picture opens the viewer normally.
+    let releaseViewerChunk: () => void = () => {};
+    let viewerChunkRequested = false;
+    let viewerChunkHeld = new Promise<void>(done => { releaseViewerChunk = done; });
+    const contested = await open(async (p: any) => {
+      await p.route(VIEWER_CHUNK, async (route: any) => {
+        viewerChunkRequested = true;
+        await viewerChunkHeld;
+        await route.continue();
+      });
+    });
+    await until(contested, p => p.loaded && p.state === null);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    for (const started = Date.now(); Date.now() - started < 10_000 && !viewerChunkRequested;) await contested.waitForTimeout(50);
+    if (options.click) await contested.locator("[data-roster-open]:visible").first().click();
+    else await contested.keyboard.press("ControlOrMeta+k");
+    await contested.waitForSelector("dialog[open]:not([data-image-viewer])", { state: "visible", timeout: 10_000 });
+    releaseViewerChunk();
+    await contested.waitForTimeout(350);
+    const duringOther = await contested.evaluate(() => {
+      const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
+      const other = openDialogs.find(d => !d.hasAttribute("data-image-viewer")) ?? null;
+      return {
+        openCount: openDialogs.length,
+        viewerOpen: openDialogs.some(d => d.hasAttribute("data-image-viewer")),
+        focusInsideOther: !!other && other.contains(document.activeElement),
+      };
+    });
+    await contested.keyboard.press("Escape");
+    for (const started = Date.now(); Date.now() - started < 5_000 && await contested.evaluate(() => !!document.querySelector("dialog[open]"));) await contested.waitForTimeout(50);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    const afterOther = await viewer(contested, v => !!v && v.loaded && v.state === "");
+    check("a late viewer module never opens over another dialog, and opens normally once it closes",
+      viewerChunkRequested && duringOther.openCount === 1 && !duringOther.viewerOpen && duringOther.focusInsideOther && !!afterOther && fitted(afterOther),
+      { viewerChunkRequested, duringOther, afterOther: !!afterOther });
+    await contested.close();
 
     // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
     let imageReads = 0, sawFailure = false, paintedUnloaded = false;
@@ -431,7 +522,7 @@ export async function runPictureChecks(
     // Storage answers again: Enter on Retry loads the picture in the same frame, with focus on the picture.
     storageDown = false;
     await failing.keyboard.press("Enter");
-    const retried = await until(failing, p => p.loaded);
+    const retried = await until(failing, p => p.loaded && p.state === null);
     const afterLoad = await failing.evaluate(FOCUS);
     check("Retry loads the picture in the same frame", !!retried?.loaded && retried.painted && retried.state === null && near(frame, retried.frame), retried);
     check("a successful retry leaves focus on the picture", afterLoad === "picture", afterLoad);
@@ -451,6 +542,91 @@ export async function runPictureChecks(
     check("a staged SVG is never drawn as a picture", !!vector && vector.image === null, staged);
     await shot(failing, "picture-staged");
     await failing.close();
+
+    // 4. Several pictures on one message. Post in an isolated channel (openBrowse) so #household's single-picture
+    // checks stay untouched across profiles, and reuse the two-picture message once posted. Long shared prefixes
+    // prove that the position ("1 of 2", "2 of 2") keeps its own room on narrow screens while only the filename truncates.
+    const firstBrowseName = "Boiler inspection - east utility room - before repairs.png";
+    const secondBrowseName = "Boiler inspection - east utility room - after repairs.png";
+    const browse = await (options.openBrowse ?? open)(async () => {});
+    const PAIR = () => {
+      const lists = [...document.querySelectorAll<HTMLElement>('.dashboard__message .hm-extras__images[data-stream-images="2"]')];
+      const links = [...(lists[lists.length - 1]?.querySelectorAll<HTMLElement>(".hm-extras__image") ?? [])];
+      if (links.length !== 2) return null;
+      links[0]!.scrollIntoView({ block: "center" });
+      return { names: links.map(link => link.title), focus: links.indexOf(document.activeElement as HTMLElement),
+        loaded: links.every(link => { const image = link.querySelector("img"); return !!image && image.complete && image.naturalWidth > 0 && !link.dataset.previewState; }) };
+    };
+    const existingPair = await browse.evaluate(PAIR);
+    if (!existingPair) {
+      await browse.setInputFiles("[data-composer-file-input]", [firstBrowseName, secondBrowseName].map(name => ({ name, mimeType: "image/png", buffer: Buffer.from(auditPng()) })));
+      await browse.waitForSelector(`[data-staged-attachment="${secondBrowseName}"]`, { state: "visible", timeout: 10_000 });
+      await browse.fill("[data-composer-input]", "Two views of the boiler label.");
+      await browse.locator("[data-composer-send]").click();
+    }
+    let pair: ReturnType<typeof PAIR> = null;
+    for (const started = Date.now(); Date.now() - started < 30_000 && !pair?.loaded;) { pair = await browse.evaluate(PAIR); if (!pair?.loaded) await browse.waitForTimeout(200); }
+    const pairDiag = pair?.loaded ? null : await browse.evaluate(() => ({
+      status: document.querySelector("[data-composer-status]")?.textContent?.trim() ?? null,
+      staged: document.querySelectorAll("[data-staged-attachment]").length,
+      input: document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? null,
+      imageLists: [...document.querySelectorAll<HTMLElement>(".hm-extras__images")].map(el => el.dataset.streamImages),
+    }));
+    check("a message posted with two pictures shows both", !!pair?.loaded && pair.names.join("|") === `${firstBrowseName}|${secondBrowseName}`, pair?.loaded ? pair : { pair, pairDiag });
+    if (pair?.loaded) {
+      const firstLabel = `${firstBrowseName}, 1 of 2`;
+      const secondLabel = `${secondBrowseName}, 2 of 2`;
+      const named = (v: Viewer | null, name: string) => !!v && v.name === name && v.loaded && v.state === "" && fitted(v);
+      const can = (v: Viewer | null, key: "previous" | "next") => v?.steps?.find(step => step.key === key);
+      await browse.locator('.dashboard__message .hm-extras__images[data-stream-images="2"]').last().locator(".hm-extras__image").first().press("Enter");
+      const first = await viewer(browse, v => named(v, firstLabel));
+      check("the viewer opens on the picture pressed and keeps 1 of 2 visible beside a truncated filename with all toolbar buttons", named(first, firstLabel)
+        && first!.nameAtomic === "true" && first!.position?.text === "1 of 2" && first!.position.ok
+        && first!.controls.every(c => c.ok)
+        && can(first, "previous")?.disabled === true && can(first, "next")?.disabled === false
+        && !!first!.steps!.every(step => step.ok), { name: first?.name, position: first?.position, controls: first?.controls, steps: first?.steps });
+      await shot(browse, "viewer-browse-first");
+      await browse.locator("[data-viewer-next]").click();
+      const second = await viewer(browse, v => named(v, secondLabel));
+      check("Next shows the second picture, keeps 2 of 2 visible with all toolbar buttons, and keeps focus in the viewer when Next has nowhere left to go", named(second, secondLabel)
+        && second!.nameAtomic === "true" && second!.position?.text === "2 of 2" && second!.position.ok
+        && second!.controls.every(c => c.ok)
+        && can(second, "next")?.disabled === true
+        && can(second, "previous")?.disabled === false && second!.focus === "inside", { name: second?.name, position: second?.position, controls: second?.controls, steps: second?.steps, focus: second?.focus });
+      await shot(browse, "viewer-browse");
+      await browse.keyboard.press("ArrowLeft");
+      const back = await viewer(browse, v => named(v, firstLabel));
+      check("the left arrow key goes back to the first picture", named(back, firstLabel), back?.name ?? null);
+      // Zoomed, the arrow keys pan and the picture stays the same one.
+      await browse.keyboard.press("+");
+      await browse.waitForTimeout(350);
+      await browse.keyboard.press("ArrowRight");
+      await browse.waitForTimeout(350);
+      const panned = await browse.evaluate(VIEWER);
+      check("while zoomed the arrow keys pan and do not change the picture", !!panned && panned.zoomed && panned.name === firstLabel, { name: panned?.name, zoomed: panned?.zoomed });
+      await browse.keyboard.press("0");
+      await browse.waitForTimeout(350);
+      if (options.click) {
+        await browse.keyboard.press("ArrowRight");
+      } else if (back) {
+        // A phone: one finger slid to the left from fitted size brings the next picture.
+        const cdp = await browse.context().newCDPSession(browse);
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          const at = { x: back.stage.x + back.stage.w / 2, y: back.stage.y + back.stage.h / 2 };
+          await touch("touchStart", [at]);
+          for (let move = 1; move <= 5; move++) await touch("touchMove", [{ x: at.x - move * 30, y: at.y }]);
+          await touch("touchEnd", []);
+        } finally { await cdp.detach().catch(() => {}); }
+      }
+      const forward = await viewer(browse, v => named(v, secondLabel));
+      check(options.click ? "the right arrow key goes to the second picture" : "a one-finger swipe to the left goes to the second picture, and the viewer stays open", named(forward, secondLabel), forward?.name ?? null);
+      await browse.keyboard.press("Escape");
+      const gone = await viewer(browse, v => v === null);
+      const after = await browse.evaluate(PAIR);
+      check("closing returns focus to the picture last shown, not the one first pressed", gone === null && after?.focus === 1, { open: gone !== null, focus: after?.focus });
+    }
+    await browse.close();
     return { checks, error: null };
   } catch (error) {
     return { checks, error: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) };

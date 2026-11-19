@@ -4,7 +4,7 @@ import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 // filename from oidc-provider's base64url interaction UID alphabet.
 export const CONSENT_SUBMIT_PATH = "/interaction/consent-submit.js";
 
-const CONSENT_WARNING = "Chats using this Claude connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
+const CONSENT_WARNING = "Chats using this connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
 
 // Sign-in providers the page may name. Any other value (null, unknown, inherited
 // object keys) renders the account without a provider, never the raw value.
@@ -43,13 +43,23 @@ const PROVIDER_GLYPHS = {
 };
 const BRAND_MARK = '<svg class="brand-mark" width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true" focusable="false"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" stroke="currentColor" stroke-width="4.8" stroke-linecap="round"></path><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="var(--accent)"></rect></svg>';
 
-export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
+/** Describes the OAuth redirect target without paths, query parameters, fragments or codes. */
+export function formatRedirectDestination(redirectUri) {
   const redirect = new URL(redirectUri);
-  const hostname = redirect.hostname;
-  const destination = ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
-    ? "a program on this computer (localhost)"
-    : !hostname && !["http:", "https:"].includes(redirect.protocol)
-      ? `an app on this device (${redirect.protocol})` : hostname;
+  const hostname = redirect.hostname.toLowerCase();
+  if (redirect.protocol === "http:" || redirect.protocol === "https:") {
+    if (["localhost", "127.0.0.1", "[::1]"].includes(hostname)) {
+      return "a program on this computer (localhost)";
+    }
+    return redirect.host.toLowerCase();
+  }
+  return hostname
+    ? `an app on this device (${redirect.protocol}//${redirect.host.toLowerCase()})`
+    : `an app on this device (${redirect.protocol})`;
+}
+
+export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
+  const destination = formatRedirectDestination(redirectUri);
   // Shared with admin-interaction-page.js: line breaks stay in the markup so the
   // facts keep one line each without this page's stylesheet.
   return `<p class="notice destination"><span class="destination-line">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong></span><br>
@@ -75,6 +85,7 @@ function renderClientIdentity(clientDisplay) {
       badge: `<span class="badge badge-neutral">HTTPS client ID</span>`,
       heading,
       facts: `<p class="app-fact">Client: <strong>${primary}</strong></p>`,
+      declared: "",
       warning: "",
     };
   }
@@ -86,6 +97,7 @@ function renderClientIdentity(clientDisplay) {
     badge: `<span class="badge badge-unverified">${ICONS.alert}Unverified app</span>`,
     heading,
     facts: `<p class="app-fact">Authorization will return to <strong>${primary}</strong>.</p>${declared}`,
+    declared,
     warning: `<p class="warning unverified-warning">${ICONS.alert}<span><strong>Not verified:</strong> CommonSwarm has not checked who runs this app. Only continue if you trust <strong>${primary}</strong> to receive your authorization code and access your workspaces.</span></p>`,
   };
 }
@@ -169,12 +181,19 @@ svg{flex:none}
 .intro{display:flex;flex-direction:column;gap:10px}
 .intro .connect-row{margin-bottom:6px}
 .lede{font-size:17px;color:var(--muted);text-wrap:pretty}
+.lede strong{color:var(--ink)}
+.result-next{font-size:17px;color:var(--ink);text-wrap:pretty}
+.result-note{margin-top:10px;font-size:15px;color:var(--muted);text-wrap:pretty}
 .app-facts{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:14px;color:var(--muted)}
 .app-facts strong{color:var(--ink);overflow-wrap:anywhere}
 .warning{display:flex;gap:10px;align-items:flex-start;padding:14px 16px;border-radius:14px;font-size:15px;text-wrap:pretty}
 .unverified-warning{background:var(--warn-bg);color:var(--warn-ink);border:1px solid var(--warn-line)}
 .unverified-warning svg{color:var(--warn-icon);margin-top:2px}
 .unverified-warning strong{overflow-wrap:anywhere}
+.unverified-decision{display:flex;flex-direction:column;gap:12px;padding:14px 16px;border-radius:14px;background:var(--warn-bg);color:var(--warn-ink);border:1px solid var(--warn-line)}
+.unverified-decision .unverified-warning{padding:0;border:0;border-radius:0;background:transparent}
+.unverified-decision .destination{padding:10px 0 0;border:0;border-top:1px solid var(--warn-line);border-radius:0;color:var(--warn-ink)}
+.unverified-decision .destination strong,.unverified-decision .destination-return{color:var(--warn-ink)}
 .account{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 10px 10px 10px;border-radius:16px;background:var(--soft);border:1px solid var(--hair)}
 .avatar{position:relative;width:40px;height:40px;border-radius:50%;background:var(--avatar);color:var(--avatar-fg);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex:none}
 .provider-badge{position:absolute;right:-3px;bottom:-3px;width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#FFFFFF;color:#17231C;box-shadow:0 0 0 2px var(--soft)}
@@ -251,12 +270,13 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
 .actions a{display:inline-flex;align-items:center;min-height:44px;color:var(--link);font-weight:600;font-size:15px;text-underline-offset:3px}
 .finish .actions a:not([aria-disabled="true"]){border:1px solid #2C2C42}
 .sign-in-actions{flex-direction:column;align-items:stretch}
-.sign-in-actions a{justify-content:center;min-height:52px;padding:0 30px;border:1px solid #2C2C42;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);text-decoration:none;font-weight:700}
+.sign-in-actions a{justify-content:center;min-height:52px;padding:12px 24px;border:1px solid #2C2C42;border-radius:26px;background:var(--primary-bg);color:var(--primary-fg);text-decoration:none;text-align:center;overflow-wrap:anywhere;font-weight:700}
 .sign-in-actions a:hover{background:var(--primary-hover);color:var(--primary-fg)}
 .sign-in-actions a.provider-secondary{background:transparent;color:var(--ink);border:1px solid var(--border)}
 .sign-in-actions a.provider-secondary:hover{background:var(--soft)}
 :focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:6px}
 .actions button:focus-visible,.switch-button:focus-visible{outline-offset:3px;border-radius:999px}
+.sign-in-actions a:focus-visible{outline-offset:3px;border-radius:26px}
 .workspace-pick:has(input:focus-visible),.home-choice:has(input:focus-visible){outline:3px solid var(--focus);outline-offset:1px}
 .workspace-pick input:focus-visible,.home-choice input:focus-visible{outline:0}
 @media (prefers-reduced-motion:no-preference){.switch-button,.actions button,.home-choice,.workspace-choice{transition:background-color .15s ease,color .15s ease,border-color .15s ease}}
@@ -273,7 +293,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
   .actions button{width:100%}
   .actions a{justify-content:center}
 }
-@media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination{border:1px solid CanvasText}}
+@media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination,.sign-in-actions a{border:1px solid CanvasText}}
 `;
 
 export function renderSignInPage({ interactionUid, providers, selectAccount = false }) {
@@ -293,21 +313,29 @@ export function renderSignInPage({ interactionUid, providers, selectAccount = fa
 
 export function renderDifferentAccountPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Start again</title><style>${CONSENT_STYLES}</style></head><body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header><div class="card">
-    <h1>You signed in as a different account; start again</h1><p>Start a new connection from your app.</p></div></main></body></html>`;
+    <meta name="color-scheme" content="light dark"><title>You signed in with a different account</title><style>${CONSENT_STYLES}</style></head>
+    <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header><div class="card">
+    <h1>You signed in with a different account</h1><p>Open the app you were connecting and start a new connection.</p></div></main></body></html>`;
 }
 
 export function renderConsentResultPage({ completed = false, clientName, restartUrl } = {}) {
   const title = completed ? "Already approved" : "Start the connection again";
+  const app = escapeHtml(clientName || "your app");
+  const body = completed
+    ? (restartUrl
+      ? `<p class="lede">If your app did not finish connecting, start a new connection from that app.</p>`
+      : `<p class="result-next">Switch back to <strong>${app}</strong> to continue.</p>
+      <p class="result-note">If it did not finish connecting, start a new connection from that app.</p>`)
+    : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`;
+  const action = restartUrl
+    ? `<a href="${escapeHtml(restartUrl)}">Return to ${app}${completed ? "" : " to start again"}</a>`
+    : `<a${completed ? ' class="provider-secondary"' : ""} href="https://commonswarm.com/app">Return to CommonSwarm</a>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><title>${title}</title><style>${CONSENT_STYLES}</style></head>
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
     <div class="card"><h1>${title}</h1>
-    ${completed ? `<p class="lede">You can return to <strong>${escapeHtml(clientName || "your app")}</strong>.</p>
-      <p>If your app did not finish connecting, start a new connection from that app.</p>`
-      : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`}
-    <div class="actions sign-in-actions">${restartUrl ? `<a href="${escapeHtml(restartUrl)}">Return to ${escapeHtml(clientName || "your app")}${completed ? "" : " to start again"}</a>`
-      : '<a href="https://commonswarm.com/app">Return to CommonSwarm</a>'}</div></div></main></body></html>`;
+    ${body}
+    <div class="actions sign-in-actions">${action}</div></div></main></body></html>`;
 }
 
 export function renderConsentPage({
@@ -360,6 +388,15 @@ export function renderConsentPage({
       </section>`
     : "";
   const client = renderClientIdentity(clientDisplay);
+  const introFacts = client.verified ? client.facts : client.declared;
+  const destination = renderConsentDestination({
+    clientName: clientDisplay.declaredName,
+    redirectUri,
+    metadataHost: clientDisplay.metadataHost,
+  });
+  const destinationBlock = client.verified
+    ? destination
+    : `<div class="unverified-decision">${client.warning}${destination}</div>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
@@ -376,8 +413,7 @@ ${CONSENT_STYLES}
       ${client.badge}
     </div>
     <h1 id="consent-title">${client.heading}</h1>
-    <div class="app-facts">${client.facts}</div>
-    ${client.warning}
+    ${introFacts ? `<div class="app-facts">${introFacts}</div>` : ""}
   </section>
   ${renderAccount(identity, csrfToken, selectionLocked ? null : switchAccount)}
   ${progressMarkup}
@@ -393,8 +429,8 @@ ${CONSENT_STYLES}
       <p class="home-needed" role="status" data-text="Choose which one is Home."></p>
     </fieldset>
     <p class="warning">${ICONS.chat}<span><strong>Before you continue:</strong> ${CONSENT_WARNING}</span></p>
-    ${renderConsentDestination({ clientName: clientDisplay.declaredName, redirectUri, metadataHost: clientDisplay.metadataHost })}
-    <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> across them. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
+    ${destinationBlock}
+    <p class="reach">It can reach only the workspaces you tick and create up to <strong>10 hosted seats</strong> across them. Approved agents can read and post messages, work with workspace files, and use shared lists and to-dos subject to workspace and content permissions. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>
   </div>

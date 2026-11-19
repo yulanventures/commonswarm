@@ -134,6 +134,57 @@ test("the confirmation names its final action, keeps the names and consequence i
   assert.equal(fakeDoc.focused, find(root, "cleanupAct"), "Back returns the keyboard to the button that opened the confirmation");
 });
 
+test("Files: the list leads, the filters sit under one closed Filter that names what is on, and filtering sends nothing", async () => {
+  const { mountCleanup } = await import("./cleanup-view.ts");
+  const root = new FakeNode(fakeDoc, "div");
+  const asked = []; let sent = 0;
+  const files = [{ id: "f1", label: "boiler-quote.pdf", detail: "" }, { id: "f2", label: "school-forms.zip", detail: "" }, { id: "f3", label: "IMG_2231.heic", detail: "" }];
+  mountCleanup(root, {
+    context: () => ({ userId: "u1", workspaceId: "w1" }),
+    agents: () => [],
+    files: async (filter) => { asked.push({ ...filter }); return filter.uploaderGone ? [] : filter.olderThanDays > 0 ? files.slice(0, 1) : files; },
+    send: async () => { sent++; return { status: 200, body: { status: "accepted" } }; },
+    newId: () => "x",
+  });
+  await flush();
+  find(root, "cleanupTab", "tombstone_file").fire("click");
+  await flush();
+  const filter = find(root, "cleanupFilter"), active = find(root, "cleanupFilterActive");
+  // One disclosure, closed on entry, before the list; "Filter" is its whole label while nothing is on.
+  assert.equal(filter.tag, "details"); assert.notEqual(filter.open, true); assert.equal(filter.hidden, false);
+  assert.equal(filter.children[0].tag, "summary"); assert.equal(filter.children[0].textContent, "Filter");
+  assert.ok(root.children.indexOf(filter) < root.children.indexOf(find(root, "cleanupList")));
+  // The age and uploader controls are inside it.
+  assert.ok(filter.all().includes(find(root, "cleanupAge")) && filter.all().includes(find(root, "cleanupUploaderGone")));
+  // Check two files, then open and close Filter: the checked files and their count stay, and nothing is reloaded.
+  for (const box of root.all().filter((node) => node.dataset.cleanupItem !== undefined).slice(0, 2)) { box.checked = true; box.fire("change"); }
+  const counted = () => root.all().find((node) => node.className === "cleanup__count").textContent;
+  assert.equal(counted(), "2 selected");
+  const loads = asked.length;
+  filter.open = true; filter.fire("toggle"); filter.open = false; filter.fire("toggle");
+  assert.equal(counted(), "2 selected"); assert.equal(asked.length, loads);
+  assert.equal(root.all().filter((node) => node.dataset.cleanupItem !== undefined && node.checked).length, 2);
+  // Changing a filter reloads the list and clears the selection, as before; its value is then said beside "Filter".
+  const age = find(root, "cleanupAge"); age.value = "90"; age.fire("change");
+  await flush();
+  assert.deepEqual(asked.at(-1), { olderThanDays: 90, uploaderGone: false });
+  assert.equal(counted(), "0 selected");
+  assert.equal(active.textContent, " · Older than 90 days");
+  assert.equal(filter.children[0].textContent, "Filter · Older than 90 days");
+  assert.equal(root.all().filter((node) => node.dataset.cleanupItem !== undefined).length, 1);
+  // Nothing matches: the list says so, and the reason stays beside "Filter".
+  const gone = find(root, "cleanupUploaderGone"); gone.checked = true; gone.fire("change");
+  await flush();
+  assert.ok(find(root, "cleanupList").textContent.includes("No files match."));
+  assert.equal(active.textContent, " · Older than 90 days · From people or agents no longer here");
+  // Clearing both says nothing extra again.
+  age.value = "0"; age.fire("change"); gone.checked = false; gone.fire("change");
+  await flush();
+  assert.equal(active.textContent, "");
+  // Filtering never sends a removal.
+  assert.equal(sent, 0);
+});
+
 test("a delayed file list from a disposed mount never paints, and a new mount starts clean", async () => {
   const { mountCleanup } = await import("./cleanup-view.ts");
   const root = new FakeNode(fakeDoc, "div");

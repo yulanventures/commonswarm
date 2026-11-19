@@ -94,6 +94,7 @@
 .hm-agent-orb[data-hue="2"] { border-color: var(--home-purple); box-shadow: inset 0 0 0 1.5px var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
 .hm-agent-orb[data-hue="3"] { border-color: var(--home-teal); box-shadow: inset 0 0 0 1.5px var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
 .hm-orb-letter { color: inherit; }
+:is(.hm-person-avatar, .hm-orb-letter)[data-initial]::before { content: attr(data-initial); content: attr(data-initial) / ""; }
 
 .hm-person-avatar[data-size="24"] { inline-size: 24px; block-size: 24px; font-size: 11px; }
 .hm-agent-orb[data-size="24"] { inline-size: 24px; block-size: 24px; border-radius: 7px; font-size: 11px; }

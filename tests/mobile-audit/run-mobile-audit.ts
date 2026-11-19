@@ -32,6 +32,7 @@ import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from 
 import { runPictureChecks, type PictureCheck } from "./picture-check.js";
 import { runPaletteChecks, type PaletteCheck } from "./palette-check.js";
 import { freezeControlProblem, type FreezeCount } from "./freeze-control.js";
+import { inShard, ownsRunChecks, parseShard } from "./shard.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -73,9 +74,18 @@ const BOOT_RETRIES = 2;
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
 type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; abort(code?: string): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
-const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
+/** One slice of the full matrix, when the workflow splits it across parallel jobs (shard.ts). A focused run is never
+ *  sharded: it names its own screens. */
+const SHARD = (() => {
+  const shard = parseShard(process.env.MOBILE_AUDIT_SHARD);
+  if (shard && DIAGNOSTIC) throw new Error("MOBILE_AUDIT_SHARD splits the full matrix; a focused run (MOBILE_AUDIT_SCREENS) is not sharded");
+  return shard;
+})();
+let manifestIds: string[] | null = null;
+const sharded = (id: string) => inShard(manifestIds ??= screens().map(screen => screen.id), id, SHARD);
+const diagnosed = (id: string, size: string) => sharded(id) && (!DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size)));
 
-/** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
+/** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, tap, contextmenu, type (with text), select
  *  (with option), press, scroll, storage, fault, dispatch, wait, settle.
  *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
  *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
@@ -83,6 +93,8 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  reveals, where a pointer on its way could land on the revealed control instead (pair it with press).
  *  forcedColors: the page is drawn in forced colours (the system's high-contrast palette) from this step on, for a
  *  capture that shows what survives when backgrounds and shadows are taken away.
+ *  tap: a real touch tap at the element's centre, with no pointer on the way (a click moves the mouse there first, and
+ *  that hover can itself reveal a control over the element). It fails when another element takes the tap at that point.
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -90,7 +102,7 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; tap?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true;
   /** Load the page again with one localStorage item already in place, so the app starts with it (a draft saved by an
    *  earlier build, for example). Every page load clears stored composer drafts first, so the item is handed across
@@ -169,6 +181,11 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
   // The recipient's profile, opened by Enter from the message Jump to present landed on.
   "app.chat.jump-present.recipient.enter": ["[data-entity-panel]:not([hidden])"],
+  // A recipient's profile opened by one touch tap, on an ordinary message and on the one Jump to present landed on.
+  "app.chat.recipient.tap": ["[data-entity-panel]:not([hidden])"],
+  "app.chat.jump-present.recipient.tap": ["[data-entity-panel]:not([hidden])"],
+  // The reaction picker opened by touch: a tap on the message brings its bar, a tap on Add reaction opens the picker.
+  "app.chat.row-tools.tap": ["[data-reaction-picker]", '.dashboard__message-tools:has([data-reaction-add][aria-expanded="true"])'],
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
@@ -219,6 +236,35 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
     ],
     activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-pd-focus="row-remove-agent-{agent}"]' } },
+  }],
+  // Withdraw access on Lists & docs: the shared confirmation opens on Go back; Escape sends nothing and returns to the same agent's button.
+  "dialog.lists-withdraw": [{
+    name: "lists-withdraw-escape-returns-to-agent",
+    start: { active: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-household-agent-list] [data-pd-focus="lists-withdraw-{withdrawAgent}"]' } },
+  }],
+  "dialog.people-withdraw": [{
+    name: "people-withdraw-escape-returns-to-agent",
+    start: { active: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-people-detail] [data-pd-focus="withdraw-{withdrawAgent}"]' } },
+  }],
+  // Cancel in the Invites tab: Go back has initial focus; Escape sends nothing and returns to the same row's Cancel button.
+  "dialog.people-invite-cancel": [{
+    name: "people-invite-cancel-escape-returns-to-row",
+    start: { active: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind="person"]' } },
   }],
   // Lowering your own role: the app focuses Go back; Escape goes back to the role select, nothing is saved.
   "dialog.role-confirm": [{
@@ -344,6 +390,17 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     keys: [{ key: "Shift+Tab", expect: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="true"]' }],
     activate: { key: "Enter", expect: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="false"]' } },
   }],
+  // Standalone Invite someone page: opens on Their email; Tab reaches Create invite link, then Open Lists & docs.
+  "app.invite-person": [{
+    name: "invite-email-to-create-and-setting",
+    start: { active: '[data-channel-view="invite"]:not([hidden]) [data-invite-email]' },
+    keys: [
+      { key: "Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-submit]' },
+      { key: "Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-workspace-view="objects"]' },
+      { key: "Shift+Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-submit]' },
+      { key: "Shift+Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-email]' },
+    ],
+  }],
   "route.terms": [{
     name: "skip-link",
     start: "document",
@@ -434,6 +491,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     require: ['[data-signal-id="{message.choiceMultiAnswered}"]:has(li[data-decision-other][data-chosen="true"])'], max: 1 }],
   "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
     require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
+  "app.chat.waiting-panel": [{ name: "waiting-panel", rows: "[data-waiting-panel]:not([hidden]) [data-waiting-card]",
+    prefer: "[data-waiting-card]:first-child", require: ["[data-waiting-card]:first-child"], max: 1, focus: true,
+    focusTarget: ".hm-decision [data-decision-option]" }],
   /* Typed Something else text survives a real feed rebuild: its field is focused, a note in this channel makes the app's
      own poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while
      the card's Done is shown and enabled, which it is only while the draft still holds the typed text. Last on the page,
@@ -533,10 +593,10 @@ async function main(): Promise<void> {
 
   const envDir = mkdtempSync(join(tmpdir(), "cswarm-mobile-audit-"));
   const envFile = join(envDir, "functions.env");
-  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\nSWARM_SEAT_ADMIN=1\n");
+  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\nSWARM_SEAT_ADMIN=1\nSWARM_CHAT_MENTIONS=1\n");
   let functionLogs = "";
   const functions = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
-    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1", SWARM_SEAT_ADMIN: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1", SWARM_SEAT_ADMIN: "1", SWARM_CHAT_MENTIONS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   const cliState = observeFunctionCli(functions);
   const capture = (chunk: Buffer) => { functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000); };
   functions.stdout?.on("data", capture); functions.stderr?.on("data", capture);
@@ -853,6 +913,7 @@ async function main(): Promise<void> {
               }
             }
           }
+          if (step.tap) await page.tap(fill(step.tap, pageIds), { timeout: 8_000 });
           if (step.contextmenu) await page.click(fill(step.contextmenu, pageIds), { button: "right", timeout: 8_000 });
           if (step.type) await page.fill(fill(step.type, pageIds), fill(step.text ?? "", pageIds));
           if (step.select) await page.selectOption(fill(step.select, pageIds), step.option ?? "", { timeout: 8_000 });
@@ -1095,7 +1156,9 @@ async function main(): Promise<void> {
       }
       // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
-      for (const [viewport, theme, desktop] of PICTURE_PROFILES) {
+      const browseScreen = screens().find(s => s.id === "app.chat.group") ?? general;
+      // The picture and palette checks are once per run: in a sharded full run, shard 1 does them.
+      for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PICTURE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
@@ -1108,12 +1171,20 @@ async function main(): Promise<void> {
           const shot = `shots/app.chat.general--${label}--${size}--${theme}.png`;
           await page.screenshot({ path: join(OUT, shot) });
           hoverShots.push(shot);
-        }, { click: desktop });
+        }, {
+          click: desktop,
+          openBrowse: async (setup) => {
+            const page = await signedIn.newPage();
+            await setup(page);
+            await openScreen(page, browseScreen!);
+            return page;
+          },
+        });
         pictures.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
       // Command palette keyboard check, on a desktop and on a phone: the selected row stays inside the results pane.
-      for (const [viewport, theme, desktop] of PALETTE_PROFILES) {
+      for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PALETTE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general) { palette.push({ viewport: size, theme, checks: [], error: "general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
@@ -1128,6 +1199,40 @@ async function main(): Promise<void> {
         });
         palette.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
+      }
+      // Waiting on you visible Sent confirmation captures at 390x844 and 1440x900 in both themes (non-mutating).
+      const waitingScreen = screens().find(s => s.id === "app.chat.waiting-panel");
+      if (waitingScreen && sharded("app.chat.waiting-panel") && (!DIAGNOSTIC || DIAGNOSTIC.screens.includes("app.chat.waiting-panel"))) {
+        for (const [viewport, desktop] of [[{ width: 390, height: 844 }, false], [{ width: 1440, height: 900 }, true]] as const) {
+          for (const theme of THEMES) {
+            const size = `${viewport.width}x${viewport.height}`;
+            const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
+            try {
+              const page = await signedIn.newPage();
+              await page.route(/\/functions\/v1\/command(?:\?|$)/u, async (route: any) => {
+                const body = route.request().postDataJSON?.() ?? null;
+                if (body?.command?.kind === "answer_choice") {
+                  await route.fulfill({
+                    status: 200,
+                    contentType: "application/json",
+                    body: JSON.stringify({ status: "accepted", choice_answer: { option_id: body.command.option_id ?? "full" } }),
+                  });
+                } else {
+                  await route.continue();
+                }
+              });
+              await openScreen(page, waitingScreen);
+              await page.locator("[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]").first().click();
+              await page.waitForSelector("[data-waiting-panel]:not([hidden]) [data-waiting-status]:not([hidden])", { state: "visible", timeout: 10_000 });
+              const shot = `shots/app.chat.waiting-panel--sent--${size}--${theme}.png`;
+              await page.screenshot({ path: join(OUT, shot) });
+              hoverShots.push(shot);
+              await page.close();
+            } finally {
+              await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
+            }
+          }
+        }
       }
     } finally { await browser.close(); }
   } finally {
@@ -1162,13 +1267,14 @@ async function main(): Promise<void> {
       palette: { runs: palette.length, checks: palette.reduce((n, r) => n + r.checks.length, 0),
         failedChecks: palette.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: palette.filter(r => r.error).length } };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures, palette,
-      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}) }, null, 2));
+      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}),
+      ...(SHARD ? { shard: `${SHARD.index + 1}/${SHARD.count}` } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
-    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === PICTURE_PROFILES.length ? 0 : 1);
-    paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === PALETTE_PROFILES.length ? 0 : 1);
+    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === (ownsRunChecks(SHARD) ? PICTURE_PROFILES.length : 0) ? 0 : 1);
+    paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === (ownsRunChecks(SHARD) ? PALETTE_PROFILES.length : 0) ? 0 : 1);
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -1190,7 +1296,8 @@ async function main(): Promise<void> {
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
-// 105 minutes. The full matrix took about 70 on 2026-11-14 (twelve viewport batches with hover witnesses, then the
+// 105 minutes, for one job. Since 2026-11-19 the workflow splits the full matrix into parallel shards (shard.ts), each
+// well inside this; an unsharded full run (local, or an older workflow) may no longer fit. The full matrix took about 70 on 2026-11-14 (twelve viewport batches with hover witnesses, then the
 // desktop hover pass and the picture check) and grows with every screen. The workflow job cap (120) must stay
 // above this plus the install and build before it.
 test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 105 * 60_000 }, async () => {

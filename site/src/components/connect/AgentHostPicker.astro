@@ -9,8 +9,9 @@
  * when there are any). The app pills, More apps for coding tools, ChatGPT and Terminal; an app an
  * agent joined through from this browser carries a mark, and the last app used is chosen again.
  * An optional name, checked live against this workspace's agents. One sentence to paste, which
- * follows the name as it is typed. "First time with {App}? Set it up": the numbered steps,
- * collapsed, and gone once the app is connected. Then the waiting line for this attempt.
+ * follows the name as it is typed, with the app's open action and destination beside it.
+ * "Set up {App}": the numbered steps, collapsed by default and gone once the app is connected.
+ * Then the waiting line for this attempt.
  *
  * KEY ROUTES. Terminal and Grok Bot have no connector: the same name field (required there, since
  * the person creates the identity) and Copy setup prompt, which mints through <agent-connect>.
@@ -29,6 +30,7 @@ import {
   TURN_ONLY_NOTE,
   agentHostsFor,
   hostSayName,
+  openDestination,
   privacyNote,
   type AgentHost,
 } from "../../lib/agent-hosts";
@@ -148,7 +150,10 @@ const notesOf = (host: AgentHost): string[] => [
           <p class="hm-ahp__value" data-ahp-sentence></p>
           <button class="hm-ahp__copy" type="button" data-ahp-copy-sentence aria-label="Copy the sentence">Copy</button>
         </div>
-        <a class="hm-ahp__link" target="_blank" rel="noopener noreferrer" data-ahp-open hidden></a>
+        <div class="hm-ahp__open-row" data-ahp-open-wrap hidden>
+          <a class="hm-ahp__link" target="_blank" rel="noopener noreferrer" aria-describedby="ahp-open-dest" data-ahp-open hidden></a>
+          <span class="hm-ahp__open-dest" id="ahp-open-dest" data-ahp-open-dest hidden></span>
+        </div>
       </div>
 
       <div class="hm-ahp__mint" data-ahp-mint-wrap hidden>
@@ -161,8 +166,14 @@ const notesOf = (host: AgentHost): string[] => [
       </div>
 
       {setupHosts.map((host) => (
-        <details class="hm-ahp__how" data-ahp-setup={host.id} open={route(host) === "waiting" ? true : undefined} hidden>
-          <summary>First time with {host.name}? Set it up</summary>
+        <details
+          class="hm-ahp__how"
+          data-ahp-setup={host.id}
+          data-ahp-setup-open={route(host) === "waiting" ? "true" : undefined}
+          open={route(host) === "waiting" ? true : undefined}
+          hidden
+        >
+          <summary>{route(host) === "waiting" ? `${host.name} status` : `Set up ${host.name}`}</summary>
           <ol class="hm-ahp__steps">
             {host.steps.map((step) => (
               <li class="hm-ahp__step">
@@ -191,13 +202,18 @@ const notesOf = (host: AgentHost): string[] => [
                   </div>
                 )}
                 {step.link && (
-                  <a
-                    class="hm-ahp__button"
-                    href={step.link.href}
-                    target={host.id === "claude" ? "_blank" : undefined}
-                    rel="nofollow noopener noreferrer"
-                    aria-label={host.id === "claude" ? `${step.link.label} (opens in a new tab)` : undefined}
-                  >{step.link.label}</a>
+                  <div class="hm-ahp__step-action">
+                    <a
+                      class="hm-ahp__button"
+                      href={step.link.href}
+                      target={host.id === "claude" ? "_blank" : undefined}
+                      rel="nofollow noopener noreferrer"
+                      aria-label={host.id === "claude" ? `${step.link.label} (opens in a new tab)` : undefined}
+                    >{step.link.label}</a>
+                    {openDestination(step.link.href) && (
+                      <span class="hm-ahp__open-dest" data-ahp-step-dest>{openDestination(step.link.href)}</span>
+                    )}
+                  </div>
                 )}
               </li>
             ))}
@@ -245,11 +261,13 @@ const notesOf = (host: AgentHost): string[] => [
     <div data-ahp-rename-slot></div>
     <div class="hm-ahp__actions">
       <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done>Done</button>
-      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
       <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another</button>
       <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-rename hidden>Rename</button>
     </div>
-    <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
+    <div class="hm-ahp__optional-access" data-ahp-approve-wrap hidden>
+      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
+      <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
+    </div>
   </section>
 
   <p class="hm-ahp__footer">
@@ -261,7 +279,7 @@ const notesOf = (host: AgentHost): string[] => [
 </agent-host-picker>
 
 <script>
-  import { agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, takenAgentName } from "../../lib/agent-hosts";
+  import { agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, openDestination, takenAgentName } from "../../lib/agent-hosts";
   import { buildAgentRenameField, type RenameField, type RenameOutcome } from "../../lib/agent-rename";
   import { addAgentStore, lastHost, rememberLastHost } from "../../lib/add-agent";
   const WAITING_HINT_MS = 120_000;
@@ -385,10 +403,15 @@ const notesOf = (host: AgentHost): string[] => [
       if (name) name.value = "";
       this.#error("");
       this.#show("form");
+      const approveWrap = this.querySelector<HTMLElement>("[data-ahp-approve-wrap]");
+      if (approveWrap) approveWrap.hidden = true;
       const approveStatus = this.querySelector<HTMLElement>("[data-ahp-approve-status]");
       if (approveStatus) approveStatus.textContent = "";
       const fold = this.querySelector<HTMLDetailsElement>("[data-ahp-yours-fold]");
       if (fold) fold.open = true;
+      for (const setup of this.querySelectorAll<HTMLDetailsElement>("[data-ahp-setup]")) {
+        setup.open = setup.dataset.ahpSetupOpen === "true";
+      }
       const next = hostId ?? lastHost(addAgentStore(), this.#viewerId);
       this.#hostId = "";
       if (next && this.#chip(next)) this.showHost(next);
@@ -443,9 +466,12 @@ const notesOf = (host: AgentHost): string[] => [
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
       const rename = this.querySelector<HTMLButtonElement>("[data-ahp-rename]");
       if (rename) rename.hidden = !this.renameAgent;
+      const showApprove = joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
+      const approveWrap = this.querySelector<HTMLElement>("[data-ahp-approve-wrap]");
+      if (approveWrap) approveWrap.hidden = !showApprove;
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
       if (approve) {
-        approve.hidden = !joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
+        approve.hidden = !showApprove;
         approve.disabled = false;
         approve.textContent = "Allow Lists & docs";
       }
@@ -632,14 +658,22 @@ const notesOf = (host: AgentHost): string[] => [
         status.textContent = chip?.dataset.ahpStatusLabel ?? "";
         status.hidden = !chip?.dataset.ahpStatusLabel;
       }
+      const openWrap = this.querySelector<HTMLElement>("[data-ahp-open-wrap]");
       const open = this.querySelector<HTMLAnchorElement>("[data-ahp-open]");
+      const openDest = this.querySelector<HTMLElement>("[data-ahp-open-dest]");
+      const href = chip?.dataset.ahpOpenHref ?? "";
+      const dest = href ? openDestination(href) : "";
+      if (openWrap) openWrap.hidden = !href;
       if (open) {
-        const href = chip?.dataset.ahpOpenHref ?? "";
         open.hidden = !href;
         if (href) {
           open.href = href;
           open.textContent = chip?.dataset.ahpOpenLabel ?? "";
         }
+      }
+      if (openDest) {
+        openDest.textContent = dest;
+        openDest.hidden = !dest;
       }
 
       const mintWrap = this.querySelector<HTMLElement>("[data-ahp-mint-wrap]");
