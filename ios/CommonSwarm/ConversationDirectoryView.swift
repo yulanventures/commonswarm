@@ -11,6 +11,7 @@ struct DirectoryView: View {
     @SwiftUI.State private var joinIDs: [UUID: UUID] = [:]
     @SwiftUI.State private var joinErrors = Set<UUID>()
 
+    @SwiftUI.State private var labels: [MemberRef: String] = [:]
     @SwiftUI.State private var composing = false
     @SwiftUI.State private var opened: ThreadRoute?
     @SwiftUI.State private var selected: ThreadRoute?
@@ -63,7 +64,8 @@ struct DirectoryView: View {
          .sheet(isPresented: $composing, onDismiss: {
              if let opened { selected = opened; self.opened = nil }
          }) {
-             NewMessagePicker(api: api, workspace: workspace.id) { updated, id in
+             NewMessagePicker(api: api, workspace: workspace.id) { updated, id, names in
+                 labels = names
                  state = .ready(updated)
                  opened = ThreadRoute(id: id)
                  composing = false
@@ -75,14 +77,18 @@ struct DirectoryView: View {
 
     @ViewBuilder private func detail(_ route: ThreadRoute, rows: [ConversationSummary]) -> some View {
              if let row = rows.first(where: { $0.id == route.id && ($0.joined || $0.kind == .publicChannel) && $0.archived_at == nil }) {
-                 let item = row.item(viewer: api.session.userID)
+                 let item = row.item(viewer: api.session.userID, labels: labels)
                  HistoryView(api: api, workspace: workspace, item: item,
                              directory: (row.members ?? []).map(\.contact),
                              draft: api.session.composer(workspace: workspace.id, conversation: item.id),
                              previewBar: row.kind != .publicChannel ? nil : AnyView(
                                  VStack { Text("Channel preview").font(.headline); joinButton(row) }
                                      .frame(maxWidth: .infinity).padding(.vertical, 8).background(.bar)
-                             )).id(row.id)
+                             ), recipientDetails: (row.members ?? []).compactMap { member in
+                                 guard row.kind.direct, member.left_at == nil,
+                                       let id = labels[MemberRef(kind: member.kind, id: member.id)] else { return nil }
+                                 return member.contact.name + " · " + id
+                             }).id(row.id)
              } else { ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left") }
     }
 
@@ -110,7 +116,7 @@ struct DirectoryView: View {
     }
 
     private func link(_ row: ConversationSummary) -> some View {
-        let item = row.item(viewer: api.session.userID)
+        let item = row.item(viewer: api.session.userID, labels: labels)
         let mentions = row.notify_level == "muted" ? 0 : row.mention_count ?? 0
         return NavigationLink(value: ThreadRoute(id: row.id)) {
             HStack {
@@ -137,7 +143,9 @@ struct DirectoryView: View {
         generation = request
         do {
             let rows = try await api.conversationList(workspace.id)
+            let names = rows == nil ? [:] : MemberChoice.disambiguators(try await api.memberChoices(workspace.id))
             guard generation == request, !Task.isCancelled else { return }
+            labels = names
             state = rows.map(Load.ready) ?? .legacy
         } catch { if generation == request && !Task.isCancelled { state = .failed } }
     }

@@ -3,7 +3,7 @@ import SwiftUI
 struct NewMessagePicker: View {
     let api: ConversationAPI
     let workspace: UUID
-    let opened: ([ConversationSummary], UUID) -> Void
+    let opened: ([ConversationSummary], UUID, [MemberRef: String]) -> Void
     @Environment(\.dismiss) private var dismiss
     @SwiftUI.State private var choices: [MemberChoice]?
     @SwiftUI.State private var selected: [MemberRef] = []
@@ -15,7 +15,17 @@ struct NewMessagePicker: View {
 
     var body: some View {
         NavigationStack {
-            List {
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Find people or agents", text: $query).autocorrectionDisabled()
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44)
+                        }.accessibilityLabel("Clear search")
+                    }
+                }.frame(minHeight: 44).padding(.horizontal)
+                List {
                 if let error { Text(error).foregroundStyle(.secondary) }
                 if let choices {
                     ForEach(choices.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }) { choice in
@@ -27,7 +37,12 @@ struct NewMessagePicker: View {
                             error = nil
                         } label: {
                             HStack {
-                                Label(choice.name, systemImage: choice.id.kind == .agent ? "cpu" : "person")
+                                Label {
+                                    VStack(alignment: .leading) {
+                                        Text(choice.name)
+                                        if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
+                                    }
+                                } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
                                 Spacer()
                                 if picked { Image(systemName: "checkmark") }
                             }.frame(minHeight: 44).contentShape(Rectangle())
@@ -37,13 +52,6 @@ struct NewMessagePicker: View {
                 } else if error == nil { ProgressView() }
                 else { Button("Retry") { Task { await load() } } }
             }
-            .navigationTitle("New message").navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $query, prompt: "Find people or agents")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
             if !selected.isEmpty {
                 Button { Task { await open() } } label: {
                     Text(restart ? "Start new group" : "Open")
@@ -54,8 +62,13 @@ struct NewMessagePicker: View {
                 .background(.bar)
             }
         }
+            .navigationTitle("New message").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) } }
+        }
         .task { await load() }.interactiveDismissDisabled(busy)
     }
+
+    private var labels: [MemberRef: String] { MemberChoice.disambiguators(choices ?? []) }
 
     private func load() async {
         error = nil
@@ -71,7 +84,9 @@ struct NewMessagePicker: View {
             let id = try await api.openConversation(workspace, members: selected, newGroup: restart, commandID: commandID)
             guard let rows = try await api.conversationList(workspace),
                   rows.contains(where: { $0.id == id && $0.kind.direct && $0.joined }) else { throw APIError.invalidResponse }
-            if !Task.isCancelled { opened(rows, id) }
+            if !Task.isCancelled { opened(rows, id, labels) }
+        } catch let refusal as ConversationRefusal where refusal.error == "conversation_left" {
+            error = "You left this group. Ask a current member to start a new group with you."
         } catch let refusal as ConversationRefusal where refusal.error == "conversation_member_left" {
             commandID = UUID()
             restart = true

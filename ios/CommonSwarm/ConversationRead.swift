@@ -33,12 +33,15 @@ struct ConversationSummary: Identifiable, Decodable {
         return joined ? .joined : (kind == .publicChannel ? .preview : .unavailable)
     }
 
-    func item(viewer: UUID) -> Conversation {
+    func item(viewer: UUID, labels: [MemberRef: String] = [:]) -> Conversation {
         let others = (members ?? []).filter { $0.left_at == nil && !($0.kind == .user && $0.id == viewer) }
         let name: String
         let symbol: String
         if kind.direct {
-            name = others.isEmpty ? "Notes to self" : others.map { $0.contact.name }.joined(separator: ", ")
+            name = others.isEmpty ? "Notes to self" : others.map { member in
+                let title = member.contact.name
+                return labels[MemberRef(kind: member.kind, id: member.id)].map { title + " · " + $0 } ?? title
+            }.joined(separator: ", ")
             symbol = kind == .group ? "person.2" : others.first?.contact.symbol ?? "person"
         } else {
             name = kind == .general ? "#general" : "#" + (slug ?? "Channel")
@@ -148,18 +151,38 @@ struct MemberRef: Codable, Hashable {
 struct MemberChoice: Identifiable {
     let id: MemberRef
     let name: String
+
+    static func disambiguators(_ choices: [MemberChoice]) -> [MemberRef: String] {
+        let groups = Dictionary(grouping: choices) { choice in
+            choice.id.kind.rawValue + ":" + choice.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        var result: [MemberRef: String] = [:]
+        for group in groups.values {
+            let ids = Set(group.map(\.id))
+            guard ids.count > 1 else { continue }
+            let strings = ids.map { $0.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "") }
+            var length = 6
+            while length < 32 && Set(strings.map { $0.prefix(length) }).count < ids.count { length += 1 }
+            for id in ids {
+                result[id] = String(id.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(length))
+            }
+        }
+        return result
+    }
 }
 
 extension ConversationAPI {
     func memberChoices(_ workspace: UUID) async throws -> [MemberChoice] {
-        let contacts = try await directory(workspace)
-        return [MemberChoice(id: .init(kind: .user, id: session.userID), name: "You")] + contacts.compactMap { item in
-            switch item.id {
-            case .agent(let id): MemberChoice(id: .init(kind: .agent, id: id), name: item.name)
-            case .person(let id): MemberChoice(id: .init(kind: .user, id: id), name: item.name)
-            default: nil
-            }
-        }
+        struct Person: Decodable { let user_id: UUID; let display_name: String? }
+        struct Agent: Decodable { let principal_id: UUID; let name: String }
+        let ws = "eq." + workspace.uuidString
+        async let people: [Person] = rows("member_profiles", ["workspace_id": ws, "select": "user_id,display_name"])
+        async let agents: [Agent] = rows("agent_principals", ["workspace_id": ws, "revoked_at": "is.null", "select": "principal_id,name"])
+        let (users, seats) = try await (people, agents)
+        let viewer = session.userID
+        return users.map { MemberChoice(id: .init(kind: .user, id: $0.user_id), name: $0.user_id == viewer ? "You" : $0.display_name ?? "Member") } +
+            seats.map { MemberChoice(id: .init(kind: .agent, id: $0.principal_id), name: $0.name) }
+
     }
 
     func openConversation(_ workspace: UUID, members: [MemberRef], newGroup: Bool, commandID: UUID) async throws -> UUID {

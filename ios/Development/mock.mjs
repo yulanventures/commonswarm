@@ -58,6 +58,8 @@ const members = [{ kind: "user", id: me, name: "You" }, { kind: "agent", id: age
 let capabilityProbeReads = 0;
 const capabilityProbe = "00000000-0000-4000-8000-000000000091";
 const teammate = { kind: "user", id: "00000000-0000-4000-8000-000000000088", name: "Morgan" };
+const twins = ["012345ab-0000-4000-8000-000000000001", "012345cd-0000-4000-8000-000000000002"]
+  .map(id => ({ kind: "agent", id, name: "Riley" }));
 const threadRows = [
   { conversation_id: randomUUID(), kind: "general", slug: "general", joined: true },
   { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true },
@@ -233,7 +235,7 @@ const server = createServer(async (req, res) => {
       const cmd = body.command;
       if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
       if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
-        const candidates = [...members, teammate];
+        const candidates = [...members, teammate, ...twins];
         const refs = [members[0], ...cmd.members.map(m => candidates.find(c => c.id === m.id.toLowerCase() && c.kind === m.kind))];
         if (refs.some(m => !m)) return reply(400, {});
         const unique = [...new Set(refs)];
@@ -304,7 +306,7 @@ const server = createServer(async (req, res) => {
         return reply(200, ws.workspace_id === workspace ? channels.filter(c => !filter || "eq." + c.channel_id === filter.toLowerCase()) : []);
       }
       case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }, ...(conversationsEnabled ? [{ user_id: teammate.id, display_name: teammate.name }] : [])]);
-      case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }]);
+      case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }, ...(conversationsEnabled ? twins.map(m => ({ principal_id: m.id, name: m.name })) : [])]);
       case "/rest/v1/signals": {
         const destination = url.searchParams.has("recipients->1") ? "direct" :
           url.searchParams.get("channel_id") === "is.null" ? "general" : url.searchParams.get("channel_id")?.slice(3).toLowerCase();

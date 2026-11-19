@@ -218,6 +218,7 @@ struct HistoryView: View {
     let directory: [Conversation]
     @ObservedObject var draft: Composer
     var previewBar: AnyView? = nil
+    var recipientDetails: [String] = []
     @StateObject private var history = MessageHistory()
     @ViewState private var readingAnchor: HistoryAnchor?
     @ViewState private var restoreAnchor: HistoryAnchor?
@@ -317,6 +318,13 @@ struct HistoryView: View {
                         else { withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(last, anchor: .bottom) } }
                     }
                     .padding(.trailing, 12).padding(.bottom, 4)
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !recipientDetails.isEmpty {
+                    Text(recipientDetails.joined(separator: "\n")).font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal).padding(.vertical, 4).background(.bar)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {

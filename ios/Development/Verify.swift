@@ -166,6 +166,16 @@ enum Verify {
         let afterOpen = try await api.conversationList(ws.id)
         try expect(afterOpen?.contains { $0.id == group && $0.kind == .group && $0.members?.count == 3 } == true,
                    "picker opens a group containing exactly the chosen user, agent and viewer")
+        let twins = choices.filter { $0.name == "Riley" }
+        let labels = MemberChoice.disambiguators(choices)
+        try expect(twins.count == 2 && Set(twins.compactMap { labels[$0.id] }).count == 2, "colliding names get distinct stable IDs")
+        for twin in twins {
+            let id = try await api.openConversation(ws.id, members: [twin.id], newGroup: false, commandID: UUID())
+            let exact = try await api.conversationList(ws.id)?.first(where: { $0.id == id })
+            try expect(exact?.members?.filter { $0.kind == .agent }.map(\.id) == [twin.id.id] &&
+                       exact?.item(viewer: session.userID, labels: labels).name == "Riley · " + (labels[twin.id] ?? ""),
+                       "picker and visible destination agree on the exact same-name recipient")
+        }
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)
         let canonicalDraft = session.composer(workspace: ws.id, conversation: canonical.id)
