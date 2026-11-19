@@ -1516,3 +1516,128 @@ test("turn-off-key pins the opened key, reuses one command id per question, canc
   assert.equal(revocations[1].tokenId, token1);
   assert.match(reloads[0].receipt, /stopped immediately for new requests/);
 });
+
+test("remove-person confirmation names the workspace, reuses one command ID, and sends nothing on cancel or stale roster", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const opener: any = doc.createElement("button");
+  opener.dataset.pdFocus = "remove-person-sam";
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Rivera household & studio — shared with everyone, including the agents";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const targetId = "33333333-3333-4333-8333-333333333333";
+
+  let ids = 0, lose = false, mayRemove = true;
+  const removals: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [{ userId: viewerId, name: "Ana Rivera" }, { userId: targetId, name: "Sam Rivera" }],
+    agents: [],
+    accessStatuses: [],
+    peopleDialogModel: () => ({
+      sample: false, workspaceName, agents: [], invites: [],
+      people: [
+        { id: viewerId, name: "Ana Rivera", role: "owner", own: true, mayRemove: false },
+        ...(ctx.members.some((m: any) => m.userId === targetId)
+          ? [{ id: targetId, name: "Sam Rivera", role: "member", own: false, mayRemove }]
+          : []),
+      ],
+    }),
+    peopleDialogCanAct, showPeopleConfirmation,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    removeWorkspaceMember: async (_session: any, commandId: string, wsId: string, memberUserId: string) => {
+      removals.push({ commandId, wsId, memberUserId });
+      if (lose) throw new Error("The result is unknown.");
+    },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => opener,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  // 1. Heading names the workspace; Go back and Escape both return focus and send nothing.
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Sam Rivera from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 2);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "keep").length, 0);
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
+    "Workspace history stays. They keep their other memberships.");
+  let buttons = dialog.querySelectorAll("button");
+  assert.equal(buttons[0].textContent, "Go back");
+  assert.equal(focused.at(-1), buttons[0], "Go back is focused on open");
+  buttons[0].click();
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Go back returns focus to opener");
+  assert.equal(removals.length, 0);
+
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  let prevented = false, stopped = false;
+  dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented && stopped, true);
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Escape returns focus to opener");
+  assert.equal(removals.length, 0);
+
+  // 2. Held question refuses with zero sends if member disappears or loses removal permission.
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  mayRemove = false;
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(removals.length, 0, "lost permission must not send removal");
+  assert.equal(dialog.open, true);
+  buttons[0].click();
+
+  mayRemove = true;
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  ctx.members = [{ userId: viewerId, name: "Ana Rivera" }];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(removals.length, 0, "already-removed person must not send removal");
+  buttons[0].click();
+
+  // 3. Confirmed removal and lost-answer retry reuse the same questionId and produce workspace-named receipt.
+  ctx.members = [{ userId: viewerId, name: "Ana Rivera" }, { userId: targetId, name: "Sam Rivera" }];
+  actions.confirmPeopleDialogAction("remove-person", targetId, opener);
+  buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(removals.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(removals.length, 2);
+  assert.equal(removals[0].commandId, removals[1].commandId, "retrying the same question reuses one command ID");
+  assert.equal(removals[0].wsId, workspaceId);
+  assert.equal(removals[0].memberUserId, targetId);
+  assert.equal(reloads[0].receipt, `Sam Rivera removed from ${workspaceName}. They keep their other memberships.`);
+});

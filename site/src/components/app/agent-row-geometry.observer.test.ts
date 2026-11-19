@@ -51,7 +51,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
         const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
           status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
-        const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
+        const longWorkspace = 'Rivera household & studio — shared with everyone, including the agents';
+        const model = { workspaceName: longWorkspace, people: [{ id: 'person', name: 'Mei Langridge', role: 'owner', own: true, mayRemove: false }, { id: 'sam', name: 'Sam Rivera', role: 'member', own: false, mayRemove: true }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
         const state = { selected: null, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [], modalCommits = [];
@@ -99,8 +100,11 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const pageRows = [], commits = [], pageState = {selected:null,query:''};
         const pageCallbacks = { render: () => PeopleView.renderPeopleDialog(pageRoot,pageDetail,model,pageState,pageCallbacks,{ page:{homeLabel:'Controlled local geometry',homeHref:'#'}}),
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
-          confirm: (action,id,opener) => PeopleView.showPeopleConfirmation(pageConfirm,action,model.agents.find(item => item.id === id),opener,
-            async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.') };
+          confirm: (action,id,opener) => {
+            const target = action === 'remove-person' ? model.people.find(item => item.id === id) : model.agents.find(item => item.id === id);
+            PeopleView.showPeopleConfirmation(pageConfirm,action,{ ...target, workspaceName: model.workspaceName },opener,
+              async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.');
+          } };
         const number = value => Number.parseFloat(value) || 0;
         const modalPaint = button => {
           const rect = button.getBoundingClientRect(), css = getComputedStyle(button);
@@ -163,6 +167,28 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
               document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
             }
           }
+          pageState.selected={type:'person',id:'sam'}; pageCallbacks.render();
+          const personOpener=pageDetail.querySelector('[data-remove-member]'); personOpener.focus(); personOpener.click();
+          pageConfirm.getBoundingClientRect();
+          const deadline=performance.now()+2000;
+          while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check(getComputedStyle(pageConfirm.querySelector('.pd-confirm-actions button')).font)) {
+            if (performance.now()>=deadline) throw Error('Person confirmation readiness');
+            await new Promise(resolve=>setTimeout(resolve,20));
+          }
+          const pButtons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], pCancel=pButtons[0];
+          const pDescribed=pageConfirm.querySelector('#'+pageConfirm.getAttribute('aria-describedby'));
+          const pRow={dark,id:'sam',kind:'remove-person',width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
+            pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
+            stopCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.stop').length,
+            keepCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.keep').length,
+            noteCount:pageConfirm.querySelectorAll('.pd-confirm-note').length,
+            noteText:pageConfirm.querySelector('.pd-confirm-note')?.textContent ?? null,
+            describedByHasBoth:!!(pDescribed && pDescribed.querySelector('.pd-confirm-facts') && pDescribed.querySelector('.pd-confirm-note')),
+            actions:pButtons.map(naturalAction),initial:modalPaint(pCancel),cancelled:false,returned:false};
+          pageRows.push(pRow); document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+          pageConfirm.addEventListener('cancel',event=>{pRow.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
+          pRow.returned=!pageConfirm.open && document.activeElement===personOpener;
+          document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
         }
         document.documentElement.dataset.pageModal=btoa(unescape(encodeURIComponent(JSON.stringify({rows:pageRows,commits}))));
       })().catch(error => { document.documentElement.dataset.pageModalError=String(error.stack || error); });
@@ -197,8 +223,17 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
 
       for (const row of page.rows) {
         const facts = `${width}px page modal: ${JSON.stringify(row)}`;
-        const name = row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent';
-        assert.equal(row.title, row.kind === 'turn-off-key' ? `Turn off ${name}’s key?` : `Remove ${name}?`, facts);
+        if (row.kind === 'remove-person') {
+          assert.equal(row.title, 'Remove Sam Rivera from Rivera household & studio — shared with everyone, including the agents?', facts);
+          assert.equal(row.stopCount, 2, facts);
+          assert.equal(row.keepCount, 0, facts);
+          assert.equal(row.noteCount, 1, facts);
+          assert.equal(row.noteText, 'Workspace history stays. They keep their other memberships.', facts);
+          assert.equal(row.describedByHasBoth, true, facts);
+        } else {
+          const name = row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent';
+          assert.equal(row.title, row.kind === 'turn-off-key' ? `Turn off ${name}’s key?` : `Remove ${name}?`, facts);
+        }
         assert.ok(row.cancelled && row.returned, `native close request must cancel and return to the actual opener: ${facts}`);
       }
     }
