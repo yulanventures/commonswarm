@@ -168,7 +168,9 @@ export function buildStreamExtras(doc: Document, extras: StreamExtrasVM, onActio
       const image = node(doc, "img"); image.alt = file.name; image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer";
       frame.append(image);
       link.append(frame, node(doc, "strong", "hm-extras__image-name", file.name), node(doc, "span", "hm-extras__image-meta", formatFileSize(file.sizeBytes)));
-      list.append(link);
+      // The link sits in a slot of its own, so a control that cannot be inside a link (Retry) can be drawn over its frame.
+      const slot = node(doc, "span", "hm-extras__picture"); slot.append(link);
+      list.append(slot);
     }
     box.append(list);
   }

@@ -9753,8 +9753,15 @@ import "../../styles/kylon-command-palette.css";
       );
     };
 
-    /** Sign and load one attachment picture once its holder nears the feed's view, with one retry. The signed link only
-     *  ever becomes the image's src: no fetch, blob or CORS (chat-image-preview.test.mjs). `holder` carries the state. */
+    /**
+     * Sign and load one attachment picture once its holder nears the feed's view, with one retry. The signed link only
+     * ever becomes the image's src: no fetch, blob or CORS (chat-image-preview.test.mjs).
+     *
+     * The picture is painted only once it has loaded. Until then `holder` says which state it is in (`loading`, or
+     * `unavailable` after a new link also failed), and the styles draw that state in the reserved frame, so the
+     * browser's own alt text and broken-picture mark never show: not before a link is signed, not while the bytes
+     * arrive, and not between a failed link and its replacement.
+     */
     const loadAttachmentPreview = (
       image: HTMLImageElement,
       holder: HTMLElement,
@@ -9762,13 +9769,30 @@ import "../../styles/kylon-command-palette.css";
     ): void => {
       let failures = 0;
       let signing = false;
+      // Only a picture that had to be fetched fades in. One drawn from a link already used does not, so a rebuilt row never flickers.
+      let fetched = false;
+      const failed = document.createElement("span");
+      failed.className = "hm-extras__image-failed";
+      const retry = document.createElement("button");
+      retry.type = "button"; retry.textContent = "Retry";
+      retry.setAttribute("aria-label", `Retry loading ${attachment.name}`);
+      const said = document.createElement("span");
+      said.textContent = "Couldn't load image";
+      failed.append(said, retry);
+      // `waiting`: not asked for yet (it is far from the view). `loading`: a link is being signed or the bytes are arriving.
+      const show = (state: "waiting" | "loading" | "unavailable" | null): void => {
+        if (state) holder.dataset.previewState = state; else delete holder.dataset.previewState;
+        failed.hidden = state !== "unavailable";
+      };
       const unavailable = (): void => {
         image.alt = `${attachment.name} preview unavailable`;
-        holder.dataset.previewState = "unavailable";
+        show("unavailable");
       };
       const load = async (): Promise<void> => {
         if (signing) return;
         signing = true;
+        fetched = true;
+        show("loading");
         const signedAt = Date.now();
         try {
           const signed = await freshAttachmentDownload(
@@ -9786,9 +9810,37 @@ import "../../styles/kylon-command-palette.css";
           signing = false;
         }
       };
+      image.addEventListener("load", () => {
+        image.alt = attachment.name;
+        show(null);
+        if (fetched && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          image.animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" });
+        }
+      });
+      image.addEventListener("error", () => {
+        // A link that has expired, or was cached too long, fails like any other: it is forgotten and one new link is signed.
+        attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
+        if (chatImagePreviewFailure(failures++) === "retry") void load();
+        else unavailable();
+      });
+      retry.addEventListener("click", (event) => {
+        event.preventDefault(); event.stopPropagation();
+        /* Retry goes away while the picture is tried again. If it holds focus, focus moves to the same attachment
+           first, so it is never dropped on the page. Nothing moves focus when the answer comes back: by then it is
+           wherever the reader has put it. */
+        if (document.activeElement === retry) {
+          // The linked picture takes focus itself. The plain card is not focusable, so its Download button does (focused, not pressed).
+          (holder instanceof HTMLAnchorElement ? holder : holder.querySelector<HTMLElement>(".dashboard__attachment-download"))?.focus({ preventScroll: true });
+        }
+        failures = 0;
+        void load();
+      });
+      // A button cannot sit inside the picture's link, so there it follows the link; the plain card holds it directly.
+      if (holder instanceof HTMLAnchorElement) holder.after(failed); else holder.prepend(failed);
       const cachedUrl = attachmentPreviewUrls.get(
         attachment.file_id, attachment.version_n, Date.now(),
       );
+      show(cachedUrl ? "loading" : "waiting");
       if (cachedUrl) {
         image.src = cachedUrl;
       } else if ("IntersectionObserver" in window) {
@@ -9801,15 +9853,6 @@ import "../../styles/kylon-command-palette.css";
       } else {
         void load();
       }
-      image.addEventListener("load", () => {
-        image.alt = attachment.name;
-        delete holder.dataset.previewState;
-      });
-      image.addEventListener("error", () => {
-        attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
-        if (chatImagePreviewFailure(failures++) === "retry") void load();
-        else unavailable();
-      });
     };
 
     const renderMessageAttachments = (body: HTMLElement, signal: Signal): void => {
