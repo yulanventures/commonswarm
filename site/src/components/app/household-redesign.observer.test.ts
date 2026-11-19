@@ -237,9 +237,12 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /"pd-quiet-link"/);
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
-  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice\)/);
+  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, questionId \?\? uuid\(\)\)/);
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
   assert.doesNotMatch(script, /window\.confirm/, "no browser prompt anywhere on the page");
+  const askPeople = section(script, "const confirmPeopleDialogAction = ", "/** Open above the current view");
+  assert.match(askPeople, /const questionId = uuid\(\);\s*showPeopleConfirmation\(confirm, action/, "People & agents makes one command id per question, outside its commit");
+  assert.match(askPeople, /peopleDialogAction\(action, id, button, notice, questionId\)/, "and every press of that question uses it");
   assert.match(cards, /const hosted = connection.kind === "hosted";/);
   assert.match(cards, /askListsWithdraw\(principalId, agentName, hosted, withdraw, status\)/,
     "a card row decides hosted from its own connection, not from a roster lookup");
@@ -783,14 +786,16 @@ test("the Just me warning is final, names the way out, and clears when Shared is
 test("approval sends only connection consent, withdrawal asks in the shared confirmation, and going back sends nothing", async () => {
   const calls: any[] = [], messages: string[] = [], asked: any[] = [], receipt = { textContent: "" };
   const scope = { workspaceId: "workspace", session: { user: { id: "person" } } };
-  let current = true, reply: any = { status: "committed", expires_at: null };
+  let current = true, reply: any = { status: "committed", expires_at: null }, ids = 0, lose = false;
   const dialog = {}, root = {}, title = { focused: 0, focus() { this.focused += 1; } };
   const ctx = {
     householdScope: () => scope, householdCurrent: () => current,
-    postCommand: async (_session: any, _id: string, body: any, envelope: any) => {
-      calls.push(JSON.parse(JSON.stringify({ body, envelope }))); return { status: 200, body: reply };
+    postCommand: async (_session: any, id: string, body: any, envelope: any) => {
+      calls.push(JSON.parse(JSON.stringify({ id, body, envelope })));
+      if (lose) throw new Error("The result is unknown. Reload Lists & docs to check this agent's access.");
+      return { status: 200, body: reply };
     },
-    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage, readableError: (error: Error) => error.message,
+    uuid: () => `command-${++ids}`, approvalUntil, accessRefusalMessage, withdrawRefusalMessage, readableError: (error: Error) => error.message,
     agents: [{ principalId: "principal", transport: "local" }], CSS: { escape: (value: string) => value },
     householdReceipts: new Map(),
     one: (selector: string) => selector === "[data-lists-confirm]" ? dialog : selector === "[data-household-agents]" ? root
@@ -823,7 +828,7 @@ test("approval sends only connection consent, withdrawal asks in the shared conf
   reply = { status: "committed", withdrawn: 1 };
   await commit(button, status);
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1], { body: { kind: "household_withdraw_connection", principal_id: "principal" }, envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } });
+  assert.deepEqual(calls[1], { id: "command-2", body: { kind: "household_withdraw_connection", principal_id: "principal" }, envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } });
   assert.equal(status.textContent, "Withdrawn. Muse can no longer use Lists & docs here.");
 
   // A refusal keeps its own sentence and is thrown, so the confirmation stays open and says it.
@@ -839,13 +844,27 @@ test("approval sends only connection consent, withdrawal asks in the shared conf
   assert.equal(receipt.textContent, "", "withdrawal has no duplicate section receipt");
   assert.deepEqual(messages, ["reload", "reload", "reload"]);
 
+  // A lost answer: the question stays open, and pressing again repeats the same command, never a new one.
+  calls.length = 0; lose = true;
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  const retry = asked.at(-1)[4];
+  await assert.rejects(retry(button, status), /result is unknown/);
+  lose = false; reply = { status: "committed", withdrawn: 1 };
+  await retry(button, status);
+  assert.deepEqual(calls.map((call: any) => call.id), [calls[0].id, calls[0].id], "the retry from the same question sends the same command id");
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  await asked.at(-1)[4](button, status);
+  assert.notEqual(calls[2].id, calls[0].id, "a new question, after a fresh look, gets a new command id");
+  calls.splice(0, calls.length, {}, {}, {}, {});
+
   // A question confirmed after the workspace changed sends nothing.
+  const reloads = messages.length;
   current = false;
   await assert.rejects(asked[0][4](button, status), /This workspace changed/);
   assert.equal(calls.length, 4);
   status.textContent = "other workspace";
   await commands.approveAgent(connection, ["read"], button, status);
-  assert.equal(messages.length, 3, "stale committed replies do not reload the current workspace");
+  assert.equal(messages.length, reloads, "stale committed replies do not reload the current workspace");
 });
 
 test("approval reads distinguish active permanent and local approvals from expired or missing ones", () => {
