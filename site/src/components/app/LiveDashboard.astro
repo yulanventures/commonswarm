@@ -5462,7 +5462,11 @@ import "../../styles/kylon-image-viewer.css";
         const manage = () => openRosterDialog({ kind: "agent", id });
         const pressOnPage = (key: string) => {
           if (activeWorkspaceId !== workspace.id || !peopleDialogOpen()) return;
-          all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key)?.click();
+          const button = all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key);
+          if (!button) return;
+          const more = button.closest<HTMLDetailsElement>("[data-people-agent-more]");
+          if (more) more.open = true;
+          button.click();
         };
         replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: () => { void manage(); },
           onToggleLead: nextIsLead => {
@@ -7345,6 +7349,8 @@ import "../../styles/kylon-image-viewer.css";
         el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === intent.principalId,
       );
       if (!matchingSlot) return;
+      const more = matchingSlot.closest<HTMLDetailsElement>("[data-people-agent-more]");
+      if (more) more.open = true;
 
       clearSeatAdminReauthIntent(session.user.id);
       if (!hasFreshInteractiveSession(session.access_token)) {
@@ -7502,6 +7508,8 @@ import "../../styles/kylon-image-viewer.css";
         const toggleBtn = all<HTMLElement>("[data-seat-admin-slot]")
           .find(el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === focusAfterReconcile.principalId)
           ?.querySelector<HTMLElement>(`[data-seat-admin-toggle="${focusAfterReconcile.level}"]`);
+        const more = toggleBtn?.closest<HTMLDetailsElement>("[data-people-agent-more]");
+        if (more) more.open = true;
         toggleBtn?.focus({ preventScroll: true });
       }
       maybeResumeSeatAdminReauth();
@@ -7529,11 +7537,12 @@ import "../../styles/kylon-image-viewer.css";
         if (beforeTarget) aside.insertBefore(slotEl, beforeTarget);
         else aside.append(slotEl);
       } else {
-        const beforeTarget = host.querySelector<HTMLElement>(
+        const container = host.querySelector<HTMLElement>("[data-people-agent-more]") ?? host;
+        const beforeTarget = container.querySelector<HTMLElement>(
           ".pd-technical, .pd-danger-zone, [data-connection-end-date]",
         );
-        if (beforeTarget) host.insertBefore(slotEl, beforeTarget);
-        else host.append(slotEl);
+        if (beforeTarget && beforeTarget.parentElement === container) container.insertBefore(slotEl, beforeTarget);
+        else container.append(slotEl);
       }
       syncSeatAdminSlots();
       const lowerAgentId = agent.principalId.toLowerCase();
@@ -7749,7 +7758,11 @@ import "../../styles/kylon-image-viewer.css";
           onQuery: (value) => { rosterFilter = value; renderDialogRoster(); },
         } });
       if (peopleDialogState.selected?.type === "agent") {
-        mountRenewalEndDate(detail, peopleDialogState.selected.id);
+        const moreHost = detail.querySelector<HTMLElement>("[data-people-agent-more]") ?? detail;
+        mountRenewalEndDate(moreHost, peopleDialogState.selected.id);
+        const endDate = moreHost.querySelector<HTMLElement>("[data-connection-end-date]");
+        const beforeMeta = moreHost.querySelector<HTMLElement>(".pd-technical, .pd-danger-zone");
+        if (endDate && beforeMeta && beforeMeta.parentElement === moreHost) moreHost.insertBefore(endDate, beforeMeta);
         mountSeatAdminPanel(detail, peopleDialogState.selected.id, "people");
       }
       restoreConnectionDateFocus(detail, endDateFocus);

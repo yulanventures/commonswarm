@@ -2278,6 +2278,10 @@
         "click": "#pd-agent-{approvalSetupAgent}"
       },
       {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
         "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]",
         "click": "[data-people-detail] button[data-pd-focus=\"allow-{approvalSetupAgent}\"]"
       },
@@ -2318,6 +2322,10 @@
         "click": "#pd-agent-{withdrawSetupAgent}"
       },
       {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
         "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]",
         "click": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]"
       },
@@ -2353,6 +2361,10 @@
       {
         "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawAgent}",
         "click": "#pd-agent-{withdrawAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
       },
       {
         "waitFor": "[data-people-detail] button[data-withdraw-agent-access=\"{withdrawAgent}\"]",
@@ -4749,6 +4761,34 @@
     ]
   },
   {
+    "id": "dialog.people-detail.more",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
+        "click": "#pd-agent-{agent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more][open] [data-remove-agent]",
+        "scroll": "[data-people-detail] [data-people-agent-more][open] [data-remove-agent]",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) [data-people-agent-more][open]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
     "id": "dialog.people-admin-access",
     "kind": "dialog",
     "path": "/app?w={workspace}&v=people",
@@ -4756,6 +4796,10 @@
       {
         "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
         "click": "#pd-agent-{agent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-people-agent-more] > summary",
+        "click": "[data-people-detail] [data-people-agent-more] > summary"
       },
       {
         "waitFor": "[data-people-detail] [data-seat-admin-toggle=\"workspace\"]:not([disabled])",

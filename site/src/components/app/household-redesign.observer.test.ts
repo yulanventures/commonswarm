@@ -615,6 +615,50 @@ test("People & agents keeps its scroll position across redraws on the same tab a
   assert.equal(side().scrollTop, 0, "switching to another profile resets the detail scroll");
 });
 
+test("agent profile keeps name, status and problem fix visible, groups routine key/access/removal under More, preserves More across same-agent redraws, and returns Escape focus to the same action", () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom();
+  f.ctx.agents.push({ principalId: "other-agent", name: "Harbor", ownerUserId: "person", model: "claude-opus-5-5", transport: "local" });
+  const baseModel = f.model();
+  const atlas = { ...baseModel.agents[0], id: "principal", name: "Atlas", own: true, mayManage: true, liveKey: true, key: "Turned off. A new key can bring it back.",
+    access: { until: null }, accessReadState: "succeeded" as const,
+    status: { kind: "key-off" as const, label: "Key turned off", attention: true, sentence: "It needs a new key to connect again.", fix: { allowed: true, action: "new-key" as const } } };
+  const harbor = { ...baseModel.agents[1], id: "other-agent", name: "Harbor", own: true, mayManage: true, liveKey: true, key: "Uses a key to connect.",
+    access: null, accessReadState: "succeeded" as const,
+    status: { kind: "active" as const, label: "Active", attention: false, sentence: "", fix: { allowed: false, action: null } } };
+  const model = () => ({ ...baseModel, agents: [atlas, harbor] });
+  const state: any = { selected: { type: "agent", id: "principal" }, query: "", tab: "agents" };
+  const paint = (options: any = {}) => renderPeopleDialog(dom.root as any, dom.detail as any, model(), state,
+    { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {} },
+    { page: { homeLabel: "Home", homeHref: "/app" }, ...options });
+  const more = () => dom.detail.querySelector("[data-people-agent-more]") as any;
+  paint();
+  assert.ok(more(), "agent profile renders a More disclosure");
+  assert.notEqual(more().open, true, "More starts closed on fresh open");
+  // Name, status, and the problem-fix action (Get a new key) stay outside More.
+  const outsideMore = dom.detail.descendants().filter(node => node !== more() && !more().contains(node));
+  assert.ok(outsideMore.some(node => node.tag === "h2" && node.textContent === "Atlas"), "name stays visible outside More");
+  assert.ok(outsideMore.some(node => node.dataset?.agentStatus === "key-off"), "status chip stays visible outside More");
+  assert.ok(outsideMore.some(node => node.tag === "button" && node.textContent === "Get a new key"), "current problem fix stays visible outside More");
+  // Routine key management, Lists & docs access changes, technical details and removal sit inside More.
+  const insideMore = more().descendants();
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-withdraw-agent-access"] === "principal"), "Lists & docs Withdraw sits inside More");
+  assert.ok(insideMore.some((node: any) => node.tag === "button" && node.textContent === "New key"), "routine Key management sits inside More");
+  assert.ok(insideMore.some((node: any) => node.className?.includes("pd-technical")), "Technical details sits inside More");
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-revoke-grant"] === "principal"), "Turn off key sits inside More");
+  assert.ok(insideMore.some((node: any) => node.attributes?.["data-remove-agent"] === "principal"), "Remove sits inside More");
+  // Opening More stays open across same-agent redraws, and resets closed when switching agents or applying focus.
+  more().open = true;
+  paint();
+  assert.equal(more().open, true, "a background redraw for the same agent keeps More open");
+  state.selected = { type: "agent", id: "other-agent" };
+  paint();
+  assert.notEqual(more().open, true, "switching to another agent starts with More closed");
+  more().open = true;
+  state.focusApplied = null;
+  paint({ focus: { kind: "agent", id: "other-agent" } });
+  assert.notEqual(more().open, true, "applying an initial focus target resets More to closed");
+});
+
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
   const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [];
   const principal = "00000000-0000-4000-8000-000000000001";

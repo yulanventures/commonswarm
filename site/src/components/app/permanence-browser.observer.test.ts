@@ -241,7 +241,11 @@ async function observeConnectionApp() {
     if (f.hosted) {
       one("[data-connected-apps-open]").click();
       await wait(() => one("[data-connected-apps-dialog]").open && one("[data-connected-apps-list] [data-connection-end-date]"), "hosted mount");
-    } else await wait(() => one("[data-people-detail] [data-connection-end-date]") && (f.scenario === "absent-home" || (f.overviewReads > 0 && (["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario) || one("[data-people-detail] [data-connection-end-date] form")))), "renewal mount");
+    } else {
+      const more = one("[data-people-detail] [data-people-agent-more]") as HTMLDetailsElement | null;
+      if (more && !more.open) more.querySelector("summary")?.click();
+      await wait(() => one("[data-people-detail] [data-connection-end-date]") && (f.scenario === "absent-home" || (f.overviewReads > 0 && (["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario) || one("[data-people-detail] [data-connection-end-date] form")))), "renewal mount");
+    }
     const rootSelector = f.hosted ? "[data-connected-apps-list]" : "[data-people-detail]";
     const editor = () => one(rootSelector + " [data-connection-end-date]");
     const form = () => editor()?.querySelector("form") as HTMLFormElement;
