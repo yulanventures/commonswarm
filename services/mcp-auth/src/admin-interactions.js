@@ -5,7 +5,7 @@ import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
 import { effectiveAdminGate } from "./admin-gate.js";
 import { CONSENT_SUBMIT_PATH, renderSignInPage } from "./interaction-page.js";
-import { renderAdminConsentPage } from "./admin-interaction-page.js";
+import { renderAdminConsentPage, renderAdminRefusedPage } from "./admin-interaction-page.js";
 
 export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
   return async (request, response, url) => {
@@ -69,11 +69,8 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       catch (error) {
         if (!(error instanceof AdminConsentError) ||
             !["unauthorized_client", "dpop_required"].includes(error.code)) throw error;
-        const message = error.code === "dpop_required"
-          ? "This client cannot prove possession of its access key. Admin access is unavailable. You can use the ordinary MCP connection."
-          : "This client needs active verification and your account-owner approval before admin access is available. You can use the ordinary MCP connection.";
         response.writeHead(403, { ...INTERACTION_SECURITY_HEADERS, "content-type": "text/html; charset=utf-8" });
-        response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Admin access unavailable</title><p>${message}</p><a href="https://commonswarm.com/app">Return to /app</a></html>`);
+        response.end(renderAdminRefusedPage(error.code));
         return true;
       }
       if (details.prompt?.name === "login") {

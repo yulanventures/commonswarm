@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { renderAdminConsentPage, FULL_ACCOUNT_WARNING, CHOSEN_COMPROMISE_WARNING, WORKER_READ_WARNING } from '../src/admin-interaction-page.js';
+import { renderAdminConsentPage, renderAdminRefusedPage, FULL_ACCOUNT_WARNING, CHOSEN_COMPROMISE_WARNING, WORKER_READ_WARNING } from '../src/admin-interaction-page.js';
 import { createAdminManifest } from '../src/admin-consent.js';
 import { adminConsentOptions } from '../src/admin-policy.generated.js';
 
@@ -285,4 +285,29 @@ test('the screen for an app that cannot have admin access is unchanged', () => {
   assert.ok(html.includes('This client is unverified. Admin access is unavailable.'));
   assert.deepEqual(elements(tree).filter(node => node.tag === 'button').map(text), ['Cancel and return to /app']);
   assert.equal(elements(tree).filter(node => node.tag === 'details').length, 0);
+});
+
+test('the admin refusal page has a heading, the reason, the ordinary way forward and the way back', () => {
+  const reasons = {
+    unauthorized_client: 'CommonSwarm couldn’t confirm that this app is eligible for admin access to your account.',
+    dpop_required: 'This app cannot prove possession of its access key, so it cannot be given admin access.',
+  };
+  for (const [code, reason] of Object.entries(reasons)) {
+    const html = renderAdminRefusedPage(code);
+    const tree = htmlTree(html);
+    assert.equal(text(one(tree, node => node.tag === 'title')), 'Admin access unavailable');
+    assert.equal(text(one(tree, node => node.tag === 'h1')), 'Admin access is not available for this app');
+    const paragraphs = elements(tree).filter(node => node.tag === 'p').map(text);
+    assert.deepEqual(paragraphs, [reason, 'To connect without admin access, add CommonSwarm as a connector in the app and choose which workspaces it may use.']);
+    // One way out, a plain link; no form, no script, nothing from the request.
+    const links = elements(tree).filter(node => node.tag === 'a');
+    assert.deepEqual(links.map(node => [text(node), node.attrs.href]), [['Return to CommonSwarm', 'https://commonswarm.com/app']]);
+    assert.equal(elements(tree).filter(node => ['form', 'script', 'input', 'button', 'img'].includes(node.tag)).length, 0);
+    assert.match(html, /<meta name="viewport" content="width=device-width,initial-scale=1">/);
+  }
+  // An unknown code never prints itself; it reads as the general refusal.
+  const unknown = renderAdminRefusedPage('<img src=x onerror=alert(1)>');
+  assert.doesNotMatch(unknown, /onerror|<img/);
+  assert.ok(unknown.includes(reasons.unauthorized_client));
+  assert.ok(renderAdminRefusedPage('constructor').includes(reasons.unauthorized_client), 'inherited object keys are not reasons');
 });
