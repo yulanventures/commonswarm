@@ -161,6 +161,11 @@ enum Verify {
         guard let atlas = choices.first(where: { $0.id.kind == .agent }) else { throw Failure.mismatch("agent picker") }
         let opened = try await api.openConversation(ws.id, members: [atlas.id], newGroup: false, commandID: UUID())
         try expect(opened == thread.id, "picker opens existing server DM by member kind and ID")
+        guard let other = choices.first(where: { $0.name == "Morgan" }) else { throw Failure.mismatch("person picker") }
+        let group = try await api.openConversation(ws.id, members: [atlas.id, other.id], newGroup: false, commandID: UUID())
+        let afterOpen = try await api.conversationList(ws.id)
+        try expect(afterOpen?.contains { $0.id == group && $0.kind == .group && $0.members?.count == 3 } == true,
+                   "picker opens a group containing exactly the chosen user, agent and viewer")
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)
         let canonicalDraft = session.composer(workspace: ws.id, conversation: canonical.id)

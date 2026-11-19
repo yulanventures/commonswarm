@@ -52,7 +52,7 @@ struct NewMessagePicker: View {
     private func load() async {
         error = nil
         do { choices = try await api.memberChoices(workspace) }
-        catch { if !Task.isCancelled { error = "Couldn’t load people and agents." } }
+        catch { if !Task.isCancelled { self.error = "Couldn’t load people and agents." } }
     }
 
     private func open() async {
@@ -68,6 +68,6 @@ struct NewMessagePicker: View {
             commandID = UUID()
             restart = true
             error = "A member left this group. Start a new group to message these recipients."
-        } catch { if !Task.isCancelled { error = "Couldn’t open this conversation." } }
+        } catch { if !Task.isCancelled { self.error = "Couldn’t open this conversation." } }
     }
 }
