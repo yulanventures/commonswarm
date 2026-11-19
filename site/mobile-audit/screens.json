@@ -1146,6 +1146,205 @@
     ]
   },
   {
+    "id": "dialog.cleanup.files",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-filter]:not([open]) ~ [data-cleanup-list] [data-cleanup-item]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list]"
+    ]
+  },
+  {
+    "id": "dialog.cleanup.files.filtered",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-age]",
+        "select": "dialog[data-cleanup-dialog][open] [data-cleanup-age]",
+        "option": "90"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]:not(:empty)",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-list] [data-cleanup-item]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_old_file"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list] [data-cleanup-item]"
+    ]
+  },
+  {
+    "id": "dialog.cleanup.files.none",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-tab=\"tombstone_file\"]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-filter] > summary"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-uploader-gone]",
+        "click": "dialog[data-cleanup-dialog][open] [data-cleanup-uploader-gone]"
+      },
+      {
+        "waitFor": "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]:not(:empty)",
+        "settle": true
+      }
+    ],
+    "ready": "dialog[data-cleanup-dialog][open] [data-cleanup-list] .cleanup__empty",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "dialog[data-cleanup-dialog][open] [data-cleanup-filter-active]",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-list] .cleanup__empty"
+    ]
+  },
+  {
     "id": "dialog.command-palette",
     "kind": "dialog",
     "path": "/app?w={workspace}",

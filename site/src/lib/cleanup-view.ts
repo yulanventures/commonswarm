@@ -169,7 +169,15 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
   };
   tabs.append(tab("remove_agent", "Agents"), tab("tombstone_file", "Files"));
 
-  const filters = el("div", "cleanup__filters");
+  /* The files lead. Age and uploader sit under one "Filter", closed on entry. While a filter is on, its value is said
+     beside "Filter" even when closed, so a shorter list has a reason on screen. Opening or closing it changes nothing
+     else: the checked files and their count stay. Changing a filter reloads the list and clears the selection, as before. */
+  const filters = el("details", "cleanup__filters");
+  filters.dataset.cleanupFilter = "";
+  const filterSummary = el("summary", "cleanup__filter-summary", "Filter");
+  const filterActive = el("span", "cleanup__filter-active");
+  filterActive.dataset.cleanupFilterActive = "";
+  filterSummary.append(filterActive);
   const age = el("select", "cleanup__age");
   age.dataset.cleanupAge = "";
   age.setAttribute("aria-label", "Uploaded");
@@ -183,8 +191,13 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
   gone.type = "checkbox";
   gone.dataset.cleanupUploaderGone = "";
   goneLabel.append(gone, " From people or agents no longer here");
-  filters.append(age, goneLabel);
-  const refilter = () => { filter = { olderThanDays: Number(age.value), uploaderGone: gone.checked }; void show("tombstone_file"); };
+  filters.append(filterSummary, age, goneLabel);
+  const syncFilterSummary = () => {
+    const parts = [filter.olderThanDays > 0 ? age.selectedOptions?.[0]?.textContent ?? `Older than ${filter.olderThanDays} days` : "",
+      filter.uploaderGone ? "From people or agents no longer here" : ""].filter(Boolean);
+    filterActive.textContent = parts.length ? ` · ${parts.join(" · ")}` : "";
+  };
+  const refilter = () => { filter = { olderThanDays: Number(age.value) || 0, uploaderGone: gone.checked === true }; syncFilterSummary(); void show("tombstone_file"); };
   age.addEventListener("change", refilter);
   gone.addEventListener("change", refilter);
 
