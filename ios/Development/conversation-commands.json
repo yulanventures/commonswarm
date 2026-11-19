@@ -1,0 +1,37 @@
+[
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000023",
+    "kind": "conversation_join"
+  },
+  {
+    "kind": "conversation_open",
+    "members": [
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "kind": "agent"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000088",
+        "kind": "user"
+      }
+    ]
+  },
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000021",
+    "kind": "conversation_invite",
+    "members": [
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "kind": "agent"
+      }
+    ]
+  },
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000021",
+    "kind": "conversation_remove",
+    "member": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "kind": "agent"
+    }
+  }
+]
