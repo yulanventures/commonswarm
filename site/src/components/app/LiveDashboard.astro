@@ -15106,6 +15106,12 @@ import "../../styles/kylon-image-viewer.css";
       else if (agents.length === 0) {
         showChannelView("no-agents");
         renderSetupChecklist();
+      } else if (
+        unknownChannelId !== null ||
+        (typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+        (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable")
+      ) {
+        renderFeed();
       } else if (signals.length === 0) {
         const workspaceId = activeWorkspaceId;
         const version = requestVersion;
@@ -15998,6 +16004,7 @@ import "../../styles/kylon-image-viewer.css";
         signals = [];
         signalCursor = null;
         signalHasMore = false;
+        one<HTMLOListElement>("[data-feed-list]")?.replaceChildren();
         directHistory = null;
         directHistoryTicket += 1;
         composerIntent = null;
@@ -17203,6 +17210,7 @@ import "../../styles/kylon-image-viewer.css";
         signals = [];
         signalCursor = null;
         signalHasMore = false;
+        one<HTMLOListElement>("[data-feed-list]")?.replaceChildren();
         signalCutoff = "";
         channelLoadError = "";
         previousSignalIds.clear();

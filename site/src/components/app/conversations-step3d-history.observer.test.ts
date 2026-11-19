@@ -531,8 +531,8 @@ async function observeConversations3D() {
       );
 
       // Navigate to #ops while conversations read is 503 -> composer is hidden AND direct form submit is refused fail-closed!
-      await click('a[href*="c=ops"]:visible');
-      await wait("#ops loaded with failed membership", () => location.search.includes("c=ops") && visible(one("[data-channel-membership-retry-bar]")));
+      await click(`a[href*="c=${f.ids.opsChannel}"]:visible`);
+      await wait("#ops loaded with failed membership", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-channel-membership-retry-bar]")));
       const form = one<HTMLFormElement>("[data-composer]")!;
       const input = one<HTMLTextAreaElement>("[data-composer-input]")!;
       input.value = "Should be blocked while membership failed";
