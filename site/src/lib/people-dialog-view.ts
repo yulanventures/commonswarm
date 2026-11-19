@@ -320,6 +320,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const prevScroll = prevContext ? { top: prevContext.scrollTop, tab: prevContext.dataset.peopleScrollTab, query: prevContext.dataset.peopleScrollQuery } : null;
   const prevSide = root.querySelector<HTMLElement>("[data-people-side]");
   const prevSideScroll = prevSide ? { top: prevSide.scrollTop, selected: prevSide.dataset.peopleScrollSelected } : null;
+  const prevAgentMore = detail.querySelector<HTMLDetailsElement>("[data-people-agent-more]");
+  const prevMoreOpen = prevAgentMore?.open === true ? prevAgentMore.dataset.peopleAgentMore : undefined;
   root.replaceChildren(); detail.replaceChildren();
   const outer = root.closest<HTMLDialogElement>("[data-roster-dialog]");
   // One roster node: the shell projects it into desktop context and returns it to this page on phones.
@@ -778,8 +780,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       if (!agent.mayManage && !model.sample) detail.append(node(doc, "p", "pd-permission-note", `${agent.ownerName?.split(/\s+/)[0] ?? "The space owner or an admin"} manages this agent.`));
       if (agent.status.attention && !model.sample) { const guidance = node(doc, "section", "pd-guidance"); guidance.append(node(doc, "h3", "", "What to do"), node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) guidance.append(next); detail.append(guidance); }
       const facts = node(doc, "dl", "pd-fact-sheet");
+      let factList = facts;
       const fact = (label: string, value: string, action?: HTMLElement) => { const row = node(doc, "div", "pd-fact-row"); row.append(node(doc, "dt", "", label), node(doc, "dd", "", value));
-        if (action) { const holder = node(doc, "dd", "pd-fact-action"); holder.append(action); row.append(holder); } facts.append(row); };
+        if (action) { const holder = node(doc, "dd", "pd-fact-action"); holder.append(action); row.append(holder); } factList.append(row); };
       if (agent.app) fact("App", agent.app);
       const edit = agent.mayManage && !model.sample ? button(doc, "Change", () => {
         if (detail.querySelector("[data-model-editor]")) return;
@@ -801,24 +804,35 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       }) : undefined;
       if (edit) { edit.dataset.editModel = agent.id; edit.dataset.pdFocus = `edit-${agent.id}`; }
       fact("Model", agent.model ?? "Not set", edit); fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
+      detail.append(facts);
+      if (agent.updateAvailable) detail.append(node(doc, "p", "pd-muted", "Update available."));
+      if (agent.status.kind === "inactive" && agent.hosted && !model.sample) detail.append(node(doc, "p", "pd-muted", "Open the chat app you use it in and say: check CommonSwarm."));
+      // Routine key management, access changes, technical details and removal sit under More; same-agent redraws keep it open.
+      const more = node(doc, "details", "pd-agent-more");
+      more.dataset.peopleAgentMore = agent.id;
+      if (!appliedFocus && prevMoreOpen === agent.id) more.open = true;
+      const moreSummary = node(doc, "summary", "", "More");
+      moreSummary.dataset.pdFocus = `agent-more-${agent.id}`;
+      more.append(moreSummary);
+      const moreFacts = node(doc, "dl", "pd-fact-sheet");
+      factList = moreFacts;
       const accessFact = peopleDialogAccessUntil(agent);
       if (accessFact !== null) {
         const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow", notice, "data-allow-agent-access") : undefined;
         accessAction?.classList.add("pd-quiet-link"); fact("Lists & docs", accessFact, accessAction);
       }
       if (agent.key !== null) fact("Key", agent.key, peopleDialogCanAct(model, "new-key", agent.id) ? actionButton("new-key", agent, "New key", notice, "data-get-agent-prompt") : undefined);
-      detail.append(facts);
-      if (agent.updateAvailable) detail.append(node(doc, "p", "pd-muted", "Update available."));
-      if (agent.status.kind === "inactive" && agent.hosted && !model.sample) detail.append(node(doc, "p", "pd-muted", "Open the chat app you use it in and say: check CommonSwarm."));
-      if (agent.hosted && peopleDialogCanAct(model, "connected-apps", agent.id)) { const connection = node(doc, "p", "pd-connection-note"); connection.append(actionButton("connected-apps", agent, "Connected apps →", notice), node(doc, "span", "", "Disconnecting its app ends access for every agent from that app.")); detail.append(connection); }
+      if (moreFacts.childElementCount) more.append(moreFacts);
+      if (agent.hosted && peopleDialogCanAct(model, "connected-apps", agent.id)) { const connection = node(doc, "p", "pd-connection-note"); connection.append(actionButton("connected-apps", agent, "Connected apps →", notice), node(doc, "span", "", "Disconnecting its app ends access for every agent from that app.")); more.append(connection); }
       const technical = node(doc, "details", "pd-technical"); technical.append(node(doc, "summary", "", "Technical details"));
       for (const value of agent.technical) { const fact = node(doc, "p", "", value);
         if (agent.grantRisk && value === agent.grantRisk) fact.dataset.grantRisk = agent.grantRisk;
         technical.append(fact);
-      } detail.append(technical);
+      } more.append(technical);
       if (agent.mayManage && !model.sample) { const danger = node(doc, "section", "pd-danger-zone"); danger.append(node(doc, "h3", "", "Stop or remove")); const actions = node(doc, "div", "pd-danger-actions");
         if (peopleDialogCanAct(model, "turn-off-key", agent.id)) { const stop = actionButton("turn-off-key", agent, "Turn off key", notice, "data-revoke-grant"); stop.setAttribute("aria-label", `Turn off key for ${agent.name}`); actions.append(stop); }
-        const remove = actionButton("remove-agent", agent, agent.hosted ? "Remove agent" : "Remove from this workspace", notice, "data-remove-agent"); remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); detail.append(danger); }
+        const remove = actionButton("remove-agent", agent, agent.hosted ? "Remove agent" : "Remove from this workspace", notice, "data-remove-agent"); remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); more.append(danger); }
+      detail.append(more);
       const error = node(doc, "p", "pd-error"); error.dataset.agentError = ""; error.setAttribute("role", "alert"); error.hidden = true; detail.append(error);
     } else {
       const person = selected as PeopleDialogPerson; const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person);

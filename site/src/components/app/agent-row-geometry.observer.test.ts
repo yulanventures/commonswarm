@@ -13,7 +13,7 @@ assert.ok(style, "LiveDashboard must expose its component stylesheet to the geom
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 type Geometry = { width: number; hostileElements: number; hostileText: boolean; modelValues: (string | null)[];
-  confirmRole: string | null; safeConfirmFocus: boolean; outerStillOpen: boolean; technicalClosed: boolean };
+  confirmRole: string | null; safeConfirmFocus: boolean; outerStillOpen: boolean; moreClosedInitially: boolean; technicalClosed: boolean };
 
 // CI only: build the production DOM builder rather than recreating obsolete row markup.
 test("A2 rows, details and confirms have usable geometry and preserve plain text", { timeout: 60_000 }, async () => {
@@ -60,12 +60,15 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         detail.querySelector('[data-edit-model]').click();
         const form = detail.querySelector('[data-model-editor]'), input = form.querySelector('input');
         input.value = '   '; form.requestSubmit(); await Promise.resolve(); await Promise.resolve();
+        const more = detail.querySelector('[data-people-agent-more]');
+        const moreClosedInitially = !more.open;
+        more.querySelector('summary').click();
         const opener = detail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
         const metrics = { width: innerWidth, hostileElements: document.querySelectorAll('img').length,
           hostileText: detail.querySelector('h2').textContent.includes(hostile), modelValues, confirmRole, safeConfirmFocus,
-          outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
+          outerStillOpen: outer.open, moreClosedInitially, technicalClosed: !detail.querySelector('.pd-technical').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
         // Separate controlled page, not Sample or a signed-in/backend journey. Never accept a command.
         outer.close(); outer.remove();
@@ -123,6 +126,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           document.documentElement.dataset.theme=dark?'dark':'light';
           for (const id of ['local','agent']) {
             pageState.selected={type:'agent',id}; pageCallbacks.render();
+            pageDetail.querySelector('[data-people-agent-more] > summary').click();
             const opener=pageDetail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
             pageConfirm.getBoundingClientRect();
             const deadline=performance.now()+2000;
@@ -156,7 +160,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.deepEqual(geometry.modelValues, [null]);
       assert.equal(geometry.confirmRole, "alertdialog"); assert.equal(geometry.safeConfirmFocus, true);
       // Focus returning to the opener is checked in the real app: the capture suite's people-confirm keyboard witness and people-hosts.
-      assert.equal(geometry.outerStillOpen, true); assert.equal(geometry.technicalClosed, true);
+      assert.equal(geometry.outerStillOpen, true); assert.equal(geometry.moreClosedInitially, true); assert.equal(geometry.technicalClosed, true);
 
       const pageEncoded = stdout.match(/data-page-modal="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
       assert.ok(pageEncoded, `page confirmation must finish at ${width}px: ${stdout.match(/data-page-modal-error="([^"]*)"/)?.[1] ?? 'no error'}; partial=${stdout.match(/data-page-modal-partial="([^"]*)"/)?.[1] ?? 'none'}`);
