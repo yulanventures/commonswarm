@@ -98,7 +98,7 @@ test("consent interaction serves HTML from the bound browser identity and owner 
   assert.equal(readerIdentity.userId, USER);
   assert.match(response.body, /Workspace One/u);
   assert.match(response.body, /Client name \(supplied by the client\): <strong>Registered &lt;app&gt; &amp; &quot;friends&quot;<\/strong>/u);
-  assert.match(response.body, /After you approve, you return to <strong>callback\.example<\/strong>/u);
+  assert.match(response.body, /After you approve, you return to <strong>callback\.example:8443<\/strong>/u);
   assert.match(response.body, /Client ID URL host: <strong>client\.example<\/strong>/u);
   assert.doesNotMatch(response.body, /unused\.example|state=private/u);
   assert.doesNotMatch(response.body, /oauth-state-not-rendered/u);
@@ -125,15 +125,19 @@ test("consent page escapes every untrusted label and contains the complete discl
   assert.doesNotMatch(html, /access_token|refresh_token|authorization_code|server-held-token/iu);
 });
 
-test("consent destination is prominent beside approval and describes loopback programs", () => {
+test("consent destination is prominent beside approval and describes HTTPS, loopback and native callbacks", () => {
+  assert.doesNotMatch(CONSENT_WARNING, /\bClaude\b/u);
   for (const [redirectUri, destination] of [
-    ["https://different.example:8443/private?code=hidden", "different.example"],
-    ["http://localhost:4321/callback", "a program on this computer (localhost)"],
+    ["https://different.example/private?code=hidden", "different.example"],
+    ["https://different.example:8443/private?code=hidden", "different.example:8443"],
+    ["http://localhost:4321/callback?code=hidden", "a program on this computer (localhost)"],
     ["http://127.0.0.1:5432/callback", "a program on this computer (localhost)"],
     ["http://[::1]:6543/callback", "a program on this computer (localhost)"],
+    ["cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback?code=hidden", "an app on this device (cursor://anysphere.cursor-retrieval)"],
+    ["com.example.app:/oauth/callback?code=hidden", "an app on this device (com.example.app:)"],
   ]) {
     const html = renderConsentPage({ interactionUid: "destination", redirectUri,
-      clientDisplay: { verified: false, primary: "metadata.example", declaredName: "Registered app" },
+      clientDisplay: { verified: false, primary: destination, declaredName: "Registered app" },
       identity, workspaces: [], selectionVersion: 0, csrfToken: "csrf" });
     assert.ok(html.includes(`After you approve, you return to <strong>${destination}</strong>`));
     const destinationStart = html.lastIndexOf('<p class="notice destination">');
@@ -142,7 +146,8 @@ test("consent destination is prominent beside approval and describes loopback pr
     const nearApproval = html.slice(destinationStart, approval);
     assert.ok(nearApproval.includes("Registered app"));
     assert.ok(nearApproval.includes(destination));
-    assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden/u);
+    assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden|\/private|user-commonswarm/u);
+    assert.doesNotMatch(html, /\bClaude\b/u);
   }
 });
 
