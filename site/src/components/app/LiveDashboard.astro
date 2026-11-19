@@ -12239,8 +12239,12 @@ import "../../styles/kylon-image-viewer.css";
         const claimsRead = homeWorkingOn(selected.id);
         /* Run the initial conversations/membership read in parallel with the channel list so
            the composer vs. preview/retry bar is settled before the first feed paint (no 72px
-           layout shift when opening a named channel). refreshConversations never throws. */
-        const conversationsRead = refreshConversations(selected.id, true);
+           layout shift when opening a named channel). refreshConversations never throws;
+           render=false avoids painting a half-loaded rail before channels arrive. Guarded for
+           script-extracted unit tests that stub openWorkspace without conversations state. */
+        const conversationsRead = typeof refreshConversations === "function"
+          ? refreshConversations(selected.id, true, false)
+          : Promise.resolve();
         const [
           [rosterSettled, memberRosterSettled, invitesSettled, accessStatusesSettled],
           nextPending,
@@ -14695,7 +14699,7 @@ import "../../styles/kylon-image-viewer.css";
      * Distinguishes a pre-Step-2b server (`ConversationsUnsupportedError` -> `"unsupported"`, legacy fallback)
      * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
      */
-    const refreshConversations = async (workspaceId: string, force: boolean): Promise<void> => {
+    const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
       if (sampleMode || !session || !workspaceId) return;
       const now = Date.now();
       if (!force && now - conversationsReadAt < 15_000) return;
@@ -14703,7 +14707,7 @@ import "../../styles/kylon-image-viewer.css";
       const generation = ++conversationsGeneration;
       if (workspaceConversations === null && conversationsReadState === "idle") {
         conversationsReadState = "pending";
-        renderChannelBlocked();
+        if (render) renderChannelBlocked();
       }
       let rows: ConversationSummary[];
       try {
@@ -14713,13 +14717,13 @@ import "../../styles/kylon-image-viewer.css";
         if (error instanceof ConversationsUnsupportedError) {
           conversationsReadState = "unsupported";
           conversationsReadError = "";
-          renderChannelBlocked();
+          if (render) renderChannelBlocked();
           return;
         }
         if (workspaceConversations === null) {
           conversationsReadState = "failed";
           conversationsReadError = readableError(error) || "Couldn't check channel membership.";
-          renderChannelBlocked();
+          if (render) renderChannelBlocked();
         }
         return;
       }
@@ -14727,9 +14731,11 @@ import "../../styles/kylon-image-viewer.css";
       workspaceConversations = rows;
       conversationsReadState = "ready";
       conversationsReadError = "";
-      renderHomeRail();
-      renderChannelBlocked();
-      renderChannelDirectoryDialog();
+      if (render) {
+        renderHomeRail();
+        renderChannelBlocked();
+        renderChannelDirectoryDialog();
+      }
     };
 
     /**
