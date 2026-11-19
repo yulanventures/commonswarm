@@ -386,6 +386,62 @@ test("decision_queue: the person's own open asks, oldest first; never for an age
   }
 });
 
+test("decision_queue_page: keyset-pages past 100 asks oldest first and enforces person/member/cursor guards", async () => {
+  const owner = await person("Owner");
+  const outsider = await person("Outsider");
+  const ws = await workspace(owner, "Paged queue test");
+  const asker = await agent(ws, owner, "BulkAsker");
+
+  // Seed 101 open asks with strictly increasing timestamps so ask #101 lands on page 2.
+  const ids: string[] = [];
+  await sql.begin(async (tx) => {
+    for (let i = 1; i <= 101; i++) {
+      const id = randomUUID();
+      ids.push(id);
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at)
+        VALUES (${id}::uuid, ${ws}::uuid, ${asker}::uuid, 'agent', ${owner}::uuid, 'ask', ${"ASK-" + i},
+          statement_timestamp() + interval '1 day', statement_timestamp() - interval '2 hours' + (${i} * interval '1 second'))`;
+    }
+  });
+
+  const queuePage = async (viewer: string, after: { created_at: string; signal_id: string } | null, extraClaims: Record<string, unknown> = {}, role = "authenticated") =>
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL ROLE ${role}`);
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewer, role: "authenticated", ...extraClaims })}, true)`;
+      const [row] = await tx<{ page: { total: number; truncated: boolean; asks: Array<{ signal_id: string; body: string; created_at: string }> } | null }[]>`
+        SELECT swarm_read.decision_queue_page(${ws}::uuid, ${after?.created_at ?? null}::timestamptz, ${after?.signal_id ?? null}::uuid) AS page`;
+      return row!.page;
+    });
+
+  const page1 = await queuePage(owner, null);
+  assert.ok(page1);
+  assert.equal(page1.total, 101);
+  assert.equal(page1.truncated, true);
+  assert.equal(page1.asks.length, 100);
+  assert.equal(page1.asks[0]!.signal_id, ids[0]);
+  assert.equal(page1.asks[99]!.signal_id, ids[99]);
+
+  const last1 = page1.asks[99]!;
+  const page2 = await queuePage(owner, { created_at: last1.created_at, signal_id: last1.signal_id });
+  assert.ok(page2);
+  assert.equal(page2.total, 101);
+  assert.equal(page2.truncated, false);
+  assert.deepEqual(page2.asks.map((a) => a.signal_id), [ids[100]]);
+  assert.equal(page2.asks[0]!.body, "ASK-101");
+
+  // Agent claims and outsiders get null; half-cursor is rejected; non-authenticated roles cannot execute.
+  assert.equal(await queuePage(owner, null, { agent_principal_id: asker }), null);
+  assert.equal(await queuePage(outsider, null), null);
+  await assert.rejects(() => sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
+    await tx`SELECT swarm_read.decision_queue_page(${ws}::uuid, ${last1.created_at}::timestamptz, NULL::uuid)`;
+  }), /decision_queue_cursor_invalid/);
+  for (const role of ["swarm_read", "swarm_command"]) {
+    await assert.rejects(() => queuePage(owner, null, {}, role), /permission denied/);
+  }
+});
+
 /* -------------------------------------------------------------------------
  * Channels C3: swarm_read.channel_messages returns only messages every member
  * can already read: whole-workspace, unexpired, filed in that channel, and for

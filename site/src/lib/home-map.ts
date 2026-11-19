@@ -328,7 +328,7 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const unlisted = typeof queue === "string" ? 0 : queue.total - queue.asks.length;
   return { people, signals, openTodos: row.content?.open_todos ?? null, lists: row.content?.lists ?? null,
     files: row.content?.files ?? null, newMessages: row.last_seen_at === null ? null : row.new_messages, needsYou,
-    needsYouComplete: typeof queue !== "string" && unlisted === 0 && [...counted].every(id => needsYou.some(item => item.id === id)),
+    needsYouComplete: typeof queue !== "string" && !queue.truncated && unlisted === 0 && [...counted].every(id => needsYou.some(item => item.id === id)),
     // An unread queue is an unmeasured count, never zero.
     ...(typeof queue === "string" ? {} : { measuredNeedsYou: needsYou.length + unlisted + homeAgentFixCards(people, workspace).length }) };
 }

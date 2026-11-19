@@ -3246,6 +3246,80 @@ export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
   return (data ?? []).map((row) => browserSignalFromRow(row as unknown as Record<string, unknown>));
 }
 
+export interface SignalLocation {
+  id: string;
+  channelId: string | null;
+  to: string | null;
+  toAgent: string | null;
+  threadRootId: string | null;
+  from: string;
+  fromKind: string;
+}
+
+/**
+ * Resolves the conversation placement columns for a small batch of signal ids in one workspace.
+ * Used by the Waiting on you channel panel so asks older than the loaded feed page distinguish
+ * named channels, #general, and direct messages without guessing on read failure.
+ */
+export async function signalLocations(
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<Map<string, SignalLocation>> {
+  const unique = [...new Set(signalIds.filter(Boolean))];
+  const out = new Map<string, SignalLocation>();
+  if (!unique.length) return out;
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const readBatch = async (ids: readonly string[]) => {
+    const rows: Array<Record<string, unknown>> = [];
+    for (let offset = 0; offset < ids.length; offset += 50) {
+      const chunk = ids.slice(offset, offset + 50);
+      const { data, error } = await readWithDeadline(
+        "signal locations",
+        (signal) =>
+          c
+            .schema("swarm_read")
+            .from("signals")
+            .select("id,channel_id,to,to_agent,thread_root_id,from,from_kind")
+            .eq("workspace_id", workspaceId)
+            .in("id", chunk)
+            .abortSignal(signal),
+      );
+      if (error) throw new Error(error.message);
+      rows.push(...((data ?? []) as Array<Record<string, unknown>>));
+    }
+    return rows;
+  };
+  const toLoc = (row: Record<string, unknown>): SignalLocation | null => {
+    if (typeof row.id !== "string") return null;
+    return {
+      id: row.id,
+      channelId: typeof row.channel_id === "string" ? row.channel_id : null,
+      to: typeof row.to === "string" ? row.to : null,
+      toAgent: typeof row.to_agent === "string" ? row.to_agent : null,
+      threadRootId: typeof row.thread_root_id === "string" ? row.thread_root_id : null,
+      from: typeof row.from === "string" ? row.from : "",
+      fromKind: typeof row.from_kind === "string" ? row.from_kind : "",
+    };
+  };
+  for (const row of await readBatch(unique)) {
+    const loc = toLoc(row);
+    if (loc) out.set(loc.id, loc);
+  }
+  const missingRoots = [...new Set(
+    [...out.values()]
+      .filter(loc => loc.channelId === null && loc.threadRootId !== null && !out.has(loc.threadRootId))
+      .map(loc => loc.threadRootId!),
+  )];
+  if (missingRoots.length) {
+    for (const row of await readBatch(missingRoots)) {
+      const loc = toLoc(row);
+      if (loc) out.set(loc.id, loc);
+    }
+  }
+  return out;
+}
+
 /**
  * The newest messages between the viewer and one teammate, by the same rule as `signalIsDirectBetween`, which the
  * screen still applies over what this returns. Narrowed in the query, so a conversation is not limited to whatever
@@ -4160,19 +4234,27 @@ export function removeReaction(session: Session, commandId: string, workspaceId:
   return postReaction("remove_reaction", session, commandId, workspaceId, signalId, emoji);
 }
 
-/** Interactive replies: the stored choices (and any answer) for up to 50 asks the signed-in person can read.
- * `null` when the read is unavailable or malformed; asks without choices simply aren't in the result. */
+/** Interactive replies: the stored choices (and any answer) for asks the signed-in person can read,
+ * paged in batches of ASK_CHOICES_BATCH (50). `null` when any batch is unavailable or malformed;
+ * asks without choices simply aren't in the result. */
 export async function askChoices(workspaceId: string, signalIds: readonly string[]): Promise<AskChoiceState[] | null> {
   const api = client();
   if (!api) throw new NoDeployment();
   if (signalIds.length === 0) return [];
-  const result = await readWithDeadline("Ask choices", signal =>
-    api.schema("swarm_read").rpc("ask_choices", {
-      p_workspace_id: workspaceId,
-      p_signal_ids: signalIds.slice(0, ASK_CHOICES_BATCH),
-    }).abortSignal(signal));
-  if (result.error) return null;
-  return parseAskChoices(result.data);
+  const out: AskChoiceState[] = [];
+  for (let offset = 0; offset < signalIds.length; offset += ASK_CHOICES_BATCH) {
+    const chunk = signalIds.slice(offset, offset + ASK_CHOICES_BATCH);
+    const result = await readWithDeadline("Ask choices", signal =>
+      api.schema("swarm_read").rpc("ask_choices", {
+        p_workspace_id: workspaceId,
+        p_signal_ids: chunk,
+      }).abortSignal(signal));
+    if (result.error) return null;
+    const parsed = parseAskChoices(result.data);
+    if (!parsed) return null;
+    out.push(...parsed);
+  }
+  return out;
 }
 
 export type AnswerChoiceResult =

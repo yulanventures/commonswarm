@@ -324,6 +324,7 @@ import "../../styles/kylon-image-viewer.css";
           <section data-home-catchup hidden></section>
           <div data-home-workspace-shell></div>
           <section class="hm-route-pane" data-home-route-pane hidden></section>
+          <div class="hm-channel-stage">
         <section class="dashboard__channel hm-frame__channel" aria-labelledby="dashboard-channel-title">
           <p class="hm-sr" role="status" data-channel-preference-status></p>
           <header class="dashboard__channel-head">
@@ -921,6 +922,8 @@ import "../../styles/kylon-image-viewer.css";
             </form>
           </div>
         </section>
+          <aside class="cs-waiting-panel" data-waiting-panel aria-label="Waiting on you" hidden></aside>
+          </div>
 
           <div data-home-phone-nav></div>
         </div>
@@ -1277,7 +1280,8 @@ import "../../styles/kylon-image-viewer.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
-  import { buildWaitingButton, updateWaitingButton, waitingTotal } from "../../lib/waiting-count";
+  import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
+  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1419,6 +1423,8 @@ import "../../styles/kylon-image-viewer.css";
     BROWSER_SIGNAL_COLUMNS,
     workspaceFiles,
     workspaceChannels,
+    signalLocations,
+    type SignalLocation,
     channelUnread,
     messageStatus,
     askChoices,
@@ -3851,6 +3857,7 @@ import "../../styles/kylon-image-viewer.css";
     function openEntityPanel(entity: EntityRef, trigger: HTMLElement): void {
       const panel = one<HTMLElement>("[data-entity-panel]");
       if (!panel) return;
+      if (typeof waitingSurface !== "undefined" && waitingSurface?.isOpen()) waitingSurface.close(false);
       if (!panel.contains(trigger)) entityPanelOrigin = trigger;
       selectedEntity = entity;
       panel.hidden = false;
@@ -5581,11 +5588,309 @@ import "../../styles/kylon-image-viewer.css";
       ["[data-home-catchup]", "cs-waiting--page"]] as const;
     const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
-    /** Catch up, unless that is where the person already is: a second press must not reload it or add to history. */
-    const openWaiting = (href: string): void => { if (homeRoute.view !== "catchup") navigateHomeHref(href); };
+    let waitingScope: WaitingScope = "channel";
+    let waitingPanelViewer = "";
+    let waitingPanelOverviewFailed = false;
+    let waitingStatusMessage = "";
+    let waitingStatusSeq = 0;
+    let waitingStatusTimer: number | undefined;
+    const clearWaitingStatus = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusTimer = undefined;
+      if (waitingStatusMessage !== "") {
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }
+    };
+    const showWaitingSent = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusMessage = "Sent";
+      waitingStatusSeq += 1;
+      waitingStatusTimer = window.setTimeout(() => {
+        waitingStatusTimer = undefined;
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }, 5_000);
+    };
+    const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelLoadedWorkspaces = new Set<string>();
+    const waitingPanelFailedWorkspaces = new Set<string>();
+    const waitingPanelTruncatedWorkspaces = new Set<string>();
+    const waitingWorkspaceChannels = new Map<string, Map<string, string>>();
+    type WaitingChoiceTicket = { viewer: string; workspaceId: string; signalId: string };
+    const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
+    const waitingPanelErrors = new Map<string, string>();
+    const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+
+    const isWaitingChannelView = (): boolean =>
+      !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
+
+    const currentWaitingPlace = (): WaitingPlace => {
+      const ws = workspaces.find(workspace => workspace.id === activeWorkspaceId) ?? workspaces[0];
+      const workspaceId = ws?.id ?? "";
+      const workspaceName = ws?.name ?? "Workspace";
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      if (dm) {
+        const label = typeof entityName === "function" ? entityName(dm) : "Direct message";
+        return { workspaceId, workspaceName, kind: "dm", channelId: null, label, dm: { kind: dm.kind, id: dm.id } };
+      }
+      if (activeChannelId === GENERAL_CHANNEL_ID) {
+        return { workspaceId, workspaceName, kind: "general", channelId: null, label: channelLabel(GENERAL_CHANNEL_SLUG) };
+      }
+      if (activeChannelId !== null) {
+        const ch = activeChannel();
+        return {
+          workspaceId,
+          workspaceName,
+          kind: "channel",
+          channelId: activeChannelId,
+          label: ch ? channelLabel(ch.slug) : channelLabel(GENERAL_CHANNEL_SLUG),
+        };
+      }
+      return { workspaceId, workspaceName, kind: "all", channelId: null, label: ALL_MESSAGES_LABEL };
+    };
+
+    const waitingChannelName = (workspaceId: string, conversation: WaitingConversation): string => {
+      if (conversation.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
+      if (conversation.kind === "dm") return "Direct message";
+      if (conversation.kind === "unknown") return "";
+      const { channelId } = conversation;
+      if (workspaceId === activeWorkspaceId) {
+        const found = channels.find(ch => ch.channelId === channelId);
+        if (found) return channelLabel(found.slug);
+      }
+      const slug = waitingWorkspaceChannels.get(workspaceId)?.get(channelId);
+      return slug ? channelLabel(slug) : "Channel";
+    };
+
+    const allWaitingAskItems = (): WaitingAskItem[] => {
+      const items: WaitingAskItem[] = [];
+      for (const workspace of workspaces) {
+        for (const ask of waitingPanelAsks.get(workspace.id) ?? []) {
+          const draft = choiceDrafts.get(choiceDraftKey(ask.workspaceId, ask.id));
+          const error = waitingPanelErrors.get(ask.id);
+          const pending = waitingPanelTickets.has(ask.id);
+          const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
+          items.push({
+            ...ask,
+            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            choices: {
+              options: ask.choices.options,
+              multi: ask.choices.multi,
+              ...(pending ? { pending: true as const } : {}),
+              ...(error ? { error } : {}),
+              ...(draft ? { draft } : {}),
+              ...(retryable ? { retryable: true as const } : {}),
+            },
+          });
+        }
+      }
+      return items;
+    };
+
+    type WaitingPanelModule = typeof import("../../lib/waiting-panel");
+    let waitingPanelMod: WaitingPanelModule | null = null;
+    let waitingPanelModPromise: Promise<WaitingPanelModule> | null = null;
+    let waitingSurface: WaitingSurface | null = null;
+    let waitingOpenEpoch = 0;
+
+    const loadWaitingPanelModule = (): Promise<WaitingPanelModule> => {
+      if (waitingPanelMod) return Promise.resolve(waitingPanelMod);
+      waitingPanelModPromise ??= import("../../lib/waiting-panel").then(mod => {
+        waitingPanelMod = mod;
+        return mod;
+      });
+      return waitingPanelModPromise;
+    };
+
+    const ensureWaitingSurface = (mod: WaitingPanelModule): WaitingSurface => {
+      if (waitingSurface) return waitingSurface;
+      waitingSurface = mod.createWaitingSurface(app, {
+        onBeforeOpen: () => {
+          const detailsClose = one<HTMLButtonElement>("[data-channel-details-close]");
+          const frame = one<HTMLElement>(".hm-frame");
+          const detailsSheet = one<HTMLDialogElement>("#cs-channel-details-sheet");
+          if (detailsSheet?.open || (frame && !frame.hasAttribute("data-channel-details-collapsed"))) {
+            detailsClose?.click();
+          }
+          if (typeof closeEntityPanel === "function") closeEntityPanel(false);
+        },
+        onStateChange: () => {
+          syncWaitingButtons();
+        },
+      });
+      waitingSurface.setEnabled(isWaitingChannelView());
+      return waitingSurface;
+    };
+
+    app.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("[data-channel-details-toggle]") && waitingSurface?.isOpen()) {
+        waitingSurface.close(false);
+      }
+    }, true);
+
+    const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
+      waitingPanelTickets.set(item.id, ticket);
+      waitingPanelErrors.delete(item.id);
+      waitingPanelLastSubmissions.set(item.id, submission);
+      renderWaitingPanelView();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission);
+      } catch {
+        result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
+      }
+      if (waitingPanelTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingPanelTickets.delete(item.id);
+      if (result.ok) {
+        choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
+        waitingPanelErrors.delete(item.id);
+        waitingPanelLastSubmissions.delete(item.id);
+        const list = waitingPanelAsks.get(item.workspaceId);
+        if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingSent();
+        renderWaitingPanelView();
+        renderHomeRail();
+        if (item.workspaceId === activeWorkspaceId) {
+          const current = choiceRows.get(item.id);
+          if (current) {
+            choiceRows.set(item.id, {
+              ...current,
+              answer: {
+                optionId: result.optionIds[0] ?? "other",
+                optionIds: result.optionIds,
+                otherText: result.otherText,
+                byViewer: true,
+                actorUserId: ticket.viewer,
+                at: null,
+              },
+            });
+            renderFeed();
+          }
+        }
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingPanelErrors.set(item.id, result.message);
+      renderWaitingPanelView();
+    };
+
+    const renderWaitingPanelView = (): void => {
+      const container = one<HTMLElement>("[data-waiting-panel]");
+      if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
+      const place = currentWaitingPlace();
+      const allItems = allWaitingAskItems();
+      const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
+      const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
+      const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
+      const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id));
+      const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id));
+      const anyWsTruncated = workspaces.some(ws => waitingPanelTruncatedWorkspaces.has(ws.id));
+      const allFailed = waitingPanelOverviewFailed || anyWsFailed;
+      const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
+      const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const complete = waitingScope === "all" ? allLoaded : wsLoaded;
+      const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
+      const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
+      waitingPanelMod.renderWaitingPanel(
+        container,
+        {
+          scope: waitingScope,
+          place,
+          items: visibleItems,
+          counts: {
+            channel: { min: channelItems.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length, complete: wsLoaded },
+            all: { min: allItems.length, complete: allLoaded },
+          },
+          loading: waitingInFlight && !complete && !truncated,
+          complete,
+          failed: failed && !waitingInFlight,
+          truncated,
+          catchUpHref: routeHref({ view: "catchup" }),
+          statusMessage: waitingStatusMessage,
+          statusSeq: waitingStatusSeq,
+        },
+        {
+          onScopeChange: (next) => {
+            clearWaitingStatus();
+            waitingScope = next;
+            renderWaitingPanelView();
+            if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
+          },
+          onClose: () => { clearWaitingStatus(); waitingSurface?.close(true); },
+          onRetryLoad: () => {
+            waitingPanelOverviewFailed = false;
+            waitingPanelFailedWorkspaces.clear();
+            renderWaitingPanelView();
+            void refreshWaitingCounts();
+          },
+          onSubmitChoice: (item, submission) => void sendWaitingPanelChoice(item, submission),
+          onRetryChoice: (item) => {
+            const last = waitingPanelLastSubmissions.get(item.id);
+            if (last) void sendWaitingPanelChoice(item, last);
+          },
+          onDraftChoice: (item, draft) => {
+            choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onOpenCatchUp: (href) => {
+            clearWaitingStatus();
+            waitingSurface?.close(false);
+            if (homeRoute.view !== "catchup") navigateHomeHref(href);
+          },
+        },
+      );
+    };
+
+    const syncWaitingPanel = (): void => {
+      const active = isWaitingChannelView();
+      if (!active) waitingOpenEpoch += 1;
+      waitingSurface?.setEnabled(active);
+      syncWaitingButtons();
+      if (active && waitingSurface?.isOpen()) renderWaitingPanelView();
+    };
+
+    /** In a channel view, toggle the Waiting on you right column (desktop) or modal sheet (phone).
+     *  Outside chat, navigate to Catch up unless already there. */
+    const openWaiting = (href: string, event: MouseEvent): void => {
+      if (isWaitingChannelView()) {
+        const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+        if (waitingSurface?.isOpen()) {
+          waitingOpenEpoch += 1;
+          waitingSurface.close(true);
+          return;
+        }
+        const epoch = ++waitingOpenEpoch;
+        const place = currentWaitingPlace();
+        if (!waitingPanelLoadedWorkspaces.has(place.workspaceId) || waitingPanelOverviewFailed) {
+          void refreshWaitingCounts();
+        }
+        void loadWaitingPanelModule().then(mod => {
+          if (epoch !== waitingOpenEpoch || !isWaitingChannelView() || document.querySelector("dialog[open]") !== null) return;
+          const surface = ensureWaitingSurface(mod);
+          // Opening always starts in This channel; channel switches keep the desktop column open.
+          waitingScope = "channel";
+          surface.open(trigger);
+          renderWaitingPanelView();
+        });
+        return;
+      }
+      if (homeRoute.view !== "catchup") navigateHomeHref(href);
+    };
     const syncWaitingButtons = (): void => {
       const shown = !sampleMode && !!session && workspaces.length > 0;
       const total = waitingTotal(workspaces.map(workspace => workspace.id), homeOverviewCounts);
+      const channelMode = isWaitingChannelView();
+      const open = channelMode && (waitingSurface?.isOpen() ?? false);
+      const controlsId = waitingSurface?.controlsId()
+        ?? (window.matchMedia("(max-width: 52rem)").matches ? "cs-waiting-sheet" : "cs-waiting-panel");
       WAITING_HOSTS.forEach(([selector, kind], index) => {
         const host = shown ? one<HTMLElement>(selector) : null;
         if (!host) { waitingLinks[index]?.remove(); return; }
@@ -5594,6 +5899,7 @@ import "../../styles/kylon-image-viewer.css";
         if (index === 0) { if (host.nextElementSibling !== link) host.after(link); }
         else if (host.lastElementChild !== link) host.append(link);
         updateWaitingButton(link, total);
+        syncWaitingButtonToggle(link, { active: channelMode && index !== 2, expanded: open, controlsId });
       });
     };
     const refreshWaitingCounts = async (): Promise<void> => {
@@ -5602,23 +5908,50 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingInFlight) { waitingAgain = true; return; }
       waitingInFlight = true;
       const generation = ++waitingGeneration, viewer = homeViewerId();
+      if (waitingPanelViewer !== viewer) {
+        waitingPanelViewer = viewer;
+        waitingPanelAsks.clear();
+        waitingPanelLoadedWorkspaces.clear();
+        waitingPanelFailedWorkspaces.clear();
+        waitingPanelTruncatedWorkspaces.clear();
+        waitingPanelTickets.clear();
+        waitingPanelErrors.clear();
+        waitingPanelLastSubmissions.clear();
+        waitingWorkspaceChannels.clear();
+        waitingPanelOverviewFailed = false;
+      }
       const live = (): boolean => generation === waitingGeneration && homeViewerId() === viewer && homeRoute.view !== "catchup";
       try {
         const overview = await homeOverview();
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
         if (!overview || !live()) return;
+        waitingPanelOverviewFailed = false;
         const now = Date.parse(overview.generated_at);
         const rows = new Map(overview.workspaces.map(row => [row.workspace_id, row]));
         const counted = new Map<string, number | null>();
-        const countOf = (workspace: Workspace, queue: DecisionQueue, choices: ReadonlyMap<string, AskChoiceState> = new Map()): number | null =>
-          homeNeedsYouCount({ workspace, state: "ready", detail: catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices) });
+        const detailOf = (workspace: Workspace, queue: DecisionQueue, choices: ReadonlyMap<string, AskChoiceState> = new Map()) =>
+          catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices);
         const toRead: Workspace[] = [];
         for (const workspace of workspaces) {
           const row = rows.get(workspace.id);
-          if (!row) counted.set(workspace.id, null);
-          else if (row.needs_you.asks.length > 0) { counted.set(workspace.id, null); toRead.push(workspace); }
-          else counted.set(workspace.id, countOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] }));
+          if (!row) {
+            counted.set(workspace.id, null);
+            waitingPanelFailedWorkspaces.add(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
+          } else if (row.needs_you.asks.length > 0) {
+            counted.set(workspace.id, null);
+            toRead.push(workspace);
+          } else {
+            const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
+            counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
+            waitingPanelAsks.set(workspace.id, []);
+            waitingPanelLoadedWorkspaces.add(workspace.id);
+            waitingPanelFailedWorkspaces.delete(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
+          }
         }
+        // Prioritize the active workspace so "This channel" paints immediately while background workspaces finish.
+        toRead.sort((a, b) => (a.id === activeWorkspaceId ? -1 : b.id === activeWorkspaceId ? 1 : 0));
         let next = 0;
         await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
           for (;;) {
@@ -5626,17 +5959,135 @@ import "../../styles/kylon-image-viewer.css";
             const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
             // A queue that cannot be read leaves its workspace uncounted, even if it was counted before: the overview
             // says something is waiting there and this read cannot say how much.
-            if (!queue) continue;
-            const ids = queue.asks.slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
-            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : null;
-            counted.set(workspace.id, countOf(workspace, queue, new Map((choices ?? []).map(choice => [choice.signalId, choice]))));
+            if (!queue) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
+              continue;
+            }
+            const ids = queue.asks.map(ask => ask.signal_id);
+            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            if (choices === null) {
+              // A failed choices read must never become an exact zero or an empty channel.
+              counted.set(workspace.id, null);
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
+              continue;
+            }
+            const choicesMap = new Map(choices.map(choice => [choice.signalId, choice]));
+            const detail = detailOf(workspace, queue, choicesMap);
+            counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
+
+            const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
+            const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
+            const locations = new Map<string, SignalLocation>();
+            const missingIds: string[] = [];
+            for (const item of choiceNeeds) {
+              const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
+              if (liveSignal) {
+                locations.set(item.id, {
+                  id: liveSignal.id,
+                  channelId: liveSignal.channelId,
+                  to: liveSignal.to,
+                  toAgent: liveSignal.toAgent,
+                  threadRootId: liveSignal.threadRootId,
+                  from: liveSignal.from,
+                  fromKind: liveSignal.fromKind,
+                });
+                if (liveSignal.channelId === null && liveSignal.threadRootId !== null) {
+                  const liveRoot = signals.find(s => s.id === liveSignal.threadRootId);
+                  if (liveRoot) {
+                    locations.set(liveRoot.id, {
+                      id: liveRoot.id,
+                      channelId: liveRoot.channelId,
+                      to: liveRoot.to,
+                      toAgent: liveRoot.toAgent,
+                      threadRootId: liveRoot.threadRootId,
+                      from: liveRoot.from,
+                      fromKind: liveRoot.fromKind,
+                    });
+                  } else {
+                    missingIds.push(liveSignal.threadRootId);
+                  }
+                }
+              } else {
+                missingIds.push(item.id);
+              }
+            }
+            let locationReadFailed = false;
+            if (missingIds.length) {
+              try {
+                const fetched = await signalLocations(workspace.id, missingIds);
+                for (const [sigId, loc] of fetched) locations.set(sigId, loc);
+              } catch {
+                locationReadFailed = true;
+              }
+            }
+            const classified = new Map<string, WaitingConversation>();
+            let anyUnknownLocation = locationReadFailed;
+            for (const item of choiceNeeds) {
+              const loc = locations.get(item.id) ?? null;
+              const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
+              const conv = classifyAskConversation(loc, rootLoc);
+              if (conv.kind === "unknown") anyUnknownLocation = true;
+              classified.set(item.id, conv);
+            }
+            const hasNamedChannel = [...classified.values()].some(conv => conv.kind === "channel");
+            if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
+              const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+              waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
+            }
+            const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
+              const raw = askById.get(item.id);
+              if (!raw || !item.choices) return [];
+              const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
+              const split = splitChoicePrompt(raw.body);
+              const question = (split.question ?? raw.body).trim() || item.what;
+              return [{
+                id: item.id,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                conversation,
+                channelLabel: waitingChannelName(workspace.id, conversation),
+                from: item.from,
+                fromKind: raw.from.kind,
+                fromId: raw.from.id,
+                what: question,
+                when: item.when,
+                createdAt: raw.created_at,
+                until: raw.until,
+                choices: { options: item.choices.options, multi: item.choices.multi },
+              }];
+            });
+            if (!live()) return;
+            waitingPanelAsks.set(workspace.id, panelItems);
+            const queueTruncated = queue.truncated || queue.asks.length < queue.total;
+            if (queueTruncated) waitingPanelTruncatedWorkspaces.add(workspace.id);
+            else waitingPanelTruncatedWorkspaces.delete(workspace.id);
+            if (anyUnknownLocation || queueTruncated) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+            } else {
+              waitingPanelLoadedWorkspaces.add(workspace.id);
+            }
+            if (anyUnknownLocation) {
+              waitingPanelFailedWorkspaces.add(workspace.id);
+            } else {
+              waitingPanelFailedWorkspaces.delete(workspace.id);
+            }
+            if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
           }
         }));
         if (!live()) return;
         for (const [id, count] of counted) homeOverviewCounts.set(id, count);
         renderHomeRail();
+        renderWaitingPanelView();
       } catch {
         // A failed overview changes nothing: what was counted stays, and what was not stays uncounted.
+        waitingPanelOverviewFailed = true;
+        renderWaitingPanelView();
       } finally {
         waitingInFlight = false;
         if (waitingAgain) { waitingAgain = false; void refreshWaitingCounts(); }
@@ -5883,8 +6334,10 @@ import "../../styles/kylon-image-viewer.css";
       void loadDirectHistory();
       syncComposerPlacement();
       renderHomeRail();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
+      const keepWaitingColumn = typeof waitingSurface !== "undefined" && (waitingSurface?.isOpen() ?? false) && !waitingSurface!.isPhone();
       const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
-      if (anchor) openEntityPanel(entity, anchor);
+      if (anchor && !keepWaitingColumn) openEntityPanel(entity, anchor);
     };
     /* For other modules (the Cmd+K palette): open a DM by principal or user id. */
     (app as HTMLElement & { openDirectMessage?: (id: string) => void }).openDirectMessage = (id: string): void => {
@@ -5998,7 +6451,7 @@ import "../../styles/kylon-image-viewer.css";
          the same way. The placement owns the name and reads the label set above. */
       syncComposerPlacement();
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); return; }
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); if (typeof syncWaitingPanel === "function") syncWaitingPanel(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
         toggleStar: () => {
@@ -6034,6 +6487,7 @@ import "../../styles/kylon-image-viewer.css";
       syncChannelLeadPill();
       // The header was rebuilt: restore the Waiting on you control and pending-access state on the People door.
       syncWaitingButtons();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
       syncRosterOpenButtons();
       syncFeedChrome();
     };
@@ -6172,7 +6626,7 @@ import "../../styles/kylon-image-viewer.css";
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
-          const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+          const askIds = (queue?.asks ?? []).map(ask => ask.signal_id);
           const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
             new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
@@ -6247,7 +6701,7 @@ import "../../styles/kylon-image-viewer.css";
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       syncStandalonePage();
-      if (home) { layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
+      if (home) { if (typeof syncWaitingPanel === "function") syncWaitingPanel(); layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren()); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
         renderHomeObjectPane();
@@ -6261,6 +6715,7 @@ import "../../styles/kylon-image-viewer.css";
       else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
       else activateWorkspaceView("signals");
       syncFeedChrome();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
     };
     const focusHomeView = (): void => {
       const route = homeRoute;
@@ -8727,7 +9182,14 @@ import "../../styles/kylon-image-viewer.css";
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
       // An answer, here or anywhere, changes what is waiting.
-      if (result.ok && typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
+      if (result.ok) {
+        if (typeof waitingPanelAsks !== "undefined") {
+          const list = waitingPanelAsks.get(workspaceId);
+          if (list) waitingPanelAsks.set(workspaceId, list.filter(entry => entry.id !== signalId));
+          if (typeof renderWaitingPanelView === "function") renderWaitingPanelView();
+        }
+        if (typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
+      }
       // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
       if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
       choiceTickets.delete(signalId);

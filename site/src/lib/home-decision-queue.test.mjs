@@ -36,6 +36,51 @@ test("the client reads swarm_read.decision_queue for one workspace and keeps the
   await assert.rejects(serverWith(async () => ({ data: null, error: { code: "42501" } })).decisionQueue("W"), /home_decision_queue_failed/);
 });
 
+test("decisionQueue keyset-pages past 100 asks via decision_queue_page and stays truncated if any page fails or stops advancing", async () => {
+  const makeAsk = n => ask(`ask-${String(n).padStart(3, "0")}`, new Date(Date.parse("2026-11-01T00:00:00Z") + n * 1000).toISOString());
+  const all101 = Array.from({ length: 101 }, (_, i) => makeAsk(i + 1));
+  const calls = [];
+  const pagedServer = serverWith(async (schema, fn, args) => {
+    calls.push([schema, fn, args]);
+    if (fn === "decision_queue") {
+      return { data: queue(all101.slice(0, 100), { total: 101, truncated: true }), error: null };
+    }
+    if (fn === "decision_queue_page") {
+      assert.equal(args.p_after_id, "ask-100");
+      assert.equal(args.p_after_created_at, all101[99].created_at);
+      return { data: queue(all101.slice(100), { total: 101, truncated: false }), error: null };
+    }
+    throw new Error(`unexpected rpc ${fn}`);
+  });
+  const full = await pagedServer.decisionQueue("W");
+  assert.equal(calls.length, 2);
+  assert.equal(full.asks.length, 101);
+  assert.equal(full.total, 101);
+  assert.equal(full.truncated, false);
+  assert.equal(full.asks[100].signal_id, "ask-101");
+
+  // Unmigrated server (PGRST202 on decision_queue_page): keeps page 1 with truncated: true (never claims complete).
+  const unmigrated = serverWith(async (_schema, fn) => {
+    if (fn === "decision_queue") return { data: queue(all101.slice(0, 100), { total: 101, truncated: true }), error: null };
+    return { data: null, error: { code: "PGRST202" } };
+  });
+  const partial = await unmigrated.decisionQueue("W");
+  assert.equal(partial.asks.length, 100);
+  assert.equal(partial.total, 101);
+  assert.equal(partial.truncated, true);
+
+  // Non-advancing cursor guard: stops and keeps truncated: true instead of looping forever.
+  let stuckCalls = 0;
+  const stuck = serverWith(async (_schema, fn) => {
+    stuckCalls += 1;
+    if (fn === "decision_queue") return { data: queue(all101.slice(0, 100), { total: 101, truncated: true }), error: null };
+    return { data: queue(all101.slice(0, 100), { total: 101, truncated: true }), error: null };
+  });
+  const stopped = await stuck.decisionQueue("W");
+  assert.equal(stuckCalls, 2);
+  assert.equal(stopped.truncated, true);
+});
+
 test("a malformed queue throws instead of rendering a guess", () => {
   const good = queue([ask("a", "2026-11-01T09:00:00Z")]);
   assert.equal(parseDecisionQueue(good, "W").asks.length, 1);

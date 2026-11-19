@@ -826,6 +826,95 @@
     ]
   },
   {
+    "id": "app.chat.waiting-panel",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-card]:first-child [data-decision-option]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
+      }
+    ],
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child .cs-waiting-card__question",
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
+    ]
+  },
+  {
+    "id": "app.chat.waiting-panel.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+      }
+    ],
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-panel]:not([hidden]) [data-waiting-state=\"empty\"] [data-waiting-switch-scope]"
+    ]
+  },
+  {
     "id": "app.chat.unread-bar",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.unread}",

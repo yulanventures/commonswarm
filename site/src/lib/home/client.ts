@@ -227,7 +227,54 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_decision_queue_failed');
-      return parseDecisionQueue(data, workspaceId);
+      const first = parseDecisionQueue(data, workspaceId);
+      if (!first || (!first.truncated && first.asks.length >= first.total)) return first;
+      // More than 100 open asks: keyset-page through decision_queue_page until the server reports
+      // no more rows. If an older server lacks the paged RPC, any later page fails, or the cap is
+      // reached, keep truncated: true so callers never mistake a partial queue for complete.
+      const asks = [...first.asks];
+      const seen = new Set(asks.map(ask => ask.signal_id));
+      let page = first;
+      let truncated = true;
+      let pages = 1;
+      const MAX_PAGES = 20;
+      while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+        const last = page.asks[page.asks.length - 1]!;
+        let next: DecisionQueue | null = null;
+        try {
+          const paged = await c.schema('swarm_read').rpc('decision_queue_page', {
+            p_workspace_id: workspaceId,
+            p_after_created_at: last.created_at,
+            p_after_id: last.signal_id,
+          });
+          if (paged.error) break;
+          next = parseDecisionQueue(paged.data, workspaceId);
+        } catch {
+          break;
+        }
+        if (!next) break;
+        let added = 0;
+        for (const ask of next.asks) {
+          if (seen.has(ask.signal_id)) continue;
+          seen.add(ask.signal_id);
+          asks.push(ask);
+          added += 1;
+        }
+        page = next;
+        pages += 1;
+        if (!next.truncated) {
+          truncated = false;
+          break;
+        }
+        if (added === 0) break;
+      }
+      return {
+        workspace_id: workspaceId,
+        generated_at: page.generated_at,
+        total: Math.max(page.total, asks.length),
+        truncated,
+        asks,
+      };
     },
 
     async activity(workspaceId, since, limit): Promise<ActivityItem[]> {
