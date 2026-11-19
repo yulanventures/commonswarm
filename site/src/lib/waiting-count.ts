@@ -83,3 +83,46 @@ export function syncWaitingButtonToggle(link: HTMLElement, toggle: { active: boo
     link.removeAttribute("aria-controls");
   }
 }
+
+export type WaitingConversation =
+  | { kind: "channel"; channelId: string }
+  | { kind: "general" }
+  | { kind: "dm"; partnerKind: "person" | "agent"; partnerId: string }
+  | { kind: "unknown" };
+
+export interface WaitingSignalPlacement {
+  channelId: string | null;
+  to: string | null;
+  toAgent: string | null;
+  threadRootId: string | null;
+  from: string;
+  fromKind: string;
+}
+
+/**
+ * Classifies where an ask lives using the same placement rule as swarm.conversation_placement:
+ * - non-null channelId -> named channel
+ * - thread reply without channelId -> its root's conversation (unknown if root wasn't read)
+ * - null channelId and unaddressed -> #general
+ * - null channelId and addressed -> direct message with the sender (never #general)
+ * - missing/failed placement lookup -> unknown (never #general)
+ */
+export function classifyAskConversation(
+  loc: WaitingSignalPlacement | null,
+  rootLoc: Pick<WaitingSignalPlacement, "channelId" | "to" | "toAgent"> | null = null,
+): WaitingConversation {
+  if (!loc) return { kind: "unknown" };
+  if (loc.channelId !== null) return { kind: "channel", channelId: loc.channelId };
+  const dmFrom = (): WaitingConversation =>
+    loc.from
+      ? { kind: "dm", partnerKind: loc.fromKind === "agent" ? "agent" : "person", partnerId: loc.from }
+      : { kind: "unknown" };
+  if (loc.threadRootId !== null) {
+    if (!rootLoc) return { kind: "unknown" };
+    if (rootLoc.channelId !== null) return { kind: "channel", channelId: rootLoc.channelId };
+    if (rootLoc.to === null && rootLoc.toAgent === null) return { kind: "general" };
+    return dmFrom();
+  }
+  if (loc.to === null && loc.toAgent === null) return { kind: "general" };
+  return dmFrom();
+}

@@ -60,9 +60,13 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
+      if (f.scenario.startsWith("failed-choices")) return Response.json({ message: "choices unavailable" }, { status: 500 });
       return Response.json({ asks: body?.p_workspace_id === ids[8] && (body?.p_signal_ids ?? []).includes(ask) ? [{ signal_id: ask, multi: false,
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
+    }
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[8] && url.searchParams.get("id")?.includes(ask)) {
+      return Response.json([{ id: ask, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent" }]);
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
       // From here on the ninth workspace has nothing waiting, in the overview and in its queue.
@@ -143,6 +147,19 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("failed-choices")) {
+      await wait(() => shown(control()) && f.overviewReads > 0 && f.log.includes("choices:9"), "failed choices read attempted");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      await wait(() => shown(panel()) && shown(panel()?.querySelector("[data-waiting-scope]")), "panel opened during failed choices");
+      const scope = panel()!.querySelector<HTMLSelectElement>("[data-waiting-scope]")!;
+      scope.value = "all";
+      scope.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(panel()?.querySelector('[data-waiting-state="failed"] [data-waiting-retry]')), "failed choices shows Retry instead of empty");
+      check(!texts.has("0") && !names.has("Waiting on you 0"), "failed choices must never render zero on badge");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -163,6 +180,10 @@ async function observeWaitingCount() {
       "Waiting on you opens in This channel and offers Show all workspaces",
     );
     check(control()!.getAttribute("aria-expanded") === "true", "control aria-expanded is not true when open");
+    const closeBox = panel()!.querySelector<HTMLElement>("[data-waiting-close]")!.getBoundingClientRect();
+    const scopeBox = panel()!.querySelector<HTMLElement>("[data-waiting-scope]")!.getBoundingClientRect();
+    check(closeBox.width >= 44 && closeBox.height >= 44, "close target under 44px: " + JSON.stringify(closeBox));
+    check(scopeBox.height >= 44, "scope selector under 44px: " + JSON.stringify(scopeBox));
     if (f.phone) {
       check(panel()!.parentElement === sheet(), "phone panel is not inside the modal dialog sheet");
     } else {
@@ -175,6 +196,7 @@ async function observeWaitingCount() {
     await wait(() => shown(card()) && options().length === 2, "Waiting on you lists the ninth workspace's question with its choices");
     check(card()!.dataset.waitingWorkspace === f.ids[8] && card()!.textContent!.includes(f.question), "the card is not the ninth workspace's question: " + card()!.textContent);
     check(options().map(option => option.dataset.decisionOption).join() === "yes,no", "the card's choices are not the stored ones");
+    check(options()[0]!.getBoundingClientRect().height >= 44, "choice option target under 44px");
     check(f.answers.length === 0, "an answer was sent before a choice was clicked");
     // 3. One choice sends one answer_choice for that ask, in the ninth workspace.
     options()[0]!.click();
@@ -182,10 +204,11 @@ async function observeWaitingCount() {
     const sent = f.answers[0];
     check(f.answers.length === 1 && sent.workspace_id === f.ids[8] && sent.command.kind === "answer_choice" && sent.command.signal_id === f.ask &&
       sent.command.option_id === "yes", "the answer names the wrong workspace, ask or option: " + JSON.stringify(f.answers));
-    // 4. The card leaves immediately, Sent is announced, and the panel settles on Nothing waiting on you.
+    // 4. The card leaves immediately, Sent is visibly shown and announced even after the last answer, and the empty state appears.
     await wait(() => !panel()?.querySelector(`[data-waiting-card="${f.ask}"]`) &&
+      shown(panel()?.querySelector("[data-waiting-status]")) &&
       panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent" &&
-      panel()?.querySelector(".cs-waiting-panel__state-text")?.textContent === "Nothing waiting on you.", "the answered question left the panel and announced Sent");
+      panel()?.querySelector(".cs-waiting-panel__state-text")?.textContent === "Nothing waiting on you.", "the answered question left the panel and showed visible Sent");
     // 5. Closing on phone returns focus to the channel header Waiting on you control.
     if (f.phone) {
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
@@ -243,6 +266,6 @@ test("Waiting on you: a question in the ninth workspace shows in the count from 
 });
 
 test("Waiting on you: an uncounted workspace makes the count a minimum, never zero", { timeout: 180_000 }, async () => {
-  const outcomes = await runWaitingScenarios(["uncounted-one-phone", "uncounted-one-desktop", "uncounted-none-phone", "uncounted-none-desktop"]);
+  const outcomes = await runWaitingScenarios(["uncounted-one-phone", "uncounted-one-desktop", "uncounted-none-phone", "uncounted-none-desktop", "failed-choices-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

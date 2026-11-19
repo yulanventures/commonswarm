@@ -1280,7 +1280,7 @@ import "../../styles/kylon-image-viewer.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
-  import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton, waitingTotal } from "../../lib/waiting-count";
+  import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
   import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
@@ -1423,7 +1423,8 @@ import "../../styles/kylon-image-viewer.css";
     BROWSER_SIGNAL_COLUMNS,
     workspaceFiles,
     workspaceChannels,
-    signalChannels,
+    signalLocations,
+    type SignalLocation,
     channelUnread,
     messageStatus,
     askChoices,
@@ -5592,6 +5593,25 @@ import "../../styles/kylon-image-viewer.css";
     let waitingPanelOverviewFailed = false;
     let waitingStatusMessage = "";
     let waitingStatusSeq = 0;
+    let waitingStatusTimer: number | undefined;
+    const clearWaitingStatus = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusTimer = undefined;
+      if (waitingStatusMessage !== "") {
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }
+    };
+    const showWaitingSent = (): void => {
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusMessage = "Sent";
+      waitingStatusSeq += 1;
+      waitingStatusTimer = window.setTimeout(() => {
+        waitingStatusTimer = undefined;
+        waitingStatusMessage = "";
+        renderWaitingPanelView();
+      }, 5_000);
+    };
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
@@ -5629,8 +5649,11 @@ import "../../styles/kylon-image-viewer.css";
       return { workspaceId, workspaceName, kind: "all", channelId: null, label: ALL_MESSAGES_LABEL };
     };
 
-    const waitingChannelName = (workspaceId: string, channelId: string | null): string => {
-      if (channelId === null) return channelLabel(GENERAL_CHANNEL_SLUG);
+    const waitingChannelName = (workspaceId: string, conversation: WaitingConversation): string => {
+      if (conversation.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
+      if (conversation.kind === "dm") return "Direct message";
+      if (conversation.kind === "unknown") return "";
+      const { channelId } = conversation;
       if (workspaceId === activeWorkspaceId) {
         const found = channels.find(ch => ch.channelId === channelId);
         if (found) return channelLabel(found.slug);
@@ -5649,7 +5672,7 @@ import "../../styles/kylon-image-viewer.css";
           const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
           items.push({
             ...ask,
-            channelLabel: waitingChannelName(ask.workspaceId, ask.channelId),
+            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
             choices: {
               options: ask.choices.options,
               multi: ask.choices.multi,
@@ -5730,8 +5753,7 @@ import "../../styles/kylon-image-viewer.css";
         if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
         const prevCount = homeOverviewCounts.get(item.workspaceId);
         if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
-        waitingStatusMessage = "Sent";
-        waitingStatusSeq += 1;
+        showWaitingSent();
         renderWaitingPanelView();
         renderHomeRail();
         if (item.workspaceId === activeWorkspaceId) {
@@ -5766,7 +5788,8 @@ import "../../styles/kylon-image-viewer.css";
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
       const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id));
-      const allFailed = waitingPanelOverviewFailed || (workspaces.length > 0 && workspaces.every(ws => waitingPanelFailedWorkspaces.has(ws.id)));
+      const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id));
+      const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
@@ -5779,9 +5802,9 @@ import "../../styles/kylon-image-viewer.css";
           place,
           items: visibleItems,
           counts: {
-            channel: wsLoaded ? channelItems.length : null,
-            workspace: wsLoaded ? workspaceItems.length : null,
-            all: allLoaded ? allItems.length : null,
+            channel: { min: channelItems.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length, complete: wsLoaded },
+            all: { min: allItems.length, complete: allLoaded },
           },
           loading: waitingInFlight && !complete,
           complete,
@@ -5791,11 +5814,12 @@ import "../../styles/kylon-image-viewer.css";
         },
         {
           onScopeChange: (next) => {
+            clearWaitingStatus();
             waitingScope = next;
             renderWaitingPanelView();
             if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
           },
-          onClose: () => waitingSurface?.close(true),
+          onClose: () => { clearWaitingStatus(); waitingSurface?.close(true); },
           onRetryLoad: () => {
             waitingPanelOverviewFailed = false;
             waitingPanelFailedWorkspaces.clear();
@@ -5922,29 +5946,80 @@ import "../../styles/kylon-image-viewer.css";
             // A queue that cannot be read leaves its workspace uncounted, even if it was counted before: the overview
             // says something is waiting there and this read cannot say how much.
             if (!queue) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
               continue;
             }
             const ids = queue.asks.slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
-            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : null;
-            const choicesMap = new Map((choices ?? []).map(choice => [choice.signalId, choice]));
+            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            if (choices === null) {
+              // A failed choices read must never become an exact zero or an empty channel.
+              counted.set(workspace.id, null);
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+              if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
+              continue;
+            }
+            const choicesMap = new Map(choices.map(choice => [choice.signalId, choice]));
             const detail = detailOf(workspace, queue, choicesMap);
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
 
             const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
             const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
-            const resolvedChannels = new Map<string, string | null>();
+            const locations = new Map<string, SignalLocation>();
             const missingIds: string[] = [];
             for (const item of choiceNeeds) {
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
-              if (liveSignal) resolvedChannels.set(item.id, liveSignal.channelId);
-              else missingIds.push(item.id);
+              if (liveSignal) {
+                locations.set(item.id, {
+                  id: liveSignal.id,
+                  channelId: liveSignal.channelId,
+                  to: liveSignal.to,
+                  toAgent: liveSignal.toAgent,
+                  threadRootId: liveSignal.threadRootId,
+                  from: liveSignal.from,
+                  fromKind: liveSignal.fromKind,
+                });
+                if (liveSignal.channelId === null && liveSignal.threadRootId !== null) {
+                  const liveRoot = signals.find(s => s.id === liveSignal.threadRootId);
+                  if (liveRoot) {
+                    locations.set(liveRoot.id, {
+                      id: liveRoot.id,
+                      channelId: liveRoot.channelId,
+                      to: liveRoot.to,
+                      toAgent: liveRoot.toAgent,
+                      threadRootId: liveRoot.threadRootId,
+                      from: liveRoot.from,
+                      fromKind: liveRoot.fromKind,
+                    });
+                  } else {
+                    missingIds.push(liveSignal.threadRootId);
+                  }
+                }
+              } else {
+                missingIds.push(item.id);
+              }
             }
+            let locationReadFailed = false;
             if (missingIds.length) {
-              const fetched = await signalChannels(workspace.id, missingIds).catch(() => new Map<string, string | null>());
-              for (const [sigId, chId] of fetched) resolvedChannels.set(sigId, chId);
+              try {
+                const fetched = await signalLocations(workspace.id, missingIds);
+                for (const [sigId, loc] of fetched) locations.set(sigId, loc);
+              } catch {
+                locationReadFailed = true;
+              }
             }
-            const hasNamedChannel = [...resolvedChannels.values()].some(chId => chId !== null);
+            const classified = new Map<string, WaitingConversation>();
+            let anyUnknownLocation = locationReadFailed;
+            for (const item of choiceNeeds) {
+              const loc = locations.get(item.id) ?? null;
+              const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
+              const conv = classifyAskConversation(loc, rootLoc);
+              if (conv.kind === "unknown") anyUnknownLocation = true;
+              classified.set(item.id, conv);
+            }
+            const hasNamedChannel = [...classified.values()].some(conv => conv.kind === "channel");
             if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
               const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
@@ -5952,15 +6027,15 @@ import "../../styles/kylon-image-viewer.css";
             const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
               const raw = askById.get(item.id);
               if (!raw || !item.choices) return [];
-              const chId = resolvedChannels.get(item.id) ?? null;
+              const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
               const split = splitChoicePrompt(raw.body);
               const question = (split.question ?? raw.body).trim() || item.what;
               return [{
                 id: item.id,
                 workspaceId: workspace.id,
                 workspaceName: workspace.name,
-                channelId: chId,
-                channelLabel: waitingChannelName(workspace.id, chId),
+                conversation,
+                channelLabel: waitingChannelName(workspace.id, conversation),
                 from: item.from,
                 fromKind: raw.from.kind,
                 fromId: raw.from.id,
@@ -5973,8 +6048,13 @@ import "../../styles/kylon-image-viewer.css";
             });
             if (!live()) return;
             waitingPanelAsks.set(workspace.id, panelItems);
-            waitingPanelLoadedWorkspaces.add(workspace.id);
-            waitingPanelFailedWorkspaces.delete(workspace.id);
+            if (anyUnknownLocation) {
+              waitingPanelLoadedWorkspaces.delete(workspace.id);
+              waitingPanelFailedWorkspaces.add(workspace.id);
+            } else {
+              waitingPanelLoadedWorkspaces.add(workspace.id);
+              waitingPanelFailedWorkspaces.delete(workspace.id);
+            }
             if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
           }
         }));

@@ -482,8 +482,8 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
     require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
   "app.chat.waiting-panel": [{ name: "waiting-panel", rows: "[data-waiting-panel]:not([hidden]) [data-waiting-card]",
-    prefer: '[data-waiting-card="{message.choiceOpen}"]', require: ['[data-waiting-card="{message.choiceOpen}"]'], max: 1, focus: true,
-    focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
+    prefer: "[data-waiting-card]:first-child", require: ["[data-waiting-card]:first-child"], max: 1, focus: true,
+    focusTarget: ".hm-decision [data-decision-option]" }],
   /* Typed Something else text survives a real feed rebuild: its field is focused, a note in this channel makes the app's
      own poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while
      the card's Done is shown and enabled, which it is only while the draft still holds the typed text. Last on the page,
@@ -1180,6 +1180,40 @@ async function main(): Promise<void> {
         });
         palette.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
+      }
+      // Waiting on you visible Sent confirmation captures at 390x844 and 1440x900 in both themes (non-mutating).
+      const waitingScreen = screens().find(s => s.id === "app.chat.waiting-panel");
+      if (waitingScreen && (!ONLY_SCREENS.length || ONLY_SCREENS.includes("app.chat.waiting-panel"))) {
+        for (const [viewport, desktop] of [[{ width: 390, height: 844 }, false], [{ width: 1440, height: 900 }, true]] as const) {
+          for (const theme of THEMES) {
+            const size = `${viewport.width}x${viewport.height}`;
+            const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
+            try {
+              const page = await signedIn.newPage();
+              await page.route(/\/functions\/v1\/command(?:\?|$)/u, async (route: any) => {
+                const body = route.request().postDataJSON?.() ?? null;
+                if (body?.command?.kind === "answer_choice") {
+                  await route.fulfill({
+                    status: 200,
+                    contentType: "application/json",
+                    body: JSON.stringify({ status: "accepted", choice_answer: { option_id: body.command.option_id ?? "full" } }),
+                  });
+                } else {
+                  await route.continue();
+                }
+              });
+              await openScreen(page, waitingScreen);
+              await page.locator("[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]").first().click();
+              await page.waitForSelector("[data-waiting-panel]:not([hidden]) [data-waiting-status]:not([hidden])", { state: "visible", timeout: 10_000 });
+              const shot = `shots/app.chat.waiting-panel--sent--${size}--${theme}.png`;
+              await page.screenshot({ path: join(OUT, shot) });
+              hoverShots.push(shot);
+              await page.close();
+            } finally {
+              await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
+            }
+          }
+        }
       }
     } finally { await browser.close(); }
   } finally {

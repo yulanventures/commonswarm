@@ -3218,34 +3218,70 @@ export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
   return (data ?? []).map((row) => browserSignalFromRow(row as unknown as Record<string, unknown>));
 }
 
+export interface SignalLocation {
+  id: string;
+  channelId: string | null;
+  to: string | null;
+  toAgent: string | null;
+  threadRootId: string | null;
+  from: string;
+  fromKind: string;
+}
+
 /**
- * Resolves the channel id for a small batch of signal ids in one workspace. Used by the Waiting on you
- * channel panel so asks older than the loaded feed page still know which channel they belong to.
+ * Resolves the conversation placement columns for a small batch of signal ids in one workspace.
+ * Used by the Waiting on you channel panel so asks older than the loaded feed page distinguish
+ * named channels, #general, and direct messages without guessing on read failure.
  */
-export async function signalChannels(
+export async function signalLocations(
   workspaceId: string,
   signalIds: readonly string[],
-): Promise<Map<string, string | null>> {
+): Promise<Map<string, SignalLocation>> {
   const unique = [...new Set(signalIds.filter(Boolean))];
-  const out = new Map<string, string | null>();
+  const out = new Map<string, SignalLocation>();
   if (!unique.length) return out;
   const c = client();
   if (!c) throw new NoDeployment();
-  const { data, error } = await readWithDeadline(
-    "signal channels",
-    (signal) =>
-      c
-        .schema("swarm_read")
-        .from("signals")
-        .select("id,channel_id")
-        .eq("workspace_id", workspaceId)
-        .in("id", unique)
-        .abortSignal(signal),
-  );
-  if (error) throw new Error(error.message);
-  for (const row of (data ?? []) as Array<{ id?: unknown; channel_id?: unknown }>) {
-    if (typeof row.id === "string") {
-      out.set(row.id, typeof row.channel_id === "string" ? row.channel_id : null);
+  const readBatch = async (ids: readonly string[]) => {
+    const { data, error } = await readWithDeadline(
+      "signal locations",
+      (signal) =>
+        c
+          .schema("swarm_read")
+          .from("signals")
+          .select("id,channel_id,to,to_agent,thread_root_id,from,from_kind")
+          .eq("workspace_id", workspaceId)
+          .in("id", ids)
+          .abortSignal(signal),
+    );
+    if (error) throw new Error(error.message);
+    return (data ?? []) as Array<Record<string, unknown>>;
+  };
+  const toLoc = (row: Record<string, unknown>): SignalLocation | null => {
+    if (typeof row.id !== "string") return null;
+    return {
+      id: row.id,
+      channelId: typeof row.channel_id === "string" ? row.channel_id : null,
+      to: typeof row.to === "string" ? row.to : null,
+      toAgent: typeof row.to_agent === "string" ? row.to_agent : null,
+      threadRootId: typeof row.thread_root_id === "string" ? row.thread_root_id : null,
+      from: typeof row.from === "string" ? row.from : "",
+      fromKind: typeof row.from_kind === "string" ? row.from_kind : "",
+    };
+  };
+  for (const row of await readBatch(unique)) {
+    const loc = toLoc(row);
+    if (loc) out.set(loc.id, loc);
+  }
+  const missingRoots = [...new Set(
+    [...out.values()]
+      .filter(loc => loc.channelId === null && loc.threadRootId !== null && !out.has(loc.threadRootId))
+      .map(loc => loc.threadRootId!),
+  )];
+  if (missingRoots.length) {
+    for (const row of await readBatch(missingRoots)) {
+      const loc = toLoc(row);
+      if (loc) out.set(loc.id, loc);
     }
   }
   return out;

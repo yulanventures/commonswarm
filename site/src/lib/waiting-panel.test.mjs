@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   WAITING_PANEL_ID,
   WAITING_SHEET_ID,
+  classifyAskConversation,
   createWaitingSurface,
   filterWaitingItems,
   renderWaitingPanel,
@@ -257,7 +258,7 @@ function sampleAsk(overrides = {}) {
     id: "ask-1",
     workspaceId: "ws-1",
     workspaceName: "Rivera Household",
-    channelId: "ch-1",
+    conversation: { kind: "channel", channelId: "ch-1" },
     channelLabel: "#household",
     from: agent,
     fromKind: "agent",
@@ -277,25 +278,42 @@ function sampleAsk(overrides = {}) {
   };
 }
 
-test("filterWaitingItems scopes accurately by named channel, #general, DM, workspace, and all workspaces", () => {
+test("classifyAskConversation and filterWaitingItems separate #general and DM asks from the same sender and never turn unknown lookups into #general", () => {
+  const genConv = classifyAskConversation({ channelId: null, to: null, toAgent: null, threadRootId: null, from: "a1", fromKind: "agent" });
+  const dmConv = classifyAskConversation({ channelId: null, to: "u-viewer", toAgent: null, threadRootId: null, from: "a1", fromKind: "agent" });
+  const threadGenConv = classifyAskConversation(
+    { channelId: null, to: "u-viewer", toAgent: null, threadRootId: "root-1", from: "a1", fromKind: "agent" },
+    { channelId: null, to: null, toAgent: null },
+  );
+  const chConv = classifyAskConversation({ channelId: "ch-1", to: "u-viewer", toAgent: null, threadRootId: null, from: "a1", fromKind: "agent" });
+  const unknownConv = classifyAskConversation(null);
+
+  assert.deepEqual(genConv, { kind: "general" });
+  assert.deepEqual(dmConv, { kind: "dm", partnerKind: "agent", partnerId: "a1" });
+  assert.deepEqual(threadGenConv, { kind: "general" });
+  assert.deepEqual(chConv, { kind: "channel", channelId: "ch-1" });
+  assert.deepEqual(unknownConv, { kind: "unknown" });
+
+  // Same sender (Atlas, a1) has one #general ask, one DM ask, one named-channel ask, and one unknown-location ask.
   const items = [
-    sampleAsk({ id: "in-ch1", workspaceId: "ws-1", channelId: "ch-1" }),
-    sampleAsk({ id: "in-gen", workspaceId: "ws-1", channelId: null, fromKind: "agent", fromId: "a1" }),
-    sampleAsk({ id: "in-dm-u1", workspaceId: "ws-1", channelId: null, from: person, fromKind: "user", fromId: "u1" }),
-    sampleAsk({ id: "in-ws2", workspaceId: "ws-2", workspaceName: "Studio", channelId: "ch-2" }),
+    sampleAsk({ id: "in-ch1", workspaceId: "ws-1", conversation: chConv }),
+    sampleAsk({ id: "in-gen", workspaceId: "ws-1", conversation: genConv, channelLabel: "#general" }),
+    sampleAsk({ id: "in-dm-a1", workspaceId: "ws-1", conversation: dmConv, channelLabel: "Direct message" }),
+    sampleAsk({ id: "in-unknown", workspaceId: "ws-1", conversation: unknownConv, channelLabel: "" }),
+    sampleAsk({ id: "in-ws2", workspaceId: "ws-2", workspaceName: "Studio", conversation: { kind: "channel", channelId: "ch-2" } }),
   ];
   const ch1 = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "channel", channelId: "ch-1", label: "#household" };
   const gen = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "general", channelId: null, label: "#general" };
-  const dm = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "dm", channelId: null, label: "Alex", dm: { kind: "person", id: "u1" } };
+  const dm = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "dm", channelId: null, label: "Atlas", dm: { kind: "agent", id: "a1" } };
 
   assert.deepEqual(filterWaitingItems(items, "channel", ch1).map(i => i.id), ["in-ch1"]);
-  assert.deepEqual(filterWaitingItems(items, "channel", gen).map(i => i.id), ["in-gen", "in-dm-u1"]);
-  assert.deepEqual(filterWaitingItems(items, "channel", dm).map(i => i.id), ["in-dm-u1"]);
-  assert.deepEqual(filterWaitingItems(items, "workspace", ch1).map(i => i.id), ["in-ch1", "in-gen", "in-dm-u1"]);
-  assert.deepEqual(filterWaitingItems(items, "all", ch1).map(i => i.id), ["in-ch1", "in-gen", "in-dm-u1", "in-ws2"]);
+  assert.deepEqual(filterWaitingItems(items, "channel", gen).map(i => i.id), ["in-gen"], "DM and unknown asks must not appear in #general");
+  assert.deepEqual(filterWaitingItems(items, "channel", dm).map(i => i.id), ["in-dm-a1"], "#general and unknown asks must not appear in DM");
+  assert.deepEqual(filterWaitingItems(items, "workspace", ch1).map(i => i.id), ["in-ch1", "in-gen", "in-dm-a1", "in-unknown"]);
+  assert.deepEqual(filterWaitingItems(items, "all", ch1).map(i => i.id), ["in-ch1", "in-gen", "in-dm-a1", "in-unknown", "in-ws2"]);
 });
 
-test("renderWaitingPanel names the channel, sends single choice on tap, gives Other a Send button, preserves failed drafts with Retry, and announces Sent", () => {
+test("renderWaitingPanel names the channel, sends single choice on tap, gives Other a Send button, preserves failed drafts with Retry, shows visible Sent, and never fakes zero on failed reads", () => {
   const { doc } = makeFakeDoc(false);
   const host = doc.createElement("aside");
   doc.root.append(host);
@@ -304,11 +322,12 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
   const retried = [];
   const drafts = [];
   const scopes = [];
+  let loadRetries = 0;
   const place = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "channel", channelId: "ch-1", label: "#household" };
   const handlers = {
     onScopeChange: s => scopes.push(s),
     onClose: () => {},
-    onRetryLoad: () => {},
+    onRetryLoad: () => { loadRetries += 1; },
     onSubmitChoice: (item, sub) => submitted.push({ id: item.id, sub }),
     onRetryChoice: item => retried.push(item.id),
     onDraftChoice: (item, draft) => drafts.push({ id: item.id, draft }),
@@ -319,7 +338,11 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
     scope: "channel",
     place,
     items: [ask],
-    counts: { channel: 1, workspace: 3, all: 7 },
+    counts: {
+      channel: { min: 1, complete: true },
+      workspace: { min: 3, complete: true },
+      all: { min: 7, complete: true },
+    },
     loading: false,
     complete: true,
     failed: false,
@@ -330,6 +353,7 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
   assert.equal(host.querySelector("[data-waiting-place]").textContent, "#household");
   const select = host.querySelector("[data-waiting-scope]");
   assert.deepEqual(select.options.map(o => o.textContent), ["This channel (1)", "All channels (3)", "All workspaces (7)"]);
+  assert.equal(host.querySelector("[data-waiting-status]").hidden, true);
 
   // Recommended option is marked and one tap sends immediately.
   const harborBtn = host.querySelector('[data-decision-option="harbor"]');
@@ -347,7 +371,11 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
     scope: "channel",
     place,
     items: [{ ...ask, when: "3m ago" }],
-    counts: { channel: 1, workspace: 3, all: 7 },
+    counts: {
+      channel: { min: 1, complete: true },
+      workspace: { min: 3, complete: true },
+      all: { min: 7, complete: true },
+    },
     loading: false,
     complete: true,
     failed: false,
@@ -369,7 +397,11 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
         draft: { selected: [], otherOpen: true, otherText: "Ask for a third quote" },
       },
     })],
-    counts: { channel: 1, workspace: 3, all: 7 },
+    counts: {
+      channel: { min: 1, complete: true },
+      workspace: { min: 3, complete: true },
+      all: { min: 7, complete: true },
+    },
     loading: false,
     complete: true,
     failed: false,
@@ -384,24 +416,70 @@ test("renderWaitingPanel names the channel, sends single choice on tap, gives Ot
   retryBtn.click();
   assert.deepEqual(retried, ["ask-1"]);
 
-  // After answering succeeds, empty channel coexists with nonzero all-workspace count and announces Sent.
+  // After answering succeeds, visible Sent banner shows even after the last card leaves, and empty channel coexists with nonzero all-channel count.
   renderWaitingPanel(host, {
     scope: "channel",
     place,
     items: [],
-    counts: { channel: 0, workspace: 2, all: 6 },
+    counts: {
+      channel: { min: 0, complete: true },
+      workspace: { min: 2, complete: true },
+      all: { min: 6, complete: true },
+    },
     loading: false,
     complete: true,
     failed: false,
     statusMessage: "Sent",
     statusSeq: 1,
   }, handlers);
-  assert.equal(host.querySelector("[data-waiting-status]").textContent, "Sent");
+  const statusEl = host.querySelector("[data-waiting-status]");
+  assert.equal(statusEl.hidden, false, "Sent confirmation must be visible in the panel");
+  assert.equal(statusEl.textContent, "Sent");
   assert.ok(host.querySelector(".cs-waiting-panel__state-text").textContent.includes("#household"));
   const switchBtn = host.querySelector("[data-waiting-switch-scope]");
   assert.equal(switchBtn.textContent, "Show all channels (2)");
   switchBtn.click();
   assert.deepEqual(scopes, ["workspace"]);
+
+  // Failed read: never renders (0) or "Nothing waiting", shows Retry and minimum counts.
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    counts: {
+      channel: { min: 0, complete: false },
+      workspace: { min: 0, complete: false },
+      all: { min: 2, complete: false },
+    },
+    loading: false,
+    complete: false,
+    failed: true,
+    statusMessage: "",
+    statusSeq: 1,
+  }, handlers);
+  assert.deepEqual(select.options.map(o => o.textContent), ["This channel", "All channels", "All workspaces (2+)"]);
+  assert.equal(host.querySelector('[data-waiting-state="failed"]') !== null, true);
+  host.querySelector("[data-waiting-retry]").click();
+  assert.equal(loadRetries, 1);
+
+  // Partial failure with loaded items shows the known items plus an inline Retry notice.
+  renderWaitingPanel(host, {
+    scope: "all",
+    place,
+    items: [ask],
+    counts: {
+      channel: { min: 1, complete: true },
+      workspace: { min: 1, complete: true },
+      all: { min: 1, complete: false },
+    },
+    loading: false,
+    complete: false,
+    failed: true,
+    statusMessage: "",
+    statusSeq: 1,
+  }, handlers);
+  assert.equal(host.querySelector("[data-waiting-incomplete]") !== null, true);
+  assert.equal(select.options[2].textContent, "All workspaces (1+)");
 });
 
 test("createWaitingSurface starts closed, stays open across desktop updates, and uses a modal dialog sheet on phone returning focus on close", () => {

@@ -10,6 +10,13 @@ import { buildChoiceCard } from "./choice-card";
 import type { AskChoiceState, ChoiceDraft, ChoiceOption, ChoiceSubmission } from "./choices";
 import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
+import {
+  classifyAskConversation,
+  type WaitingConversation,
+  type WaitingSignalPlacement,
+} from "./waiting-count";
+
+export { classifyAskConversation, type WaitingConversation, type WaitingSignalPlacement };
 
 export type WaitingScope = "channel" | "workspace" | "all";
 
@@ -26,7 +33,7 @@ export interface WaitingAskItem {
   id: string;
   workspaceId: string;
   workspaceName: string;
-  channelId: string | null;
+  conversation: WaitingConversation;
   channelLabel: string;
   from: PersonVM | AgentVM;
   fromKind: "agent" | "user";
@@ -45,10 +52,15 @@ export interface WaitingAskItem {
   };
 }
 
+export interface WaitingScopeCount {
+  min: number;
+  complete: boolean;
+}
+
 export interface WaitingPanelCounts {
-  channel: number | null;
-  workspace: number | null;
-  all: number | null;
+  channel: WaitingScopeCount;
+  workspace: WaitingScopeCount;
+  all: WaitingScopeCount;
 }
 
 export interface WaitingPanelVM {
@@ -86,11 +98,18 @@ export function filterWaitingItems(
   return items.filter(item => {
     if (item.workspaceId !== place.workspaceId) return false;
     if (place.kind === "all") return true;
-    if (place.kind === "channel") return item.channelId === place.channelId;
-    if (place.kind === "general") return item.channelId === null;
+    if (place.kind === "channel") {
+      return item.conversation.kind === "channel" && item.conversation.channelId === place.channelId;
+    }
+    if (place.kind === "general") {
+      return item.conversation.kind === "general";
+    }
     if (place.kind === "dm" && place.dm) {
-      const dmKind = place.dm.kind === "person" ? "user" : "agent";
-      return item.channelId === null && item.fromKind === dmKind && item.fromId === place.dm.id;
+      return (
+        item.conversation.kind === "dm" &&
+        item.conversation.partnerKind === place.dm.kind &&
+        item.conversation.partnerId === place.dm.id
+      );
     }
     return false;
   });
@@ -112,8 +131,15 @@ function node<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 
-function scopeOptionText(base: string, count: number | null): string {
-  return count === null ? base : `${base} (${count > 99 ? "99+" : count})`;
+function formatScopeCount(count: WaitingScopeCount): string {
+  if (count.min > 99) return "99+";
+  if (count.complete) return String(count.min);
+  return count.min > 0 ? `${count.min}+` : "";
+}
+
+function scopeOptionText(base: string, count: WaitingScopeCount): string {
+  const num = formatScopeCount(count);
+  return num ? `${base} (${num})` : base;
 }
 
 function placeHeadingText(vm: WaitingPanelVM): string {
@@ -124,15 +150,15 @@ function placeHeadingText(vm: WaitingPanelVM): string {
 
 function cardLocationText(item: WaitingAskItem, scope: WaitingScope): string | null {
   if (scope === "channel") return null;
-  if (scope === "workspace") return item.channelLabel;
-  return `${item.workspaceName} · ${item.channelLabel}`;
+  if (scope === "workspace") return item.channelLabel || null;
+  return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
 }
 
 function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
-    item.channelId,
+    item.conversation,
     item.channelLabel,
     item.from.name,
     item.what,
@@ -251,10 +277,12 @@ export function renderWaitingPanel(
     }
     controls.append(scope);
 
-    const status = node(doc, "p", "hm-sr");
+    // Visible confirmation banner and polite live region: announces "Sent" and stays visible after the last answer.
+    const status = node(doc, "p", "cs-waiting-panel__status");
     status.dataset.waitingStatus = "";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
+    status.hidden = true;
 
     const body = node(doc, "div", "cs-waiting-panel__body");
     body.dataset.waitingBody = "";
@@ -263,7 +291,6 @@ export function renderWaitingPanel(
     container.replaceChildren(root);
   }
 
-  // Keep event listeners bound to the latest handlers via dataset-keyed delegation on root.
   const closeBtn = root.querySelector<HTMLButtonElement>("[data-waiting-close]");
   if (closeBtn) closeBtn.onclick = () => handlers.onClose();
 
@@ -289,9 +316,13 @@ export function renderWaitingPanel(
   }
 
   const statusEl = root.querySelector<HTMLElement>("[data-waiting-status]");
-  if (statusEl && statusEl.dataset.waitingStatusSeq !== String(vm.statusSeq)) {
-    statusEl.dataset.waitingStatusSeq = String(vm.statusSeq);
-    statusEl.textContent = vm.statusMessage;
+  if (statusEl) {
+    const hasStatus = vm.statusMessage.trim() !== "";
+    statusEl.hidden = !hasStatus;
+    if (statusEl.dataset.waitingStatusSeq !== String(vm.statusSeq) || statusEl.textContent !== vm.statusMessage) {
+      statusEl.dataset.waitingStatusSeq = String(vm.statusSeq);
+      statusEl.textContent = vm.statusMessage;
+    }
   }
 
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
@@ -299,13 +330,17 @@ export function renderWaitingPanel(
 
   if (vm.items.length === 0) {
     const emptyState = vm.failed ? "failed" : vm.loading || !vm.complete ? "loading" : "empty";
+    const wsNum = formatScopeCount(vm.counts.workspace);
+    const allNum = formatScopeCount(vm.counts.all);
     const emptyKey = JSON.stringify([
       emptyState,
       vm.scope,
       vm.place.label,
       vm.place.workspaceName,
-      vm.counts.workspace,
-      vm.counts.all,
+      wsNum,
+      allNum,
+      vm.counts.workspace.min,
+      vm.counts.all.min,
     ]);
     if (body.dataset.waitingEmptyKey === emptyKey) return;
     body.dataset.waitingEmptyKey = emptyKey;
@@ -329,23 +364,23 @@ export function renderWaitingPanel(
             ? `Nothing waiting in ${vm.place.workspaceName}.`
             : "Nothing waiting on you.";
       wrap.append(node(doc, "p", "cs-waiting-panel__state-text", emptyCopy));
-      if (vm.scope === "channel" && (vm.counts.workspace ?? 0) > 0) {
+      if (vm.scope === "channel" && vm.counts.workspace.min > 0) {
         const showWs = node(
           doc,
           "button",
           "cs-waiting-panel__action",
-          `Show all channels (${vm.counts.workspace})`,
+          `Show all channels (${wsNum})`,
         );
         showWs.type = "button";
         showWs.dataset.waitingSwitchScope = "workspace";
         showWs.addEventListener("click", () => handlers.onScopeChange("workspace"));
         wrap.append(showWs);
-      } else if (vm.scope !== "all" && (vm.counts.all ?? 0) > 0) {
+      } else if (vm.scope !== "all" && vm.counts.all.min > 0) {
         const showAll = node(
           doc,
           "button",
           "cs-waiting-panel__action",
-          `Show all workspaces (${vm.counts.all})`,
+          `Show all workspaces (${allNum})`,
         );
         showAll.type = "button";
         showAll.dataset.waitingSwitchScope = "all";
@@ -405,6 +440,24 @@ export function renderWaitingPanel(
     }
     if (card !== cursor) list.insertBefore(card, cursor);
     else cursor = cursor.nextSibling;
+  }
+
+  // Show an inline incomplete notice with Retry whenever some reads failed alongside already-loaded cards.
+  const existingNotice = body.querySelector<HTMLElement>("[data-waiting-incomplete]");
+  if (vm.failed && !vm.complete) {
+    if (!existingNotice) {
+      const notice = node(doc, "div", "cs-waiting-panel__incomplete");
+      notice.dataset.waitingIncomplete = "";
+      notice.append(node(doc, "p", "cs-waiting-panel__state-text", "Some waiting questions could not be loaded."));
+      const retry = node(doc, "button", "cs-waiting-panel__action", "Retry");
+      retry.type = "button";
+      retry.dataset.waitingRetry = "";
+      retry.addEventListener("click", () => handlers.onRetryLoad());
+      notice.append(retry);
+      body.append(notice);
+    }
+  } else {
+    existingNotice?.remove();
   }
 }
 

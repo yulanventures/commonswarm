@@ -840,7 +840,7 @@
       },
       {
         "media": "(width <= 52rem)",
-        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]"
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-card]:first-child [data-decision-option]"
       },
       {
         "media": "(width > 52rem)",
@@ -852,13 +852,10 @@
       },
       {
         "media": "(width > 52rem)",
-        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]"
-      },
-      {
-        "scroll": "[data-waiting-panel]:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"]"
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
       }
     ],
-    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]",
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]",
     "states": [
       "dense"
     ],
@@ -869,7 +866,8 @@
       "seed_choice_asks"
     ],
     "frame": [
-      "[data-waiting-panel]:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]"
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child .cs-waiting-card__question",
+      "[data-waiting-panel]:not([hidden]) [data-waiting-card]:first-child [data-decision-option]"
     ]
   },
   {
