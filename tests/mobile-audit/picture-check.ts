@@ -182,7 +182,7 @@ export async function runPictureChecks(
     const unsigned = signing.picture;
     check("a picture with no link yet waits in its frame and is not painted", signing.seen && !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted,
       { seen: signing.seen, unsigned });
-    const signedLater = await until(unsignedPage, p => p.loaded);
+    const signedLater = await until(unsignedPage, p => p.loaded && p.state === null);
     check("it appears in the same frame once its link is signed", !!signedLater?.loaded && signedLater.painted && signedLater.state === null && near(unsigned?.frame ?? null, signedLater.frame), { unsigned: unsigned?.frame, loaded: signedLater });
     await unsignedPage.close();
 
@@ -203,7 +203,7 @@ export async function runPictureChecks(
     check("frame is reserved at 16:10 before the picture loads", !!frame && frame.w > 0 && Math.abs(frame.h - frame.w * 10 / 16) <= 1, frame);
     await shot(page, "picture-loading");
     release();
-    const after = await until(page, p => p.loaded);
+    const after = await until(page, p => p.loaded && p.state === null);
     check("picture loads at its real size", after?.natural?.w === AUDIT_PNG_SIZE.width && after.natural.h === AUDIT_PNG_SIZE.height, after);
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
     check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
@@ -316,9 +316,24 @@ export async function runPictureChecks(
       check("nothing navigated to the file while the viewer was used", !navigated, navigated);
       page.off("request", watch);
       // Download is the viewer's own button, and it starts the picture's own signed file. Activate the picture link
-      // directly so a background feed rebuild frame cannot send bare Enter to <body>.
+      // directly and record lightweight failure-only diagnostics in case Enter does not open the viewer.
+      await page.evaluate(() => {
+        const list = document.querySelector("[data-feed-list]");
+        const trace = { activeBefore: `${document.activeElement?.tagName ?? ""}:${document.activeElement?.className ?? ""}`, keydowns: [] as string[], dialogs: 0, feedRebuilds: 0 };
+        const onKey = (e: KeyboardEvent) => { trace.keydowns.push(`${e.key}:t=${(e.target as Element | null)?.tagName ?? "?"}.${(e.target as Element | null)?.className ?? ""}:a=${document.activeElement?.tagName ?? "?"}.${document.activeElement?.className ?? ""}`); };
+        const mo = new MutationObserver((records) => {
+          for (const rec of records) {
+            if (rec.target === list) trace.feedRebuilds++;
+            for (const node of rec.addedNodes) if (node instanceof Element && node.matches?.("dialog[data-image-viewer]")) trace.dialogs++;
+          }
+        });
+        document.addEventListener("keydown", onKey, true);
+        mo.observe(document.body, { childList: true, subtree: true });
+        (window as any).__csPicTrace = { trace, stop: () => { document.removeEventListener("keydown", onKey, true); mo.disconnect(); return trace; } };
+      });
       await page.locator(".dashboard__message .hm-extras__image").first().press("Enter");
       const forDownload = await viewer(page, v => !!v && v.loaded && v.state === "");
+      const openTrace = await page.evaluate(() => (window as any).__csPicTrace?.stop?.() ?? null);
       let commandStatus: number | null = null;
       const onCommandResponse = (response: any) => {
         if (String(response.url()).includes("/functions/v1/command") && (response.request().postData() ?? "").includes("file_download_url")) {
@@ -335,7 +350,7 @@ export async function runPictureChecks(
         } finally { page.off("response", onCommandResponse); }
       }
       check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
-        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS) }) });
+        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS), openTrace }) });
     }
     await page.close();
 
@@ -365,7 +380,7 @@ export async function runPictureChecks(
         url: location.pathname + location.search,
       };
     };
-    const loadedStale = await until(stale, p => p.loaded);
+    const loadedStale = await until(stale, p => p.loaded && p.state === null);
     const staleAt = await stale.evaluate(() => location.pathname + location.search);
     await stale.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
     await stale.keyboard.press("Enter");
@@ -385,6 +400,44 @@ export async function runPictureChecks(
     check("Tab reaches that Retry, and with the viewer's code back it opens the viewer", onRetryOpen === "retry" && !!recovered2 && fitted(recovered2) && await stale.evaluate(OPEN_FAILED) === null && !strayed,
       { onRetryOpen, recovered: recovered2, strayed });
     await stale.close();
+
+    // 2a-dialog. If another dialog opens while the viewer's module is still loading, that dialog stays the only open
+    // dialog and keeps focus; once it closes, a fresh press on the picture opens the viewer normally.
+    let releaseViewerChunk: () => void = () => {};
+    let viewerChunkRequested = false;
+    let viewerChunkHeld = new Promise<void>(done => { releaseViewerChunk = done; });
+    const contested = await open(async (p: any) => {
+      await p.route(VIEWER_CHUNK, async (route: any) => {
+        viewerChunkRequested = true;
+        await viewerChunkHeld;
+        await route.continue();
+      });
+    });
+    await until(contested, p => p.loaded && p.state === null);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    for (const started = Date.now(); Date.now() - started < 10_000 && !viewerChunkRequested;) await contested.waitForTimeout(50);
+    if (options.click) await contested.locator("[data-roster-open]:visible").first().click();
+    else await contested.keyboard.press("ControlOrMeta+k");
+    await contested.waitForSelector("dialog[open]:not([data-image-viewer])", { state: "visible", timeout: 10_000 });
+    releaseViewerChunk();
+    await contested.waitForTimeout(350);
+    const duringOther = await contested.evaluate(() => {
+      const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
+      const other = openDialogs.find(d => !d.hasAttribute("data-image-viewer")) ?? null;
+      return {
+        openCount: openDialogs.length,
+        viewerOpen: openDialogs.some(d => d.hasAttribute("data-image-viewer")),
+        focusInsideOther: !!other && other.contains(document.activeElement),
+      };
+    });
+    await contested.keyboard.press("Escape");
+    for (const started = Date.now(); Date.now() - started < 5_000 && await contested.evaluate(() => !!document.querySelector("dialog[open]"));) await contested.waitForTimeout(50);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    const afterOther = await viewer(contested, v => !!v && v.loaded && v.state === "");
+    check("a late viewer module never opens over another dialog, and opens normally once it closes",
+      viewerChunkRequested && duringOther.openCount === 1 && !duringOther.viewerOpen && duringOther.focusInsideOther && !!afterOther && fitted(afterOther),
+      { viewerChunkRequested, duringOther, afterOther: !!afterOther });
+    await contested.close();
 
     // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
     let imageReads = 0, sawFailure = false, paintedUnloaded = false;
@@ -449,7 +502,7 @@ export async function runPictureChecks(
     // Storage answers again: Enter on Retry loads the picture in the same frame, with focus on the picture.
     storageDown = false;
     await failing.keyboard.press("Enter");
-    const retried = await until(failing, p => p.loaded);
+    const retried = await until(failing, p => p.loaded && p.state === null);
     const afterLoad = await failing.evaluate(FOCUS);
     check("Retry loads the picture in the same frame", !!retried?.loaded && retried.painted && retried.state === null && near(frame, retried.frame), retried);
     check("a successful retry leaves focus on the picture", afterLoad === "picture", afterLoad);

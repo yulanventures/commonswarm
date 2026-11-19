@@ -9890,15 +9890,19 @@ import "../../styles/kylon-image-viewer.css";
      * downloaded and the reader stays where they are: the picture says "Couldn't open picture" with Retry, and the
      * app checks for a new release, whose notice offers the reload that a release needs.
      */
+    const loadImageViewer = () => import("../../lib/image-viewer");
     let chatPictureOpening = false;
     const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
-      if (chatPictureOpening || one("[data-image-viewer]")) return;
+      if (chatPictureOpening || document.querySelector("dialog[open]")) return;
       const { file_id: fileId, version_n: version } = attachment;
+      const openedFeed = feedIdentity();
       const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
       const slot = trigger.parentElement;
       slot?.querySelector("[data-picture-open-failed]")?.remove();
       chatPictureOpening = true;
-      void import("../../lib/image-viewer").then(({ openImageViewer }) => {
+      void loadImageViewer().then(({ openImageViewer }) => {
+        // Another dialog (e.g. People) or a navigation may have arrived while the viewer module was loading.
+        if (document.querySelector("dialog[open]") || feedIdentity() !== openedFeed) return;
         openImageViewer(app, {
           name: attachment.name,
           link: async () => {
@@ -9919,7 +9923,7 @@ import "../../styles/kylon-image-viewer.css";
           back?.focus({ preventScroll: true });
         });
       }, () => {
-        if (!slot || !trigger.isConnected) return;
+        if (!slot || !trigger.isConnected || feedIdentity() !== openedFeed) return;
         const note = document.createElement("span");
         note.className = "hm-extras__image-failed"; note.dataset.pictureOpenFailed = ""; note.setAttribute("role", "alert");
         const said = document.createElement("span"); said.textContent = "Couldn't open picture";
@@ -10066,25 +10070,25 @@ import "../../styles/kylon-image-viewer.css";
           selection: field && field.selectionStart !== null && field.selectionEnd !== null ? [field.selectionStart, field.selectionEnd] : null };
       } else if (active !== null && active !== document.body) feedFocus = null;
       if (!feedFocus) return;
-      const restore = (): void => {
+      const restore = (deferMissing: boolean): void => {
         if (generation !== feedRenderGeneration || !feedFocus) return;
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) { feedFocus = null; return; }
+        if (feedIdentity() !== feedFocus.feed || document.querySelector("dialog[open]")) { feedFocus = null; return; }
+        const next = [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(feedFocus.id)}"]`)][feedFocus.copy];
+        const target = !next ? null : feedFocus.identity === null ? next
+          : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === feedFocus!.identity)[feedFocus.ordinal] ?? null;
+        if (!target && deferMissing) { window.requestAnimationFrame(() => restore(false)); return; }
         const pending = feedFocus;
         feedFocus = null;
-        const now = document.activeElement;
-        if (now !== null && now !== document.body) return;
-        if (feedIdentity() !== pending.feed || document.querySelector("dialog[open]")) return;
-        const next = [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(pending.id)}"]`)][pending.copy];
-        if (!next) return;
-        const target = pending.identity === null ? next
-          : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === pending.identity)[pending.ordinal] ?? null;
         target?.focus({ preventScroll: true });
         if (pending.selection && target instanceof HTMLInputElement) {
           const end = target.value.length;
           target.setSelectionRange(Math.min(pending.selection[0], end), Math.min(pending.selection[1], end));
         }
       };
-      // After the rebuild returns, then (for anything but a text field) after the frame its deferred controls are added in.
-      queueMicrotask(() => { if (feedFocus?.selection) restore(); else window.requestAnimationFrame(restore); });
+      // Restore controls already in the rebuilt DOM before the next event; defer only controls added on the next frame (Show more).
+      queueMicrotask(() => restore(true));
     };
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);

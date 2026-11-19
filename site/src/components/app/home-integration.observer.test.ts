@@ -2363,6 +2363,157 @@ test('keepFeedFocus identity ignores transient picture preview state across feed
   assert.notEqual(idOf(link('file-a')), idOf(link('file-b')), 'different pictures keep distinct identities');
 });
 
+test('keepFeedFocus restores rebuilt controls in the microtask and defers only missing next-frame controls', async () => {
+  const code = await dashboardFunctions(['FEED_FOCUSABLE', 'controlIdentity', 'feedIdentity', 'keepFeedFocus']);
+  class FakeHTMLElement {
+    tagName: string;
+    className: string;
+    dataset: Record<string, string>;
+    attributes: { name: string; value: string }[];
+    parent: FakeHTMLElement | null = null;
+    children: FakeHTMLElement[] = [];
+    focused = false;
+    constructor(tag: string, className: string, attrs: Record<string, string> = {}) {
+      this.tagName = tag.toUpperCase();
+      this.className = className;
+      this.dataset = {};
+      this.attributes = Object.entries(attrs).map(([name, value]) => ({ name, value }));
+      if (attrs['data-signal-id']) this.dataset.signalId = attrs['data-signal-id'];
+    }
+    append(...nodes: FakeHTMLElement[]) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+    contains(el: unknown): boolean {
+      if (el === this) return true;
+      return this.children.some(c => c.contains(el));
+    }
+    closest(selector: string): FakeHTMLElement | null {
+      if (selector === '[data-signal-id]' && this.dataset.signalId) return this;
+      return this.parent?.closest(selector) ?? null;
+    }
+    getAttribute(name: string): string | null { return this.attributes.find(a => a.name === name)?.value ?? null; }
+    querySelectorAll(selector: string): FakeHTMLElement[] {
+      const out: FakeHTMLElement[] = [];
+      const walk = (n: FakeHTMLElement) => {
+        for (const c of n.children) {
+          const matchSignal = selector.startsWith('[data-signal-id="') && c.dataset.signalId === selector.slice(17, -2);
+          const matchFocusable = selector.includes('a[href]') && (c.tagName === 'A' || c.tagName === 'BUTTON');
+          if (matchSignal || matchFocusable) out.push(c);
+          walk(c);
+        }
+      };
+      walk(this);
+      return out;
+    }
+    focus() { this.focused = true; doc.activeElement = this; }
+  }
+  class FakeHTMLInputElement extends FakeHTMLElement { type = 'text'; selectionStart = null; selectionEnd = null; }
+  const body = new FakeHTMLElement('body', '');
+  const doc: { activeElement: FakeHTMLElement | null; body: FakeHTMLElement; querySelector: () => null } = {
+    activeElement: body, body, querySelector: () => null,
+  };
+  const rafQueue: (() => void)[] = [];
+  const context = createContext({
+    HTMLElement: FakeHTMLElement,
+    HTMLInputElement: FakeHTMLInputElement,
+    CSS: { escape: (s: string) => s },
+    document: doc,
+    window: { requestAnimationFrame: (fn: () => void) => { rafQueue.push(fn); return rafQueue.length; } },
+    queueMicrotask,
+    homeRoute: { view: 'chat' }, activeWorkspaceId: 'w1', activeChannelId: 'c1', signalFilter: 'all', activeWorkspaceView: 'signals',
+    feedFocus: null, feedRenderGeneration: 0,
+  });
+  runInContext(code, context);
+  const keep = runInContext('keepFeedFocus', context) as (list: FakeHTMLElement) => void;
+
+  // 1. Synchronous control (picture link): restored in the microtask BEFORE requestAnimationFrame.
+  const list = new FakeHTMLElement('ol', '');
+  const row1 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  const pic1 = new FakeHTMLElement('a', 'hm-extras__image', { 'data-stream-image': 'f1' });
+  row1.append(pic1); list.append(row1);
+  pic1.focus();
+  keep(list);
+  // Simulate list.replaceChildren() + synchronous rebuild.
+  list.children = [];
+  doc.activeElement = body;
+  const row2 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  const pic2 = new FakeHTMLElement('a', 'hm-extras__image', { 'data-stream-image': 'f1', 'data-preview-state': 'loading' });
+  row2.append(pic2); list.append(row2);
+  await Promise.resolve();
+  assert.equal(doc.activeElement, pic2, 'picture link regains focus in the microtask with no dead-focus frame');
+  assert.equal(rafQueue.length, 0, 'no requestAnimationFrame scheduled when rebuilt control is already present');
+
+  // 2. Deferred control (Show more added next frame): defers to requestAnimationFrame, then restores.
+  const showMore1 = new FakeHTMLElement('button', 'hm-show-more', { 'aria-label': 'Show more' });
+  row2.append(showMore1);
+  showMore1.focus();
+  keep(list);
+  list.children = [];
+  doc.activeElement = body;
+  const row3 = new FakeHTMLElement('li', '', { 'data-signal-id': 'sig-1' });
+  list.append(row3);
+  await Promise.resolve();
+  assert.equal(doc.activeElement, body, 'focus waits when deferred control is not yet in the rebuilt DOM');
+  assert.equal(rafQueue.length, 1, 'requestAnimationFrame is scheduled for deferred controls');
+  const showMore2 = new FakeHTMLElement('button', 'hm-show-more', { 'aria-label': 'Show more' });
+  row3.append(showMore2);
+  rafQueue.shift()!();
+  assert.equal(doc.activeElement, showMore2, 'deferred control regains focus once added on the next frame');
+});
+
+test('openChatPicture aborts if another dialog opens while the viewer module loads, then opens normally once it closes', async () => {
+  const code = await dashboardFunctions(['openChatPicture']);
+  let openDialog: object | null = null;
+  let currentFeed = 'chat:w1:c1';
+  let openedCount = 0;
+  let resolveLoader: ((mod: { openImageViewer: (...args: unknown[]) => void }) => void) | null = null;
+  const openImageViewer = () => { openedCount++; };
+  const context = createContext({
+    app: {},
+    document: { querySelector: (sel: string) => sel === 'dialog[open]' ? openDialog : null },
+    feedIdentity: () => currentFeed,
+    loadImageViewer: () => new Promise((resolve) => { resolveLoader = resolve; }),
+    chatPictureOpening: false,
+    attachmentPreviewUrls: { get: () => null, remember() {}, forget() {} },
+    freshAttachmentDownload: async () => ({ url: 'https://storage.test/pic' }),
+    setComposerStatus() {},
+    readableError: String,
+    one: () => null,
+    checkForNewBuild: async () => {},
+    CSS: { escape: (s: string) => s },
+  });
+  runInContext(code, context);
+  const openPic = runInContext('openChatPicture', context) as (a: { file_id: string; version_n: number; name: string }, t: unknown) => void;
+  const trigger = { isConnected: true, closest: () => ({ dataset: { signalId: 'sig-1' } }), parentElement: { querySelector: () => null } };
+
+  // Start opening picture while the viewer module response is held.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  assert.equal(runInContext('chatPictureOpening', context), true);
+  // Open People while the viewer module is still in flight.
+  openDialog = { id: 'dashboard-roster-dialog' };
+  // Release the viewer module response: viewer must NOT open over People, and opening lock must clear.
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 0, 'viewer does not open over an already-open dialog');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after aborting');
+
+  // Close People and press the picture again: viewer opens normally.
+  openDialog = null;
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer opens normally once the other dialog has closed');
+
+  // Navigating to another channel while the viewer module is loading also aborts cleanly.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  currentFeed = 'chat:w1:c2';
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer does not open after navigating away');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after navigation abort');
+});
+
 test('pending-access indicator on the People door is pinned out of flow and restored on shell rebuild', async () => {
   const code = await dashboardFunctions(['syncRosterOpenButtons']);
   const attrs = new Map<string, string>();
