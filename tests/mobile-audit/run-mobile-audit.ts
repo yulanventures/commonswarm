@@ -16,13 +16,14 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { CONFLICT_DOC, postRefreshNote, resetUnreadChannel, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
+import { cancelTestInvites, CONFLICT_DOC, postRefreshNote, resetUnreadChannel, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -122,6 +123,10 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   /** A request this capture must never send: `request` is a part of its URL and `body` a text its body contains (a command's
    *  kind, for example). Watched from before the page loads to the end of the witnesses; one match is a capture error. */
   never?: { request: string; body: string };
+  /** The capture creates invitations in this workspace (a placeholder such as "{invitesWorkspace}"). Setup text may use
+   *  {unique}, a value fresh for each capture, in their addresses; when the capture ends, pass or fail, every invitation
+   *  still pending there whose address contains that value is cancelled as the owner, through revoke_invitation. */
+  invitesIn?: string;
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
    *  as after a deploy; the page's navigation itself is served unchanged. */
   newBuild?: true;
@@ -485,6 +490,8 @@ const ACTIVATION_WITNESSES: Record<string, ActivationSpec[]> = {
 
 const loopback = (value: string) => ["127.0.0.1", "localhost", "[::1]"].includes(new URL(value).hostname);
 const fill = (value: string, ids: Record<string, string>) => value.replace(/\{([a-zA-Z.]+)\}/g, (_, key: string) => ids[key] ?? `missing-${key}`);
+/** A value fresh for each capture of a screen, for setup text that must not repeat across captures (see Screen.invitesIn). */
+const uniqueByPage = new WeakMap<object, string>();
 
 function screens(): Screen[] {
   const manifest = join(ROOT, "site/mobile-audit/screens.json");
@@ -741,8 +748,11 @@ async function main(): Promise<void> {
         }
       };
       const openScreen = async (page: any, screen: Screen, fault: Fault | null = null): Promise<boolean> => {
+        // A screen that creates invitations gets a value of its own, {unique}, for their addresses (see Screen.invitesIn).
+        if (screen.invitesIn && !uniqueByPage.has(page)) uniqueByPage.set(page, `audit${randomBytes(5).toString("hex")}`);
+        const pageIds: Record<string, string> = screen.invitesIn ? { ...seed.ids, unique: uniqueByPage.get(page)! } : seed.ids;
         if (screen.newBuild) {
-          const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
+          const appPath = new URL(fill(screen.path, pageIds), "http://x").pathname;
           await page.route((url: URL) => url.pathname === appPath, async (route: Route) => {
             if (route.request().resourceType() !== "fetch") return route.continue();
             const served = await route.fetch();
@@ -752,12 +762,12 @@ async function main(): Promise<void> {
             return route.fulfill({ status: served.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(body, "utf8") });
           });
         }
-        if (screen.unread) await resetUnreadChannel(env, seed.ids);
+        if (screen.unread) await resetUnreadChannel(env, pageIds);
         // The save-conflict doc opens at its fixed base text in every capture.
         for (const step of screen.setup ?? []) {
-          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.base);
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, pageIds), fill(step.advance.object, pageIds), CONFLICT_DOC.base);
         }
-        await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
+        await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, pageIds)}`, { waitUntil: "domcontentloaded" });
         await appBooted(page);
         // A capture that breaks a read on purpose (screen.fault) owns its own recovery; leave its states alone.
         if (!fault) await recoverBoot(page);
@@ -773,12 +783,12 @@ async function main(): Promise<void> {
         for (const step of screen.setup ?? []) {
           if (step.forcedColors) await page.emulateMedia({ forcedColors: "active" });
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-          if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
-          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.current);
-          if (step.hover) await page.hover(fill(step.hover, seed.ids), { timeout: 8_000 });
-          if (step.focus) await page.focus(fill(step.focus, seed.ids), { timeout: 8_000 });
+          if (step.waitFor) await page.waitForSelector(fill(step.waitFor, pageIds), { state: "visible", timeout: 30_000 });
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, pageIds), fill(step.advance.object, pageIds), CONFLICT_DOC.current);
+          if (step.hover) await page.hover(fill(step.hover, pageIds), { timeout: 8_000 });
+          if (step.focus) await page.focus(fill(step.focus, pageIds), { timeout: 8_000 });
           if (step.click) {
-            const target = fill(step.click, seed.ids);
+            const target = fill(step.click, pageIds);
             if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
               && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
               await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
@@ -840,18 +850,18 @@ async function main(): Promise<void> {
               }
             }
           }
-          if (step.contextmenu) await page.click(fill(step.contextmenu, seed.ids), { button: "right", timeout: 8_000 });
-          if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
-          if (step.select) await page.selectOption(fill(step.select, seed.ids), step.option ?? "", { timeout: 8_000 });
+          if (step.contextmenu) await page.click(fill(step.contextmenu, pageIds), { button: "right", timeout: 8_000 });
+          if (step.type) await page.fill(fill(step.type, pageIds), fill(step.text ?? "", pageIds));
+          if (step.select) await page.selectOption(fill(step.select, pageIds), step.option ?? "", { timeout: 8_000 });
           if (step.press) await page.keyboard.press(step.press);
           if (step.scroll) {
-            const scrollTarget = fill(step.scroll, seed.ids);
+            const scrollTarget = fill(step.scroll, pageIds);
             try { await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
             catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
           }
           if (step.storage) {
             await page.evaluate(([key, value]: [string, string]) => window.sessionStorage.setItem("commonswarm-audit:stored", JSON.stringify({ [key]: value })),
-              [fill(step.storage.key, seed.ids), fill(step.storage.value, seed.ids)] as [string, string]);
+              [fill(step.storage.key, pageIds), fill(step.storage.value, pageIds)] as [string, string]);
             await page.reload({ waitUntil: "domcontentloaded" });
             await appBooted(page);
           }
@@ -861,19 +871,19 @@ async function main(): Promise<void> {
           if (step.settle) await settle(page);
         }
         // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
-        if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
+        if (screen.ready) await page.waitForSelector(fill(screen.ready, pageIds), { state: "visible", timeout: 30_000 });
         // Let reads the setup started finish (and their re-renders land) before measuring: a dialog can
         // render, then render again when its read returns (workspace settings and its organizations).
         const settled = await settle(page);
         // The declared state must still be on screen after settling: a re-render that closed it would
         // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
-        if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
+        if (screen.ready && !(await page.waitForSelector(fill(screen.ready, pageIds), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
           throw new Error(`ready state lost after settling: ${screen.ready}`);
         }
         // What the capture is for must actually be in the picture: scroll the first part that is not into view once, settle, and
         // check again.
         if (screen.frame?.length) {
-          const parts = screen.frame.map(selector => fill(selector, seed.ids));
+          const parts = screen.frame.map(selector => fill(selector, pageIds));
           const outside = () => page.evaluate((list: string[]) => list.filter(selector => {
             const el = document.querySelector(selector);
             if (!el) return true;
@@ -1034,6 +1044,11 @@ async function main(): Promise<void> {
             // Recorded whether or not the capture went on to succeed.
             if (bootRetries.has(page)) entry.bootRetries = bootRetries.get(page);
             await fault?.remove();
+            // Invitations this capture created are cancelled whether it passed or failed.
+            if (screen.invitesIn && uniqueByPage.has(page)) {
+              try { entry.invitesCancelled = await cancelTestInvites(env, seed.owner, fill(screen.invitesIn, seed.ids), uniqueByPage.get(page)!); }
+              catch (error) { entry.invitesCancelled = String(error instanceof Error ? error.message : error).slice(0, 200); if (!entry.error) entry.error = `invite cleanup failed: ${entry.invitesCancelled}`; }
+            }
             await page.close();
           }
           return entry;
