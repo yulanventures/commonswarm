@@ -1598,7 +1598,6 @@ test("PR 2 HezSec C2 real-caller witness: onAuthChange suppresses stale success/
     const sessionA = (await mgr.runtimeFor(userA.id)!.verifySession())!;
     const home = createHomeServer(sessionA, {
       client: () => mgr.runtimeFor(userA.id)!.client,
-      pinned: pinAccountContext({ userId: userA.id })!,
     });
     pageRpcCalls = 0;
     holdPage2 = true;
@@ -1615,7 +1614,6 @@ test("PR 2 HezSec C2 real-caller witness: onAuthChange suppresses stale success/
     mgr.switchActiveAccount(userA.id);
     const home2 = createHomeServer(sessionA, {
       client: () => mgr.runtimeFor(userA.id)!.client,
-      pinned: pinAccountContext({ userId: userA.id })!,
     });
     holdPage2 = true;
     page2ReturnError = true;
@@ -1631,7 +1629,6 @@ test("PR 2 HezSec C2 real-caller witness: onAuthChange suppresses stale success/
     mgr.switchActiveAccount(userA.id);
     const home3 = createHomeServer(sessionA, {
       client: () => mgr.runtimeFor(userA.id)!.client,
-      pinned: pinAccountContext({ userId: userA.id })!,
     });
     holdPage2 = false;
     page2ReturnError = false;
@@ -1771,4 +1768,112 @@ test("PR 2 HezSec C3 & C5 real-caller witness: signInWithProvider aborts before 
     if (origWindow === undefined) delete (globalThis as Record<string, unknown>).window;
     else (globalThis as Record<string, unknown>).window = origWindow;
   }
+});
+
+test("PR 2 HezSec C7 held-poll witnesses: peer sign-out and sign-out-all during held badge verification NEVER restore expired labels; trigger title clears without active email", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const userC = makeUser("33333333-3333-4333-8333-333333333333", "c@example.test", "C");
+  const live = new Map<string, typeof userA>();
+
+  let holdBearer: string | null = null;
+  let releaseHold: (() => void) | null = null;
+  let holdReachedResolve: (() => void) | null = null;
+  let holdReached = new Promise<void>((r) => { holdReachedResolve = r; });
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : body.email === userC.email ? userC : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      if (holdBearer && bearer === holdBearer) {
+        holdBearer = null;
+        holdReachedResolve?.();
+        await new Promise<void>((resolve) => { releaseHold = resolve; });
+      }
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found", msg: "Session not found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/auth/v1/logout")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      live.delete(bearer);
+      return new Response(null, { status: 204 });
+    }
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "refresh_token") {
+      return Response.json({ error: "invalid_grant", error_description: "Refresh Token Not Found" }, { status: 400 });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const sharedLs = new MemoryStorage();
+  const locks = createLocks();
+  const mgr = new AccountManager(deployment, {
+    localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+  await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+  const promB1 = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  assert.equal(promB1.kind, "promoted");
+  mgr.switchActiveAccount(userA.id);
+
+  // Case 1: Peer tab signs out Account B WHILE poller's verifySession() is held -> ownership loss MUST NOT restore B as "Sign in again"!
+  const poller = new InactiveAccountBadgePoller(mgr, async () => 1, { intervalMs: 0 });
+  holdBearer = mgr.runtimeFor(userB.id)!.peekAccessToken()!;
+  holdReached = new Promise<void>((r) => { holdReachedResolve = r; });
+  const poll1 = poller.pollOnce();
+  await holdReached;
+  const peer = new AccountManager(deployment, {
+    localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await peer.initialize();
+  await peer.signOutAccount(userB.id, promB1.account.loginId);
+  peer.destroy();
+  (releaseHold as (() => void) | null)?.();
+  releaseHold = null;
+  await poll1;
+  assert.equal(poller.isExpired(userB.id, promB1.account.loginId), false, "peer sign-out must NOT be recorded as expired");
+  assert.equal(poller.expiredAccounts().length, 0, "peer sign-out must leave 0 expired cues");
+
+  // Case 2: Sign out all + poller.clear() WHILE poller's verifySession() is held for genuinely expired B -> B's label MUST NOT return even after C signs in!
+  const promB2 = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  assert.equal(promB2.kind, "promoted");
+  mgr.switchActiveAccount(userA.id);
+  const bToken2 = mgr.runtimeFor(userB.id)!.peekAccessToken()!;
+  holdBearer = bToken2;
+  holdReached = new Promise<void>((r) => { holdReachedResolve = r; });
+  const poll2 = poller.pollOnce();
+  await holdReached;
+  // Simulate Sign out all clearing the poller & sessions while poll2 is in flight (and server returns 403 for bToken2).
+  live.delete(bToken2);
+  poller.clear();
+  await mgr.signOutAllAccounts();
+  (releaseHold as (() => void) | null)?.();
+  releaseHold = null;
+  await poll2;
+  await mgr.signInWithPasswordStaging({ email: userC.email, password: "pw" });
+  assert.equal(poller.isExpired(userB.id, promB2.account.loginId), false, "held poll after sign-out-all must NOT restore B");
+  assert.equal(poller.expiredAccounts().length, 0, "B's expired label must never reappear after sign-out-all + C sign-in");
+  poller.stop();
+  mgr.destroy();
+
+  // Verify trigger title is explicitly cleared when active email is absent AND C3 intent-gen guards exist in all 3 OTP surfaces.
+  const [liveDash, inviteOnramp] = await Promise.all([
+    readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/invite/InviteOnramp.astro", import.meta.url), "utf8"),
+  ]);
+  assert.ok(liveDash.includes('triggerEl.removeAttribute("title")') && liveDash.includes('triggerEl?.removeAttribute("title")'));
+  assert.ok(liveDash.includes("signedOutOtpIntentGen") && liveDash.includes("addAccountOtpIntentGen"));
+  assert.ok(inviteOnramp.includes("inviteOtpIntentGen"));
 });

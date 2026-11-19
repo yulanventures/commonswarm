@@ -775,6 +775,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
     let inviteOtpAttemptId: string | null = null;
     let inviteOtpEmail = "";
+    let inviteOtpIntentGen = 0;
     const showInviteAuthStep = (step: "entry" | "code"): void => {
       const emailForm = one<HTMLFormElement>("[data-email-form]");
       const otpForm = one<HTMLFormElement>("[data-invite-otp-form]");
@@ -782,6 +783,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       if (otpForm) otpForm.hidden = step !== "code";
     };
     const resetInviteOtp = (cancelAttempt = false): void => {
+      inviteOtpIntentGen += 1;
       if (cancelAttempt && inviteOtpAttemptId) {
         accountManager()?.cancelAttempt(inviteOtpAttemptId);
       }
@@ -803,12 +805,20 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       const otpInput = one<HTMLInputElement>("#invite-otp");
       const verifyBtn = one<HTMLButtonElement>("[data-invite-otp-verify]");
       if (!resumeId) return;
+      const myGen = ++inviteOtpIntentGen;
+      const myAuthGen = authGeneration;
       if (error) error.hidden = true;
       if (trigger) trigger.disabled = true;
       try {
         const redirect = new URL("/invite", window.location.origin);
         redirect.searchParams.set("resume", resumeId);
         const started = await signInWithEmail(requestedEmail, redirect.href);
+        if (myGen !== inviteOtpIntentGen || myAuthGen !== authGeneration) {
+          if (started && typeof started === "object" && started.attemptId) {
+            accountManager()?.cancelAttempt(started.attemptId);
+          }
+          return;
+        }
         if (isMultiAccountEnabled() && started && typeof started === "object" && started.attemptId) {
           inviteOtpAttemptId = started.attemptId;
           inviteOtpEmail = requestedEmail;
@@ -822,6 +832,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           if (status) status.textContent = `Check ${requestedEmail} for your sign-in link.`;
         }
       } catch (caught) {
+        if (myGen !== inviteOtpIntentGen || myAuthGen !== authGeneration) return;
         if (!inviteOtpEmail) resetInviteOtp(false);
         const choices = listSentence(renderedProviderNames());
         if (error) {
@@ -892,14 +903,19 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
       if (error) error.hidden = true;
       if (verifyBtn) verifyBtn.disabled = true;
+      const myGen = inviteOtpIntentGen;
+      const myAuthGen = authGeneration;
       const attemptId = inviteOtpAttemptId;
+      const isCurrentVerify = (): boolean =>
+        myGen === inviteOtpIntentGen && myAuthGen === authGeneration && inviteOtpAttemptId === attemptId;
       try {
         const outcome = await verifyEmailOtpSignIn(attemptId, code);
         if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
-          resetInviteOtp(false);
+          if (isCurrentVerify()) resetInviteOtp(false);
           if (status) status.textContent = "";
           await boot();
         } else {
+          if (!isCurrentVerify()) return;
           inviteOtpAttemptId = null;
           if (verifyBtn) verifyBtn.disabled = true;
           if (error) {
@@ -909,6 +925,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           resendBtn?.focus();
         }
       } catch (caught) {
+        if (!isCurrentVerify()) return;
         inviteOtpAttemptId = null;
         if (verifyBtn) verifyBtn.disabled = true;
         if (error) {
@@ -917,7 +934,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         }
         resendBtn?.focus();
       } finally {
-        if (verifyBtn && inviteOtpAttemptId) verifyBtn.disabled = false;
+        if (verifyBtn && isCurrentVerify()) verifyBtn.disabled = false;
       }
     });
 

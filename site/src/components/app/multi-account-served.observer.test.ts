@@ -235,6 +235,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
   };
   const inviterId = "99999999-9999-4999-8999-999999999999";
   const sharedWs = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const opsChannelId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const inviteWs = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const orgId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const anonKey = "synthetic-served-anon-key";
@@ -254,6 +255,16 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
   let otpHeldResolve: (() => void) | null = null;
   let otpHeldPromise = new Promise<void>((r) => { otpHeldResolve = r; });
 
+  let holdVerify = false;
+  let releaseVerify: (() => void) | null = null;
+  let verifyHeldResolve: (() => void) | null = null;
+  let verifyHeldPromise = new Promise<void>((r) => { verifyHeldResolve = r; });
+
+  let holdChannelVisibility = false;
+  let releaseChannelVisibility: (() => void) | null = null;
+  let channelVisibilityHeldResolve: (() => void) | null = null;
+  let channelVisibilityHeldPromise = new Promise<void>((r) => { channelVisibilityHeldResolve = r; });
+
   let holdFileCreate = false;
   let releaseFileCreate: (() => void) | null = null;
   let fileCreateHeldResolve: (() => void) | null = null;
@@ -268,6 +279,16 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     holdOtp = hold;
     releaseOtp = null;
     otpHeldPromise = new Promise<void>((r) => { otpHeldResolve = r; });
+  };
+  const resetVerifyGate = (hold: boolean): void => {
+    holdVerify = hold;
+    releaseVerify = null;
+    verifyHeldPromise = new Promise<void>((r) => { verifyHeldResolve = r; });
+  };
+  const resetChannelVisibilityGate = (hold: boolean): void => {
+    holdChannelVisibility = hold;
+    releaseChannelVisibility = null;
+    channelVisibilityHeldPromise = new Promise<void>((r) => { channelVisibilityHeldResolve = r; });
   };
 
   let origin = "";
@@ -399,6 +420,15 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         sendJson(res, 200, {});
         return;
       }
+      if (url.pathname === "/auth/v1/verify" && method === "POST") {
+        await readJsonBody(req);
+        if (holdVerify) {
+          verifyHeldResolve?.();
+          await new Promise<void>((resolve) => { releaseVerify = resolve; });
+        }
+        sendJson(res, 400, { error_code: "otp_expired", msg: "Token has expired or is invalid" });
+        return;
+      }
       if (url.pathname === "/auth/v1/user" && method === "GET") {
         const bearer = String(req.headers.authorization ?? "").replace(/^Bearer /i, "");
         const who = liveTokens.get(bearer);
@@ -436,7 +466,21 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         return;
       }
       if (url.pathname === "/rest/v1/channels" && method === "GET") {
-        sendJson(res, 200, []);
+        if (holdChannelVisibility && url.searchParams.get("channel_id") === `eq.${opsChannelId}`) {
+          channelVisibilityHeldResolve?.();
+          await new Promise<void>((resolve) => { releaseChannelVisibility = resolve; });
+        }
+        sendJson(res, 200, [{
+          channel_id: opsChannelId,
+          workspace_id: sharedWs,
+          slug: "ops",
+          purpose: "Operations channel",
+          visibility: "public",
+          created_by_principal: userA.id,
+          created_by_kind: "user",
+          created_at: "2026-11-19T00:00:00Z",
+          archived_at: null,
+        }]);
         return;
       }
       if (url.pathname === "/rest/v1/rpc/home_overview" && method === "POST") {
@@ -658,6 +702,43 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     const displayedEmail = (await page.locator("[data-add-account-code-email]").innerText()).trim();
     assert.equal(displayedEmail, "submitted@example.test", "code step must name submitted email, never post-submit edit");
 
+    // C3 held resend across Change email: click Resend (held), click Change email, release -> MUST stay on Step 1 & cancel late attempt!
+    resetOtpGate(true);
+    await page.click("[data-add-account-otp-resend]");
+    await otpHeldPromise;
+    await page.click("[data-add-account-otp-change]");
+    await page.waitForSelector("[data-add-account-entry]:not([hidden])");
+    (releaseOtp as (() => void) | null)?.();
+    await page.waitForTimeout(80);
+    const afterHeldResendChange = await page.evaluate(() => ({
+      entryVisible: !(document.querySelector<HTMLElement>("[data-add-account-entry]")?.hidden ?? true),
+      codeHidden: document.querySelector<HTMLElement>("[data-add-account-code-step]")?.hidden ?? false,
+      attemptKeys: Object.keys(sessionStorage).filter((k) => k.includes(":attempt:")),
+    }));
+    assert.equal(afterHeldResendChange.entryVisible, true, "late resend must NOT reopen code step after Change email");
+    assert.equal(afterHeldResendChange.codeHidden, true, "code step must stay hidden after Change email");
+    assert.equal(afterHeldResendChange.attemptKeys.length, 0, "late resend attempt must be cancelled after Change email");
+
+    // C3 held verify refusal across Change email: send code -> submit verify (held refusal) -> click Change email -> release -> MUST NOT repaint error!
+    resetOtpGate(false);
+    await page.fill("#add-account-email", "verify@example.test");
+    await page.click("[data-add-account-email-code]");
+    await page.waitForSelector("[data-add-account-code-step]:not([hidden])");
+    resetVerifyGate(true);
+    await page.fill("#add-account-otp", "000000");
+    await page.click("[data-add-account-otp-verify]");
+    await verifyHeldPromise;
+    await page.click("[data-add-account-otp-change]");
+    await page.waitForSelector("[data-add-account-entry]:not([hidden])");
+    (releaseVerify as (() => void) | null)?.();
+    await page.waitForTimeout(80);
+    const afterHeldVerifyChange = await page.evaluate(() => ({
+      entryVisible: !(document.querySelector<HTMLElement>("[data-add-account-entry]")?.hidden ?? true),
+      codeStatus: (document.querySelector<HTMLElement>("[data-add-account-code-status]")?.textContent ?? "").trim(),
+    }));
+    assert.equal(afterHeldVerifyChange.entryVisible, true, "held verify refusal must stay on Step 1 after Change email");
+    assert.equal(afterHeldVerifyChange.codeStatus, "", "held verify refusal must NOT repaint stale error after Change email");
+
     // Press Escape -> dialog closes, focus returns to desktop account trigger, staging attempt cleared!
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-add-account-dialog]")?.open);
@@ -669,7 +750,37 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterEscape.attemptKeys.length, 0, "Escape must retire staging attempt cleanly");
 
     // ── FLOW 3 (C1): Real LiveDashboard.astro composer Send handler across same-workspace A->B & A->B->A ──
-    // Switch to Account A and navigate to the workspace chat composer.
+    // Case 3a0: Hold named-channel visibility read across same-workspace A -> B -> 0 file_version_create, 0 PUT, 0 commit, 0 post!
+    await page.click("[data-user-menu-trigger]");
+    await page.click(`[data-account-switch="${userA.id}"]`);
+    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await page.goto(`${origin}/app?w=${sharedWs}&c=${opsChannelId}`);
+    await page.waitForSelector("[data-composer]:not([hidden])");
+    commandsSent.length = 0;
+    putCount = 0;
+    resetChannelVisibilityGate(true);
+    resetFileCreateGate(false);
+    await page.setInputFiles("[data-composer-file-input]", {
+      name: "secret-vis-a.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("account A visibility-held file"),
+    });
+    await page.fill("[data-composer-input]", "held visibility A->B message");
+    await page.click("[data-composer-send]");
+    await channelVisibilityHeldPromise;
+    await page.click("[data-user-menu-trigger]");
+    await page.click(`[data-account-switch="${userB.id}"]`);
+    (releaseChannelVisibility as (() => void) | null)?.();
+    await page.waitForTimeout(100);
+    resetChannelVisibilityGate(false);
+    assert.equal(
+      commandsSent.some((c) => ["file_version_create", "file_version_commit", "post_signal"].includes(c.kind)),
+      false,
+      "held named-channel visibility read across A->B must send ZERO file_version_create/commit/post commands",
+    );
+    assert.equal(putCount, 0, "held named-channel visibility read across A->B must issue 0 PUTs");
+
+    // Switch back to Account A and navigate to the workspace chat composer.
     await page.click("[data-user-menu-trigger]");
     await page.click(`[data-account-switch="${userA.id}"]`);
     await page.waitForSelector('[data-panel="channel"]:not([hidden])');

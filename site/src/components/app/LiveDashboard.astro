@@ -6384,7 +6384,10 @@ import "../../styles/kylon-image-viewer.css";
         : "";
       const triggerIdentity = activeEmail && activeEmail !== viewerLabel ? `${viewerLabel} (${activeEmail})` : viewerLabel;
       triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
-      if (triggerEl && activeEmail) triggerEl.title = triggerIdentity;
+      if (triggerEl) {
+        if (activeEmail) triggerEl.title = triggerIdentity;
+        else triggerEl.removeAttribute("title");
+      }
       const triggerEmailSub = one<HTMLElement>("[data-rail-account-email]");
       if (triggerEmailSub) {
         if (activeEmail && activeEmail !== viewerLabel) {
@@ -16557,6 +16560,7 @@ import "../../styles/kylon-image-viewer.css";
 
     let activeSignedOutOtpAttemptId: string | null = null;
     let activeSignedOutOtpEmail = "";
+    let signedOutOtpIntentGen = 0;
     const renderSignedOutEmailSentCopy = (mode: "code" | "link", targetEmail: string): void => {
       const titleEl = one<HTMLElement>("[data-email-sent-title]");
       const copyEl = one<HTMLElement>("[data-email-sent-copy]");
@@ -16583,6 +16587,7 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
     const resetSignedOutOtp = (cancelAttempt = false): void => {
+      signedOutOtpIntentGen += 1;
       if (cancelAttempt && activeSignedOutOtpAttemptId) {
         accountManager()?.cancelAttempt(activeSignedOutOtpAttemptId);
       }
@@ -16600,6 +16605,7 @@ import "../../styles/kylon-image-viewer.css";
     for (const button of all<HTMLButtonElement>("[data-use-email]")) {
       button.addEventListener("click", () => {
         resetSignedOutOtp(true);
+        authError(null);
         showAuthView("choices");
         one<HTMLInputElement>("#dashboard-email")?.focus();
       });
@@ -16620,10 +16626,17 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const sendSignedOutEmailCodeOrLink = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
+      const myGen = ++signedOutOtpIntentGen;
       busy(trigger, true);
       authError(null);
       try {
         const started = await signInWithEmail(requestedEmail, new URL("/app", window.location.origin).href);
+        if (myGen !== signedOutOtpIntentGen) {
+          if (started && typeof started === "object" && started.attemptId) {
+            accountManager()?.cancelAttempt(started.attemptId);
+          }
+          return;
+        }
         const otpRow = one<HTMLFormElement>("[data-signed-out-otp-row]");
         const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
         const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
@@ -16642,6 +16655,7 @@ import "../../styles/kylon-image-viewer.css";
           showAuthView("email-sent");
         }
       } catch (error) {
+        if (myGen !== signedOutOtpIntentGen) return;
         resetSignedOutOtp(false);
         authError(readableError(error));
       } finally {
@@ -16690,26 +16704,31 @@ import "../../styles/kylon-image-viewer.css";
       if (!code) { authError("Enter the emailed sign-in code."); otpInput.focus(); return; }
       busy(verifyBtn, true);
       authError(null);
+      const myGen = signedOutOtpIntentGen;
       const attemptId = activeSignedOutOtpAttemptId;
       try {
         const outcome = await verifyEmailOtpSignIn(attemptId, code);
         if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
-          resetSignedOutOtp(false);
+          if (myGen === signedOutOtpIntentGen) resetSignedOutOtp(false);
           if (!authReloadQueued) runBoot();
         } else {
+          if (myGen !== signedOutOtpIntentGen || activeSignedOutOtpAttemptId !== attemptId) return;
           activeSignedOutOtpAttemptId = null;
           if (verifyBtn) verifyBtn.disabled = true;
           authError(outcome.message || "That sign-in code did not work or expired. Send a new code.");
           resendBtn?.focus();
         }
       } catch (error) {
+        if (myGen !== signedOutOtpIntentGen || activeSignedOutOtpAttemptId !== attemptId) return;
         activeSignedOutOtpAttemptId = null;
         if (verifyBtn) verifyBtn.disabled = true;
         authError(readableError(error));
         resendBtn?.focus();
       } finally {
         if (verifyBtn) verifyBtn.removeAttribute("aria-busy");
-        if (verifyBtn && activeSignedOutOtpAttemptId) verifyBtn.disabled = false;
+        if (verifyBtn && myGen === signedOutOtpIntentGen && activeSignedOutOtpAttemptId === attemptId) {
+          verifyBtn.disabled = false;
+        }
       }
     });
 
@@ -16929,8 +16948,10 @@ import "../../styles/kylon-image-viewer.css";
     let activeAddAccountOtpEmail = "";
     let addAccountClosingForPromotion = false;
     let addAccountDialogEpoch = 0;
+    let addAccountOtpIntentGen = 0;
     const retireAddAccountAttemptsSync = (): void => {
       addAccountDialogEpoch += 1;
+      addAccountOtpIntentGen += 1;
       if (activeAddAccountOtpAttemptId) {
         accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
         activeAddAccountOtpAttemptId = null;
@@ -17017,6 +17038,7 @@ import "../../styles/kylon-image-viewer.css";
         railSignOutBtn?.classList.remove("hm-menu-item--identified");
         railSignOutOthersBtn?.classList.remove("hm-menu-item--identified");
         if (triggerEmailSub) { triggerEmailSub.textContent = ""; triggerEmailSub.hidden = true; }
+        triggerEl?.removeAttribute("title");
         return;
       }
       const accounts = multi.listAccounts();
@@ -17030,7 +17052,10 @@ import "../../styles/kylon-image-viewer.css";
           ? `${activeRecord.label} (${activeRecord.secondary})`
           : activeRecord.label;
         triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
-        if (triggerEl) triggerEl.title = triggerIdentity;
+        if (triggerEl) {
+          if (activeRecord.secondary) triggerEl.title = triggerIdentity;
+          else triggerEl.removeAttribute("title");
+        }
         if (triggerEmailSub) {
           if (activeRecord.secondary && activeRecord.secondary !== activeRecord.label) {
             triggerEmailSub.textContent = activeRecord.secondary;
@@ -17040,6 +17065,9 @@ import "../../styles/kylon-image-viewer.css";
             triggerEmailSub.hidden = true;
           }
         }
+      } else {
+        triggerEl?.removeAttribute("title");
+        if (triggerEmailSub) { triggerEmailSub.textContent = ""; triggerEmailSub.hidden = true; }
       }
       if (railSignOutLabel) railSignOutLabel.textContent = "Sign out on this device";
       else if (railSignOutBtn) railSignOutBtn.textContent = "Sign out on this device";
@@ -17188,6 +17216,7 @@ import "../../styles/kylon-image-viewer.css";
       if (codeStep) codeStep.hidden = step !== "code";
     };
     const resetAddAccountOtp = (): void => {
+      addAccountOtpIntentGen += 1;
       activeAddAccountOtpAttemptId = null;
       activeAddAccountOtpEmail = "";
       const otpInput = one<HTMLInputElement>("#add-account-otp");
@@ -17249,6 +17278,7 @@ import "../../styles/kylon-image-viewer.css";
       const sendAddAccountCode = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
         if (!status) return;
         const openingEpoch = addAccountDialogEpoch;
+        const myGen = ++addAccountOtpIntentGen;
         if (trigger) trigger.disabled = true;
         status.textContent = "";
         if (codeStatusEl) codeStatusEl.textContent = "";
@@ -17259,7 +17289,7 @@ import "../../styles/kylon-image-viewer.css";
             "add-account",
           );
           if (started && typeof started === "object" && started.attemptId) {
-            if (!dialog?.open || addAccountDialogEpoch !== openingEpoch) {
+            if (!dialog?.open || addAccountDialogEpoch !== openingEpoch || myGen !== addAccountOtpIntentGen) {
               accountManager()?.cancelAttempt(started.attemptId);
               return;
             }
@@ -17272,7 +17302,7 @@ import "../../styles/kylon-image-viewer.css";
             if (otpInput) { otpInput.value = ""; otpInput.focus(); }
           }
         } catch (error) {
-          if (!dialog?.open || addAccountDialogEpoch !== openingEpoch) return;
+          if (!dialog?.open || addAccountDialogEpoch !== openingEpoch || myGen !== addAccountOtpIntentGen) return;
           if (activeAddAccountOtpEmail) {
             if (codeStatusEl) codeStatusEl.textContent = readableError(error);
           } else {
@@ -17370,13 +17400,20 @@ import "../../styles/kylon-image-viewer.css";
         if (!token) { codeStatusEl.textContent = "Enter the emailed sign-in code."; otpInput.focus(); return; }
         if (otpVerifyBtn) otpVerifyBtn.disabled = true;
         codeStatusEl.textContent = "";
+        const openingEpoch = addAccountDialogEpoch;
+        const myGen = addAccountOtpIntentGen;
         const attemptId = activeAddAccountOtpAttemptId;
         const priorUserId = session?.user.id ?? "";
+        const isCurrentVerify = (): boolean =>
+          Boolean(dialog?.open) &&
+          addAccountDialogEpoch === openingEpoch &&
+          addAccountOtpIntentGen === myGen &&
+          activeAddAccountOtpAttemptId === attemptId;
         try {
           const outcome = await verifyEmailOtpSignIn(attemptId, token);
           if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
             addAccountClosingForPromotion = true;
-            resetAddAccountOtp();
+            if (isCurrentVerify()) resetAddAccountOtp();
             const promotedUserId = outcome.account.userId;
             if (promotedUserId !== priorUserId) {
               teardownActiveAccountView();
@@ -17386,18 +17423,20 @@ import "../../styles/kylon-image-viewer.css";
             renderAccountSwitcher();
             if (!authReloadQueued && promotedUserId !== priorUserId) runBoot();
           } else {
+            if (!isCurrentVerify()) return;
             activeAddAccountOtpAttemptId = null;
             if (otpVerifyBtn) otpVerifyBtn.disabled = true;
             codeStatusEl.textContent = outcome.message || "That sign-in code did not work or expired. Send a new code.";
             otpResendBtn?.focus();
           }
         } catch (error) {
+          if (!isCurrentVerify()) return;
           activeAddAccountOtpAttemptId = null;
           if (otpVerifyBtn) otpVerifyBtn.disabled = true;
           codeStatusEl.textContent = readableError(error);
           otpResendBtn?.focus();
         } finally {
-          if (otpVerifyBtn && activeAddAccountOtpAttemptId) otpVerifyBtn.disabled = false;
+          if (otpVerifyBtn && isCurrentVerify()) otpVerifyBtn.disabled = false;
         }
       });
 
@@ -19888,6 +19927,11 @@ import "../../styles/kylon-image-viewer.css";
       // overrides keepConnectCredentialVisible() and immediately clears all private DOM/secrets!
       onAccountForcedTeardown((detail) => {
         pendingSeatAdminReauthNotice = false;
+        if (detail.reason === "all-signed-out") {
+          inactiveBadgePoller?.clear();
+        } else if (detail.reason === "signed-out" && detail.userId) {
+          inactiveBadgePoller?.forgetExpired(detail.userId);
+        }
         if (detail.reason === "expired" && !passwordChangeNotice) {
           pendingForcedNotice = new SessionExpired().message;
         }

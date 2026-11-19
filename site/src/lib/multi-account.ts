@@ -728,6 +728,11 @@ export class AccountSessionRuntime {
     return parsed ? credentialFingerprint(parsed) : null;
   }
 
+  /** Whether this login runtime was proven terminally expired by GoTrue (not merely removed by peer sign-out). */
+  isTerminallyExpired(): boolean {
+    return this.deadSession;
+  }
+
   /** Bounded, identity-safe verification strictly on this login's runtime (QA-010 + C2/C3). */
   async verifySession(): Promise<Session | null> {
     if (this.disposed || !this.checkOwned()) {
@@ -3449,6 +3454,7 @@ export class InactiveAccountBadgePoller {
   private readonly counts = new Map<string, number | null>();
   private readonly expired = new Set<string>();
   private readonly expiredRecords = new Map<string, AccountRecord>();
+  private pollGeneration = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
   private stopped = false;
@@ -3489,9 +3495,24 @@ export class InactiveAccountBadgePoller {
     return out;
   }
 
-  /** Forget an expired display cue (e.g. after explicit sign-out). */
+  /** Forget an expired display cue and invalidate any in-flight poll (e.g. after explicit sign-out). */
   forgetExpired(userId: string): void {
-    if (this.expiredRecords.delete(userId)) {
+    this.pollGeneration += 1;
+    let changed = this.expiredRecords.delete(userId);
+    const prefix = `${userId}\0`;
+    for (const key of [...this.expired]) {
+      if (key.startsWith(prefix)) {
+        this.expired.delete(key);
+        changed = true;
+      }
+    }
+    for (const key of [...this.counts.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.counts.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) {
       this.options.onUpdate?.();
     }
   }
@@ -3534,6 +3555,9 @@ export class InactiveAccountBadgePoller {
   }
 
   clear(): void {
+    // C7: Advance pollGeneration unconditionally so any in-flight poll awaiting verifySession()
+    // cannot write stale expired labels back after sign-out-all or teardown!
+    this.pollGeneration += 1;
     if (this.counts.size === 0 && this.expired.size === 0 && this.expiredRecords.size === 0) return;
     this.counts.clear();
     this.expired.clear();
@@ -3550,6 +3574,7 @@ export class InactiveAccountBadgePoller {
 
   stop(): void {
     this.stopped = true;
+    this.pollGeneration += 1;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -3563,6 +3588,7 @@ export class InactiveAccountBadgePoller {
     if (this.stopped || this.inFlight) return;
     if (this.options.isHidden?.()) return;
     this.inFlight = true;
+    const pollGen = this.pollGeneration;
     try {
       this.prune();
       const active = this.manager.activeAccount();
@@ -3571,7 +3597,7 @@ export class InactiveAccountBadgePoller {
       );
       let updated = false;
       for (const account of inactiveAccounts) {
-        if (this.stopped || this.options.isHidden?.()) break;
+        if (this.stopped || this.pollGeneration !== pollGen || this.options.isHidden?.()) break;
         const runtime = this.manager.runtimeForLogin(account.userId, account.loginId);
         const key = this.keyFor(account.userId, account.loginId);
         if (!runtime || !runtime.isLiveOwned()) {
@@ -3580,9 +3606,11 @@ export class InactiveAccountBadgePoller {
         }
         try {
           const verified = await runtime.verifySession();
-          if (this.stopped || !verified || verified.user.id !== account.userId || !runtime.isLiveOwned()) {
+          if (this.stopped || this.pollGeneration !== pollGen) break;
+          if (!verified || verified.user.id !== account.userId || !runtime.isLiveOwned()) {
             if (this.counts.delete(key)) updated = true;
-            if (!verified) {
+            // C7: Only surface "Sign in again" when GoTrue proved terminal expiry, NEVER for peer/local sign-out!
+            if (!verified && runtime.isTerminallyExpired()) {
               this.expired.add(key);
               this.expiredRecords.set(account.userId, { ...account });
               updated = true;
@@ -3592,6 +3620,7 @@ export class InactiveAccountBadgePoller {
           if (this.expired.delete(key)) updated = true;
           if (this.expiredRecords.delete(account.userId)) updated = true;
           const count = await this.fetchWaitingCount(runtime);
+          if (this.stopped || this.pollGeneration !== pollGen) break;
           // Recheck ownership & that this login is still live and still inactive before committing!
           const stillOwned = this.manager.listAccounts().some(
             (a) => a.userId === account.userId && a.loginId === account.loginId,
@@ -3606,16 +3635,22 @@ export class InactiveAccountBadgePoller {
             updated = true;
           }
         } catch (error) {
+          if (this.stopped || this.pollGeneration !== pollGen) break;
           if (error instanceof MultiAccountSessionExpired) {
             if (this.counts.delete(key)) updated = true;
-            this.expired.add(key);
-            this.expiredRecords.set(account.userId, { ...account });
-            updated = true;
+            // C7: Distinguish proven terminal expiry from peer sign-out / disposal ownership loss!
+            if (runtime.isTerminallyExpired()) {
+              this.expired.add(key);
+              this.expiredRecords.set(account.userId, { ...account });
+              updated = true;
+            }
           }
-          // Transient error: leave existing unknown/previous state without leaking across accounts.
+          // Transient error or ownership loss: leave no stale expired label behind.
         }
       }
-      if (updated) this.options.onUpdate?.();
+      if (updated && !this.stopped && this.pollGeneration === pollGen) {
+        this.options.onUpdate?.();
+      }
     } finally {
       this.inFlight = false;
     }
