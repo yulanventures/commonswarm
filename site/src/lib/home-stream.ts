@@ -199,6 +199,8 @@ export function groupStreamMessage(row: HTMLElement, signal: GroupableSignal, pr
   const time = row.querySelector<HTMLTimeElement>(".hm-author__when");
   if (time) {
     const gutter = time.cloneNode(true) as HTMLElement; gutter.classList.add("hm-message-time");
+    // Decorative gutter clock: never carry a native title tooltip that pops up over the message above.
+    gutter.removeAttribute("title");
     gutter.setAttribute("aria-hidden", "true"); row.append(gutter);
   }
 }
