@@ -46,6 +46,8 @@ let failNextTodoOnce = false;
 let conflictNextTodoOnce = false;
 let conflictDropNextTodoOnce = false;
 let hideWaitingTodosRpc = false;
+let failWaitingTodosRpcStatus = null;
+let capHomeOverviewAssigned = false;
 let forceTodosPageSize = null;
 let forceCommentsPageSize = null;
 let omitLocationSignalIds = new Set();
@@ -260,6 +262,17 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/fixture/show-waiting-todos-rpc") {
       hideWaitingTodosRpc = false;
+      failWaitingTodosRpcStatus = null;
+      capHomeOverviewAssigned = false;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-waiting-todos-rpc") {
+      const code = url.searchParams.get("status");
+      failWaitingTodosRpcStatus = code ? Number(code) : null;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/cap-home-overview") {
+      capHomeOverviewAssigned = url.searchParams.get("on") === "1";
       return reply(200, { ok: true });
     }
     if (req.method === "POST" && url.pathname === "/fixture/todos-page-size") {
@@ -578,6 +591,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/rest/v1/rpc/waiting_todos_page") {
+      if (failWaitingTodosRpcStatus) {
+        return reply(failWaitingTodosRpcStatus, { message: "waiting_todos_page failed" });
+      }
       if (hideWaitingTodosRpc) {
         return reply(404, { code: "PGRST202", message: "Could not find the function swarm_read.waiting_todos_page" });
       }
@@ -622,6 +638,17 @@ const server = createServer(async (req, res) => {
         const assigned = active
           .filter((t) => t.reason === "assigned" || t.reason === "request")
           .map((t) => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }));
+        if (capHomeOverviewAssigned && w.workspace_id === wsMain) {
+          for (let i = assigned.length; i < 20; i += 1) {
+            const hex = String(i + 1).padStart(12, "0");
+            assigned.push({
+              todo_id: `70000000-0000-4000-8000-${hex}`,
+              title: `Capped overview todo ${i + 1}`,
+              state: "open",
+              due_on: null,
+            });
+          }
+        }
         const waiting = active
           .filter((t) => t.reason !== "assigned")
           .map((t) => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on, reason: t.reason, agent_id: t.agent_id }));
