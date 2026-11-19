@@ -324,6 +324,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-alternative p,
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-context,
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-note { color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(.pd-confirm-error, .pd-error) { color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions { flex-wrap: wrap; gap: 12px; }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(.pd-confirm-actions,.pd-alternative) button {
   box-sizing: border-box; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; padding: 10px 12px;
