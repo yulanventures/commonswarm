@@ -1273,6 +1273,7 @@ test("PR 2 Designer CHANGES (1)-(4) + HezSec C3 signed-out copy: distinct code s
   assert.ok(liveDash.includes("focusVisibleAccountTrigger()"));
 
   // Designer #3: Visible "Current", "N waiting", "Sign in again", wrapping full email, active identifier on trigger & single-account sign-out actions, 5-account cap guidance, switch live announcement
+  assert.equal(liveDash.includes("viewerInitials("), false, "account switcher must call the existing initials() helper, not undefined viewerInitials()");
   assert.ok(liveDash.includes('currentEl.textContent = "Current"') && liveDash.includes('badge.textContent = `${waiting} waiting`') && liveDash.includes('expiredEl.textContent = "Sign in again"'));
   assert.ok(liveDash.includes("data-signout-sub") && liveDash.includes("data-signout-others-sub") && liveDash.includes("data-rail-account-email") && liveDash.includes("data-account-live"));
   assert.ok(liveDash.includes("Sign out of an account to add another."));

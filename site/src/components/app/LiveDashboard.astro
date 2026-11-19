@@ -2924,7 +2924,7 @@ import "../../styles/kylon-image-viewer.css";
                   userId: acct.userId,
                   label: acct.label,
                   secondary: acct.secondary,
-                  initials: viewerInitials(acct.label || acct.secondary),
+                  initials: initials(acct.label || acct.secondary),
                   active: Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId),
                   waitingCount: inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null,
                   expired: inactiveBadgePoller?.isExpired(acct.userId, acct.loginId) ?? false,
@@ -2933,7 +2933,7 @@ import "../../styles/kylon-image-viewer.css";
                   userId: acct.userId,
                   label: acct.label,
                   secondary: acct.secondary,
-                  initials: viewerInitials(acct.label || acct.secondary),
+                  initials: initials(acct.label || acct.secondary),
                   active: false,
                   waitingCount: null,
                   expired: true,
@@ -17092,7 +17092,7 @@ import "../../styles/kylon-image-viewer.css";
 
         const avatar = document.createElement("span");
         avatar.className = "hm-account-row__avatar";
-        avatar.dataset.initials = viewerInitials(acct.label || acct.secondary);
+        avatar.dataset.initials = initials(acct.label || acct.secondary);
         avatar.setAttribute("aria-hidden", "true");
 
         const meta = document.createElement("span");
