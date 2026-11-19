@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOrganizationMenu, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { buildOrganizationMenu, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceMenu, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -257,4 +257,70 @@ test("People & agents header buttons include the displayed member count in their
   assert.equal(phonePeople?.attrs["aria-label"], "People & agents, 3");
   assert.equal(phonePeople?.attrs["aria-description"], undefined);
   assert.equal(textOf(phonePeople), "3");
+});
+
+test("workspace header and ⋯ menu expose conversation members only when Step 2b data is present", () => {
+  const element = tag => ({
+    tag, children: [], attrs: {}, listeners: {}, dataset: {}, className: "", textContent: "", title: "", hidden: false,
+    classList: { add() {} },
+    append(...children) { this.children.push(...children); },
+    prepend(...children) { this.children.unshift(...children); },
+    remove() {},
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    querySelector(sel) {
+      const flat = n => [n, ...n.children.flatMap(flat)];
+      if (sel === ".hm-member-stack__count") return flat(this).find(n => n.className === "hm-member-stack__count") ?? null;
+      return null;
+    },
+    focus() {},
+  });
+  const doc = { createElement: element, createElementNS: (_ns, tag) => element(tag), defaultView: { matchMedia: () => ({ matches: false }) } };
+  const flat = node => [node, ...node.children.flatMap(flat)];
+  let openedWith = null;
+  const baseVm = {
+    sample: false, workspaceId: "ws-1", name: "Home", pane: "chat",
+    people: [{ person: person("u1", "Owner", true), agents: [] }],
+    hrefs, todosAvailable: true, menu: { settings: true, adminAccess: false },
+    channelTitle: "#ops",
+    conversationMembers: { count: 3, label: "#ops members" },
+  };
+  const header = buildWorkspaceHeader(doc, baseVm, {
+    openPeople: () => {},
+    openConversationMembers: (btn) => { openedWith = btn; },
+    menu: () => {},
+  });
+  const btn = flat(header).find(n => Object.hasOwn(n.dataset, "conversationMembersOpen"));
+  assert.ok(btn, "desktop header should render conversationMembers button");
+  assert.equal(btn.attrs["aria-label"], "#ops members (3)");
+  btn.listeners.click();
+  assert.equal(openedWith, btn);
+
+  const withoutStep2b = buildWorkspaceHeader(doc, { ...baseVm, conversationMembers: undefined }, {
+    openPeople: () => {},
+    openConversationMembers: () => {},
+    menu: () => {},
+  });
+  assert.equal(flat(withoutStep2b).find(n => Object.hasOwn(n.dataset, "conversationMembersOpen")), undefined);
+
+  const actions = [];
+  const menuWrap = buildWorkspaceMenu(doc, baseVm, {
+    openPeople: () => {},
+    menu: () => {},
+    feedMenu: () => ({
+      channels: [{ id: "general", label: "#general", current: true }],
+      mayCreateChannel: true,
+      conversationMembers: { label: "Members (3)" },
+      filters: [{ value: "all", label: "All", current: true }],
+      refresh: null,
+    }),
+    feed: (action) => actions.push(action),
+  }, "hm-ws");
+  const trigger = flat(menuWrap).find(n => n.className === "hm-menu__trigger");
+  trigger.listeners.click();
+  const menuItem = flat(menuWrap).find(n => Object.hasOwn(n.dataset, "menuConversationMembers"));
+  assert.ok(menuItem, "⋯ menu should expose Members item");
+  assert.equal(menuItem.textContent, "Members (3)");
+  menuItem.listeners.click();
+  assert.deepEqual(actions, [{ kind: "conversation-members" }]);
 });
