@@ -18,7 +18,7 @@ import {
   sessionCookie,
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
-import { CONSENT_SUBMIT_PATH, renderConsentPage, renderSignInPage, renderDifferentAccountPage, renderConsentResultPage } from "./interaction-page.js";
+import { CONSENT_SUBMIT_PATH, formatRedirectDestination, renderConsentPage, renderSignInPage, renderDifferentAccountPage, renderConsentResultPage } from "./interaction-page.js";
 import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE, RESOURCE_SCOPES } from "./provider.js";
 
@@ -129,11 +129,9 @@ async function clientConsentDisplay(provider, clientId, redirectUri) {
     return { verified: true, primary: new URL(clientId).host,
       metadataHost: new URL(clientId).hostname, declaredName: client?.clientName ?? null };
   }
-  const redirect = new URL(redirectUri);
   return {
     verified: false,
-    primary: !redirect.hostname && !["http:", "https:"].includes(redirect.protocol)
-      ? `an app on this device (${redirect.protocol})` : redirect.hostname.toLowerCase(),
+    primary: formatRedirectDestination(redirectUri),
     declaredName: client?.clientName ?? null,
   };
 }

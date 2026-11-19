@@ -4,7 +4,7 @@ import { AUTH_PROVIDER_CATALOG } from "./auth-provider-catalog.js";
 // filename from oidc-provider's base64url interaction UID alphabet.
 export const CONSENT_SUBMIT_PATH = "/interaction/consent-submit.js";
 
-const CONSENT_WARNING = "Chats using this Claude connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
+const CONSENT_WARNING = "Chats using this connection can use any seat created by the connection. Seat names do not isolate chats. These seats check messages during a chat turn; they do not run a listener.";
 
 // Sign-in providers the page may name. Any other value (null, unknown, inherited
 // object keys) renders the account without a provider, never the raw value.
@@ -43,13 +43,23 @@ const PROVIDER_GLYPHS = {
 };
 const BRAND_MARK = '<svg class="brand-mark" width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true" focusable="false"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" stroke="currentColor" stroke-width="4.8" stroke-linecap="round"></path><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="var(--accent)"></rect></svg>';
 
-export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
+/** Describes the OAuth redirect target without paths, query parameters, fragments or codes. */
+export function formatRedirectDestination(redirectUri) {
   const redirect = new URL(redirectUri);
-  const hostname = redirect.hostname;
-  const destination = ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
-    ? "a program on this computer (localhost)"
-    : !hostname && !["http:", "https:"].includes(redirect.protocol)
-      ? `an app on this device (${redirect.protocol})` : hostname;
+  const hostname = redirect.hostname.toLowerCase();
+  if (redirect.protocol === "http:" || redirect.protocol === "https:") {
+    if (["localhost", "127.0.0.1", "[::1]"].includes(hostname)) {
+      return "a program on this computer (localhost)";
+    }
+    return redirect.host.toLowerCase();
+  }
+  return hostname
+    ? `an app on this device (${redirect.protocol}//${redirect.host.toLowerCase()})`
+    : `an app on this device (${redirect.protocol})`;
+}
+
+export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
+  const destination = formatRedirectDestination(redirectUri);
   // Shared with admin-interaction-page.js: line breaks stay in the markup so the
   // facts keep one line each without this page's stylesheet.
   return `<p class="notice destination"><span class="destination-line">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong></span><br>
@@ -408,7 +418,7 @@ ${CONSENT_STYLES}
     </fieldset>
     <p class="warning">${ICONS.chat}<span><strong>Before you continue:</strong> ${CONSENT_WARNING}</span></p>
     ${destinationBlock}
-    <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> across them. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
+    <p class="reach">It can reach only the workspaces you tick and create up to <strong>10 hosted seats</strong> across them. Approved agents can read and post messages, work with workspace files, and use shared lists and to-dos subject to workspace and content permissions. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>
   </div>

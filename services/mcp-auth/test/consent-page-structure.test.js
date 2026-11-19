@@ -434,7 +434,7 @@ test("the picker says what the app can reach directly above Allow, and ties hidi
   const tree = htmlTree(html);
   const form = one(tree, (node) => node.tag === "form" && node.attrs.action?.endsWith("/consent"));
   const reach = one(form, (node) => node.tag === "p" && node.attrs.class === "reach");
-  assert.equal(text(reach), "It can reach only the workspaces you tick, and create up to 10 hosted seats across them. You can revoke it, or a single seat, later in /app → Connected apps.");
+  assert.equal(text(reach), "It can reach only the workspaces you tick and create up to 10 hosted seats across them. Approved agents can read and post messages, work with workspace files, and use shared lists and to-dos subject to workspace and content permissions. You can revoke it, or a single seat, later in /app → Connected apps.");
   const actions = one(form, (node) => node.tag === "div" && node.attrs.class === "actions");
   const blocks = form.children.filter((child) => typeof child !== "string");
   assert.equal(blocks.indexOf(actions) - blocks.indexOf(reach), 1, "nothing sits between the reach line and the buttons");
@@ -515,4 +515,14 @@ test("an unverified app groups its destination and warning once beside Allow con
   // Verified consent keeps its plain destination with no unverified wrapper.
   const verified = htmlTree(page());
   assert.equal(find(verified, (node) => node.attrs.class === "unverified-decision").length, 0);
+
+  // Native callback with authority (Cursor): names the scheme and device app, never calls it Claude, leaks no path.
+  const cursorHtml = page({
+    clientDisplay: { verified: false, primary: "an app on this device (cursor://anysphere.cursor-retrieval)", declaredName: "Cursor", metadataHost: null },
+    redirectUri: "cursor://anysphere.cursor-retrieval/oauth/user-commonswarm/callback?code=secret",
+  });
+  assert.doesNotMatch(cursorHtml, /\bClaude\b|user-commonswarm|code=secret/u);
+  const cursorTree = htmlTree(cursorHtml);
+  const cursorDecision = one(cursorTree, (node) => node.attrs.class === "unverified-decision");
+  assert.match(text(cursorDecision), /After you approve, you return to an app on this device \(cursor:\/\/anysphere\.cursor-retrieval\)\./u);
 });
