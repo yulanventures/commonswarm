@@ -21,11 +21,22 @@ struct SignInView: View {
                         .frame(maxWidth: .infinity).padding(.bottom, 12)
                     Button { start(.google) } label: { primaryLabel("Continue with Google") }
                         .buttonStyle(.borderedProminent).disabled(!canStart(.google))
-                    Button { showEmail = true } label: { primaryLabel("Continue with email") }
+                    Button {
+                        #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+                        auth.cancelGooglePreparation()
+                        #endif
+                        showEmail = true
+                    } label: { primaryLabel("Continue with email") }
                         .buttonStyle(.borderedProminent).disabled(deployment == nil || auth.pending)
                     Button { start(.github) } label: {
                         Text("Continue with GitHub").font(.subheadline).frame(minHeight: 44)
                     }.disabled(!canStart(.github))
+                    #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+                    if auth.preparedGoogle != nil {
+                        Text("After the USB test is approved, tap Continue with Google again.")
+                        Button("Cancel Google sign-in") { auth.cancelGooglePreparation() }
+                    }
+                    #endif
                     if auth.failed { Text("Couldn’t sign in. Try again.") }
                     if deployment == nil { Text("Sign-in is unavailable in this build.") }
                 }
@@ -45,8 +56,8 @@ struct SignInView: View {
         guard deployment != nil, window != nil, !auth.pending else { return false }
         switch provider {
         case .google:
-            // Enable only on a build signed for the verified, claimed HTTPS return.
-            #if COMMONSWARM_GOOGLE_HTTPS
+            // The custom Google return is confined to a separately enabled USB Debug build.
+            #if COMMONSWARM_GOOGLE_HTTPS || (DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB)
             return true
             #else
             return false

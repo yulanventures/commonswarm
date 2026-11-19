@@ -70,7 +70,9 @@ const server = createServer(async (req, res) => {
       return reply(200, authenticatedRequests);
     }
     if (req.method === "GET" && url.pathname === "/auth/v1/authorize") {
-      const callback = callbacks.get(url.searchParams.get("provider"));
+      const provider = url.searchParams.get("provider");
+      const callback = provider === "google" && process.env.CS_FIXTURE_GOOGLE_USB === "1"
+        ? "commonswarm://auth/callback" : callbacks.get(provider);
       if (!callback) return reply(400, {});
       const redirect = new URL(url.searchParams.get("redirect_to"));
       const state = redirect.searchParams.get("state");

@@ -12,7 +12,12 @@ enum BrowserProvider: String {
     var callback: URL {
         switch self {
         case .github: URL(string: "com.commonswarm.ios://auth/callback")!
-        case .google: URL(string: "https://commonswarm.com/ios/auth/callback")!
+        case .google:
+            #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+            URL(string: "commonswarm://auth/callback")!
+            #else
+            URL(string: "https://commonswarm.com/ios/auth/callback")!
+            #endif
         }
     }
 }
@@ -41,9 +46,17 @@ struct SignInAttempt {
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     }
 
+    private var challenge: String { Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8)))) }
+
+    #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+    var usbBinding: String {
+        let value = "commonswarm-google-usb-v1\n" + challenge + "\n" + state
+        return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    #endif
+
     func authorize(at origin: URL) -> URL {
         let redirect = provider.callback.appending(queryItems: [URLQueryItem(name: "state", value: state)])
-        let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
         return origin.appending(path: "auth/v1/authorize").appending(queryItems: [
             URLQueryItem(name: "provider", value: provider.rawValue),
             URLQueryItem(name: "code_challenge_method", value: "s256"),
