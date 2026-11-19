@@ -214,10 +214,14 @@ async function observeStep3BA11y() {
   };
 
   try {
+    await document.fonts.ready;
+    const waitVisible = async (label: string, selector: string): Promise<Element> => {
+      await wait(label, () => visible(one(selector)));
+      return one(selector)!;
+    };
+
     if (f.scene === "membership-retry") {
-      await wait("membership retry visible", () => visible(one("[data-channel-membership-retry-bar]")));
-      await document.fonts.ready;
-      const root = one("[data-channel-membership-retry-bar]")!;
+      const root = await waitVisible("membership retry visible", "[data-channel-membership-retry-bar]");
       document.documentElement.dataset.step3bA11y = JSON.stringify({
         ok: true,
         scene: f.scene,
@@ -228,7 +232,8 @@ async function observeStep3BA11y() {
       return;
     }
 
-    await wait("step 2b rail ready", () => !!one("[data-home-dms]") && !!one(`[data-rail-conversation="${f.ids.dmGroupConv}"]`));
+    await wait("step 2b rail ready", () => one("live-dashboard")?.getAttribute("data-state") === "channel" &&
+      !!one("[data-home-dms]") && !!one(`[data-rail-conversation="${f.ids.dmGroupConv}"]`));
 
     if (f.scene === "rail-menu") {
       await openDrawerIfPhone();
@@ -301,13 +306,12 @@ async function observeStep3BA11y() {
     }
 
     if (f.scene === "preview" || f.scene === "preview-retry") {
-      await wait("preview bar visible", () => visible(one("[data-channel-preview-bar]")));
+      await waitVisible("preview bar visible", "[data-channel-preview-bar]");
       if (f.scene === "preview-retry") {
         await click("[data-channel-preview-join]:visible");
         await wait("preview retry state", () => one("[data-channel-preview-join]")?.textContent === "Retry");
       }
-      await document.fonts.ready;
-      const bar = one("[data-channel-preview-bar]")!;
+      const bar = await waitVisible("preview bar settled", "[data-channel-preview-bar]");
       document.documentElement.dataset.step3bA11y = JSON.stringify({
         ok: true,
         scene: f.scene,
