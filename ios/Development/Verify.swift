@@ -115,6 +115,33 @@ enum Verify {
         try await api.join(workspace: ws.id, conversation: preview.id, commandID: UUID())
         let updated = try await api.conversationList(ws.id)
         try expect(updated?.first(where: { $0.id == preview.id })?.joined == true, "Join changes membership for the previewed channel")
+        let place = preview.item(viewer: session.userID)
+        let pendingDraft = session.composer(workspace: ws.id, conversation: place.id)
+        let publicHistory = MessageHistory()
+        _ = await publicHistory.load(.latest, api: api, workspace: ws.id, destination: place.destination)
+        pendingDraft.text = "Pending at removal"
+        guard let stale = pendingDraft.begin(workspace: ws.id, destination: place.destination) else { throw Failure.mismatch("joined composer") }
+        pendingDraft.failed(stale.command_id, with: APIError.refused(503))
+        let beforeRemoval = try await control("lose-public")
+        _ = await publicHistory.load(.latest, api: api, workspace: ws.id, destination: place.destination)
+        try expect(pendingDraft.access == .preview && pendingDraft.outgoing.isEmpty && pendingDraft.retry(stale.command_id) == nil,
+                   "fresh unjoined history retires the pending composer")
+        do { _ = try await api.post(stale); throw Failure.mismatch("posted before explicit Join") } catch APIError.refused(403) {}
+        let afterRemoval = try await control("thread-posts")
+        try expect(beforeRemoval == afterRemoval, "zero post requests while unjoined")
+        try await api.join(workspace: ws.id, conversation: preview.id, commandID: UUID())
+        _ = try await api.conversationList(ws.id)
+        try expect(pendingDraft.access == .joined && pendingDraft.outgoing.isEmpty, "explicit Join restores an empty composer")
+        guard let secret = modern.first(where: { $0.slug == "access-check" })?.item(viewer: session.userID) else { throw Failure.mismatch("private channel") }
+        let privateHistory = MessageHistory()
+        let secretDraft = session.composer(workspace: ws.id, conversation: secret.id)
+        _ = await privateHistory.load(.latest, api: api, workspace: ws.id, destination: secret.destination)
+        try expect(privateHistory.messages?.isEmpty == false && secretDraft.access == .joined, "private history is initially visible")
+        secretDraft.text = "Private draft"
+        _ = try await control("deny-private")
+        _ = await privateHistory.load(.latest, api: api, workspace: ws.id, destination: secret.destination)
+        try expect(privateHistory.messages == nil && secretDraft.access == .unavailable && secretDraft.text.isEmpty,
+                   "authoritative private denial clears both history and draft")
         let canonical = thread.item(viewer: session.userID)
         let canonicalPost = Post(id: UUID(), workspace: ws.id, destination: canonical.destination, body: "Canonical DM")
         let canonicalID = try await api.post(canonicalPost)

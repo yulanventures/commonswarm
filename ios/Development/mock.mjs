@@ -71,6 +71,10 @@ if (review) {
   }
   messages[0].attachments = [fixtureFile];
 }
+const privateCheck = { conversation_id: randomUUID(), kind: "private_channel", channel_id: randomUUID(), slug: "access-check", joined: true };
+if (verify) threadRows.push(privateCheck);
+let privateDenied = false;
+let threadPosts = 0;
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -95,6 +99,12 @@ const server = createServer(async (req, res) => {
       return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
     }
     if (verify && req.method === "GET" && url.pathname.startsWith("/fixture/")) {
+      if (url.pathname === "/fixture/lose-public") {
+        threadRows.find(r => r.slug === "garden").joined = false;
+        return reply(200, threadPosts);
+      }
+      if (url.pathname === "/fixture/deny-private") { privateDenied = true; return reply(200, threadPosts); }
+      if (url.pathname === "/fixture/thread-posts") return reply(200, threadPosts);
       if (url.pathname === "/fixture/wait-for-post") {
         await postReceived;
       } else if (url.pathname === "/fixture/release") {
@@ -185,6 +195,10 @@ const server = createServer(async (req, res) => {
       if (body.resource === "conversations" && body.include_archived === false) return reply(200, { conversations: threadRows });
       const row = threadRows.find(r => r.conversation_id === body.conversation_id?.toLowerCase());
       if (body.resource !== "conversation_history" || !row) return reply(404, { error: "conversation_not_found" });
+      if (row === privateCheck) {
+        if (privateDenied) return reply(404, { error: "conversation_not_found" });
+        return reply(200, { conversation: row, messages: [messages[0]] });
+      }
       const targets = [row.conversation_id, row.kind === "general" ? "general" : row.channel_id];
       const history = messages.filter(m => targets.includes(m.fixtureDestination) && m.workspace === ws &&
         (!body.before_created_at || m.created_at < body.before_created_at ||
@@ -201,6 +215,7 @@ const server = createServer(async (req, res) => {
         return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
       }
       const cmd = body.command;
+      if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
       if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
         const target = threadRows.find(r => r.conversation_id === cmd.conversation_id.toLowerCase() && r.kind === "public_channel");
         if (!target) return reply(404, {});

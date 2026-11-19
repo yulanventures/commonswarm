@@ -59,7 +59,7 @@ struct DirectoryView: View {
                  HistoryView(api: api, workspace: workspace, item: item,
                              directory: (row.members ?? []).map(\.contact),
                              draft: api.session.composer(workspace: workspace.id, conversation: item.id),
-                             previewBar: row.joined ? nil : AnyView(
+                             previewBar: row.kind != .publicChannel ? nil : AnyView(
                                  VStack { Text("Channel preview").font(.headline); joinButton(row) }
                                      .frame(maxWidth: .infinity).padding(.vertical, 8).background(.bar)
                              )).id(row.id)
@@ -78,7 +78,7 @@ struct DirectoryView: View {
     }
 
     private func join(_ row: ConversationSummary) async {
-        guard row.kind == .publicChannel, !row.joined, joining.insert(row.id).inserted else { return }
+        guard row.kind == .publicChannel, joining.insert(row.id).inserted else { return }
         defer { joining.remove(row.id) }
         let id = joinIDs[row.id] ?? UUID()
         joinIDs[row.id] = id

@@ -237,6 +237,12 @@ struct ConversationAPI {
             let status: String
             let signal: Signal
         }
+        if let address = post.command["conversation_id"] ?? nil, let id = UUID(uuidString: address) {
+            let draft = await session.composer(workspace: post.workspace_id, conversation: .thread(id))
+            guard let rows = try await conversationList(post.workspace_id),
+                  rows.contains(where: { $0.id == id && $0.access == .joined }),
+                  await draft.access == .joined else { throw APIError.refused(403) }
+        }
         var request = request("functions/v1/command")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -28,6 +28,10 @@ struct ConversationSummary: Identifiable, Decodable {
     let last_message_at, notify_level: String?
     let mention_count, unread_count: Int?
     var id: UUID { conversation_id }
+    var access: Composer.Access {
+        if archived_at != nil { return .unavailable }
+        return joined ? .joined : (kind == .publicChannel ? .preview : .unavailable)
+    }
 
     func item(viewer: UUID) -> Conversation {
         let others = (members ?? []).filter { $0.left_at == nil && !($0.kind == .user && $0.id == viewer) }
@@ -61,6 +65,7 @@ extension ConversationAPI {
             let include_archived = false
         }
         struct Reply: Decodable { let conversations: [ConversationSummary] }
+        let read = await session.nextMembershipRead()
         let (data, response) = try await session.data(for: readRequest(Query(workspace_id: workspace)))
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
         if status == 400, let refusal = try? JSONDecoder().decode([String: String].self, from: data),
@@ -74,6 +79,7 @@ extension ConversationAPI {
               rows.allSatisfy({ $0.kind != .publicChannel && $0.kind != .privateChannel || $0.channel_id != nil })
         else { throw APIError.invalidResponse }
         try await session.recordConversationCapability(workspace: workspace, supported: true)
+        await session.reconcileMemberships(workspace: workspace, rows: rows, read: read)
         return rows
     }
 
@@ -86,10 +92,20 @@ extension ConversationAPI {
             let before_id: UUID?
         }
         struct Reply: Decodable { let conversation: ConversationSummary; let messages: [Message] }
-        let result: Reply = try await send(readRequest(Query(workspace_id: workspace, conversation_id: id,
-            limit: Self.pageSize, before_created_at: before?.created_at, before_id: before?.id)))
-        guard result.conversation.id == id else { throw APIError.invalidResponse }
-        return result.messages
+        let draft = await session.composer(workspace: workspace, conversation: .thread(id))
+        let read = await session.nextMembershipRead()
+        do {
+            let result: Reply = try await send(readRequest(Query(workspace_id: workspace, conversation_id: id,
+                limit: Self.pageSize, before_created_at: before?.created_at, before_id: before?.id)))
+            guard result.conversation.id == id else { throw APIError.invalidResponse }
+            let access = result.conversation.access
+            guard await draft.apply(access, read: read) else { throw CancellationError() }
+            guard access != .unavailable else { throw APIError.refused(403) }
+            return result.messages
+        } catch APIError.refused(let status) where [401, 403, 404].contains(status) {
+            _ = await draft.apply(.unavailable, read: read)
+            throw APIError.refused(status)
+        }
     }
 }
 

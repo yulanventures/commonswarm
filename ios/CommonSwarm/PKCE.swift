@@ -241,6 +241,18 @@ final class HumanSession {
         return http.statusCode
     }
 
+    private var membershipRead = 0
+    func nextMembershipRead() -> Int { membershipRead += 1; return membershipRead }
+
+    func reconcileMemberships(workspace: UUID, rows: [ConversationSummary], read: Int) {
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        for (key, draft) in drafts where key.workspace == workspace {
+            if case .thread(let id) = key.conversation {
+                draft.apply(byID[id]?.access ?? .unavailable, read: read)
+            }
+        }
+    }
+
     private var supportedWorkspaces = Set<UUID>()
 
     func recordConversationCapability(workspace: UUID, supported: Bool) throws {
@@ -251,7 +263,8 @@ final class HumanSession {
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
         let key = DraftKey(workspace: workspace, conversation: conversation)
         if let draft = drafts[key] { return draft }
-        let draft = Composer()
+        let draft: Composer
+        if case .thread = conversation { draft = Composer(access: .checking) } else { draft = Composer() }
         drafts[key] = draft
         return draft
     }
