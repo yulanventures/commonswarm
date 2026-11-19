@@ -16,6 +16,8 @@ struct DirectoryView: View {
     @SwiftUI.State private var opened: ThreadRoute?
     @SwiftUI.State private var selected: ThreadRoute?
 
+    @SwiftUI.State private var membersRow: ConversationSummary?
+
     var body: some View {
         Group {
             switch state {
@@ -89,6 +91,10 @@ struct DirectoryView: View {
                                        let id = labels[MemberRef(kind: member.kind, id: member.id)] else { return nil }
                                  return member.contact.name + " · " + id
                              }).id(row.id)
+                     .toolbar { Button { membersRow = row } label: { Label("Members", systemImage: "person.2") } }
+                     .sheet(item: $membersRow) { target in
+                         ConversationMembersView(api: api, workspace: workspace.id, row: target) { state = .ready($0) }
+                     }
              } else { ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left") }
     }
 

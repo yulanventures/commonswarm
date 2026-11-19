@@ -176,6 +176,19 @@ enum Verify {
                        exact?.item(viewer: session.userID, labels: labels).name == "Riley · " + (labels[twin.id] ?? ""),
                        "picker and visible destination agree on the exact same-name recipient")
         }
+        let directAccess = try await api.memberAccess(workspace: ws.id, row: thread)
+        try expect(!directAccess.add && !directAccess.remove, "DM members are fixed")
+        for kind in [ConversationKind.publicChannel, .privateChannel] {
+            guard let channel = modern.first(where: { $0.kind == kind && $0.joined }) else { throw Failure.mismatch("joined channel") }
+            let rights = try await api.memberAccess(workspace: ws.id, row: channel)
+            try expect(rights.add && rights.remove, "workspace owner manages live channel")
+            try await api.changeMembers(.add([atlas.id]), workspace: ws.id, row: channel, commandID: UUID())
+            let invited = try await api.conversationList(ws.id)?.first(where: { $0.id == channel.id })
+            try expect(invited?.members?.contains(where: { $0.id == atlas.id.id }) == true, "invite appears on the same channel")
+            try await api.changeMembers(.remove(atlas.id), workspace: ws.id, row: channel, commandID: UUID())
+            let removed = try await api.conversationList(ws.id)?.first(where: { $0.id == channel.id })
+            try expect(removed?.members?.contains(where: { $0.id == atlas.id.id }) == false, "removed recipient disappears")
+        }
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)
         let canonicalDraft = session.composer(workspace: ws.id, conversation: canonical.id)

@@ -62,7 +62,8 @@ const twins = ["012345ab-0000-4000-8000-000000000001", "012345cd-0000-4000-8000-
   .map(id => ({ kind: "agent", id, name: "Riley" }));
 const threadRows = [
   { conversation_id: randomUUID(), kind: "general", slug: "general", joined: true },
-  { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true },
+  { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true, members: [members[0]] },
+  { conversation_id: randomUUID(), kind: "private_channel", channel_id: longChannel, slug: "design", joined: true, members: [members[0]] },
   { conversation_id: randomUUID(), kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
   { conversation_id: randomUUID(), kind: "dm", joined: true, members, mention_count: 103 }
 ];
@@ -246,6 +247,24 @@ const server = createServer(async (req, res) => {
         if (!same) threadRows.push(thread);
         return reply(200, { status: "accepted", conversation: thread });
       }
+      if (["conversation_invite", "conversation_remove", "channel_member_add", "channel_member_remove"].includes(cmd?.kind)) {
+        if (body.workspace_id?.toLowerCase() !== workspace) return reply(403, {});
+        const isPrivate = cmd.kind.startsWith("channel_member_");
+        const target = threadRows.find(r => isPrivate
+          ? r.kind === "private_channel" && r.channel_id === cmd.channel_id?.toLowerCase()
+          : r.kind === "public_channel" && r.conversation_id === cmd.conversation_id?.toLowerCase());
+        if (!target || !target.joined) return reply(403, {});
+        if (cmd.members) {
+          for (const ref of cmd.members) {
+            if (ref.kind !== "agent" || ref.id.toLowerCase() !== agent) return reply(400, {});
+            if (!target.members.includes(members[1])) target.members.push(members[1]);
+          }
+        } else {
+          if (cmd.member.kind !== "agent" || cmd.member.id.toLowerCase() !== agent) return reply(400, {});
+          target.members = target.members.filter(m => m !== members[1]);
+        }
+        return reply(200, isPrivate ? { status: "accepted" } : { status: "accepted", conversation_id: target.conversation_id });
+      }
       if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
         const target = threadRows.find(r => r.conversation_id === cmd.conversation_id.toLowerCase() && r.kind === "public_channel");
         if (!target) return reply(404, {});
@@ -307,6 +326,7 @@ const server = createServer(async (req, res) => {
       }
       case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }, ...(conversationsEnabled ? [{ user_id: teammate.id, display_name: teammate.name }] : [])]);
       case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }, ...(conversationsEnabled ? twins.map(m => ({ principal_id: m.id, name: m.name })) : [])]);
+      case "/rest/v1/memberships": return reply(200, [{ role: "owner" }]);
       case "/rest/v1/signals": {
         const destination = url.searchParams.has("recipients->1") ? "direct" :
           url.searchParams.get("channel_id") === "is.null" ? "general" : url.searchParams.get("channel_id")?.slice(3).toLowerCase();
