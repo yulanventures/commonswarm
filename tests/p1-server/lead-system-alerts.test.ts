@@ -1383,9 +1383,14 @@ test("Condition 5 & Delivery: pinned roles, unclaimed vs serving hosted replacem
   assert.equal(ownerEscalatedAfter.alerts.some((a) => a.alert_id === targetAlert.alert_id), false);
 });
 
-test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE without stalling ordinary commands or activity", { timeout: 60_000 }, async () => {
-  // Set up a second workspace for owner, a multi-workspace revoked local agent, a separate revoked agent
-  // for /functions/v1/activity, and a healthy sibling agent owned by the same owner (sharing swarm.users).
+test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE without blocking renew_wake_lease, signals_seen, or activity", { timeout: 60_000 }, async () => {
+  // Set up:
+  // 1. A second workspace for owner + multi-workspace revoked agents (command & activity).
+  // 2. A standing-grant local agent whose predecessor token has a used successor so renew_agent_token
+  //    hits the real predecessor_superseded refusal path (the prime suspect for holding swarm.users
+  //    FOR NO KEY UPDATE when record_system_alert ran inline inside the renewal transaction).
+  // 3. A sibling agent owned by the SAME owner with an active wake lease + a live signal so we can
+  //    fire real renew_wake_lease (x2) and signals_seen (x1) concurrently under #general FOR UPDATE.
   const ws2 = randomUUID();
   await sql.begin(async (tx) => {
     await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${ws2}::uuid, 'LockHardeningWS2', ${owner.id}::uuid)`;
@@ -1393,12 +1398,55 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
     await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${ws2}::uuid, 'workspace')`;
   });
 
-  const healthySibling = await agentOf(owner.id, "lock-healthy-sibling");
+  const leaseBot = await agentOf(owner.id, "lock-lease-sibling");
   const openCh = await createChannel(owner, "lock-open-ctrl");
+  const watcherId = randomUUID();
+  const hostId = randomUUID();
+  const claimedLease = await send(leaseBot.token, {
+    kind: "claim_wake_lease", watcher_id: watcherId, host_label: "lock-test-host", host_id: hostId, take_over: false,
+  });
+  assert.equal(claimedLease.status, 200, JSON.stringify(claimedLease.body));
+  const leaseGeneration = Number(claimedLease.body.generation);
+
+  const seedSig = await send(leaseBot.token, {
+    kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: "signal for signals_seen",
+    to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+  });
+  assert.equal(seedSig.status, 200, JSON.stringify(seedSig.body));
+  const seenSignalId = String((seedSig.body.signal as Row).id);
+
+  // Standing-grant agent whose predecessor token is superseded by a used successor.
+  const renewPrincipal = randomUUID();
+  const renewDevice = randomUUID();
+  const renewRun = randomUUID();
+  const renewGrant = randomUUID();
+  const renewTask = randomUUID();
+  const renewLineage = randomUUID();
+  const predToken = `swm_agt_${randomBytes(24).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${renewDevice}::uuid, ${owner.id}::uuid, 'renew-lock-test')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${renewPrincipal}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${`renew-lock-${renewPrincipal.slice(0, 6)}`})`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${renewRun}::uuid, ${renewPrincipal}::uuid, ${renewDevice}::uuid)`;
+    await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used, horizon_expires_at, bound_device_id, created_by)
+      VALUES (${renewGrant}::uuid, ${workspace}::uuid, ${renewPrincipal}::uuid, ${renewRun}::uuid, 'standing', NULL, 0, NULL, ${renewDevice}::uuid, ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id, renewal_grant_id)
+      VALUES (${randomUUID()}::uuid, ${renewPrincipal}::uuid, ${renewRun}::uuid, ${renewTask}::uuid, 1,
+        ${tx.json(["post_signal"])}::jsonb, ${createHash("sha256").update(predToken).digest()},
+        statement_timestamp() + interval '1 hour', ${renewLineage}::uuid, ${renewGrant}::uuid)`;
+  });
+  const firstRenew = await send(predToken, { kind: "renew_agent_token" });
+  assert.equal(firstRenew.status, 200, JSON.stringify(firstRenew.body));
+  const succToken = String(firstRenew.body.agent_token);
+  const useSucc = await send(succToken, {
+    kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: "mark successor first_used_at",
+    to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+  });
+  assert.equal(useSucc.status, 200, JSON.stringify(useSucc.body));
+
   const revokedCmd = await agentOf(owner.id, "lock-revoked-cmd");
   const revokedAct = await agentOf(owner.id, "lock-revoked-act");
   const revokedAfter = await agentOf(owner.id, "lock-revoked-after");
-
   for (const ag of [revokedCmd, revokedAct, revokedAfter]) {
     await sql`
       INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
@@ -1408,8 +1456,11 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
     await sql`UPDATE swarm.agent_tokens SET revoked_at = statement_timestamp() WHERE principal_id = ${ag.principal}::uuid`;
   }
 
-  // Hold an exclusive FOR UPDATE lock on workspace's #general conversation row for 1.5s while firing
-  // revoked-token command + activity requests AND concurrent healthy commands for the same owner.
+  // Hold an exclusive FOR UPDATE lock on workspace's #general conversation row while firing:
+  // - renew_agent_token (predecessor_superseded), which previously held swarm.users FOR NO KEY UPDATE
+  //   while waiting up to 5s on #general inside insertAudit,
+  // - two concurrent renew_wake_lease commands and one signals_seen command for the SAME owner,
+  // - revoked multi-workspace /functions/v1/command and /functions/v1/activity calls.
   let holdReady!: () => void;
   let releaseHold!: () => void;
   const holdStarted = new Promise<void>((r) => { holdReady = r; });
@@ -1427,7 +1478,11 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   await holdStarted;
 
   const t0 = Date.now();
-  const [cmdRevokedRes, actRevokedRes, ...healthyResults] = await Promise.all([
+  const [supersededRes, wakeLease1, wakeLease2, signalsSeenRes, cmdRevokedRes, actRevokedRes] = await Promise.all([
+    send(predToken, { kind: "renew_agent_token" }),
+    send(leaseBot.token, { kind: "renew_wake_lease", watcher_id: watcherId, generation: leaseGeneration }),
+    send(leaseBot.token, { kind: "renew_wake_lease", watcher_id: watcherId, generation: leaseGeneration }),
+    send(owner.jwt, { kind: "signals_seen", signal_ids: [seenSignalId] }),
     send(revokedCmd.token, {
       kind: "post_signal", signal_kind: "note", body: "revoked under contention",
       to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
@@ -1438,26 +1493,31 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
       headers: { authorization: `Bearer ${revokedAct.token}`, "content-type": "application/json" },
       body: JSON.stringify({ workspace_id: workspace, state: "working", summary: "revoked heartbeat" }),
     }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) as Row })),
-    ...Array.from({ length: 4 }, (_, i) =>
-      send(healthySibling.token, {
-        kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: `healthy burst ${i}`,
-        to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
-      })
-    ),
   ]);
   const elapsedMs = Date.now() - t0;
 
   releaseHold();
   await generalHold;
 
+  assert.notEqual(supersededRes.status, 503, `predecessor_superseded must not 503: ${JSON.stringify(supersededRes.body)}`);
+  assert.equal(wakeLease1.status, 200, `renew_wake_lease #1 must succeed 200 without 55P03: ${JSON.stringify(wakeLease1.body)}`);
+  assert.equal(wakeLease2.status, 200, `renew_wake_lease #2 must succeed 200 without 55P03: ${JSON.stringify(wakeLease2.body)}`);
+  assert.equal(signalsSeenRes.status, 200, `signals_seen must succeed 200 without 55P03: ${JSON.stringify(signalsSeenRes.body)}`);
   assert.ok(cmdRevokedRes.status === 401 || cmdRevokedRes.status === 403, `revoked command must refuse cleanly, got ${cmdRevokedRes.status}`);
   assert.equal(actRevokedRes.status, 403, `revoked activity must return 403, got ${actRevokedRes.status}`);
-  assert.ok(elapsedMs < 3_000, `best-effort 250ms alert lock_timeout must prevent 5s stall or hang (took ${elapsedMs}ms)`);
-  for (const res of healthyResults) {
-    assert.equal(res.status, 200, `concurrent healthy commands for same owner must return 200 (zero 503), got ${res.status} ${JSON.stringify(res.body)}`);
-  }
+  assert.ok(elapsedMs < 3_000, `post-tx 250ms best-effort alert lock_timeout must prevent 5s stall or hang (took ${elapsedMs}ms)`);
 
-  // Once #general is unlocked, a fresh revoked multi-workspace call records alerts cleanly across both workspaces.
+  // Once #general is unlocked, both post-tx local_renewal_superseded and multi-workspace
+  // local_credential_revoked alerts record cleanly in swarm.system_alerts.
+  const supersededAfter = await send(predToken, { kind: "renew_agent_token" });
+  assert.notEqual(supersededAfter.status, 503);
+  const renewAlerts = await sql<{ workspace_id: string }[]>`
+    SELECT workspace_id::text AS workspace_id
+    FROM swarm.system_alerts
+    WHERE kind = 'local_renewal_superseded' AND affected_principal_id = ${renewPrincipal}::uuid
+  `;
+  assert.equal(renewAlerts.length, 1, "post-tx local_renewal_superseded alert must record cleanly once #general is unlocked");
+
   const afterRes = await send(revokedAfter.token, {
     kind: "post_signal", signal_kind: "note", body: "revoked after unlock",
     to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
