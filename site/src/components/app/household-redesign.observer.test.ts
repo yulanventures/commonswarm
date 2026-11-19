@@ -277,7 +277,7 @@ function approvalDom() {
   const doc: any = { activeElement: null };
   class Element {
     children: Element[] = []; dataset: Record<string, string> = {}; attributes: Record<string, string> = {};
-    textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = "";
+    textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = ""; scrollTop = 0;
     ownerDocument = doc; events = new Map<string, () => void>();
     classList = {
       add: (...names: string[]) => { this.className += ` ${names.join(" ")}`; },
@@ -586,6 +586,31 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "no Remove while the list is being read again");
   access = undefined; paint();
   assert.equal(all(node => node.dataset?.adminAccess !== undefined).length, 0, "with agent admin access off, the tab lists people only");
+});
+
+test("People & agents keeps its scroll position across redraws on the same tab and profile, and resets when changing tab, query, focus or selection", () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom();
+  const state: any = { selected: null, query: "", tab: "admins" };
+  const paint = (options: any = {}) => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(), state,
+    { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {} },
+    { page: { homeLabel: "Home", homeHref: "/app" }, ...options });
+  const ctx = () => dom.root.querySelector("[data-people-context]")!;
+  const side = () => dom.root.querySelector("[data-people-side]")!;
+  paint();
+  ctx().scrollTop = 178;
+  paint();
+  assert.equal(ctx().scrollTop, 178, "a background redraw on the same tab and query preserves scroll position");
+  state.query = "m"; paint();
+  assert.equal(ctx().scrollTop, 0, "typing a query resets scroll to the top of results");
+  ctx().scrollTop = 90; state.tab = "agents"; paint();
+  assert.equal(ctx().scrollTop, 0, "switching tabs resets scroll to the top");
+  ctx().scrollTop = 120; paint({ focus: { kind: "person", id: "person" } });
+  assert.equal(ctx().scrollTop, 0, "applying an initial focus target resets scroll");
+  state.selected = { type: "person", id: "person" }; paint();
+  side().scrollTop = 140; paint();
+  assert.equal(side().scrollTop, 140, "a redraw of the same open profile preserves its scroll position");
+  state.selected = { type: "agent", id: "principal" }; paint();
+  assert.equal(side().scrollTop, 0, "switching to another profile resets the detail scroll");
 });
 
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
