@@ -98,7 +98,7 @@ private final class UploadProgress: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
-private struct FileEnvelope<Command: Encodable>: Encodable {
+struct WorkspaceCommand<Command: Encodable>: Encodable {
     let client_version = ConversationAPI.clientVersion
     let command_id, workspace_id: UUID
     let stream = ["kind": "workspace"]
@@ -170,7 +170,7 @@ extension ConversationAPI {
         var req = request("functions/v1/command")
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(FileEnvelope(command_id: id, workspace_id: workspace, command: command))
+        req.httpBody = try JSONEncoder().encode(WorkspaceCommand(command_id: id, workspace_id: workspace, command: command))
         return try await send(req)
     }
 }

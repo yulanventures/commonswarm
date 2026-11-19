@@ -7,6 +7,10 @@ struct DirectoryView: View {
     @SwiftUI.State private var state: Load = .loading
     @SwiftUI.State private var generation = UUID()
 
+    @SwiftUI.State private var joining = Set<UUID>()
+    @SwiftUI.State private var joinIDs: [UUID: UUID] = [:]
+    @SwiftUI.State private var joinErrors = Set<UUID>()
+
     var body: some View {
         Group {
             switch state {
@@ -29,20 +33,61 @@ struct DirectoryView: View {
             return ($0.last_message_at ?? "") > ($1.last_message_at ?? "")
         }
         return List {
-            Section("Channels") { ForEach(channels) { row in link(row) } }
+            Section("Channels") {
+                ForEach(channels) { row in link(row) }
+                NavigationLink("All channels", value: ChannelDirectoryRoute())
+            }
             Section("Direct messages") {
                 if directs.isEmpty { Text("No direct messages yet").foregroundStyle(.secondary) }
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
+         .navigationDestination(for: ChannelDirectoryRoute.self) { _ in
+             List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
+                 VStack(alignment: .leading) {
+                     link(row)
+                     if let description = row.description, !description.isEmpty {
+                         Text(description).font(.subheadline).foregroundStyle(.secondary)
+                     }
+                     if !row.joined { joinButton(row) }
+                 }
+             }.navigationTitle("All channels")
+         }
          .navigationDestination(for: ThreadRoute.self) { route in
-             if let row = rows.first(where: { $0.id == route.id && $0.joined && $0.archived_at == nil }) {
+             if let row = rows.first(where: { $0.id == route.id && ($0.joined || $0.kind == .publicChannel) && $0.archived_at == nil }) {
                  let item = row.item(viewer: api.session.userID)
                  HistoryView(api: api, workspace: workspace, item: item,
                              directory: (row.members ?? []).map(\.contact),
-                             draft: api.session.composer(workspace: workspace.id, conversation: item.id)).id(row.id)
+                             draft: api.session.composer(workspace: workspace.id, conversation: item.id),
+                             previewBar: row.kind != .publicChannel ? nil : AnyView(
+                                 VStack { Text("Channel preview").font(.headline); joinButton(row) }
+                                     .frame(maxWidth: .infinity).padding(.vertical, 8).background(.bar)
+                             )).id(row.id)
              } else { ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left") }
          }
+    }
+
+    @ViewBuilder private func joinButton(_ row: ConversationSummary) -> some View {
+        if joinErrors.contains(row.id) { Text("Couldn’t join channel").foregroundStyle(.secondary) }
+        Button {
+            Task { await join(row) }
+        } label: {
+            Text(joining.contains(row.id) ? "Joining…" : "Join #" + (row.slug ?? "channel"))
+                .frame(minHeight: 44).contentShape(Rectangle())
+        }.buttonStyle(.borderless).disabled(joining.contains(row.id))
+    }
+
+    private func join(_ row: ConversationSummary) async {
+        guard row.kind == .publicChannel, joining.insert(row.id).inserted else { return }
+        defer { joining.remove(row.id) }
+        let id = joinIDs[row.id] ?? UUID()
+        joinIDs[row.id] = id
+        joinErrors.remove(row.id)
+        do {
+            try await api.join(workspace: workspace.id, conversation: row.id, commandID: id)
+            await refresh()
+            joinIDs.removeValue(forKey: row.id)
+        } catch { if !Task.isCancelled { joinErrors.insert(row.id) } }
     }
 
     private func link(_ row: ConversationSummary) -> some View {
@@ -80,3 +125,5 @@ struct DirectoryView: View {
 }
 
 struct ThreadRoute: Hashable { let id: UUID }
+
+private struct ChannelDirectoryRoute: Hashable {}

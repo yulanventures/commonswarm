@@ -217,6 +217,7 @@ struct HistoryView: View {
     let item: Conversation
     let directory: [Conversation]
     @ObservedObject var draft: Composer
+    var previewBar: AnyView? = nil
     @StateObject private var history = MessageHistory()
     @ViewState private var readingAnchor: HistoryAnchor?
     @ViewState private var restoreAnchor: HistoryAnchor?
@@ -234,8 +235,10 @@ struct HistoryView: View {
                     if history.hasOlder, let first = history.messages?.first, history.retry == nil {
                         Button("Load earlier messages") { Task { await load(.older(before: first)) } }.disabled(history.loadingOlder)
                     }
-                    if let messages = history.messages {
-                        if messages.isEmpty && draft.outgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
+                    if draft.access == .unavailable {
+                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left")
+                    } else if let messages = history.messages {
+                        if messages.isEmpty && visibleOutgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
                         ForEach(messages) { message in
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -252,7 +255,7 @@ struct HistoryView: View {
                             }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }
-                    ForEach(draft.outgoing) { row in
+                    ForEach(visibleOutgoing) { row in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack {
                                 Text("You").bold()
@@ -317,7 +320,10 @@ struct HistoryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+                if draft.access == .preview, let previewBar { previewBar }
+                else if draft.access == .joined {
+                    ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+                }
             }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
@@ -344,10 +350,14 @@ struct HistoryView: View {
         }
     }
 
-    private var latestID: UUID? { draft.outgoing.last?.id ?? history.messages?.last?.id }
+    private var latestID: UUID? { visibleOutgoing.last?.id ?? history.messages?.last?.id }
+
+    private var visibleOutgoing: [Composer.Outgoing] {
+        draft.access == .joined ? draft.outgoing : []
+    }
 
     private func deliver(_ post: Post?) {
-        guard let post else { return }
+        guard draft.access == .joined, let post else { return }
         scrollToLatest += 1
         Task {
             guard let row = draft.outgoing.first(where: { $0.id == post.command_id }) else { return }
@@ -361,6 +371,7 @@ struct HistoryView: View {
                 return
             }
             do {
+                guard draft.access == .joined, draft.outgoing.contains(where: { $0.id == post.command_id }) else { return }
                 let signalID = try await api.post(post, attachments: refs)
                 guard api.session.isActive else { return }
                 draft.accepted(post.command_id, signalID: signalID)

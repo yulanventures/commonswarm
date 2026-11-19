@@ -193,13 +193,15 @@ final class HumanSession {
         self.bearer = bearer
     }
 
-    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+    func data(for request: URLRequest, canDispatch: @MainActor @Sendable () -> Bool = { true }) async throws -> (Data, URLResponse) {
         guard let bearer else { throw CancellationError() }
         let accessToken = try await bearer()
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()
         var authorized = request
         authorized.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
+        // Fetching the bearer can suspend after the membership preflight.
+        guard canDispatch() else { throw CancellationError() }
         let response = try await transport.data(for: authorized)
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()
@@ -241,6 +243,18 @@ final class HumanSession {
         return http.statusCode
     }
 
+    private var membershipRead = 0
+    func nextMembershipRead() -> Int { membershipRead += 1; return membershipRead }
+
+    func reconcileMemberships(workspace: UUID, rows: [ConversationSummary], read: Int) {
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        for (key, draft) in drafts where key.workspace == workspace {
+            if case .thread(let id) = key.conversation {
+                draft.apply(byID[id]?.access ?? .unavailable, read: read)
+            }
+        }
+    }
+
     private var supportedWorkspaces = Set<UUID>()
 
     func recordConversationCapability(workspace: UUID, supported: Bool) throws {
@@ -251,7 +265,8 @@ final class HumanSession {
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
         let key = DraftKey(workspace: workspace, conversation: conversation)
         if let draft = drafts[key] { return draft }
-        let draft = Composer()
+        let draft: Composer
+        if case .thread = conversation { draft = Composer(access: .checking) } else { draft = Composer() }
         drafts[key] = draft
         return draft
     }
