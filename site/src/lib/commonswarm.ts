@@ -2819,6 +2819,10 @@ export interface Signal {
   inReplyTo?: string | null;
   /** A thread reply the author also sent to the channel. Always false on a root. */
   broadcastToChannel: boolean;
+  /** Step 2b canonical conversation id when returned by conversation_history or post_signal. */
+  conversationId?: string | null;
+  /** Step 2b conversation kind stamped by conversation_history for strict DM exclusion. */
+  conversationKind?: ConversationKind | null;
 }
 
 /** Optional and additive: legacy rows become empty, and newer metadata fields are ignored. */
@@ -3595,6 +3599,8 @@ export function browserAcceptedDeliveryIndicator(
  * did before. Never send a key here as `null` to mean "no": send nothing.
  */
 export interface BrowserSignalPlacement {
+  /** Step 2a/2b conversation id: replaces channel/expected_channel_id on top-level posts. */
+  conversationId?: string | null;
   /** Channel slug. Omitted or null means unfiled, which reads in all-signals. */
   channel?: string | null;
   /** The message a thread reply belongs to. A reply inherits its root's channel. */
@@ -3632,6 +3638,9 @@ export function browserSignalCommand(
   if (mentions !== undefined && recipients.length > 0) {
     throw new Error("A message is either addressed or it mentions; it cannot do both.");
   }
+  const conversationId = typeof placement.conversationId === "string" && placement.conversationId !== ""
+    ? placement.conversationId
+    : null;
   return {
     kind: "post_signal",
     signal_kind: signalKind,
@@ -3649,15 +3658,19 @@ export function browserSignalCommand(
        key. An addressed message never carries it. */
     ...(mentions === undefined ? {} : { mentions: toWireRecipients(mentions) }),
     ...(attachments.length === 0 ? {} : { attachments }),
-    ...(placement.channel === undefined || placement.channel === null
-      ? {}
-      : { channel: placement.channel }),
-    ...(placement.threadRootId === undefined || placement.threadRootId === null
-      ? {}
-      : { thread_root_id: placement.threadRootId }),
-    ...(placement.broadcastToChannel === undefined
-      ? {}
-      : { broadcast_to_channel: placement.broadcastToChannel }),
+    ...(conversationId !== null
+      ? { conversation_id: conversationId }
+      : {
+        ...(placement.channel === undefined || placement.channel === null
+          ? {}
+          : { channel: placement.channel }),
+        ...(placement.threadRootId === undefined || placement.threadRootId === null
+          ? {}
+          : { thread_root_id: placement.threadRootId }),
+        ...(placement.broadcastToChannel === undefined
+          ? {}
+          : { broadcast_to_channel: placement.broadcastToChannel }),
+      }),
   };
 }
 
@@ -3810,6 +3823,9 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
     threadRootId: text(row.thread_root_id),
     inReplyTo: text(row.in_reply_to),
     broadcastToChannel: row.broadcast_to_channel === true,
+    ...(typeof row.conversation_id === "string" && row.conversation_id !== ""
+      ? { conversationId: row.conversation_id }
+      : {}),
   };
 }
 

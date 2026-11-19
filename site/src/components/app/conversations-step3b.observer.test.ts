@@ -164,6 +164,14 @@ function installConversations3BFixture() {
         }
         return Response.json({ conversations: f.conversations });
       }
+      if (body?.resource === "conversation_history") {
+        if (fallback) return Response.json({ error: "unsupported_resource", message: "Not deployed yet." }, { status: 400 });
+        const matched = f.conversations.find((c: any) => c.conversation_id === body.conversation_id);
+        if (!matched) {
+          return Response.json({ error: "conversation_not_found", message: "This conversation isn't available in this workspace." }, { status: 404 });
+        }
+        return Response.json({ conversation: matched, messages: [], has_more: false, next_before: null, next_after: null });
+      }
     }
     if (url.pathname === "/functions/v1/command" && request.method === "POST") {
       const body = await request.clone().json().catch(() => null);
