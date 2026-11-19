@@ -108,8 +108,14 @@ export function openImageViewer(host: HTMLElement, sources: readonly PictureSour
   const dialog = el("dialog", "cs-viewer");
   dialog.dataset.imageViewer = ""; dialog.tabIndex = -1;
   const bar = el("header", "cs-viewer__bar");
-  // The name says which picture this is, and with several, which of how many. It is announced when it changes.
-  const name = el("p", "cs-viewer__name"); name.setAttribute("aria-live", "polite");
+  // The name says which picture this is, and with several, which of how many. The position keeps its own room so a
+  // long filename truncates before it does, while the live region announces the full filename and position together.
+  const name = el("p", "cs-viewer__name"); name.setAttribute("aria-live", "polite"); name.setAttribute("aria-atomic", "true");
+  const title = el("span", "cs-viewer__title");
+  const sep = el("span", "cs-viewer__sep"); sep.textContent = ", ";
+  const position = el("span", "cs-viewer__position"); position.dataset.viewerPosition = "";
+  name.append(title);
+  if (sources.length > 1) name.append(sep, position);
   const zoom = control("Zoom", "viewerZoom", ICONS.zoomIn); zoom.setAttribute("aria-pressed", "false");
   const download = control("Download", "viewerDownload", ICONS.download);
   const close = control("Close", "viewerClose", ICONS.close); close.autofocus = true;
@@ -175,8 +181,10 @@ export function openImageViewer(host: HTMLElement, sources: readonly PictureSour
   /** Show `sources[to]`: named, fitted, and loading from its own link. */
   const present = (to: number): void => {
     index = to; source = sources[index]!;
-    name.textContent = sources.length > 1 ? `${source.name}, ${index + 1} of ${sources.length}` : source.name;
-    dialog.setAttribute("aria-label", source.name);
+    const of = sources.length > 1 ? `${index + 1} of ${sources.length}` : "";
+    title.textContent = source.name;
+    if (sources.length > 1) position.textContent = of;
+    dialog.setAttribute("aria-label", of ? `${source.name}, ${of}` : source.name);
     image.alt = source.name;
     retry.setAttribute("aria-label", `Retry loading ${source.name}`);
     previous.disabled = index === 0; next.disabled = index === sources.length - 1;
