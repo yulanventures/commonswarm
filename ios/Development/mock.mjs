@@ -231,6 +231,10 @@ const server = createServer(async (req, res) => {
       }
       const cmd = body.command;
       if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
+      if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
+        if (cmd.members.length !== 1 || cmd.members[0].kind !== "agent" || cmd.members[0].id.toLowerCase() !== agent) return reply(400, {});
+        return reply(200, { status: "accepted", conversation: threadRows.find(r => r.kind === "dm") });
+      }
       if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
         const target = threadRows.find(r => r.conversation_id === cmd.conversation_id.toLowerCase() && r.kind === "public_channel");
         if (!target) return reply(404, {});

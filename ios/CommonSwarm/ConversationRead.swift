@@ -115,7 +115,13 @@ extension ConversationAPI {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(WorkspaceCommand(command_id: id, workspace_id: workspace, command: command))
-        return try await send(req)
+        let (data, response) = try await session.data(for: req)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
+        guard status == 200 else {
+            if let refusal = try? JSONDecoder().decode(ConversationRefusal.self, from: data) { throw refusal }
+            throw APIError.refused(status)
+        }
+        return try JSONDecoder().decode(R.self, from: data)
     }
 
     func join(workspace: UUID, conversation: UUID, commandID: UUID) async throws {
@@ -126,5 +132,47 @@ extension ConversationAPI {
         struct Receipt: Decodable { let status: String; let conversation_id: UUID }
         let receipt: Receipt = try await conversationCommand(Join(conversation_id: conversation), workspace: workspace, id: commandID)
         guard receipt.status == "accepted", receipt.conversation_id == conversation else { throw APIError.invalidResponse }
+    }
+}
+
+
+struct ConversationRefusal: Decodable, Error {
+    let error: String
+}
+
+struct MemberRef: Codable, Hashable {
+    let kind: ConversationMember.Kind
+    let id: UUID
+}
+
+struct MemberChoice: Identifiable {
+    let id: MemberRef
+    let name: String
+}
+
+extension ConversationAPI {
+    func memberChoices(_ workspace: UUID) async throws -> [MemberChoice] {
+        let contacts = try await directory(workspace)
+        return [MemberChoice(id: .init(kind: .user, id: session.userID), name: "You")] + contacts.compactMap { item in
+            switch item.id {
+            case .agent(let id): MemberChoice(id: .init(kind: .agent, id: id), name: item.name)
+            case .person(let id): MemberChoice(id: .init(kind: .user, id: id), name: item.name)
+            default: nil
+            }
+        }
+    }
+
+    func openConversation(_ workspace: UUID, members: [MemberRef], newGroup: Bool, commandID: UUID) async throws -> UUID {
+        struct Open: Encodable {
+            let kind = "conversation_open"
+            let members: [MemberRef]
+            let new_group: Bool?
+        }
+        struct Opened: Decodable { let conversation_id: UUID; let kind: ConversationKind }
+        struct Receipt: Decodable { let status: String; let conversation: Opened }
+        let result: Receipt = try await conversationCommand(Open(members: members, new_group: newGroup ? true : nil),
+                                                            workspace: workspace, id: commandID)
+        guard result.status == "accepted", result.conversation.kind.direct else { throw APIError.invalidResponse }
+        return result.conversation.conversation_id
     }
 }

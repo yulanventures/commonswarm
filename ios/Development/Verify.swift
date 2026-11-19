@@ -157,6 +157,10 @@ enum Verify {
         _ = await privateHistory.load(.latest, api: api, workspace: ws.id, destination: secret.destination)
         try expect(privateHistory.messages == nil && secretDraft.access == .unavailable && secretDraft.text.isEmpty,
                    "authoritative private denial clears both history and draft")
+        let choices = try await api.memberChoices(ws.id)
+        guard let atlas = choices.first(where: { $0.id.kind == .agent }) else { throw Failure.mismatch("agent picker") }
+        let opened = try await api.openConversation(ws.id, members: [atlas.id], newGroup: false, commandID: UUID())
+        try expect(opened == thread.id, "picker opens existing server DM by member kind and ID")
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)
         let canonicalDraft = session.composer(workspace: ws.id, conversation: canonical.id)

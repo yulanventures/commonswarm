@@ -11,6 +11,10 @@ struct DirectoryView: View {
     @SwiftUI.State private var joinIDs: [UUID: UUID] = [:]
     @SwiftUI.State private var joinErrors = Set<UUID>()
 
+    @SwiftUI.State private var composing = false
+    @SwiftUI.State private var opened: ThreadRoute?
+    @SwiftUI.State private var selected: ThreadRoute?
+
     var body: some View {
         Group {
             switch state {
@@ -53,7 +57,23 @@ struct DirectoryView: View {
                  }
              }.navigationTitle("All channels")
          }
-         .navigationDestination(for: ThreadRoute.self) { route in
+         .toolbar {
+             Button { composing = true } label: { Label("New message", systemImage: "square.and.pencil") }
+         }
+         .sheet(isPresented: $composing, onDismiss: {
+             if let opened { selected = opened; self.opened = nil }
+         }) {
+             NewMessagePicker(api: api, workspace: workspace.id) { updated, id in
+                 state = .ready(updated)
+                 opened = ThreadRoute(id: id)
+                 composing = false
+             }
+         }
+         .navigationDestination(for: ThreadRoute.self) { route in detail(route, rows: rows) }
+         .navigationDestination(item: $selected) { route in detail(route, rows: rows) }
+    }
+
+    @ViewBuilder private func detail(_ route: ThreadRoute, rows: [ConversationSummary]) -> some View {
              if let row = rows.first(where: { $0.id == route.id && ($0.joined || $0.kind == .publicChannel) && $0.archived_at == nil }) {
                  let item = row.item(viewer: api.session.userID)
                  HistoryView(api: api, workspace: workspace, item: item,
@@ -64,7 +84,6 @@ struct DirectoryView: View {
                                      .frame(maxWidth: .infinity).padding(.vertical, 8).background(.bar)
                              )).id(row.id)
              } else { ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left") }
-         }
     }
 
     @ViewBuilder private func joinButton(_ row: ConversationSummary) -> some View {
