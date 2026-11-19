@@ -130,9 +130,40 @@ struct VerifySharedObjects {
         let afterRemove = await MainActor.run { detailStore.detail }!
         expect(afterRemove.sortedListItems.count == 3, "Expected 3 items after remove")
 
+        // 5b. Hold the confirming read after a committed Add -> tapping a second row during the held window sends ZERO updates, then works after release
+        await MainActor.run { detailStore.newItemText = "Drop cloth" }
+        try await postFixture(origin.appending(path: "fixture/hold-next-read"))
+        let heldAddTask = Task { await detailStore.addItem(api: objectsAPI) }
+        struct HeldState: Decodable { let held: Bool }
+        var isHeld = false
+        for _ in 0..<50 {
+            let (hData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/read-held"))
+            if let st = try? JSONDecoder().decode(HeldState.self, from: hData), st.held {
+                isHeld = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        expect(isHeld, "Expected post-save read to be held in fixture")
+        expect(await MainActor.run { detailStore.isSaving && !detailStore.canEditList }, "Editing must stay disabled while confirming read is in-flight")
+        let updatesWhileHeldBefore = try await fetchUpdateCount(origin)
+        await detailStore.toggleItem(afterRemove.sortedListItems[0], api: objectsAPI)
+        let updatesWhileHeldAfter = try await fetchUpdateCount(origin)
+        expect(updatesWhileHeldBefore == updatesWhileHeldAfter, "Tapping a second row during held post-save read must send zero updates")
+        try await postFixture(origin.appending(path: "fixture/release-held-read"))
+        await heldAddTask.value
+        let afterHeldAdd = await MainActor.run { detailStore.detail }!
+        expect(afterHeldAdd.sortedListItems.last?.text == "Drop cloth", "Expected Drop cloth visible after held read completes")
+        expect(await MainActor.run { !detailStore.isSaving && detailStore.canEditList }, "Editing must re-enable once current list is displayed")
+        // Verify a follow-up edit against the new revision commits cleanly with no conflict
+        await detailStore.toggleItem(afterHeldAdd.sortedListItems.last!, api: objectsAPI)
+        let afterFollowUp = await MainActor.run { detailStore.detail }!
+        let noConflictAfterHeld = await MainActor.run { detailStore.conflictMessage == nil }
+        expect(afterFollowUp.sortedListItems.last?.checked == true && noConflictAfterHeld, "Follow-up edit after held read must commit without conflict")
+
         // 6. Conflict handling: 409 conflict surfaces conflict banner and Reload recovers fresh revision
         try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
-        await detailStore.toggleItem(afterRemove.sortedListItems[0], api: objectsAPI)
+        await detailStore.toggleItem(afterFollowUp.sortedListItems[0], api: objectsAPI)
         expect(await MainActor.run { detailStore.conflictMessage != nil }, "409 conflict must set conflictMessage")
         await detailStore.load(api: objectsAPI)
         expect(await MainActor.run { detailStore.conflictMessage == nil }, "Reload must clear conflict and load current revision")
@@ -149,7 +180,7 @@ struct VerifySharedObjects {
         }
         let (updData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/updates"))
         let updates = try JSONDecoder().decode([RecordedUpdate].self, from: updData)
-        expect(updates.count == 5, "Expected 5 update calls (1 failed + 1 retry + 1 add + 1 remove + 1 conflict), got \(updates.count)")
+        expect(updates.count == 7, "Expected 7 update calls (1 failed + 1 retry + 1 add + 1 remove + 1 held add + 1 follow-up toggle + 1 conflict), got \(updates.count)")
         expect(updates[0].command_id == updates[1].command_id, "Retry must reuse original command_id")
         expect(updates.allSatisfy { $0.arguments.seat == "seat_0000000000000000000000" && $0.arguments.request_id == $0.command_id }, "Every update must carry seat and request_id == command_id")
 

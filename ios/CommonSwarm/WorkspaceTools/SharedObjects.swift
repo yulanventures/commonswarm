@@ -628,6 +628,7 @@ final class SharedObjectDetailStore: ObservableObject {
 
     private func applyListPatch(_ edit: SharedPendingListEdit, api: SharedObjectsAPI) async {
         isSaving = true
+        defer { isSaving = false }
         saveError = nil
         conflictMessage = nil
         pendingEdit = edit
@@ -639,7 +640,6 @@ final class SharedObjectDetailStore: ObservableObject {
             operations: edit.operations,
             requestID: edit.commandID
         )
-        isSaving = false
 
         switch outcome {
         case .committed:
