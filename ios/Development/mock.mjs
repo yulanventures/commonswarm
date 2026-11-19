@@ -143,15 +143,15 @@ const server = createServer(async (req, res) => {
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        receipts.set(body.command_id, body);
         messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
+        receipts.set(body.command_id, { command: body.command, signal: messages[0] });
         if (review && body.command.body === "Uncertain send") {
           refuseNextLookup.add(body.command_id);
           return reply(503, {});
         }
       }
-      return reply(200, { status: "accepted" });
+      return reply(200, { status: "accepted", signal: receipts.get(body.command_id).signal });
     }
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);

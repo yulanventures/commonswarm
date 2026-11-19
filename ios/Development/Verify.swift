@@ -71,36 +71,48 @@ enum Verify {
         try expect(session.composer(workspace: ws.id, conversation: dm.id).text == "Unsent A", "return restores draft")
         draft.text = "Uncertain send"
         guard let uncertain = draft.begin(workspace: ws.id, destination: dm.destination) else { throw Failure.mismatch("begin post") }
+        try expect(draft.text.isEmpty && draft.outgoing.first?.post.body == uncertain.body, "tap moves visible draft into pending row immediately")
+        draft.text = "Second draft"
+        guard let secondPost = draft.begin(workspace: ws.id, destination: dm.destination) else {
+            throw Failure.mismatch("a second send can start while the first is pending")
+        }
+        try expect(draft.outgoing.count == 2 && secondPost.command_id != uncertain.command_id, "independent pending messages")
+        let secondReceipt = try await api.post(secondPost)
+        draft.accepted(secondPost.command_id, signalID: secondReceipt)
+        draft.reconcile(try await api.history(ws.id, dm.destination))
+        try expect(draft.outgoing.map(\.id) == [uncertain.command_id], "out-of-order confirmation clears only its own row")
         do {
             try await api.post(uncertain)
             throw Failure.mismatch("fixture should withhold first receipt")
         } catch let error as APIError {
             guard case .refused(503) = error else { throw error }
-            draft.failed(with: error)
+            draft.failed(uncertain.command_id, with: error)
         }
-        try expect(session.composer(workspace: second.id, conversation: dm.id).submission == nil, "pending ID isolated")
+        try expect(session.composer(workspace: second.id, conversation: dm.id).outgoing.isEmpty, "pending ID isolated")
         let returnedDraft = session.composer(workspace: ws.id, conversation: dm.id)
         returnedDraft.text = "Newer typing"
-        guard let replayed = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else { throw Failure.mismatch("retry") }
+        guard let replayed = returnedDraft.retry(uncertain.command_id) else { throw Failure.mismatch("retry") }
         try expect(replayed.command_id == uncertain.command_id && replayed.body == uncertain.body, "retry preserves intent")
         do {
             try await api.post(replayed)
             throw Failure.mismatch("fixture should refuse the first receipt lookup")
         } catch let error as APIError {
             guard case .refused(403) = error else { throw error }
-            returnedDraft.failed(with: error)
+            returnedDraft.failed(uncertain.command_id, with: error)
         }
-        try expect(returnedDraft.failure == .unconfirmed, "pre-receipt 403 cannot settle an accepted post")
-        guard let finalRetry = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else {
+
+        guard let finalRetry = returnedDraft.retry(uncertain.command_id) else {
             throw Failure.mismatch("retry after refusal")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         try expect(try encoder.encode(finalRetry) == encoder.encode(uncertain), "the entire envelope survives 503 then 403")
-        try await api.post(finalRetry)
-        returnedDraft.accepted()
+        let signalID = try await api.post(finalRetry)
+        returnedDraft.accepted(finalRetry.command_id, signalID: signalID)
         try expect(returnedDraft.text == "Newer typing" && inB.text == "Unsent B", "accept retains newer and other workspace drafts")
         let delivered = try await api.history(ws.id, dm.destination)
+        returnedDraft.reconcile(delivered)
+        try expect(returnedDraft.outgoing.isEmpty, "accepted server identity replaces pending row")
         try expect(delivered.filter { $0.body == uncertain.body }.count == 1, "one post across workspace switch")
         if case .channel(let uuid, _) = channel.destination {
             let renamed = Conversation(destination: .channel(uuid, "renamed"), name: "#renamed", symbol: "number")
