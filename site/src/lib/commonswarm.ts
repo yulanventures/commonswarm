@@ -1704,6 +1704,39 @@ export async function setWorkspaceLead(
     : null;
 }
 
+export type AgentRemovalScope = "workspace" | "permanent";
+
+/** Asks the server whether removing this agent from this workspace is workspace-only or permanent retirement. */
+export async function readAgentRemovalScope(
+  session: Session,
+  workspaceId: string,
+  principalId: string,
+): Promise<AgentRemovalScope | null> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/rest/v1/rpc/agent_removal_scope`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "accept-profile": "swarm_read",
+        "content-profile": "swarm_read",
+      },
+      body: JSON.stringify({ p_workspace_id: workspaceId, p_principal_id: principalId }),
+      signal: deadline.controller.signal,
+    });
+    if (!response.ok) throw new Error(`Could not check removal scope (HTTP ${response.status}).`);
+    const raw = (await response.json()) as unknown;
+    return raw === "workspace" || raw === "permanent" ? raw : null;
+  } finally {
+    deadline.clear();
+  }
+}
+
 /**
  * Removes workspace access. Local account connections remain available in other workspaces.
  * Browser surface is principal-only — there is no per-token UI.

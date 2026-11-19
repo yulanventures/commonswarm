@@ -1405,6 +1405,7 @@ import "../../styles/kylon-image-viewer.css";
     PasswordCodeRequired,
     PASSWORD_MIN_LENGTH,
     removeWorkspaceMember,
+    readAgentRemovalScope,
     revokeAgentPrincipal,
     setAgentModel,
     subscribeAgentActivity,
@@ -8087,6 +8088,8 @@ import "../../styles/kylon-image-viewer.css";
       }));
     };
     const uncertainAgentRemovals = new Set<string>();
+    const confirmedRemovalScopes = new Map<string, "workspace" | "permanent">();
+    let confirmScopeGeneration = 0;
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
@@ -8146,10 +8149,12 @@ import "../../styles/kylon-image-viewer.css";
           }
         }
         if (questionId) uncertainAgentRemovals.delete(questionId);
+        const scope = questionId ? confirmedRemovalScopes.get(questionId) : undefined;
+        if (questionId) confirmedRemovalScopes.delete(questionId);
         const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
-        receipt = agent.transport === "hosted_mcp"
+        receipt = agent.transport === "hosted_mcp" || scope === "workspace"
           ? `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`
-          : `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+          : `${agent.name} permanently removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
         ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;
@@ -8199,14 +8204,45 @@ import "../../styles/kylon-image-viewer.css";
         if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !grant.tokenId) return;
         pinnedKey = { tokenId: grant.tokenId, grantId: grant.grantId ?? null };
       }
+      const switchToKey = () => confirmPeopleDialogAction("turn-off-key", id, opener);
+      const afterCommit = () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true });
+      if (action === "remove-agent" && !("hosted" in item && item.hosted)) {
+        const questionId = uuid();
+        const currentSession = session;
+        const runCommit = async (button: HTMLButtonElement, notice: HTMLElement) => {
+          if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
+          await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
+        };
+        const loadScope = () => {
+          const checkAttempt = ++confirmScopeGeneration;
+          showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "loading" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+          if (!currentSession || !workspaceId) {
+            showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            return;
+          }
+          void readAgentRemovalScope(currentSession, workspaceId, id).then((scope) => {
+            if (checkAttempt !== confirmScopeGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            if (scope === "workspace" || scope === "permanent") {
+              confirmedRemovalScopes.set(questionId, scope);
+              showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: scope }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            } else {
+              showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            }
+          }, () => {
+            if (checkAttempt !== confirmScopeGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+          });
+        };
+        loadScope();
+        return;
+      }
       // One command id per question: pressing again after a lost answer repeats the same command, which the server
       // answers from its receipt instead of revoking or withdrawing a second time. A new question gets a new id.
       const questionId = uuid();
       showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName }, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
         await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
-      }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
-        () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
+      }, readableError, switchToKey, afterCommit);
     };
 
     /** Open above the current view; a cold People link first opens its workspace chat. */

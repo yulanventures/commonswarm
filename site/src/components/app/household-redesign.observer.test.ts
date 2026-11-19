@@ -1866,8 +1866,13 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     },
     peopleDialogFocusTarget: () => null,
     uncertainAgentRemovals: new Set<string>(),
+    confirmedRemovalScopes: new Map<string, "workspace" | "permanent">(),
+    confirmScopeGeneration: 0,
+    readAgentRemovalScope: async () => ctx.scopeAnswer,
+    scopeAnswer: "permanent" as "workspace" | "permanent" | null,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   // 1. Hosted agent: workspace-only heading, 1 stop, quiet history/continuity note, no dead key alternative, Escape returns to opener with 0 removals.
   const hostedOpener: any = doc.createElement("button");
@@ -1884,18 +1889,43 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   assert.equal(focused.at(-1), hostedOpener);
   assert.equal(removals.length, 0);
 
-  // 2. Own local agent with live key: warns of permanent original-workspace retirement, keeps retained history underneath,
-  //    and Turn off key instead opens the key confirmation WITHOUT removing the agent.
+  // 2. Local agent scope check failure -> Go back focused + Retry offered, NO Remove button enabled; Retry resolves to workspace-only or permanent.
   const localOpener: any = doc.createElement("button");
+  let failScope = true;
+  ctx.readAgentRemovalScope = async () => { if (failScope) throw new Error("offline"); return ctx.scopeAnswer; };
   actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  assert.equal(dialog.dataset.confirmReady, "false", "loading state holds off Remove");
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back");
+  await flush();
+  assert.equal(dialog.dataset.confirmReady, "true");
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back,Retry");
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  assert.equal(removals.length, 0);
+
+  // Retry succeeds with workspace-only scope (added workspace): names workspace, labels Remove from workspace, omits Turn off key instead.
+  failScope = false; ctx.scopeAnswer = "workspace";
+  dialog.querySelectorAll("button").find((b: any) => b.dataset?.confirmRetry !== undefined).click();
+  await flush();
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Sprout from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back,Remove from workspace");
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), localOpener);
+
+  // 3. Own local agent with permanent scope + live key: states access ends in every workspace, labels Permanently remove agent,
+  //    and Turn off key instead opens the key confirmation WITHOUT removing the agent.
+  ctx.scopeAnswer = "permanent";
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  await flush();
   assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Remove Sprout?");
   assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 2);
-  assert.match(dialog.querySelectorAll("li")[1]?.children?.[1]?.textContent ?? "", /original workspace, its identity, keys, and connections everywhere end permanently/);
-  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
-    "Its history stays as “Sprout (removed)”. If it was added here from another workspace, its connection and other workspaces stay.");
+  assert.equal(dialog.querySelectorAll("li")[0]?.children?.[1]?.textContent, "Access ends immediately in every workspace where it is connected.");
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent, "Its history stays as “Sprout (removed)”.");
+  assert.ok(dialog.querySelectorAll("button").some((b: any) => b.textContent === "Permanently remove agent"));
   assert.equal(focused.at(-1)?.textContent, "Go back");
   const insteadBtn = dialog.querySelectorAll("button").find((b: any) => b.dataset?.turnOffKeyInstead !== undefined);
-  assert.ok(insteadBtn, "Turn off key instead is reachable for own local agent with a live key");
+  assert.ok(insteadBtn, "Turn off key instead is reachable for own local agent facing permanent retirement");
   insteadBtn.click();
   assert.equal(removals.length, 0, "switching to Turn off key instead never removes the agent");
   assert.equal(keyRevokes.length, 0, "switching to Turn off key instead does not revoke a key until confirmed");
@@ -1908,13 +1938,14 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   assert.equal(removals.length, 0);
   assert.equal(keyRevokes.length, 0);
 
-  // 3. Another member's local agent: admin cannot turn off their local key, so Turn off key instead is omitted.
+  // 4. Another member's local agent (permanent scope): admin cannot turn off their local key, so Turn off key instead is omitted.
   const peerOpener: any = doc.createElement("button");
   actions.confirmPeopleDialogAction("remove-agent", foreignLocalId, peerOpener);
+  await flush();
   assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
   dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
 
-  // 4. Confirmed hosted removal + lost-answer retry (not yet committed) reuses one command ID and names the workspace in the receipt.
+  // 5. Confirmed hosted removal + lost-answer retry (not yet committed) reuses one command ID and names the workspace in the receipt.
   actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
   const confirmBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
   lose = true;
@@ -1929,17 +1960,18 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   assert.equal(removals[0].commandId, removals[1].commandId, "retry reuses one command ID");
   assert.equal(reloads[0].receipt, `Muse removed from ${workspaceName}. Its history stays as “Muse (removed)”.`);
 
-  // 5. Secondary-workspace lost-reply witness (HezSec C1): first call commits removal once and loses its reply;
+  // 6. Secondary-workspace lost-reply witness (HezSec C1): first call commits removal once and loses its reply;
   //    retry with the same command ID hits 409 command_id_conflict (or 403) because membership is already revoked.
   //    While roster read fails or is unauthorized, outcome stays uncertain (never "did not change anything" / "HTTP 409")
   //    with the same command ID; once an authorized roster read settles the removal, the dialog completes and removal ran once.
   for (const [label, retryError, targetId, transport, btnLabel] of [
     ["hosted 409 conflict", Object.assign(new Error("Agent removal failed (HTTP 409). CommonSwarm did not confirm a change."), { status: 409, code: "command_id_conflict", uncertain: true }), hostedId, "hosted_mcp", "Remove from workspace"],
-    ["local added-workspace 403", Object.assign(new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."), { status: 403, code: "forbidden" }), localId, "local", "Remove agent"],
+    ["local added-workspace 403", Object.assign(new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."), { status: 403, code: "forbidden" }), localId, "local", "Remove from workspace"],
   ] as const) {
     ctx.agents = makeLiveAgents();
     ctx.serverRoster = makeLiveAgents();
     ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+    ctx.scopeAnswer = "workspace";
     removals.length = 0; reloads.length = 0;
     let committedCount = 0;
     let rosterMode: "fail" | "unauthorized" | "settled" = "fail";
@@ -1965,6 +1997,7 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     };
     const opener: any = doc.createElement("button");
     actions.confirmPeopleDialogAction("remove-agent", targetId, opener);
+    await flush();
     const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === btnLabel);
     // Attempt 1: server commits once, reply lost, roster read fails -> stays open with uncertain message.
     await btn.events.get("click")?.();
@@ -1993,7 +2026,6 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     assert.equal(removals.length, 2, `${label}: settled from roster read without sending another command`);
     assert.equal(committedCount, 1, `${label}: removal happened exactly once`);
     assert.equal(reloads.length, 1, `${label}: reloaded dialog with removal receipt`);
-    if (transport === "hosted_mcp") assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
-    else assert.match(reloads[0].receipt, /removed\./);
+    assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
   }
 });

@@ -2799,7 +2799,7 @@
         "click": "[data-people-context] button[data-pd-focus=\"row-remove-agent-{agent}\"]"
       }
     ],
-    "ready": "dialog[data-people-confirm][open] #pd-confirm-title",
+    "ready": "dialog[data-people-confirm][open][data-confirm-ready=\"true\"] #pd-confirm-title",
     "states": [
       "dense"
     ],

@@ -109,7 +109,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
           confirm: (action,id,opener) => {
             const target = action === 'remove-person' ? model.people.find(item => item.id === id) : action === 'cancel-invite' ? model.invites.find(item => item.id === id) : model.agents.find(item => item.id === id);
-            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) } : { ...target, workspaceName: model.workspaceName };
+            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) }
+              : action === 'remove-agent' && !target.hosted ? { ...target, workspaceName: model.workspaceName, removalScope: 'permanent' }
+              : { ...target, workspaceName: model.workspaceName };
             PeopleView.showPeopleConfirmation(pageConfirm,action,item,opener,
               async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.',
               () => pageCallbacks.confirm('turn-off-key', id, opener));
@@ -310,6 +312,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           } else {
             assert.equal(row.title, `Remove ${name}?`, facts);
             assert.equal(row.stopCount, 2, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+            assert.equal(row.actions[1]?.text, 'Permanently remove agent', facts);
             assert.equal(row.hasAlternative, false, facts);
           }
         }
