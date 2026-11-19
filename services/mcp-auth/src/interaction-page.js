@@ -75,6 +75,7 @@ function renderClientIdentity(clientDisplay) {
       badge: `<span class="badge badge-neutral">HTTPS client ID</span>`,
       heading,
       facts: `<p class="app-fact">Client: <strong>${primary}</strong></p>`,
+      declared: "",
       warning: "",
     };
   }
@@ -86,6 +87,7 @@ function renderClientIdentity(clientDisplay) {
     badge: `<span class="badge badge-unverified">${ICONS.alert}Unverified app</span>`,
     heading,
     facts: `<p class="app-fact">Authorization will return to <strong>${primary}</strong>.</p>${declared}`,
+    declared,
     warning: `<p class="warning unverified-warning">${ICONS.alert}<span><strong>Not verified:</strong> CommonSwarm has not checked who runs this app. Only continue if you trust <strong>${primary}</strong> to receive your authorization code and access your workspaces.</span></p>`,
   };
 }
@@ -175,6 +177,10 @@ svg{flex:none}
 .unverified-warning{background:var(--warn-bg);color:var(--warn-ink);border:1px solid var(--warn-line)}
 .unverified-warning svg{color:var(--warn-icon);margin-top:2px}
 .unverified-warning strong{overflow-wrap:anywhere}
+.unverified-decision{display:flex;flex-direction:column;gap:12px;padding:14px 16px;border-radius:14px;background:var(--warn-bg);color:var(--warn-ink);border:1px solid var(--warn-line)}
+.unverified-decision .unverified-warning{padding:0;border:0;border-radius:0;background:transparent}
+.unverified-decision .destination{padding:10px 0 0;border:0;border-top:1px solid var(--warn-line);border-radius:0;color:var(--warn-ink)}
+.unverified-decision .destination strong,.unverified-decision .destination-return{color:var(--warn-ink)}
 .account{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 10px 10px 10px;border-radius:16px;background:var(--soft);border:1px solid var(--hair)}
 .avatar{position:relative;width:40px;height:40px;border-radius:50%;background:var(--avatar);color:var(--avatar-fg);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex:none}
 .provider-badge{position:absolute;right:-3px;bottom:-3px;width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#FFFFFF;color:#17231C;box-shadow:0 0 0 2px var(--soft)}
@@ -360,6 +366,15 @@ export function renderConsentPage({
       </section>`
     : "";
   const client = renderClientIdentity(clientDisplay);
+  const introFacts = client.verified ? client.facts : client.declared;
+  const destination = renderConsentDestination({
+    clientName: clientDisplay.declaredName,
+    redirectUri,
+    metadataHost: clientDisplay.metadataHost,
+  });
+  const destinationBlock = client.verified
+    ? destination
+    : `<div class="unverified-decision">${client.warning}${destination}</div>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
@@ -376,8 +391,7 @@ ${CONSENT_STYLES}
       ${client.badge}
     </div>
     <h1 id="consent-title">${client.heading}</h1>
-    <div class="app-facts">${client.facts}</div>
-    ${client.warning}
+    ${introFacts ? `<div class="app-facts">${introFacts}</div>` : ""}
   </section>
   ${renderAccount(identity, csrfToken, selectionLocked ? null : switchAccount)}
   ${progressMarkup}
@@ -393,7 +407,7 @@ ${CONSENT_STYLES}
       <p class="home-needed" role="status" data-text="Choose which one is Home."></p>
     </fieldset>
     <p class="warning">${ICONS.chat}<span><strong>Before you continue:</strong> ${CONSENT_WARNING}</span></p>
-    ${renderConsentDestination({ clientName: clientDisplay.declaredName, redirectUri, metadataHost: clientDisplay.metadataHost })}
+    ${destinationBlock}
     <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> across them. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>

@@ -471,3 +471,48 @@ test("the picker says what the app can reach directly above Allow, and ties hidi
     assert.doesNotMatch(selector, /:has\([^()]*:has\(/u, selector);
   }
 });
+
+test("an unverified app groups its destination and warning once beside Allow connection, using the same picker", () => {
+  const html = page({
+    clientDisplay: { verified: false, primary: "reader.example.test", declaredName: "Reader app", metadataHost: null },
+    redirectUri: "https://reader.example.test/callback",
+  });
+  const tree = htmlTree(html);
+  const intro = one(tree, (node) => node.tag === "section" && node.attrs.class === "intro");
+  assert.match(text(intro), /Unverified app/u);
+  assert.match(text(intro), /Choose workspaces for reader\.example\.test/u);
+  assert.match(text(intro), /It calls itself “Reader app”\./u);
+  assert.doesNotMatch(text(intro), /Authorization will return to|Not verified:/u);
+  assert.equal(find(intro, (node) => node.attrs.class?.includes("unverified-warning")).length, 0);
+
+  const form = one(tree, (node) => node.tag === "form" && node.attrs.action?.endsWith("/consent"));
+  const decision = one(form, (node) => node.tag === "div" && node.attrs.class === "unverified-decision");
+  const warning = one(decision, (node) => node.attrs.class === "warning unverified-warning");
+  const destination = one(decision, (node) => node.attrs.class === "notice destination");
+  assert.match(text(warning), /Not verified:.*reader\.example\.test/u);
+  assert.match(text(destination), /After you approve, you return to reader\.example\.test\./u);
+  assert.equal(find(tree, (node) => node.attrs.class?.includes("unverified-warning")).length, 1);
+  assert.equal(find(tree, (node) => node.attrs.class === "notice destination").length, 1);
+
+  const reach = one(form, (node) => node.tag === "p" && node.attrs.class === "reach");
+  const actions = one(form, (node) => node.tag === "div" && node.attrs.class === "actions");
+  const blocks = form.children.filter((child) => typeof child !== "string");
+  assert.equal(blocks.indexOf(reach) - blocks.indexOf(decision), 1, "the unverified decision sits directly above reach");
+  assert.equal(blocks.indexOf(actions) - blocks.indexOf(reach), 1, "reach sits directly above Allow connection");
+
+  // Same workspace picker controls as the verified case.
+  assert.equal(html.match(/type="checkbox" name="workspace_ids"/gu).length, 3);
+  assert.equal(html.match(/type="radio" name="home_workspace_id"/gu).length, 3);
+
+  // Without a declared name, the intro omits the app-facts wrapper instead of rendering an empty box.
+  const unnamed = htmlTree(page({
+    clientDisplay: { verified: false, primary: "reader.example.test", declaredName: null, metadataHost: null },
+    redirectUri: "https://reader.example.test/callback",
+  }));
+  const unnamedIntro = one(unnamed, (node) => node.tag === "section" && node.attrs.class === "intro");
+  assert.equal(find(unnamedIntro, (node) => node.attrs.class === "app-facts").length, 0);
+
+  // Verified consent keeps its plain destination with no unverified wrapper.
+  const verified = htmlTree(page());
+  assert.equal(find(verified, (node) => node.attrs.class === "unverified-decision").length, 0);
+});
