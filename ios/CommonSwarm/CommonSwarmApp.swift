@@ -110,7 +110,7 @@ private struct WorkspacesView: View {
     }
 }
 
-private struct RetryView: View {
+struct RetryView: View {
     let text: String
     let action: () async -> Void
     var body: some View {
