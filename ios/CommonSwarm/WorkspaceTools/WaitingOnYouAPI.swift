@@ -8,6 +8,7 @@ enum AnswerChoiceOutcome: Equatable, Sendable {
 struct WaitingLoadSnapshot: Sendable {
     let items: [WaitingAskItem]
     let workspaceComplete: [UUID: Bool]
+    let workspaceFailed: [UUID: Bool]
     let enumeratedAllWorkspaces: Bool
 }
 
@@ -223,11 +224,11 @@ struct WaitingOnYouAPI: Sendable {
     private func loadWorkspace(_ workspace: Workspace) async -> WaitingWorkspaceLoad {
         do {
             guard let queue = try await decisionQueue(workspaceID: workspace.id) else {
-                return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: true)
+                return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: true, failed: false)
             }
             let ids = queue.asks.map(\.signal_id)
             if ids.isEmpty {
-                return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: queue.complete)
+                return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: queue.complete, failed: false)
             }
 
             async let choicesTask = askChoices(workspaceID: workspace.id, signalIDs: ids)
@@ -235,12 +236,20 @@ struct WaitingOnYouAPI: Sendable {
             async let channelsTask = channelSlugs(workspaceID: workspace.id)
 
             let choicesList = try await choicesTask
-            let locations = (try? await locationsTask) ?? [:]
-            let locationsSucceeded = !locations.isEmpty
+            let locations: [UUID: WaitingSignalPlacement]
+            let locationsFailed: Bool
+            do {
+                locations = try await locationsTask
+                locationsFailed = false
+            } catch {
+                locations = [:]
+                locationsFailed = true
+            }
             let channels = await channelsTask
 
             let choicesByID = Dictionary(uniqueKeysWithValues: choicesList.map { ($0.signal_id, $0) })
             var items: [WaitingAskItem] = []
+            var anyUnknownLocation = false
             for ask in queue.asks {
                 guard let choiceState = choicesByID[ask.signal_id],
                       choiceState.answer == nil,
@@ -248,6 +257,9 @@ struct WaitingOnYouAPI: Sendable {
                 let loc = locations[ask.signal_id]
                 let root = loc?.thread_root_id.flatMap { locations[$0] }
                 let conversation = WaitingChoiceRules.classifyConversation(loc, root: root)
+                if conversation == .unknown {
+                    anyUnknownLocation = true
+                }
                 let fromKind: WaitingPartnerKind = ask.from.kind == "agent" ? .agent : .person
                 let senderName = ask.from.name?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let displayName = (senderName?.isEmpty == false) ? senderName! : (fromKind == .agent ? "Agent" : "Member")
@@ -259,7 +271,7 @@ struct WaitingOnYouAPI: Sendable {
                     channelLabel = "#general"
                 case .dm:
                     channelLabel = displayName
-                case .unknown:
+                case .group, .unknown:
                     channelLabel = ""
                 }
                 items.append(WaitingAskItem(
@@ -278,13 +290,15 @@ struct WaitingOnYouAPI: Sendable {
                     options: choiceState.options
                 ))
             }
+            let failed = locationsFailed || anyUnknownLocation
             return WaitingWorkspaceLoad(
                 workspaceID: workspace.id,
                 items: items,
-                complete: queue.complete && locationsSucceeded
+                complete: queue.complete && !failed,
+                failed: failed
             )
         } catch {
-            return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: false)
+            return WaitingWorkspaceLoad(workspaceID: workspace.id, items: [], complete: false, failed: true)
         }
     }
 
@@ -314,13 +328,16 @@ struct WaitingOnYouAPI: Sendable {
         let sortedResults = results.sorted { (orderIndex[$0.workspaceID] ?? .max) < (orderIndex[$1.workspaceID] ?? .max) }
         var allItems: [WaitingAskItem] = []
         var completeMap: [UUID: Bool] = [:]
+        var failedMap: [UUID: Bool] = [:]
         for result in sortedResults {
             allItems.append(contentsOf: result.items)
             completeMap[result.workspaceID] = result.complete
+            failedMap[result.workspaceID] = result.failed
         }
         return WaitingLoadSnapshot(
             items: allItems,
             workspaceComplete: completeMap,
+            workspaceFailed: failedMap,
             enumeratedAllWorkspaces: enumeratedAll
         )
     }

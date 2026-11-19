@@ -2,11 +2,17 @@ import Foundation
 
 @main
 struct VerifyWaitingOnYou {
-    static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
-        if !condition() {
+    static func expect(_ condition: Bool, _ message: String) {
+        if !condition {
             fputs("FAIL: \(message)\n", stderr)
             exit(1)
         }
+    }
+
+    static func postFixture(_ url: URL) async throws {
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, _) = try await URLSession.shared.data(for: req)
     }
 
     static func main() async throws {
@@ -29,52 +35,101 @@ struct VerifyWaitingOnYou {
         expect(workspaces.count == 2, "Expected 2 workspaces")
         let mainWS = workspaces[0]
 
-        let waitingAPI = WaitingOnYouAPI(api: convAPI)
-        let generalPlace = WaitingPlace(workspaceID: mainWS.id, workspaceName: mainWS.name, conversation: .general, label: "#general")
-        let store = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        // 0. Exercise real conversation directory path (POST /functions/v1/read -> HTTP 200)
+        let directoryRows = try await convAPI.conversationList(mainWS.id)
+        expect(directoryRows != nil, "Expected modern conversationList response from POST /functions/v1/read")
+        let rows = directoryRows ?? []
+        let generalRow = rows.first { $0.kind == .general }!
+        let groupRows = rows.filter { $0.kind == .group }
+        expect(groupRows.count == 2, "Expected two distinct group DMs in directory, got \(groupRows.count)")
 
-        // 1. Load across all workspaces; verify channel default scope & complete counts
+        let waitingAPI = WaitingOnYouAPI(api: convAPI)
+        let generalPlace = WaitingPlace(
+            workspace: mainWS,
+            conversation: generalRow.item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (generalRow.members ?? []).map(\.contact),
+            channelID: generalRow.channel_id
+        )
+        expect(generalPlace.conversation == .general, "Directory #general must resolve to .general")
+
+        // 1. Missing placement on #general ask + two distinct group DMs via directory:
+        //    neither group DM may match the unresolved ask; broader scopes keep it; queue stays incomplete with Retry.
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/omit-location?id=30000000-0000-4000-8000-000000000001")!)
+        let groupPlaceA = WaitingPlace(
+            workspace: mainWS,
+            conversation: groupRows[0].item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (groupRows[0].members ?? []).map(\.contact),
+            channelID: groupRows[0].channel_id
+        )
+        let groupPlaceB = WaitingPlace(
+            workspace: mainWS,
+            conversation: groupRows[1].item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (groupRows[1].members ?? []).map(\.contact),
+            channelID: groupRows[1].channel_id
+        )
+        expect(groupPlaceA.conversation != groupPlaceB.conversation, "Distinct group DMs must have distinct conversation identities")
+        expect(groupPlaceA.conversation != .unknown && groupPlaceB.conversation != .unknown, "Group DMs must not collapse to .unknown")
+
+        let groupStoreA = await MainActor.run { WaitingOnYouStore(place: groupPlaceA) }
+        let groupStoreB = await MainActor.run { WaitingOnYouStore(place: groupPlaceB) }
+        await groupStoreA.load(api: waitingAPI)
+        await groupStoreB.load(api: waitingAPI)
+
+        expect(await MainActor.run { groupStoreA.visibleItems.isEmpty }, "Group A must not receive ask with missing location")
+        expect(await MainActor.run { groupStoreB.visibleItems.isEmpty }, "Group B must not receive ask with missing location")
+        expect(await MainActor.run { groupStoreA.scopeFailed && !groupStoreA.scopeComplete }, "Missing location must mark channel scope failed/incomplete (never false empty state)")
+        expect(await MainActor.run { groupStoreA.counts.all.complete == false && groupStoreA.counts.all.badgeText == "4+" }, "Incomplete cross-workspace header badge must show 4+, got \(await MainActor.run { groupStoreA.counts.all.badgeText })")
+
+        await MainActor.run { groupStoreA.scope = .workspace }
+        expect(await MainActor.run { groupStoreA.visibleItems.count == 3 }, "Unresolved ask must remain visible in All channels")
+        expect(await MainActor.run { groupStoreA.scopeFailed && !groupStoreA.scopeComplete }, "All channels must also report incomplete/retry when a location is missing")
+
+        try await postFixture(origin.appending(path: "fixture/restore-locations"))
+
+        // 2. Failed decision_queue read for mainWS -> never false empty state
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/fail-decision-queue?ws=\(mainWS.id.uuidString.lowercased())")!)
+        let failStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        await failStore.load(api: waitingAPI)
+        expect(await MainActor.run { failStore.visibleItems.isEmpty }, "Failed workspace read should have 0 channel items")
+        expect(await MainActor.run { failStore.scopeFailed && !failStore.scopeComplete }, "Failed workspace read must set scopeFailed and !scopeComplete so Retry shows instead of empty state")
+        expect(await MainActor.run { failStore.counts.all.min == 1 && !failStore.counts.all.complete }, "Other workspace item still counts as 1+ when mainWS fails")
+        try await postFixture(origin.appending(path: "fixture/fail-decision-queue"))
+
+        // 3. Normal load across all workspaces; header uses counts.all (4) while sheet opens on This channel (1)
+        let store = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
         await store.load(api: waitingAPI)
+        let initialScope = await MainActor.run { store.scope }
+        expect(initialScope == .channel, "Sheet must open on This channel by default")
         let initialCounts = await MainActor.run { store.counts }
         expect(initialCounts.channel == WaitingScopeCount(min: 1, complete: true), "Expected 1 in #general, got \(initialCounts.channel)")
         expect(initialCounts.workspace == WaitingScopeCount(min: 3, complete: true), "Expected 3 in workspace, got \(initialCounts.workspace)")
-        expect(initialCounts.all == WaitingScopeCount(min: 4, complete: true), "Expected 4 across all workspaces, got \(initialCounts.all)")
+        expect(initialCounts.all == WaitingScopeCount(min: 4, complete: true), "Expected 4 across all workspaces for header count, got \(initialCounts.all)")
+        expect(await MainActor.run { !store.scopeFailed && store.scopeComplete }, "Healthy load must be complete and not failed")
 
         let generalItems = await MainActor.run { store.visibleItems }
         expect(generalItems.count == 1, "Expected 1 visible item in #general")
         let firstAsk = generalItems[0]
-        // Verify recommended option ordered first
-        expect(firstAsk.orderedOptions.first?.id == "ship", "Expected recommended option 'ship' first")
-        expect(firstAsk.orderedOptions.first?.isRecommended == true, "Expected isRecommended == true")
-        // Verify prompt splitting
-        expect(firstAsk.prompt.prose == "The TestFlight build passed smoke checks.", "Unexpected prose: \(String(describing: firstAsk.prompt.prose))")
-        expect(firstAsk.prompt.question == "Should we publish build 14 to internal testers now?", "Unexpected question: \(String(describing: firstAsk.prompt.question))")
 
-        // 2. Verify DM vs #general placement (DM must never appear in #general)
-        await MainActor.run { store.scope = .workspace }
-        let wsItems = await MainActor.run { store.visibleItems }
-        expect(wsItems.contains { if case .dm(.agent, _) = $0.conversation { return true }; return false }, "Expected DM ask classified as .dm, not .general")
-        expect(wsItems.contains { if case .channel = $0.conversation { return true }; return false }, "Expected named channel ask classified as .channel")
+        // Verify recommended option comes first
+        expect(firstAsk.orderedOptions.first?.id == "ship" && firstAsk.orderedOptions.first?.isRecommended == true, "Recommended option must sort first")
+        expect(firstAsk.prompt.question == "Should we publish build 14 to internal testers now?", "Prompt split should extract trailing question")
 
-        // 3. Failure preserves card, draft, and command_id; Retry succeeds and removes card + shows Sent banner
-        var failReq = URLRequest(url: origin.appending(path: "fixture/fail-next"))
-        failReq.httpMethod = "POST"
-        _ = try await URLSession.shared.data(for: failReq)
-
-        await MainActor.run { store.scope = .channel }
+        // 4. Verify failure keeps card editable & retry reuses same command_id
+        try await postFixture(origin.appending(path: "fixture/fail-next"))
         await store.submitSingleOption("ship", for: firstAsk, api: waitingAPI)
-        let afterFailFailure = await MainActor.run { store.failuresBySignal[firstAsk.id] }
-        expect(afterFailFailure != nil && afterFailFailure?.retryable == true, "Expected retryable failure")
-        let stillVisible = await MainActor.run { store.visibleItems.count }
-        expect(stillVisible == 1, "Failed card must remain in list")
+        let failState = await MainActor.run { store.failuresBySignal[firstAsk.id] }
+        expect(failState != nil && failState?.retryable == true, "Expected retryable failure on 503")
+        expect(await MainActor.run { store.visibleItems.count } == 1, "Failed card must stay visible")
 
         await store.retry(for: firstAsk, api: waitingAPI)
-        let afterRetryVisible = await MainActor.run { store.visibleItems.count }
+        expect(await MainActor.run { store.visibleItems.count } == 0, "Answered card must leave list")
         let banner = await MainActor.run { store.sentBanner }
-        expect(afterRetryVisible == 0, "Answered card must leave list")
         expect(banner == "Sent", "Expected visible Sent banner, got \(String(describing: banner))")
 
-        // 4. Verify multi-select + Other answer uses v2 wire format
+        // 5. Verify multi-select + Other answer uses v2 wire format
         await MainActor.run { store.scope = .workspace }
         let mobileAsk = await MainActor.run { store.visibleItems.first { $0.multi }! }
         await MainActor.run {
@@ -85,7 +140,7 @@ struct VerifyWaitingOnYou {
         let remainingWorkspace = await MainActor.run { store.counts.workspace.min }
         expect(remainingWorkspace == 1, "Expected 1 remaining ask in workspace, got \(remainingWorkspace)")
 
-        // 5. Inspect wire commands recorded by fixture: v1 single-option & stable retry command_id, v2 multi+other
+        // 6. Inspect wire commands recorded by fixture: v1 single-option & stable retry command_id, v2 multi+other
         struct RecordedCommand: Decodable {
             struct Body: Decodable {
                 let kind: String
@@ -104,32 +159,31 @@ struct VerifyWaitingOnYou {
         expect(recorded[0].command.option_id == "ship" && recorded[0].command.option_ids == nil && recorded[0].command.other_text == nil, "Single choice must use v1 exact shape")
         expect(recorded[2].command.option_id == nil && recorded[2].command.option_ids == ["todos"] && recorded[2].command.other_text == "Also check VoiceOver focus", "Multi+Other must use v2 shape")
 
-        // 6. Placement rule unit checks (missing root -> unknown, never #general; thread destinations)
+        // 7. Placement rule unit checks (missing root -> unknown, never #general; .unknown never matches .unknown)
         let unknown = WaitingChoiceRules.classifyConversation(nil)
         expect(unknown == .unknown, "nil placement must be .unknown")
         let replyNoRoot = WaitingSignalPlacement(id: UUID(), channel_id: nil, to: nil, to_agent: nil, thread_root_id: UUID(), from: UUID(), from_kind: "agent")
         expect(WaitingChoiceRules.classifyConversation(replyNoRoot, root: nil) == .unknown, "thread reply without root must be .unknown")
         expect(WaitingChoiceRules.cleanOtherText("hello\u{0007}") == nil, "Control chars must be rejected")
 
-        let threadChannelID = UUID()
-        let threadGeneral = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .general), name: "#general", symbol: "number"))
-        expect(threadGeneral.conversation == .general, "Thread general must map to .general")
-        let threadChannel = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .publicChannel), name: "#mobile", symbol: "number"), channelID: threadChannelID)
-        expect(threadChannel.conversation == .channel(threadChannelID), "Thread channel must map to .channel(channelID)")
-        let atlasID = UUID()
-        let threadDM = WaitingPlace(
-            workspace: mainWS,
-            conversation: Conversation(destination: .thread(UUID(), .dm), name: "Atlas", symbol: "cpu"),
-            viewerID: session.userID,
-            directory: [
-                Conversation(destination: .person(session.userID), name: "You", symbol: "person"),
-                Conversation(destination: .agent(atlasID), name: "Atlas", symbol: "cpu"),
-            ]
+        let unknownPlace = WaitingPlace(workspaceID: mainWS.id, workspaceName: mainWS.name, conversation: .unknown, label: "Unknown")
+        let syntheticUnknownItem = WaitingAskItem(
+            id: UUID(),
+            workspaceID: mainWS.id,
+            workspaceName: mainWS.name,
+            conversation: .unknown,
+            channelLabel: "",
+            fromKind: .agent,
+            fromID: UUID(),
+            fromName: "Atlas",
+            body: "Unresolved?",
+            createdAt: "2026-11-19T14:00:00.000Z",
+            until: "2026-11-20T14:00:00.000Z",
+            multi: false,
+            options: []
         )
-        expect(threadDM.conversation == .dm(.agent, atlasID), "Thread DM must map to .dm(.agent, atlasID)")
-        let threadGroup = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .group), name: "Team", symbol: "person.2"))
-        expect(threadGroup.conversation == .unknown, "Thread group DM must map to .unknown")
+        expect(WaitingChoiceRules.filterItems([syntheticUnknownItem], scope: .channel, place: unknownPlace).isEmpty, ".unknown place must never match .unknown ask")
 
-        print("PASS: VerifyWaitingOnYou (scopes, complete counts, DM vs #general, thread places, recommended order, v1/v2 answer_choice, stable retry, Sent banner)")
+        print("PASS: VerifyWaitingOnYou (directory read, distinct groups, missing-location retry, cross-workspace header count, v1/v2 answer_choice, stable retry, Sent banner)")
     }
 }

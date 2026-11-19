@@ -27,6 +27,13 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
     let conversation: Conversation
     @StateObject private var store: WaitingOnYouStore
     @State private var isPresented = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var badgeFill: Color {
+        colorScheme == .dark
+            ? Color(red: 0.08, green: 0.40, blue: 0.80)
+            : Color(red: 0.00, green: 0.35, blue: 0.80)
+    }
 
     init(
         api: ConversationAPI,
@@ -52,7 +59,7 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        let count = store.counts.channel
+        let count = store.counts.all
         let badge = count.badgeText
         let accessibleName = badge.isEmpty
             ? "Waiting, waiting on you" + (count.complete ? "" : ", still counting")
@@ -76,7 +83,7 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
                                     .padding(.vertical, 2)
                                     .foregroundStyle(count.min > 0 ? Color.white : .secondary)
                                     .background(
-                                        count.min > 0 ? Color.accentColor : Color(.tertiarySystemFill),
+                                        count.min > 0 ? badgeFill : Color(.tertiarySystemFill),
                                         in: Capsule()
                                     )
                             }
@@ -170,13 +177,11 @@ struct WaitingOnYouSheetView: View {
     private var content: some View {
         let visible = store.visibleItems
         let counts = store.counts
+        let incomplete = store.scopeFailed || (store.hasLoadedOnce && !store.scopeComplete)
 
-        if store.loadFailed && visible.isEmpty {
-            RetryView(text: "Couldn’t load waiting questions") {
-                await store.load(api: api)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if store.isLoading && visible.isEmpty && !counts.channel.complete {
+        if visible.isEmpty && incomplete && !store.isLoading {
+            incompleteEmptyState(counts: counts)
+        } else if store.isLoading && visible.isEmpty && !store.scopeComplete {
             ProgressView("Checking questions…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if visible.isEmpty {
@@ -215,6 +220,23 @@ struct WaitingOnYouSheetView: View {
                             }
                         )
                     }
+
+                    if incomplete && !store.isLoading {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Some waiting questions couldn’t be loaded.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button("Retry") {
+                                Task { await store.load(api: api) }
+                            }
+                            .buttonStyle(.bordered)
+                            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
                 }
                 .padding()
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: visible.map(\.id))
@@ -224,6 +246,30 @@ struct WaitingOnYouSheetView: View {
                 await store.load(api: api)
             }
         }
+    }
+
+    @ViewBuilder
+    private func incompleteEmptyState(counts: WaitingPanelCounts) -> some View {
+        VStack(spacing: 14) {
+            RetryView(text: "Couldn’t check all waiting questions") {
+                await store.load(api: api)
+            }
+            if store.scope == .channel && counts.workspace.min > 0 {
+                Button("Show all channels (\(counts.workspace.badgeText))") {
+                    store.scope = .workspace
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: 44)
+            } else if store.scope != .all && counts.all.min > 0 {
+                Button("Show all workspaces (\(counts.all.badgeText))") {
+                    store.scope = .all
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: 44)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -386,6 +432,8 @@ private struct WaitingAskCardView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isPending)
+                    .accessibilityAddTraits(item.multi && isSelected ? .isSelected : [])
+                    .accessibilityValue(item.multi ? (isSelected ? "Checked" : "Not checked") : "")
                 }
             }
 

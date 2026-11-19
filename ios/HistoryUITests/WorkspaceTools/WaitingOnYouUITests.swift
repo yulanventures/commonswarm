@@ -50,6 +50,9 @@ final class WaitingOnYouUITests: XCTestCase {
 
         let waitingButton = app.buttons["waiting-on-you-button"].firstMatch
         XCTAssertTrue(waitingButton.waitForExistence(timeout: 8), "Expected Waiting on you button in channel header")
+        let crossWorkspacePredicate = NSPredicate(format: "label CONTAINS %@", "Waiting 4")
+        let crossWorkspaceExpectation = expectation(for: crossWorkspacePredicate, evaluatedWith: waitingButton)
+        wait(for: [crossWorkspaceExpectation], timeout: 8)
         waitingButton.tap()
 
         let question = app.staticTexts["Should we publish build 14 to internal testers now?"].firstMatch
@@ -71,6 +74,11 @@ final class WaitingOnYouUITests: XCTestCase {
         XCTAssertTrue(showAll.waitForExistence(timeout: 5))
         showAll.tap()
         XCTAssertTrue(app.staticTexts["Which screens should we audit first on iPhone SE?"].firstMatch.waitForExistence(timeout: 5))
+        let multiOption = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "To-dos list and detail")).firstMatch
+        XCTAssertTrue(multiOption.waitForExistence(timeout: 5))
+        XCTAssertEqual(multiOption.value as? String, "Not checked")
+        multiOption.tap()
+        XCTAssertEqual(multiOption.value as? String, "Checked")
         capture("waiting-workspace")
     }
 }
