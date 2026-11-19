@@ -8090,6 +8090,7 @@ import "../../styles/kylon-image-viewer.css";
     const uncertainAgentRemovals = new Set<string>();
     const confirmedRemovalScopes = new Map<string, "workspace" | "permanent">();
     let confirmScopeGeneration = 0;
+    one<HTMLDialogElement>("[data-people-confirm]")?.addEventListener("close", () => { ++confirmScopeGeneration; });
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
@@ -8119,19 +8120,27 @@ import "../../styles/kylon-image-viewer.css";
         if (!agent) throw new Error("This agent is no longer in this workspace. Go back and check the list.");
         const pinnedSession = session;
         const questionGeneration = confirmScopeGeneration;
+        const confirmAtStart = one<HTMLDialogElement>("[data-people-confirm]");
+        const dialogGeneration = confirmAtStart?.dataset?.confirmGeneration ?? "";
         const commandId = questionId ?? uuid();
+        const scope = questionId ? confirmedRemovalScopes.get(questionId) : undefined;
+        // Only a workspace-only removal (hosted agent, or a local agent confirmed by the server to be in an added workspace)
+        // can be settled from workspace-roster absence. Permanent local retirement affects identity and keys across every
+        // workspace, so it may only be claimed from an authoritative revoke_agent_principal receipt.
+        const workspaceOnlyRemoval = agent.transport === "hosted_mcp" || scope === "workspace";
         const stillLiveRemoveQuestion = (): boolean => {
-          if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return false;
+          if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return false;
           if (questionGeneration !== confirmScopeGeneration) return false;
           const confirm = one<HTMLDialogElement>("[data-people-confirm]");
-          if (confirm && !confirm.open) return false;
+          if (confirm && (!confirm.open || (confirm.dataset?.confirmGeneration ?? "") !== dialogGeneration)) return false;
           if (!agents.some((entry) => entry.principalId === agent.principalId)) return false;
           return peopleDialogCanAct(peopleDialogModel(), "remove-agent", id);
         };
         const settledRemoval = async (): Promise<boolean> => {
+          if (!workspaceOnlyRemoval) return false;
           try {
             const [nextAgents, nextMembers] = await Promise.all([roster(workspaceId), memberRoster(workspaceId)]);
-            if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return false;
+            if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return false;
             return nextMembers.members.some((entry) => entry.userId === userId)
               && !nextAgents.some((entry) => entry.principalId === agent.principalId);
           } catch { return false; }
@@ -8143,9 +8152,9 @@ import "../../styles/kylon-image-viewer.css";
         };
         let confirmed = false;
         if (questionId && uncertainAgentRemovals.has(questionId)) {
-          confirmed = await settledRemoval();
+          if (workspaceOnlyRemoval) confirmed = await settledRemoval();
           if (!confirmed && !stillLiveRemoveQuestion()) {
-            throw new Error(workspaceId !== activeWorkspaceId || userId !== session?.user.id
+            throw new Error(!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId
               ? "This space has changed. Go back and check the details."
               : "This action is no longer available. Go back and check the details.");
           }
@@ -8159,17 +8168,16 @@ import "../../styles/kylon-image-viewer.css";
             const uncertainNow = wasUncertain || isUncertain(error);
             if (!uncertainNow) throw error;
             if (questionId) uncertainAgentRemovals.add(questionId);
-            confirmed = await settledRemoval();
+            confirmed = workspaceOnlyRemoval ? await settledRemoval() : false;
             if (!confirmed) {
               throw new Error("The removal result is unknown. Reload the list to check, or try again.");
             }
           }
         }
         if (questionId) uncertainAgentRemovals.delete(questionId);
-        const scope = questionId ? confirmedRemovalScopes.get(questionId) : undefined;
         if (questionId) confirmedRemovalScopes.delete(questionId);
         const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
-        receipt = agent.transport === "hosted_mcp" || scope === "workspace"
+        receipt = workspaceOnlyRemoval
           ? `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`
           : `${agent.name} permanently removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
@@ -8234,12 +8242,13 @@ import "../../styles/kylon-image-viewer.css";
         const loadScope = () => {
           const checkAttempt = ++confirmScopeGeneration;
           showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "loading" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+          const loadingDialogGeneration = confirm.dataset?.confirmGeneration ?? "";
           if (!currentSession || !workspaceId) {
             showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
             return;
           }
           void readAgentRemovalScope(currentSession, workspaceId, id).then((scope) => {
-            if (checkAttempt !== confirmScopeGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            if (checkAttempt !== confirmScopeGeneration || (confirm.dataset?.confirmGeneration ?? "") !== loadingDialogGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
             if (scope === "workspace" || scope === "permanent") {
               confirmedRemovalScopes.set(questionId, scope);
               showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: scope }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
@@ -8247,7 +8256,7 @@ import "../../styles/kylon-image-viewer.css";
               showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
             }
           }, () => {
-            if (checkAttempt !== confirmScopeGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            if (checkAttempt !== confirmScopeGeneration || (confirm.dataset?.confirmGeneration ?? "") !== loadingDialogGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
             showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
           });
         };

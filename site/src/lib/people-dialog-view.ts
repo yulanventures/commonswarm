@@ -919,6 +919,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   const doc = dialog.ownerDocument; const copy = peopleConfirmationCopy(action, item);
   const localScope = action === "remove-agent" && !item.hosted ? (item.removalScope ?? "failed") : undefined;
   dialog.replaceChildren(); dialog.setAttribute("role", "alertdialog"); dialog.setAttribute("aria-labelledby", "pd-confirm-title"); dialog.setAttribute("aria-describedby", "pd-confirm-description");
+  dialog.dataset.confirmGeneration = String((Number(dialog.dataset.confirmGeneration) || 0) + 1);
   dialog.dataset.confirmReady = localScope === "loading" ? "false" : "true";
   const symbol = node(doc, "span", "pd-confirm-icon", action === "withdraw" ? "▤" : "⚠"); symbol.setAttribute("aria-hidden", "true");
   const title = node(doc, "h2", "", copy.title); title.id = "pd-confirm-title";
@@ -962,7 +963,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   // The page layout has no outer dialog: its host is the current People & agents page (a render replaces the element).
   const pageHost = () => host || dialog.closest("[data-roster-dialog]") ? null : doc.querySelector<HTMLElement>("[data-people-page]");
   dialog.toggleAttribute("data-people-page-confirm", !!pageHost());
-  const close = () => { if (pending) return; dialog.close();
+  const close = () => { if (pending) return; dialog.dataset.confirmGeneration = String((Number(dialog.dataset.confirmGeneration) || 0) + 1); dialog.close();
     const outer = dialog.closest<HTMLDialogElement>("[data-roster-dialog]");
     const fallback = host ? host.fallback() : outer?.querySelector<HTMLElement>("#pd-detail-title") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title")
       ?? pageHost()?.querySelector<HTMLElement>("#pd-detail-title") ?? (pageHost() ? pageHeading(doc) : null);
