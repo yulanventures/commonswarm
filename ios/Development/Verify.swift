@@ -82,7 +82,12 @@ enum Verify {
         } catch APIError.refused(503) {}
         let ref = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
         try expect(ref.file_id == upload.file.id && ref.version_n == 1, "lost commit retries the original upload")
-        try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"), attachments: [ref])
+        let postedID = try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"), attachments: [ref])
+        let channelMessages = try await api.history(ws.id, channel.destination)
+        let postedFiles = channelMessages.first { $0.id == postedID }?.attachments ?? []
+        try expect(postedFiles.count == 1 && postedFiles.first?.file_id == ref.file_id &&
+                   postedFiles.first?.version_n == ref.version_n && postedFiles.first?.name == upload.file.name,
+                   "the retried upload appears once on the confirmed message")
         let workspaces = try await api.workspaces()
         guard let second = workspaces.first(where: { $0.id != ws.id }) else { throw Failure.mismatch("second workspace") }
         let draft = session.composer(workspace: ws.id, conversation: dm.id)

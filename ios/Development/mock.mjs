@@ -177,7 +177,7 @@ const server = createServer(async (req, res) => {
         if (cmd.kind === "file_version_create") {
           if (uploads.has(cmd.version_id)) return reply(409, {});
           const path = "/storage/v1/object/upload/sign/swarm-files/" + workspace + "/" + cmd.file_id.toLowerCase() + "/1";
-          uploads.set(cmd.version_id, { id: cmd.file_id, path, type: cmd.content_type, size: cmd.declared_size_bytes });
+          uploads.set(cmd.version_id, { id: cmd.file_id, name: cmd.name, path, type: cmd.content_type, size: cmd.declared_size_bytes });
           const receipt = { status: "accepted", file_id: cmd.file_id, version_id: cmd.version_id, version_n: 1,
             upload_path: path + "?token=" + cmd.version_id };
           fileReceipts.set(body.command_id, receipt);
@@ -196,11 +196,17 @@ const server = createServer(async (req, res) => {
       }
       if (body.command.channel && !channels.some(row => row.slug === body.command.channel && row.channel_id === body.command.expected_channel_id)) return reply(404, {});
       if (refuseNextLookup.delete(body.command_id)) return reply(403, {});
-      if (cmd.attachments?.some(ref => ![...uploads.values()].some(f => f.id === ref.file_id && f.digest && ref.version_n === 1))) return reply(400, {});
+      const attachments = [];
+      for (const ref of cmd.attachments ?? []) {
+        const file = [...uploads.values()].find(f => f.id === ref.file_id && f.digest && ref.version_n === 1);
+        if (!file) return reply(400, {});
+        attachments.push({ file_id: file.id, version_n: ref.version_n, name: file.name,
+          content_type: file.type, size_bytes: file.size });
+      }
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments: cmd.attachments,
+        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
         receipts.set(body.command_id, { command: body.command, signal: messages[0] });
         if (review && body.command.body === "Uncertain send") {
