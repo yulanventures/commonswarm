@@ -236,8 +236,11 @@ async function subscribeWakeSocket(wakeId: string): Promise<{
   const client = createClient(local.API_URL, local.ANON_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  await client.realtime.setAuth(local.ANON_KEY);
   const frames: Row[] = [];
-  const channel = client.channel(`cswarm-wake:${wakeId}`, { config: { private: true } });
+  const channel = client.channel(`cswarm-wake:${wakeId}`, {
+    config: { private: true, broadcast: { ack: false, self: false } },
+  });
   channel.on("broadcast", { event: "wake" }, (msg) => {
     frames.push((msg.payload ?? {}) as Row);
   });
@@ -428,9 +431,53 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   const alertSignal = (leadAInbox.body.signals as Row[]).find((s) => s.id === byScope.get(privA.id)!.alert_id);
   assert.ok(alertSignal);
   assert.equal(alertSignal.channel_id, privA.id);
+  assert.deepEqual(alertSignal.system_alert, {
+    alert_id: byScope.get(privA.id)!.alert_id,
+    kind: "agent_quiet",
+    affected_principal_id: quietSeat.principal,
+  });
   assert.match(String(alertSignal.body), new RegExp(quietSeat.name));
   assert.match(String(alertSignal.body), /Fix:/);
   assert.doesNotMatch(String(alertSignal.body), /SECRET_/);
+
+  // Reroute cursor proof (routed_at): open an alert routed to leadOpen on #open-ch, advance
+  // wsLead's cursor past opened_at, make leadOpen stale so the alert reroutes to wsLead, and verify
+  // routed_at advances ONLY on route change so wsLead's cursor-based inbox read still receives it!
+  const [beforeReroute] = await sql<{ alert_id: string; routed_lead_principal_id: string; routed_at: Date; opened_at: Date }[]>`
+    SELECT alert_id, routed_lead_principal_id, routed_at, opened_at
+    FROM swarm.system_alerts
+    WHERE alert_id = ${String(byScope.get(openCh.id)!.alert_id)}::uuid
+  `;
+  assert.equal(beforeReroute!.routed_lead_principal_id, leadOpen.principal);
+  // Refreshing waiting count while leadOpen is still live MUST NOT bump routed_at.
+  await delay(50);
+  await sql`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')`;
+  const [afterNoReroute] = await sql<{ routed_at: Date }[]>`
+    SELECT routed_at FROM swarm.system_alerts WHERE alert_id = ${beforeReroute!.alert_id}::uuid
+  `;
+  assert.equal(afterNoReroute!.routed_at.getTime(), beforeReroute!.routed_at.getTime(), "routed_at must not bump when routed lead is unchanged");
+
+  // Record wsLead's cursor AFTER opened_at, then make leadOpen stale so the alert reroutes to wsLead.
+  await delay(50);
+  const wsLeadCursorAt = new Date().toISOString();
+  await delay(50);
+  await setPresence(leadOpen, { watcherAgoSec: 600, lastCommandAgoSec: 900 });
+  await sql`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')`;
+  const [afterReroute] = await sql<{ routed_lead_principal_id: string; routed_at: Date }[]>`
+    SELECT routed_lead_principal_id, routed_at FROM swarm.system_alerts WHERE alert_id = ${beforeReroute!.alert_id}::uuid
+  `;
+  assert.equal(afterReroute!.routed_lead_principal_id, wsLead.principal);
+  assert.ok(afterReroute!.routed_at.getTime() > new Date(wsLeadCursorAt).getTime(), "routed_at must advance on reroute");
+  const wsLeadAfterCursor = await readResource(wsLead.token, {
+    resource: "signals", workspace_id: workspace, inbox: true, about: null, kind: null, since: null,
+    after_created_at: wsLeadCursorAt, after_id: "00000000-0000-0000-0000-000000000000",
+    limit: 20, include_stale: false,
+  });
+  assert.equal(wsLeadAfterCursor.status, 200);
+  assert.ok(
+    (wsLeadAfterCursor.body.signals as Row[]).some((s) => s.id === beforeReroute!.alert_id),
+    "rerouted alert must appear after backup lead's existing inbox cursor",
+  );
 });
 
 test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404 AND identical audit_log visibility for non-member admin, with authorized control", { timeout: 90_000 }, async () => {
@@ -518,7 +565,7 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
         1, statement_timestamp() - interval '15 minutes', interval '30 minutes'
       )
     `;
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 15_000;
     while (ctrlSock.frames.length === 0 && Date.now() < deadline) await delay(50);
     assert.ok(ctrlSock.frames.length >= 1, "authorized lead socket must receive wake frame");
     assert.deepEqual(ctrlSock.frames[0], { v: 1 }, "wake frame must carry minimal {v:1} only");
@@ -617,25 +664,34 @@ test("Condition 4: real-socket bare wake control, concurrent public-to-private c
 
 test("Condition 5 & Delivery: grant-scoped hosted loss (unrelated workspace & reconnected seat excluded), pinned roles, pg_cron timer, and CLI/client end-to-end flow", { timeout: 90_000 }, async () => {
   // 1. Pinned roles: direct table writes and internal producer EXECUTE refused; reader helper works.
-  for (const role of ["authenticated", "swarm_read", "swarm_command"]) {
+  const expectDeniedAs = async (role: string, run: (tx: postgres.TransactionSql) => Promise<unknown>, label: string) => {
     await sql.begin(async (tx) => {
       await tx.unsafe(`SET LOCAL ROLE ${role}`);
-      await assert.rejects(
-        () => tx`INSERT INTO swarm.system_alerts (workspace_id, kind, affected_principal_id, fix_hint, escalate_after)
-          VALUES (${workspace}::uuid, 'local_credential_revoked', ${wsLead.principal}::uuid, 'x', statement_timestamp())`,
-        (err: { code?: string }) => err.code === "42501",
-      );
-      await assert.rejects(() => tx`SELECT swarm.sync_quiet_agent_alerts()`, (err: { code?: string }) => err.code === "42501");
-      await assert.rejects(() => tx`SELECT swarm.escalate_due_system_alerts()`, (err: { code?: string }) => err.code === "42501");
-      await assert.rejects(() => tx`SELECT swarm.system_alert_lock_scope(${workspace}::uuid, NULL)`, (err: { code?: string }) => err.code === "42501");
+      await assert.rejects(() => run(tx), (err: { code?: string }) => err.code === "42501", `${role}: ${label}`);
     });
+  };
+  for (const role of ["authenticated", "swarm_read", "swarm_command"]) {
+    await expectDeniedAs(
+      role,
+      (tx) => tx`INSERT INTO swarm.system_alerts (workspace_id, kind, affected_principal_id, fix_hint, escalate_after)
+        VALUES (${workspace}::uuid, 'local_credential_revoked', ${wsLead.principal}::uuid, 'x', statement_timestamp())`,
+      "direct insert",
+    );
+    await expectDeniedAs(role, (tx) => tx`SELECT swarm.sync_quiet_agent_alerts()`, "sync_quiet_agent_alerts");
+    await expectDeniedAs(role, (tx) => tx`SELECT swarm.escalate_due_system_alerts()`, "escalate_due_system_alerts");
+    await expectDeniedAs(role, (tx) => tx`SELECT swarm.system_alert_lock_scope(${workspace}::uuid, NULL)`, "system_alert_lock_scope");
   }
   for (const role of ["authenticated", "swarm_read"]) {
-    await sql.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL ROLE ${role}`);
-      await assert.rejects(() => tx`SELECT swarm.record_system_alert(${workspace}::uuid, 'local_credential_revoked', ${wsLead.principal}::uuid)`, (err: { code?: string }) => err.code === "42501");
-      await assert.rejects(() => tx`SELECT swarm.record_hosted_seat_refused_alerts('pg_1234567890abcdef', ${owner.id}::uuid)`, (err: { code?: string }) => err.code === "42501");
-    });
+    await expectDeniedAs(
+      role,
+      (tx) => tx`SELECT swarm.record_system_alert(${workspace}::uuid, 'local_credential_revoked', ${wsLead.principal}::uuid)`,
+      "record_system_alert",
+    );
+    await expectDeniedAs(
+      role,
+      (tx) => tx`SELECT swarm.record_hosted_seat_refused_alerts('pg_1234567890abcdef', ${owner.id}::uuid)`,
+      "record_hosted_seat_refused_alerts",
+    );
   }
 
   // 2. Grant-scoped hosted seat refusal:

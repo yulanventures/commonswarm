@@ -17192,7 +17192,7 @@ async function handleTransaction(
         AND command_id = ${commandId}
       LIMIT 1
     `;
-    const existing = choiceKind ? undefined : existingRows[0];
+    const existing = choiceKind || kind === RESOLVE_SYSTEM_ALERT_KIND ? undefined : existingRows[0];
     if (existing) {
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&

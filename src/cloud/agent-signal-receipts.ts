@@ -155,6 +155,7 @@ export function seenAckTargets(
     (row.kind === "ask" || row.kind === "note") &&
     !(row.from_kind === "agent" && row.from === principalId) &&
     row.reaction === undefined &&
+    row.system_alert === undefined &&
     signalReachesAgent(row, principalId)
   ).map((row) => row.id);
   return [...new Set(ids)].slice(0, limit);

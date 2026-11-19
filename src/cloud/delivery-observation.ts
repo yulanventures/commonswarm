@@ -135,7 +135,7 @@ export function surfacedDeliveryIds(
   options: { excludeOwn?: boolean } = {},
 ): string[] {
   return [...new Set(rows.filter((row) =>
-    (row.kind === "ask" || row.kind === "note") && row.reaction === undefined &&
+    (row.kind === "ask" || row.kind === "note") && row.reaction === undefined && row.system_alert === undefined &&
     (principalId === null || signalReachesAgent(row, principalId)) &&
     !(options.excludeOwn === true && row.from_kind === "agent" && row.from === principalId)
   ).map((row) => row.id))];

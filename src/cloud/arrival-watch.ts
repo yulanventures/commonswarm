@@ -841,8 +841,10 @@ export function arrivalNotification(
     snippet: arrivalSnippet(signal.body),
     body: signal.body,
     attachment_count: signal.attachments?.length ?? 0,
-    // A reaction's id is not a message: an answer to it goes in the thread of the message it was on.
-    reply_command: signal.reaction !== undefined
+    // A system alert resolves via cswarm alert resolve; a reaction answers in its parent thread.
+    reply_command: signal.system_alert !== undefined
+      ? `cswarm alert resolve ${signal.system_alert.alert_id} "<note>" --workspace-id ${workspaceId}`
+      : signal.reaction !== undefined
       ? arrivalReplyCommand(signal.reaction.signal_id, workspaceId, signal.reaction.signal_id)
       : arrivalReplyCommand(signal.id, workspaceId, publicReplyThreadRoot(signal)),
   };

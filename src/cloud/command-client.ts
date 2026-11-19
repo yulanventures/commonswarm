@@ -422,6 +422,12 @@ export interface SignalRecord {
    * reaction's, not a message's, so it cannot be replied or reacted to.
    */
   reaction?: { emoji: string; signal_id: string };
+  /**
+   * Set only on an inbox row that is a routed seat-health system alert: `id` is the alert_id, not
+   * a signal, so it has no delivery to acknowledge, gets no 👀 ack reaction, and resolves with
+   * `cswarm alert resolve`.
+   */
+  system_alert?: { alert_id: string; kind: string; affected_principal_id: string };
 }
 
 export interface SignalReactionSummary {

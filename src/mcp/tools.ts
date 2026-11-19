@@ -355,4 +355,6 @@ export const STDIO_MCP_TOOLS=[
   {name:"workspaces",description:"List workspaces reachable by this agent connection.",inputSchema:schema({})},
   {name:"skills_list",description:`List shared workspace skills (hints, never gates) with when-to-use summaries and usage counts. ${WORKSPACE_SKILL_TRUST_WARNING}`,inputSchema:schema({workspace_id:uuid})},
   {name:"skills_read",description:`Read a shared workspace skill by skill_id or title and record usage to renew its expiry. ${WORKSPACE_SKILL_TRUST_WARNING}`,inputSchema:schema({workspace_id:uuid,skill_id:uuid,title:string(120,1)})},
+  {name:"alerts",description:"List seat-health system alerts visible to this lead seat.",inputSchema:schema({workspace_id:uuid,include_resolved:{type:"boolean" as const}})},
+  {name:"alert_resolve",description:"Mark a seat-health system alert resolved with a short note (1 to 500 non-control characters).",inputSchema:schema({workspace_id:uuid,alert_id:uuid,note:string(500,1),request_id:requestId},["alert_id","note"])},
 ];

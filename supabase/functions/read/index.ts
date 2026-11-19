@@ -894,7 +894,7 @@ async function handle(
           SELECT alert_id, workspace_id, channel_id, kind,
                  affected_principal_id, affected_seat_name, fix_hint,
                  waiting_count, oldest_waiting_at, routed_lead_principal_id,
-                 opened_at, escalate_after, escalated_at,
+                 routed_at, opened_at, escalate_after, escalated_at,
                  resolved_at, resolved_by_kind, resolved_by_id, resolution_note
           FROM swarm_read.system_alerts
           WHERE workspace_id = ${body.workspace_id}::uuid
@@ -1137,7 +1137,7 @@ async function handle(
         SELECT alert_id, workspace_id, channel_id, kind,
                affected_principal_id, affected_seat_name, fix_hint,
                waiting_count, oldest_waiting_at, routed_lead_principal_id,
-               opened_at, escalate_after, escalated_at,
+               routed_at, opened_at, escalate_after, escalated_at,
                resolved_at, resolved_by_kind, resolved_by_id, resolution_note
         FROM swarm_read.system_alerts
         WHERE workspace_id = ${agent.principal_workspace_id}::uuid
@@ -1686,7 +1686,8 @@ async function handle(
               a.fix_hint
             )
         END AS body,
-        a.opened_at + interval '7 days' AS until, a.opened_at AS created_at,
+        COALESCE(a.routed_at, a.opened_at) + interval '7 days' AS until,
+        COALESCE(a.routed_at, a.opened_at) AS created_at,
         ${agent.principal_id}::uuid AS to_agent, NULL::uuid AS in_reply_to, NULL::text AS reply_status,
         0 AS chain_hop, '[]'::jsonb AS attachments, a.channel_id, NULL::uuid AS thread_root_id,
         false AS broadcast_to_channel,
@@ -1694,6 +1695,11 @@ async function handle(
         'private' AS audience,
         ${body.include_mentions ? tx`'[]'::jsonb AS mentions,` : tx``}
         ${body.include_reactions ? tx`'[]'::jsonb AS reactions,` : tx``}
+        jsonb_build_object(
+          'alert_id', a.alert_id,
+          'kind', a.kind,
+          'affected_principal_id', a.affected_principal_id
+        ) AS system_alert,
         'unknown' AS sender_owner_relation
       FROM swarm_read.system_alerts AS a
       WHERE a.workspace_id = ${body.workspace_id}::uuid
@@ -1704,20 +1710,20 @@ async function handle(
         AND ${inReplyTo}::uuid IS NULL
         AND (${channelId}::uuid IS NULL OR a.channel_id = ${channelId}::uuid)
         AND (${unfiledOnly} = false OR a.channel_id IS NULL)
-        AND (${body.since}::timestamptz IS NULL OR a.opened_at >= ${body.since}::timestamptz)
+        AND (${body.since}::timestamptz IS NULL OR COALESCE(a.routed_at, a.opened_at) >= ${body.since}::timestamptz)
         AND (
           ${useAfterCursor} = false
-          OR date_trunc('milliseconds', a.opened_at) >
+          OR date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) >
             date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
           OR (
-            date_trunc('milliseconds', a.opened_at) =
+            date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) =
               date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
             AND a.alert_id > ${afterId}::uuid
           )
         )
       ORDER BY
-        CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', a.opened_at) END ASC,
-        CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', a.opened_at) END DESC,
+        CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END ASC,
+        CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END DESC,
         CASE WHEN ${orderAsc} THEN a.alert_id END ASC,
         CASE WHEN ${orderDesc} THEN a.alert_id END DESC
       LIMIT ${body.limit}

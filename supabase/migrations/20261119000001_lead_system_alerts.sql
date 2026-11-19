@@ -48,6 +48,7 @@ CREATE TABLE swarm.system_alerts (
   waiting_count integer CHECK (waiting_count IS NULL OR waiting_count > 0),
   oldest_waiting_at timestamptz,
   routed_lead_principal_id uuid REFERENCES swarm.agent_principals (principal_id),
+  routed_at timestamptz,
   opened_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   escalate_after timestamptz NOT NULL,
   escalated_at timestamptz,
@@ -66,6 +67,7 @@ CREATE TABLE swarm.system_alerts (
   FOREIGN KEY (channel_id, workspace_id)
     REFERENCES swarm.channels (channel_id, workspace_id),
   CHECK (routed_lead_principal_id IS NULL OR routed_lead_principal_id <> affected_principal_id),
+  CHECK (routed_at IS NULL OR routed_at >= opened_at),
   CHECK ((kind = 'agent_quiet') = (waiting_count IS NOT NULL AND oldest_waiting_at IS NOT NULL)),
   CHECK (escalate_after >= opened_at),
   CHECK (escalated_at IS NULL OR escalated_at >= opened_at),
@@ -499,18 +501,29 @@ BEGIN
     SET waiting_count = CASE WHEN p_kind = 'agent_quiet' THEN p_waiting_count ELSE a.waiting_count END,
         oldest_waiting_at = CASE WHEN p_kind = 'agent_quiet'
           THEN LEAST(a.oldest_waiting_at, p_oldest_waiting_at) ELSE a.oldest_waiting_at END,
-        routed_lead_principal_id = CASE
-          WHEN a.routed_lead_principal_id IS NOT NULL
-            AND swarm.system_alert_candidate_is_eligible(
-              p_workspace_id, p_channel_id, a.routed_lead_principal_id, p_affected_principal_id, true
-            )
-            AND swarm.system_alert_agent_is_current_lead(
-              p_workspace_id, p_channel_id, a.routed_lead_principal_id, p_affected_principal_id
-            )
-          THEN a.routed_lead_principal_id
-          ELSE v_lead
+        routed_lead_principal_id = next_route.next_lead,
+        routed_at = CASE
+          WHEN next_route.next_lead IS DISTINCT FROM a.routed_lead_principal_id THEN
+            CASE WHEN next_route.next_lead IS NOT NULL THEN v_opened ELSE NULL END
+          ELSE a.routed_at
         END,
         updated_at = v_opened
+    FROM (
+      SELECT
+        CASE
+          WHEN cur.routed_lead_principal_id IS NOT NULL
+            AND swarm.system_alert_candidate_is_eligible(
+              p_workspace_id, p_channel_id, cur.routed_lead_principal_id, p_affected_principal_id, true
+            )
+            AND swarm.system_alert_agent_is_current_lead(
+              p_workspace_id, p_channel_id, cur.routed_lead_principal_id, p_affected_principal_id
+            )
+          THEN cur.routed_lead_principal_id
+          ELSE v_lead
+        END AS next_lead
+      FROM swarm.system_alerts AS cur
+      WHERE cur.alert_id = v_existing_id
+    ) AS next_route
     WHERE a.alert_id = v_existing_id;
     RETURN v_existing_id;
   END IF;
@@ -533,6 +546,7 @@ BEGIN
     waiting_count,
     oldest_waiting_at,
     routed_lead_principal_id,
+    routed_at,
     opened_at,
     escalate_after,
     escalated_at,
@@ -546,6 +560,7 @@ BEGIN
     p_waiting_count,
     p_oldest_waiting_at,
     v_lead,
+    CASE WHEN v_lead IS NOT NULL THEN v_opened ELSE NULL END,
     v_opened,
     v_escalate_after,
     v_escalated_at,
@@ -1235,6 +1250,7 @@ AS
     a.waiting_count,
     a.oldest_waiting_at,
     a.routed_lead_principal_id,
+    a.routed_at,
     a.opened_at,
     a.escalate_after,
     a.escalated_at,

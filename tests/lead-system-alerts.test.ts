@@ -16,8 +16,18 @@ import {
 } from "../supabase/functions/command/system-alerts.js";
 import { HUMAN_ONLY_COMMANDS } from "../src/protocol/workspace-commands.js";
 import { resolveSystemAlertCommand } from "../src/cloud/system-alerts.js";
+import { deliveryAckIds } from "../src/cloud/agent-check.js";
+import { seenAckTargets } from "../src/cloud/agent-signal-receipts.js";
+import { surfacedDeliveryIds } from "../src/cloud/delivery-observation.js";
+import { arrivalNotification } from "../src/cloud/arrival-watch.js";
+import { STDIO_MCP_TOOLS } from "../src/mcp/tools.js";
+import type { SignalRecord } from "../src/cloud/command-client.js";
 
 const ALERT = "11111111-2222-4333-8444-555555555555";
+const WS = "22222222-3333-4444-8555-666666666666";
+const LEAD = "33333333-4444-4555-8666-777777777777";
+const AFFECTED = "44444444-5555-4666-8777-888888888888";
+const NORMAL_SIG = "55555555-6666-4777-8888-999999999999";
 
 test("resolve_system_alert parses valid UUID and trimmed non-control note", () => {
   assert.deepEqual(
@@ -111,4 +121,52 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   assert.match(rollback, /DROP FUNCTION IF EXISTS swarm_read\.owner_alert_inbox\(uuid\);/);
   assert.match(rollback, /DROP VIEW IF EXISTS swarm_read\.system_alerts;/);
   assert.match(rollback, /DROP TABLE IF EXISTS swarm\.system_alerts;/);
+});
+
+test("system_alert inbox marker skips delivery ack, observation, auto-eyes reaction and points arrival notification to cswarm alert resolve", () => {
+  const alertRow: SignalRecord = {
+    id: ALERT,
+    workspace_id: WS,
+    from: AFFECTED,
+    from_kind: "agent",
+    to: null,
+    to_agent: LEAD,
+    in_reply_to: null,
+    about: "system_alert:agent_quiet",
+    kind: "note",
+    body: `System alert (agent_quiet, id ${ALERT}): seat stopped listening.`,
+    until: "2026-12-01T00:00:00Z",
+    created_at: "2026-11-19T15:00:00Z",
+    recipients: [{ kind: "agent", id: LEAD, position: 0 }],
+    audience: "private",
+    system_alert: { alert_id: ALERT, kind: "agent_quiet", affected_principal_id: AFFECTED },
+  };
+  const normalRow: SignalRecord = {
+    id: NORMAL_SIG,
+    workspace_id: WS,
+    from: AFFECTED,
+    from_kind: "agent",
+    to: null,
+    to_agent: LEAD,
+    in_reply_to: null,
+    about: null,
+    kind: "note",
+    body: "Normal note to lead.",
+    until: "2026-12-01T00:00:00Z",
+    created_at: "2026-11-19T15:01:00Z",
+    recipients: [{ kind: "agent", id: LEAD, position: 0 }],
+    audience: "private",
+  };
+  const rows = [alertRow, normalRow];
+
+  assert.deepEqual(deliveryAckIds(rows), [NORMAL_SIG], "deliveryAckIds must skip system_alert rows");
+  assert.deepEqual(seenAckTargets(rows, LEAD), [NORMAL_SIG], "seenAckTargets must skip system_alert rows");
+  assert.deepEqual(surfacedDeliveryIds(rows, LEAD), [NORMAL_SIG], "surfacedDeliveryIds must skip system_alert rows");
+
+  const notif = arrivalNotification(alertRow, WS, { url: "https://api.commonswarm.com", anonKey: "anon" });
+  assert.equal(notif.reply_command, `cswarm alert resolve ${ALERT} "<note>" --workspace-id ${WS}`);
+
+  const toolNames = STDIO_MCP_TOOLS.map((t) => t.name);
+  assert.ok(toolNames.includes("alerts"), "STDIO_MCP_TOOLS includes alerts");
+  assert.ok(toolNames.includes("alert_resolve"), "STDIO_MCP_TOOLS includes alert_resolve");
 });

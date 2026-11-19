@@ -15,6 +15,7 @@ export interface SystemAlertRecord {
   waiting_count: number | null;
   oldest_waiting_at: string | null;
   routed_lead_principal_id: string | null;
+  routed_at?: string | null;
   opened_at: string;
   escalate_after?: string | null;
   escalated_at: string | null;
