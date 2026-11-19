@@ -1183,7 +1183,7 @@ async function main(): Promise<void> {
       }
       // Waiting on you visible Sent confirmation captures at 390x844 and 1440x900 in both themes (non-mutating).
       const waitingScreen = screens().find(s => s.id === "app.chat.waiting-panel");
-      if (waitingScreen && (!ONLY_SCREENS.length || ONLY_SCREENS.includes("app.chat.waiting-panel"))) {
+      if (waitingScreen && sharded("app.chat.waiting-panel") && (!DIAGNOSTIC || DIAGNOSTIC.screens.includes("app.chat.waiting-panel"))) {
         for (const [viewport, desktop] of [[{ width: 390, height: 844 }, false], [{ width: 1440, height: 900 }, true]] as const) {
           for (const theme of THEMES) {
             const size = `${viewport.width}x${viewport.height}`;
