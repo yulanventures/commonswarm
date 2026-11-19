@@ -267,3 +267,58 @@ test("Step 3B Direct messages rail shows + New message, DM/group rows, mention b
   dmMenuButtons[1].listeners.click({});
   assert.deepEqual(menus, ["dm-2"]);
 });
+
+test("rail channel and DM rows keep visible text aligned with accessible names (WCAG 2.5.3)", () => {
+  const textOf = (node) => typeof node === "string"
+    ? node
+    : (node.textContent || "") + (node.children ?? []).map(textOf).join("");
+  const root = buildHomeRail(
+    doc,
+    {
+      sample: false,
+      catchUp: { href: "/app?v=catchup", current: false, needsYou: null },
+      workspaces: [],
+      people: null,
+      channels: ready([
+        row("quiet", "general", { unread: false, mentionCount: 0 }),
+        row("ops", "ops", { unread: true, mentionCount: 2 }),
+        row("busy", "alerts", { unread: true, mentionCount: 120 }),
+      ]),
+      directMessages: {
+        rows: [
+          { id: "dm-quiet", kind: "dm", title: "Alex", href: "/app?w=w&dm=dm-quiet", current: false, unreadCount: 0, mentionCount: 0 },
+          { id: "dm-unread", kind: "dm", title: "Lead", href: "/app?w=w&dm=dm-unread", current: false, unreadCount: 1, mentionCount: 0 },
+          { id: "dm-group", kind: "group_dm", title: "Alex and Lead", href: "/app?w=w&dm=dm-group", current: false, unreadCount: 4, mentionCount: 2, memberCount: 3 },
+        ],
+      },
+    },
+    { openPerson() {}, openAgent() {}, selectChannel() {}, channelMenu() {}, newChannel() {}, retryChannels() {}, selectConversation() {} },
+  );
+
+  const chQuiet = find(root, (n) => n.dataset?.railChannel === "quiet")[0];
+  assert.equal(textOf(chQuiet), "general");
+  assert.equal(chQuiet.attrs["aria-label"], "#general");
+
+  const chOps = find(root, (n) => n.dataset?.railChannel === "ops")[0];
+  assert.equal(textOf(chOps), "ops 2");
+  assert.equal(chOps.attrs["aria-label"], "#ops, 2 mentions");
+
+  const chBusy = find(root, (n) => n.dataset?.railChannel === "busy")[0];
+  assert.equal(textOf(chBusy), "alerts 99+");
+  assert.equal(chBusy.attrs["aria-label"], "#alerts, 99+ (120 mentions)");
+
+  const dmQuiet = find(root, (n) => n.dataset?.railConversation === "dm-quiet")[0];
+  assert.equal(textOf(dmQuiet), "Alex", "decorative avatar initial stays out of DM text");
+  assert.equal(find(dmQuiet, (n) => n.className === "hm-rail__dm-mark")[0]?.dataset.mark, "A");
+  assert.equal(dmQuiet.attrs["aria-label"], "Alex");
+
+  const dmUnread = find(root, (n) => n.dataset?.railConversation === "dm-unread")[0];
+  assert.equal(textOf(dmUnread), "Lead");
+  assert.equal(find(dmUnread, (n) => n.className === "hm-rail__dm-mark")[0]?.dataset.mark, "L");
+  assert.equal(dmUnread.attrs["aria-label"], "Lead, 1 unread");
+
+  const dmGroup = find(root, (n) => n.dataset?.railConversation === "dm-group")[0];
+  assert.equal(textOf(dmGroup), "Alex and Lead 2");
+  assert.equal(find(dmGroup, (n) => n.className === "hm-rail__dm-mark")[0]?.dataset.mark, "3");
+  assert.equal(dmGroup.attrs["aria-label"], "Alex and Lead, 2 mentions, 3 members");
+});
