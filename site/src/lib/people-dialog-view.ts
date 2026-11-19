@@ -158,7 +158,7 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
     stops: item.hosted ? [`${name} will lose access to this space. Its identity and every connection will end.`, "This cannot be undone."] : [`${name} will lose access to this workspace immediately.`],
     stays: [`Its history stays as “${name} (removed)”.`, ...(item.hosted ? ["Its owner can connect a new agent with the same name."] : [])] };
   if (action === "turn-off-key") return { title: `Turn off ${name}’s key?`, button: "Turn off key",
-    stops: [`${name} stops when its current access ends.`, "This key cannot be used again."],
+    stops: ["This key and its renewals stop immediately for new requests, in any workspace where it is used.", "This key cannot be used again."],
     stays: ["Its identity and history stay here. Its owner can get a new key to bring it back."] };
   if (action === "withdraw") {
     const workspace = item.workspaceName?.trim();
@@ -914,7 +914,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
     copy.stops.forEach((text, index) => { addFact(text, false); if (copy.stays[index]) addFact(copy.stays[index]!, true); });
     copy.stays.slice(copy.stops.length).forEach((text) => addFact(text, true)); dialog.append(symbol, title, facts);
   }
-  if (action === "remove-agent" && item.hosted && item.liveKey && alternative) { const option = node(doc, "section", "pd-alternative"); option.append(node(doc, "h3", "", "Would turning off the key be enough?"), node(doc, "p", "", `Keep ${item.name} and its history here. It stops when its current access ends; a new key can bring it back.`), button(doc, "Turn off key instead →", () => alternative())); dialog.append(option); }
+  if (action === "remove-agent" && item.hosted && item.liveKey && alternative) { const option = node(doc, "section", "pd-alternative"); option.append(node(doc, "h3", "", "Would turning off the key be enough?"), node(doc, "p", "", `Keep ${item.name} and its history here. Its key and renewals stop immediately for new requests; a new key can bring it back.`), button(doc, "Turn off key instead →", () => alternative())); dialog.append(option); }
   const notice = node(doc, "p", "pd-error"); notice.setAttribute("role", "alert"); notice.hidden = true;
   let pending = false;
   // The page layout has no outer dialog: its host is the current People & agents page (a render replaces the element).

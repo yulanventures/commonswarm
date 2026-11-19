@@ -6,7 +6,7 @@ import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
-import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog } from "../../lib/people-dialog-view";
+import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, showPeopleConfirmation } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -242,7 +242,7 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.doesNotMatch(script, /window\.confirm/, "no browser prompt anywhere on the page");
   const askPeople = section(script, "const confirmPeopleDialogAction = ", "/** Open above the current view");
   assert.match(askPeople, /const questionId = uuid\(\);\s*showPeopleConfirmation\(confirm, action, \{ \.\.\.item, workspaceName: model\.workspaceName \}/, "People & agents makes one command id per question and passes the workspace name");
-  assert.match(askPeople, /peopleDialogAction\(action, id, button, notice, questionId\)/, "and every press of that question uses it");
+  assert.match(askPeople, /peopleDialogAction\(action, id, button, notice, questionId, pinnedKey\)/, "and every press of that question uses it");
   assert.match(cards, /const hosted = connection.kind === "hosted";/);
   assert.match(cards, /askListsWithdraw\(principalId, agentName, hosted, withdraw, status\)/,
     "a card row decides hosted from its own connection, not from a roster lookup");
@@ -1385,4 +1385,134 @@ test("standalone Invite someone page leads with workspace and email, drops the e
   assert.match(hint, /email they sign in with/i);
   assert.match(hint, /earlier messages,[\s\S]*lists and files/i);
   assert.match(hint, /not your other workspaces/i);
+});
+
+test("turn-off-key pins the opened key, reuses one command id per question, cancels cleanly, and refuses across replacement", async () => {
+  const dom = approvalDom();
+  const doc = dom.doc as any;
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const opener: any = doc.createElement("button");
+  opener.dataset.pdFocus = "turn-off-key-principal";
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const principalId = "22222222-2222-4222-8222-222222222222";
+  const userId = "33333333-3333-4333-8333-333333333333";
+  const grant1 = "44444444-4444-4444-8444-444444444441";
+  const token1 = "55555555-5555-4555-8555-555555555551";
+  const grant2 = "44444444-4444-4444-8444-444444444442";
+  const token2 = "55555555-5555-4555-8555-555555555552";
+
+  const makeAgent = (grantId: string, tokenId: string) => ({
+    principalId, ownerUserId: userId, name: "Sprout", transport: "local",
+    work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } },
+  });
+  const makeGrant = (grantId: string, tokenId: string) => ({
+    workspaceId, principalId, ownerUserId: userId, grantId, tokenId,
+  });
+
+  let ids = 0, lose = false;
+  const revocations: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: userId } },
+    activeWorkspaceId: workspaceId,
+    agents: [makeAgent(grant1, token1)],
+    accessStatuses: [makeGrant(grant1, token1)],
+    peopleDialogModel: () => ({
+      sample: false, workspaceName: "Herb garden", people: [], invites: [],
+      agents: [{ id: principalId, name: "Sprout", hosted: false, liveKey: true, own: true, mayManage: true }],
+    }),
+    peopleDialogCanAct, homeConnectionAccess, homeConnectionTokenMatches, showPeopleConfirmation,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeAgentToken: async (_session: any, commandId: string, wsId: string, tokenId: string) => {
+      revocations.push({ commandId, wsId, tokenId });
+      if (lose) throw new Error("The result is unknown.");
+    },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => opener,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  // 1. Both cancel paths (Go back and Escape) send nothing and return focus to opener.
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  let buttons = dialog.querySelectorAll("button");
+  assert.equal(buttons[0].textContent, "Go back");
+  assert.equal(focused.at(-1), buttons[0], "Go back is focused on open");
+  buttons[0].click();
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Go back returns focus to opener");
+  assert.equal(revocations.length, 0, "Go back sends nothing");
+
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  let prevented = false, stopped = false;
+  dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented && stopped, true);
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), opener, "Escape returns focus to opener");
+  assert.equal(revocations.length, 0, "Escape sends nothing");
+
+  // 2. Held question across same-agent key replacement (T1 -> T2) refuses with zero sends.
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  assert.equal(dialog.open, true);
+  ctx.agents = [makeAgent(grant2, token2)];
+  ctx.accessStatuses = [makeGrant(grant2, token2)];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(revocations.length, 0, "replacement key must never be revoked by an earlier question");
+  assert.equal(dialog.open, true, "dialog stays open to show refusal");
+  assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /This key has changed/);
+  buttons[0].click();
+
+  // 3. Held question when key disappears / cannot be verified refuses with zero sends.
+  ctx.agents = [makeAgent(grant1, token1)];
+  ctx.accessStatuses = [makeGrant(grant1, token1)];
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  ctx.accessStatuses = [];
+  buttons = dialog.querySelectorAll("button");
+  await buttons[1].events.get("click")?.();
+  assert.equal(revocations.length, 0, "unverifiable key sends nothing");
+  buttons[0].click();
+
+  // 4. One correctly targeted send + retry after lost answer reuses the same command ID and pinned token.
+  ctx.agents = [makeAgent(grant1, token1)];
+  ctx.accessStatuses = [makeGrant(grant1, token1)];
+  actions.confirmPeopleDialogAction("turn-off-key", principalId, opener);
+  buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true, "lost answer keeps question open for safe retry");
+  assert.equal(revocations.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(revocations.length, 2);
+  assert.equal(revocations[0].commandId, revocations[1].commandId, "retrying the same question reuses the same command ID");
+  assert.equal(revocations[0].tokenId, token1);
+  assert.equal(revocations[1].tokenId, token1);
+  assert.match(reloads[0].receipt, /stopped immediately for new requests/);
 });
