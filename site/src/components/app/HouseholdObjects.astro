@@ -64,6 +64,10 @@ const { state } = Astro.props;
   .household-objects .hh-history small { overflow-wrap: anywhere; }
   .household-objects .hh-conflict { background: var(--surface-2, #f1efea); border-left: 3px solid var(--accent, #315cff); padding: 20px; margin-top: 24px; }
   .household-objects .hh-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  /* The save-conflict review compares two versions side by side; the original opens under them on request. */
+  @media (min-width: 721px) { .household-objects .hh-conflict .hh-comparison { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .household-objects .hh-conflict .hh-original { margin-block-start: 16px; }
+  .household-objects .hh-conflict [data-hh-action="original"] { margin-block-start: 16px; }
   .household-objects .hh-conflict label { display: flex; gap: 10px; align-items: baseline; margin: 20px 0; }
   .household-objects .hh-conflict input { accent-color: var(--accent, #315cff); }
   @media (max-width: 720px) { .household-objects .hh-layout, .household-objects .hh-comparison { grid-template-columns: 1fr; gap: 20px; } }

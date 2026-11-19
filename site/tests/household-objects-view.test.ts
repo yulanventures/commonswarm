@@ -138,7 +138,7 @@ test('interrupted and pending saves keep their draft and reuse the original requ
   assert.equal(fixture.controller.getState().selected_id, null);
 });
 
-test('revision ids are shown on request; the conflict review says who saved Base and Current and when', async () => {
+test('revision ids are shown on request; the conflict review says who saved the original and Current and when', async () => {
   const fixture = setup('editor', { save: async () => ({ status: 'conflict', object_id: 'weekend',
     current: fixture.conflict.current.revision, draft_id: 'draft-a' }) });
   fixture.controller.select('weekend'); fixture.controller.stage(fixture.conflict.proposed);
@@ -158,18 +158,30 @@ test('revision ids are shown on request; the conflict review says who saved Base
   // Each copy of the switch names its place, so focus returns to the one that was pressed after a redraw.
   assert.match(review, /<button type="button" data-hh-action="revision-ids" data-hh-value="conflict" aria-pressed="false">Show revision ids<\/button>/);
   assert.match(history, /<button type="button" data-hh-action="revision-ids" data-hh-value="history" aria-pressed="false">Show revision ids<\/button>/);
-  // Base and Current stay two labelled versions, each with who saved it and a machine-readable time.
-  assert.match(review, /<section aria-label="Base"><h4>Base<\/h4><p class="hh-version-meta">Saved by Agent agent-a for person-a · <time datetime="[^"]+Z">/);
-  assert.match(review, /<section aria-label="Current"><h4>Current<\/h4><p class="hh-version-meta">Saved by Person person-b · <time datetime="[^"]+Z">/);
-  // The person's own draft was never saved, so it claims no author or time.
-  assert.match(review, /<section aria-label="Your proposed draft"><h4>Your proposed draft<\/h4>(?!<p class="hh-version-meta">)/);
+  // The two versions to compare come first and in this order: Current, with who saved it and a machine-readable time,
+  // then the person's own draft, which was never saved and so claims no author or time.
+  assert.match(review, /<div class="hh-comparison"><section aria-label="Current"><h4>Current<\/h4><p class="hh-version-meta">Saved by Person person-b · <time datetime="[^"]+Z">[\s\S]*?<\/section><section aria-label="Your draft"><h4>Your draft<\/h4>(?!<p class="hh-version-meta">)[\s\S]*?<\/section><\/div>/);
+  // The original both started from is not drawn until asked for; its button says so and sits right under the two.
+  assert.equal(state.show_original, false);
+  assert.doesNotMatch(review, /aria-label="Original version"|agent-a for person-a/);
+  assert.match(review, /<\/div>\s*<button type="button" data-hh-action="original" data-hh-value="conflict" aria-expanded="false">Show original version<\/button>/);
+  // Asked for: the whole original, with who saved it and when, under the two versions and before the review tick.
+  assert.equal(fixture.controller.toggleOriginal(), true);
+  state = fixture.controller.getState();
+  review = renderHouseholdConflict(state);
+  assert.match(review, /aria-expanded="true">Hide original version<\/button>\s*<div class="hh-original"><section aria-label="Original version"><h4>Original version<\/h4><p class="hh-version-meta">Saved by Agent agent-a for person-a · <time datetime="[^"]+Z">/);
+  assert.ok(review.indexOf('class="hh-original"') > review.indexOf('aria-label="Your draft"') && review.indexOf('class="hh-original"') < review.indexOf('data-hh-review'));
+  // It is display only: the draft, the conflict and the save state are untouched, and it closes again.
+  assert.equal(state.save_state, 'conflict'); assert.deepEqual(state.proposed, fixture.conflict.proposed);
+  assert.equal(fixture.controller.toggleOriginal(), false);
+  assert.doesNotMatch(renderHouseholdConflict(fixture.controller.getState()), /aria-label="Original version"/);
 
-  // On: the exact ids are there to compare, labelled Base and Current, and each history row carries its own.
+  // On: the exact ids are there to compare, labelled Original and Current, and each history row carries its own.
   assert.equal(fixture.controller.toggleRevisionIds(), true);
   state = fixture.controller.getState();
   review = renderHouseholdConflict(state);
   history = renderHouseholdObjectHistory(object(), false, undefined, state.show_revision_ids);
-  assert.match(review, new RegExp(`Base revision <code>${base}</code> · Current revision <code>${current}</code>`));
+  assert.match(review, new RegExp(`Original revision <code>${base}</code> · Current revision <code>${current}</code>`));
   assert.match(review, /aria-pressed="true">Hide revision ids<\/button>/);
   for (const version of object().history) assert.match(history, new RegExp(`Revision <code>${version.revision.token}</code>`));
   assert.match(renderHouseholdObjects(state), new RegExp(`Revision <code>${object().history[0]!.revision.token}</code>`));
@@ -229,8 +241,8 @@ test('conflicts require private recovery and review; the reviewed retry uses cur
   assert.equal(await fixture.controller.save(true), false);
   assert.equal(await fixture.controller.recoverDraft(), true);
   const html = renderHouseholdConflict(fixture.controller.getState());
-  assert.match(html, /aria-label="Base"/); assert.match(html, /aria-label="Current"/);
-  assert.match(html, /aria-label="Your proposed draft"/);
+  assert.match(html, /aria-label="Current"/); assert.match(html, /aria-label="Your draft"/);
+  assert.doesNotMatch(html, /aria-label="Original version"/, 'the original is shown on request');
   assert.equal(await fixture.controller.save(), false);
   assert.equal(calls.length, 1);
   await fixture.controller.save(true);
@@ -355,7 +367,7 @@ test('all three Astro components compile and server-render escaped, accessible r
   for (const [name, props, expected] of [
     ['HouseholdObjects', { state }, /aria-label="Household workspace"/],
     ['HouseholdObjectHistory', { object: fixture.doc }, /Retired · retained/],
-    ['HouseholdConflict', { state }, /aria-label="Your proposed draft"/],
+    ['HouseholdConflict', { state }, /aria-label="Your draft"/],
   ] as const) {
     const source = await readFile(new URL(`../src/components/app/${name}.astro`, import.meta.url), 'utf8');
     const compiled = transform(source, { filename: `${name}.astro`, internalURL: 'astro/compiler-runtime',
