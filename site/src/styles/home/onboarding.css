@@ -847,7 +847,7 @@
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
-  min-block-size: 36px;
+  min-block-size: 44px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -981,6 +981,31 @@
 }
 
 .hm-ahp__link:hover { color: var(--home-ink); }
+
+.hm-ahp__open-row,
+.hm-ahp__step-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-inline-size: 0;
+}
+
+.hm-ahp__open-row[hidden],
+.hm-ahp__open-dest[hidden] { display: none; }
+
+.hm-ahp__open-row > .hm-ahp__link {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 0;
+}
+
+.hm-ahp__open-dest {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  overflow-wrap: anywhere;
+}
 
 .hm-ahp__status {
   position: absolute;

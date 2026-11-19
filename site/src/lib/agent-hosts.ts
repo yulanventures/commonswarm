@@ -169,6 +169,16 @@ export function claudeInstallLink(address: string = AGENT_CONNECTOR_ADDRESS): st
   return `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=CommonSwarm&connectorUrl=${encodeURIComponent(address)}`;
 }
 
+/** The host name shown beside an external web open action (e.g. "claude.ai"); empty for relative or app-scheme links. */
+export function openDestination(href: string): string {
+  try {
+    const url = new URL(href);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.host : "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Cursor's documented install-link format: the server object, JSON-serialized, base64 of its
  * UTF-8 bytes, query-escaped. Built from the constant so the link cannot drift from the address.
