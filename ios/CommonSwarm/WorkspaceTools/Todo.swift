@@ -22,19 +22,21 @@ struct Todo: Decodable, Hashable, Identifiable {
     }
 }
 
+@MainActor
 class TodoViewModel: ObservableObject {
     @Published var todos: [Todo] = []
     @Published var isLoading = false
     @Published var error: Error?
     
     func load(api: TodoAPI, workspaceID: UUID) async {
-        await MainActor.run { isLoading = true; error = nil }
+        isLoading = true
+        error = nil
         do {
             let fetchedTodos = try await api.todos(workspace: workspaceID)
-            await MainActor.run { self.todos = fetchedTodos }
+            self.todos = fetchedTodos
         } catch {
-            await MainActor.run { self.error = error }
+            self.error = error
         }
-        await MainActor.run { isLoading = false }
+        isLoading = false
     }
 }
