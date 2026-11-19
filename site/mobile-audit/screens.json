@@ -4242,7 +4242,11 @@
     "requiresSeed": [
       "create_workspace",
       "pending invite"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "revoke_invitation"
+    }
   },
   {
     "id": "menu.landing-preview",

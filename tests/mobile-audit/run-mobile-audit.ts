@@ -256,6 +256,16 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Escape", expect: { active: '[data-people-detail] [data-pd-focus="withdraw-{withdrawAgent}"]' } },
   }],
+  // Cancel in the Invites tab: Go back has initial focus; Escape sends nothing and returns to the same row's Cancel button.
+  "dialog.people-invite-cancel": [{
+    name: "people-invite-cancel-escape-returns-to-row",
+    start: { active: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind="person"]' } },
+  }],
   // Lowering your own role: the app focuses Go back; Escape goes back to the role select, nothing is saved.
   "dialog.role-confirm": [{
     name: "role-confirm-escape-keeps-role",
