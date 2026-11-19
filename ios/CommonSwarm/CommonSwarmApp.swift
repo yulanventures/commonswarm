@@ -236,7 +236,7 @@ struct HistoryView: View {
                         Button("Load earlier messages") { Task { await load(.older(before: first)) } }.disabled(history.loadingOlder)
                     }
                     if let messages = history.messages {
-                        if messages.isEmpty && draft.outgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
+                        if messages.isEmpty && visibleOutgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
                         ForEach(messages) { message in
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -253,7 +253,7 @@ struct HistoryView: View {
                             }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }
-                    ForEach(draft.outgoing) { row in
+                    ForEach(visibleOutgoing) { row in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack {
                                 Text("You").bold()
@@ -348,10 +348,14 @@ struct HistoryView: View {
         }
     }
 
-    private var latestID: UUID? { draft.outgoing.last?.id ?? history.messages?.last?.id }
+    private var latestID: UUID? { visibleOutgoing.last?.id ?? history.messages?.last?.id }
+
+    private var visibleOutgoing: [Composer.Outgoing] {
+        previewBar == nil ? draft.outgoing : []
+    }
 
     private func deliver(_ post: Post?) {
-        guard let post else { return }
+        guard previewBar == nil, let post else { return }
         scrollToLatest += 1
         Task {
             guard let row = draft.outgoing.first(where: { $0.id == post.command_id }) else { return }
