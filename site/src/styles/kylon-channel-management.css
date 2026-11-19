@@ -373,12 +373,12 @@ live-dashboard.dashboard[data-kylon-shell] [data-conversation-members-dialog] .d
 }
 live-dashboard.dashboard[data-kylon-shell] .cm-members-toolbar { display: flex; flex: none; }
 live-dashboard.dashboard[data-kylon-shell] .cm-members-add-panel {
-  display: flex; flex-direction: column; gap: 10px; flex: none;
+  display: flex; flex-direction: column; gap: 10px; flex: 0 1 auto; min-block-size: 0; overflow: hidden;
   padding: 12px; border: 1px solid var(--k-shell-line); border-radius: var(--k-shell-radius);
   background: var(--k-shell-subtle);
 }
 live-dashboard.dashboard[data-kylon-shell] .cm-members-add-list {
-  max-block-size: 13rem; overflow-y: auto; overscroll-behavior: contain;
+  flex: 1 1 auto; min-block-size: 0; max-block-size: 13rem; overflow-y: auto; overscroll-behavior: contain;
 }
 live-dashboard.dashboard[data-kylon-shell] .cm-member-row {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
@@ -427,5 +427,20 @@ live-dashboard.dashboard[data-kylon-shell] .cm-member-row__confirm-text {
 @media (pointer: coarse) {
   live-dashboard.dashboard[data-kylon-shell] :is([data-conversation-picker-dialog], [data-conversation-members-dialog]) .cm-search {
     font-size: 16px; line-height: 24px;
+  }
+}
+/* Short viewports (844x390 landscape or phone with search keyboard open): keep Add and Cancel inside the viewport while the candidate list scrolls. */
+@media (height <= 32rem) {
+  live-dashboard.dashboard[data-kylon-shell] :is([data-conversation-picker-dialog], [data-conversation-members-dialog]) {
+    max-block-size: calc(100dvh - 16px); padding: 12px 16px; gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-conversation-members-dialog]:has(.cm-members-add-panel:not([hidden])) .cm-directory-results {
+    display: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cm-members-add-panel {
+    flex: 1 1 auto; min-block-size: 0; padding: 10px; gap: 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cm-members-add-list {
+    max-block-size: none;
   }
 }

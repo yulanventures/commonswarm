@@ -2766,7 +2766,10 @@ import "../../styles/kylon-image-viewer.css";
       else if (action.kind === "all-channels") openChannelDirectory();
       else if (action.kind === "channel-settings") openChannelDialog("settings", activeChannelId);
       else if (action.kind === "conversation-members") {
-        if (typeof openConversationMembersSheet === "function") void openConversationMembersSheet(null);
+        if (typeof openConversationMembersSheet === "function") {
+          const trigger = all<HTMLElement>(".hm-menu__trigger").find(el => el.getClientRects().length > 0 && !el.closest("[hidden],[inert]")) ?? null;
+          void openConversationMembersSheet(trigger);
+        }
       }
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
       else if (action.kind === "star" || action.kind === "involvement") {
@@ -15108,6 +15111,7 @@ import "../../styles/kylon-image-viewer.css";
         ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
         : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
         : element?.hasAttribute("data-conversation-members-open") ? "[data-conversation-members-open]"
+        : element?.classList.contains("hm-menu__trigger") ? ".hm-menu__trigger"
         : element?.hasAttribute("data-channel-header-description") ? "[data-channel-header-description]"
         : element?.hasAttribute("data-channel-lead-pill") ? "[data-channel-lead-pill]"
         : element?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]"

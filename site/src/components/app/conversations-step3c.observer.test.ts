@@ -16,6 +16,8 @@ function installConversations3CFixture() {
   f.openMode = params.get("open_mode") ?? "flow";
   f.viewerRole = params.get("viewer_role") ?? "owner";
   f.promotedManager = params.get("promoted_manager") === "1";
+  f.manyMembers = params.get("many_members") === "1";
+  f.sameName = params.get("same_name") === "1";
   f.convCommands = [] as any[];
   f.signalCommands = [] as any[];
   f.uploadCalls = [] as string[];
@@ -64,7 +66,7 @@ function installConversations3CFixture() {
       lead_mode: "workspace", lead_agent_principal_id: null,
       members: [
         { kind: "user", id: f.owner, name: "Synthetic owner", left_at: null },
-        { kind: "user", id: peerAlex, name: "Alex", left_at: null },
+        { kind: "user", id: peerAlex, name: f.sameName ? "Jordan Lee" : "Alex", left_at: null },
       ],
       notify_level: "everything", starred: false, star_rank: null,
       read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
@@ -76,7 +78,7 @@ function installConversations3CFixture() {
       lead_mode: "workspace", lead_agent_principal_id: null,
       members: [
         { kind: "user", id: f.owner, name: "Synthetic owner", left_at: null },
-        { kind: "user", id: peerAlex, name: "Alex", left_at: null },
+        { kind: "user", id: peerAlex, name: f.sameName ? "Jordan Lee" : "Alex", left_at: null },
       ],
       notify_level: "everything", starred: false, star_rank: null,
       read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
@@ -87,7 +89,7 @@ function installConversations3CFixture() {
       archived_at: null, joined: true, generation: 1, lead_mode: null, lead_agent_principal_id: null,
       members: [
         { kind: "user", id: f.owner, name: "Synthetic owner", left_at: null },
-        { kind: "user", id: peerAlex, name: "Alex", left_at: null },
+        { kind: "user", id: peerAlex, name: f.sameName ? "Jordan Lee" : "Alex", left_at: null },
       ],
       notify_level: "everything", starred: false, star_rank: null,
       read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
@@ -138,6 +140,24 @@ function installConversations3CFixture() {
       return Response.json(f.promotedManager ? [{ is_manager: true }] : []);
     }
     if (url.pathname === "/rest/v1/member_profiles") {
+      if (f.sameName) {
+        return Response.json([
+          { user_id: f.owner, display_name: "Synthetic owner", role: f.viewerRole },
+          { user_id: peerAlex, display_name: "Jordan Lee", role: "member" },
+          { user_id: peerSam, display_name: "Jordan Lee", role: "member" },
+        ]);
+      }
+      if (f.manyMembers) {
+        return Response.json([
+          { user_id: f.owner, display_name: "Synthetic owner", role: f.viewerRole },
+          { user_id: peerAlex, display_name: "Alex", role: "member" },
+          ...Array.from({ length: 10 }, (_, i) => ({
+            user_id: `aaaa0000-0000-4000-8000-${String(i + 10).padStart(12, "0")}`,
+            display_name: `Teammate ${i + 1}`,
+            role: "member",
+          })),
+        ]);
+      }
       return Response.json([
         { user_id: f.owner, display_name: "Synthetic owner", role: f.viewerRole },
         { user_id: peerAlex, display_name: "Alex", role: "member" },
@@ -300,6 +320,18 @@ async function observeConversations3C() {
   const click = async (selector: string) => {
     const response = await fetch(`/__click?selector=${encodeURIComponent(selector)}`);
     check(response.ok, "click failed (" + selector + "): " + await response.text());
+  };
+  const pressKey = async (key: string) => {
+    const response = await fetch(`/__key?key=${encodeURIComponent(key)}`);
+    check(response.ok, "key failed (" + key + "): " + await response.text());
+  };
+  const centerReachable = (el: HTMLElement | null, label: string) => {
+    target44(el, label);
+    const r = el!.getBoundingClientRect();
+    check(r.top >= 0 && r.bottom <= innerHeight + 0.5 && r.left >= 0 && r.right <= innerWidth + 0.5, `${label} clipped outside viewport: ${JSON.stringify(r)} vs ${innerWidth}x${innerHeight}`);
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const hit = document.elementFromPoint(cx, cy);
+    check(hit?.closest("button") === el, `${label} center (${cx.toFixed(1)},${cy.toFixed(1)}) missed hit test: hit ${hit?.outerHTML.slice(0, 120)}`);
   };
   const target44 = (el: HTMLElement | null, label: string) => {
     check(el && visible(el), `${label} not visible`);
@@ -499,14 +531,37 @@ async function observeConversations3C() {
         await click("[data-conversation-members-add-toggle]:visible");
         await wait("add panel open", () => visible(one("[data-conversation-members-add-panel]")));
         await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
-        target44(one<HTMLElement>("[data-conversation-members-add-submit]"), "Add submit");
+        centerReachable(one<HTMLElement>("[data-conversation-members-add-submit]"), "Add submit");
+        centerReachable(one<HTMLElement>("[data-conversation-members-add-cancel]"), "Add cancel");
       } else {
         target44(one<HTMLElement>(`[data-conversation-member-remove="user:${f.ids.peerAlex}"]`), "Remove button");
         await click(`[data-conversation-member-remove="user:${f.ids.peerAlex}"]:visible`);
         await wait("remove confirm open", () => visible(one(`[data-conversation-member-confirm="user:${f.ids.peerAlex}"]`)));
-        target44(one<HTMLElement>(`[data-conversation-member-remove-cancel="user:${f.ids.peerAlex}"]`), "Remove Cancel");
-        target44(one<HTMLElement>(`[data-conversation-member-remove-confirm="user:${f.ids.peerAlex}"]`), "Remove Confirm");
+        centerReachable(one<HTMLElement>(`[data-conversation-member-remove-cancel="user:${f.ids.peerAlex}"]`), "Remove Cancel");
+        centerReachable(one<HTMLElement>(`[data-conversation-member-remove-confirm="user:${f.ids.peerAlex}"]`), "Remove Confirm");
+        if (f.sameName) {
+          const confirmText = one(`[data-conversation-member-confirm="user:${f.ids.peerAlex}"]`)?.textContent ?? "";
+          check(confirmText.includes("Jordan Lee · dddd44"), "same-name remove prompt must include discriminator: " + confirmText);
+        }
       }
+      await document.fonts.ready;
+      check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
+      document.documentElement.dataset.step3cObservation = JSON.stringify({ ok: true, capture: f.capture });
+      return;
+    }
+
+    if (f.capture === "same-name-picker") {
+      await openDrawerIfPhone();
+      await click("[data-home-new-dm]:visible");
+      await wait("picker open", () => one<HTMLDialogElement>("[data-conversation-picker-dialog]")?.open === true);
+      const opt1 = one(`[data-conversation-picker-option="user:${f.ids.peerAlex}"]`);
+      const opt2 = one(`[data-conversation-picker-option="user:${f.ids.peerSam}"]`);
+      check(opt1?.textContent?.includes("Jordan Lee · dddd44") && opt2?.textContent?.includes("Jordan Lee · dddd55"), "both Jordan Lee rows must be distinguishable");
+      await click(`[data-conversation-picker-option="user:${f.ids.peerAlex}"]:visible`);
+      const chip = one<HTMLElement>(`[data-conversation-picker-chip="user:${f.ids.peerAlex}"]`);
+      check(chip?.getAttribute("aria-label")?.includes("Jordan Lee · dddd44"), "selected chip aria-label must carry discriminator");
+      centerReachable(chip, "same-name selected chip");
+      centerReachable(one<HTMLElement>("[data-conversation-picker-submit]"), "picker Open");
       await document.fonts.ready;
       check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
       document.documentElement.dataset.step3cObservation = JSON.stringify({ ok: true, capture: f.capture });
@@ -576,8 +631,9 @@ async function observeConversations3C() {
     await click(`[data-conversation-member-remove-confirm="user:${f.ids.peerAlex}"]:visible`);
     await wait("Alex removed from #ops", () => !one(`[data-conversation-member-row="user:${f.ids.peerAlex}"]`));
     check(f.convCommands.some((c: any) => c.kind === "conversation_remove" && c.conversation_id === f.ids.opsConv), "confirming Remove must send conversation_remove");
-    await click("[data-conversation-members-close]:visible");
-    await wait("ops members closed", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+    await pressKey("Escape");
+    await wait("ops members closed via Escape", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+    check(document.activeElement !== document.body && visible(document.activeElement), "Escape must return focus to a reachable opener, got " + document.activeElement?.outerHTML.slice(0, 120));
 
     await openDrawerIfPhone();
     await click(`[data-rail-channel="${f.ids.secretChannel}"]:visible`);
@@ -622,6 +678,7 @@ test("Step 3C signed-in dashboard wires New message picker (#511 flows), Channel
     const url = new URL(request.url!, "http://127.0.0.1");
     if (url.pathname === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
     if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).first().click().then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
+    if (url.pathname === "/__key") { void activePage!.keyboard.press(url.searchParams.get("key")!).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname.startsWith("/fonts/") && url.pathname.endsWith(".woff2")) { void readFile(join(fonts, basename(url.pathname))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return; }
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(url.pathname === "/app.js" ? bundled.join("\n") : html);
@@ -651,6 +708,9 @@ test("Step 3C signed-in dashboard wires New message picker (#511 flows), Channel
       { name: "1024x1366-dark-picker", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=dark&capture=picker`, screenshot: true },
       { name: "360x740-light-members-add", width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=light&capture=members-add`, screenshot: true },
       { name: "360x740-dark-members-add", width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=dark&capture=members-add`, screenshot: true },
+      { name: "844x390-light-members-add-landscape", width: 844, height: 390, query: `w=${ws}&c=${opsCh}&theme=light&capture=members-add&many_members=1`, screenshot: true },
+      { name: "360x740-light-same-name-picker", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&capture=same-name-picker&same_name=1`, screenshot: true },
+      { name: "360x740-light-same-name-members", width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=light&capture=members-remove-confirm&same_name=1`, screenshot: true },
       { name: "390x844-light-members-remove-confirm", width: 390, height: 844, query: `w=${ws}&c=${opsCh}&theme=light&capture=members-remove-confirm`, screenshot: true },
       { name: "390x844-dark-members-remove-confirm", width: 390, height: 844, query: `w=${ws}&c=${opsCh}&theme=dark&capture=members-remove-confirm`, screenshot: true },
       { name: "1024x1366-light-members-add", width: 1024, height: 1366, query: `w=${ws}&c=${opsCh}&theme=light&capture=members-add`, screenshot: true },
