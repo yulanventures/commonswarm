@@ -4294,6 +4294,43 @@ export async function answerChoice(
   return { ok: false, status, error, message };
 }
 
+export type AnswerPlainAskResult =
+  | { ok: true }
+  | { ok: false; status: number; error: string | null; message: string };
+
+/** Wire body for a private reply (`post_signal` with `in_reply_to`) answering or closing a historical ask. */
+export function plainAskReplyCommand(signalId: string, bodyText: string): Record<string, unknown> {
+  return {
+    kind: "post_signal",
+    signal_kind: "note",
+    body: bodyText,
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: signalId,
+    about: null,
+  };
+}
+
+/** Sends a private reply to answer or close a historical plain-text or stale ask in place. */
+export async function answerPlainAsk(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  signalId: string,
+  bodyText: string,
+): Promise<AnswerPlainAskResult> {
+  const command = plainAskReplyCommand(signalId, bodyText);
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 200 && body.status === "accepted") return { ok: true };
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : status === 403
+      ? "Whoever asked is no longer in this workspace, so this couldn't be sent."
+      : CHOICE_ANSWER_FAILED;
+  return { ok: false, status, error, message };
+}
+
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */
 export async function homeOverviewAsks(workspaceId: string, ids: readonly string[]): Promise<Signal[]> {
   const api = client();

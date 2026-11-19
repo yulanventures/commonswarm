@@ -8,6 +8,7 @@
 @import './context.css';
 @import '../kylon-channel.css';
 @import '../kylon-waiting-panel.css';
+@import '../kylon-waiting-survey.css';
 @import '../kylon-rail.css';
 @import '../kylon-stream.css';
 @import '../carbon-theme.css';

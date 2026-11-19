@@ -15,8 +15,28 @@ import {
   type WaitingConversation,
   type WaitingSignalPlacement,
 } from "./waiting-count";
+import {
+  buildPlainAskCard,
+  emptySurveyDraft,
+  hasChoices,
+  plainAskCardSignature,
+  renderWaitingSurvey,
+  surveyDoneMessage,
+  type SurveyDraft,
+  type SurveyReviewEntry,
+  type WaitingSurveyHandlers,
+  type WaitingSurveyVM,
+} from "./waiting-survey";
 
-export { classifyAskConversation, type WaitingConversation, type WaitingSignalPlacement };
+export {
+  classifyAskConversation,
+  emptySurveyDraft,
+  hasChoices,
+  surveyDoneMessage,
+  type WaitingConversation,
+  type WaitingSignalPlacement,
+};
+export type { SurveyDraft, SurveyReviewEntry, WaitingSurveyHandlers, WaitingSurveyVM };
 
 export type WaitingScope = "channel" | "workspace" | "all";
 
@@ -42,12 +62,19 @@ export interface WaitingAskItem {
   when: string;
   createdAt: string;
   until: string;
-  choices: {
+  choices?: {
     options: ChoiceOption[];
     multi: boolean;
     pending?: true;
     error?: string;
     draft?: ChoiceDraft;
+    retryable?: true;
+  } | null;
+  plain?: {
+    pending?: true;
+    pendingMode?: "answer" | "stale";
+    error?: string;
+    draftText?: string;
     retryable?: true;
   };
 }
@@ -75,6 +102,8 @@ export interface WaitingPanelVM {
   catchUpHref?: string;
   statusMessage: string;
   statusSeq: number;
+  survey?: WaitingSurveyVM | null;
+  focusSurveyHeading?: boolean;
 }
 
 export interface WaitingPanelHandlers {
@@ -84,6 +113,11 @@ export interface WaitingPanelHandlers {
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
+  onSubmitPlain?: (item: WaitingAskItem, body: string, stale: boolean) => void;
+  onRetryPlain?: (item: WaitingAskItem) => void;
+  onDraftPlain?: (item: WaitingAskItem, text: string) => void;
+  onStartSurvey?: () => void;
+  surveyHandlers?: WaitingSurveyHandlers;
   onOpenCatchUp?: (href: string) => void;
 }
 
@@ -157,7 +191,9 @@ function cardLocationText(item: WaitingAskItem, scope: WaitingScope): string | n
   return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
 }
 
-function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
+type WaitingChoiceAskItem = WaitingAskItem & { choices: NonNullable<WaitingAskItem["choices"]> };
+
+function cardSignature(item: WaitingChoiceAskItem, scope: WaitingScope): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
@@ -176,7 +212,7 @@ function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
 
 function buildAskCard(
   doc: Document,
-  item: WaitingAskItem,
+  item: WaitingChoiceAskItem,
   scope: WaitingScope,
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
@@ -270,6 +306,7 @@ export function renderWaitingPanel(
     header.append(headingGroup, closeBtn);
 
     const controls = node(doc, "div", "cs-waiting-panel__controls");
+    controls.dataset.waitingControls = "";
     const scope = node(doc, "select", "cs-waiting-panel__scope");
     scope.dataset.waitingScope = "";
     scope.setAttribute("aria-label", "Scope");
@@ -278,7 +315,11 @@ export function renderWaitingPanel(
       opt.value = value;
       scope.append(opt);
     }
-    controls.append(scope);
+    const reviewBtn = node(doc, "button", "cs-waiting-panel__review-trigger", "Review questions");
+    reviewBtn.type = "button";
+    reviewBtn.dataset.waitingReviewStart = "";
+    reviewBtn.hidden = true;
+    controls.append(scope, reviewBtn);
 
     // Visible confirmation banner and polite live region: announces "Sent" and stays visible after the last answer.
     const status = node(doc, "p", "cs-waiting-panel__status");
@@ -318,6 +359,22 @@ export function renderWaitingPanel(
     };
   }
 
+  const controlsEl = root.querySelector<HTMLElement>("[data-waiting-controls]");
+  if (controlsEl) controlsEl.hidden = Boolean(vm.survey);
+
+  const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
+  if (reviewBtn) {
+    const canReview =
+      !vm.survey &&
+      typeof handlers.onStartSurvey === "function" &&
+      (vm.items.length >= 2 || vm.items.some(item => !hasChoices(item)));
+    reviewBtn.hidden = !canReview;
+    if (canReview) {
+      reviewBtn.textContent = vm.items.length === 1 ? "Review question" : `Review questions (${vm.items.length})`;
+      reviewBtn.onclick = () => handlers.onStartSurvey?.();
+    }
+  }
+
   const statusEl = root.querySelector<HTMLElement>("[data-waiting-status]");
   if (statusEl) {
     const hasStatus = vm.statusMessage.trim() !== "";
@@ -330,6 +387,12 @@ export function renderWaitingPanel(
 
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
   if (!body) return;
+
+  if (vm.survey && handlers.surveyHandlers) {
+    delete body.dataset.waitingEmptyKey;
+    renderWaitingSurvey(body, vm.survey, handlers.surveyHandlers, vm.focusSurveyHeading === true);
+    return;
+  }
 
   const buildCatchUpLink = (): HTMLAnchorElement | null => {
     if (!vm.catchUpHref) return null;
@@ -471,13 +534,20 @@ export function renderWaitingPanel(
 
   let cursor: ChildNode | null = list.firstChild;
   for (const item of vm.items) {
-    const sig = cardSignature(item, vm.scope);
+    const choiceCard = hasChoices(item);
+    const sig = choiceCard ? cardSignature(item, vm.scope) : plainAskCardSignature(item, vm.scope);
     let card = existing.get(item.id);
     if (card && card.dataset.waitingCardSig === sig) {
       const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
       if (timeEl && timeEl.textContent !== item.when) timeEl.textContent = item.when;
     } else {
-      const built = buildAskCard(doc, item, vm.scope, handlers);
+      const built = choiceCard
+        ? buildAskCard(doc, item, vm.scope, handlers)
+        : buildPlainAskCard(doc, item, vm.scope, {
+            onSubmitPlain: (ask, text, stale) => handlers.onSubmitPlain?.(ask, text, stale),
+            onRetryPlain: (ask) => handlers.onRetryPlain?.(ask),
+            onDraftPlain: (ask, text) => handlers.onDraftPlain?.(ask, text),
+          });
       if (card) {
         if (cursor === card) cursor = built;
         card.replaceWith(built);

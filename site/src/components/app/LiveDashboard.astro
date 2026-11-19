@@ -1303,7 +1303,7 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
-  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
+  import type { SurveyDraft, SurveyReviewEntry, WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1463,6 +1463,7 @@ import "../../styles/kylon-image-viewer.css";
     removeReaction,
     type ReactionResult,
     answerChoice,
+    answerPlainAsk,
     type ChannelUnread,
     createChannel,
     updateChannel,
@@ -5655,9 +5656,9 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       }
     };
-    const showWaitingSent = (): void => {
+    const showWaitingSent = (message = "Sent"): void => {
       window.clearTimeout(waitingStatusTimer);
-      waitingStatusMessage = "Sent";
+      waitingStatusMessage = message;
       waitingStatusSeq += 1;
       waitingStatusTimer = window.setTimeout(() => {
         waitingStatusTimer = undefined;
@@ -5674,6 +5675,26 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+    const waitingPlainPendingMode = new Map<string, "answer" | "stale">();
+    const waitingPlainLastSubmissions = new Map<string, { body: string; stale: boolean }>();
+    const waitingSurveyDrafts = new Map<string, SurveyDraft>();
+    const waitingSurveyCommandIds = new Map<string, string>();
+    let waitingSurveyActive = false;
+    let waitingSurveyStep = 0;
+    let waitingSurveySending = false;
+    let waitingSurveyFocusHeading = false;
+    let waitingSurveyPlaceKey = "";
+    const resetWaitingSurveySession = (): void => {
+      waitingPlainPendingMode.clear();
+      waitingPlainLastSubmissions.clear();
+      waitingSurveyDrafts.clear();
+      waitingSurveyCommandIds.clear();
+      waitingSurveyActive = false;
+      waitingSurveyStep = 0;
+      waitingSurveySending = false;
+      waitingSurveyFocusHeading = false;
+      waitingSurveyPlaceKey = "";
+    };
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -5720,22 +5741,41 @@ import "../../styles/kylon-image-viewer.css";
       const items: WaitingAskItem[] = [];
       for (const workspace of workspaces) {
         for (const ask of waitingPanelAsks.get(workspace.id) ?? []) {
-          const draft = choiceDrafts.get(choiceDraftKey(ask.workspaceId, ask.id));
+          const key = choiceDraftKey(ask.workspaceId, ask.id);
           const error = waitingPanelErrors.get(ask.id);
           const pending = waitingPanelTickets.has(ask.id);
-          const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
-          items.push({
-            ...ask,
-            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
-            choices: {
-              options: ask.choices.options,
-              multi: ask.choices.multi,
-              ...(pending ? { pending: true as const } : {}),
-              ...(error ? { error } : {}),
-              ...(draft ? { draft } : {}),
-              ...(retryable ? { retryable: true as const } : {}),
-            },
-          });
+          if (ask.choices && ask.choices.options.length > 0) {
+            const draft = choiceDrafts.get(key);
+            const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
+            items.push({
+              ...ask,
+              channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+              choices: {
+                options: ask.choices.options,
+                multi: ask.choices.multi,
+                ...(pending ? { pending: true as const } : {}),
+                ...(error ? { error } : {}),
+                ...(draft ? { draft } : {}),
+                ...(retryable ? { retryable: true as const } : {}),
+              },
+            });
+          } else {
+            const draftText = waitingSurveyDrafts.get(key)?.plainText ?? "";
+            const retryable = error !== undefined && waitingPlainLastSubmissions.has(ask.id);
+            const pendingMode = waitingPlainPendingMode.get(ask.id);
+            items.push({
+              ...ask,
+              channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+              choices: null,
+              plain: {
+                ...(pending ? { pending: true as const } : {}),
+                ...(pending && pendingMode ? { pendingMode } : {}),
+                ...(error ? { error } : {}),
+                ...(draftText ? { draftText } : {}),
+                ...(retryable ? { retryable: true as const } : {}),
+              },
+            });
+          }
         }
       }
       return items;
@@ -5785,7 +5825,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
-      if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      if (!activeSession || sampleMode || !item.choices || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
       const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
       waitingPanelTickets.set(item.id, ticket);
       waitingPanelErrors.delete(item.id);
@@ -5800,7 +5840,9 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingPanelTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
       waitingPanelTickets.delete(item.id);
       if (result.ok) {
-        choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
+        const key = choiceDraftKey(item.workspaceId, item.id);
+        choiceDrafts.delete(key);
+        waitingSurveyDrafts.delete(key);
         waitingPanelErrors.delete(item.id);
         waitingPanelLastSubmissions.delete(item.id);
         const list = waitingPanelAsks.get(item.workspaceId);
@@ -5834,6 +5876,139 @@ import "../../styles/kylon-image-viewer.css";
       renderWaitingPanelView();
     };
 
+    const sendWaitingPanelPlain = async (item: WaitingAskItem, body: string, stale: boolean): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
+      const cmdKey = `${item.workspaceId}:${item.id}:${stale ? "stale" : "plain"}:${body}`;
+      const cmdId = waitingSurveyCommandIds.get(cmdKey) ?? uuid();
+      waitingSurveyCommandIds.set(cmdKey, cmdId);
+      waitingPanelTickets.set(item.id, ticket);
+      waitingPlainPendingMode.set(item.id, stale ? "stale" : "answer");
+      waitingPanelErrors.delete(item.id);
+      waitingPlainLastSubmissions.set(item.id, { body, stale });
+      renderWaitingPanelView();
+      let result: Awaited<ReturnType<typeof answerPlainAsk>>;
+      try {
+        result = await answerPlainAsk(activeSession, cmdId, item.workspaceId, item.id, body);
+      } catch {
+        result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
+      }
+      if (waitingPanelTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingPanelTickets.delete(item.id);
+      waitingPlainPendingMode.delete(item.id);
+      if (result.ok) {
+        const key = choiceDraftKey(item.workspaceId, item.id);
+        waitingSurveyDrafts.delete(key);
+        waitingSurveyCommandIds.delete(cmdKey);
+        waitingPanelErrors.delete(item.id);
+        waitingPlainLastSubmissions.delete(item.id);
+        const list = waitingPanelAsks.get(item.workspaceId);
+        if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingSent(stale ? "Cleared" : "Sent");
+        renderWaitingPanelView();
+        renderHomeRail();
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingPanelErrors.set(item.id, result.message);
+      renderWaitingPanelView();
+    };
+
+    const sendWaitingSurveyBatch = async (entries: readonly SurveyReviewEntry[]): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || waitingSurveySending || entries.length === 0 || activeSession.user.id !== homeViewerId()) return;
+      const viewer = activeSession.user.id;
+      waitingSurveySending = true;
+      renderWaitingPanelView();
+      let sentAnswers = 0;
+      let clearedStale = 0;
+      let failedCount = 0;
+      for (const entry of entries) {
+        if (homeViewerId() !== viewer || session !== activeSession) {
+          waitingSurveySending = false;
+          return;
+        }
+        const { item, resolution } = entry;
+        const cmdKey = `${item.workspaceId}:${item.id}:${JSON.stringify(resolution)}`;
+        const cmdId = waitingSurveyCommandIds.get(cmdKey) ?? uuid();
+        waitingSurveyCommandIds.set(cmdKey, cmdId);
+        let ok = false;
+        let errorMessage = CHOICE_ANSWER_FAILED;
+        let choiceAnswer: { optionIds: string[]; otherText: string | null } | null = null;
+        try {
+          if (resolution.kind === "choice" && item.choices) {
+            const res = await answerChoice(activeSession, cmdId, item.workspaceId, item.id, item.choices.multi, resolution.submission);
+            if (res.ok) {
+              ok = true;
+              choiceAnswer = { optionIds: res.optionIds, otherText: res.otherText };
+            } else {
+              errorMessage = res.message;
+            }
+          } else if (resolution.kind === "plain" || resolution.kind === "stale") {
+            const res = await answerPlainAsk(activeSession, cmdId, item.workspaceId, item.id, resolution.body);
+            if (res.ok) ok = true;
+            else errorMessage = res.message;
+          }
+        } catch {
+          errorMessage = CHOICE_ANSWER_FAILED;
+        }
+        if (homeViewerId() !== viewer || session !== activeSession) {
+          waitingSurveySending = false;
+          return;
+        }
+        if (ok) {
+          const key = choiceDraftKey(item.workspaceId, item.id);
+          choiceDrafts.delete(key);
+          waitingSurveyDrafts.delete(key);
+          waitingSurveyCommandIds.delete(cmdKey);
+          waitingPanelErrors.delete(item.id);
+          waitingPanelLastSubmissions.delete(item.id);
+          waitingPlainLastSubmissions.delete(item.id);
+          const list = waitingPanelAsks.get(item.workspaceId);
+          if (list) waitingPanelAsks.set(item.workspaceId, list.filter(ask => ask.id !== item.id));
+          const prevCount = homeOverviewCounts.get(item.workspaceId);
+          if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+          if (choiceAnswer && item.workspaceId === activeWorkspaceId) {
+            const current = choiceRows.get(item.id);
+            if (current) {
+              choiceRows.set(item.id, {
+                ...current,
+                answer: {
+                  optionId: choiceAnswer.optionIds[0] ?? "other",
+                  optionIds: choiceAnswer.optionIds,
+                  otherText: choiceAnswer.otherText,
+                  byViewer: true,
+                  actorUserId: viewer,
+                  at: null,
+                },
+              });
+              renderFeed();
+            }
+          }
+          if (resolution.kind === "stale") clearedStale += 1;
+          else sentAnswers += 1;
+        } else {
+          waitingPanelErrors.set(item.id, errorMessage);
+          failedCount += 1;
+        }
+      }
+      waitingSurveySending = false;
+      if (failedCount === 0 && (sentAnswers > 0 || clearedStale > 0)) {
+        waitingSurveyActive = false;
+        waitingSurveyStep = 0;
+        showWaitingSent(waitingPanelMod?.surveyDoneMessage(sentAnswers, clearedStale) ?? "Sent");
+      } else if (failedCount > 0) {
+        const done = sentAnswers + clearedStale;
+        if (done > 0) showWaitingSent(`Sent ${done} · ${failedCount} could not be sent`);
+      }
+      renderWaitingPanelView();
+      renderHomeRail();
+      if (sentAnswers > 0 || clearedStale > 0) scheduleWaitingRefresh(400);
+    };
+
     const renderWaitingPanelView = (): void => {
       const container = one<HTMLElement>("[data-waiting-panel]");
       if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
@@ -5852,6 +6027,21 @@ import "../../styles/kylon-image-viewer.css";
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
+      const focusHeading = waitingSurveyFocusHeading;
+      waitingSurveyFocusHeading = false;
+      const placeKey = `${waitingScope}:${place.workspaceId}:${place.kind}:${place.channelId ?? ""}:${place.dm?.id ?? ""}`;
+      if (waitingSurveyActive && waitingSurveyPlaceKey !== "" && waitingSurveyPlaceKey !== placeKey && !waitingSurveySending) {
+        waitingSurveyActive = false;
+        waitingSurveyStep = 0;
+      }
+      waitingSurveyPlaceKey = placeKey;
+      if (waitingSurveyActive && visibleItems.length === 0 && !waitingSurveySending) {
+        waitingSurveyActive = false;
+        waitingSurveyStep = 0;
+      }
+      if (waitingSurveyActive && waitingSurveyStep > visibleItems.length) {
+        waitingSurveyStep = visibleItems.length;
+      }
       waitingPanelMod.renderWaitingPanel(
         container,
         {
@@ -5870,10 +6060,24 @@ import "../../styles/kylon-image-viewer.css";
           catchUpHref: routeHref({ view: "catchup" }),
           statusMessage: waitingStatusMessage,
           statusSeq: waitingStatusSeq,
+          survey: waitingSurveyActive
+            ? {
+                scope: waitingScope,
+                items: visibleItems,
+                step: waitingSurveyStep,
+                drafts: waitingSurveyDrafts,
+                errors: waitingPanelErrors,
+                sending: waitingSurveySending,
+                draftKey: item => choiceDraftKey(item.workspaceId, item.id),
+              }
+            : null,
+          focusSurveyHeading: focusHeading,
         },
         {
           onScopeChange: (next) => {
             clearWaitingStatus();
+            waitingSurveyActive = false;
+            waitingSurveyStep = 0;
             waitingScope = next;
             renderWaitingPanelView();
             if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
@@ -5891,7 +6095,62 @@ import "../../styles/kylon-image-viewer.css";
             if (last) void sendWaitingPanelChoice(item, last);
           },
           onDraftChoice: (item, draft) => {
-            choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+            const key = choiceDraftKey(item.workspaceId, item.id);
+            choiceDrafts.set(key, draft);
+            const existing = waitingSurveyDrafts.get(key) ?? waitingPanelMod?.emptySurveyDraft(draft);
+            if (existing) {
+              waitingSurveyDrafts.set(key, {
+                ...existing,
+                choice: { selected: [...draft.selected], otherOpen: draft.otherOpen, otherText: draft.otherText },
+                stale: false,
+                skipped: false,
+              });
+            }
+          },
+          onSubmitPlain: (item, body, stale) => void sendWaitingPanelPlain(item, body, stale),
+          onRetryPlain: (item) => {
+            const last = waitingPlainLastSubmissions.get(item.id);
+            if (last) void sendWaitingPanelPlain(item, last.body, last.stale);
+          },
+          onDraftPlain: (item, text) => {
+            const key = choiceDraftKey(item.workspaceId, item.id);
+            const existing = waitingSurveyDrafts.get(key) ?? waitingPanelMod?.emptySurveyDraft();
+            if (existing) {
+              waitingSurveyDrafts.set(key, { ...existing, plainText: text, stale: false, skipped: false });
+            }
+          },
+          onStartSurvey: () => {
+            clearWaitingStatus();
+            waitingSurveyActive = true;
+            waitingSurveyStep = 0;
+            waitingSurveyFocusHeading = true;
+            renderWaitingPanelView();
+          },
+          surveyHandlers: {
+            onExit: () => {
+              waitingSurveyActive = false;
+              renderWaitingPanelView();
+              const reviewBtn = container.querySelector<HTMLElement>("[data-waiting-review-start]");
+              const target = reviewBtn && !reviewBtn.hidden ? reviewBtn : container.querySelector<HTMLElement>("[data-waiting-close]");
+              target?.focus({ preventScroll: true });
+            },
+            onStep: (nextStep, focus) => {
+              waitingSurveyStep = nextStep;
+              waitingSurveyFocusHeading = focus;
+              renderWaitingPanelView();
+            },
+            onDraftChange: (item, draft) => {
+              const key = choiceDraftKey(item.workspaceId, item.id);
+              waitingSurveyDrafts.set(key, draft);
+              if (item.choices && item.choices.options.length > 0) {
+                choiceDrafts.set(key, {
+                  selected: [...draft.choice.selected],
+                  otherOpen: draft.choice.otherOpen,
+                  otherText: draft.choice.otherText,
+                });
+              }
+            },
+            onSubmitAll: (entries) => void sendWaitingSurveyBatch(entries),
           },
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
@@ -5904,6 +6163,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const syncWaitingPanel = (): void => {
       const active = isWaitingChannelView();
+      if (!session) resetWaitingSurveySession();
       if (!active) waitingOpenEpoch += 1;
       waitingSurface?.setEnabled(active);
       syncWaitingButtons();
@@ -5930,6 +6190,8 @@ import "../../styles/kylon-image-viewer.css";
           const surface = ensureWaitingSurface(mod);
           // Opening always starts in This channel; channel switches keep the desktop column open.
           waitingScope = "channel";
+          waitingSurveyActive = false;
+          waitingSurveyStep = 0;
           surface.open(trigger);
           renderWaitingPanelView();
         });
@@ -5970,6 +6232,7 @@ import "../../styles/kylon-image-viewer.css";
         waitingPanelTickets.clear();
         waitingPanelErrors.clear();
         waitingPanelLastSubmissions.clear();
+        resetWaitingSurveySession();
         waitingWorkspaceChannels.clear();
         waitingPanelOverviewFailed = false;
       }
@@ -6035,10 +6298,10 @@ import "../../styles/kylon-image-viewer.css";
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
 
             const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
-            const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
+            const askNeeds = detail.needsYou.filter(item => item.kind === "ask");
             const locations = new Map<string, SignalLocation>();
             const missingIds: string[] = [];
-            for (const item of choiceNeeds) {
+            for (const item of askNeeds) {
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
               if (liveSignal) {
                 locations.set(item.id, {
@@ -6081,7 +6344,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             const classified = new Map<string, WaitingConversation>();
             let anyUnknownLocation = locationReadFailed;
-            for (const item of choiceNeeds) {
+            for (const item of askNeeds) {
               const loc = locations.get(item.id) ?? null;
               const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
               const conv = classifyAskConversation(loc, rootLoc);
@@ -6093,12 +6356,13 @@ import "../../styles/kylon-image-viewer.css";
               const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
-            const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
+            const panelItems: WaitingAskItem[] = askNeeds.flatMap(item => {
               const raw = askById.get(item.id);
-              if (!raw || !item.choices) return [];
+              if (!raw) return [];
               const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
-              const split = splitChoicePrompt(raw.body);
-              const question = (split.question ?? raw.body).trim() || item.what;
+              const hasItemChoices = !!item.choices && item.choices.options.length > 0;
+              const split = hasItemChoices ? splitChoicePrompt(raw.body) : null;
+              const question = (split?.question ?? raw.body).trim() || item.what;
               return [{
                 id: item.id,
                 workspaceId: workspace.id,
@@ -6112,7 +6376,7 @@ import "../../styles/kylon-image-viewer.css";
                 when: item.when,
                 createdAt: raw.created_at,
                 until: raw.until,
-                choices: { options: item.choices.options, multi: item.choices.multi },
+                choices: hasItemChoices ? { options: item.choices!.options, multi: item.choices!.multi } : null,
               }];
             });
             if (!live()) return;
