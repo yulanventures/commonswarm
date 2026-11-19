@@ -292,9 +292,66 @@ struct WaitingTodoDetail: Hashable, Sendable {
     let assigneeName: String
     let assigneeIsAgent: Bool
     let comments: [WaitingTodoComment]
+    let nextCommentOffset: Int?
 
     var formattedDue: String? {
         WaitingChoiceRules.formatLocalDueDate(dueOn)
+    }
+
+    func withState(_ newState: String) -> WaitingTodoDetail {
+        WaitingTodoDetail(
+            id: id,
+            workspaceID: workspaceID,
+            title: title,
+            state: newState,
+            version: version,
+            notes: notes,
+            dueOn: dueOn,
+            assigneeName: assigneeName,
+            assigneeIsAgent: assigneeIsAgent,
+            comments: comments,
+            nextCommentOffset: nextCommentOffset
+        )
+    }
+
+    func appendingComments(_ more: [WaitingTodoComment], nextOffset: Int?) -> WaitingTodoDetail {
+        var merged = comments
+        let existing = Set(comments.map(\.id))
+        for comment in more where !existing.contains(comment.id) {
+            merged.append(comment)
+        }
+        return WaitingTodoDetail(
+            id: id,
+            workspaceID: workspaceID,
+            title: title,
+            state: state,
+            version: version,
+            notes: notes,
+            dueOn: dueOn,
+            assigneeName: assigneeName,
+            assigneeIsAgent: assigneeIsAgent,
+            comments: merged,
+            nextCommentOffset: nextOffset
+        )
+    }
+}
+
+enum WaitingBannerKind: Equatable, Sendable {
+    case sent
+    case done
+    case dropped
+}
+
+struct WaitingStatusBanner: Equatable, Sendable {
+    let kind: WaitingBannerKind
+    let text: String
+
+    var accessibilityLabel: String {
+        switch kind {
+        case .sent: return text == "Sent" ? "Answer sent" : text
+        case .done: return "To-do marked done"
+        case .dropped: return text
+        }
     }
 }
 
@@ -493,7 +550,9 @@ final class WaitingOnYouStore: ObservableObject {
     @Published var draftsBySignal: [UUID: WaitingChoiceDraft] = [:]
     @Published private(set) var pendingByTodo: Set<UUID> = []
     @Published private(set) var failuresByTodo: [UUID: WaitingTodoFailure] = [:]
-    @Published private(set) var sentBanner: String?
+    @Published private(set) var statusBanner: WaitingStatusBanner?
+
+    var sentBanner: String? { statusBanner?.text }
 
     let place: WaitingPlace
     private var bannerTask: Task<Void, Never>?
@@ -609,7 +668,11 @@ final class WaitingOnYouStore: ObservableObject {
         case .done:
             todos.removeAll { $0.id == item.id }
             failuresByTodo[item.id] = nil
-            showStatusBanner("Done")
+            showStatusBanner(.done, "Done")
+        case .dropped:
+            todos.removeAll { $0.id == item.id }
+            failuresByTodo[item.id] = nil
+            showStatusBanner(.dropped, "This to-do was dropped.")
         case .failed(let message, let retryable):
             failuresByTodo[item.id] = WaitingTodoFailure(message: message, retryable: retryable)
         }
@@ -618,7 +681,15 @@ final class WaitingOnYouStore: ObservableObject {
     func removeCompletedTodo(_ todoID: UUID) {
         todos.removeAll { $0.id == todoID }
         failuresByTodo[todoID] = nil
-        showStatusBanner("Done")
+        showStatusBanner(.done, "Done")
+    }
+
+    func removeDroppedTodo(_ todoID: UUID, announce: Bool = true) {
+        todos.removeAll { $0.id == todoID }
+        failuresByTodo[todoID] = nil
+        if announce {
+            showStatusBanner(.dropped, "This to-do was dropped.")
+        }
     }
 
     private func submit(
@@ -645,7 +716,7 @@ final class WaitingOnYouStore: ObservableObject {
             items.removeAll { $0.id == item.id }
             draftsBySignal[item.id] = nil
             failuresBySignal[item.id] = nil
-            showStatusBanner("Sent")
+            showStatusBanner(.sent, "Sent")
         case .failed(let message, let retryable):
             failuresBySignal[item.id] = WaitingCardFailure(
                 commandID: commandID,
@@ -656,13 +727,13 @@ final class WaitingOnYouStore: ObservableObject {
         }
     }
 
-    private func showStatusBanner(_ text: String) {
-        sentBanner = text
+    private func showStatusBanner(_ kind: WaitingBannerKind, _ text: String) {
+        statusBanner = WaitingStatusBanner(kind: kind, text: text)
         bannerTask?.cancel()
         bannerTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            self?.sentBanner = nil
+            self?.statusBanner = nil
         }
     }
 }

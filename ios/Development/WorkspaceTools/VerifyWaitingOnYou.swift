@@ -166,12 +166,38 @@ struct VerifyWaitingOnYou {
         expect(recordedTodos.allSatisfy { $0.arguments.seat == "seat_0000000000000000000000" && $0.arguments.request_id == $0.command_id && $0.arguments.state == "done" }, "All todo_set_state calls must carry seat, request_id == command_id, and state == done")
         expect(recordedTodos[2].arguments.base_version == recordedTodos[1].arguments.base_version + 1, "Conflict retry must bump base_version from current.version")
 
-        // 5. Verify Open (readTodoDetail) resolves display names (no UUIDs) and comments
+        // 5. Verify Open (readTodoDetail) decodes real server Actor comment authors (user_id + principal_id) AND honors next_comment_offset
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/comments-page-size?n=2")!)
+        let generalDetailPage1 = try await waitingAPI.readTodoDetail(workspaceID: mainWS.id, todoID: generalTodo.id)
+        expect(generalDetailPage1.comments.count == 2, "Expected 2 comments on page 1, got \(generalDetailPage1.comments.count)")
+        expect(generalDetailPage1.comments[0].authorName == "Maya Chen" && !generalDetailPage1.comments[0].authorIsAgent, "Expected person Actor comment decoded as Maya Chen")
+        expect(generalDetailPage1.comments[1].authorName == "Atlas" && generalDetailPage1.comments[1].authorIsAgent, "Expected agent Actor comment decoded as Atlas")
+        expect(generalDetailPage1.nextCommentOffset == 2, "Expected next_comment_offset == 2, got \(String(describing: generalDetailPage1.nextCommentOffset))")
+
+        let generalDetailPage2 = try await waitingAPI.readTodoDetail(workspaceID: mainWS.id, todoID: generalTodo.id, commentOffset: 2)
+        let mergedDetail = generalDetailPage1.appendingComments(generalDetailPage2.comments, nextOffset: generalDetailPage2.nextCommentOffset)
+        expect(mergedDetail.comments.count == 3 && mergedDetail.comments[2].authorName == "You" && mergedDetail.nextCommentOffset == nil, "Expected page 2 comment authored by You and nil nextCommentOffset")
+        try await postFixture(origin.appending(path: "fixture/comments-page-size"))
+
         let detail = try await waitingAPI.readTodoDetail(workspaceID: mainWS.id, todoID: mobileTodos[0].id)
         expect(detail.title == "Review dark mode token audit for iPhone SE", "Unexpected detail title")
         expect(detail.assigneeName == "Atlas" && detail.assigneeIsAgent, "Expected Atlas agent assignee")
         expect(detail.formattedDue == "Due Nov 26", "Expected Due Nov 26")
-        expect(detail.comments.count == 1 && detail.comments[0].authorName == "Atlas", "Expected resolved comment author")
+        expect(detail.comments.count == 1 && detail.comments[0].authorName == "Atlas" && detail.comments[0].authorIsAgent, "Expected resolved agent Actor comment author")
+
+        // 5b. Verify Dropped distinction: conflict returning Dropped AND already-dropped todo NEVER announce Done
+        let wsAssignedTodo = await MainActor.run { store.todos.first { $0.id == UUID(uuidString: "50000000-0000-4000-8000-000000000003")! }! }
+        try await postFixture(origin.appending(path: "fixture/conflict-drop-next-todo"))
+        await store.markTodoDone(wsAssignedTodo, api: waitingAPI)
+        let conflictDroppedBanner = await MainActor.run { store.statusBanner }
+        expect(conflictDroppedBanner?.kind == .dropped && conflictDroppedBanner?.text == "This to-do was dropped.", "Conflict returning Dropped must announce dropped, NOT Done; got \(String(describing: conflictDroppedBanner))")
+        expect(await MainActor.run { !store.todos.contains(where: { $0.id == wsAssignedTodo.id }) }, "Stale dropped card must leave list")
+
+        // Also verify initial todo_read seeing already-dropped returns .dropped (NOT .done)
+        let alreadyDroppedOutcome = await waitingAPI.markTodoDone(workspaceID: mainWS.id, todoID: wsAssignedTodo.id)
+        expect(alreadyDroppedOutcome == .dropped, "Already-dropped to-do must return .dropped, got \(alreadyDroppedOutcome)")
+        let droppedDetail = try await waitingAPI.readTodoDetail(workspaceID: mainWS.id, todoID: wsAssignedTodo.id)
+        expect(droppedDetail.state == "dropped", "Fresh detail must report state == dropped")
 
         // 6. Verify multi-select + Other answer uses v2 wire format
         await MainActor.run { store.scope = .workspace }
@@ -182,14 +208,14 @@ struct VerifyWaitingOnYou {
         }
         await store.submitDraft(for: mobileAsk, api: waitingAPI)
         let remainingWorkspace = await MainActor.run { store.counts.workspace.min }
-        expect(remainingWorkspace == 3, "Expected 3 remaining items (1 ask + 2 todos) in workspace, got \(remainingWorkspace)")
+        expect(remainingWorkspace == 2, "Expected 2 remaining items (1 ask + 1 request todo) in workspace, got \(remainingWorkspace)")
 
         // 7. Verify home_overview fallback when waiting_todos_page returns 404 (PGRST202)
         try await postFixture(origin.appending(path: "fixture/hide-waiting-todos-rpc"))
         let fallbackStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
         await fallbackStore.load(api: waitingAPI)
         let fallbackTodos = await MainActor.run { fallbackStore.todos }
-        expect(fallbackTodos.count == 3, "Expected 3 remaining open/doing todos via home_overview fallback (deduplicated), got \(fallbackTodos.count)")
+        expect(fallbackTodos.count == 2, "Expected 2 remaining open/doing todos via home_overview fallback (deduplicated), got \(fallbackTodos.count)")
         let fallbackRequest = fallbackTodos.first { $0.id == mobileTodos[0].id }
         expect(fallbackRequest?.reason == .request && fallbackRequest?.canMarkDone == false, "Fallback must let request replace assigned for duplicate todo_id")
         expect(await MainActor.run { fallbackStore.visibleTodos.isEmpty }, "Fallback workspace-only todos must not clutter #general")

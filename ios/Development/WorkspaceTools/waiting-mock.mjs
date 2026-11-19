@@ -44,8 +44,10 @@ const receivedTodoCommands = [];
 let failNextOnce = false;
 let failNextTodoOnce = false;
 let conflictNextTodoOnce = false;
+let conflictDropNextTodoOnce = false;
 let hideWaitingTodosRpc = false;
 let forceTodosPageSize = null;
+let forceCommentsPageSize = null;
 let omitLocationSignalIds = new Set();
 let failDecisionQueueWs = null;
 
@@ -128,15 +130,21 @@ const todosByWorkspace = new Map([
       comments: [
         {
           comment_id: "60000000-0000-4000-8000-000000000001",
-          author: { kind: "user", id: maya },
+          author: { user_id: maya, principal_id: null },
           body: "Drafted the final bullet points for dark mode and Waiting on you.",
           created_at: "2026-11-19T13:10:00.000Z",
         },
         {
           comment_id: "60000000-0000-4000-8000-000000000002",
-          author: { kind: "agent", id: atlas },
+          author: { user_id: me, principal_id: atlas },
           body: "All release checks passed on iPhone SE and iPhone 17 Pro.",
           created_at: "2026-11-19T14:05:00.000Z",
+        },
+        {
+          comment_id: "60000000-0000-4000-8000-000000000004",
+          author: { user_id: me, principal_id: null },
+          body: "Looks good, ready for final sign-off.",
+          created_at: "2026-11-19T14:30:00.000Z",
         },
       ],
     },
@@ -156,7 +164,7 @@ const todosByWorkspace = new Map([
       comments: [
         {
           comment_id: "60000000-0000-4000-8000-000000000003",
-          author: { kind: "agent", id: atlas },
+          author: { user_id: me, principal_id: atlas },
           body: "Ready for review once the contrast update lands.",
           created_at: "2026-11-19T14:20:00.000Z",
         },
@@ -226,6 +234,25 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/conflict-next-todo") {
       conflictNextTodoOnce = true;
       return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/conflict-drop-next-todo") {
+      conflictDropNextTodoOnce = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/drop-todo") {
+      const wsId = (url.searchParams.get("ws") || wsMain).toLowerCase();
+      const id = (url.searchParams.get("id") || "").toLowerCase();
+      const todo = findTodo(wsId, id);
+      if (todo) {
+        todo.state = "dropped";
+        todo.version += 1;
+      }
+      return reply(200, { ok: Boolean(todo) });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/comments-page-size") {
+      const n = url.searchParams.get("n");
+      forceCommentsPageSize = n ? Number(n) : null;
+      return reply(200, { ok: true, pageSize: forceCommentsPageSize });
     }
     if (req.method === "POST" && url.pathname === "/fixture/hide-waiting-todos-rpc") {
       hideWaitingTodosRpc = true;
@@ -441,6 +468,10 @@ const server = createServer(async (req, res) => {
         if (cmd.tool === "todo_read") {
           const todo = findTodo(wsId, String(args.todo_id ?? "").toLowerCase());
           if (!todo) return reply(200, { status: "refused", reason: "todo_not_found" });
+          const offset = Number.isInteger(args.comment_offset) && args.comment_offset >= 0 ? args.comment_offset : 0;
+          const pageSize = forceCommentsPageSize ?? 20;
+          const slice = todo.comments.slice(offset, offset + pageSize);
+          const nextOffset = offset + slice.length < todo.comments.length ? offset + slice.length : null;
           return reply(200, {
             status: "ok",
             todo: {
@@ -452,7 +483,8 @@ const server = createServer(async (req, res) => {
               due_on: todo.due_on,
               assignee: todo.assignee,
             },
-            comments: todo.comments,
+            comments: slice,
+            next_comment_offset: nextOffset,
           });
         }
         if (cmd.tool === "todo_set_state") {
@@ -463,6 +495,23 @@ const server = createServer(async (req, res) => {
           }
           const todo = findTodo(wsId, String(args.todo_id ?? "").toLowerCase());
           if (!todo) return reply(200, { status: "refused", reason: "todo_not_found" });
+          if (conflictDropNextTodoOnce) {
+            conflictDropNextTodoOnce = false;
+            todo.state = "dropped";
+            todo.version += 1;
+            return reply(409, {
+              status: "conflict",
+              current: {
+                todo_id: todo.todo_id,
+                title: todo.title,
+                state: todo.state,
+                version: todo.version,
+                notes: todo.notes,
+                due_on: todo.due_on,
+                assignee: todo.assignee,
+              },
+            });
+          }
           if (conflictNextTodoOnce) {
             conflictNextTodoOnce = false;
             todo.version += 1;
