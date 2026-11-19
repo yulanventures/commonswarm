@@ -88,7 +88,13 @@ test("finish model escapes names, retains client trust disclosure, and emits onl
   assert.match(html, /It calls itself/u);
   assert.deepEqual(finishPaths("interaction-test"), { connectedPath: "/interaction/interaction-test/connected", finishPath: "/interaction/interaction-test/finish" });
   for (const uid of ["../bad", "x?code=dummy", "x#bad", "https://bad", "", "finish-timer.js"]) assert.throws(() => finishPaths(uid), TypeError);
-  assert.match(renderFinishExpiredPage({ clientDisplay: { primary: evil, verified: false } }), /Return link expired\. Return to &lt;img/u);
+  const expiredUnverified = renderFinishExpiredPage({ clientDisplay: { primary: evil, declaredName: evil, verified: false } });
+  assert.match(expiredUnverified, /<section id="finish-page" aria-labelledby="finish-title" tabindex="0">/u);
+  assert.match(expiredUnverified, /<h1 id="finish-title">Return link expired<\/h1>/u);
+  assert.match(expiredUnverified, /<p id="finish-status" class="lede">Open &lt;img src=x&gt; &amp; &quot;friend&#39;s&quot; and start a new connection\.<\/p>/u);
+  assert.match(expiredUnverified, /Unverified app/u);
+  assert.match(expiredUnverified, /Not verified:/u);
+  assert.equal(expiredUnverified.match(/Return link expired/gu)?.length, 2); // <title> and <h1> only, not repeated in body.
   assert.doesNotMatch(renderFinishExpiredPage(model), /<script|href=/u);
 });
 
@@ -205,8 +211,12 @@ test("keyboard Pause keeps expiry alive, permits manual Continue, and disables s
   const paused = browser(); paused.click("finish-pause"); paused.advance(3001);
   assert.equal(paused.document.activeElement, paused.elements.get("finish-continue")); assert.deepEqual(paused.navigations, []); assert.equal(paused.timers.size, 1);
   paused.advance(120001); assert.equal(paused.elements.get("finish-title").textContent, "Return link expired");
-  assert.equal(paused.elements.get("finish-status").textContent, "Return link expired. Return to client.example.test and start a new connection.");
-  assert.equal(paused.elements.get("finish-continue").getAttribute("aria-disabled"), "true"); assert.equal(paused.document.activeElement, paused.elements.get("finish-page"));
+  assert.equal(paused.elements.get("finish-status").textContent, "Open client.example.test and start a new connection.");
+  assert.equal(paused.elements.get("finish-page").getAttribute("tabindex"), "0");
+  assert.equal(paused.elements.get("finish-continue").getAttribute("aria-disabled"), "true");
+  assert.equal(paused.elements.get("finish-continue").getAttribute("href"), null);
+  assert.equal(paused.elements.get("finish-continue").getAttribute("tabindex"), "-1");
+  assert.equal(paused.document.activeElement, paused.elements.get("finish-page"));
   assert.equal(paused.click("finish-continue").defaultPrevented, true); assert.deepEqual(paused.navigations, []);
   const continued = browser(); continued.click("finish-pause"); continued.click("finish-continue"); continued.advance(120001);
   assert.deepEqual(continued.navigations, ["/interaction/interaction-test/finish"]);
