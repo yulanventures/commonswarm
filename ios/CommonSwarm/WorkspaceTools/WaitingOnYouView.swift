@@ -105,7 +105,21 @@ struct WaitingOnYouSheetView: View {
     @ObservedObject var store: WaitingOnYouStore
     let api: WaitingOnYouAPI
     let onDismiss: () -> Void
+    @State private var openedTodo: WaitingTodoItem?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var bannerForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.68, green: 0.96, blue: 0.75)
+            : Color(red: 0.06, green: 0.34, blue: 0.14)
+    }
+
+    private var bannerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.09, green: 0.24, blue: 0.14)
+            : Color(red: 0.86, green: 0.96, blue: 0.89)
+    }
 
     var body: some View {
         NavigationStack {
@@ -118,18 +132,18 @@ struct WaitingOnYouSheetView: View {
                 if let banner = store.sentBanner {
                     HStack(spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(bannerForeground)
                             .accessibilityHidden(true)
                         Text(banner)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(bannerForeground)
                         Spacer()
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(Color.green.opacity(0.14))
+                    .background(bannerBackground)
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Answer sent")
+                    .accessibilityLabel(banner == "Done" ? "To-do marked done" : "Answer sent")
                 }
 
                 content
@@ -142,6 +156,11 @@ struct WaitingOnYouSheetView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done", action: onDismiss)
                         .frame(minWidth: 44, minHeight: 44)
+                }
+            }
+            .navigationDestination(item: $openedTodo) { todo in
+                WaitingTodoDetailView(item: todo, api: api) { completedID in
+                    store.removeCompletedTodo(completedID)
                 }
             }
         }
@@ -168,23 +187,25 @@ struct WaitingOnYouSheetView: View {
 
     @ViewBuilder
     private var content: some View {
-        let visible = store.visibleItems
+        let visibleAsks = store.visibleItems
+        let visibleTodos = store.visibleTodos
+        let isEmpty = visibleAsks.isEmpty && visibleTodos.isEmpty
         let counts = store.counts
 
-        if store.loadFailed && visible.isEmpty {
-            RetryView(text: "Couldn’t load waiting questions") {
+        if store.loadFailed && isEmpty {
+            RetryView(text: "Couldn’t load waiting items") {
                 await store.load(api: api)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if store.isLoading && visible.isEmpty && !counts.channel.complete {
-            ProgressView("Checking questions…")
+        } else if store.isLoading && isEmpty && !counts.channel.complete {
+            ProgressView("Checking waiting items…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if visible.isEmpty {
+        } else if isEmpty {
             emptyState(counts: counts)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(visible) { item in
+                    ForEach(visibleAsks) { item in
                         WaitingAskCardView(
                             item: item,
                             scope: store.scope,
@@ -215,9 +236,34 @@ struct WaitingOnYouSheetView: View {
                             }
                         )
                     }
+
+                    ForEach(visibleTodos) { todo in
+                        WaitingTodoCardView(
+                            item: todo,
+                            scope: store.scope,
+                            isPending: store.pendingByTodo.contains(todo.id),
+                            failure: store.failuresByTodo[todo.id],
+                            onMarkDone: {
+                                Task {
+                                    await store.markTodoDone(todo, api: api)
+                                }
+                            },
+                            onRetry: {
+                                Task {
+                                    await store.markTodoDone(todo, api: api)
+                                }
+                            },
+                            onOpen: {
+                                openedTodo = todo
+                            }
+                        )
+                    }
                 }
                 .padding()
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: visible.map(\.id))
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.2),
+                    value: visibleAsks.map(\.id) + visibleTodos.map(\.id)
+                )
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
