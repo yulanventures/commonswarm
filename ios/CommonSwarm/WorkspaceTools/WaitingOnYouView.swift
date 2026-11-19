@@ -243,9 +243,18 @@ private struct WaitingAskCardView: View {
     @Binding var draft: WaitingChoiceDraft
     let isPending: Bool
     let failure: WaitingCardFailure?
+    @Environment(\.colorScheme) private var colorScheme
     let onSelectOption: (String) -> Void
     let onSendDraft: () -> Void
     let onRetry: () -> Void
+
+    private var recommendedForeground: Color {
+        colorScheme == .dark ? Color(red: 0.49, green: 0.75, blue: 1.00) : Color(red: 0.00, green: 0.32, blue: 0.70)
+    }
+
+    private var recommendedBackground: Color {
+        colorScheme == .dark ? Color(red: 0.08, green: 0.20, blue: 0.32) : Color(red: 0.89, green: 0.94, blue: 1.00)
+    }
 
     var body: some View {
         let split = item.prompt
@@ -318,8 +327,8 @@ private struct WaitingAskCardView: View {
                                             .font(.caption2.weight(.semibold))
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
-                                            .foregroundStyle(Color.accentColor)
-                                            .background(Color.accentColor.opacity(0.14), in: Capsule())
+                                            .foregroundStyle(recommendedForeground)
+                                            .background(recommendedBackground, in: Capsule())
                                     }
                                 }
                                 if let desc = option.description, !desc.isEmpty {
