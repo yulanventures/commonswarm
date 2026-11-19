@@ -4623,10 +4623,9 @@ export async function listConversations(
     result = await postConversationRead(request, "conversations");
   } catch (error) {
     // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
-    // Retry once on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
+    // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
     // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
     if (!(error instanceof TypeError)) throw error;
-    await new Promise((resolve) => setTimeout(resolve, 200));
     result = await postConversationRead(request, "conversations");
   }
   const outcome = parseConversationsListOutcome(result.status, result.body);
