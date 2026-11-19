@@ -2525,20 +2525,33 @@ test('pending-access indicator on the People door is pinned out of flow and rest
     toggleAttribute(name: string, force?: boolean) { if (force) attrs.set(name, ''); else attrs.delete(name); },
   };
   let pending = 2;
+  let memberCount = '';
+  const countedButton = {
+    title: '',
+    attrs: new Map<string, string>(),
+    querySelector(selector: string) {
+      return selector === '.hm-member-stack__count' && memberCount ? { textContent: memberCount } : null;
+    },
+    setAttribute(name: string, value: string) { this.attrs.set(name, value); },
+    toggleAttribute(name: string, force?: boolean) { if (force) this.attrs.set(name, ''); else this.attrs.delete(name); },
+  };
   const context = createContext({
-    all: (selector: string) => selector === '[data-roster-open]' ? [button] : [],
+    all: (selector: string) => selector === '[data-roster-open]' ? [button, countedButton] : [],
     currentPendingAccessRows: () => Array.from({ length: pending }),
   });
   runInContext(code, context);
+  memberCount = '3';
   runInContext('syncRosterOpenButtons()', context);
   assert.equal(attrs.has('data-pending-access'), true, 'pending state is set when pending rows exist');
   assert.equal(attrs.get('aria-label'), 'People & agents · 2 pending access');
   assert.equal(button.title, '2 pending access');
+  assert.equal(countedButton.attrs.get('aria-label'), 'People & agents, 3 · 2 pending access');
   pending = 0;
   runInContext('syncRosterOpenButtons()', context);
   assert.equal(attrs.has('data-pending-access'), false, 'pending state clears when no pending rows exist');
   assert.equal(attrs.get('aria-label'), 'People & agents');
   assert.equal(button.title, 'People & agents');
+  assert.equal(countedButton.attrs.get('aria-label'), 'People & agents, 3');
 
   const css = await readFile(new URL('../../styles/kylon-channel.css', import.meta.url), 'utf8');
   assert.match(css, /\[data-roster-open\]\s*\{[^}]*position:\s*relative/, 'People door establishes a positioning context');

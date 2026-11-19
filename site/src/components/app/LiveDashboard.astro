@@ -6479,7 +6479,9 @@ import "../../styles/kylon-image-viewer.css";
     };
     const syncRosterOpenButtons = (pendingTotal = currentPendingAccessRows().length): void => {
       for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
-        button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
+        const count = button.querySelector?.(".hm-member-stack__count")?.textContent?.trim();
+        const base = count ? `People & agents, ${count}` : "People & agents";
+        button.setAttribute("aria-label", `${base}${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
         button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
         button.toggleAttribute("data-pending-access", pendingTotal > 0);
         button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";

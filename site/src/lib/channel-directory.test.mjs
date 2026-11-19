@@ -105,3 +105,32 @@ test("legacy rows without joined omit Join and Joined controls", () => {
   assert.equal(walk(host).find((n) => n.dataset?.channelDirectoryAction === "join:c1"), undefined);
   assert.equal(walk(host).find((n) => n.dataset?.channelDirectoryJoined !== undefined), undefined);
 });
+
+test("directory links compute their name from content with channel name first and description once", () => {
+  const { host, walk } = hostFixture();
+  const textOf = (node) => typeof node === "string"
+    ? node
+    : (node.textContent || "") + (node.children ?? []).map(textOf).join("");
+  renderChannelDirectory(
+    host,
+    [
+      { id: "c1", slug: "design", description: "Design reviews and UI specs.", href: "/app?w=w&c=c1", archived: false, unread: false, manageable: false, joined: false },
+      { id: "c2", slug: "ops", description: null, href: "/app?w=w&c=c2", archived: false, unread: true, manageable: false, joined: true },
+    ],
+    "",
+    new Set(),
+    new Map(),
+    { open() {}, unarchive() {}, join() {} },
+  );
+  const designLink = walk(host).find((n) => n.dataset?.channelDirectoryAction === "open:c1");
+  assert.ok(designLink);
+  assert.equal(designLink.attrs["aria-labelledby"], undefined);
+  assert.equal(designLink.attrs["aria-describedby"], undefined);
+  assert.equal(textOf(designLink), "#design Design reviews and UI specs.");
+
+  const opsLink = walk(host).find((n) => n.dataset?.channelDirectoryAction === "open:c2");
+  assert.ok(opsLink);
+  assert.equal(opsLink.attrs["aria-labelledby"], undefined);
+  assert.equal(opsLink.attrs["aria-describedby"], undefined);
+  assert.equal(textOf(opsLink), "#ops");
+});
