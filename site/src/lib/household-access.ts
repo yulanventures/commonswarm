@@ -84,6 +84,16 @@ export const CONTENT_OPERATION_LABELS: Readonly<Record<HouseholdContentOperation
   update: "Change them",
 });
 
+/**
+ * The per-agent approval row. Reading always comes with an approval, so it is said as a sentence instead of
+ * a ticked box nobody can change. Adding and changing can each be granted on their own alongside reading.
+ */
+export const READ_ACCESS_INCLUDED = "Read access included.";
+export const APPROVAL_CHOICE_LABELS: Readonly<Record<Exclude<HouseholdContentOperation, "read">, string>> = Object.freeze({
+  create: "Add new lists and docs",
+  update: "Change existing lists and docs",
+});
+
 /** Roles and operations in enforcement order, so screens never type their own list. */
 export const CONTENT_ROLES: readonly HouseholdContentRole[] = HOUSEHOLD_CONTENT_ROLES;
 export const CONTENT_OPERATIONS: readonly HouseholdContentOperation[] = HOUSEHOLD_CONTENT_OPERATIONS;

@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
-import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
+import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
 import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
@@ -153,7 +153,7 @@ test("approving an agent uses the independent server command without changing th
   assert.match(approve, /approvalUntil\(/);
   assert.match(approve, /await loadHouseholdConnections\(\)/);
   assert.match(script, /for \(const operation of CONTENT_OPERATIONS\)/);
-  assert.match(script, /CONTENT_OPERATION_LABELS\[operation\]/);
+  assert.match(script, /APPROVAL_CHOICE_LABELS\[operation\]/);
 });
 
 test("every household result is dropped once its workspace, account, version or generation moved on", () => {
@@ -221,7 +221,12 @@ test("creation asks for purpose without a default and states the owner's Editor 
 test("active approvals expose Save and withdrawal in both places, owned agents only in the dialog", () => {
   const cards = section(script, "const renderAgentApprovals", "const connectionReads");
   assert.match(cards, /input.checked = approval \? approval.operations.includes\(operation\) : true/);
-  assert.match(cards, /allow.textContent = approval \? "Save" : "Allow"/);
+  assert.match(cards, /allow.textContent = approval \? "Save" : editor \? "Allow" : "Allow read access"/);
+  // Reading has no box: it is a sentence, it is skipped in the loop, and it is always the first thing sent.
+  assert.match(cards, /included\.textContent = READ_ACCESS_INCLUDED;/);
+  assert.match(cards, /if \(operation === "read"\) continue;/);
+  assert.match(cards, /const operations = \["read", \.\.\.\[\.\.\.choices\.querySelectorAll<HTMLInputElement>\("\[data-approval-operation\]"\)\]/);
+  assert.doesNotMatch(cards, /input\.disabled/);
   assert.match(cards, /withdraw.textContent = "Withdraw access"/);
   assert.match(cards, /approvalDescription\(approval\)/);
   const model = section(script, "const peopleDialogModel", "const syncPeopleDialogLayout");
@@ -348,7 +353,7 @@ test("hosted and local owners use the same Allow controls and approval command; 
     f.ctx.householdConnectionsReadState = "succeeded";
     f.ctx.sampleMode = true; paint(); assert.equal(allowButton(), undefined); f.ctx.sampleMode = false;
     Object.assign(f.ctx, { document: dom.doc, one: (selector: string) => selector === "[data-household-agent-list]" ? dom.list : null,
-      householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, HOSTED_LISTS_NOTE,
+      householdAccess: { contentRole: "editor" }, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, HOSTED_LISTS_NOTE,
       initials: () => "M", markAgentAvatar: () => {}, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
     const funcs = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
       ${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ renderAgentApprovals, approveAgent });`, { ...f.ctx });
@@ -356,6 +361,14 @@ test("hosted and local owners use the same Allow controls and approval command; 
     const choices = dom.list.descendants().find(node => node.tag === "fieldset");
     const allow = dom.list.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
     assert.ok(choices && !choices.hidden); assert.ok(allow && !allow.hidden);
+    // Reading is a sentence, not a box; the two real choices are named in full and start ticked, as before.
+    const boxes = () => dom.list.descendants().filter(node => node.tag === "input");
+    assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
+    assert.deepEqual(boxes().map(node => [node.value, node.checked, !!node.disabled]), [["create", true, false], ["update", true, false]]);
+    assert.equal("approvalReadOnly" in dom.list.descendants().find(node => node.tag === "li")!.dataset, false);
+    const said = dom.list.descendants().map(node => String(node.textContent ?? "").trim());
+    for (const label of ["Add new lists and docs", "Change existing lists and docs"]) assert.ok(said.includes(label), label);
+    assert.equal(said.some(text => /See lists and docs|Add new ones|Change them/.test(text)), false, "the old short labels are gone from this row");
     assert.equal(dom.list.descendants().some(node => node.textContent === HOSTED_LISTS_NOTE), kind === "hosted");
     allow.click();
     // The event starts an async command; one event-loop turn drains its resolved transport and read.
@@ -370,6 +383,40 @@ test("hosted and local owners use the same Allow controls and approval command; 
     assert.ok(dom.detail.descendants().some(node => node.tag === "button" && node.textContent === "Withdraw"));
     funcs.renderAgentApprovals();
     assert.ok(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Save"));
+    const sentOperations = () => calls.at(-1)!.body.connection.operations;
+    const press = async (text: string) => {
+      const button = dom.list.descendants().find(node => node.tag === "button" && node.textContent === text);
+      assert.ok(button, `a ${text} button`); button.click();
+      await new Promise<void>(resolve => setImmediate(resolve));
+    };
+    // A saved grant with only one optional permission keeps exactly that choice, and Save sends it with reading.
+    connection.approval = { operations: ["read", "update"], expires_at: null };
+    funcs.renderAgentApprovals();
+    assert.deepEqual(boxes().map(node => [node.value, node.checked]), [["create", false], ["update", true]]);
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read", "update"]);
+    // Either optional permission can be granted on its own alongside reading; with neither, reading alone is sent.
+    funcs.renderAgentApprovals();
+    boxes()[0].checked = true; boxes()[1].checked = false;
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read", "create"]);
+    funcs.renderAgentApprovals();
+    for (const box of boxes()) box.checked = false;
+    await press("Save");
+    assert.deepEqual(sentOperations(), ["read"]);
+    // A reader can pass on reading only: no boxes, the action says so, and reading is what is sent.
+    connection.approval = null;
+    const reader = execute(`${section(script, "const connectionApproval =", "const connectionReads")}
+      ${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ renderAgentApprovals, approveAgent });`,
+      { ...f.ctx, householdAccess: { contentRole: "reader" } });
+    reader.renderAgentApprovals();
+    assert.deepEqual(boxes(), []);
+    // The reader's row is marked, so its longer button can take its own line on a narrow phone; an editor's is not.
+    assert.equal(dom.list.descendants().find(node => node.tag === "li")!.dataset.approvalReadOnly, "");
+    assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
+    assert.equal(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Allow"), false);
+    await press("Allow read access");
+    assert.deepEqual(sentOperations(), ["read"]);
   }
 });
 
