@@ -8300,9 +8300,12 @@ import "../../styles/kylon-image-viewer.css";
         teardownAgentOversight();
       }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
-      /* Any navigation leaves a Direct Message; flush outgoing draft BEFORE clearing DM scope so popstate/Back never bleeds drafts. */
+      /* Any navigation leaves a Direct Message and any active thread reply; flush outgoing draft
+         and clear threadReplyRoot BEFORE changing scope so popstate/Back never bleeds a draft
+         or leaves a public channel thread root underneath a private DM marker. */
       const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
       if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
+      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
@@ -8341,7 +8344,9 @@ import "../../styles/kylon-image-viewer.css";
       } else if (route.view === "chat") {
         applyChannelFromUrl(route.workspaceId);
         if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
+        if (typeof syncComposerPlacement === "function") syncComposerPlacement();
         if (typeof syncComposerAddress === "function") syncComposerAddress();
+        if (typeof renderComposerAudience === "function") renderComposerAudience();
         if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
         syncChannelUrl();
         if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
@@ -13563,7 +13568,7 @@ import "../../styles/kylon-image-viewer.css";
             void refreshSignalReactions(workspaceId, version);
             void refreshPendingAccess(workspaceId, version);
             void refreshBrainTopics(false);
-            void refreshConversations(workspaceId, true);
+            void refreshConversations(workspaceId, refreshed.changed);
           }
           return;
         }
@@ -17118,6 +17123,7 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       if ((requested === null || requested === "") && requestedDm !== null && requestedDm !== "") {
+        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
         activeChannelId = null;
         unknownChannelId = null;
         if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
@@ -20411,6 +20417,10 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       const isStep2bDmPost = !sampleMode && typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null;
+      if (isStep2bDmPost && threadReplyRoot !== null) {
+        setComposerStatus("Close the thread reply before sending in a direct message.", "error");
+        return;
+      }
       /* A TAG TYPED IN THE LAST 150ms IS STILL A RECIPIENT. The tag-to-chip pass is
          debounced, so a reader who types "@Wren" and presses Enter at once would otherwise
          send to a set that had not caught up. Run it now, then read the set. */
@@ -20515,7 +20525,7 @@ import "../../styles/kylon-image-viewer.css";
           ? freshConvTarget.kind
           : null;
       const freshPlacementChannelId = isStep2bDmPost ? null : destination.channelId;
-      const freshPlacementThreadRootId = replyRoot?.id ?? null;
+      const freshPlacementThreadRootId = isStep2bDmPost ? null : (replyRoot?.id ?? null);
       // HezSec #5: gate BOTH top-level sends and thread replies against channel membership
       // (including pending/failed membership reads) before any attachment upload or post.
       if (!sampleMode && !isStep2bDmPost && typeof channelMembershipSendRefusal === "function") {
@@ -20673,7 +20683,9 @@ import "../../styles/kylon-image-viewer.css";
          it does not take a channel of its own"). `broadcast_to_channel` is sent only when it
          is true, which is the shape `cswarm reply --thread --broadcast-to-channel` sends and
          keeps the key set the smallest thing that says what was asked. */
-      const placement: BrowserSignalPlacement = placementThreadRootId !== null
+      const placement: BrowserSignalPlacement = isStep2bDmPost && placementConversationId !== null
+        ? { conversationId: placementConversationId }
+        : placementThreadRootId !== null
         ? {
           threadRootId: placementThreadRootId,
           ...(broadcastToChannel ? { broadcastToChannel: true } : {}),

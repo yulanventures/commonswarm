@@ -730,7 +730,6 @@ export type ConversationsListOutcome =
   | { status: "failed"; message: string };
 
 const UNSUPPORTED_CONVERSATIONS_READ_ERRORS = new Set([
-  "invalid_request",
   "unknown_resource",
   "invalid_resource",
   "unsupported_resource",

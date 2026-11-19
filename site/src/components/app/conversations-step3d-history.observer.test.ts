@@ -13,6 +13,8 @@ function installConversations3DFixture() {
   const params = new URL(location.href).searchParams;
   f.capture = params.get("capture") ?? "flow";
   f.historyRequests = [] as any[];
+  f.conversationsReadCount = 0;
+  f.unsupportedResponseCount = 0;
   f.signalCommands = [] as any[];
   f.uploadCalls = [] as string[];
   f.fileCreateCalls = 0;
@@ -20,6 +22,7 @@ function installConversations3DFixture() {
   f.fileCommitCalls = 0;
   f.convCommands = [] as any[];
   f.failNextOlder = params.get("fail_older") === "1";
+  f.failOlderSticky = params.get("fail_older_sticky") === "1";
   f.failConversations = params.get("fail_conversations") ?? "";
   f.unjoinedOps = params.get("unjoined_ops") === "1";
   f.holdNextOlder = false;
@@ -224,6 +227,7 @@ function installConversations3DFixture() {
     if (url.pathname === "/functions/v1/read" && request.method === "POST") {
       const body = await request.clone().json().catch(() => null);
       if (body?.resource === "conversations") {
+        f.conversationsReadCount += 1;
         if (f.holdNextConversations) {
           f.holdNextConversations = false;
           await new Promise<void>((resolve) => { f.releaseConversations = resolve; });
@@ -232,7 +236,11 @@ function installConversations3DFixture() {
           return Response.json({}, { status: 404 });
         }
         if (f.failConversations === "invalid_request") {
-          return Response.json({ error: "invalid_request", message: "Unsupported resource." }, { status: 400 });
+          return Response.json({ error: "invalid_request", message: "Invalid request." }, { status: 400 });
+        }
+        if (f.failConversations === "unsupported_resource") {
+          f.unsupportedResponseCount += 1;
+          return Response.json({ error: "unsupported_resource", message: "Unsupported resource." }, { status: 400 });
         }
         if (f.failConversations === "1" || f.failConversations === "503") {
           return Response.json({ error: "service_unavailable", message: "Conversations service unavailable." }, { status: 503 });
@@ -263,6 +271,9 @@ function installConversations3DFixture() {
         }
         const store = historyByConv[convId] ?? { newest: [], older: [] };
         if (body.before_created_at && body.before_id) {
+          if (f.failOlderSticky) {
+            return Response.json({ error: "service_unavailable", message: "History read failed." }, { status: 503 });
+          }
           if (f.failNextOlder) {
             f.failNextOlder = false;
             return Response.json({ error: "service_unavailable", message: "History read failed." }, { status: 503 });
@@ -333,9 +344,13 @@ function installConversations3DFixture() {
         f.conversations = f.conversations.filter((c: any) => c.conversation_id !== command.conversation_id);
         return Response.json({ status: "accepted", conversation_id: command.conversation_id, changed: true });
       }
-      if (command?.kind === "conversation_set_notify") {
+      if (
+        command?.kind === "conversation_set_notify" ||
+        command?.kind === "conversation_invite" ||
+        command?.kind === "channel_members_add"
+      ) {
         f.convCommands.push(command);
-        return Response.json({ status: "accepted", conversation_id: command.conversation_id, changed: true });
+        return Response.json({ status: "accepted", conversation_id: command.conversation_id ?? opsConv, changed: true });
       }
       if (command?.kind === "signals_seen" || command?.kind === "conversation_mark_read") {
         return Response.json({ status: "accepted" });
@@ -376,11 +391,12 @@ async function observeConversations3D() {
     // Designer #1 & #2 witness: Retry Load older keeps visible message coordinate stable before, while pending, and after prepend,
     // and moves keyboard focus from the disappearing Load older button to a visible message (or preserves focus if reader tabbed away).
     if (f.capture === "designer-retry" || f.capture === "designer-retry-tab-away") {
-      await wait("group dm history loaded for designer retry", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22"));
+      await wait("group dm history loaded for designer retry", () =>
+        (one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22") &&
+        visible(one("[data-load-older]")),
+      );
       const scroller = one<HTMLElement>(".dashboard__feed-view")!;
       scroller.scrollTop = 0;
-      scroller.dispatchEvent(new Event("scroll"));
-      await new Promise(r => setTimeout(r, 80));
       if (!visible(one("[data-load-older-error]")) && !one<HTMLButtonElement>("[data-load-older]")?.disabled) {
         await click("[data-load-older]:visible");
       }
@@ -393,6 +409,7 @@ async function observeConversations3D() {
       check(!!msg6, "Group DM message #6 must be rendered");
       const topBefore = msg6.getBoundingClientRect().top;
 
+      f.failOlderSticky = false;
       f.holdNextOlder = true;
       await press("Enter");
       await wait("retry request held in flight", () => typeof f.releaseOlder === "function");
@@ -537,6 +554,46 @@ async function observeConversations3D() {
         `HezSec C1: held visibility across scope retirement must emit 0 file_create(${f.fileCreateCalls}), 0 PUT(${f.storagePutCalls}), 0 commit(${f.fileCommitCalls}), 0 post(${f.signalCommands.length})`,
       );
 
+      // HezSec C1 (public channel thread -> popstate to DM): push 1:1 DM Alex from #general, navigate Back to #general,
+      // open a public #general thread reply, then navigate Forward via browser history (popstate restoring DM) ->
+      // must clear stale threadReplyRoot, show private DM audience marker, and post strictly to DM conversation_id.
+      await click('a[href*="c=general"]:visible');
+      await wait("on #general before pushing 1:1 dm", () => location.search.includes("c=general") && !!one('[data-message-reply="00000000-0000-4000-8000-000000000001"]'));
+      await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
+      await wait("pushed 1:1 dm Alex onto history", () => location.search.includes(`dm=${f.ids.dmAlexConv}`) && (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."));
+      history.back();
+      await wait("popstate back to #general", () => location.search.includes("c=general") && !!one('[data-message-reply="00000000-0000-4000-8000-000000000001"]'));
+      const generalReplyBtn = one<HTMLButtonElement>('[data-message-reply="00000000-0000-4000-8000-000000000001"]')!;
+      generalReplyBtn.focus();
+      generalReplyBtn.click();
+      await wait("public #general thread reply open before popstate", () =>
+        visible(one("[data-composer-reply]")) &&
+        (one("[data-composer-reply-target-text]")?.textContent ?? "").includes("Replying to Alex"),
+      );
+      history.forward();
+      await wait("popstate restored 1:1 DM Alex from public thread", () =>
+        location.search.includes(`dm=${f.ids.dmAlexConv}`) &&
+        (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."),
+      );
+      check(!visible(one("[data-composer-reply]")), "HezSec C1: popstate to DM must clear stale public thread reply bar");
+      check(
+        one("[data-composer-audience]")?.getAttribute("data-audience") === "private" &&
+        one("[data-composer-audience-sentence]")?.textContent === "Only Alex and you can read this.",
+        "HezSec C1: popstate to DM must show exact private DM audience marker: " + one("[data-composer-audience-sentence]")?.textContent,
+      );
+      input.value = "Private message after popstate from public thread";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await click("[data-composer-send]:visible");
+      await wait("DM message sent after popstate from public thread", () => f.signalCommands.length === 1);
+      const popstateDmCmd = f.signalCommands[0];
+      check(
+        popstateDmCmd.conversation_id === f.ids.dmAlexConv &&
+        !("thread_root_id" in popstateDmCmd) &&
+        !("channel" in popstateDmCmd) &&
+        !("broadcast_to_channel" in popstateDmCmd),
+        "HezSec C1: post after popstate to DM must target DM conversation_id with no public thread_root_id: " + JSON.stringify(popstateDmCmd),
+      );
+
       document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
       return;
     }
@@ -632,6 +689,53 @@ async function observeConversations3D() {
       return;
     }
 
+    // HezSec C3 (Members preflight bearer retirement): start on #ops, push 1:1 DM Alex via openDirectConversation,
+    // go Back to #ops, hold /auth/v1/user inside Members preflight listConversations, then navigate Forward via
+    // popstate (reconcileOpenMembersSheet closes the busy dialog & retires lifetime) -> 0 outgoing conversations reads & 0 commands!
+    if (f.capture === "hezsec-members-preflight") {
+      await wait("#ops loaded initially", () =>
+        (one("[data-feed-list]")?.textContent ?? "").includes("Ops channel deploy note.") &&
+        !!one(`[data-rail-conversation="${f.ids.dmAlexConv}"]`),
+      );
+      await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
+      await wait("pushed 1:1 DM Alex onto history", () =>
+        location.search.includes(`dm=${f.ids.dmAlexConv}`) &&
+        (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."),
+      );
+      history.back();
+      await wait("returned to #ops via popstate", () =>
+        (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) &&
+        (one("[data-feed-list]")?.textContent ?? "").includes("Ops channel deploy note.") &&
+        !!shown("[data-conversation-members-open]"),
+      );
+      await click("[data-conversation-members-open]:visible");
+      await wait("Members sheet open on #ops", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === true);
+      await click("[data-conversation-members-add-toggle]:visible");
+      await wait("Lead candidate visible in Members add panel", () => !!shown(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]`));
+      await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
+      const convReadsBeforePreflight = f.conversationsReadCount;
+      const convCmdsBeforePreflight = f.convCommands.length;
+      f.holdNextAuthUser = true;
+      f.releaseAuthUser = null;
+      await click("[data-conversation-members-add-submit]:visible");
+      await wait("Members preflight /auth/v1/user held", () => typeof f.releaseAuthUser === "function");
+      // Retire the busy Members sheet via real route navigation (popstate -> reconcileOpenMembersSheet -> closeMembers(false) -> lifetime.retire()).
+      history.forward();
+      await wait("Members sheet retired by popstate while preflight auth held", () =>
+        one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false &&
+        location.search.includes(`dm=${f.ids.dmAlexConv}`),
+      );
+      f.releaseAuthUser();
+      await new Promise((r) => setTimeout(r, 140));
+      check(
+        f.conversationsReadCount === convReadsBeforePreflight && f.convCommands.length === convCmdsBeforePreflight,
+        `HezSec C3: retired Members preflight must emit 0 conversations reads (before=${convReadsBeforePreflight}, after=${f.conversationsReadCount}) and 0 commands (before=${convCmdsBeforePreflight}, after=${f.convCommands.length})`,
+      );
+
+      document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
+      return;
+    }
+
     // HezSec #4 & #5 witness: bare 404 (and 503) conversations list fails closed (Retry, read-only, DM exclusion active),
     // and unjoined/failed channel membership blocks BOTH top-level and real thread submits before any upload/post.
     if (f.capture === "hezsec-503-and-unjoined") {
@@ -688,6 +792,24 @@ async function observeConversations3D() {
       check(
         f.signalCommands.length === 0 && f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0,
         "HezSec #5: unjoined #ops must block real thread reply submit with 0 posts/uploads",
+      );
+
+      // HezSec C4 (confirmed-modern downgrade control): once Step 2b conversations succeeded for this viewer+workspace,
+      // even an explicit 400 unsupported_resource on a later refresh must NOT downgrade to legacy or expose the composer!
+      f.failConversations = "unsupported_resource";
+      await click(`[data-rail-conversation-menu="${f.ids.dmAlexConv}"]:visible`);
+      await wait("alex rail menu open for confirmed-modern downgrade control", () => visible(one(".cs-context-menu")));
+      await click('.cs-context-menu__item:has-text("Star")');
+      await wait("unsupported_resource response observed after modern confirmation", () => f.unsupportedResponseCount >= 1);
+      await new Promise((r) => setTimeout(r, 120));
+      check(!visible(form), "HezSec C4: confirmed-modern workspace must not downgrade to legacy composer on later unsupported_resource");
+      check(visible(one("[data-channel-preview-bar]")), "HezSec C4: unjoined #ops preview bar must stay enforced after unsupported_resource");
+      input.value = "Post-downgrade bypass attempt";
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 80));
+      check(
+        f.signalCommands.length === 0 && f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0,
+        "HezSec C4: confirmed-modern workspace must block submit after unsupported_resource with 0 posts/uploads",
       );
 
       document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
@@ -889,12 +1011,13 @@ test("Step 3D-1 signed-in dashboard wires conversation_history cursors, post_sig
     const unknownConv = "deadbeef-dead-4eef-8eef-deadbeef0000";
     const cases: { name: string; width: number; height: number; query: string; screenshot?: boolean }[] = [
       { name: "flow-1024-light", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=flow&fail_older=1` },
-      { name: "designer-retry-360", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older=1` },
-      { name: "designer-retry-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older=1` },
-      { name: "designer-retry-tab-away-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-tab-away&fail_older=1` },
+      { name: "designer-retry-360", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1` },
+      { name: "designer-retry-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1` },
+      { name: "designer-retry-tab-away-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-tab-away&fail_older_sticky=1` },
       { name: "hezsec-drafts-and-audience-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-drafts-and-audience` },
       { name: "hezsec-held-omission-and-fences-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-held-omission-and-fences&hold_first_history=${groupConv}` },
-      { name: "hezsec-503-and-unjoined-1024", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=light&capture=hezsec-503-and-unjoined&fail_conversations=404&unjoined_ops=1` },
+      { name: "hezsec-members-preflight-1024", width: 1024, height: 1366, query: `w=${ws}&c=66666666-6666-4666-8666-666666666666&theme=light&capture=hezsec-members-preflight` },
+      { name: "hezsec-503-and-unjoined-1024", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=light&capture=hezsec-503-and-unjoined&fail_conversations=invalid_request&unjoined_ops=1` },
       { name: "404-back-to-general-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${unknownConv}&theme=light&capture=unavailable-404-back` },
       { name: "360x740-light-group-dm", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=group-dm-capture`, screenshot: true },
       { name: "360x740-dark-group-dm", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=dark&capture=group-dm-capture`, screenshot: true },
