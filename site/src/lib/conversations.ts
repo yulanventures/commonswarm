@@ -636,6 +636,41 @@ export function parseConversationsListResponse(body: Record<string, unknown>): C
   return out;
 }
 
+export type ConversationsListOutcome =
+  | { status: "ready"; conversations: ConversationSummary[] }
+  | { status: "unsupported"; message: string }
+  | { status: "failed"; message: string };
+
+const UNSUPPORTED_CONVERSATIONS_READ_ERRORS = new Set([
+  "invalid_request",
+  "invalid_resource",
+  "unsupported_resource",
+  "not_found",
+]);
+
+/**
+ * Classifies a `POST /functions/v1/read` (`resource: "conversations"`) response.
+ * Only an explicit pre-Step-2b not-supported refusal selects `"unsupported"`.
+ * An empty 200, malformed 200 (missing `conversations` array), or any transient/unexpected error
+ * returns `"failed"` so the UI shows Retry and never exposes the legacy composer.
+ */
+export function parseConversationsListOutcome(
+  status: number,
+  body: Record<string, unknown>,
+): ConversationsListOutcome {
+  if (status === 200) {
+    if (Array.isArray(body.conversations)) {
+      return { status: "ready", conversations: parseConversationsListResponse(body) };
+    }
+    return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
+  }
+  const code = typeof body.error === "string" ? body.error : "";
+  if (status === 404 || (status === 400 && UNSUPPORTED_CONVERSATIONS_READ_ERRORS.has(code))) {
+    return { status: "unsupported", message: errorSentence(body, `Conversations read unavailable (HTTP ${status}).`) };
+  }
+  return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
+}
+
 export function parseOversightListResponse(body: Record<string, unknown>): OversightConversationSummary[] {
   if (!Array.isArray(body.conversations)) return [];
   const out: OversightConversationSummary[] = [];

@@ -56,6 +56,7 @@ import {
   parseConversationActionResponse,
   parseConversationHistoryResponse,
   parseConversationOpenResponse,
+  parseConversationsListOutcome,
   parseConversationsListResponse,
   parseOversightHistoryResponse,
   parseOversightListResponse,
@@ -4427,15 +4428,10 @@ export async function listConversations(
     buildListConversationsRequest(workspaceId, includeArchived),
     "conversations",
   );
-  if (status === 400 || status === 404) {
-    throw new ConversationsUnsupportedError(
-      typeof body.message === "string" ? body.message : `Conversations read unavailable (HTTP ${status}).`,
-    );
-  }
-  if (status !== 200 || !Array.isArray(body.conversations)) {
-    throw new Error(typeof body.message === "string" ? body.message : "Couldn't check channel membership.");
-  }
-  return parseConversationsListResponse(body);
+  const outcome = parseConversationsListOutcome(status, body);
+  if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
+  if (outcome.status === "failed") throw new Error(outcome.message);
+  return outcome.conversations;
 }
 
 /** Step 2b `resource: "conversation_history"`: cursor-paged messages for one conversation. */

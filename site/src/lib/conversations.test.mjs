@@ -30,6 +30,7 @@ import {
   parseConversationActionResponse,
   parseConversationHistoryResponse,
   parseConversationOpenResponse,
+  parseConversationsListOutcome,
   parseConversationsListResponse,
   parseOversightHistoryResponse,
   parseOversightListResponse,
@@ -335,4 +336,28 @@ test("Step 2b read request builders and decoders match the wire spec and keep ov
     assert.equal(oversightPage.conversation.readOnly, true);
     assert.deepEqual(oversightPage.messages, [S1]);
   }
+});
+
+test("empty or malformed 200 conversations read fails closed (Retry); only explicit not-supported selects legacy fallback", () => {
+  // Empty 200 (e.g. truncated proxy response or empty JSON object) must fail, never select unsupported.
+  assert.equal(parseConversationsListOutcome(200, {}).status, "failed");
+  assert.equal(parseConversationsListOutcome(200, { grants: [] }).status, "failed");
+  assert.equal(parseConversationsListOutcome(200, { conversations: null }).status, "failed");
+  assert.equal(parseConversationsListOutcome(200, { conversations: "bad" }).status, "failed");
+
+  // Transient and unlabelled errors also fail (Retry).
+  assert.equal(parseConversationsListOutcome(503, { error: "service_unavailable" }).status, "failed");
+  assert.equal(parseConversationsListOutcome(500, {}).status, "failed");
+  assert.equal(parseConversationsListOutcome(400, {}).status, "failed");
+  assert.equal(parseConversationsListOutcome(403, { error: "forbidden" }).status, "failed");
+
+  // Only explicit pre-Step-2b not-supported signals select unsupported.
+  assert.equal(parseConversationsListOutcome(400, { error: "invalid_request" }).status, "unsupported");
+  assert.equal(parseConversationsListOutcome(400, { error: "invalid_resource" }).status, "unsupported");
+  assert.equal(parseConversationsListOutcome(400, { error: "unsupported_resource" }).status, "unsupported");
+  assert.equal(parseConversationsListOutcome(404, {}).status, "unsupported");
+
+  // Valid 200 array selects ready.
+  const ready = parseConversationsListOutcome(200, { conversations: [] });
+  assert.deepEqual(ready, { status: "ready", conversations: [] });
 });
