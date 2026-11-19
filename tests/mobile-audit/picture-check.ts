@@ -182,7 +182,7 @@ export async function runPictureChecks(
     const unsigned = signing.picture;
     check("a picture with no link yet waits in its frame and is not painted", signing.seen && !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted,
       { seen: signing.seen, unsigned });
-    const signedLater = await until(unsignedPage, p => p.loaded);
+    const signedLater = await until(unsignedPage, p => p.loaded && p.state === null);
     check("it appears in the same frame once its link is signed", !!signedLater?.loaded && signedLater.painted && signedLater.state === null && near(unsigned?.frame ?? null, signedLater.frame), { unsigned: unsigned?.frame, loaded: signedLater });
     await unsignedPage.close();
 
@@ -203,7 +203,7 @@ export async function runPictureChecks(
     check("frame is reserved at 16:10 before the picture loads", !!frame && frame.w > 0 && Math.abs(frame.h - frame.w * 10 / 16) <= 1, frame);
     await shot(page, "picture-loading");
     release();
-    const after = await until(page, p => p.loaded);
+    const after = await until(page, p => p.loaded && p.state === null);
     check("picture loads at its real size", after?.natural?.w === AUDIT_PNG_SIZE.width && after.natural.h === AUDIT_PNG_SIZE.height, after);
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
     check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
@@ -316,9 +316,24 @@ export async function runPictureChecks(
       check("nothing navigated to the file while the viewer was used", !navigated, navigated);
       page.off("request", watch);
       // Download is the viewer's own button, and it starts the picture's own signed file. Activate the picture link
-      // directly so a background feed rebuild frame cannot send bare Enter to <body>.
+      // directly and record lightweight failure-only diagnostics in case Enter does not open the viewer.
+      await page.evaluate(() => {
+        const list = document.querySelector("[data-feed-list]");
+        const trace = { activeBefore: `${document.activeElement?.tagName ?? ""}:${document.activeElement?.className ?? ""}`, keydowns: [] as string[], dialogs: 0, feedRebuilds: 0 };
+        const onKey = (e: KeyboardEvent) => { trace.keydowns.push(`${e.key}:t=${(e.target as Element | null)?.tagName ?? "?"}.${(e.target as Element | null)?.className ?? ""}:a=${document.activeElement?.tagName ?? "?"}.${document.activeElement?.className ?? ""}`); };
+        const mo = new MutationObserver((records) => {
+          for (const rec of records) {
+            if (rec.target === list) trace.feedRebuilds++;
+            for (const node of rec.addedNodes) if (node instanceof Element && node.matches?.("dialog[data-image-viewer]")) trace.dialogs++;
+          }
+        });
+        document.addEventListener("keydown", onKey, true);
+        mo.observe(document.body, { childList: true, subtree: true });
+        (window as any).__csPicTrace = { trace, stop: () => { document.removeEventListener("keydown", onKey, true); mo.disconnect(); return trace; } };
+      });
       await page.locator(".dashboard__message .hm-extras__image").first().press("Enter");
       const forDownload = await viewer(page, v => !!v && v.loaded && v.state === "");
+      const openTrace = await page.evaluate(() => (window as any).__csPicTrace?.stop?.() ?? null);
       let commandStatus: number | null = null;
       const onCommandResponse = (response: any) => {
         if (String(response.url()).includes("/functions/v1/command") && (response.request().postData() ?? "").includes("file_download_url")) {
@@ -335,7 +350,7 @@ export async function runPictureChecks(
         } finally { page.off("response", onCommandResponse); }
       }
       check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
-        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS) }) });
+        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS), openTrace }) });
     }
     await page.close();
 
@@ -449,7 +464,7 @@ export async function runPictureChecks(
     // Storage answers again: Enter on Retry loads the picture in the same frame, with focus on the picture.
     storageDown = false;
     await failing.keyboard.press("Enter");
-    const retried = await until(failing, p => p.loaded);
+    const retried = await until(failing, p => p.loaded && p.state === null);
     const afterLoad = await failing.evaluate(FOCUS);
     check("Retry loads the picture in the same frame", !!retried?.loaded && retried.painted && retried.state === null && near(frame, retried.frame), retried);
     check("a successful retry leaves focus on the picture", afterLoad === "picture", afterLoad);
