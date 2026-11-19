@@ -51,10 +51,19 @@ struct MessageAttachmentView: View {
             Button {
                 open()
             } label: {
-                if let thumbnail {
-                    Image(uiImage: thumbnail).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 180)
+                if attachment.isRasterImage {
+                    // Reserve the preview before the first scroll to the latest message.
+                    Color.clear.frame(maxWidth: 260).frame(height: 180)
+                        .overlay(alignment: .leading) {
+                            if let thumbnail {
+                                Image(uiImage: thumbnail).resizable().scaledToFit()
+                            } else {
+                                Label(safeName, systemImage: "photo")
+                            }
+                        }
+                        .contentShape(Rectangle())
                 } else {
-                    Label(safeName, systemImage: attachment.isRasterImage ? "photo" : "doc")
+                    Label(safeName, systemImage: "doc")
                 }
             }
             .accessibilityLabel(safeName)
