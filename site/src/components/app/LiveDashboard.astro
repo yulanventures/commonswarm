@@ -659,6 +659,8 @@ import "../../styles/kylon-image-viewer.css";
               <HouseholdObjects state={emptyHousehold} />
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title" tabindex="-1">Let your agents use Lists &amp; docs</h2>
+                {/* Withdraw access asks here, in the same confirmation People & agents uses. */}
+                <dialog class="pd-confirm" data-lists-confirm></dialog>
                 <p class="dashboard__access-lead">
                   {HOSTED_LISTS_NOTE}
                   Hosted agents you connect as workspace owner inherit your Lists access unless you restrict them.
@@ -1325,7 +1327,7 @@ import "../../styles/kylon-image-viewer.css";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
-  import { renderPeopleDialog, withdrawConfirmText, peopleDialogCanAct, showPeopleConfirmation,
+  import { renderPeopleDialog, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
@@ -8072,7 +8074,7 @@ import "../../styles/kylon-image-viewer.css";
         resolve("asked");
       }));
     };
-    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
+    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
       const agent = agents.find((entry) => entry.principalId === id);
@@ -8088,7 +8090,7 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       let receipt = "";
-      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
+      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, questionId ?? uuid()); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
       if (action === "turn-off-key" && grant && agent && homeConnectionTokenMatches(agent, grant)) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
@@ -8129,9 +8131,12 @@ import "../../styles/kylon-image-viewer.css";
       const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
       const workspaceId = activeWorkspaceId, userId = session?.user.id;
+      // One command id per question: pressing again after a lost answer repeats the same command, which the server
+      // answers from its receipt instead of withdrawing a second time. A new question gets a new id.
+      const questionId = uuid();
       showPeopleConfirmation(confirm, action, item, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
-        await peopleDialogAction(action, id, button, notice);
+        await peopleDialogAction(action, id, button, notice, questionId);
       }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
         () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
     };
@@ -12763,7 +12768,8 @@ import "../../styles/kylon-image-viewer.css";
           withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
           withdraw.textContent = "Withdraw access";
           withdraw.dataset.withdrawApproval = principalId;
-          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, hosted, withdraw, status); });
+          withdraw.dataset.pdFocus = `lists-withdraw-${principalId}`;
+          withdraw.addEventListener("click", () => askListsWithdraw(principalId, agentName, hosted, withdraw, status));
           row.append(withdraw);
         }
         list.append(row);
@@ -12890,6 +12896,27 @@ import "../../styles/kylon-image-viewer.css";
       return householdCurrent(scope) ? "approved" : "stale";
     };
 
+    /** Withdraw access on a Lists & docs approval asks first, in the same confirmation People & agents uses: the agent's
+        name, what stops and what stays (different for an agent in a chat app), with Go back focused. Going back sends
+        nothing and returns focus to this agent's button; confirming sends one withdrawal for this agent here. */
+    const askListsWithdraw = (principalId: string, agentName: string, hosted: boolean, opener: HTMLButtonElement, status: HTMLElement): void => {
+      const dialog = one<HTMLDialogElement>("[data-lists-confirm]"), root = one<HTMLElement>("[data-household-agents]");
+      const scope = householdScope();
+      if (!dialog || !root || !scope || opener.disabled) return;
+      const title = (): HTMLElement | null => one<HTMLElement>("#dashboard-agent-approvals-title");
+      // One command id per question, as in People & agents: a retry after a lost answer repeats the same command.
+      const questionId = uuid();
+      showPeopleConfirmation(dialog, "withdraw", { name: agentName, hosted }, opener,
+        async (button) => {
+          // The workspace may have changed while the question was open; then nothing is sent.
+          if (!householdCurrent(scope)) throw new Error("This workspace changed. Nothing was withdrawn.");
+          await withdrawAgent(principalId, agentName, hosted, button, status, questionId);
+        },
+        readableError, undefined,
+        () => (one<HTMLElement>(`[data-household-agent-list] [data-approval-agent="${CSS.escape(principalId)}"] .dashboard__button--primary`) ?? title())?.focus({ preventScroll: true }),
+        { root, fallback: title });
+    };
+
     /** Withdrawal leaves the agent connected and is audited by the command path. */
     const withdrawAgent = async (
       principalId: string,
@@ -12897,37 +12924,40 @@ import "../../styles/kylon-image-viewer.css";
       hosted: boolean,
       button: HTMLButtonElement,
       status: HTMLElement,
-      confirmed = false,
+      commandId: string,
     ): Promise<void> => {
+      /* Called only once the person has confirmed, in the shared confirmation (from People & agents or from Lists &
+         docs). A refusal or an unknown result is thrown, so the confirmation stays open and says so. `commandId`
+         belongs to that question: a second press after a lost answer sends the same command again. */
       const scope = householdScope();
-      if (!scope || (!confirmed && button.disabled)) return;
-      if (!confirmed && !window.confirm(withdrawConfirmText(agentName, hosted))) return;
+      if (!scope) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {
         if (householdCurrent(scope)) status.textContent = message;
       };
+      const unknown = "The result is unknown. Reload Lists & docs to check this agent's access.";
       try {
-        const result = await postCommand(
-          scope.session, uuid(),
-          { kind: "household_withdraw_connection", principal_id: principalId },
-          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
-          "The result is unknown. Reload Lists & docs to check this agent's access.",
-        );
+        let result: Awaited<ReturnType<typeof postCommand>>;
+        try {
+          result = await postCommand(
+            scope.session, commandId,
+            { kind: "household_withdraw_connection", principal_id: principalId },
+            { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+            unknown,
+          );
+        } catch (error) { settle(unknown); throw error; }
         if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
           const message = hosted ? `Withdrawn. The stored Lists & docs approval for ${agentName} was removed.` : `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
           householdReceipts.set(principalId, message);
           settle(message);
           await loadHouseholdConnections();
-        } else {
-          const refusal = withdrawRefusalMessage(result.body.reason);
-          settle(refusal);
-          if (confirmed) throw new Error(refusal);
+          return;
         }
-      } catch (error) {
-        if (confirmed) throw error;
-        settle("The result is unknown. Reload Lists & docs to check this agent's access.");
+        const refusal = withdrawRefusalMessage(result.body.reason);
+        settle(refusal);
+        throw new Error(refusal);
       } finally {
         button.disabled = false;
       }

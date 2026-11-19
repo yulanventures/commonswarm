@@ -2309,6 +2309,69 @@
     }
   },
   {
+    "id": "dialog.lists-withdraw",
+    "kind": "dialog",
+    "path": "/app?w={withdrawWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawSetupAgent}",
+        "click": "#pd-agent-{withdrawSetupAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]"
+      },
+      {
+        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]",
+        "settle": true
+      },
+      {
+        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]",
+        "settle": true
+      },
+      {
+        "click": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]"
+      }
+    ],
+    "ready": "dialog[data-lists-confirm][open] #pd-confirm-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_lists_withdraw"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_withdraw_connection"
+    }
+  },
+  {
+    "id": "dialog.people-withdraw",
+    "kind": "dialog",
+    "path": "/app?w={withdrawWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawAgent}",
+        "click": "#pd-agent-{withdrawAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-withdraw-agent-access=\"{withdrawAgent}\"]",
+        "click": "[data-people-detail] button[data-withdraw-agent-access=\"{withdrawAgent}\"]"
+      }
+    ],
+    "ready": "dialog[data-people-confirm][open] #pd-confirm-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_lists_withdraw"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "household_withdraw_connection"
+    }
+  },
+  {
     "id": "app.people.allow-row",
     "kind": "view",
     "path": "/app?w={approvalWorkspace}&v=people",
