@@ -159,6 +159,7 @@
   background: var(--home-rail-raised); color: var(--home-rail-strong);
   font-size: 11px; font-weight: 700; line-height: 1;
 }
+.hm-rail__dm-mark[data-mark]::before { content: attr(data-mark); content: attr(data-mark) / ""; }
 .hm-rail__mention-badge {
   display: inline-grid; place-items: center; flex: none;
   min-inline-size: 20px; block-size: 20px; padding-inline: 6px;

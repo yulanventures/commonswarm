@@ -302,14 +302,20 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   if (unread === true || mentions > 0) link.dataset.unread = "";
   if (muted) link.dataset.muted = "";
   const baseLabel = channelRowName(row.slug, mentions > 0 ? false : unread, muted);
-  link.setAttribute("aria-label", mentions > 0 ? `${baseLabel}, ${mentions} ${mentions === 1 ? "mention" : "mentions"}` : baseLabel);
+  const badgeText = mentions > 99 ? "99+" : String(mentions);
+  link.setAttribute(
+    "aria-label",
+    mentions > 0
+      ? `${baseLabel}, ${mentions > 99 ? `${badgeText} (${mentions} mentions)` : `${mentions} ${mentions === 1 ? "mention" : "mentions"}`}`
+      : baseLabel,
+  );
   link.title = channelLabel(row.slug);
   const name = node(doc, "span", "hm-rail__name", row.slug);
   link.append(icon(doc, archived ? "archive" : "workspace"), name);
   if (mentions > 0) {
-    const mark = node(doc, "span", "hm-rail__badge hm-rail__mention-badge", mentions > 99 ? "99+" : String(mentions));
+    const mark = node(doc, "span", "hm-rail__badge hm-rail__mention-badge", badgeText);
     mark.setAttribute("aria-hidden", "true");
-    link.append(mark);
+    link.append(" ", mark);
   } else if (unread === true) {
     const dot = node(doc, "span", "hm-rail__unread");
     dot.setAttribute("aria-hidden", "true");
@@ -529,22 +535,22 @@ function directMessageItem(doc: Document, row: RailDirectMessageRowVM, sample: b
   });
   if (indicator.kind !== "none") anchor.dataset.unread = "";
   if (muted) anchor.dataset.muted = "";
+  const mentionLabel = indicator.kind === "mentions"
+    ? (row.mentionCount > 99 ? `${indicator.text} (${indicator.label})` : indicator.label)
+    : "";
+  const statusLabel = muted ? "muted" : indicator.kind === "mentions" ? mentionLabel : indicator.kind !== "none" ? indicator.label : "";
   const labelParts = [
     row.title,
+    statusLabel,
     row.kind === "group_dm" && (row.memberCount ?? 0) > 2 ? `${row.memberCount} members` : "",
-    muted ? "muted" : indicator.kind !== "none" ? indicator.label : "",
   ].filter(Boolean);
   anchor.setAttribute("aria-label", labelParts.join(", "));
   anchor.title = row.title;
 
-  const mark = node(
-    doc,
-    "span",
-    "hm-rail__dm-mark",
-    row.kind === "group_dm"
-      ? String(row.memberCount ?? 3)
-      : Array.from(row.title.trim())[0]?.toLocaleUpperCase() ?? "D",
-  );
+  const mark = node(doc, "span", "hm-rail__dm-mark");
+  mark.dataset.mark = row.kind === "group_dm"
+    ? String(row.memberCount ?? 3)
+    : Array.from(row.title.trim())[0]?.toLocaleUpperCase() ?? "D";
   mark.setAttribute("aria-hidden", "true");
   const name = node(doc, "span", "hm-rail__name", row.title);
   anchor.append(mark, name);
@@ -552,7 +558,7 @@ function directMessageItem(doc: Document, row: RailDirectMessageRowVM, sample: b
   if (indicator.kind === "mentions") {
     const count = node(doc, "span", "hm-rail__badge hm-rail__mention-badge", indicator.text);
     count.setAttribute("aria-hidden", "true");
-    anchor.append(count);
+    anchor.append(" ", count);
   } else if (indicator.kind === "dot") {
     const dot = node(doc, "span", "hm-rail__unread");
     dot.setAttribute("aria-hidden", "true");
