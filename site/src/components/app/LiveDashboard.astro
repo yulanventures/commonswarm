@@ -6053,6 +6053,7 @@ import "../../styles/kylon-image-viewer.css";
           ...(catchUpChoiceIsPending(item.id) ? { pending: true as const } : {}), ...(error ? { error } : {}) } };
       });
       const key = homeStructureKey(vm);
+      const needsKey = homeStructureKey({ needsYou: vm.needsYou, expanded: Boolean(vm.needsYouExpanded), sample: vm.sample });
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
       }
@@ -6077,8 +6078,28 @@ import "../../styles/kylon-image-viewer.css";
         const summary = view.querySelector<HTMLElement>(".hm-catchup-subline");
         if (summary) summary.textContent = vm.emptySummary;
       }
-      replaceHomeRegion(slot, "catchup", [view]);
+      // When background workspaces finish loading without changing Waiting on you, update the surrounding sections in
+      // place so interactive choice cards stay mounted with their hover, focus and typed drafts undisturbed.
+      const existingRoot = typeof slot.querySelector === "function" ? slot.querySelector<HTMLElement>(".hm-catchup") : null;
+      const existingNeeds = existingRoot?.querySelector<HTMLElement>(".hm-catchup-needs") ?? null;
+      const nextNeeds = typeof view.querySelector === "function" ? view.querySelector<HTMLElement>(".hm-catchup-needs") : null;
+      if (existingRoot && existingNeeds && nextNeeds && slot.dataset?.catchUpNeedsKey === needsKey) {
+        const syncSection = (selector: string): void => {
+          const cur = existingRoot.querySelector<HTMLElement>(selector);
+          const next = view.querySelector<HTMLElement>(selector);
+          if (cur && next) cur.replaceWith(next);
+          else if (cur && !next) cur.remove();
+          else if (!cur && next) existingRoot.append(next);
+        };
+        syncSection(".hm-catchup-header");
+        syncSection(".hm-catchup-workspaces");
+        syncSection(".hm-catchup-latest");
+        refreshHomeCatchUpTimes(slot, vm);
+      } else {
+        replaceHomeRegion(slot, "catchup", [view]);
+      }
       homeCatchUpKey = key;
+      if (slot.dataset) slot.dataset.catchUpNeedsKey = needsKey;
       renderHomeRail();
     };
     /* Waiting on you: a click on an ask's choice sends answer_choice. On success the catch-up reloads and the
