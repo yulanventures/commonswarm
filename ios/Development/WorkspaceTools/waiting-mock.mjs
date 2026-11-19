@@ -46,6 +46,8 @@ let failNextTodoOnce = false;
 let conflictNextTodoOnce = false;
 let hideWaitingTodosRpc = false;
 let forceTodosPageSize = null;
+let omitLocationSignalIds = new Set();
+let failDecisionQueueWs = null;
 
 const asksByWorkspace = new Map([
   [wsMain, [
@@ -237,6 +239,19 @@ const server = createServer(async (req, res) => {
       forceTodosPageSize = Number(url.searchParams.get("n") || "1");
       return reply(200, { ok: true, pageSize: forceTodosPageSize });
     }
+    if (verify && req.method === "POST" && url.pathname === "/fixture/omit-location") {
+      const id = (url.searchParams.get("id") || sigGeneralChoice).toLowerCase();
+      omitLocationSignalIds.add(id);
+      return reply(200, { ok: true });
+    }
+    if (verify && req.method === "POST" && url.pathname === "/fixture/restore-locations") {
+      omitLocationSignalIds = new Set();
+      return reply(200, { ok: true });
+    }
+    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-decision-queue") {
+      failDecisionQueueWs = url.searchParams.get("ws")?.toLowerCase() || null;
+      return reply(200, { ok: true });
+    }
     if (verify && req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, receivedCommands);
     }
@@ -288,6 +303,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/functions/v1/read") {
       const reqWs = workspaces.find((w) => w.workspace_id === String(body.workspace_id ?? "").toLowerCase()) ?? workspaces[0];
+      const baseMembers = [
+        { kind: "user", id: me, name: "You", left_at: null },
+        { kind: "user", id: maya, name: "Maya Chen", left_at: null },
+        { kind: "agent", id: atlas, name: "Atlas", left_at: null },
+      ];
       const convGeneral = {
         conversation_id: "40000000-0000-4000-8000-000000000001",
         kind: "general",
@@ -296,11 +316,7 @@ const server = createServer(async (req, res) => {
         description: null,
         archived_at: null,
         joined: true,
-        members: [
-          { kind: "user", id: me, name: "You", left_at: null },
-          { kind: "user", id: maya, name: "Maya Chen", left_at: null },
-          { kind: "agent", id: atlas, name: "Atlas", left_at: null },
-        ],
+        members: baseMembers,
         last_message_at: "2026-11-19T14:00:00.000Z",
         notify_level: "all",
         mention_count: 0,
@@ -314,7 +330,7 @@ const server = createServer(async (req, res) => {
         description: "Mobile client engineering",
         archived_at: null,
         joined: true,
-        members: convGeneral.members,
+        members: baseMembers,
         last_message_at: "2026-11-19T14:30:00.000Z",
         notify_level: "all",
         mention_count: 0,
@@ -337,7 +353,37 @@ const server = createServer(async (req, res) => {
         mention_count: 0,
         unread_count: 0,
       };
-      const allConvs = reqWs.workspace_id === wsMain ? [convGeneral, convMobile, convDmAtlas] : [convGeneral];
+      const convGroupA = {
+        conversation_id: "40000000-0000-4000-8000-000000000004",
+        kind: "group_dm",
+        channel_id: null,
+        slug: null,
+        description: null,
+        archived_at: null,
+        joined: true,
+        members: baseMembers,
+        last_message_at: "2026-11-19T14:50:00.000Z",
+        notify_level: "all",
+        mention_count: 0,
+        unread_count: 0,
+      };
+      const convGroupB = {
+        conversation_id: "40000000-0000-4000-8000-000000000005",
+        kind: "group_dm",
+        channel_id: null,
+        slug: null,
+        description: null,
+        archived_at: null,
+        joined: true,
+        members: baseMembers,
+        last_message_at: "2026-11-19T14:55:00.000Z",
+        notify_level: "all",
+        mention_count: 0,
+        unread_count: 0,
+      };
+      const allConvs = reqWs.workspace_id === wsMain
+        ? [convGeneral, convMobile, convDmAtlas, convGroupA, convGroupB]
+        : [convGeneral];
       if (body.resource === "conversations") {
         return reply(200, { conversations: allConvs });
       }
@@ -469,6 +515,9 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/rest/v1/rpc/decision_queue") {
       const wsId = String(body.p_workspace_id ?? "").toLowerCase();
+      if (failDecisionQueueWs && wsId === failDecisionQueueWs) {
+        return reply(503, { message: "decision_queue unavailable" });
+      }
       const all = (asksByWorkspace.get(wsId) ?? []).filter((a) => !answered.has(a.signal_id));
       return reply(200, {
         workspace_id: wsId,
@@ -571,7 +620,7 @@ const server = createServer(async (req, res) => {
         if (idFilter?.startsWith("in.(") && idFilter.endsWith(")")) {
           const wanted = new Set(idFilter.slice(4, -1).split(",").map((s) => s.toLowerCase()));
           const rows = (asksByWorkspace.get(ws.workspace_id) ?? [])
-            .filter((a) => wanted.has(a.signal_id))
+            .filter((a) => wanted.has(a.signal_id) && !omitLocationSignalIds.has(a.signal_id))
             .map((a) => a.placement);
           return reply(200, rows);
         }

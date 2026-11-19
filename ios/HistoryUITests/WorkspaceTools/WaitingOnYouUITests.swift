@@ -50,6 +50,9 @@ final class WaitingOnYouUITests: XCTestCase {
 
         let waitingButton = app.buttons["waiting-on-you-button"].firstMatch
         XCTAssertTrue(waitingButton.waitForExistence(timeout: 8), "Expected Waiting on you button in channel header")
+        let crossWorkspacePredicate = NSPredicate(format: "label CONTAINS %@", "Waiting 8")
+        let crossWorkspaceExpectation = expectation(for: crossWorkspacePredicate, evaluatedWith: waitingButton)
+        wait(for: [crossWorkspaceExpectation], timeout: 8)
         waitingButton.tap()
 
         let question = app.staticTexts["Should we publish build 14 to internal testers now?"].firstMatch
@@ -89,11 +92,16 @@ final class WaitingOnYouUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Nothing waiting in #general"].firstMatch.waitForExistence(timeout: 5))
         capture("waiting-todo-done")
 
-        // Jump to All channels from empty state and verify waiting + workspace to-dos appear
+        // Jump to All channels from empty state, verify accessible multi-select toggle + waiting to-dos
         let showAll = app.buttons.containing(NSPredicate(format: "label BEGINSWITH %@", "Show all channels")).firstMatch
         XCTAssertTrue(showAll.waitForExistence(timeout: 5))
         showAll.tap()
         XCTAssertTrue(app.staticTexts["Which screens should we audit first on iPhone SE?"].firstMatch.waitForExistence(timeout: 5))
+        let multiOption = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "To-dos list and detail")).firstMatch
+        XCTAssertTrue(multiOption.waitForExistence(timeout: 5))
+        XCTAssertEqual(multiOption.value as? String, "Not checked")
+        multiOption.tap()
+        XCTAssertEqual(multiOption.value as? String, "Checked")
         let mobileTodo = app.staticTexts["Review dark mode token audit for iPhone SE"].firstMatch
         for _ in 0..<4 where !mobileTodo.exists {
             app.swipeUp()

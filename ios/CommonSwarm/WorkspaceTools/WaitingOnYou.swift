@@ -26,6 +26,7 @@ enum WaitingConversation: Hashable, Sendable {
     case channel(UUID)
     case general
     case dm(WaitingPartnerKind, UUID)
+    case group(UUID)
     case unknown
 }
 
@@ -64,7 +65,7 @@ struct WaitingPlace: Hashable, Sendable {
             self.conversation = .dm(.person, id)
         case .agent(let id):
             self.conversation = .dm(.agent, id)
-        case .thread(_, let kind):
+        case .thread(let threadID, let kind):
             switch kind {
             case .general:
                 self.conversation = .general
@@ -91,7 +92,7 @@ struct WaitingPlace: Hashable, Sendable {
                     self.conversation = .unknown
                 }
             case .group:
-                self.conversation = .unknown
+                self.conversation = .group(threadID)
             }
         }
     }
@@ -208,6 +209,7 @@ struct WaitingWorkspaceLoad: Sendable {
     let items: [WaitingAskItem]
     let todos: [WaitingTodoItem]
     let complete: Bool
+    let failed: Bool
 }
 
 enum WaitingTodoReason: String, Decodable, Hashable, Sendable {
@@ -409,7 +411,12 @@ enum WaitingChoiceRules {
         case .workspace:
             return items.filter { $0.workspaceID == place.workspaceID }
         case .channel:
-            return items.filter { $0.workspaceID == place.workspaceID && $0.conversation == place.conversation }
+            guard place.conversation != .unknown else { return [] }
+            return items.filter {
+                $0.workspaceID == place.workspaceID
+                    && $0.conversation != .unknown
+                    && $0.conversation == place.conversation
+            }
         }
     }
 
@@ -434,7 +441,7 @@ enum WaitingChoiceRules {
                     return todo.placement == .channel && todo.channelID == channelID
                 case .general:
                     return todo.placement == .general
-                case .dm, .unknown:
+                case .dm, .group, .unknown:
                     return false
                 }
             }
@@ -476,7 +483,9 @@ final class WaitingOnYouStore: ObservableObject {
     @Published private(set) var items: [WaitingAskItem] = []
     @Published private(set) var todos: [WaitingTodoItem] = []
     @Published private(set) var workspaceComplete: [UUID: Bool] = [:]
+    @Published private(set) var workspaceFailed: [UUID: Bool] = [:]
     @Published private(set) var allWorkspacesEnumerated = false
+    @Published private(set) var hasLoadedOnce = false
     @Published private(set) var isLoading = false
     @Published private(set) var loadFailed = false
     @Published private(set) var pendingBySignal: Set<UUID> = []
@@ -499,6 +508,24 @@ final class WaitingOnYouStore: ObservableObject {
 
     var visibleTodos: [WaitingTodoItem] {
         WaitingChoiceRules.filterTodos(todos, scope: scope, place: place)
+    }
+
+    var scopeComplete: Bool {
+        switch scope {
+        case .channel, .workspace:
+            return workspaceComplete[place.workspaceID] ?? false
+        case .all:
+            return allWorkspacesEnumerated && !workspaceComplete.isEmpty && workspaceComplete.values.allSatisfy { $0 }
+        }
+    }
+
+    var scopeFailed: Bool {
+        switch scope {
+        case .channel, .workspace:
+            return workspaceFailed[place.workspaceID] ?? false
+        case .all:
+            return (hasLoadedOnce && !allWorkspacesEnumerated) || workspaceFailed.values.contains(true)
+        }
     }
 
     var counts: WaitingPanelCounts {
@@ -544,9 +571,11 @@ final class WaitingOnYouStore: ObservableObject {
         guard !Task.isCancelled else { return }
         allWorkspacesEnumerated = result.enumeratedAllWorkspaces
         workspaceComplete = result.workspaceComplete
+        workspaceFailed = result.workspaceFailed
         items = result.items
         todos = result.todos
-        loadFailed = !result.enumeratedAllWorkspaces && result.items.isEmpty && result.todos.isEmpty
+        hasLoadedOnce = true
+        loadFailed = (!result.enumeratedAllWorkspaces || result.workspaceFailed.values.contains(true)) && result.items.isEmpty && result.todos.isEmpty
         isLoading = false
     }
 

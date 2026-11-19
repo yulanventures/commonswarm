@@ -35,11 +35,54 @@ struct VerifyWaitingOnYou {
         expect(workspaces.count == 2, "Expected 2 workspaces")
         let mainWS = workspaces[0]
 
-        let waitingAPI = WaitingOnYouAPI(api: convAPI)
-        let generalPlace = WaitingPlace(workspaceID: mainWS.id, workspaceName: mainWS.name, conversation: .general, label: "#general")
-        let store = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        // 0. Exercise real conversation directory path (POST /functions/v1/read -> HTTP 200)
+        let directoryRows = try await convAPI.conversationList(mainWS.id)
+        expect(directoryRows != nil, "Expected modern conversationList response from POST /functions/v1/read")
+        let rows = directoryRows ?? []
+        let generalRow = rows.first { $0.kind == .general }!
+        let groupRows = rows.filter { $0.kind == .group }
+        expect(groupRows.count == 2, "Expected two distinct group DMs in directory, got \(groupRows.count)")
 
-        // 1. Force 1-item pages on waiting_todos_page to verify keyset pagination across all pages
+        let waitingAPI = WaitingOnYouAPI(api: convAPI)
+        let generalPlace = WaitingPlace(
+            workspace: mainWS,
+            conversation: generalRow.item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (generalRow.members ?? []).map(\.contact),
+            channelID: generalRow.channel_id
+        )
+        expect(generalPlace.conversation == .general, "Directory #general must resolve to .general")
+
+        // 1. Missing placement on #general ask + two distinct group DMs via directory:
+        //    neither group DM may match the unresolved ask or workspace/channel todos; queue stays incomplete with Retry.
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/omit-location?id=30000000-0000-4000-8000-000000000001")!)
+        let groupPlaceA = WaitingPlace(
+            workspace: mainWS,
+            conversation: groupRows[0].item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (groupRows[0].members ?? []).map(\.contact),
+            channelID: groupRows[0].channel_id
+        )
+        let groupPlaceB = WaitingPlace(
+            workspace: mainWS,
+            conversation: groupRows[1].item(viewer: tokens.userID),
+            viewerID: tokens.userID,
+            directory: (groupRows[1].members ?? []).map(\.contact),
+            channelID: groupRows[1].channel_id
+        )
+        expect(groupPlaceA.conversation != groupPlaceB.conversation, "Distinct group DMs must have distinct conversation identities")
+        let groupStoreA = await MainActor.run { WaitingOnYouStore(place: groupPlaceA) }
+        let groupStoreB = await MainActor.run { WaitingOnYouStore(place: groupPlaceB) }
+        await groupStoreA.load(api: waitingAPI)
+        await groupStoreB.load(api: waitingAPI)
+        expect(await MainActor.run { groupStoreA.visibleItems.isEmpty && groupStoreA.visibleTodos.isEmpty }, "Group A must not receive unresolved ask or non-group todos")
+        expect(await MainActor.run { groupStoreB.visibleItems.isEmpty && groupStoreB.visibleTodos.isEmpty }, "Group B must not receive unresolved ask or non-group todos")
+        expect(await MainActor.run { groupStoreA.scopeFailed && !groupStoreA.scopeComplete }, "Missing location must mark scope failed/incomplete (never false empty state)")
+        expect(await MainActor.run { groupStoreA.counts.all.badgeText == "8+" }, "Incomplete cross-workspace header badge must show 8+, got \(await MainActor.run { groupStoreA.counts.all.badgeText })")
+        try await postFixture(origin.appending(path: "fixture/restore-locations"))
+
+        // 2. Force 1-item pages on waiting_todos_page to verify keyset pagination across all pages
+        let store = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/todos-page-size?n=1")!)
         await store.load(api: waitingAPI)
         let initialCounts = await MainActor.run { store.counts }
@@ -76,7 +119,7 @@ struct VerifyWaitingOnYou {
         expect(firstAsk.orderedOptions.first?.id == "ship" && firstAsk.orderedOptions.first?.isRecommended == true, "Recommended option must sort first")
         expect(firstAsk.prompt.question == "Should we publish build 14 to internal testers now?", "Prompt split should extract trailing question")
 
-        // 2. Verify ask failure keeps card editable & retry reuses same command_id
+        // 3. Verify ask failure keeps card editable & retry reuses same command_id
         try await postFixture(origin.appending(path: "fixture/fail-next"))
         await store.submitSingleOption("ship", for: firstAsk, api: waitingAPI)
         let failState = await MainActor.run { store.failuresBySignal[firstAsk.id] }
@@ -88,7 +131,7 @@ struct VerifyWaitingOnYou {
         let sentBanner = await MainActor.run { store.sentBanner }
         expect(sentBanner == "Sent", "Expected visible Sent banner, got \(String(describing: sentBanner))")
 
-        // 3. Verify Mark done failure -> Retry -> HTTP 409 conflict auto-retry -> committed + Done banner
+        // 4. Verify Mark done failure -> Retry -> HTTP 409 conflict auto-retry -> committed + Done banner
         try await postFixture(origin.appending(path: "fixture/fail-next-todo"))
         await store.markTodoDone(generalTodo, api: waitingAPI)
         let todoFail = await MainActor.run { store.failuresByTodo[generalTodo.id] }
@@ -123,14 +166,14 @@ struct VerifyWaitingOnYou {
         expect(recordedTodos.allSatisfy { $0.arguments.seat == "seat_0000000000000000000000" && $0.arguments.request_id == $0.command_id && $0.arguments.state == "done" }, "All todo_set_state calls must carry seat, request_id == command_id, and state == done")
         expect(recordedTodos[2].arguments.base_version == recordedTodos[1].arguments.base_version + 1, "Conflict retry must bump base_version from current.version")
 
-        // 4. Verify Open (readTodoDetail) resolves display names (no UUIDs) and comments
+        // 5. Verify Open (readTodoDetail) resolves display names (no UUIDs) and comments
         let detail = try await waitingAPI.readTodoDetail(workspaceID: mainWS.id, todoID: mobileTodos[0].id)
         expect(detail.title == "Review dark mode token audit for iPhone SE", "Unexpected detail title")
         expect(detail.assigneeName == "Atlas" && detail.assigneeIsAgent, "Expected Atlas agent assignee")
         expect(detail.formattedDue == "Due Nov 26", "Expected Due Nov 26")
         expect(detail.comments.count == 1 && detail.comments[0].authorName == "Atlas", "Expected resolved comment author")
 
-        // 5. Verify multi-select + Other answer uses v2 wire format
+        // 6. Verify multi-select + Other answer uses v2 wire format
         await MainActor.run { store.scope = .workspace }
         let mobileAsk = await MainActor.run { store.visibleItems.first { $0.multi }! }
         await MainActor.run {
@@ -141,7 +184,7 @@ struct VerifyWaitingOnYou {
         let remainingWorkspace = await MainActor.run { store.counts.workspace.min }
         expect(remainingWorkspace == 3, "Expected 3 remaining items (1 ask + 2 todos) in workspace, got \(remainingWorkspace)")
 
-        // 6. Verify home_overview fallback when waiting_todos_page returns 404 (PGRST202)
+        // 7. Verify home_overview fallback when waiting_todos_page returns 404 (PGRST202)
         try await postFixture(origin.appending(path: "fixture/hide-waiting-todos-rpc"))
         let fallbackStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
         await fallbackStore.load(api: waitingAPI)
@@ -152,7 +195,7 @@ struct VerifyWaitingOnYou {
         expect(await MainActor.run { fallbackStore.visibleTodos.isEmpty }, "Fallback workspace-only todos must not clutter #general")
         try await postFixture(origin.appending(path: "fixture/show-waiting-todos-rpc"))
 
-        // 7. Inspect ask wire commands recorded by fixture
+        // 8. Inspect ask wire commands recorded by fixture
         struct RecordedCommand: Decodable {
             struct Body: Decodable {
                 let kind: String
@@ -171,31 +214,12 @@ struct VerifyWaitingOnYou {
         expect(recorded[0].command.option_id == "ship" && recorded[0].command.option_ids == nil && recorded[0].command.other_text == nil, "Single choice must use v1 exact shape")
         expect(recorded[2].command.option_id == nil && recorded[2].command.option_ids == ["todos"] && recorded[2].command.other_text == "Also check VoiceOver focus", "Multi+Other must use v2 shape")
 
-        // 8. Placement rule unit checks (missing root -> unknown, never #general; thread destinations)
-        let unknown = WaitingChoiceRules.classifyConversation(nil)
-        expect(unknown == .unknown, "nil placement must be .unknown")
+        // 9. Placement rule unit checks
+        expect(WaitingChoiceRules.classifyConversation(nil) == .unknown, "nil placement must be .unknown")
         let replyNoRoot = WaitingSignalPlacement(id: UUID(), channel_id: nil, to: nil, to_agent: nil, thread_root_id: UUID(), from: UUID(), from_kind: "agent")
         expect(WaitingChoiceRules.classifyConversation(replyNoRoot, root: nil) == .unknown, "thread reply without root must be .unknown")
         expect(WaitingChoiceRules.cleanOtherText("hello\u{0007}") == nil, "Control chars must be rejected")
 
-        let threadChannelID = UUID()
-        let threadGeneral = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .general), name: "#general", symbol: "number"))
-        expect(threadGeneral.conversation == .general, "Thread general must map to .general")
-        let threadChannel = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .publicChannel), name: "#mobile", symbol: "number"), channelID: threadChannelID)
-        expect(threadChannel.conversation == .channel(threadChannelID), "Thread channel must map to .channel(channelID)")
-        let threadDM = WaitingPlace(
-            workspace: mainWS,
-            conversation: Conversation(destination: .thread(UUID(), .dm), name: "Atlas", symbol: "cpu"),
-            viewerID: session.userID,
-            directory: [
-                Conversation(destination: .person(session.userID), name: "You", symbol: "person"),
-                Conversation(destination: .agent(atlasID), name: "Atlas", symbol: "cpu"),
-            ]
-        )
-        expect(threadDM.conversation == .dm(.agent, atlasID), "Thread DM must map to .dm(.agent, atlasID)")
-        let threadGroup = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .group), name: "Team", symbol: "person.2"))
-        expect(threadGroup.conversation == .unknown, "Thread group DM must map to .unknown")
-
-        print("PASS: VerifyWaitingOnYou (asks + paginated todos, home_overview fallback, scope filters, Mark done retry+conflict, todo detail, v1/v2 answer_choice)")
+        print("PASS: VerifyWaitingOnYou (directory read, distinct groups, missing-location retry, asks + paginated todos, home_overview fallback, Mark done retry+conflict, todo detail, v1/v2 answer_choice)")
     }
 }

@@ -14,6 +14,7 @@ struct WaitingLoadSnapshot: Sendable {
     let items: [WaitingAskItem]
     let todos: [WaitingTodoItem]
     let workspaceComplete: [UUID: Bool]
+    let workspaceFailed: [UUID: Bool]
     let enumeratedAllWorkspaces: Bool
 }
 
@@ -507,7 +508,9 @@ struct WaitingOnYouAPI: Sendable {
         let items: [WaitingAskItem]
         let todos: [WaitingTodoItem]
         let asksComplete: Bool
+        let asksFailed: Bool
         let todosComplete: Bool
+        let todosFailed: Bool
         let needsOverviewFallback: Bool
     }
 
@@ -523,16 +526,16 @@ struct WaitingOnYouAPI: Sendable {
             }
         }()
 
-        async let todosResultTask: (entries: [WaitingTodoEntryWire], complete: Bool, fallback: Bool) = {
+        async let todosResultTask: (entries: [WaitingTodoEntryWire], complete: Bool, failed: Bool, fallback: Bool) = {
             do {
                 guard let page = try await waitingTodosPage(workspaceID: workspace.id) else {
-                    return ([], true, false)
+                    return ([], true, false, false)
                 }
-                return (page.todos, page.complete, false)
+                return (page.todos, page.complete, false, false)
             } catch is ToolsUnavailableError {
-                return ([], false, true)
+                return ([], false, false, true)
             } catch {
-                return ([], false, false)
+                return ([], false, true, false)
             }
         }()
 
@@ -543,6 +546,7 @@ struct WaitingOnYouAPI: Sendable {
         let todosNeedChannels = todosResult.entries.contains { $0.placement == .channel && $0.channel_id != nil }
 
         var items: [WaitingAskItem] = []
+        var asksFailed = !asksResult.ok
         var asksComplete = asksResult.ok && asksResult.complete
         var channels: [UUID: String] = [:]
 
@@ -552,12 +556,20 @@ struct WaitingOnYouAPI: Sendable {
             async let channelsTask = channelSlugs(workspaceID: workspace.id)
 
             let choicesList = try? await choicesTask
-            let locations = (try? await locationsTask) ?? [:]
-            let locationsSucceeded = !locations.isEmpty
+            let locations: [UUID: WaitingSignalPlacement]
+            let locationsFailed: Bool
+            do {
+                locations = try await locationsTask
+                locationsFailed = false
+            } catch {
+                locations = [:]
+                locationsFailed = true
+            }
             channels = await channelsTask
 
             if let choicesList {
                 let choicesByID = Dictionary(uniqueKeysWithValues: choicesList.map { ($0.signal_id, $0) })
+                var anyUnknownLocation = false
                 for ask in asksResult.asks {
                     guard let choiceState = choicesByID[ask.signal_id],
                           choiceState.answer == nil,
@@ -565,6 +577,9 @@ struct WaitingOnYouAPI: Sendable {
                     let loc = locations[ask.signal_id]
                     let root = loc?.thread_root_id.flatMap { locations[$0] }
                     let conversation = WaitingChoiceRules.classifyConversation(loc, root: root)
+                    if conversation == .unknown {
+                        anyUnknownLocation = true
+                    }
                     let fromKind: WaitingPartnerKind = ask.from.kind == "agent" ? .agent : .person
                     let senderName = ask.from.name?.trimmingCharacters(in: .whitespacesAndNewlines)
                     let displayName = (senderName?.isEmpty == false) ? senderName! : (fromKind == .agent ? "Agent" : "Member")
@@ -576,7 +591,7 @@ struct WaitingOnYouAPI: Sendable {
                         channelLabel = "#general"
                     case .dm:
                         channelLabel = displayName
-                    case .unknown:
+                    case .group, .unknown:
                         channelLabel = ""
                     }
                     items.append(WaitingAskItem(
@@ -595,8 +610,12 @@ struct WaitingOnYouAPI: Sendable {
                         options: choiceState.options
                     ))
                 }
-                asksComplete = asksComplete && locationsSucceeded
+                if locationsFailed || anyUnknownLocation {
+                    asksFailed = true
+                    asksComplete = false
+                }
             } else {
+                asksFailed = true
                 asksComplete = false
             }
         } else if todosNeedChannels {
@@ -638,7 +657,9 @@ struct WaitingOnYouAPI: Sendable {
             items: items,
             todos: mappedTodos,
             asksComplete: asksComplete,
+            asksFailed: asksFailed,
             todosComplete: todosResult.complete,
+            todosFailed: todosResult.failed,
             needsOverviewFallback: todosResult.fallback
         )
     }
@@ -676,10 +697,12 @@ struct WaitingOnYouAPI: Sendable {
         var allItems: [WaitingAskItem] = []
         var allTodos: [WaitingTodoItem] = []
         var completeMap: [UUID: Bool] = [:]
+        var failedMap: [UUID: Bool] = [:]
         for result in sortedResults {
             allItems.append(contentsOf: result.items)
             var todos = result.todos
             var todosComplete = result.todosComplete
+            var todosFailed = result.todosFailed
             if result.needsOverviewFallback {
                 if let overview, let row = overviewByWorkspace[result.workspace.id] {
                     let extracted = Self.extractOverviewTodos(
@@ -689,17 +712,22 @@ struct WaitingOnYouAPI: Sendable {
                     )
                     todos = extracted.todos
                     todosComplete = extracted.complete
+                    todosFailed = false
                 } else {
                     todosComplete = false
+                    todosFailed = true
                 }
             }
             allTodos.append(contentsOf: todos)
-            completeMap[result.workspace.id] = result.asksComplete && todosComplete
+            let anyFailed = result.asksFailed || todosFailed
+            completeMap[result.workspace.id] = result.asksComplete && todosComplete && !anyFailed
+            failedMap[result.workspace.id] = anyFailed
         }
         return WaitingLoadSnapshot(
             items: allItems,
             todos: allTodos,
             workspaceComplete: completeMap,
+            workspaceFailed: failedMap,
             enumeratedAllWorkspaces: enumeratedAll
         )
     }
