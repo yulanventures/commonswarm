@@ -675,9 +675,9 @@ test("4. DM & group-DM thread replies unblock, security fences, SQL privilege de
 
 test("5. HezSec C1-C3 witnesses: NULL-total DM thread gates, DM human-to-agent thread mentions, and live workspace seat requirement", { timeout: 90_000 }, async () => {
   // === C1: NULL-total audience check on BOTH DM thread gates ===
-  // Group DM with two humans (ann, ben) and one agent (annBotA).
-  const grpC1 = String(((ok(await send(ann.jwt, {
-    kind: "conversation_open", members: [uRef(ben), aRef(annBotA)], new_group: true,
+  // Group DM with two humans (ann, ben) and one agent (annBotA); opened by current member ben with new_group=true.
+  const grpC1 = String(((ok(await send(ben.jwt, {
+    kind: "conversation_open", members: [uRef(ann), aRef(annBotA)], new_group: true,
   }), "open C1 group")).conversation as Row).conversation_id);
   const c1OpenRoot = await posted(ann.jwt, { conversation_id: grpC1, body: "C1 open group root" });
 
