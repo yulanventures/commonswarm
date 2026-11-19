@@ -197,3 +197,73 @@ test("a sample rail and an archived row never move", () => {
     "live rows move; an archived row does not");
   assert.deepEqual(["a", "c", "z"].map((id) => shortcut(build(true), id)), ["undefined", "undefined", "undefined"]);
 });
+
+test("Step 3B Direct messages rail shows + New message, DM/group rows, mention badges, muted suppression, and sibling menus", () => {
+  const selected = [];
+  const menus = [];
+  let newDmClicks = 0;
+  const root = buildHomeRail(
+    doc,
+    {
+      sample: false,
+      catchUp: { href: "/app?v=catchup", current: false, needsYou: null },
+      workspaces: [],
+      people: null,
+      channels: ready([
+        row("a", "design", { unread: true, mentionCount: 3 }),
+        row("b", "muted-ch", { unread: true, mentionCount: 5, muted: true }),
+      ]),
+      directMessages: {
+        rows: [
+          { id: "dm-1", kind: "dm", title: "Lead", href: "/app?w=w&dm=dm-1", current: true, unreadCount: 0, mentionCount: 0 },
+          { id: "dm-2", kind: "group_dm", title: "Alex and Lead", href: "/app?w=w&dm=dm-2", current: false, unreadCount: 4, mentionCount: 2, memberCount: 3 },
+          { id: "dm-3", kind: "dm", title: "Notes to self", href: "/app?w=w&dm=dm-3", current: false, unreadCount: 2, mentionCount: 0 },
+          { id: "dm-4", kind: "group_dm", title: "Muted group", href: "/app?w=w&dm=dm-4", current: false, unreadCount: 9, mentionCount: 4, muted: true, memberCount: 4 },
+        ],
+      },
+    },
+    {
+      openPerson() {},
+      openAgent() {},
+      selectChannel() {},
+      channelMenu() {},
+      newChannel() {},
+      retryChannels() {},
+      selectConversation: (id) => selected.push(id),
+      conversationMenu: (id) => menus.push(id),
+      newDirectMessage: () => { newDmClicks += 1; },
+    },
+  );
+
+  // Channel mention badge shown when unmuted, suppressed when muted.
+  const designLink = find(root, (n) => n.dataset?.railChannel === "a")[0];
+  assert.equal(find(designLink, (n) => n.className?.includes("hm-rail__mention-badge"))[0]?.textContent, "3");
+  assert.match(designLink.attrs["aria-label"], /3 mentions$/);
+  const mutedCh = find(root, (n) => n.dataset?.railChannel === "b")[0];
+  assert.equal(find(mutedCh, (n) => n.className?.includes("hm-rail__mention-badge")).length, 0);
+
+  // Direct messages heading + New message button.
+  const newDm = find(root, (n) => n.dataset?.homeNewDm !== undefined)[0];
+  assert.equal(newDm?.attrs["aria-label"], "New message");
+  newDm.listeners.click();
+  assert.equal(newDmClicks, 1);
+
+  // Rows, badges, mute suppression, current mark, click & menu wiring.
+  const dmLinks = find(root, (n) => n.dataset?.railConversation !== undefined);
+  assert.deepEqual(dmLinks.map((n) => n.dataset.railConversation), ["dm-1", "dm-2", "dm-3", "dm-4"]);
+  assert.equal(dmLinks[0].attrs["aria-current"], "page");
+  assert.equal(find(dmLinks[1], (n) => n.className?.includes("hm-rail__mention-badge"))[0]?.textContent, "2");
+  assert.equal(find(dmLinks[2], (n) => n.className === "hm-rail__unread").length, 1);
+  assert.equal(dmLinks[3].dataset.muted, "");
+  assert.equal(dmLinks[3].dataset.unread, undefined);
+  assert.equal(find(dmLinks[3], (n) => n.className?.includes("hm-rail__mention-badge")).length, 0);
+  assert.equal(find(dmLinks[3], (n) => n.className === "hm-rail__unread").length, 0);
+
+  dmLinks[1].listeners.click({ defaultPrevented: false, button: 0, preventDefault() {} });
+  assert.deepEqual(selected, ["dm-2"]);
+
+  const dmMenuButtons = find(root, (n) => n.dataset?.railConversationMenu !== undefined);
+  assert.deepEqual(dmMenuButtons.map((n) => n.dataset.railConversationMenu), ["dm-1", "dm-2", "dm-3", "dm-4"]);
+  dmMenuButtons[1].listeners.click({});
+  assert.deepEqual(menus, ["dm-2"]);
+});
