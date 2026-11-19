@@ -4349,7 +4349,36 @@ async function admitHumanSession(tx: Sql, verified: VerifiedHuman): Promise<bool
 async function authenticateHuman(
   tx: Sql,
   verified: VerifiedHuman,
+  options?: { skipUpsertIfUnchanged?: boolean },
 ): Promise<AuthContext | null> {
+  if (options?.skipUpsertIfUnchanged) {
+    const existing = await tx<{ user_id: string; display_name: string; email: string | null }[]>`
+      SELECT user_id, display_name, email
+      FROM swarm.users
+      WHERE user_id = ${verified.userId}::uuid
+    `;
+    const row = existing[0];
+    if (
+      !row ||
+      row.display_name !== verified.displayName ||
+      (verified.email !== null && row.email !== verified.email)
+    ) {
+      throw new LocalAuthDiscoveryChanged();
+    }
+    return {
+      credentialKind: "user",
+      ledgerCredentialKind: "user",
+      ledgerPrincipalId: row.user_id,
+      credentialId: null,
+      deviceId: null,
+      actor: { user: row.user_id, agent_principal: null, run: null },
+      agent: null,
+      agentFirstUse: false,
+      identityVerified: verified.identityVerified,
+      email: verified.email ?? row.email,
+      interactiveAuthAtSeconds: verified.interactiveAuthAtSeconds,
+    };
+  }
   const rows = await tx<{ user_id: string; email: string | null }[]>`
     INSERT INTO swarm.users (user_id, display_name, email)
     VALUES (
@@ -16311,6 +16340,42 @@ async function handleTransaction(
       : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
     const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
     timer.mark("plan_start");
+    // Operational workspace-routed commands never mutate swarm.workspaces or
+    // swarm.streams (they emit no stream events). Keep workspaceMode='share'
+    // (still fenced against workspace archive/removal FOR UPDATE) and omit the
+    // workspace stream lock so concurrent sibling agents do not serialize.
+    const isNonStreamWorkspaceKind =
+      kind === CLAIM_AGENT_INBOX_KIND ||
+      kind === ACK_AGENT_DELIVERY_KIND ||
+      kind === TOUCH_PRESENCE_KIND ||
+      kind === SIGNALS_SEEN_KIND ||
+      kind === "claim_wake_lease" ||
+      kind === "renew_wake_lease" ||
+      kind === "release_wake_lease";
+    const isOperationalWorkspaceKind =
+      isNonStreamWorkspaceKind || kind === RENEW_AGENT_TOKEN_KIND;
+    let humanSkipUpsertIfUnchanged = false;
+    let humanActorUserMode: "keyShare" | "noKeyUpdate" | "update" | undefined;
+    if (verifiedHuman !== null) {
+      if (kind === "invite_member" || kind === CREATE_WORKSPACE_KIND) {
+        // Acquire FOR UPDATE on swarm.users upfront before workspace/stream
+        // locks so later budget checks never upgrade NO KEY UPDATE -> UPDATE
+        // while concurrent agents hold FOR KEY SHARE on swarm.users.
+        humanActorUserMode = "update";
+      } else if (kind === SIGNALS_SEEN_KIND) {
+        const [existingUser] = await tx<{ display_name: string; email: string | null }[]>`
+          SELECT display_name, email FROM swarm.users WHERE user_id = ${verifiedHuman.userId}::uuid
+        `;
+        if (
+          existingUser !== undefined &&
+          existingUser.display_name === verifiedHuman.displayName &&
+          (verifiedHuman.email === null || existingUser.email === verifiedHuman.email)
+        ) {
+          humanActorUserMode = "keyShare";
+          humanSkipUpsertIfUnchanged = true;
+        }
+      }
+    }
     if (resumeFamily && hostedSeat===null) {
       if (verifiedHuman && !resumeAdmissionRefusal) {
         try {
@@ -16338,10 +16403,12 @@ async function handleTransaction(
     } else {
       localState.localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
         ...(agentTokenHash ? {hash:agentTokenHash}:{}), memberMutation:['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','enable_agent_management','disable_agent_management'].includes(kind), connectionOnly:kind===RENEW_AGENT_TOKEN_KIND, workspace:localWorkspace,actor:verifiedHuman?.userId,
+        ...(humanActorUserMode ? { actorUserMode: humanActorUserMode } : {}),
         household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
-        streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
-        workspaceMode: household || revocation || localExpiry || verifiedHuman || seatAdminAgent
-          || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
+        streamIds: isNonStreamWorkspaceKind ? [] : localStreams.map(r=>r.stream_id),
+        workspaceMode: household || revocation || localExpiry
+          || (verifiedHuman && kind !== SIGNALS_SEEN_KIND) || seatAdminAgent
+          || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && !isOperationalWorkspaceKind ? 'update':'share',
         ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
         ...(revocation ? {revocation}:{}),
         memberTargets:removeUser ? [removeUser] : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
@@ -16391,7 +16458,9 @@ async function handleTransaction(
       : agentTokenHash !== null
       ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
-      ? await authenticateHuman(tx, verifiedHuman)
+      ? await authenticateHuman(tx, verifiedHuman, {
+        skipUpsertIfUnchanged: humanSkipUpsertIfUnchanged && localState.localPlan !== null,
+      })
       : null;
     if (!auth) {
       logCommandFailure(
