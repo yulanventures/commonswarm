@@ -132,7 +132,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-dire
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-joined {
   color: var(--k-shell-secondary); font: 500 13px/20px var(--k-shell-font); white-space: nowrap;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-error { grid-column: 1 / -1; margin: 0; color: var(--danger, var(--k-shell-ink)); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-error { grid-column: 1 / -1; margin: 0; color: var(--k-shell-danger, var(--danger, var(--k-shell-ink))); }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer { display: flex; justify-content: flex-end; flex: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer[hidden] { display: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .dashboard__button--primary {
@@ -255,7 +255,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop
   background: var(--k-shell-surface);
 }
 .cm-preview-bar__join { min-inline-size: 44px; min-block-size: 44px; }
-.cm-preview-bar__error { margin: 0; flex: 1 1 16rem; color: var(--danger, var(--k-shell-ink)); font-size: 13px; line-height: 20px; }
+.cm-preview-bar__error { margin: 0; flex: 1 1 16rem; color: var(--k-shell-danger, var(--danger, var(--k-shell-ink))); font-size: 13px; line-height: 20px; }
 @media (width <= 52rem) {
   .cm-preview-bar { padding: 12px; }
   .cm-preview-bar__join { inline-size: 100%; }
