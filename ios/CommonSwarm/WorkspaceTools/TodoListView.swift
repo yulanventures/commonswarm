@@ -115,14 +115,6 @@ struct TodoListView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("To-dos")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: TodoSummary.self) { summary in
-            TodoDetailView(
-                api: api,
-                workspaceID: workspaceID,
-                summary: summary,
-                directory: viewModel.directory
-            )
-        }
         .task(id: viewModel.filter) {
             await load()
         }
@@ -152,7 +144,14 @@ struct TodoListView: View {
                     }
                     Section {
                         ForEach(items) { todo in
-                            NavigationLink(value: todo) {
+                            NavigationLink {
+                                TodoDetailView(
+                                    api: api,
+                                    workspaceID: workspaceID,
+                                    summary: todo,
+                                    directory: viewModel.directory
+                                )
+                            } label: {
                                 TodoRowView(todo: todo, directory: viewModel.directory)
                             }
                         }

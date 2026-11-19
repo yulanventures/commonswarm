@@ -62,17 +62,25 @@ final class TodosUITests: XCTestCase {
 
         try tapButton("All")
         XCTAssertTrue(app.staticTexts["Audit dark mode contrast across workspace list"].firstMatch.waitForExistence(timeout: 5), "Expected done to-do under All")
-        XCTAssertTrue(app.staticTexts["Archive legacy preview route after migration"].firstMatch.waitForExistence(timeout: 5), "Expected dropped to-do under All")
+        let droppedTask = app.staticTexts["Archive legacy preview route after migration"].firstMatch
+        if !droppedTask.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(droppedTask.waitForExistence(timeout: 5), "Expected dropped to-do under All")
         try tapButton("Open")
         XCTAssertTrue(taskTitle.waitForExistence(timeout: 5))
 
         taskTitle.tap()
 
-        XCTAssertTrue(app.staticTexts["Assigned to"].firstMatch.waitForExistence(timeout: 8), "Expected Assigned to row in detail")
-        XCTAssertTrue(app.staticTexts["Maya Chen"].firstMatch.waitForExistence(timeout: 5), "Expected Maya Chen in detail")
-        XCTAssertTrue(app.staticTexts["Tue, Nov 24"].firstMatch.waitForExistence(timeout: 5), "Expected local calendar due date in detail")
-        XCTAssertTrue(app.staticTexts["Started walking through the release checklist on the test phone."].firstMatch.waitForExistence(timeout: 5), "Expected comment in detail")
+        XCTAssertTrue(app.staticTexts["Assigned to, Maya Chen"].firstMatch.waitForExistence(timeout: 8), "Expected Maya Chen in detail")
+        XCTAssertTrue(app.staticTexts["Due, Tue, Nov 24"].firstMatch.waitForExistence(timeout: 5), "Expected local calendar due date in detail")
         XCTAssertFalse(app.staticTexts["00000000..."].exists, "Detail must never show abbreviated UUID")
         capture("todos-detail")
+
+        let comment = app.staticTexts["Started walking through the release checklist on the test phone."].firstMatch
+        if !comment.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(comment.waitForExistence(timeout: 5), "Expected comment in detail")
     }
 }
