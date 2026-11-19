@@ -740,6 +740,24 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       }
     };
 
+    const waitForServerCondition = async (
+      predicate: () => boolean,
+      label: string,
+      timeoutMs = 15_000,
+    ): Promise<void> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) return;
+        await page.waitForTimeout(25);
+      }
+      const feedback = await page.evaluate(
+        () => (document.querySelector<HTMLElement>("[data-composer-feedback]")?.textContent ?? "").trim(),
+      ).catch(() => "");
+      throw new Error(
+        `Timed out waiting for ${label}; composerFeedback=${JSON.stringify(feedback)}, putCount=${putCount}, commands=${JSON.stringify(commandsSent)}`,
+      );
+    };
+
     // ── FLOW 1 (C6 + Designer): Served /app sign-in A -> Add account Google PKCE redirect -> B promoted ──
     await page.goto(`${origin}/app`);
     await page.waitForSelector('[data-panel="signed-out"]:not([hidden])');
@@ -1016,7 +1034,10 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     );
     await page.fill("[data-composer-input]", "ops control message");
     await page.click("[data-composer-send]");
-    await page.waitForFunction(() => (document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "") === "");
+    await waitForServerCondition(
+      () => commandsSent.some((c) => c.kind === "post_signal"),
+      "Case 3a1 post_signal after #ops open visibility check",
+    );
     assert.equal(putCount, 1, "unchanged #ops control must upload attachment after open visibility check");
     assert.deepEqual(
       commandsSent.filter((c) => ["file_version_create", "file_version_commit", "post_signal"].includes(c.kind)),
@@ -1088,9 +1109,17 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       mimeType: "text/plain",
       buffer: Buffer.from("control bytes"),
     });
+    await page.waitForFunction(
+      () => (document.querySelector<HTMLElement>("[data-composer-attachments]")?.textContent ?? "").includes("ok-a.txt"),
+      null,
+      { timeout: 10_000 },
+    );
     await page.fill("[data-composer-input]", "control message");
     await page.click("[data-composer-send]");
-    await page.waitForFunction(() => (document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "") === "");
+    await waitForServerCondition(
+      () => commandsSent.some((c) => c.kind === "post_signal"),
+      "Case 3c post_signal for unchanged-account control",
+    );
     assert.equal(putCount, 1, "unchanged control must upload attachment once");
     assert.deepEqual(
       commandsSent.filter((c) => ["file_version_create", "file_version_commit", "post_signal"].includes(c.kind)),
