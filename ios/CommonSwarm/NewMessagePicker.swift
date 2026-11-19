@@ -41,12 +41,20 @@ struct NewMessagePicker: View {
             .searchable(text: $query, prompt: "Find people or agents")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(restart ? "Start new group" : "Open") { Task { await open() } }
-                        .disabled(busy || selected.isEmpty)
-                }
             }
-        }.task { await load() }.interactiveDismissDisabled(busy)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !selected.isEmpty {
+                Button { Task { await open() } } label: {
+                    Text(restart ? "Start new group" : "Open")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent).disabled(busy)
+                .padding(.horizontal).padding(.vertical, 6)
+                .background(.bar)
+            }
+        }
+        .task { await load() }.interactiveDismissDisabled(busy)
     }
 
     private func load() async {
