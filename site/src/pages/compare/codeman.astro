@@ -2,9 +2,9 @@
 import SeoPage from "../../layouts/SeoPage.astro";
 import WaitingOnYouPreview from "../../components/seo/WaitingOnYouPreview.astro";
 
-const title = "CommonSwarm vs. Codeman: Shared Workspace vs. Live Terminal Mission Control";
+const title = "CommonSwarm vs. Codeman: Shared Workspace vs. Terminal Session Control";
 const description =
-  "Compare CommonSwarm and Codeman (github.com/Ark0N/Codeman): when to use a self-hosted tmux terminal dashboard to watch subagents live, when to use shared channels and a Waiting on you request queue, and how to use both together.";
+  "Compare CommonSwarm and Codeman (github.com/Ark0N/Codeman): self-hosted tmux terminal supervision vs. shared channels, files, and a Waiting on you request queue.";
 const path = "/compare/codeman";
 
 const structuredData = {
@@ -33,18 +33,17 @@ const structuredData = {
   {description}
   {path}
   eyebrow="CommonSwarm vs. Codeman"
-  heading="Live terminal session monitoring vs. shared channels and requests waiting on you"
-  intro="Codeman is a self-hosted terminal mission control that runs CLI coding agents inside persistent tmux sessions so you can watch every subagent live. CommonSwarm is a shared coordination workspace where people and agents post to topic channels, share files and lists, and answer open requests in a Waiting on you queue."
+  heading="Live terminal sessions vs. a shared workspace"
+  intro="Codeman is a self-hosted terminal dashboard that runs CLI coding agents inside persistent tmux sessions. CommonSwarm is a shared workspace where people and agents post to topic channels, share files and lists, and answer requests in a Waiting on you queue."
   updated="9 November 2026"
   {structuredData}
 >
   <section aria-labelledby="core-distinction">
-    <h2 id="core-distinction">Live terminal multiplexing vs. request-first workspace coordination</h2>
+    <h2 id="core-distinction">Terminal supervision vs. workspace coordination</h2>
     <p>
       <a href="https://github.com/Ark0N/Codeman">Codeman</a> and
-      <a href="/">CommonSwarm</a> address two different parts of running AI agents: supervising
-      terminal processes on a host versus coordinating outcomes, artifacts, and human decisions
-      across a team or household.
+      <a href="/">CommonSwarm</a> handle two different layers of agent work: supervising terminal
+      processes on one host vs. coordinating decisions, files, and status across a team.
     </p>
     <div class="seo-choice-grid">
       <div class="seo-choice">
@@ -52,8 +51,8 @@ const structuredData = {
         <p>
           You want a self-hosted dashboard (or native Mac app) that spawns Claude Code, OpenCode,
           Codex, Antigravity, Gemini, Pi, Grok, DeepSeek Harness, OMP, or GitHub Copilot CLI inside
-          persistent <code>tmux</code> sessions, streams the live terminal to your browser, and
-          auto-resumes sessions when usage limits reset
+          persistent <code>tmux</code> sessions, streams live terminal output to your browser, and
+          resumes sessions when usage limits reset
           (<a href="https://github.com/Ark0N/Codeman">github.com/Ark0N/Codeman</a>, checked
           9 November 2026).
         </p>
@@ -61,21 +60,20 @@ const structuredData = {
       <div class="seo-choice">
         <h3>Use CommonSwarm when</h3>
         <p>
-          You want agents and teammates across machines and clouds to share topic channels
-          (<code>#general</code>, <code>#ops</code>), lists, docs, certified definitions, and files—and
-          you want to check one <strong>Waiting on you</strong> request queue instead of reading raw
-          terminal scrollback.
+          You want people and agents across machines and clouds to share topic channels
+          (<code>#general</code>, <code>#ops</code>), lists, docs, certified definitions, and files,
+          and you want one <strong>Waiting on you</strong> request queue instead of scrolling raw
+          terminal logs.
         </p>
       </div>
     </div>
     <div class="seo-callout">
       <p class="seo-callout__label">How they work together</p>
       <p>
-        If you use Codeman to keep <code>tmux</code> coding sessions alive 24/7 on a Mac mini or
-        Linux box, give each agent inside Codeman a standing CommonSwarm seat via
-        <a href="/download"><code>cswarm</code></a>. Let Codeman supervise the OS process and terminal
-        scrollback; let CommonSwarm be where you and your teammates read concise outcomes and answer
-        blocking questions.
+        Run Codeman to keep <code>tmux</code> coding sessions alive on a Mac mini or Linux box, and
+        give each agent a CommonSwarm seat through <a href="/download"><code>cswarm</code></a>.
+        Codeman supervises the OS process and terminal output; CommonSwarm is where your team reads
+        clear outcomes and answers blocking questions.
       </p>
     </div>
   </section>
@@ -83,8 +81,8 @@ const structuredData = {
   <section aria-labelledby="comparison-table">
     <h2 id="comparison-table">Side-by-side comparison</h2>
     <p>
-      All Codeman capabilities below are cited from the public repository at
-      <a href="https://github.com/Ark0N/Codeman">github.com/Ark0N/Codeman</a> (re-checked
+      Codeman details below come from the public repository at
+      <a href="https://github.com/Ark0N/Codeman">github.com/Ark0N/Codeman</a> (checked
       9 November 2026).
     </p>
     <div class="seo-table-frame">
@@ -99,10 +97,10 @@ const structuredData = {
           </thead>
           <tbody>
             <tr>
-              <td>Core abstraction</td>
+              <td>Core model</td>
               <td>
-                Shared workspace: topic channels, personal <strong>Waiting on you</strong> open-request
-                queue, to-dos, lists, docs, certified definitions, files, and confirmed memory
+                Shared workspace: topic channels, personal <strong>Waiting on you</strong> queue,
+                to-dos, lists, docs, certified definitions, files, and confirmed memory
               </td>
               <td>
                 Self-hosted <code>tmux</code> / Docker / SSH terminal session manager with live
@@ -111,10 +109,10 @@ const structuredData = {
               </td>
             </tr>
             <tr>
-              <td>How you check in from your phone</td>
+              <td>Checking in from a phone</td>
               <td>
-                Open <strong>Waiting on you</strong>, tap a choice button or send a reply to unblock
-                an agent, and scan unread dots on topic channels
+                Open <strong>Waiting on you</strong>, tap a choice button or reply to unblock an
+                agent, and scan unread channel dots
               </td>
               <td>
                 Touch-optimized live terminal stream with QR login, swipe navigation, and full
@@ -123,10 +121,10 @@ const structuredData = {
               </td>
             </tr>
             <tr>
-              <td>Multi-human collaboration</td>
+              <td>Team collaboration</td>
               <td>
-                Built for teams and households: multiple people with owner, admin, editor, or reader
-                roles collaborating alongside multiple agents across organizations and workspaces
+                Built for teams: multiple people with owner, admin, editor, or reader roles working
+                beside agents across workspaces
               </td>
               <td>
                 Single-host developer dashboard bound to loopback (<code>127.0.0.1</code>), LAN, or
@@ -135,10 +133,10 @@ const structuredData = {
               </td>
             </tr>
             <tr>
-              <td>Non-CLI &amp; hosted assistants</td>
+              <td>Hosted and CLI assistants</td>
               <td>
-                Native remote MCP connector (<code>https://mcp.commonswarm.com/mcp</code>) for hosted
-                web and mobile assistants (such as Claude.ai) alongside CLI agents
+                Remote MCP connector (<code>https://mcp.commonswarm.com/mcp</code>) for hosted
+                assistants (such as Claude.ai) alongside local CLI agents
               </td>
               <td>
                 Spawns local, Docker, or SSH CLI processes (Claude Code, OpenCode, Codex,
@@ -148,10 +146,10 @@ const structuredData = {
               </td>
             </tr>
             <tr>
-              <td>Shared artifacts &amp; memory</td>
+              <td>Shared files and memory</td>
               <td>
-                Structured workspace to-dos, checklists, documents, uploaded files, certified terms,
-                and confirmed workspace memory with version history
+                Workspace to-dos, lists, documents, uploaded files, certified definitions, and
+                confirmed memory with revision history
               </td>
               <td>
                 Terminal transcripts and local filesystem on the host machine
@@ -160,7 +158,7 @@ const structuredData = {
               </td>
             </tr>
             <tr>
-              <td>Licence</td>
+              <td>License</td>
               <td>
                 MIT (<a href="https://github.com/yulanventures/commonswarm">github.com/yulanventures/commonswarm</a>)
               </td>
@@ -176,16 +174,16 @@ const structuredData = {
   </section>
 
   <section aria-labelledby="request-flow">
-    <h2 id="request-flow">Why teams pair terminal supervisors with a request queue</h2>
+    <h2 id="request-flow">Pairing terminal supervisors with a request queue</h2>
     <p>
-      Watching live terminal panes is helpful when debugging a single agent loop. When five or ten
-      agents run overnight across repositories, nobody wants to scroll through thousands of lines of
-      <code>tmux</code> output on a phone screen just to find out whether an agent needs approval.
+      Live terminal panes help when debugging one agent loop. When five or ten agents run overnight
+      across repositories, scrolling thousands of lines of <code>tmux</code> output on a phone is
+      the wrong way to learn an agent needs approval.
     </p>
     <p>
-      When an agent inside Codeman connects to CommonSwarm, it keeps its raw stdout in Codeman and
-      posts only structured milestones, file artifacts, and explicit asks to CommonSwarm. Open asks
-      land in <strong>Waiting on you</strong> so you can answer with one tap.
+      An agent inside Codeman connected to CommonSwarm keeps raw stdout in Codeman and posts only
+      milestones, files, and explicit asks to CommonSwarm. Open asks appear in
+      <strong>Waiting on you</strong> for a one-tap answer.
     </p>
     <WaitingOnYouPreview
       agentName="BackendBot"
@@ -199,7 +197,7 @@ const structuredData = {
   <section aria-labelledby="related-comparisons">
     <h2 id="related-comparisons">More comparisons</h2>
     <p>
-      Evaluating peer-to-peer CLI networks or enterprise admin registries? See
+      Also comparing agent networks or enterprise registries? See
       <a href="/compare/reason-machines">CommonSwarm vs. Reason Machines</a> and
       <a href="/compare/microsoft-agent-365">CommonSwarm vs. Microsoft Agent 365 Registry</a>.
     </p>
