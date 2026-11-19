@@ -209,7 +209,9 @@ final class HumanSession {
     // The signed URL authorizes only this file. Share sign-out cancellation with the app transport.
     func downloadStorage(_ url: URL, size: Int) async throws -> Data {
         guard isActive else { throw CancellationError() }
-        let data = try await Self.readStorage(URLRequest(url: url), size: size, transport: transport)
+        var request = URLRequest(url: url)
+        request.httpShouldHandleCookies = false
+        let data = try await Self.readStorage(request, size: size, transport: transport)
         guard isActive else { throw CancellationError() }
         return data
     }
