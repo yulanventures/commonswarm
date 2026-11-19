@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { NavigatorLockAcquireTimeoutError } from "@supabase/supabase-js";
 import {
   AccountManager,
   MAX_SIGNED_IN_ACCOUNTS,
@@ -60,7 +61,7 @@ class TestWebLocks {
 
   readonly lock: LockLike = async <R>(name: string, acquireTimeout: number, fn: () => Promise<R>): Promise<R> => {
     if (acquireTimeout === 0 && (this.active.has(name) || this.chains.has(name))) {
-      throw new Error(`Lock busy: ${name}`);
+      throw new NavigatorLockAcquireTimeoutError(`Lock busy: ${name}`);
     }
     const prev = this.chains.get(name) ?? Promise.resolve();
     let release!: () => void;
@@ -527,6 +528,73 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   assert.equal(sub, null);
   assert.equal(joinCalled, false, "old loginId cannot join Realtime after same-user re-sign-in");
   mgr.destroy();
+
+  // Terminal expiry: sets deadSession, disposes runtime, clears tabActive, bumps viewGeneration BEFORE onForcedTeardown.
+  const lsExp = new MemoryStorage();
+  const ssExp = new MemoryStorage();
+  const expTeardowns: Array<{
+    reason: string;
+    userId?: string;
+    loginId?: string;
+    disposedAtCallback: boolean;
+    activeAtCallback: unknown;
+    pinnedCurrentAtCallback: boolean;
+  }> = [];
+  let rtExpRef: ReturnType<AccountManager["runtimeFor"]> = null;
+  let pinnedExpRef: ReturnType<AccountManager["pinContext"]> = null;
+  const expMgr = new AccountManager(DEPLOYMENT, {
+    localStorage: lsExp,
+    sessionStorage: ssExp,
+    fetcher: mock.fetcher,
+    webLocks: locks.lock,
+    createBroadcastChannel: hub.create,
+    onForcedTeardown: (d) => {
+      expTeardowns.push({
+        ...d,
+        disposedAtCallback: rtExpRef?.isDisposed() ?? false,
+        activeAtCallback: expMgr.activeAccount(),
+        pinnedCurrentAtCallback: pinnedExpRef?.isCurrent() ?? true,
+      });
+    },
+  });
+  await expMgr.initialize();
+  const expA = await expMgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(expA.kind, "promoted");
+  rtExpRef = expMgr.runtimeFor(expA.account.userId)!;
+  await rtExpRef.ready();
+  pinnedExpRef = expMgr.pinContext();
+  assert.ok(pinnedExpRef && pinnedExpRef.isCurrent());
+  // Revoke session server-side so GET /auth/v1/user returns terminal 403 session_not_found.
+  mock.state.sessionsByAccess.delete(rtExpRef.peekAccessToken()!);
+  await assert.rejects(rtExpRef.verifySession(), { name: "SessionExpired" });
+  assert.equal(rtExpRef.isLiveOwned(), false, "terminal expiry must mark runtime dead");
+  assert.equal(rtExpRef.isDisposed(), true, "terminal expiry must dispose runtime");
+  assert.equal(pinnedExpRef.isCurrent(), false, "terminal expiry must invalidate pinned context");
+  assert.equal(expMgr.activeAccount(), null, "terminal expiry must clear activeAccount without resurrecting from disk");
+  assert.equal(expMgr.runtimeFor(expA.account.userId), null);
+  assert.equal(expMgr.pinContext(), null);
+  assert.equal(expTeardowns.length, 1);
+  assert.equal(expTeardowns[0]!.reason, "expired");
+  assert.equal(expTeardowns[0]!.userId, expA.account.userId);
+  assert.equal(expTeardowns[0]!.loginId, expA.account.loginId);
+  assert.equal(expTeardowns[0]!.disposedAtCallback, true, "runtime disposed BEFORE onForcedTeardown");
+  assert.equal(expTeardowns[0]!.activeAtCallback, null, "tabActive cleared BEFORE onForcedTeardown");
+  assert.equal(expTeardowns[0]!.pinnedCurrentAtCallback, false, "viewGeneration bumped BEFORE onForcedTeardown");
+  expMgr.destroy();
+
+  // initialize() fails closed cleanly on DurableOwnershipWriteError during first-load cutover.
+  const lsFailInit = new MemoryStorage();
+  lsFailInit.failSetKeys.add(accountsStorageKey(ORIGIN_HASH));
+  const failInitMgr = new AccountManager(DEPLOYMENT, {
+    localStorage: lsFailInit,
+    sessionStorage: new MemoryStorage(),
+    fetcher: mock.fetcher,
+    webLocks: locks.lock,
+    createBroadcastChannel: hub.create,
+  });
+  const failInitRes = await failInitMgr.initialize();
+  assert.deepEqual(failInitRes, { accounts: [], active: null, cutoverClearedLegacy: false });
+  failInitMgr.destroy();
 });
 
 test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), durable ownership beats failed slot deletion, and failed ownership update reports unconfirmed without deleting slot", async () => {
@@ -537,18 +605,53 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
   const hub = new TestBroadcastHub();
   const mock = createMockGoTrue();
 
-  // Install a global BroadcastChannel spy BEFORE creating AccountManager / SupabaseClient.
-  const origBC = globalThis.BroadcastChannel;
+  // Install global window, document, and BroadcastChannel spies BEFORE creating AccountManager / SupabaseClient
+  // so GoTrueClient.isBrowser() is TRUE in Node (non-vacuous witness that SDK constructs & we close BroadcastChannel).
+  const g = globalThis as unknown as {
+    BroadcastChannel?: unknown;
+    window?: unknown;
+    document?: unknown;
+  };
+  const hasOrigBC = Object.prototype.hasOwnProperty.call(g, "BroadcastChannel");
+  const hasOrigWindow = Object.prototype.hasOwnProperty.call(g, "window");
+  const hasOrigDocument = Object.prototype.hasOwnProperty.call(g, "document");
+  const origBC = g.BroadcastChannel;
+  const origWindow = g.window;
+  const origDocument = g.document;
+
   const globalPosts: Array<{ name: string; data: unknown }> = [];
+  const constructedChannels: Array<{ name: string; closed: boolean; posts: unknown[] }> = [];
   class SpyBroadcastChannel {
     private inner: BroadcastChannelLike;
-    constructor(readonly name: string) { this.inner = hub.create(name); }
-    postMessage(data: unknown) { globalPosts.push({ name: this.name, data }); this.inner.postMessage(data); }
+    private record: { name: string; closed: boolean; posts: unknown[] };
+    constructor(readonly name: string) {
+      this.inner = hub.create(name);
+      this.record = { name, closed: false, posts: [] };
+      constructedChannels.push(this.record);
+    }
+    postMessage(data: unknown) {
+      this.record.posts.push(data);
+      globalPosts.push({ name: this.name, data });
+      this.inner.postMessage(data);
+    }
     addEventListener(type: "message", fn: (e: MessageEvent) => void) { this.inner.addEventListener(type, fn); }
     removeEventListener(type: "message", fn: (e: MessageEvent) => void) { this.inner.removeEventListener(type, fn); }
-    close() { this.inner.close(); }
+    close() {
+      this.record.closed = true;
+      this.inner.close();
+    }
   }
-  (globalThis as unknown as { BroadcastChannel: unknown }).BroadcastChannel = SpyBroadcastChannel;
+  g.BroadcastChannel = SpyBroadcastChannel;
+  g.window = {
+    addEventListener() {},
+    removeEventListener() {},
+    BroadcastChannel: SpyBroadcastChannel,
+  };
+  g.document = {
+    visibilityState: "visible",
+    addEventListener() {},
+    removeEventListener() {},
+  };
 
   try {
     const tab1 = new AccountManager(DEPLOYMENT, {
@@ -565,10 +668,19 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
     const p1 = await tab1.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
     assert.equal(p1.kind, "promoted");
     const rt1 = tab1.runtimeFor(p1.account.userId)!;
+    const slotKey1 = slotStorageKey(ORIGIN_HASH, p1.account.loginId);
+    // Synchronously right after runtime creation (before initialize completes), SDK constructed BroadcastChannel(slotKey1)
+    // and AccountSessionRuntime immediately closed it!
+    const sdkChannelsForSlot1 = constructedChannels.filter((c) => c.name === slotKey1);
+    assert.equal(sdkChannelsForSlot1.length, 1, "GoTrueClient must actually construct BroadcastChannel(slotKey) in browser env");
+    assert.equal(sdkChannelsForSlot1[0]!.closed, true, "SDK BroadcastChannel must be closed synchronously pre-init");
+    assert.equal(sdkChannelsForSlot1[0]!.posts.length, 0, "0 posts on SDK BroadcastChannel before initialize()");
+
     await rt1.ready();
-    // Trigger an actual SDK refresh to prove TOKEN_REFRESHED never leaks credentials over BroadcastChannel.
+    // Trigger an actual SDK refresh to prove INITIAL_SESSION + TOKEN_REFRESHED never post on SDK BroadcastChannel.
     const refreshed = await rt1.client.auth.refreshSession();
     assert.equal(refreshed.error, null);
+    assert.equal(sdkChannelsForSlot1[0]!.posts.length, 0, "0 posts on SDK BroadcastChannel across INITIAL_SESSION + TOKEN_REFRESHED");
 
     // Assert ZERO access_token or refresh_token strings ever crossed ANY BroadcastChannel (SDK or app)!
     for (const msg of [...globalPosts, ...hub.posted.map((p) => ({ name: p.channel, data: p.message }))]) {
@@ -583,15 +695,37 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
     assert.equal(expectedLoginLock, `lock:${rt1.slotKey}`);
     assert.ok(locks.acquired.includes(expectedLoginLock), "SDK refresh acquired exact lock:<slotKey>");
 
-    // Case A (C3): FAILED Step 1 durable ownership write during logout -> DO NOT delete slot, DO NOT claim browserSignedOut!
-    const slotKey1 = slotStorageKey(ORIGIN_HASH, p1.account.loginId);
+    // Case A (C3): FAILED Step 1 durable ownership write during logout ->
+    // (1) DO NOT delete slot, DO NOT claim browserSignedOut, and DO NOT resurrect the torn-down account in this tab!
+    // (2) An in-flight refresh hitting fencedResponse(400 session_not_found) after failed Step 1 MUST NOT delete slotKey from disk!
+    let releaseQueuedLock!: () => void;
+    const queuedLockHold = locks.lock(expectedLoginLock, -1, async () => {
+      await new Promise<void>((resolve) => { releaseQueuedLock = resolve; });
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    const queuedRefreshPromise = rt1.client.auth.refreshSession();
+    await new Promise((r) => setTimeout(r, 15));
+
     ls.failSetKeys.add(accountsStorageKey(ORIGIN_HASH));
     const failedLogout = await tab1.signOutAccount(p1.account.userId, p1.account.loginId);
     assert.equal(failedLogout.browserSignedOut, false, "must NOT report browser-wide sign-out when ownership write failed");
     assert.equal(failedLogout.localTabTornDown, true, "current tab still tears down immediately");
     assert.equal(failedLogout.slotDeleted, false, "slot must NOT be deleted when Step 1 ownership fence failed");
+    assert.equal(failedLogout.nextActive, null, "torn-down account must NOT be resurrected as nextActive");
+    assert.equal(tab1.activeAccount(), null, "activeAccount() must stay null in this tab after failed Step 1");
+    assert.equal(tab1.runtimeFor(p1.account.userId), null, "runtimeFor() must stay null in this tab after failed Step 1");
+    assert.equal(tab1.pinContext(), null, "pinContext() must stay null in this tab after failed Step 1");
+    assert.equal(tab1.listAccounts().length, 0, "tab-fenced login must not appear in listAccounts()");
     assert.ok(ls.rawGet(slotKey1), "slot remains on disk because Step 1 failed");
     assert.match(failedLogout.notice ?? "", /could not be confirmed/i);
+
+    // Release the queued lock so the in-flight refresh enters buildAuthFetch -> receives fencedResponse(400 session_not_found)
+    // -> SDK calls storageAdapter.removeItem(slotKey1), which MUST clear memory only and leave localStorage intact!
+    releaseQueuedLock();
+    await queuedLockHold;
+    const queuedRefreshRes = await queuedRefreshPromise;
+    assert.ok(queuedRefreshRes.error, "fenced refresh must fail with error");
+    assert.ok(ls.rawGet(slotKey1), "SDK removeItem after fenced 400 MUST NOT delete slotKey from localStorage when Step 1 failed");
     ls.failSetKeys.clear();
 
     // Case B (C3): SUCCEEDED Step 1 durable ownership write + FAILED Step 2 slot deletion ->
@@ -677,7 +811,12 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
     tab2.destroy();
     tab3.destroy();
   } finally {
-    (globalThis as unknown as { BroadcastChannel: unknown }).BroadcastChannel = origBC;
+    if (hasOrigBC) g.BroadcastChannel = origBC;
+    else delete g.BroadcastChannel;
+    if (hasOrigWindow) g.window = origWindow;
+    else delete g.window;
+    if (hasOrigDocument) g.document = origDocument;
+    else delete g.document;
   }
 });
 
@@ -718,8 +857,8 @@ test("C3 & C5: Sign out all fences held Add account, clears all browser sessions
   assert.equal(teardowns.at(-1)?.reason, "signed-out");
   assert.equal(teardowns.at(-1)?.userId, a.account.userId);
 
-  // Start an OAuth Add account attempt, then run Sign out all BEFORE callback returns -> promotion fenced!
-  const attempt = await tab1.startOAuthAttempt({
+  // Start an OAuth Add account attempt in tab2, then run Sign out all in tab1 -> cross-tab allSignOutGen fence!
+  const attempt = await tab2.startOAuthAttempt({
     provider: "github", purpose: "add-account", returnRoute: "/app", origin: "https://commonswarm.com",
   });
   const challenge = new URL(attempt.authorizeUrl).searchParams.get("code_challenge")!;
@@ -727,6 +866,19 @@ test("C3 & C5: Sign out all fences held Add account, clears all browser sessions
     challenge,
     user: makeUser("33333333-3333-4333-8333-333333333333", "third@example.test", "Third"),
   });
+
+  // Step 1 failure during Sign out all: tears down current tab & fences all logins in this tab without deleting slots!
+  ls.failSetKeys.add(accountsStorageKey(ORIGIN_HASH));
+  const failedAll = await tab1.signOutAllAccounts();
+  assert.equal(failedAll.browserSignedOut, false, "must NOT claim browser-wide sign-out all on Step 1 failure");
+  assert.equal(failedAll.localTabTornDown, true, "current tab tears down immediately");
+  assert.equal(failedAll.slotsDeleted, 0, "slots must NOT be deleted when Step 1 fails");
+  assert.equal(tab1.activeAccount(), null, "activeAccount() must stay null after failed Sign out all");
+  assert.equal(tab1.listAccounts().length, 0, "tab-fenced logins must not resurrect in listAccounts()");
+  assert.equal(tab1.runtimeFor(b.account.userId), null);
+  assert.equal(tab1.pinContext(), null);
+  assert.ok(ls.rawGet(slotStorageKey(ORIGIN_HASH, b.account.loginId)), "slot remains on disk when Step 1 fails");
+  ls.failSetKeys.clear();
 
   // Offline remote logout still completes durable local Sign out all and reports unconfirmed honestly.
   mock.state.logoutMode = "offline";
@@ -739,12 +891,14 @@ test("C3 & C5: Sign out all fences held Add account, clears all browser sessions
   assert.equal(tab1.listAccounts().length, 0);
   assert.equal(tab2.listAccounts().length, 0);
 
-  // Late callback for attempt started before Sign out all is fenced and refused!
+  // Late callback in tab2 for attempt started before Sign out all is fenced by allSignOutGen and refused!
   mock.state.logoutMode = "ok";
   const lateNav = makeLocation(`https://commonswarm.com/app?code=late-code&cs_attempt=${attempt.attemptId}`);
-  const lateRes = await tab1.consumeAuthCallbackBootstrap(lateNav.location, lateNav.history);
+  const lateRes = await tab2.consumeAuthCallbackBootstrap(lateNav.location, lateNav.history);
   assert.equal(lateRes.kind, "refused");
+  assert.equal(lateRes.reason, "fenced_by_signout_all");
   assert.equal(tab1.listAccounts().length, 0);
+  assert.equal(tab2.listAccounts().length, 0);
 
   tab1.destroy();
   tab2.destroy();

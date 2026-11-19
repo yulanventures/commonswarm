@@ -599,7 +599,14 @@ export class AccountSessionRuntime {
     });
     this.authSubscription = data.subscription;
     this.client = supa;
-    this.initialized = supa.auth.initialize().then(() => undefined).catch(() => undefined);
+    this.initialized = supa.auth
+      .initialize()
+      .then(() => {
+        if (this.disposed) {
+          try { void supa.auth.dispose(); } catch { /* ignore */ }
+        }
+      })
+      .catch(() => undefined);
   }
 
   isDisposed(): boolean {
@@ -607,7 +614,7 @@ export class AccountSessionRuntime {
   }
 
   isLiveOwned(): boolean {
-    return !this.disposed && this.checkOwned();
+    return !this.disposed && !this.deadSession && this.checkOwned();
   }
 
   async ready(): Promise<void> {
@@ -665,6 +672,7 @@ export class AccountSessionRuntime {
     try { this.authSubscription?.unsubscribe(); } catch { /* ignore */ }
     this.authSubscription = null;
     try { void this.client.auth.stopAutoRefresh(); } catch { /* ignore */ }
+    try { void this.client.auth.dispose(); } catch { /* ignore */ }
     try { void this.client.removeAllChannels(); } catch { /* ignore */ }
     try { void this.client.realtime.disconnect(); } catch { /* ignore */ }
     // Fence late setAuth calls on disposed clients.
@@ -801,6 +809,14 @@ export class AccountSessionRuntime {
         this.scheduleStorageRetry();
       },
       removeItem: (key: string): void => {
+        // C3: Once disposed or unowned (including tab-local fence after a failed Step 1 logout),
+        // clear memory only — never let an SDK cleanup delete localStorage slots out from under Step 1.
+        if (this.disposed || !this.checkOwned()) {
+          this.pendingStorageWrites.delete(key);
+          this.removedStorageKeys.add(key);
+          this.authMemory.delete(key);
+          return;
+        }
         if (key === this.slotKey && this.removalSnapshot !== null) {
           const expected = this.removalSnapshot;
           this.removalSnapshot = null;
@@ -957,6 +973,7 @@ export class AccountSessionRuntime {
         if (isAuthSessionMissingError(sessionError) || TERMINAL_REFRESH_CODES.has(sessionError.code ?? "")) {
           const successor = await this.client.auth.getSession();
           if (successor.data.session) throw new MultiAccountAuthRecoveryRequired();
+          this.deadSession = true;
           this.onTerminalExpiry();
           throw new MultiAccountSessionExpired();
         }
@@ -1025,6 +1042,7 @@ export class AccountManager {
   private readonly cleanups: Array<() => void> = [];
 
   private memoryOwnership: DurableOwnershipTable = { version: 1, allSignOutGen: 1, accounts: [] };
+  private readonly tabFencedLoginIds = new Set<string>();
   private tabActive: { userId: string; loginId: string } | null = null;
   private viewGeneration = 0;
   private destroyed = false;
@@ -1092,18 +1110,23 @@ export class AccountManager {
     if (this.sharedPersistenceAvailable) {
       const read = this.readDurableOwnership();
       if (!read.ok && read.reason === "missing") {
-        cutoverClearedLegacy = await this.withRegistryLock(async () => {
-          return this.withLegacyLock(async () => {
-            const recheck = this.readDurableOwnership();
-            if (recheck.ok) return false;
-            if (!recheck.ok && recheck.reason !== "missing") return false;
-            const hadLegacy = this.safeLocalGet(this.legacyKey) !== null;
-            this.safeLocalRemove(this.legacyKey);
-            this.writeDurableOwnership({ version: 1, allSignOutGen: 1, accounts: [] });
-            this.sweepOrphanSlots([]);
-            return hadLegacy;
+        try {
+          cutoverClearedLegacy = await this.withRegistryLock(async () => {
+            return this.withLegacyLock(async () => {
+              const recheck = this.readDurableOwnership();
+              if (recheck.ok) return false;
+              if (!recheck.ok && recheck.reason !== "missing") return false;
+              const hadLegacy = this.safeLocalGet(this.legacyKey) !== null;
+              this.safeLocalRemove(this.legacyKey);
+              this.writeDurableOwnership({ version: 1, allSignOutGen: 1, accounts: [] });
+              this.sweepOrphanSlots([]);
+              return hadLegacy;
+            });
           });
-        });
+        } catch {
+          // Fail closed cleanly on storage write failure during cutover.
+          cutoverClearedLegacy = false;
+        }
       }
     }
 
@@ -1130,9 +1153,11 @@ export class AccountManager {
 
   /** Authoritative list of owned accounts (fails closed to empty if durable ownership is unreadable). */
   listAccounts(): readonly AccountRecord[] {
-    if (!this.sharedPersistenceAvailable) return [...this.memoryOwnership.accounts];
+    if (!this.sharedPersistenceAvailable) {
+      return this.memoryOwnership.accounts.filter((a) => !this.tabFencedLoginIds.has(a.loginId));
+    }
     const read = this.readDurableOwnership();
-    return read.ok ? [...read.state.accounts] : [];
+    return read.ok ? read.state.accounts.filter((a) => !this.tabFencedLoginIds.has(a.loginId)) : [];
   }
 
   /** Current tab's pinned active account, falling back to shared default -> first owned account. */
@@ -1257,7 +1282,8 @@ export class AccountManager {
       return;
     }
 
-    const ownedByLogin = new Map(read.state.accounts.map((a) => [a.loginId, a]));
+    const visibleAccounts = read.state.accounts.filter((a) => !this.tabFencedLoginIds.has(a.loginId));
+    const ownedByLogin = new Map(visibleAccounts.map((a) => [a.loginId, a]));
 
     // Dispose any runtime whose loginId is no longer positively owned (or whose allSignOutGen is stale).
     for (const [loginId, runtime] of [...this.runtimes.entries()]) {
@@ -1277,14 +1303,14 @@ export class AccountManager {
       this.clearTabAccount();
       this.viewGeneration += 1;
       this.env.onForcedTeardown?.({
-        reason: read.state.accounts.length === 0 ? "all-signed-out" : "signed-out",
+        reason: visibleAccounts.length === 0 ? "all-signed-out" : "signed-out",
         userId: departed.userId,
         loginId: departed.loginId,
       });
     }
 
     const nextActive = this.activeAccount();
-    this.env.onOwnershipChange?.(read.state.accounts, nextActive);
+    this.env.onOwnershipChange?.(visibleAccounts, nextActive);
   }
 
   // ── C1: Direct GoTrue PKCE / Pinned-Email OTP / Password Staging ──────────────────────────────
@@ -1661,6 +1687,13 @@ export class AccountManager {
     }
 
     // Always tear down the current tab immediately regardless of storage failure!
+    // If Step 1 failed, fence this loginId locally in this tab so activeAccount()/runtimeFor()/pinContext()
+    // cannot resurrect it from the unchanged durable table.
+    if (step1Succeeded) {
+      this.tabFencedLoginIds.delete(loginId);
+    } else {
+      this.tabFencedLoginIds.add(loginId);
+    }
     existingRuntime?.dispose();
     this.runtimes.delete(loginId);
     const wasActive = Boolean(this.tabActive && this.tabActive.userId === userId && this.tabActive.loginId === loginId);
@@ -1672,12 +1705,14 @@ export class AccountManager {
 
     if (!step1Succeeded) {
       // C3: Step 1 failed -> DO NOT delete the slot and DO NOT report browser-wide sign-out succeeded.
+      const nextActive = this.activeAccount();
+      this.env.onOwnershipChange?.(this.listAccounts(), nextActive);
       return {
         browserSignedOut: false,
         localTabTornDown: true,
         slotDeleted: false,
         remoteRevocation: { status: "skipped" },
-        nextActive: this.activeAccount(),
+        nextActive,
         notice: "Signed out in this tab, but browser-wide sign-out could not be confirmed. Try again.",
       };
     }
@@ -1788,6 +1823,16 @@ export class AccountManager {
     }
 
     // Always tear down all in-tab runtimes, sockets, attempts, and active state immediately!
+    if (step1Succeeded) {
+      this.tabFencedLoginIds.clear();
+    } else {
+      for (const s of capturedSessions) this.tabFencedLoginIds.add(s.loginId);
+      for (const id of this.runtimes.keys()) this.tabFencedLoginIds.add(id);
+      const rawRead = this.sharedPersistenceAvailable ? this.readDurableOwnership() : null;
+      if (rawRead?.ok) {
+        for (const a of rawRead.state.accounts) this.tabFencedLoginIds.add(a.loginId);
+      }
+    }
     for (const runtime of this.runtimes.values()) runtime.dispose();
     this.runtimes.clear();
     this.tabActive = null;
@@ -1796,6 +1841,7 @@ export class AccountManager {
     this.viewGeneration += 1;
 
     if (!step1Succeeded) {
+      this.env.onOwnershipChange?.(this.listAccounts(), null);
       return {
         browserSignedOut: false,
         localTabTornDown: true,
@@ -2083,7 +2129,14 @@ export class AccountManager {
         }
       },
       onTerminalExpiry: () => {
+        this.tabFencedLoginIds.add(record.loginId);
+        const expired = this.runtimes.get(record.loginId);
+        this.runtimes.delete(record.loginId);
+        expired?.dispose();
         if (this.tabActive?.loginId === record.loginId) {
+          this.tabActive = null;
+          this.clearTabAccount();
+          this.viewGeneration += 1;
           this.env.onForcedTeardown?.({ reason: "expired", userId: record.userId, loginId: record.loginId });
         }
       },
@@ -2093,7 +2146,7 @@ export class AccountManager {
   }
 
   private isLoginOwned(userId: string, loginId: string, expectedAllSignOutGen: number): boolean {
-    if (this.destroyed) return false;
+    if (this.destroyed || this.tabFencedLoginIds.has(loginId)) return false;
     if (!this.sharedPersistenceAvailable) {
       return (
         this.memoryOwnership.allSignOutGen === expectedAllSignOutGen &&
