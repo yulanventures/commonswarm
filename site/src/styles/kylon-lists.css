@@ -34,6 +34,13 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval {
   align-items: center; gap: 8px 12px; padding: 16px 0; min-inline-size: 0;
   border-block-end: 1px solid var(--k-shell-line); border-radius: 0; background: transparent;
 }
+/* A reader's "Allow read access" is long. On a narrow phone it goes on its own line under "Read access
+   included.", and the agent's name takes the space beside the avatar. */
+@media (width < 23.75rem) {
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval[data-approval-read-only] {
+    grid-template-areas: "orb copy copy" "choices choices choices" "allow allow allow" "status status status" "withdraw withdraw withdraw";
+  }
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval > .dashboard__agent-avatar {
   inline-size: 32px; block-size: 32px; font: 600 12px/1 var(--k-shell-font); align-self: center;
 }

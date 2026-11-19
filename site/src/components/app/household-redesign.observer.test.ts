@@ -365,6 +365,7 @@ test("hosted and local owners use the same Allow controls and approval command; 
     const boxes = () => dom.list.descendants().filter(node => node.tag === "input");
     assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
     assert.deepEqual(boxes().map(node => [node.value, node.checked, !!node.disabled]), [["create", true, false], ["update", true, false]]);
+    assert.equal("approvalReadOnly" in dom.list.descendants().find(node => node.tag === "li")!.dataset, false);
     const said = dom.list.descendants().map(node => String(node.textContent ?? "").trim());
     for (const label of ["Add new lists and docs", "Change existing lists and docs"]) assert.ok(said.includes(label), label);
     assert.equal(said.some(text => /See lists and docs|Add new ones|Change them/.test(text)), false, "the old short labels are gone from this row");
@@ -410,6 +411,8 @@ test("hosted and local owners use the same Allow controls and approval command; 
       { ...f.ctx, householdAccess: { contentRole: "reader" } });
     reader.renderAgentApprovals();
     assert.deepEqual(boxes(), []);
+    // The reader's row is marked, so its longer button can take its own line on a narrow phone; an editor's is not.
+    assert.equal(dom.list.descendants().find(node => node.tag === "li")!.dataset.approvalReadOnly, "");
     assert.ok(dom.list.descendants().some(node => node.tag === "p" && node.textContent === "Read access included."));
     assert.equal(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Allow"), false);
     await press("Allow read access");

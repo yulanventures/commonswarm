@@ -12592,6 +12592,8 @@ import "../../styles/kylon-command-palette.css";
         allow.className = "dashboard__button dashboard__button--primary";
         /* A reader can only pass on reading, so their button says exactly that. */
         allow.textContent = approval ? "Save" : editor ? "Allow" : "Allow read access";
+        /* That longer button gets its own line on a narrow phone (kylon-lists.css), so the name keeps its room. */
+        if (!approval && !editor) row.dataset.approvalReadOnly = "";
         const status = document.createElement("p");
         status.className = "dashboard__approval-status";
         status.setAttribute("role", "status");
