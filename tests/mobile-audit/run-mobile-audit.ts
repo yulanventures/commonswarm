@@ -85,7 +85,7 @@ let manifestIds: string[] | null = null;
 const sharded = (id: string) => inShard(manifestIds ??= screens().map(screen => screen.id), id, SHARD);
 const diagnosed = (id: string, size: string) => sharded(id) && (!DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size)));
 
-/** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
+/** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, tap, contextmenu, type (with text), select
  *  (with option), press, scroll, storage, fault, dispatch, wait, settle.
  *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
  *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
@@ -93,6 +93,8 @@ const diagnosed = (id: string, size: string) => sharded(id) && (!DIAGNOSTIC || (
  *  reveals, where a pointer on its way could land on the revealed control instead (pair it with press).
  *  forcedColors: the page is drawn in forced colours (the system's high-contrast palette) from this step on, for a
  *  capture that shows what survives when backgrounds and shadows are taken away.
+ *  tap: a real touch tap at the element's centre, with no pointer on the way (a click moves the mouse there first, and
+ *  that hover can itself reveal a control over the element). It fails when another element takes the tap at that point.
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -100,7 +102,7 @@ const diagnosed = (id: string, size: string) => sharded(id) && (!DIAGNOSTIC || (
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; tap?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true;
   /** Load the page again with one localStorage item already in place, so the app starts with it (a draft saved by an
    *  earlier build, for example). Every page load clears stored composer drafts first, so the item is handed across
@@ -179,6 +181,11 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
   // The recipient's profile, opened by Enter from the message Jump to present landed on.
   "app.chat.jump-present.recipient.enter": ["[data-entity-panel]:not([hidden])"],
+  // A recipient's profile opened by one touch tap, on an ordinary message and on the one Jump to present landed on.
+  "app.chat.recipient.tap": ["[data-entity-panel]:not([hidden])"],
+  "app.chat.jump-present.recipient.tap": ["[data-entity-panel]:not([hidden])"],
+  // The reaction picker opened by touch: a tap on the message brings its bar, a tap on Add reaction opens the picker.
+  "app.chat.row-tools.tap": ["[data-reaction-picker]", '.dashboard__message-tools:has([data-reaction-add][aria-expanded="true"])'],
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
@@ -893,6 +900,7 @@ async function main(): Promise<void> {
               }
             }
           }
+          if (step.tap) await page.tap(fill(step.tap, pageIds), { timeout: 8_000 });
           if (step.contextmenu) await page.click(fill(step.contextmenu, pageIds), { button: "right", timeout: 8_000 });
           if (step.type) await page.fill(fill(step.type, pageIds), fill(step.text ?? "", pageIds));
           if (step.select) await page.selectOption(fill(step.select, pageIds), step.option ?? "", { timeout: 8_000 });
