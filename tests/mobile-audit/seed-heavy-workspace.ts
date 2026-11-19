@@ -1047,6 +1047,34 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         steps.push("seed_admin_grants");
       } else if (ready) note("seed_admin_grants", "the Workshop agents (one per owner) or its organization were not found");
     } catch (error) { note("seed_admin_grants", error); }
+    // Two agents with one name on the Admins list (app.people.admins.same-name and the two screens after it), in a workspace
+    // of its own. The product refuses a second agent with a name already in use, so the two are created under different
+    // names and then given the same long one directly; that is how the list can meet it (an agent that left the roster and
+    // a newer one that took its name). Both grants name the second person as grantor, also set directly, so the viewer's
+    // account-wide Admin access list does not change.
+    try {
+      const sameNameWorkspace = randomUUID(), shared = "Juniper Orchard Records & Harvest Planning Agent";
+      const ready = ok("create_workspace same name", await command(owner.token, { kind: "create_workspace", workspace_id: sameNameWorkspace, name: "Orchard", org_id: workspace }, null))
+        && ok("create_agent_principal same name a", await command(owner.token, { kind: "create_agent_principal", name: "Juniper A", model: "claude-opus-5-5" }, sameNameWorkspace))
+        && ok("create_agent_principal same name b", await command(owner.token, { kind: "create_agent_principal", name: "Juniper B", model: "claude-opus-5-5" }, sameNameWorkspace));
+      const twins = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${sameNameWorkspace}::uuid AND name IN ('Juniper A', 'Juniper B') ORDER BY name` : [];
+      if (twins.length === 2) {
+        await sql`UPDATE swarm.agent_principals SET name = ${shared} WHERE workspace_id = ${sameNameWorkspace}::uuid AND name IN ('Juniper A', 'Juniper B')`;
+        const grantIds: string[] = [];
+        for (const twin of twins) {
+          const grantId = randomUUID(), scopeNames = ["role:workspace_admin"], workspaceIds = [sameNameWorkspace];
+          const manifest = { registry_version: 3, level: "workspace", scope_names: scopeNames, workspace_ids: workspaceIds, organization_id: null, principal_id: twin.principal_id, expires: null };
+          await sql`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, level, organization_id,
+              registry_version, scope_names, workspace_ids, manifest, manifest_digest, created_at, expires_at)
+            VALUES (${grantId}::uuid, ${people[2]!.id}::uuid, ${twin.principal_id}::uuid, 'workspace', NULL, 3, ${scopeNames}::text[],
+              ${workspaceIds}::uuid[], ${sql.json(manifest)}::jsonb, ${"a".repeat(64)}, statement_timestamp(), NULL)`;
+          grantIds.push(grantId);
+        }
+        Object.assign(ids, { sameNameWorkspace, sameNameGrant: grantIds[0]!, sameNameOtherGrant: grantIds[1]! });
+        steps.push("seed_same_name_admins");
+      } else if (ready) note("seed_same_name_admins", "the two Orchard agents were not found");
+    } catch (error) { note("seed_same_name_admins", error); }
     // A second viewer with a delegated invitation (app.invitation-inbox, dialog.invitation-review). The invitee already belongs
     // to {workspace}, so the inbox shows as the corner card above the composer rather than atop the create-workspace screen.
     // The admin person invites them to a workspace the admin owns, so nothing appears in the owner's captures.
