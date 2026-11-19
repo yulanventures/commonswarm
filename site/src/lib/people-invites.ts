@@ -136,7 +136,7 @@ export function peopleInviteReceipt(invite: Pick<PeopleInvite, "kind" | "name">)
 export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "name"> & { workspaceName?: string; detail?: string }) {
   const name = invite.name;
   if (invite.kind === "person") return { title: `Cancel the invitation for ${name}?`, button: "Cancel invitation",
-    stops: ["The email link stops working and leaves this list. No one has joined with it."],
+    stops: ["Cancelling this invitation stops the email link from working."],
     stays: ["You can send a new invitation later."] };
   // The key was unused when this list loaded. The server revokes it either way, so say what that means if it has been used since.
   if (invite.kind === "key") return { title: `Cancel the key for ${name}?`, button: "Cancel key",

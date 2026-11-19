@@ -69,7 +69,7 @@ test("confirmation names recipient email or agent, identifies connect code by wo
   const person = peopleInviteConfirmCopy({ kind: "person", name: "mei@example.test", workspaceName: "Herb garden" });
   assert.equal(person.title, "Cancel the invitation for mei@example.test?");
   assert.equal(person.button, "Cancel invitation");
-  assert.deepEqual(person.stops, ["The email link stops working and leaves this list. No one has joined with it."]);
+  assert.deepEqual(person.stops, ["Cancelling this invitation stops the email link from working."]);
   assert.deepEqual(person.stays, ["You can send a new invitation later."]);
 
   const keyCopy = peopleInviteConfirmCopy({ kind: "key", name: "River", workspaceName: "Herb garden" });
