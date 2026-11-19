@@ -305,7 +305,7 @@ test(
     assert.equal(claim.status, 200, JSON.stringify(claim.body));
     const deliveries = (claim.body.deliveries ?? []) as Row[];
     assert.ok(deliveries.length >= 1, `expected leased delivery: ${JSON.stringify(claim.body)}`);
-    const leasedSignalId = String(deliveries[0]!.signal_id);
+    const leasedSignalId = String((deliveries[0]!.signal as Row).id);
     const leaseId = String(deliveries[0]!.lease_id);
 
     let deliveryLock: HeldLock | null = null;
