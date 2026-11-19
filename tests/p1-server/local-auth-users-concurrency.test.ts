@@ -312,6 +312,7 @@ test(
     let ownerLock: HeldLock | null = null;
     let parkedAckPromise: Promise<{ status: number; body: Row }> | null = null;
     let parkedAckSettled = false;
+    let parkedAckResult: { status: number; body: Row } | null = null;
 
     try {
       deliveryLock = await holdRowLock(async (tx) => {
@@ -329,8 +330,10 @@ test(
         lease_id: leaseId,
         listener_instance_id: parkedListener,
         outcome: "observed",
+        last_error_code: null,
       }).then((res) => {
         parkedAckSettled = true;
+        parkedAckResult = res;
         return res;
       });
 
@@ -350,7 +353,7 @@ test(
           ackWaiting = true;
           break;
         }
-        assert.equal(parkedAckSettled, false, "parked ack settled prematurely");
+        assert.equal(parkedAckSettled, false, `parked ack settled prematurely: ${JSON.stringify(parkedAckResult)}`);
         await delay(25);
       }
       assert.ok(ackWaiting, "parked agent ack reached signal_deliveries while holding lockLocalAuthPlan locks");
