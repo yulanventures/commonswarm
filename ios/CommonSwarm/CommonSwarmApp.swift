@@ -110,7 +110,7 @@ private struct WorkspacesView: View {
     }
 }
 
-private struct RetryView: View {
+struct RetryView: View {
     let text: String
     let action: () async -> Void
     var body: some View {
@@ -320,6 +320,7 @@ private struct HistoryView: View {
                 ConversationComposer(draft: draft, destination: item.name, allowsAttachments: item.symbol != "lock", send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
             }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
+            .waitingOnYouToolbar(api: api, workspace: workspace, conversation: item)
             .task { await load() }
     }
 
