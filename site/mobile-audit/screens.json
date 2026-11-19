@@ -853,6 +853,9 @@
       {
         "media": "(width > 52rem)",
         "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]"
+      },
+      {
+        "scroll": "[data-waiting-panel]:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"]"
       }
     ],
     "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-card=\"{message.choiceOpen}\"] [data-decision-option=\"harbor\"]",

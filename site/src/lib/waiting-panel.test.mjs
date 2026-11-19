@@ -128,6 +128,9 @@ class FakeNode {
     }
   }
   insertBefore(node, ref) {
+    if (ref !== null && ref !== undefined && ref.parentNode !== this) {
+      throw new Error("NotFoundError: reference node is not a child of this node");
+    }
     if (node.parentNode) node.remove();
     node.parentNode = this;
     const idx = ref ? this.children.indexOf(ref) : -1;

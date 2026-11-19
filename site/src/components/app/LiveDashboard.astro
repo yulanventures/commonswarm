@@ -5953,6 +5953,8 @@ import "../../styles/kylon-image-viewer.css";
               const raw = askById.get(item.id);
               if (!raw || !item.choices) return [];
               const chId = resolvedChannels.get(item.id) ?? null;
+              const split = splitChoicePrompt(raw.body);
+              const question = (split.question ?? raw.body).trim() || item.what;
               return [{
                 id: item.id,
                 workspaceId: workspace.id,
@@ -5962,7 +5964,7 @@ import "../../styles/kylon-image-viewer.css";
                 from: item.from,
                 fromKind: raw.from.kind,
                 fromId: raw.from.id,
-                what: item.what,
+                what: question,
                 when: item.when,
                 createdAt: raw.created_at,
                 until: raw.until,

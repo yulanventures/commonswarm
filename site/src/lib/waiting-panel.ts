@@ -391,8 +391,12 @@ export function renderWaitingPanel(
       if (timeEl && timeEl.textContent !== item.when) timeEl.textContent = item.when;
     } else {
       const built = buildAskCard(doc, item, vm.scope, handlers);
-      if (card) card.replaceWith(built);
-      else list.insertBefore(built, cursor);
+      if (card) {
+        if (cursor === card) cursor = built;
+        card.replaceWith(built);
+      } else {
+        list.insertBefore(built, cursor);
+      }
       card = built;
       if (activeCardId === item.id && activeControlId) {
         const restored = doc.getElementById(activeControlId);
