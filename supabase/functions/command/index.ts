@@ -13523,14 +13523,6 @@ async function replayAuditChannelIds(
       typeof alert.channel_id === "string" && UUID_RE.test(alert.channel_id)) {
     collected.add(alert.channel_id);
   }
-  if (typeof command.alert_id === "string" && UUID_RE.test(command.alert_id)) {
-    const [alertChannel] = await tx<{ channel_id: string | null }[]>`
-      SELECT swarm.system_alert_audit_channel_id(${workspaceId}::uuid, ${command.alert_id}::uuid) AS channel_id
-    `;
-    if (typeof alertChannel?.channel_id === "string" && UUID_RE.test(alertChannel.channel_id)) {
-      collected.add(alertChannel.channel_id);
-    }
-  }
   const reraise = record(stored?.reraise);
   if (typeof reraise?.signal_id === "string" && UUID_RE.test(reraise.signal_id)) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [reraise.signal_id]));

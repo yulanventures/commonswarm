@@ -1,6 +1,7 @@
 /**
  * Unit and contract checks for lead system alerts (CS fcb99658):
- * command parser, migration grants/RLS invariants, rollback coverage, and no ops email bridge.
+ * command parser, cloud client/CLI wire builders, migration grants/RLS/lock-order/pg_cron
+ * invariants, rollback coverage, and no ops email bridge.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -14,6 +15,7 @@ import {
   SYSTEM_ALERT_KINDS,
 } from "../supabase/functions/command/system-alerts.js";
 import { HUMAN_ONLY_COMMANDS } from "../src/protocol/workspace-commands.js";
+import { resolveSystemAlertCommand } from "../src/cloud/system-alerts.js";
 
 const ALERT = "11111111-2222-4333-8444-555555555555";
 
@@ -33,6 +35,11 @@ test("resolve_system_alert parses valid UUID and trimmed non-control note", () =
       },
     },
   );
+  assert.deepEqual(resolveSystemAlertCommand(ALERT.toUpperCase(), "  Fixed listener  "), {
+    kind: "resolve_system_alert",
+    alert_id: ALERT,
+    note: "Fixed listener",
+  });
 });
 
 test("resolve_system_alert refuses wrong fields, bad UUID, empty/overlong/control notes", () => {
@@ -56,9 +63,11 @@ test("resolve_system_alert refuses wrong fields, bad UUID, empty/overlong/contro
       { ok: false, status: 400, reason: RESOLVE_SYSTEM_ALERT_NOTE_RULE_TEXT },
     );
   }
+  assert.throws(() => resolveSystemAlertCommand("bad-id", "ok"), /UUID/);
+  assert.throws(() => resolveSystemAlertCommand(ALERT, "bad\nnote"), /non-control/);
 });
 
-test("migration enforces FORCE RLS, pinned producers, owner-only escalation and clean rollback", () => {
+test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron schedule, owner-only escalation and clean rollback", () => {
   const migration = readFileSync("supabase/migrations/20261119000001_lead_system_alerts.sql", "utf8");
   const rollback = readFileSync("deploy/release-proofs/lead-system-alerts/20261119000001-rollback.sql", "utf8");
   const commandEdge = readFileSync("supabase/functions/command/index.ts", "utf8");
@@ -76,13 +85,26 @@ test("migration enforces FORCE RLS, pinned producers, owner-only escalation and 
     migration,
     /REVOKE ALL ON TABLE swarm\.system_alerts\s+FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;/,
   );
-  // sync_quiet_agent_alerts and escalate_due_system_alerts stay swarm_admin-only (not granted to swarm_command).
-  assert.doesNotMatch(migration, /GRANT EXECUTE[\s\S]*sync_quiet_agent_alerts[\s\S]*TO swarm_command/);
-  assert.doesNotMatch(migration, /GRANT EXECUTE[\s\S]*escalate_due_system_alerts[\s\S]*TO swarm_command/);
+  // Narrow reader grant for view predicate ONLY.
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION\s+swarm\.system_alert_claims_can_read\(uuid, uuid, uuid\)\s+TO authenticated, swarm_read;/,
+  );
+  // Producers and scope lock helpers remain private/pinned (scoped per SQL statement).
+  assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*sync_quiet_agent_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
+  assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*escalate_due_system_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
+  assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*system_alert_lock_scope[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
+  // Canonical scope lock order & bare {"v": 1} wake frames.
+  assert.match(migration, /'channel-access:'/);
+  assert.match(migration, /'conversation-frames:'/);
+  assert.doesNotMatch(migration, /'alert_id', NEW\.alert_id/);
   // Owner alert inbox requires role='owner' and rejects agent claims.
   assert.match(migration, /v_claims \? 'agent_principal_id'/);
   assert.match(migration, /m\.role = 'owner'/);
-  // No email bridge in the migration or edge handler.
+  // pg_cron timer scheduled & unscheduled on rollback.
+  assert.match(migration, /'swarm-sync-system-alerts'/);
+  assert.match(rollback, /cron\.unschedule\('swarm-sync-system-alerts'\)/);
+  // No email bridge in the migration.
   assert.doesNotMatch(migration, /smtp|alerts\.jsonl|quiet-agents\.sql/i);
 
   // Rollback drops table, view, triggers and functions.

@@ -141,6 +141,10 @@ import {
   type ChannelRow,
 } from "./cloud/channels.js";
 import {
+  readSystemAlerts,
+  resolveSystemAlertCommand,
+} from "./cloud/system-alerts.js";
+import {
   getMemoryAsAgent,
   MEMORY_KINDS,
   MEMORY_QUERY_MAX,
@@ -756,6 +760,8 @@ export const BOOLEAN_FLAGS = new Set([
   "workspace",
   "none",
   "all",
+  "resolved",
+  "escalated",
 ]);
 
 const UUID_RE =
@@ -4933,6 +4939,79 @@ async function runRoster(args: Arguments): Promise<void> {
       + `${waiting}${work}\n`);
   }
   if (roster.truncated) process.stdout.write("Showing the first 200 agents.\n");
+}
+
+export const RUN_ALERTS_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "resolved",
+  "escalated",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_ALERT_RESOLVE_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+async function runAlerts(args: Arguments): Promise<void> {
+  args.assertShape(RUN_ALERTS_ACCEPTED_FLAGS, 1);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const result = await readSystemAlerts(cloud, selected.bearer, selected.selectedWorkspace, {
+    includeResolved: args.has("resolved"),
+    escalatedOnly: args.has("escalated"),
+    fetcher: selected.fetcher,
+  });
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (result.alerts.length === 0) {
+    process.stdout.write("No system alerts.\n");
+    return;
+  }
+  for (const a of result.alerts) {
+    const state = a.resolved_at ? "resolved" : a.escalated_at ? "escalated" : "open";
+    const waiting = a.waiting_count ? ` · waiting ${a.waiting_count}` : "";
+    const note = a.resolution_note ? ` · note: ${sanitizeDisplayLabel(a.resolution_note, "")}` : "";
+    process.stdout.write(
+      `${a.alert_id} · ${a.kind} · ${sanitizeDisplayLabel(a.affected_seat_name, "Unnamed agent")} · ${state}${waiting} · Fix: ${a.fix_hint}${note}\n`,
+    );
+  }
+}
+
+async function runAlertResolve(args: Arguments): Promise<void> {
+  args.assertShape(RUN_ALERT_RESOLVE_ACCEPTED_FLAGS, 4);
+  const alertId = args.positionals[2];
+  const note = args.positionals[3];
+  if (alertId === undefined || note === undefined) {
+    throw new UsageError("cswarm alert resolve requires <alert-id> and <note>");
+  }
+  let command;
+  try {
+    command = resolveSystemAlertCommand(alertId, note);
+  } catch (error) {
+    throw new UsageError((error as Error).message);
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const client = new ThinCommandClient(cloud, selected.fetcher);
+  const sent = await client.sendResolveSystemAlert({
+    workspaceId: selected.selectedWorkspace,
+    command,
+    credential: selected.bearer,
+  });
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(sent.response.alert, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Resolved alert ${command.alert_id}.\n`);
 }
 
 async function runMembers(args: Arguments): Promise<void> {
@@ -11535,6 +11614,14 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   react: commandEntry({ tool: "react", mcp: true, handler: traced("runReact", runReact), description: "React to a message with one or more emojis, or shortcodes such as :+1:. --remove takes them off.", mutates: true, flags: [...agentFlags, "remove"], transports: STDIO_ONLY, ...EXPAND_PROFILE, profileListOrder: 20, visible: true, help: ["cswarm react <signal-id> <emoji>... [--remove] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   unreact: commandEntry({ ...noTool("the react tool takes remove"), handler: traced("runReact", runReact), description: "Take your emoji reactions off a message.", mutates: true, flags: agentFlags, transports: STDIO_ONLY, ...EXPAND_PROFILE, profileListOrder: 21, visible: true, help: ["cswarm unreact <signal-id> <emoji>... [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   reraise: commandEntry({ tool: "reraise", mcp: true, handler: traced("runReraise", runReraise), description: "Re-raise an open ask you sent: one reminder to the same people, at most once every 24 hours.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 17, visible: true, help: ["cswarm reraise <ask-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  alerts: commandEntry({ ...noTool("system alert inspection is CLI/API-facing"), handler: traced("runAlerts", runAlerts), description: "List seat-health system alerts visible to this lead or workspace owner/admin.", mutates: false, flags: [...agentFlags, "resolved", "escalated"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 28, visible: true, help: ["cswarm alerts [--resolved] [--escalated] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  alert: group({
+    resolve: commandEntry({ ...noTool("system alert resolution is CLI/API-facing"), handler: traced("runAlertResolve", runAlertResolve), description: "Mark a seat-health system alert resolved with a short note.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ['cswarm alert resolve <alert-id> "<note>" [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]'] }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm alert takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 29,
+    refusalTrace: "runAlert",
+  }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
@@ -11661,6 +11748,8 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
   roster: RUN_ROSTER_ACCEPTED_FLAGS,
   reraise: RUN_RERAISE_ACCEPTED_FLAGS,
+  alerts: RUN_ALERTS_ACCEPTED_FLAGS,
+  "alert.resolve": RUN_ALERT_RESOLVE_ACCEPTED_FLAGS,
   react: RUN_REACT_ACCEPTED_FLAGS,
   unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,

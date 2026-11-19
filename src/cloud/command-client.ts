@@ -462,6 +462,12 @@ export interface ReraiseAskCommand {
   signal_id: string;
 }
 
+export interface ResolveSystemAlertCommand {
+  kind: "resolve_system_alert";
+  alert_id: string;
+  note: string;
+}
+
 /**
  * Interactive replies: an ask with fixed choices (server flag SWARM_INTERACTIVE_REPLIES), to one
  * person (to_user_id) or to anyone who can read it (null). multi and channel are sent only when used.
@@ -1606,8 +1612,26 @@ export class ThinCommandClient {
     return { httpStatus: sent.httpStatus, response: body as CommandHttpResponse & ReactionOutcome };
   }
 
+  async sendResolveSystemAlert(request: {
+    workspaceId: string;
+    command: ResolveSystemAlertCommand;
+    credential: string;
+    commandId?: string;
+    signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; response: CommandHttpResponse & { alert: Record<string, unknown> } }> {
+    const sent = await this.sendWithReason({
+      ...request,
+      commandId: request.commandId ?? newCommandId(),
+    });
+    const body = sent.response as CommandHttpResponse & { alert?: Record<string, unknown> };
+    if (body.status !== "accepted" || !body.alert || typeof body.alert !== "object" || Array.isArray(body.alert)) {
+      throw new Error("command endpoint returned a malformed system alert resolution");
+    }
+    return { httpStatus: sent.httpStatus, response: body as CommandHttpResponse & { alert: Record<string, unknown> } };
+  }
+
   private async sendWithReason(request: {
-    workspaceId: string; command: SeatAdminCommand | SeatAdminCreateSeatCommand | ReactionCommand; credential: string; commandId: string; signal?: AbortSignal;
+    workspaceId: string; command: SeatAdminCommand | SeatAdminCreateSeatCommand | ReactionCommand | ResolveSystemAlertCommand; credential: string; commandId: string; signal?: AbortSignal;
   }): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);

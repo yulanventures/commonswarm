@@ -4,20 +4,28 @@
 --
 -- Security invariants:
 --   1. Source scope (channel_id) is preserved on every alert row and never stripped on fallback.
---      Quiet-agent evidence excludes DMs, group DMs, addressed messages and replies to addressed
---      messages, and partitions by (workspace_id, affected_principal_id, channel_id) before counting
---      and deduping so a private alert never hides a public alert or discloses private activity.
+--      Quiet-agent sync resolves canonical placement from swarm.conversation_signals /
+--      swarm.conversations, excludes DMs, group DMs, addressed messages, addressed thread roots
+--      and chain/reply history, and partitions by (workspace_id, affected_principal_id, scope)
+--      before counting and deduping so a private alert never hides a public alert or discloses
+--      private activity.
 --   2. Every lead candidate independently passes workspace membership, live owner, scope access,
 --      listener liveness (at routing/wake time) and distinct-from-affected checks. Read, inbox,
 --      resolve and wake recheck live actor authority from verified claims; an agent claim never
 --      exercises human owner authority, and stale/demoted leads are refused.
---   3. Resolve and escalation lock the same alert row FOR UPDATE so a resolved alert never escalates
---      and repeated escalation passes never enqueue twice.
+--   3. Wake emission, alert writes, resolution and escalation acquire the canonical scope lock
+--      order (conversations FOR SHARE -> channel-access shared -> conversation-frames shared ->
+--      system_alerts FOR UPDATE) so concurrent membership removals and public-to-private
+--      conversions serialize cleanly without late wakes or stale resolves, and resolve/escalation
+--      serialize on the same alert row. Wake frames carry bare {"v": 1}.
 --   4. Direct table writes are denied to all client and edge roles. Internal producers are pinned:
 --      record_system_alert / record_hosted_seat_refused_alerts / resolve_system_alert execute as
 --      swarm_admin via swarm_command; sync_quiet_agent_alerts / escalate_due_system_alerts execute
---      only as swarm_admin. Escalation targets authorized human role='owner' inbox reads only
---      (never role='admin', never email).
+--      only as swarm_admin (scheduled via pg_cron). Only the claims-bound view predicate
+--      system_alert_claims_can_read is granted to authenticated and swarm_read. Escalation targets
+--      authorized human role='owner' inbox reads only (never role='admin', never email).
+--   5. Hidden and unknown alerts return identical refusal metadata (channel_id NULL) so fresh
+--      resolve probes produce identical HTTP 404 and identical audit_log visibility.
 --
 -- Rollback: deploy/release-proofs/lead-system-alerts/20261119000001-rollback.sql.
 SET search_path = swarm, pg_catalog, public;
@@ -123,6 +131,39 @@ AS $$
       'Reconnect the hosted MCP connection in its client and claim the seat again.'
     ELSE NULL
   END;
+$$;
+
+-- Canonical shared authorization fence matching 20261118000005_conversations_commands.sql:
+-- conversations FOR SHARE -> channel-access shared -> conversation-frames shared.
+-- Must be acquired BEFORE any swarm.system_alerts FOR UPDATE row lock.
+CREATE FUNCTION swarm.system_alert_lock_scope(p_workspace uuid, p_channel uuid)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF p_workspace IS NULL THEN
+    RETURN;
+  END IF;
+  PERFORM 1
+  FROM swarm.conversations AS c
+  WHERE c.workspace_id = p_workspace
+    AND CASE
+      WHEN p_channel IS NULL THEN c.kind = 'general'
+      ELSE c.conversation_id = p_channel
+    END
+  FOR SHARE;
+  IF p_channel IS NOT NULL THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('channel-access:' || p_workspace::text || ':' || p_channel::text, 0)
+    );
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('conversation-frames:' || p_workspace::text || ':' || p_channel::text, 0)
+    );
+  END IF;
+END;
 $$;
 
 -- Independent eligibility check for one candidate lead on one alert scope.
@@ -292,7 +333,8 @@ $$;
 
 -- Read gate for swarm_read.system_alerts: derives actor strictly from verified JWT claims.
 -- Agent claims use agent authority ONLY (never human owner authority). Both humans (owners/admins)
--- and lead agents must pass the alert's channel scope check.
+-- and lead agents must pass the alert's channel scope check. Granted ONLY to authenticated and
+-- swarm_read so selecting swarm_read.system_alerts works under both reader roles.
 CREATE FUNCTION swarm.system_alert_claims_can_read(
   p_workspace uuid,
   p_channel uuid,
@@ -358,7 +400,7 @@ END;
 $$;
 
 -- Trusted server-only producer entry point (swarm_command + swarm_admin only).
--- Verifies authoritative workspace, seat membership and channel scope before recording.
+-- Acquires canonical scope lock before checking channel/lead eligibility and writing alert row.
 CREATE FUNCTION swarm.record_system_alert(
   p_workspace_id uuid,
   p_kind text,
@@ -402,6 +444,9 @@ BEGIN
       RETURN NULL;
     END IF;
   END IF;
+
+  -- Acquire canonical scope lock BEFORE reading channel visibility/lead or locking alert row.
+  PERFORM swarm.system_alert_lock_scope(p_workspace_id, p_channel_id);
 
   -- Require authoritative unarchived workspace and active seat membership in that workspace.
   IF NOT EXISTS (
@@ -513,7 +558,8 @@ END;
 $$;
 
 -- Exact-grant hosted refusal producer (swarm_command + swarm_admin only).
--- Requires an exact, unambiguous (provider_grant_id, owner_user_id) match and active workspace seats.
+-- Tied strictly to live seats bound to THIS grant and THIS grant-approved workspace, excluding
+-- seats already reconnected on a live replacement grant for that workspace.
 CREATE FUNCTION swarm.record_hosted_seat_refused_alerts(
   p_provider_grant_id text,
   p_owner_user_id uuid
@@ -543,21 +589,47 @@ BEGIN
   END IF;
 
   FOR v_rec IN
-    SELECT DISTINCT am.workspace_id, p.principal_id
-    FROM swarm.hosted_mcp_grant_agents AS b
+    SELECT DISTINCT hs.workspace_id, hs.principal_id
+    FROM swarm.hosted_mcp_seats AS hs
     JOIN swarm.agent_principals AS p
-      ON p.principal_id = b.principal_id
+      ON p.principal_id = hs.principal_id
      AND p.owner_user_id = p_owner_user_id
      AND p.revoked_at IS NULL
-    JOIN swarm.agent_workspace_memberships AS am
-      ON am.principal_id = p.principal_id
-     AND am.revoked_at IS NULL
+     AND p.transport = 'hosted_mcp'
     JOIN swarm.workspaces AS w
-      ON w.workspace_id = am.workspace_id
+      ON w.workspace_id = hs.workspace_id
      AND w.archived_at IS NULL
-    WHERE b.grant_id = v_grant_id
-      AND b.owner_user_id = p_owner_user_id
-    ORDER BY am.workspace_id, p.principal_id
+    JOIN swarm.memberships AS m
+      ON m.workspace_id = hs.workspace_id
+     AND m.user_id = p_owner_user_id
+     AND m.revoked_at IS NULL
+    WHERE hs.grant_id = v_grant_id
+      AND hs.owner_user_id = p_owner_user_id
+      AND hs.revoked_at IS NULL
+      AND swarm.hosted_binding_eligible(v_grant_id, hs.workspace_id, hs.principal_id)
+      -- Exclude superseded bindings when the seat already has a live replacement grant here.
+      AND NOT EXISTS (
+        SELECT 1
+        FROM swarm.hosted_mcp_grant_agents AS la
+        JOIN swarm.hosted_mcp_grants AS lg
+          ON lg.grant_id = la.grant_id
+         AND lg.owner_user_id = la.owner_user_id
+        WHERE la.principal_id = hs.principal_id
+          AND la.owner_user_id = p_owner_user_id
+          AND la.grant_id <> v_grant_id
+          AND la.revoked_at IS NULL
+          AND lg.state = 'active'
+          AND lg.revoked_at IS NULL
+          AND lg.connection_expired_at IS NULL
+          AND (lg.connection_expires_at IS NULL OR lg.connection_expires_at > clock_timestamp())
+          AND NOT EXISTS (
+            SELECT 1
+            FROM commonswarm_oauth.refresh_family_tombstones AS rf
+            WHERE rf.grant_id = lg.provider_grant_id
+          )
+          AND swarm.hosted_binding_eligible(lg.grant_id, hs.workspace_id, hs.principal_id)
+      )
+    ORDER BY hs.workspace_id, hs.principal_id
   LOOP
     IF swarm.record_system_alert(v_rec.workspace_id, 'hosted_seat_refused', v_rec.principal_id) IS NOT NULL THEN
       v_recorded := v_recorded + 1;
@@ -567,8 +639,9 @@ BEGIN
 END;
 $$;
 
--- Escalate unresolved open alerts whose threshold has elapsed. Locks rows FOR UPDATE in alert_id
--- order so concurrent resolution wins cleanly and repeated passes never escalate a row twice.
+-- Escalate unresolved open alerts whose threshold has elapsed. Acquires canonical scope lock
+-- before locking each alert row FOR UPDATE in alert_id order so concurrent resolution and channel
+-- changes serialize cleanly and repeated passes never escalate twice.
 CREATE FUNCTION swarm.escalate_due_system_alerts()
 RETURNS integer
 LANGUAGE plpgsql
@@ -577,34 +650,37 @@ SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 DECLARE
+  v_rec record;
   v_count integer := 0;
+  v_updated integer;
 BEGIN
-  WITH due AS (
-    SELECT a.alert_id
+  FOR v_rec IN
+    SELECT a.alert_id, a.workspace_id, a.channel_id
     FROM swarm.system_alerts AS a
     WHERE a.resolved_at IS NULL
       AND a.escalated_at IS NULL
       AND a.escalate_after <= statement_timestamp()
     ORDER BY a.alert_id
-    FOR UPDATE
-  ), updated AS (
+  LOOP
+    PERFORM swarm.system_alert_lock_scope(v_rec.workspace_id, v_rec.channel_id);
     UPDATE swarm.system_alerts AS a
     SET escalated_at = statement_timestamp(),
         updated_at = statement_timestamp()
-    FROM due
-    WHERE a.alert_id = due.alert_id
+    WHERE a.alert_id = v_rec.alert_id
       AND a.resolved_at IS NULL
       AND a.escalated_at IS NULL
-    RETURNING a.alert_id
-  )
-  SELECT count(*)::integer INTO v_count FROM updated;
+      AND a.escalate_after <= statement_timestamp();
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    v_count := v_count + v_updated;
+  END LOOP;
   RETURN v_count;
 END;
 $$;
 
--- Server-only quiet-agent sync (swarm_admin only). Partitions eligible non-DM, non-addressed
--- waiting deliveries by (workspace_id, affected_principal_id, channel_id) before counting and
--- opening alerts, then runs due escalations.
+-- Server-only quiet-agent sync (swarm_admin only). Derives canonical scope from conversation
+-- placement (swarm.conversation_signals / swarm.conversations) so replies with inherited private
+-- placement never bucket under workspace-general, excludes DMs, group DMs, addressed messages,
+-- addressed roots and chain/legacy-thread history, then partitions by (workspace, principal, scope).
 CREATE FUNCTION swarm.sync_quiet_agent_alerts(
   p_escalation_interval interval DEFAULT interval '30 minutes'
 )
@@ -631,92 +707,131 @@ BEGIN
         ON pr.workspace_id = am.workspace_id
        AND pr.principal_id = am.principal_id
       GROUP BY am.principal_id
+    ), eligible_evidence AS (
+      SELECT
+        w.workspace_id,
+        p.principal_id,
+        CASE
+          WHEN cs.signal_id IS NOT NULL THEN conv.channel_id
+          ELSE s.channel_id
+        END AS effective_channel_id,
+        d.enqueued_at
+      FROM agent_route AS ar
+      JOIN swarm.agent_principals AS p
+        ON p.principal_id = ar.principal_id
+       AND p.revoked_at IS NULL
+       AND p.transport <> 'hosted_mcp'
+      JOIN swarm.agent_workspace_memberships AS am
+        ON am.principal_id = p.principal_id
+       AND am.revoked_at IS NULL
+      JOIN swarm.workspaces AS w
+        ON w.workspace_id = am.workspace_id
+       AND w.archived_at IS NULL
+      JOIN swarm.memberships AS owner_m
+        ON owner_m.workspace_id = w.workspace_id
+       AND owner_m.user_id = p.owner_user_id
+       AND owner_m.revoked_at IS NULL
+      JOIN swarm.signal_deliveries AS d
+        ON d.recipient_agent_principal_id = p.principal_id
+       AND d.workspace_id = w.workspace_id
+       AND d.acked_at IS NULL
+       AND d.enqueued_at <= v_now - interval '10 minutes'
+      JOIN swarm.signals AS s
+        ON s.workspace_id = d.workspace_id
+       AND s.id = d.signal_id
+       AND s.until > v_now
+      LEFT JOIN swarm.conversation_signals AS cs
+        ON cs.workspace_id = s.workspace_id
+       AND cs.signal_id = s.id
+      LEFT JOIN swarm.conversations AS conv
+        ON conv.conversation_id = cs.conversation_id
+       AND conv.workspace_id = cs.workspace_id
+      WHERE ar.route_at IS NOT NULL
+        AND ar.route_at < v_now - interval '3 minutes'
+        AND ar.route_at > v_now - interval '24 hours'
+        AND (ar.last_command_at IS NULL OR ar.last_command_at <= v_now - interval '10 minutes')
+        AND NOT swarm.agent_listener_is_live(p.principal_id)
+        -- Signal itself must be unaddressed and outside private reply/chain predicates.
+        AND s.to_user_id IS NULL
+        AND s.to_agent_principal_id IS NULL
+        AND s.in_reply_to IS NULL
+        AND s.parent_signal_id IS NULL
+        AND s.chain_root_id IS NULL
+        AND s.chain_participants IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM swarm.signal_recipients AS sr
+          WHERE sr.workspace_id = s.workspace_id
+            AND sr.signal_id = s.id
+        )
+        -- Canonical conversation placement & audience rule:
+        --   * Mapped: require conversation-wide audience in general/public_channel/private_channel.
+        --   * Unmapped legacy history: exclude thread replies completely (only top-level unaddressed).
+        AND (
+          (
+            cs.signal_id IS NOT NULL
+            AND cs.audience = 'conversation'
+            AND conv.kind IN ('general', 'public_channel', 'private_channel')
+            AND conv.archived_at IS NULL
+          )
+          OR (
+            cs.signal_id IS NULL
+            AND s.thread_root_id IS NULL
+          )
+        )
+        -- Thread replies must inherit from an unaddressed, non-chain, conversation-wide root.
+        AND (
+          s.thread_root_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM swarm.signals AS root
+            LEFT JOIN swarm.conversation_signals AS rcs
+              ON rcs.workspace_id = root.workspace_id
+             AND rcs.signal_id = root.id
+            LEFT JOIN swarm.conversations AS rconv
+              ON rconv.conversation_id = rcs.conversation_id
+             AND rconv.workspace_id = rcs.workspace_id
+            WHERE root.workspace_id = s.workspace_id
+              AND root.id = s.thread_root_id
+              AND root.to_user_id IS NULL
+              AND root.to_agent_principal_id IS NULL
+              AND root.in_reply_to IS NULL
+              AND root.parent_signal_id IS NULL
+              AND root.chain_root_id IS NULL
+              AND root.chain_participants IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM swarm.signal_recipients AS rr
+                WHERE rr.workspace_id = root.workspace_id
+                  AND rr.signal_id = root.id
+              )
+              AND (
+                rcs.signal_id IS NULL
+                OR (
+                  rcs.audience = 'conversation'
+                  AND rconv.kind IN ('general', 'public_channel', 'private_channel')
+                )
+              )
+          )
+        )
     )
     SELECT
-      w.workspace_id,
-      p.principal_id,
-      s.channel_id,
+      e.workspace_id,
+      e.principal_id,
+      e.effective_channel_id AS channel_id,
       count(*)::integer AS waiting_count,
-      min(d.enqueued_at) AS oldest_waiting_at
-    FROM agent_route AS ar
-    JOIN swarm.agent_principals AS p
-      ON p.principal_id = ar.principal_id
-     AND p.revoked_at IS NULL
-     AND p.transport <> 'hosted_mcp'
-    JOIN swarm.agent_workspace_memberships AS am
-      ON am.principal_id = p.principal_id
-     AND am.revoked_at IS NULL
-    JOIN swarm.workspaces AS w
-      ON w.workspace_id = am.workspace_id
-     AND w.archived_at IS NULL
-    JOIN swarm.memberships AS owner_m
-      ON owner_m.workspace_id = w.workspace_id
-     AND owner_m.user_id = p.owner_user_id
-     AND owner_m.revoked_at IS NULL
-    JOIN swarm.signal_deliveries AS d
-      ON d.recipient_agent_principal_id = p.principal_id
-     AND d.workspace_id = w.workspace_id
-     AND d.acked_at IS NULL
-     AND d.enqueued_at <= v_now - interval '10 minutes'
-    JOIN swarm.signals AS s
-      ON s.workspace_id = d.workspace_id
-     AND s.id = d.signal_id
-     AND s.until > v_now
-    WHERE ar.route_at IS NOT NULL
-      AND ar.route_at < v_now - interval '3 minutes'
-      AND ar.route_at > v_now - interval '24 hours'
-      AND (ar.last_command_at IS NULL OR ar.last_command_at <= v_now - interval '10 minutes')
-      AND NOT swarm.agent_listener_is_live(p.principal_id)
-      -- Exclude DM, group DM, addressed signals and replies to addressed signals.
-      AND s.to_user_id IS NULL
-      AND s.to_agent_principal_id IS NULL
-      AND NOT EXISTS (
-        SELECT 1
-        FROM swarm.signal_recipients AS sr
-        WHERE sr.workspace_id = s.workspace_id
-          AND sr.signal_id = s.id
-      )
-      AND (
-        s.in_reply_to IS NULL
-        OR NOT EXISTS (
-          SELECT 1
-          FROM swarm.signals AS ps
-          WHERE ps.workspace_id = s.workspace_id
-            AND ps.id = s.in_reply_to
-            AND (
-              ps.to_user_id IS NOT NULL
-              OR ps.to_agent_principal_id IS NOT NULL
-              OR EXISTS (
-                SELECT 1
-                FROM swarm.signal_recipients AS psr
-                WHERE psr.workspace_id = ps.workspace_id
-                  AND psr.signal_id = ps.id
-              )
-            )
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM swarm.conversation_signals AS cs
-        JOIN swarm.conversations AS conv
-          ON conv.conversation_id = cs.conversation_id
-         AND conv.workspace_id = cs.workspace_id
-        WHERE cs.workspace_id = s.workspace_id
-          AND cs.signal_id = s.id
-          AND (cs.audience <> 'conversation' OR conv.kind IN ('dm', 'group_dm'))
-      )
-      AND (
-        s.channel_id IS NULL
-        OR EXISTS (
-          SELECT 1
-          FROM swarm.channels AS ch
-          WHERE ch.workspace_id = w.workspace_id
-            AND ch.channel_id = s.channel_id
-            AND ch.archived_at IS NULL
-        )
-      )
-    GROUP BY w.workspace_id, p.principal_id, s.channel_id
-    ORDER BY min(d.enqueued_at), w.workspace_id, p.principal_id, s.channel_id NULLS FIRST
+      min(e.enqueued_at) AS oldest_waiting_at
+    FROM eligible_evidence AS e
+    WHERE e.effective_channel_id IS NULL
+       OR EXISTS (
+         SELECT 1
+         FROM swarm.channels AS ch
+         WHERE ch.workspace_id = e.workspace_id
+           AND ch.channel_id = e.effective_channel_id
+           AND ch.archived_at IS NULL
+       )
+    GROUP BY e.workspace_id, e.principal_id, e.effective_channel_id
+    ORDER BY min(e.enqueued_at), e.workspace_id, e.principal_id, e.effective_channel_id NULLS FIRST
   LOOP
     IF swarm.record_system_alert(
       v_rec.workspace_id,
@@ -740,10 +855,9 @@ END;
 $$;
 
 -- Command-edge resolution entry point (swarm_command + swarm_admin only).
--- Locks the row FOR UPDATE to serialize against escalation, rechecks live actor authority and scope
--- (agent authority strictly separate from human owner authority), and returns uniform 'not_found'
--- for unknown, cross-workspace or unauthorized alert IDs while preserving channel_id for private
--- audit gating.
+-- Acquires canonical scope lock BEFORE locking the alert row FOR UPDATE so concurrent channel
+-- conversions/removals and escalations serialize cleanly. Returns uniform not_found with
+-- channel_id NULL for BOTH unknown and unauthorized alert IDs (closing audit-view oracles).
 CREATE FUNCTION swarm.resolve_system_alert(
   p_workspace_id uuid,
   p_alert_id uuid,
@@ -759,6 +873,8 @@ SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 DECLARE
+  v_peek_channel uuid;
+  v_found_peek boolean := false;
   v_row swarm.system_alerts%ROWTYPE;
   v_seat_name text;
   v_authorized boolean := false;
@@ -771,6 +887,20 @@ BEGIN
     OR p_note <> btrim(p_note) OR p_note ~ '[[:cntrl:]]' THEN
     RETURN jsonb_build_object('outcome', 'invalid');
   END IF;
+
+  -- Peek immutable channel_id so we acquire the canonical scope lock BEFORE system_alerts FOR UPDATE.
+  SELECT a.channel_id
+  INTO v_peek_channel
+  FROM swarm.system_alerts AS a
+  WHERE a.workspace_id = p_workspace_id
+    AND a.alert_id = p_alert_id;
+  v_found_peek := FOUND;
+
+  IF NOT v_found_peek THEN
+    RETURN jsonb_build_object('outcome', 'not_found', 'channel_id', NULL);
+  END IF;
+
+  PERFORM swarm.system_alert_lock_scope(p_workspace_id, v_peek_channel);
 
   SELECT *
   INTO v_row
@@ -816,8 +946,10 @@ BEGIN
     END IF;
   END IF;
 
+  -- Uniform refusal: omit channel_id so unauthorized probes produce identical HTTP 404 and
+  -- identical audit_log visibility to unknown UUID probes.
   IF NOT v_authorized THEN
-    RETURN jsonb_build_object('outcome', 'not_found', 'channel_id', v_row.channel_id);
+    RETURN jsonb_build_object('outcome', 'not_found', 'channel_id', NULL);
   END IF;
 
   IF v_row.resolved_at IS NOT NULL THEN
@@ -867,25 +999,8 @@ BEGIN
 END;
 $$;
 
--- Internal command-edge helper for tagging audit_log.channel_ids on resolve retries/conflicts.
-CREATE FUNCTION swarm.system_alert_audit_channel_id(
-  p_workspace_id uuid,
-  p_alert_id uuid
-)
-RETURNS uuid
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = pg_catalog
-AS $$
-  SELECT a.channel_id
-  FROM swarm.system_alerts AS a
-  WHERE a.workspace_id = p_workspace_id
-    AND a.alert_id = p_alert_id
-  LIMIT 1;
-$$;
-
 ALTER FUNCTION swarm.system_alert_fix_hint(text) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.system_alert_lock_scope(uuid, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_candidate_is_eligible(uuid, uuid, uuid, uuid, boolean) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_pick_lead(uuid, uuid, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_agent_is_current_lead(uuid, uuid, uuid, uuid) OWNER TO swarm_admin;
@@ -895,10 +1010,10 @@ ALTER FUNCTION swarm.record_hosted_seat_refused_alerts(text, uuid) OWNER TO swar
 ALTER FUNCTION swarm.escalate_due_system_alerts() OWNER TO swarm_admin;
 ALTER FUNCTION swarm.sync_quiet_agent_alerts(interval) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text) OWNER TO swarm_admin;
-ALTER FUNCTION swarm.system_alert_audit_channel_id(uuid, uuid) OWNER TO swarm_admin;
 
 REVOKE ALL ON FUNCTION
   swarm.system_alert_fix_hint(text),
+  swarm.system_alert_lock_scope(uuid, uuid),
   swarm.system_alert_candidate_is_eligible(uuid, uuid, uuid, uuid, boolean),
   swarm.system_alert_pick_lead(uuid, uuid, uuid),
   swarm.system_alert_agent_is_current_lead(uuid, uuid, uuid, uuid),
@@ -907,21 +1022,25 @@ REVOKE ALL ON FUNCTION
   swarm.record_hosted_seat_refused_alerts(text, uuid),
   swarm.escalate_due_system_alerts(),
   swarm.sync_quiet_agent_alerts(interval),
-  swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text),
-  swarm.system_alert_audit_channel_id(uuid, uuid)
+  swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text)
 FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+-- Narrow reader grant for swarm_read.system_alerts view predicate ONLY.
+GRANT EXECUTE ON FUNCTION
+  swarm.system_alert_claims_can_read(uuid, uuid, uuid)
+TO authenticated, swarm_read;
 
 -- Pin producer and command roles strictly: only swarm_command gets its narrow edge entry points.
 -- sync_quiet_agent_alerts and escalate_due_system_alerts remain swarm_admin-only.
 GRANT EXECUTE ON FUNCTION
   swarm.record_system_alert(uuid, text, uuid, uuid, integer, timestamptz, interval),
   swarm.record_hosted_seat_refused_alerts(text, uuid),
-  swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text),
-  swarm.system_alert_audit_channel_id(uuid, uuid)
+  swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text)
 TO swarm_command;
 
--- Content-free realtime wake triggers (revalidating live eligibility and scope at emit time).
--- Never emit resolution notes or alert text; never broadcast on the workspace-wide signal topic.
+-- Minimal content-free realtime wake triggers ({"v": 1} only) serialized behind the canonical
+-- scope lock so concurrent membership removals or public-to-private conversions never leave a
+-- late wake frame.
 CREATE FUNCTION swarm.notify_system_alert_insert()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -935,6 +1054,7 @@ BEGIN
   IF NEW.resolved_at IS NOT NULL THEN
     RETURN NULL;
   END IF;
+  PERFORM swarm.system_alert_lock_scope(NEW.workspace_id, NEW.channel_id);
   BEGIN
     IF NEW.routed_lead_principal_id IS NOT NULL
       AND swarm.system_alert_candidate_is_eligible(
@@ -950,11 +1070,7 @@ BEGIN
         AND p.revoked_at IS NULL;
       IF v_wake_id IS NOT NULL THEN
         PERFORM realtime.send(
-          pg_catalog.jsonb_build_object(
-            'v', 1,
-            'alert_id', NEW.alert_id,
-            'enqueued_at', NEW.opened_at
-          ),
+          pg_catalog.jsonb_build_object('v', 1),
           'wake',
           'cswarm-wake:' || v_wake_id,
           true
@@ -1005,6 +1121,7 @@ BEGIN
   IF NEW.resolved_at IS NOT NULL OR NEW.escalated_at IS NULL OR OLD.escalated_at IS NOT NULL THEN
     RETURN NULL;
   END IF;
+  PERFORM swarm.system_alert_lock_scope(NEW.workspace_id, NEW.channel_id);
   BEGIN
     FOR v_owner_id IN
       SELECT m.user_id
@@ -1048,6 +1165,7 @@ BEGIN
     OR NEW.routed_lead_principal_id IS NOT DISTINCT FROM OLD.routed_lead_principal_id THEN
     RETURN NULL;
   END IF;
+  PERFORM swarm.system_alert_lock_scope(NEW.workspace_id, NEW.channel_id);
   BEGIN
     IF swarm.system_alert_candidate_is_eligible(
       NEW.workspace_id, NEW.channel_id, NEW.routed_lead_principal_id, NEW.affected_principal_id, true
@@ -1061,11 +1179,7 @@ BEGIN
         AND p.revoked_at IS NULL;
       IF v_wake_id IS NOT NULL THEN
         PERFORM realtime.send(
-          pg_catalog.jsonb_build_object(
-            'v', 1,
-            'alert_id', NEW.alert_id,
-            'enqueued_at', NEW.updated_at
-          ),
+          pg_catalog.jsonb_build_object('v', 1),
           'wake',
           'cswarm-wake:' || v_wake_id,
           true
@@ -1243,5 +1357,13 @@ ALTER FUNCTION swarm_read.owner_alert_inbox(uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.owner_alert_inbox(uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.owner_alert_inbox(uuid) TO authenticated, swarm_read;
+
+-- Schedule quiet-agent sync and due-alert escalation every 2 minutes inside PostgreSQL.
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT cron.schedule(
+  'swarm-sync-system-alerts',
+  '*/2 * * * *',
+  $$SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')$$
+);
 
 RESET search_path;
