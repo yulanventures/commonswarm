@@ -934,5 +934,5 @@ test("5. HezSec C1-C3 witnesses: NULL-total DM thread gates, DM human-to-agent t
   const seatedOversight = ok(await readResource(ann.jwt, {
     resource: "conversation_oversight", workspace_id: workspace, agent_principal_id: annBotA.id,
   }), "seated agent oversight list");
-  assert.ok(parseConversationsListResponse(seatedOversight).some((c) => c.conversationId === dmAnnBot));
+  assert.ok(parseOversightListResponse(seatedOversight).some((c) => c.conversationId === dmAnnBot && c.readOnly === true));
 });
