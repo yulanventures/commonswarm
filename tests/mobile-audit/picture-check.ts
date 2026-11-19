@@ -335,7 +335,7 @@ export async function runPictureChecks(
         } finally { page.off("response", onCommandResponse); }
       }
       check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
-        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus }) });
+        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS) }) });
     }
     await page.close();
 
