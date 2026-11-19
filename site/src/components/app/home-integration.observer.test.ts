@@ -1925,7 +1925,7 @@ test('accepted agent removals leave every current surface immediately and after 
       let homePeopleReadState='ready', homeWorkspaceRead=0, homeOverviewCounts=new Map();
       let removedAgents=new Map(${JSON.stringify(reloaded ? targets.map(agent => [agent.principalId, agent.name]) : [])}), removedAgentOwners=new Map();
       let pendingAgentsLoadFailed=false, householdConnectionsReadState='pending', householdConnections=[], peopleDialogReceipts=new Map(), householdReceipts=new Map();
-      let livePromptPrincipalId='', renderedWakeMarkKey='', pendingPollTimer, wakeRosterLastFetchedAt=0, wakeRosterRefreshInFlight=false;
+      let livePromptPrincipalId='', renderedWakeMarkKey='', pendingPollTimer, wakeRosterLastFetchedAt=0, wakeRosterRefreshInFlight=false, confirmScopeGeneration=0;
       const app={dataset:{channelView:'feed'}}, uuid=()=> 'request', WAKE_ROSTER_REFRESH_TIMEOUT_MS=1, PENDING_POLL_TICK_MS=4000;
       const currentPendingAccessRows=()=>[], peopleInvites=()=>[], pendingInvites=[], pendingAgents=[], peopleDialogState={selected:null}, householdAccess={status:'ok',workspaceId:'W'};
       const shouldPollPendingAccess=()=>true, pendingAccessKey=()=>'', renderedPendingAccessKey='', refreshPendingAccess=()=>{};

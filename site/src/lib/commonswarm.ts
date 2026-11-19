@@ -1750,6 +1750,39 @@ export async function setWorkspaceLead(
     : null;
 }
 
+export type AgentRemovalScope = "workspace" | "permanent";
+
+/** Asks the server whether removing this agent from this workspace is workspace-only or permanent retirement. */
+export async function readAgentRemovalScope(
+  session: Session,
+  workspaceId: string,
+  principalId: string,
+): Promise<AgentRemovalScope | null> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/rest/v1/rpc/agent_removal_scope`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "accept-profile": "swarm_read",
+        "content-profile": "swarm_read",
+      },
+      body: JSON.stringify({ p_workspace_id: workspaceId, p_principal_id: principalId }),
+      signal: deadline.controller.signal,
+    });
+    if (!response.ok) throw new Error(`Could not check removal scope (HTTP ${response.status}).`);
+    const raw = (await response.json()) as unknown;
+    return raw === "workspace" || raw === "permanent" ? raw : null;
+  } finally {
+    deadline.clear();
+  }
+}
+
 /**
  * Removes workspace access. Local account connections remain available in other workspaces.
  * Browser surface is principal-only — there is no per-token UI.
@@ -1765,20 +1798,31 @@ export async function revokeAgentPrincipal(
     commandId,
     { kind: "revoke_agent_principal", principal_id: principalId },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "CommonSwarm lost the removal result. Retry or reload the list to check.",
   );
+  const code = typeof body.error === "string" ? body.error : undefined;
   if (status === 403) {
-    throw new Error(
-      "Your current project role cannot remove this agent. CommonSwarm did not change anything.",
+    throw Object.assign(
+      new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."),
+      { status, code: code ?? "forbidden" },
+    );
+  }
+  if (status === 409 && code === "command_id_conflict") {
+    throw Object.assign(
+      new Error("CommonSwarm could not confirm whether this removal already completed. Reload the list to check."),
+      { status, code, uncertain: true },
     );
   }
   if (status !== 200) {
-    throw new Error(
-      `Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`,
+    throw Object.assign(
+      new Error(`Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`),
+      { status, code, uncertain: status === 0 || status >= 500 },
     );
   }
   if (body.status !== "accepted") {
-    throw new Error(
-      `Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`,
+    throw Object.assign(
+      new Error(`Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`),
+      { status, code: typeof body.reason === "string" ? body.reason : "refused" },
     );
   }
 }

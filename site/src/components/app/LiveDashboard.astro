@@ -1445,6 +1445,7 @@ import "../../styles/kylon-image-viewer.css";
     PasswordCodeRequired,
     PASSWORD_MIN_LENGTH,
     removeWorkspaceMember,
+    readAgentRemovalScope,
     revokeAgentPrincipal,
     setAgentModel,
     subscribeAgentActivity,
@@ -3120,7 +3121,7 @@ import "../../styles/kylon-image-viewer.css";
       const pageSize = 200;
       const result: Agent[] = [];
       for (let offset = 0; ; offset += pageSize) {
-        const { data, error } = await api
+        const { data, error, status } = await api
           .schema("swarm_read")
           .from("agent_principals")
           .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at")
@@ -3129,7 +3130,7 @@ import "../../styles/kylon-image-viewer.css";
           .order("name", { ascending: true })
           .order("principal_id", { ascending: true })
           .range(offset, offset + pageSize - 1);
-        if (error) throw new Error(error.message);
+        if (error) throw Object.assign(new Error(error.message), { status, code: error.code });
         const page = data ?? [];
         const joinedTimes = new Map(page.map(row => [String(row.principal_id), typeof row.created_at === "string" ? row.created_at : null]));
         result.push(...rosterAgentsFromRows(page).map(agent => ({ ...agent, joinedAt: joinedTimes.get(agent.principalId) ?? null })));
@@ -3193,13 +3194,13 @@ import "../../styles/kylon-image-viewer.css";
     ): Promise<{ names: Map<string, string>; members: Member[] }> => {
       const api = client();
       if (!api) throw new NoDeployment();
-      const { data, error } = await api
+      const { data, error, status } = await api
         .schema("swarm_read")
         .from("member_profiles")
         .select("user_id,display_name,role")
         .eq("workspace_id", workspaceId)
         .limit(1_000);
-      if (error) throw new Error(error.message);
+      if (error) throw Object.assign(new Error(error.message), { status, code: error.code });
       const members = (data ?? []).map((row) => ({
         userId: String(row.user_id ?? ""),
         name: String(row.display_name ?? ""),
@@ -8706,6 +8707,10 @@ import "../../styles/kylon-image-viewer.css";
         resolve("asked");
       }));
     };
+    const uncertainAgentRemovals = new Set<string>();
+    const confirmedRemovalScopes = new Map<string, "workspace" | "permanent">();
+    let confirmScopeGeneration = 0;
+    one<HTMLDialogElement>("[data-people-confirm]")?.addEventListener("close", () => { ++confirmScopeGeneration; });
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
@@ -8731,7 +8736,96 @@ import "../../styles/kylon-image-viewer.css";
         await revokeAgentToken(session, questionId ?? uuid(), workspaceId, pinnedKey.tokenId);
         receipt = `Key turned off. ${agent.name}’s key and its renewals stopped immediately for new requests.`;
       }
-      if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+      if (action === "remove-agent") {
+        if (!agent) throw new Error("This agent is no longer in this workspace. Go back and check the list.");
+        const pinnedSession = session;
+        const questionGeneration = confirmScopeGeneration;
+        const confirmAtStart = one<HTMLDialogElement>("[data-people-confirm]");
+        const dialogGeneration = confirmAtStart?.dataset?.confirmGeneration ?? "";
+        const commandId = questionId ?? uuid();
+        const scope = questionId ? confirmedRemovalScopes.get(questionId) : undefined;
+        // Workspace-only removal (hosted agent, or a local agent confirmed by the server to be in an added workspace)
+        // is proven by authorized workspace-roster absence. Permanent local retirement affects identity and keys across
+        // every workspace, so receiptConfirmed (authoritative revoke_agent_principal 200) stays separate from roster absence.
+        const workspaceOnlyRemoval = agent.transport === "hosted_mcp" || scope === "workspace";
+        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
+        const stillLiveRemoveQuestion = (): boolean => {
+          if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return false;
+          if (questionGeneration !== confirmScopeGeneration) return false;
+          const confirm = one<HTMLDialogElement>("[data-people-confirm]");
+          if (confirm && (!confirm.open || (confirm.dataset?.confirmGeneration ?? "") !== dialogGeneration)) return false;
+          if (!agents.some((entry) => entry.principalId === agent.principalId)) return false;
+          return peopleDialogCanAct(peopleDialogModel(), "remove-agent", id);
+        };
+        const isFreshRefusalError = (error: unknown): boolean => {
+          if (typeof error !== "object" || error === null) return false;
+          const record = error as { status?: unknown; code?: unknown };
+          return record.status === 403 || record.code === "forbidden" || record.code === "42501";
+        };
+        const checkRemovalRead = async (): Promise<"absent" | "refused" | "unknown"> => {
+          const [rosterRes, memberRes] = await Promise.allSettled([roster(workspaceId), memberRoster(workspaceId)]);
+          if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return "unknown";
+          if (memberRes.status === "rejected") {
+            return isFreshRefusalError(memberRes.reason)
+              || (rosterRes.status === "rejected" && isFreshRefusalError(rosterRes.reason))
+              ? "refused" : "unknown";
+          }
+          const freshViewer = memberRes.value.members.find((entry) => entry.userId === userId);
+          const freshMayManage = Boolean(
+            freshViewer && (freshViewer.role === "owner" || freshViewer.role === "admin" || agent.ownerUserId === userId),
+          );
+          if (!freshMayManage) return "refused";
+          if (rosterRes.status === "rejected") {
+            return isFreshRefusalError(rosterRes.reason) ? "refused" : "unknown";
+          }
+          if (!rosterRes.value.some((entry) => entry.principalId === agent.principalId)) return "absent";
+          return "unknown";
+        };
+        const isUncertain = (error: unknown): boolean => {
+          if (typeof error !== "object" || error === null) return true;
+          const record = error as { status?: unknown; uncertain?: unknown };
+          return record.uncertain === true || typeof record.status !== "number" || record.status === 0 || record.status >= 500;
+        };
+        const permanentUncertainMessage = (absentHere: boolean): string => absentHere
+          ? `${agent.name} is no longer in ${workspaceName || "this workspace"}, but permanent removal could not be confirmed. Reload to check.`
+          : "The removal result is unknown. Reload the list to check, or try again.";
+        let receiptConfirmed = false;
+        let rosterAbsent = false;
+        if (questionId && uncertainAgentRemovals.has(questionId)) {
+          const preRead = await checkRemovalRead();
+          if (preRead === "refused") {
+            throw new Error("This action is no longer available. Go back and check the details.");
+          }
+          if (preRead === "absent") rosterAbsent = true;
+          if (!(workspaceOnlyRemoval && rosterAbsent) && !stillLiveRemoveQuestion()) {
+            throw new Error(!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId
+              ? "This space has changed. Go back and check the details."
+              : "This action is no longer available. Go back and check the details.");
+          }
+        }
+        if (!receiptConfirmed && !(workspaceOnlyRemoval && rosterAbsent)) {
+          try {
+            await revokeAgentPrincipal(pinnedSession, commandId, workspaceId, agent.principalId);
+            receiptConfirmed = true;
+          } catch (error) {
+            const wasUncertain = Boolean(questionId && uncertainAgentRemovals.has(questionId));
+            const uncertainNow = wasUncertain || isUncertain(error);
+            if (!uncertainNow) throw error;
+            if (questionId) uncertainAgentRemovals.add(questionId);
+            const postRead = await checkRemovalRead();
+            if (postRead === "absent") rosterAbsent = true;
+            if (!(workspaceOnlyRemoval && rosterAbsent)) {
+              throw new Error(workspaceOnlyRemoval
+                ? "The removal result is unknown. Reload the list to check, or try again."
+                : permanentUncertainMessage(rosterAbsent));
+            }
+          }
+        }
+        if (questionId) uncertainAgentRemovals.delete(questionId);
+        if (questionId) confirmedRemovalScopes.delete(questionId);
+        receipt = receiptConfirmed && !workspaceOnlyRemoval
+          ? `${agent.name} permanently removed. Its history stays as “${agent.name} (removed)”.`
+          : `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
         ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;
@@ -8769,6 +8863,7 @@ import "../../styles/kylon-image-viewer.css";
       await reloadPeopleDialog(workspaceId, id, receipt, action);
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
+      ++confirmScopeGeneration;
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
       const found = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
       const item = found && action === "cancel-invite" ? { ...found, detail: peopleInviteDisplayDetail(found as PeopleInvite, model.invites) } : found;
@@ -8781,14 +8876,46 @@ import "../../styles/kylon-image-viewer.css";
         if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !grant.tokenId) return;
         pinnedKey = { tokenId: grant.tokenId, grantId: grant.grantId ?? null };
       }
+      const switchToKey = () => confirmPeopleDialogAction("turn-off-key", id, opener);
+      const afterCommit = () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true });
+      if (action === "remove-agent" && !("hosted" in item && item.hosted)) {
+        const questionId = uuid();
+        const currentSession = session;
+        const runCommit = async (button: HTMLButtonElement, notice: HTMLElement) => {
+          if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
+          await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
+        };
+        const loadScope = () => {
+          const checkAttempt = ++confirmScopeGeneration;
+          showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "loading" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+          const loadingDialogGeneration = confirm.dataset?.confirmGeneration ?? "";
+          if (!currentSession || !workspaceId) {
+            showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            return;
+          }
+          void readAgentRemovalScope(currentSession, workspaceId, id).then((scope) => {
+            if (checkAttempt !== confirmScopeGeneration || (confirm.dataset?.confirmGeneration ?? "") !== loadingDialogGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            if (scope === "workspace" || scope === "permanent") {
+              confirmedRemovalScopes.set(questionId, scope);
+              showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: scope }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            } else {
+              showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+            }
+          }, () => {
+            if (checkAttempt !== confirmScopeGeneration || (confirm.dataset?.confirmGeneration ?? "") !== loadingDialogGeneration || !confirm.open || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+            showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName, removalScope: "failed" }, opener, runCommit, readableError, switchToKey, afterCommit, undefined, loadScope);
+          });
+        };
+        loadScope();
+        return;
+      }
       // One command id per question: pressing again after a lost answer repeats the same command, which the server
       // answers from its receipt instead of revoking or withdrawing a second time. A new question gets a new id.
       const questionId = uuid();
       showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName }, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
         await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
-      }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
-        () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
+      }, readableError, switchToKey, afterCommit);
     };
 
     /** Open above the current view; a cold People link first opens its workspace chat. */
@@ -23990,6 +24117,8 @@ import "../../styles/kylon-image-viewer.css";
   .pd-confirm-facts li::before { content: ""; position: absolute; inset-inline-start: 0; inset-block-start: 8px; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--danger); }
   .pd-confirm-facts li.keep::before { background: var(--success); }
   .pd-confirm-note { margin: 14px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+  .pd-confirm-error { margin: 14px 0 0; color: inherit; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .pd-confirm .pd-error { color: inherit; }
   .pd-alternative { margin-block-start: 20px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--canvas); }
   .pd-alternative h3 { font-size: 13px; }
   .pd-alternative p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin-block-start: 6px; }
@@ -24022,8 +24151,15 @@ import "../../styles/kylon-image-viewer.css";
     .pd-fact-row .pd-fact-action { grid-column: 2; grid-row: 2; }
     .pd-fact-row .pd-text-button, .pd-danger-button { font-size: 14px; }
     .pd-scroll-footer { padding: 9px 16px calc(9px + env(safe-area-inset-bottom)); }
-    .pd-confirm { padding: 24px; }
-    .pd-confirm-actions { flex-direction: column-reverse; }
+    .pd-confirm { padding: 20px; }
+    .pd-confirm-icon { margin-block-end: 12px; }
+    .pd-confirm h2 { font-size: 20px; line-height: 1.28; }
+    .pd-confirm-facts { margin: 14px 0 0; gap: 8px; }
+    .pd-confirm-facts li { line-height: 1.5; }
+    .pd-confirm-note { margin: 10px 0 0; line-height: 1.48; }
+    .pd-confirm-error { margin: 10px 0 0; line-height: 1.48; }
+    .pd-alternative { margin-block-start: 14px; padding: 12px; }
+    .pd-confirm-actions { flex-direction: column-reverse; margin-block-start: 16px; }
     .pd-confirm-actions .dashboard__button { inline-size: 100%; }
   }
   @media (prefers-reduced-motion: reduce) { .dashboard__roster-dialog, .pd-confirm { animation: none; transition: none; scroll-behavior: auto; } }
