@@ -373,6 +373,17 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     keys: [{ key: "Shift+Tab", expect: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="true"]' }],
     activate: { key: "Enter", expect: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="false"]' } },
   }],
+  // Standalone Invite someone page: opens on Their email; Tab reaches Create invite link, then Open Lists & docs.
+  "app.invite-person": [{
+    name: "invite-email-to-create-and-setting",
+    start: { active: '[data-channel-view="invite"]:not([hidden]) [data-invite-email]' },
+    keys: [
+      { key: "Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-submit]' },
+      { key: "Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-workspace-view="objects"]' },
+      { key: "Shift+Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-submit]' },
+      { key: "Shift+Tab", expect: '[data-channel-view="invite"]:not([hidden]) [data-invite-email]' },
+    ],
+  }],
   "route.terms": [{
     name: "skip-link",
     start: "document",

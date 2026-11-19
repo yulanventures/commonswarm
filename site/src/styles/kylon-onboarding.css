@@ -34,21 +34,12 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view {
   max-inline-size: 624px;
   margin-inline: auto;
   padding: 20px 24px 32px;
-  gap: 20px;
+  gap: 16px;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__choice-copy {
   min-inline-size: 0;
-  gap: 8px;
-}
-
-live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__eyebrow {
-  color: var(--k-shell-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.5;
-  letter-spacing: 0;
-  text-transform: none;
+  gap: 4px;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__choice-copy h2,
@@ -65,13 +56,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__title 
   overflow-wrap: anywhere;
 }
 
-live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__choice-copy > p:last-child {
-  color: var(--k-shell-secondary);
-  font-size: 14px;
-  line-height: 1.55;
-}
-
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-prerequisite {
+  margin: 0;
   padding: 12px;
   border: 1px solid var(--k-shell-line);
   border-radius: var(--k-shell-radius);
@@ -172,6 +158,10 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view :is(.dashboar
   font-size: 13px;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-form .dashboard__invite-hint {
+  flex-basis: 100%;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-result {
@@ -418,6 +408,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp :is(but
     min-inline-size: 44px;
     min-block-size: 44px;
     margin-block-start: 4px;
+    margin-inline-start: -4px;
     padding: 8px 4px;
   }
 }

@@ -1367,3 +1367,22 @@ test("openWorkspace settles each read independently so sibling failures keep loa
     assert.ok(rendered.includes("files:0:Could not load files. The signal feed is still available."));
   }
 });
+
+test("standalone Invite someone page leads with workspace and email, drops the eyebrow, and keeps disclosure beside Create invite link", () => {
+  const invite = section(markup, 'data-channel-view="invite"', "</section>");
+  assert.doesNotMatch(invite, /dashboard__eyebrow/, "repeated Invite someone eyebrow is removed");
+  const workspaceIdx = invite.indexOf("data-invite-workspace");
+  const emailIdx = invite.indexOf('for="dashboard-invite-email"');
+  const submitIdx = invite.indexOf("data-invite-submit");
+  const hintIdx = invite.indexOf('id="dashboard-invite-email-hint"');
+  const formEndIdx = invite.indexOf("</form>");
+  const prereqIdx = invite.indexOf("dashboard__invite-prerequisite");
+  const settingIdx = invite.indexOf('data-workspace-view="objects"');
+  assert.ok(workspaceIdx > 0 && workspaceIdx < emailIdx, "workspace name precedes Their email");
+  assert.ok(emailIdx < submitIdx && submitIdx < hintIdx && hintIdx < formEndIdx, "disclosure sits beside Create invite link inside the form");
+  assert.ok(formEndIdx < prereqIdx && prereqIdx < settingIdx, "prerequisite and Open Lists & docs sit after the form");
+  const hint = section(invite, 'id="dashboard-invite-email-hint"', "</p>");
+  assert.match(hint, /email they sign in with/i);
+  assert.match(hint, /earlier messages,[\s\S]*lists and files/i);
+  assert.match(hint, /not your other workspaces/i);
+});
