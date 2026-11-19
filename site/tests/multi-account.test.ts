@@ -541,6 +541,48 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   );
   assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "wrong deployment sends 0 requests");
 
+  // Current workspace pin with mismatched envelope or payload workspace_id -> refused BEFORE any send (C2)!
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-wrong-env-ws", { kind: "test" }, {
+      scope: { workspaceId: "ws-alpha" },
+      extra: { workspace_id: "ws-beta" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "WorkspaceMismatch" },
+  );
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-wrong-cmd-ws", { kind: "revoke_agent_principal", workspace_id: "ws-beta" }, {
+      scope: { workspaceId: "ws-alpha" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "WorkspaceMismatch" },
+  );
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-wrong-nested-ws", { kind: "x", payload: { target_workspace_id: "ws-beta" } }, {
+      scope: { workspaceId: "ws-alpha" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "WorkspaceMismatch" },
+  );
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-acct-sneak-ws", { kind: "test" }, {
+      scope: "account",
+      extra: { workspace_id: "ws-beta" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "WorkspaceMismatch" },
+  );
+  assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "mismatched workspace payload/envelope sends 0 requests");
+
+  // Positive control: current pin on ws-alpha derives envelope workspace_id directly from the verified pin!
+  const okWsCmd = await postPinnedCommand(pinnedFor401, "cmd-ok-ws", { kind: "test" }, {
+    scope: { workspaceId: "ws-alpha" },
+    fetcher: mock.fetcher,
+  });
+  assert.equal(okWsCmd.status, 200);
+  assert.equal(mock.state.commandRequests.at(-1)?.body.workspace_id, "ws-alpha", "envelope workspace_id derived from pin");
+  const requestsAfterOkWs = mock.state.commandRequests.length;
+
   // Workspace A -> B -> A invalidates pinned workspace context for sends and Realtime!
   const pinnedWs = mgr.pinContext({ workspaceId: "ws-alpha" });
   assert.ok(pinnedWs && pinnedWs.isCurrent("ws-alpha"));
@@ -558,7 +600,7 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   let wsJoinCalled = false;
   assert.equal(await attachPinnedRealtime(pinnedWs, { workspaceId: "ws-alpha" }, () => { wsJoinCalled = true; return {}; }), null);
   assert.equal(wsJoinCalled, false, "stale workspace pin cannot join Realtime");
-  assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "stale workspace sends 0 commands");
+  assert.equal(mock.state.commandRequests.length, requestsAfterOkWs, "stale workspace sends 0 commands");
 
   // Re-pin fresh context on ws-alpha and test held 401 retry invalidated by account switch!
   const pinnedFresh401 = mgr.pinContext({ workspaceId: "ws-alpha" });
@@ -576,7 +618,7 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   mgr.switchActiveAccount(b.account.userId);
   releaseRefresh();
   await assert.rejects(cmdPromise, { name: "AuthRecoveryRequired" });
-  assert.equal(mock.state.commandRequests.length, 1, "must not resend command after switching to B during 401 refresh");
+  assert.equal(mock.state.commandRequests.length, requestsAfterOkWs + 1, "must not resend command after switching to B during 401 refresh");
 
   // Held 401 retry ALSO aborted by workspace A -> B -> A while refresh is in flight!
   mgr.switchActiveAccount(a.account.userId);
@@ -595,7 +637,7 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   mgr.setActiveWorkspace("ws-alpha");
   releaseWsRefresh();
   await assert.rejects(wsCmdPromise, { name: "AuthRecoveryRequired" });
-  assert.equal(mock.state.commandRequests.length, 2, "must not resend command after workspace A->B->A during 401 refresh");
+  assert.equal(mock.state.commandRequests.length, requestsAfterOkWs + 2, "must not resend command after workspace A->B->A during 401 refresh");
 
   // Realtime join aborted if account signs out and same user re-signs-in (new loginId) mid-verify!
   mock.state.refreshGate = null;
@@ -1489,4 +1531,167 @@ test("C5 signOutAccount authorization: refuses mismatched {userId, loginId} and 
   assert.equal(mgr.listAccounts()[0]!.loginId, aNew.account.loginId);
 
   mgr.destroy();
+});
+
+test("C1 slot-lock cancellation & C2 credential-generation fences (delayed expiry cleanup + duplicate liveness vs peer successor)", async () => {
+  // 1. C1: Cancellation landing WHILE awaiting the new login's slot lock rolls back the slot & refuses promotion!
+  {
+    const ls = new MemoryStorage();
+    const ss = new MemoryStorage();
+    const locks = new TestWebLocks();
+    const hub = new TestBroadcastHub();
+    const mock = createMockGoTrue();
+
+    let hitSlotLock!: () => void;
+    const atSlotLock = new Promise<void>((resolve) => { hitSlotLock = resolve; });
+    let releaseSlotLock!: () => void;
+    const slotLockGate = new Promise<void>((resolve) => { releaseSlotLock = resolve; });
+    let interceptSlotLock = true;
+    const holdingLocks: LockLike = async (name, timeout, fn) => {
+      if (interceptSlotLock && name.includes(":login:")) {
+        interceptSlotLock = false;
+        hitSlotLock();
+        await slotLockGate;
+      }
+      return locks.lock(name, timeout, fn);
+    };
+
+    const mgr = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: ss, fetcher: mock.fetcher,
+      webLocks: holdingLocks, createBroadcastChannel: hub.create,
+    });
+    await mgr.initialize();
+    const otp = await mgr.startEmailOtpAttempt({ email: "second@example.test", purpose: "add-account", returnRoute: "/app" });
+    const logoutsBefore = mock.state.logouts.length;
+    const verifyPromise = mgr.verifyEmailOtpAttempt({ attemptId: otp.attemptId, token: "123456" });
+    await atSlotLock;
+    // Cancel AFTER the initial attempt guard under registry lock passed, WHILE the new login's slot lock is pending!
+    mgr.cancelAttempt(otp.attemptId);
+    releaseSlotLock();
+    const res = await verifyPromise;
+    assert.equal(res.kind, "refused");
+    assert.equal(res.reason, "attempt_cancelled");
+    assert.equal(mgr.listAccounts().length, 0, "cancelled promotion during slot write must NOT publish ownership");
+    assert.equal(ls.keys().some((k) => k.includes(":login:")), false, "unowned slot rolled back cleanly");
+    assert.equal(mock.state.logouts.length, logoutsBefore + 1, "staging session locally revoked on rollback");
+    assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+    mgr.destroy();
+  }
+
+  // 2. C2: Delayed expiry retirement queued behind registry lock MUST NOT drop a peer-rotated successor under same loginId!
+  {
+    const ls = new MemoryStorage();
+    const locks = new TestWebLocks();
+    const hub = new TestBroadcastHub();
+    const mock = createMockGoTrue();
+
+    const tab1 = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    const tab2 = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    await Promise.all([tab1.initialize(), tab2.initialize()]);
+
+    const a = await tab1.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+    assert.equal(a.kind, "promoted");
+    const loginId = a.account.loginId;
+    const slotKey = slotStorageKey(ORIGIN_HASH, loginId);
+    const rt1 = tab1.runtimeFor(a.account.userId)!;
+    await rt1.ready();
+    const expiredAccess = rt1.peekAccessToken()!;
+
+    // Hold the registry lock across terminal expiry so delayed retireExpiredLogin queues behind registryLock!
+    let releaseRegistry!: () => void;
+    const registryHold = locks.lock(registryLockName(ORIGIN_HASH), -1, async () => {
+      await new Promise<void>((resolve) => { releaseRegistry = resolve; });
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Expire old token on server and trigger terminal expiry in tab1 (fires onTerminalExpiry + queues retireExpiredLogin).
+    mock.state.sessionsByAccess.delete(expiredAccess);
+    await assert.rejects(rt1.verifySession(), { name: "SessionExpired" });
+
+    // While retireExpiredLogin is still waiting on registryLock, peer tab commits a newer credential under the SAME loginId!
+    const peerSuccessor = mock.mintSession(makeUser(a.account.userId, "first@example.test", "First Owner"));
+    await locks.lock(loginLockName(ORIGIN_HASH, loginId), -1, async () => {
+      ls.rawSet(slotKey, JSON.stringify(peerSuccessor));
+    });
+
+    // Release registryLock so queued retireExpiredLogin acquires `registry -> lock:${slotKey}` and inspects disk!
+    releaseRegistry();
+    await registryHold;
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Newer peer credential MUST retain both durable ownership AND its slot!
+    assert.equal(tab2.listAccounts().length, 1, "peer successor must NOT lose durable ownership to delayed retirement");
+    assert.equal(tab2.listAccounts()[0]!.loginId, loginId);
+    assert.ok((ls.rawGet(slotKey) ?? "").includes(peerSuccessor.access_token), "peer successor slot preserved on disk");
+    tab1.destroy();
+    tab2.destroy();
+  }
+
+  // 3. C2: Duplicate-sign-in liveness check is pinned to the exact checked credential (NOT just loginId),
+  //        so an expired check on T1 cannot replace a peer-rotated live successor T2 committed while T1's check was in flight!
+  {
+    const ls = new MemoryStorage();
+    const locks = new TestWebLocks();
+    const hub = new TestBroadcastHub();
+    const mock = createMockGoTrue();
+
+    const mgr = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    await mgr.initialize();
+    const a = await mgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+    assert.equal(a.kind, "promoted");
+    const loginId = a.account.loginId;
+    const slotKey = slotStorageKey(ORIGIN_HASH, loginId);
+    const oldToken = mgr.runtimeFor(a.account.userId)!.peekAccessToken()!;
+
+    // Expire T1 on server without running local verifySession yet.
+    mock.state.sessionsByAccess.delete(oldToken);
+
+    // Intercept GET /auth/v1/user ONLY for oldToken (the duplicate-liveness check on T1) to hold it in flight!
+    let hitT1Liveness!: () => void;
+    const atT1Liveness = new Promise<void>((resolve) => { hitT1Liveness = resolve; });
+    let releaseT1Liveness!: () => void;
+    const t1LivenessGate = new Promise<void>((resolve) => { releaseT1Liveness = resolve; });
+    const gatedFetcher: typeof fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      const bearer = headers.get("authorization")?.replace(/^Bearer /i, "") ?? "";
+      if (bearer === oldToken) {
+        hitT1Liveness();
+        await t1LivenessGate;
+      }
+      return mock.fetcher(input, init);
+    };
+    const mgr2 = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: gatedFetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    await mgr2.initialize();
+
+    const logoutsBefore = mock.state.logouts.length;
+    const freshSignInPromise = mgr2.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+    await atT1Liveness;
+
+    // While T1's liveness check is in flight, a peer commits a live rotated successor T2 under the SAME loginId!
+    const liveSuccessorT2 = mock.mintSession(makeUser(a.account.userId, "first@example.test", "First Owner"));
+    ls.rawSet(slotKey, JSON.stringify(liveSuccessorT2));
+
+    // Release T1's liveness check (returns 403 session_not_found for T1!).
+    releaseT1Liveness();
+    const dupRes = await freshSignInPromise;
+    assert.equal(dupRes.kind, "kept-existing", "stale T1 expired result must NOT replace live peer successor T2");
+    assert.equal(dupRes.account.loginId, loginId, "same loginId preserved");
+    assert.ok((ls.rawGet(slotKey) ?? "").includes(liveSuccessorT2.access_token), "live peer successor T2 kept on disk");
+    assert.equal(mock.state.logouts.length, logoutsBefore + 1, "redundant staging session locally revoked");
+
+    mgr.destroy();
+    mgr2.destroy();
+  }
 });

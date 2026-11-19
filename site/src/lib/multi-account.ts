@@ -160,6 +160,13 @@ export class MultiAccountDeploymentMismatch extends Error {
   }
 }
 
+export class MultiAccountWorkspaceMismatch extends Error {
+  override name = "WorkspaceMismatch";
+  constructor() {
+    super("Refused to send a command whose workspace does not match the pinned workspace.");
+  }
+}
+
 export interface LockLike {
   <R>(name: string, acquireTimeout: number, fn: () => Promise<R>): Promise<R>;
 }
@@ -468,6 +475,10 @@ function sameCredentials(a: Session, b: Session): boolean {
   );
 }
 
+function credentialFingerprint(session: Pick<Session, "access_token" | "refresh_token">): string {
+  return `${session.access_token}\0${session.refresh_token}`;
+}
+
 async function isRestSessionEnded(response: Response): Promise<boolean> {
   if (response.status !== 401) return false;
   const body = await response.clone().json().catch(() => null) as { code?: unknown } | null;
@@ -540,7 +551,7 @@ export class AccountSessionRuntime {
   private readonly env: MultiAccountEnv;
   private readonly checkOwned: () => boolean;
   private readonly onSessionUpdated: (event: string, session: Session | null) => void;
-  private readonly onTerminalExpiry: () => void;
+  private readonly onTerminalExpiry: (failedCredential: string | null) => void;
 
   constructor(params: {
     deployment: MultiAccountDeployment;
@@ -553,7 +564,7 @@ export class AccountSessionRuntime {
     env: MultiAccountEnv;
     checkOwned: () => boolean;
     onSessionUpdated: (event: string, session: Session | null) => void;
-    onTerminalExpiry: () => void;
+    onTerminalExpiry: (failedCredential: string | null) => void;
   }) {
     this.deployment = params.deployment;
     this.userId = params.userId;
@@ -696,6 +707,13 @@ export class AccountSessionRuntime {
   peekAccessToken(): string | null {
     const raw = this.authMemory.get(this.slotKey) ?? (this.persistent ? (this.readDisk(this.slotKey) ?? null) : null);
     return parseSavedSession(raw)?.access_token ?? null;
+  }
+
+  /** Return current credential fingerprint from memory/disk for successor comparison. */
+  peekCredentialFingerprint(): string | null {
+    const raw = this.authMemory.get(this.slotKey) ?? (this.persistent ? (this.readDisk(this.slotKey) ?? null) : null);
+    const parsed = parseSavedSession(raw);
+    return parsed ? credentialFingerprint(parsed) : null;
   }
 
   /** Bounded, identity-safe verification strictly on this login's runtime (QA-010 + C2/C3). */
@@ -1016,14 +1034,19 @@ export class AccountSessionRuntime {
 
   private async verifiedSessionInner(): Promise<Session | null> {
     if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+    const initialFingerprint = this.peekCredentialFingerprint();
     try {
       const { data, error: sessionError } = await this.client.auth.getSession();
       if (sessionError) {
         if (isAuthSessionMissingError(sessionError) || TERMINAL_REFRESH_CODES.has(sessionError.code ?? "")) {
           const successor = await this.client.auth.getSession();
           if (successor.data.session) throw new MultiAccountAuthRecoveryRequired();
+          const diskAfter = this.persistent ? parseSavedSession(this.readDisk(this.slotKey) ?? null) : null;
+          if (diskAfter && initialFingerprint !== null && credentialFingerprint(diskAfter) !== initialFingerprint) {
+            throw new MultiAccountAuthRecoveryRequired();
+          }
           this.deadSession = true;
-          this.onTerminalExpiry();
+          this.onTerminalExpiry(initialFingerprint);
           throw new MultiAccountSessionExpired();
         }
         throw new MultiAccountAuthRecoveryRequired();
@@ -1046,7 +1069,7 @@ export class AccountSessionRuntime {
         }
         if (isAuthSessionMissingError(error)) {
           this.deadSession = true;
-          this.onTerminalExpiry();
+          this.onTerminalExpiry(credentialFingerprint(session));
           throw new MultiAccountSessionExpired();
         }
         throw new MultiAccountAuthRecoveryRequired();
@@ -1099,6 +1122,7 @@ export class AccountManager {
 
   private memoryOwnership: DurableOwnershipTable = { version: 1, allSignOutGen: 1, accounts: [] };
   private readonly tabFencedLoginIds = new Set<string>();
+  private readonly tabExpiredCredentials = new Map<string, string>();
   private tabActive: { userId: string; loginId: string } | null = null;
   private activeWorkspaceId: string | null = null;
   private viewGeneration = 0;
@@ -2066,6 +2090,7 @@ export class AccountManager {
     // cannot resurrect it from the unchanged durable table.
     if (step1Succeeded) {
       this.tabFencedLoginIds.delete(loginId);
+      this.tabExpiredCredentials.delete(loginId);
     } else {
       this.tabFencedLoginIds.add(loginId);
     }
@@ -2209,6 +2234,7 @@ export class AccountManager {
     // Always tear down all in-tab runtimes, sockets, attempts, and active state immediately!
     if (step1Succeeded) {
       this.tabFencedLoginIds.clear();
+      this.tabExpiredCredentials.clear();
     } else {
       for (const s of capturedSessions) this.tabFencedLoginIds.add(s.loginId);
       for (const id of this.runtimes.keys()) this.tabFencedLoginIds.add(id);
@@ -2309,19 +2335,8 @@ export class AccountManager {
     return { ok: true };
   }
 
-  private async verifyExistingRecordLive(existing: AccountRecord): Promise<"live" | "expired"> {
-    if (this.tabFencedLoginIds.has(existing.loginId)) return "expired";
-    const existingRuntime = this.runtimes.get(existing.loginId);
-    if (existingRuntime?.isDead()) return "expired";
-    let token = existingRuntime && existingRuntime.userId === existing.userId
-      ? existingRuntime.peekAccessToken()
-      : null;
-    if (!token && this.sharedPersistenceAvailable) {
-      const parsed = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, existing.loginId)));
-      if (!parsed || parsed.user.id !== existing.userId) return "expired";
-      token = parsed.access_token;
-    }
-    if (!token) return "expired";
+  private async verifyExistingTokenLive(userId: string, accessToken: string): Promise<"live" | "expired"> {
+    if (!accessToken) return "expired";
     try {
       const response = await this.env.fetcher(
         `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/user`,
@@ -2329,14 +2344,14 @@ export class AccountManager {
           method: "GET",
           headers: {
             apikey: this.deployment.anonKey,
-            authorization: `Bearer ${token}`,
+            authorization: `Bearer ${accessToken}`,
           },
           signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
         },
       );
       if (response.ok) {
         const body = await response.json().catch(() => null) as User | null;
-        return body && body.id === existing.userId ? "live" : "expired";
+        return body && body.id === userId ? "live" : "expired";
       }
       if (response.status === 401 || response.status === 403 || response.status === 404) {
         return "expired";
@@ -2349,9 +2364,32 @@ export class AccountManager {
     }
   }
 
-  private async retireExpiredLogin(userId: string, loginId: string, expectedAllSignOutGen: number): Promise<void> {
+  private readLoginCredential(record: AccountRecord): { fingerprint: string; accessToken: string } | null {
+    if (this.sharedPersistenceAvailable) {
+      const parsed = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, record.loginId)));
+      if (!parsed || parsed.user.id !== record.userId) return null;
+      return { fingerprint: credentialFingerprint(parsed), accessToken: parsed.access_token };
+    }
+    const rt = this.runtimes.get(record.loginId);
+    if (!rt || rt.userId !== record.userId) return null;
+    const fp = rt.peekCredentialFingerprint();
+    const tok = rt.peekAccessToken();
+    return fp && tok ? { fingerprint: fp, accessToken: tok } : null;
+  }
+
+  /**
+   * C2: Retire an expired login ONLY after acquiring `registry -> lock:${slotKey}` and confirming
+   * the slot still holds the exact failed credential (never dropping a peer-rotated successor!).
+   */
+  private async retireExpiredLogin(
+    userId: string,
+    loginId: string,
+    expectedAllSignOutGen: number,
+    failedCredential: string | null,
+  ): Promise<void> {
     if (this.destroyed) return;
     let removed = false;
+    let preservedSuccessor = false;
     try {
       await this.withRegistryLock(async () => {
         if (!this.sharedPersistenceAvailable) {
@@ -2365,38 +2403,56 @@ export class AccountManager {
           removed = true;
           return;
         }
-        const read = this.readDurableOwnership();
-        if (!read.ok || read.state.allSignOutGen !== expectedAllSignOutGen) return;
-        const hasExact = read.state.accounts.some((a) => a.userId === userId && a.loginId === loginId);
-        if (!hasExact) return;
-        const nextAccounts = read.state.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId));
-        this.writeDurableOwnership({
-          version: 1,
-          allSignOutGen: read.state.allSignOutGen,
-          accounts: nextAccounts,
-        });
-        if (this.safeLocalGet(activeAccountStorageKey(this.originHash)) === userId) {
-          if (nextAccounts.length > 0) {
-            this.safeLocalSet(activeAccountStorageKey(this.originHash), nextAccounts[0]!.userId);
-          } else {
-            this.safeLocalRemove(activeAccountStorageKey(this.originHash));
+        await this.withLoginLock(loginId, async () => {
+          const read = this.readDurableOwnership();
+          if (!read.ok || read.state.allSignOutGen !== expectedAllSignOutGen) return;
+          const hasExact = read.state.accounts.some((a) => a.userId === userId && a.loginId === loginId);
+          if (!hasExact) return;
+
+          // Compare the current disk slot under `registry -> lock:${slotKey}` before removing ownership!
+          const diskSession = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, loginId)));
+          if (diskSession && diskSession.user.id === userId) {
+            if (failedCredential === null || credentialFingerprint(diskSession) !== failedCredential) {
+              // A peer refresh committed a newer credential under this loginId -> preserve ownership & slot!
+              preservedSuccessor = true;
+              return;
+            }
           }
-        }
-        removed = true;
+
+          const nextAccounts = read.state.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId));
+          this.writeDurableOwnership({
+            version: 1,
+            allSignOutGen: read.state.allSignOutGen,
+            accounts: nextAccounts,
+          });
+          if (this.safeLocalGet(activeAccountStorageKey(this.originHash)) === userId) {
+            if (nextAccounts.length > 0) {
+              this.safeLocalSet(activeAccountStorageKey(this.originHash), nextAccounts[0]!.userId);
+            } else {
+              this.safeLocalRemove(activeAccountStorageKey(this.originHash));
+            }
+          }
+          try {
+            this.env.localStorage!.removeItem(slotStorageKey(this.originHash, loginId));
+          } catch { /* ownership already removed */ }
+          removed = true;
+        });
       });
     } catch {
       removed = false;
     }
-    if (!removed) return;
-    if (this.sharedPersistenceAvailable) {
-      try {
-        await this.tryWithLoginLock(loginId, async () => {
-          this.env.localStorage!.removeItem(slotStorageKey(this.originHash, loginId));
-        });
-      } catch {
-        this.safeLocalRemove(slotStorageKey(this.originHash, loginId));
+
+    if (preservedSuccessor) {
+      // Peer successor is live under this loginId; release this tab's stale expiry fence!
+      if (this.tabExpiredCredentials.get(loginId) === failedCredential) {
+        this.tabExpiredCredentials.delete(loginId);
+        this.tabFencedLoginIds.delete(loginId);
       }
+      return;
     }
+    if (!removed) return;
+    this.tabExpiredCredentials.delete(loginId);
+    this.tabFencedLoginIds.delete(loginId);
     this.broadcast({
       type: "ownership-changed",
       originHash: this.originHash,
@@ -2451,9 +2507,11 @@ export class AccountManager {
     type LockedResult =
       | { kind: "promoted"; account: AccountRecord; replacedLoginId?: string; allSignOutGen: number; session: MinimizedSession }
       | { kind: "kept-existing"; account: AccountRecord }
-      | { kind: "needs-liveness-check"; existing: AccountRecord }
+      | { kind: "needs-liveness-check"; existing: AccountRecord; credentialKey: string; accessToken: string }
       | { kind: "refused"; reason: PromotionRefusalReason };
 
+    // Keyed strictly by `${loginId}\0${credentialFingerprint}` so a stale liveness result
+    // for an old token can NEVER replace a peer-rotated successor under the same loginId!
     const verifiedExistingLiveness = new Map<string, "live" | "expired">();
 
     const runLockedPromotion = async (): Promise<LockedResult> =>
@@ -2479,21 +2537,37 @@ export class AccountManager {
         }
 
         const existing = current.accounts.find((a) => a.userId === verifiedUser.id);
+        let confirmedExpiredFingerprint: string | null = null;
+        let existingSlotMissing = false;
+
         if (existing && !replaceExisting) {
-          const locallyDead =
-            this.tabFencedLoginIds.has(existing.loginId) ||
-            Boolean(this.runtimes.get(existing.loginId)?.isDead()) ||
-            (this.sharedPersistenceAvailable && this.safeLocalGet(slotStorageKey(this.originHash, existing.loginId)) === null);
-          if (!locallyDead) {
-            const knownLiveness = verifiedExistingLiveness.get(existing.loginId);
-            if (!knownLiveness) {
-              return { kind: "needs-liveness-check", existing };
-            }
-            if (knownLiveness === "live") {
-              return { kind: "kept-existing", account: existing };
+          const currentCred = this.readLoginCredential(existing);
+          if (!currentCred) {
+            existingSlotMissing = true;
+          } else {
+            const tabExpiredFp = this.tabExpiredCredentials.get(existing.loginId);
+            const locallyExpiredSameCred = tabExpiredFp !== undefined && tabExpiredFp === currentCred.fingerprint;
+            const locallyLogoutFenced =
+              this.tabFencedLoginIds.has(existing.loginId) && tabExpiredFp === undefined;
+            if (locallyExpiredSameCred || locallyLogoutFenced) {
+              confirmedExpiredFingerprint = currentCred.fingerprint;
+            } else {
+              const livenessMapKey = `${existing.loginId}\0${currentCred.fingerprint}`;
+              const knownLiveness = verifiedExistingLiveness.get(livenessMapKey);
+              if (!knownLiveness) {
+                return {
+                  kind: "needs-liveness-check",
+                  existing,
+                  credentialKey: currentCred.fingerprint,
+                  accessToken: currentCred.accessToken,
+                };
+              }
+              if (knownLiveness === "live") {
+                return { kind: "kept-existing", account: existing };
+              }
+              confirmedExpiredFingerprint = currentCred.fingerprint;
             }
           }
-          // Existing row is expired/dead -> fall through and replace it with the fresh sign-in!
         }
 
         if (!existing && current.accounts.length >= MAX_SIGNED_IN_ACCOUNTS) {
@@ -2520,24 +2594,78 @@ export class AccountManager {
         if (this.sharedPersistenceAvailable) {
           const slot = slotStorageKey(this.originHash, newLoginId);
           const serializedSession = JSON.stringify(minimized);
+          const locksToHold = existing && !replaceExisting
+            ? [existing.loginId, newLoginId]
+            : [newLoginId];
+
+          let innerOutcome: LockedResult | null = null;
           try {
-            await this.withLoginLock(newLoginId, async () => {
+            await this.withLoginLocksInOrder(locksToHold, async () => {
+              // C2: Under `registry -> loginLocks`, confirm existing slot was NOT rotated to a newer
+              // peer credential while waiting for the lock!
+              if (existing && !replaceExisting) {
+                const lockedExistingCred = this.readLoginCredential(existing);
+                if (lockedExistingCred) {
+                  if (existingSlotMissing || lockedExistingCred.fingerprint !== confirmedExpiredFingerprint) {
+                    const known = verifiedExistingLiveness.get(`${existing.loginId}\0${lockedExistingCred.fingerprint}`);
+                    if (known === "live") {
+                      innerOutcome = { kind: "kept-existing", account: existing };
+                      return;
+                    }
+                    if (!known) {
+                      innerOutcome = {
+                        kind: "needs-liveness-check",
+                        existing,
+                        credentialKey: lockedExistingCred.fingerprint,
+                        accessToken: lockedExistingCred.accessToken,
+                      };
+                      return;
+                    }
+                  }
+                }
+              }
+
               this.env.localStorage!.setItem(slot, serializedSession);
               if (this.env.localStorage!.getItem(slot) !== serializedSession) {
                 throw new DurableOwnershipWriteError();
               }
+
+              // C1: Recheck attempt cancellation & registry state IMMEDIATELY before publishing ownership
+              // (synchronously with ZERO awaits between this check and writeDurableOwnership!).
+              const recheckAttempt = this.isAttemptGuardLive(attemptGuard);
+              if (!recheckAttempt.ok) {
+                this.safeLocalRemove(slot);
+                innerOutcome = { kind: "refused", reason: recheckAttempt.reason };
+                return;
+              }
+              const recheckOwnership = this.readDurableOwnership();
+              if (!recheckOwnership.ok) {
+                this.safeLocalRemove(slot);
+                innerOutcome = { kind: "refused", reason: "storage_unavailable" };
+                return;
+              }
+              if (recheckOwnership.state.allSignOutGen !== attemptGuard.allSignOutGenAtStart) {
+                this.safeLocalRemove(slot);
+                innerOutcome = { kind: "refused", reason: "fenced_by_signout_all" };
+                return;
+              }
+
+              // Publish durable ownership only after slot write AND synchronous post-lock rechecks pass.
+              this.writeDurableOwnership(nextTable);
+              if (existing) {
+                this.safeLocalRemove(slotStorageKey(this.originHash, existing.loginId));
+              }
             });
-            // Publish durable ownership only after the new slot is safely written and read back.
-            this.writeDurableOwnership(nextTable);
           } catch {
             this.safeLocalRemove(slot);
             return { kind: "refused", reason: "ownership_write_failed" };
           }
-          if (existing) {
-            this.safeLocalRemove(slotStorageKey(this.originHash, existing.loginId));
-          }
+          if (innerOutcome) return innerOutcome;
           this.sweepOrphanSlots(nextAccounts);
         } else {
+          // Memory-only mode: recheck attempt synchronously right before publishing.
+          const recheckAttempt = this.isAttemptGuardLive(attemptGuard);
+          if (!recheckAttempt.ok) return { kind: "refused", reason: recheckAttempt.reason };
           this.memoryOwnership = nextTable;
         }
 
@@ -2551,11 +2679,12 @@ export class AccountManager {
       });
 
     let lockedResult = await runLockedPromotion();
-    // C2: Verify existing duplicate session liveness OUTSIDE the registry lock so expired rows never block fresh sign-in.
-    for (let rounds = 0; rounds < 2 && lockedResult.kind === "needs-liveness-check"; rounds += 1) {
+    // C2: Verify existing duplicate session liveness OUTSIDE the registry lock, pinned to the exact checked credential.
+    for (let rounds = 0; rounds < 3 && lockedResult.kind === "needs-liveness-check"; rounds += 1) {
       const target = lockedResult.existing;
-      const status = await this.verifyExistingRecordLive(target);
-      verifiedExistingLiveness.set(target.loginId, status);
+      const checkedCredKey = lockedResult.credentialKey;
+      const status = await this.verifyExistingTokenLive(target.userId, lockedResult.accessToken);
+      verifiedExistingLiveness.set(`${target.loginId}\0${checkedCredKey}`, status);
       lockedResult = await runLockedPromotion();
     }
     if (lockedResult.kind === "needs-liveness-check") {
@@ -2565,6 +2694,11 @@ export class AccountManager {
     if (lockedResult.kind === "kept-existing") {
       // C1/C4: Duplicate user keeps existing live session intact; remotely revoke ONLY the unused staging session.
       const stagingRevoked = await this.bestEffortRemoteLocalLogout(minimized.access_token);
+      // Release any stale expiry fence if a peer successor proved live.
+      if (this.tabExpiredCredentials.has(lockedResult.account.loginId)) {
+        this.tabExpiredCredentials.delete(lockedResult.account.loginId);
+        this.tabFencedLoginIds.delete(lockedResult.account.loginId);
+      }
       this.switchActiveAccount(lockedResult.account.userId);
       return { kind: "kept-existing", account: lockedResult.account, stagingRevoked };
     }
@@ -2575,6 +2709,7 @@ export class AccountManager {
     }
 
     if (lockedResult.replacedLoginId) {
+      this.tabExpiredCredentials.delete(lockedResult.replacedLoginId);
       this.tabFencedLoginIds.delete(lockedResult.replacedLoginId);
       this.runtimes.get(lockedResult.replacedLoginId)?.dispose();
       this.runtimes.delete(lockedResult.replacedLoginId);
@@ -2674,8 +2809,11 @@ export class AccountManager {
           });
         }
       },
-      onTerminalExpiry: () => {
+      onTerminalExpiry: (failedCredential) => {
         this.tabFencedLoginIds.add(record.loginId);
+        if (failedCredential !== null) {
+          this.tabExpiredCredentials.set(record.loginId, failedCredential);
+        }
         const expired = this.runtimes.get(record.loginId);
         this.runtimes.delete(record.loginId);
         expired?.dispose();
@@ -2686,8 +2824,8 @@ export class AccountManager {
           this.viewGeneration += 1;
           this.env.onForcedTeardown?.({ reason: "expired", userId: record.userId, loginId: record.loginId });
         }
-        // Retire the exact expired loginId from durable ownership in the background without touching any successor.
-        void this.retireExpiredLogin(record.userId, record.loginId, allSignOutGen);
+        // Retire the exact expired loginId from durable ownership ONLY if disk still holds failedCredential!
+        void this.retireExpiredLogin(record.userId, record.loginId, allSignOutGen, failedCredential);
       },
     });
     this.runtimes.set(record.loginId, runtime);
@@ -2862,6 +3000,15 @@ export class AccountManager {
     return lockImpl(loginLockName(this.originHash, loginId), -1, fn);
   }
 
+  private withLoginLocksInOrder<R>(loginIds: string[], fn: () => Promise<R>): Promise<R> {
+    const ordered = [...new Set(loginIds)].sort();
+    const acquireAt = (index: number): Promise<R> => {
+      if (index >= ordered.length) return fn();
+      return this.withLoginLock(ordered[index]!, () => acquireAt(index + 1));
+    };
+    return acquireAt(0);
+  }
+
   private tryWithLoginLock<R>(loginId: string, fn: () => Promise<R>): Promise<R> {
     const lockImpl = this.sharedPersistenceAvailable && this.env.webLocks ? this.env.webLocks : processLock;
     return lockImpl(loginLockName(this.originHash, loginId), 0, fn);
@@ -2880,6 +3027,24 @@ function sameDeployment(a: MultiAccountDeployment, b: MultiAccountDeployment): b
   }
 }
 
+const WORKSPACE_FIELD_RE = /^(?:workspace_id|workspaceId|target_workspace_id|targetWorkspaceId)$/;
+
+function collectEmbeddedWorkspaceIds(value: unknown, depth = 0, out: string[] = []): string[] {
+  if (depth > 6 || !value || typeof value !== "object") return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectEmbeddedWorkspaceIds(item, depth + 1, out);
+    return out;
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (WORKSPACE_FIELD_RE.test(key) && entry !== undefined && entry !== null) {
+      out.push(typeof entry === "string" ? entry.trim() : String(entry));
+    } else if (entry && typeof entry === "object") {
+      collectEmbeddedWorkspaceIds(entry, depth + 1, out);
+    }
+  }
+  return out;
+}
+
 function isPinnedScopeCurrent(ctx: PinnedAccountContext, scope: PinnedOperationScope): boolean {
   if (scope === "account") return ctx.isCurrent();
   const targetWorkspace = scope.workspaceId?.trim();
@@ -2889,11 +3054,12 @@ function isPinnedScopeCurrent(ctx: PinnedAccountContext, scope: PinnedOperationS
 
 /**
  * C2: Execute a credentialed command strictly bound to the initiating PinnedAccountContext and scope.
- * Derives the destination URL and apikey strictly from `ctx.runtime.deployment` (refusing any mismatched
- * deployment before sending), enforces an explicit workspace/account scope guard, refreshes ONLY on
- * `ctx.runtime` on 401 unauthenticated, and rechecks `isPinnedScopeCurrent` before every send and retry
- * so account or workspace A -> B -> A, sign-out, expiry, or same-user re-sign-in cannot send under a
- * different login/workspace or revive an old confirmation.
+ * Derives the destination URL, apikey, and envelope `workspace_id` strictly from the verified runtime
+ * and workspace pin (refusing any mismatched deployment or mismatched envelope/payload workspace ID
+ * before sending), enforces an explicit workspace/account scope guard, refreshes ONLY on `ctx.runtime`
+ * on 401 unauthenticated, and rechecks `isPinnedScopeCurrent` before every send and retry so account
+ * or workspace A -> B -> A, sign-out, expiry, or same-user re-sign-in cannot send under a different
+ * login/workspace or revive an old confirmation.
  */
 export async function postPinnedCommand(
   ctx: PinnedAccountContext,
@@ -2911,17 +3077,43 @@ export async function postPinnedCommand(
   if (options.expectedDeployment && !sameDeployment(options.expectedDeployment, verifiedDeployment)) {
     throw new MultiAccountDeploymentMismatch();
   }
+  // C2: Validate EVERY embedded workspace field in options.extra and command against the pin BEFORE any send!
+  const embeddedWorkspaceIds = [
+    ...collectEmbeddedWorkspaceIds(options.extra),
+    ...collectEmbeddedWorkspaceIds(command),
+  ];
+  if (options.scope === "account") {
+    if (embeddedWorkspaceIds.length > 0) {
+      throw new MultiAccountWorkspaceMismatch();
+    }
+  } else {
+    const pinnedWorkspace = options.scope.workspaceId?.trim();
+    if (!pinnedWorkspace || ctx.workspaceId !== pinnedWorkspace) {
+      throw new MultiAccountWorkspaceMismatch();
+    }
+    for (const foundWs of embeddedWorkspaceIds) {
+      if (foundWs !== pinnedWorkspace) {
+        throw new MultiAccountWorkspaceMismatch();
+      }
+    }
+  }
+
   if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
   const initial = await ctx.runtime.verifySession();
   if (!initial || !isPinnedScopeCurrent(ctx, options.scope) || initial.user.id !== ctx.userId) {
     throw new MultiAccountAuthRecoveryRequired();
   }
-  const wireBody = JSON.stringify({
+  const envelope: Record<string, unknown> = {
+    ...(options.extra ?? {}),
     command_id: commandId,
     client_version: options.clientVersion ?? "0.1.0",
     command,
-    ...(options.extra ?? {}),
-  });
+  };
+  if (options.scope !== "account") {
+    // Derive envelope workspace_id directly from the verified workspace pin.
+    envelope.workspace_id = options.scope.workspaceId.trim();
+  }
+  const wireBody = JSON.stringify(envelope);
   const fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   const endpoint = `${verifiedDeployment.url.replace(/\/+$/, "")}/functions/v1/command`;
   let credential = initial;
