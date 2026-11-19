@@ -119,6 +119,10 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.workspace_live_lead(uuid)', 'EXECUTE', false],
   // Channel leads: post_signal asks who an untagged person post in a channel wakes.
   ['swarm_command', 'FUNCTION', 'swarm.channel_effective_live_lead(uuid,uuid)', 'EXECUTE', false],
+  // Lead system alerts (20261119000001): server-only producers and lead resolution entry point.
+  ['swarm_command', 'FUNCTION', 'swarm.record_system_alert(uuid,text,uuid,uuid,integer,timestampwithtimezone,interval)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.record_hosted_seat_refused_alerts(text,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.resolve_system_alert(uuid,uuid,text,uuid,uuid,text)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

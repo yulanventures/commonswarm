@@ -9,8 +9,10 @@ const catalog = (rollback = false) => dbAssert(
     .trim().replace(/;$/, ''), rollback ? 'channel lead rollback catalog' : 'channel lead catalog');
 
 test('channel leads roll back to the private-channels view and apply again', () => {
-  // 20261118000001 replaces the lead function; its own rollback puts the 20261117000002 body back first.
-  runSql(repoSql('deploy/release-proofs/channel-lead-backup/20261118000001-rollback.sql')
+  // 20261119000001 depends on channels.lead_mode / lead_agent_principal_id (channels_sync_conversation_frames)
+  // and 20261118000001 replaces the lead function; roll back both later migrations first.
+  runSql(repoSql('deploy/release-proofs/lead-system-alerts/20261119000001-rollback.sql')
+    + repoSql('deploy/release-proofs/channel-lead-backup/20261118000001-rollback.sql')
     + catalog()
     + repoSql(`${root}-rollback.sql`)
     + catalog(true)

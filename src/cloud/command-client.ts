@@ -422,6 +422,12 @@ export interface SignalRecord {
    * reaction's, not a message's, so it cannot be replied or reacted to.
    */
   reaction?: { emoji: string; signal_id: string };
+  /**
+   * Set only on an inbox row that is a routed seat-health system alert: `id` is the alert_id, not
+   * a signal, so it has no delivery to acknowledge, gets no 👀 ack reaction, and resolves with
+   * `cswarm alert resolve`.
+   */
+  system_alert?: { alert_id: string; kind: string; affected_principal_id: string };
 }
 
 export interface SignalReactionSummary {
@@ -460,6 +466,12 @@ export const SIGNAL_WRITE_RETRY_BASE_MS = 500;
 export interface ReraiseAskCommand {
   kind: "reraise_ask";
   signal_id: string;
+}
+
+export interface ResolveSystemAlertCommand {
+  kind: "resolve_system_alert";
+  alert_id: string;
+  note: string;
 }
 
 /**
@@ -1606,8 +1618,26 @@ export class ThinCommandClient {
     return { httpStatus: sent.httpStatus, response: body as CommandHttpResponse & ReactionOutcome };
   }
 
+  async sendResolveSystemAlert(request: {
+    workspaceId: string;
+    command: ResolveSystemAlertCommand;
+    credential: string;
+    commandId?: string;
+    signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; response: CommandHttpResponse & { alert: Record<string, unknown> } }> {
+    const sent = await this.sendWithReason({
+      ...request,
+      commandId: request.commandId ?? newCommandId(),
+    });
+    const body = sent.response as CommandHttpResponse & { alert?: Record<string, unknown> };
+    if (body.status !== "accepted" || !body.alert || typeof body.alert !== "object" || Array.isArray(body.alert)) {
+      throw new Error("command endpoint returned a malformed system alert resolution");
+    }
+    return { httpStatus: sent.httpStatus, response: body as CommandHttpResponse & { alert: Record<string, unknown> } };
+  }
+
   private async sendWithReason(request: {
-    workspaceId: string; command: SeatAdminCommand | SeatAdminCreateSeatCommand | ReactionCommand; credential: string; commandId: string; signal?: AbortSignal;
+    workspaceId: string; command: SeatAdminCommand | SeatAdminCreateSeatCommand | ReactionCommand | ResolveSystemAlertCommand; credential: string; commandId: string; signal?: AbortSignal;
   }): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);

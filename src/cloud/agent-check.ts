@@ -47,7 +47,9 @@ export const AGENT_PRESENCE_TOUCH_INTERVAL_MS = 60_000;
  * out: its id is a reaction's, which has no delivery to acknowledge.
  */
 export function deliveryAckIds(rows: readonly SignalRecord[]): string[] {
-  return rows.filter(row => (row.kind === "ask" || row.kind === "note") && row.reaction === undefined).map(row => row.id);
+  return rows
+    .filter(row => (row.kind === "ask" || row.kind === "note") && row.reaction === undefined && row.system_alert === undefined)
+    .map(row => row.id);
 }
 
 export interface AgentCheckMessage {

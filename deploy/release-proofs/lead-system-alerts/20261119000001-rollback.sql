@@ -1,0 +1,42 @@
+-- Rollback for 20261119000001_lead_system_alerts.sql.
+-- Roll back the edge functions first, then run this script to drop the schedule, views,
+-- triggers, functions and table cleanly.
+SET search_path = swarm, pg_catalog, public;
+
+SELECT cron.unschedule('swarm-sync-system-alerts')
+WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'swarm-sync-system-alerts');
+
+DROP FUNCTION IF EXISTS swarm_read.owner_alert_inbox(uuid);
+DROP VIEW IF EXISTS swarm_read.system_alerts;
+
+DROP TRIGGER IF EXISTS system_alerts_notify_reroute ON swarm.system_alerts;
+DROP TRIGGER IF EXISTS system_alerts_notify_escalate ON swarm.system_alerts;
+DROP TRIGGER IF EXISTS system_alerts_notify_insert ON swarm.system_alerts;
+DROP FUNCTION IF EXISTS swarm.notify_system_alert_reroute();
+DROP FUNCTION IF EXISTS swarm.notify_system_alert_escalate();
+DROP FUNCTION IF EXISTS swarm.notify_system_alert_insert();
+
+DROP FUNCTION IF EXISTS swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text);
+DROP FUNCTION IF EXISTS swarm.sync_quiet_agent_alerts(interval);
+DROP FUNCTION IF EXISTS swarm.escalate_due_system_alerts();
+DROP FUNCTION IF EXISTS swarm.record_hosted_seat_refused_alerts(text, uuid);
+DROP FUNCTION IF EXISTS swarm.record_system_alert(uuid, text, uuid, uuid, integer, timestamptz, interval);
+DROP FUNCTION IF EXISTS swarm.system_alert_wake_targets(uuid, uuid, uuid, uuid, boolean);
+DROP FUNCTION IF EXISTS swarm.system_alert_claims_can_read(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_actor_can_resolve(uuid, uuid, uuid, text, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_agent_is_current_lead(uuid, uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_pick_lead(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_candidate_is_eligible(uuid, uuid, uuid, uuid, boolean);
+DROP TRIGGER IF EXISTS channels_sync_conversation_frames ON swarm.channels;
+DROP TRIGGER IF EXISTS channel_members_lock_agent_frames ON swarm.channel_members;
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_channel_frames();
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_agent_member_frames();
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_scopes(uuid[], uuid[]);
+DROP FUNCTION IF EXISTS swarm.system_alert_lock_scope(uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.system_alert_fix_hint(text);
+
+DROP TRIGGER IF EXISTS system_alerts_validate_refs ON swarm.system_alerts;
+DROP FUNCTION IF EXISTS swarm.system_alert_validate_refs();
+DROP TABLE IF EXISTS swarm.system_alerts;
+
+RESET search_path;

@@ -207,6 +207,10 @@ import {
   type SetChannelLeadCommand,
 } from "./channel-lead.ts";
 import {
+  parseResolveSystemAlertCommand,
+  type ResolveSystemAlertCommand,
+} from "./system-alerts.ts";
+import {
   advanceChannelReads,
   channelFeedMessage,
   type ChannelReadPosition,
@@ -612,6 +616,7 @@ type ValidatedCommand =
   | RegisterAgentSeatCommand
   | SignalCommand
   | ReraiseAskCommand
+  | ResolveSystemAlertCommand
   | MemorySaveCommand
   | MemoryForgetCommand
   | AskChoiceCommand
@@ -825,6 +830,7 @@ interface StoredResponse {
   star_rank?: number | null;
   org_id?: string;
   from_org_id?: string;
+  alert?: Record<string, unknown>;
   ok: boolean;
   reason?: string;
   detail?: string;
@@ -1400,6 +1406,7 @@ const COMMAND_KINDS = [
   "submit_feedback",
   "post_signal",
   "reraise_ask",
+  "resolve_system_alert",
   "memory_save",
   "memory_forget",
   "ask_choice",
@@ -1995,6 +2002,21 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
   if (audit.commandKind === RENEW_AGENT_TOKEN_KIND && audit.reason === "predecessor_superseded") {
     logAccessLost({ class: "local_renewal_superseded",
       principal_ref: auth?.actor.agent_principal ?? null, owner_ref: null, grant_ref: null });
+    if (audit.workspaceId && auth?.actor.agent_principal) {
+      try {
+        await tx.savepoint(async (sp) => {
+          await sp`
+            SELECT swarm.record_system_alert(
+              ${audit.workspaceId}::uuid,
+              'local_renewal_superseded',
+              ${auth.actor.agent_principal}::uuid
+            )
+          `;
+        });
+      } catch {
+        // Alert recording must never disrupt audit logging or refusal responses.
+      }
+    }
   }
   const auditCredentialKind = auth === null
     ? null
@@ -2779,6 +2801,10 @@ function validateCommand(
         channel_creation_policy: cmd.channel_creation_policy as ChannelCreationPolicy,
       },
     };
+  }
+
+  if (cmd.kind === "resolve_system_alert") {
+    return parseResolveSystemAlertCommand(cmd);
   }
 
   if (cmd.kind === "reraise_ask") {
@@ -4222,6 +4248,7 @@ function storedResponse(value: unknown): StoredResponse {
         })),
       }
       : {}),
+    ...(record(response.alert) !== null ? { alert: record(response.alert)! } : {}),
     // Conversations (step 2a): a conversation command's answer replays exactly as it was given.
     ...conversationReplayFields(response),
   };
@@ -13456,6 +13483,7 @@ async function replayAuditChannelIds(
   command: {
     readonly kind: string;
     readonly channel_id?: string | null;
+    readonly alert_id?: string;
     readonly signal_ids?: readonly string[];
     readonly signal_id?: string;
     readonly channel_ids?: readonly (string | null)[];
@@ -13488,6 +13516,11 @@ async function replayAuditChannelIds(
   if (signal !== null && Object.hasOwn(signal, "channel_id") &&
       typeof signal.channel_id === "string" && UUID_RE.test(signal.channel_id)) {
     collected.add(signal.channel_id);
+  }
+  const alert = record(stored?.alert);
+  if (alert !== null && Object.hasOwn(alert, "channel_id") &&
+      typeof alert.channel_id === "string" && UUID_RE.test(alert.channel_id)) {
+    collected.add(alert.channel_id);
   }
   const reraise = record(stored?.reraise);
   if (typeof reraise?.signal_id === "string" && UUID_RE.test(reraise.signal_id)) {
@@ -13843,6 +13876,155 @@ async function reraiseAsk(
   }
   await audit("accepted", null);
   await chargeSpend(tx, "signal_post");
+  return {
+    status: 200,
+    body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion },
+  };
+}
+
+async function resolveSystemAlert(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: ResolveSystemAlertCommand,
+  ctx: {
+    commandId: string;
+    hash: string;
+    kind: string;
+    minClientVersion: string;
+    ignoredIdentity: string | null;
+    decided: (result: HttpResult) => HttpResult;
+  },
+): Promise<HttpResult> {
+  const { commandId, hash, kind, decided } = ctx;
+  let auditChannelIds: readonly string[] | undefined;
+  const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
+    insertAudit(tx, {
+      auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+      outcome, reason, detail, hash, channelIds: auditChannelIds,
+    });
+  const uniformNotFound = (): HttpResult => ({
+    status: 404,
+    body: {
+      error: "alert_not_found",
+      message: "No matching system alert in this workspace.",
+    },
+  });
+
+  const actorKind: "agent" | "user" = auth.credentialKind === "user" ? "user" : "agent";
+  const actorId = actorKind === "user" ? auth.actor.user : auth.actor.agent_principal;
+  const actorOwnerUserId = actorKind === "agent" ? auth.actor.user : null;
+  if (actorId === null) {
+    await audit("authz", "alert_not_found");
+    return decided(uniformNotFound());
+  }
+
+  const [prior] = await tx<{
+    request_hash: string; workspace_id: string; stream_id: string; response: unknown;
+  }[]>`
+    SELECT request_hash, workspace_id, stream_id, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind}
+      AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  if (prior !== undefined) {
+    const matches = prior.request_hash === hash &&
+      prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
+    auditChannelIds = await replayAuditChannelIds(
+      tx,
+      prior.workspace_id,
+      auth,
+      command,
+      matches,
+      prior.response,
+    );
+    if (!matches) {
+      await audit("conflict", "command_id_conflict");
+      return decided({ status: 409, body: { error: "command_id_conflict" } });
+    }
+    const [recheck] = await tx<{ result: Record<string, unknown> }[]>`
+      SELECT swarm.resolve_system_alert(
+        ${route.workspaceId}::uuid,
+        ${command.alert_id}::uuid,
+        ${actorKind},
+        ${actorId}::uuid,
+        ${actorOwnerUserId}::uuid,
+        ${command.note}
+      ) AS result
+    `;
+    const recheckChannel = typeof recheck?.result?.channel_id === "string"
+      ? recheck.result.channel_id : null;
+    if (recheckChannel && (!auditChannelIds || !auditChannelIds.includes(recheckChannel))) {
+      auditChannelIds = [...(auditChannelIds ?? []), recheckChannel];
+    }
+    if (recheck?.result?.outcome === "not_found") {
+      await audit("authz", "alert_not_found");
+      return decided(uniformNotFound());
+    }
+    await audit("replayed", null);
+    return decided(replayResult(storedResponse(prior.response), kind));
+  }
+
+  const [resolved] = await tx<{ result: Record<string, unknown> }[]>`
+    SELECT swarm.resolve_system_alert(
+      ${route.workspaceId}::uuid,
+      ${command.alert_id}::uuid,
+      ${actorKind},
+      ${actorId}::uuid,
+      ${actorOwnerUserId}::uuid,
+      ${command.note}
+    ) AS result
+  `;
+  const result = resolved?.result ?? { outcome: "not_found", channel_id: null };
+  const channelId = typeof result.channel_id === "string" && UUID_RE.test(result.channel_id)
+    ? result.channel_id : null;
+  if (channelId !== null) auditChannelIds = [channelId];
+
+  if (result.outcome === "invalid") {
+    await audit("validation", "invalid_system_alert_resolution");
+    return decided({ status: 400, body: { error: "invalid_request" } });
+  }
+  if (result.outcome === "not_found") {
+    await audit("authz", "alert_not_found");
+    return decided(uniformNotFound());
+  }
+  if (result.outcome === "already_resolved") {
+    await audit("domain", "alert_already_resolved");
+    return decided({
+      status: 409,
+      body: {
+        error: "alert_already_resolved",
+        message: "This system alert is already resolved.",
+      },
+    });
+  }
+  const alertRecord = record(result.alert);
+  if (alertRecord === null) {
+    throw new Error("resolve_system_alert returned no alert record");
+  }
+  const response: StoredResponse = { ok: true, event_ids: [], alert: alertRecord };
+  const inserted = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.ledgerCredentialKind},
+      ${auth.ledgerPrincipalId},
+      ${commandId},
+      ${route.workspaceId}::uuid,
+      ${route.streamId}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (inserted.length === 0) {
+    throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+  }
+  await audit("accepted", null);
   return {
     status: 200,
     body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion },
@@ -16844,7 +17026,8 @@ async function handleTransaction(
         /* A choice ask posts one ask, so it needs post_signal like any ask. answer_choice is a
          * person's command and never reaches an agent credential path with a scope. */
         !auth.agent.scopes.includes(
-          validation.command.kind === "reraise_ask" || validation.command.kind === "memory_save" ||
+          validation.command.kind === "reraise_ask" || validation.command.kind === "resolve_system_alert" ||
+            validation.command.kind === "memory_save" ||
             validation.command.kind === "memory_forget" || validation.command.kind === "ask_choice" ||
             /* A reaction is visible content on a message, like a post. */
             (REACTION_COMMAND_KINDS as readonly string[]).includes(validation.command.kind)
@@ -17008,7 +17191,7 @@ async function handleTransaction(
         AND command_id = ${commandId}
       LIMIT 1
     `;
-    const existing = choiceKind ? undefined : existingRows[0];
+    const existing = choiceKind || kind === "resolve_system_alert" ? undefined : existingRows[0];
     if (existing) {
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
@@ -17563,6 +17746,12 @@ async function handleTransaction(
       return await reraiseAsk(tx, route, auth, command, {
         commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
       }, hostedSeatCapability);
+    }
+
+    if (command.kind === "resolve_system_alert") {
+      return await resolveSystemAlert(tx, route, auth, command, {
+        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+      });
     }
 
     if (command.kind === "memory_save" || command.kind === "memory_forget") {

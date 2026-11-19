@@ -36,6 +36,7 @@ import { validateHouseholdToolArguments, HouseholdToolInputError } from "../prot
 import { HOUSEHOLD_MCP_TOOLS, createHouseholdMcpTools } from "./household-tools.js";
 import { SEAT_ADMIN_MCP_TOOLS, isSeatAdminTool, seatAdminMcpCommand } from "./seat-admin-tools.js";
 import { readSeatAdminSelf, SeatAdminOutcomeUnknown, SeatAdminRejected, sendSeatAdminCommand } from "../cloud/seat-admin.js";
+import { readSystemAlerts, resolveSystemAlertCommand } from "../cloud/system-alerts.js";
 import { HouseholdObjectClient } from "../cloud/household-objects.js";
 import { createHouseholdHttpTransport, callHouseholdSkills } from "../cloud/household-http.js";
 
@@ -181,6 +182,45 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         signal: extra.signal,
       });
       return { isError: result.status === 'refused', content: [{ type: 'text', text: JSON.stringify(capMcpResult(withSkillTrustWarning(result))) }] };
+    }
+    if (request.params.name === "alerts") {
+      const argsObj = selected.arguments;
+      for (const k of Object.keys(argsObj)) {
+        if (k !== "include_resolved") throw new McpError(ErrorCode.InvalidParams, "Unknown argument.");
+      }
+      if (argsObj.include_resolved !== undefined && typeof argsObj.include_resolved !== "boolean") {
+        throw new McpError(ErrorCode.InvalidParams, "include_resolved must be a boolean.");
+      }
+      const auth = await authenticated();
+      const result = await readSystemAlerts(profileTarget(profile), auth.token, profile.workspace_id, {
+        includeResolved: argsObj.include_resolved === true,
+        fetcher: auth.fetcher,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(capMcpResult(result)) }] };
+    }
+    if (request.params.name === "alert_resolve") {
+      const argsObj = selected.arguments;
+      for (const k of Object.keys(argsObj)) {
+        if (k !== "alert_id" && k !== "note" && k !== "request_id") {
+          throw new McpError(ErrorCode.InvalidParams, "Unknown argument.");
+        }
+      }
+      if (typeof argsObj.alert_id !== "string" || typeof argsObj.note !== "string") {
+        throw new McpError(ErrorCode.InvalidParams, "alert_resolve requires alert_id and note.");
+      }
+      let cmd: ReturnType<typeof resolveSystemAlertCommand>;
+      try { cmd = resolveSystemAlertCommand(argsObj.alert_id, argsObj.note); }
+      catch (error) { throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : "Invalid arguments."); }
+      const auth = await authenticated();
+      const client = new ThinCommandClient(profileTarget(profile), auth.fetcher);
+      const sent = await client.sendResolveSystemAlert({
+        workspaceId: profile.workspace_id,
+        command: cmd,
+        credential: auth.token,
+        ...(typeof argsObj.request_id === "string" ? { commandId: argsObj.request_id } : {}),
+        signal: extra.signal,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(capMcpResult(sent.response.alert)) }] };
     }
     if (isSeatAdminTool(request.params.name)) {
       let parsed: ReturnType<typeof seatAdminMcpCommand>;

@@ -191,15 +191,39 @@ export async function reportRevokedLocalCredential(
     // In-memory gate only; the key never reaches a log field.
     const key = Array.from(tokenHash.subarray(0, 8), b => b.toString(16).padStart(2, "0")).join("");
     if (tokenHash.length !== 32 || !accessLostProbes.allow(`local_credential_revoked:${key}`, now)) return;
-    const [row] = await withTx(tx => tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
-      SELECT t.principal_id::text AS principal_id, p.owner_user_id::text AS owner_user_id,
-        (t.revoked_at IS NOT NULL OR p.revoked_at IS NOT NULL OR d.revoked_at IS NOT NULL
-          OR g.revoked_at IS NOT NULL) IS TRUE AS revoked
-      FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
-      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
-      LEFT JOIN swarm.devices d ON d.device_id=r.device_id
-      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
-      WHERE t.token_hash=${tokenHash} AND p.transport='local'`);
+    const [row] = await withTx(async (tx) => {
+      const found = await tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
+        SELECT t.principal_id::text AS principal_id, p.owner_user_id::text AS owner_user_id,
+          (t.revoked_at IS NOT NULL OR p.revoked_at IS NOT NULL OR d.revoked_at IS NOT NULL
+            OR g.revoked_at IS NOT NULL) IS TRUE AS revoked
+        FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+        JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+        LEFT JOIN swarm.devices d ON d.device_id=r.device_id
+        LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+        WHERE t.token_hash=${tokenHash} AND p.transport='local'`;
+      if (found[0]?.revoked === true) {
+        try {
+          await tx.savepoint(async (sp) => {
+            await sp`
+              SELECT swarm.record_system_alert(
+                am.workspace_id,
+                'local_credential_revoked',
+                ${found[0]!.principal_id}::uuid
+              )
+              FROM swarm.agent_workspace_memberships AS am
+              JOIN swarm.workspaces AS w
+                ON w.workspace_id = am.workspace_id
+               AND w.archived_at IS NULL
+              WHERE am.principal_id = ${found[0]!.principal_id}::uuid
+                AND am.revoked_at IS NULL
+            `;
+          });
+        } catch {
+          // Alert recording must never alter auth refusal behavior.
+        }
+      }
+      return found;
+    });
     if (row?.revoked !== true) return;
     logAccessLost({ class: "local_credential_revoked", principal_ref: row.principal_id,
       owner_ref: row.owner_user_id, grant_ref: null }, now);
