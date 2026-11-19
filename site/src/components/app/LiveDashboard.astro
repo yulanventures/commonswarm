@@ -8124,10 +8124,11 @@ import "../../styles/kylon-image-viewer.css";
         const dialogGeneration = confirmAtStart?.dataset?.confirmGeneration ?? "";
         const commandId = questionId ?? uuid();
         const scope = questionId ? confirmedRemovalScopes.get(questionId) : undefined;
-        // Only a workspace-only removal (hosted agent, or a local agent confirmed by the server to be in an added workspace)
-        // can be settled from workspace-roster absence. Permanent local retirement affects identity and keys across every
-        // workspace, so it may only be claimed from an authoritative revoke_agent_principal receipt.
+        // Workspace-only removal (hosted agent, or a local agent confirmed by the server to be in an added workspace)
+        // is proven by authorized workspace-roster absence. Permanent local retirement affects identity and keys across
+        // every workspace, so receiptConfirmed (authoritative revoke_agent_principal 200) stays separate from roster absence.
         const workspaceOnlyRemoval = agent.transport === "hosted_mcp" || scope === "workspace";
+        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
         const stillLiveRemoveQuestion = (): boolean => {
           if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return false;
           if (questionGeneration !== confirmScopeGeneration) return false;
@@ -8136,50 +8137,75 @@ import "../../styles/kylon-image-viewer.css";
           if (!agents.some((entry) => entry.principalId === agent.principalId)) return false;
           return peopleDialogCanAct(peopleDialogModel(), "remove-agent", id);
         };
-        const settledRemoval = async (): Promise<boolean> => {
-          if (!workspaceOnlyRemoval) return false;
-          try {
-            const [nextAgents, nextMembers] = await Promise.all([roster(workspaceId), memberRoster(workspaceId)]);
-            if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return false;
-            return nextMembers.members.some((entry) => entry.userId === userId)
-              && !nextAgents.some((entry) => entry.principalId === agent.principalId);
-          } catch { return false; }
+        const isFreshRefusalError = (error: unknown): boolean => {
+          if (typeof error !== "object" || error === null) return false;
+          const record = error as { status?: unknown; code?: unknown };
+          return record.status === 403 || record.code === "forbidden";
+        };
+        const checkRemovalRead = async (): Promise<"absent" | "refused" | "unknown"> => {
+          const [rosterRes, memberRes] = await Promise.allSettled([roster(workspaceId), memberRoster(workspaceId)]);
+          if (!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId) return "unknown";
+          if (memberRes.status === "rejected") {
+            return isFreshRefusalError(memberRes.reason)
+              || (rosterRes.status === "rejected" && isFreshRefusalError(rosterRes.reason))
+              ? "refused" : "unknown";
+          }
+          const freshViewer = memberRes.value.members.find((entry) => entry.userId === userId);
+          const freshMayManage = Boolean(
+            freshViewer && (freshViewer.role === "owner" || freshViewer.role === "admin" || agent.ownerUserId === userId),
+          );
+          if (!freshMayManage) return "refused";
+          if (rosterRes.status === "rejected") {
+            return isFreshRefusalError(rosterRes.reason) ? "refused" : "unknown";
+          }
+          if (!rosterRes.value.some((entry) => entry.principalId === agent.principalId)) return "absent";
+          return "unknown";
         };
         const isUncertain = (error: unknown): boolean => {
           if (typeof error !== "object" || error === null) return true;
           const record = error as { status?: unknown; uncertain?: unknown };
           return record.uncertain === true || typeof record.status !== "number" || record.status === 0 || record.status >= 500;
         };
-        let confirmed = false;
+        const permanentUncertainMessage = (absentHere: boolean): string => absentHere
+          ? `${agent.name} is no longer in ${workspaceName || "this workspace"}, but permanent removal could not be confirmed. Reload to check.`
+          : "The removal result is unknown. Reload the list to check, or try again.";
+        let receiptConfirmed = false;
+        let rosterAbsent = false;
         if (questionId && uncertainAgentRemovals.has(questionId)) {
-          if (workspaceOnlyRemoval) confirmed = await settledRemoval();
-          if (!confirmed && !stillLiveRemoveQuestion()) {
+          const preRead = await checkRemovalRead();
+          if (preRead === "refused") {
+            throw new Error("This action is no longer available. Go back and check the details.");
+          }
+          if (preRead === "absent") rosterAbsent = true;
+          if (!(workspaceOnlyRemoval && rosterAbsent) && !stillLiveRemoveQuestion()) {
             throw new Error(!session || session.user.id !== pinnedSession.user.id || workspaceId !== activeWorkspaceId
               ? "This space has changed. Go back and check the details."
               : "This action is no longer available. Go back and check the details.");
           }
         }
-        if (!confirmed) {
+        if (!receiptConfirmed && !(workspaceOnlyRemoval && rosterAbsent)) {
           try {
             await revokeAgentPrincipal(pinnedSession, commandId, workspaceId, agent.principalId);
-            confirmed = true;
+            receiptConfirmed = true;
           } catch (error) {
             const wasUncertain = Boolean(questionId && uncertainAgentRemovals.has(questionId));
             const uncertainNow = wasUncertain || isUncertain(error);
             if (!uncertainNow) throw error;
             if (questionId) uncertainAgentRemovals.add(questionId);
-            confirmed = workspaceOnlyRemoval ? await settledRemoval() : false;
-            if (!confirmed) {
-              throw new Error("The removal result is unknown. Reload the list to check, or try again.");
+            const postRead = await checkRemovalRead();
+            if (postRead === "absent") rosterAbsent = true;
+            if (!(workspaceOnlyRemoval && rosterAbsent)) {
+              throw new Error(workspaceOnlyRemoval
+                ? "The removal result is unknown. Reload the list to check, or try again."
+                : permanentUncertainMessage(rosterAbsent));
             }
           }
         }
         if (questionId) uncertainAgentRemovals.delete(questionId);
         if (questionId) confirmedRemovalScopes.delete(questionId);
-        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
-        receipt = workspaceOnlyRemoval
-          ? `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`
-          : `${agent.name} permanently removed. Its history stays as “${agent.name} (removed)”.`;
+        receipt = receiptConfirmed && !workspaceOnlyRemoval
+          ? `${agent.name} permanently removed. Its history stays as “${agent.name} (removed)”.`
+          : `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
         ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;

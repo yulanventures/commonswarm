@@ -1980,14 +1980,14 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     ctx.scopeAnswer = "workspace";
     removals.length = 0; reloads.length = 0;
     let committedCount = 0;
-    let rosterMode: "fail" | "unauthorized" | "settled" = "fail";
+    let rosterMode: "fail" | "stale-agent" | "settled" = "fail";
     ctx.roster = async () => {
       if (rosterMode === "fail") throw new Error("network down");
+      if (rosterMode === "stale-agent") return makeLiveAgents();
       return ctx.serverRoster;
     };
     ctx.memberRoster = async () => {
       if (rosterMode === "fail") throw new Error("network down");
-      if (rosterMode === "unauthorized") return { names: new Map(), members: [] };
       return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
     };
     ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
@@ -2013,11 +2013,11 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     assert.match(alertText, /unknown/i, `${label}: reports uncertain outcome`);
     assert.doesNotMatch(alertText, /did not change anything|HTTP 409/i, `${label}: never claims nothing changed`);
 
-    // Attempt 2: roster read returns empty/unauthorized membership -> must NOT falsely settle; retries same command ID;
+    // Attempt 2: viewer is still an authorized owner, but roster read has not yet dropped the agent -> retries same command ID;
     // server replies with 409/403 -> still preserves uncertain outcome and never claims "did not change anything".
-    rosterMode = "unauthorized";
+    rosterMode = "stale-agent";
     await btn.events.get("click")?.();
-    assert.equal(dialog.open, true, `${label}: unauthorized empty read cannot settle removal`);
+    assert.equal(dialog.open, true, `${label}: stale roster read cannot settle removal`);
     assert.equal(removals.length, 2, `${label}: retried once with original command ID`);
     assert.equal(removals[0].commandId, removals[1].commandId, `${label}: kept original command ID across uncertain retry`);
     assert.equal(removals[1].callerSession.user.id, viewerId, `${label}: retry passes pinned session`);
@@ -2036,14 +2036,15 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
   }
 
-  // 7. Retry after uncertain removal aborts with 0 sends when account, workspace, live question, row, or authority changes during settledRemoval().
-  for (const kind of ["account-switch", "workspace-switch", "authority-lost", "row-removed", "dialog-replaced"] as const) {
+  // 7. Retry after uncertain removal aborts with 0 sends when account, workspace, live question, row, authority,
+  //    or a fresh membership/role refusal changes during checkRemovalRead(), even while cached UI still shows admin.
+  for (const kind of ["account-switch", "workspace-switch", "authority-lost", "row-removed", "dialog-replaced", "fresh-demotion", "fresh-no-membership", "fresh-403"] as const) {
     ctx.session = { user: { id: viewerId } };
     ctx.activeWorkspaceId = workspaceId;
     ctx.agents = makeLiveAgents();
     ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
     ctx.serverRoster = makeLiveAgents();
-    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "admin" }];
     let mayManageNow = true;
     ctx.peopleDialogModel = () => ({
       sample: false, workspaceName, people: [], invites: [],
@@ -2053,6 +2054,9 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
         own: a.ownerUserId === viewerId, mayManage: mayManageNow,
       })),
     });
+    const isFreshCase = kind === "fresh-demotion" || kind === "fresh-no-membership" || kind === "fresh-403";
+    const targetForCase = isFreshCase ? foreignLocalId : hostedId;
+    ctx.readAgentRemovalScope = async () => "workspace";
     removals.length = 0; reloads.length = 0;
     let firstCall = true;
     ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
@@ -2062,30 +2066,42 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     ctx.roster = async () => { throw new Error("offline"); };
     ctx.memberRoster = async () => { throw new Error("offline"); };
     const opener: any = doc.createElement("button");
-    actions.confirmPeopleDialogAction("remove-agent", hostedId, opener);
+    actions.confirmPeopleDialogAction("remove-agent", targetForCase, opener);
+    await flush();
     const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
     // Attempt 1 leaves questionId in uncertainAgentRemovals.
     await btn.events.get("click")?.();
     assert.equal(removals.length, 1, `${kind}: initial uncertain send recorded`);
     removals.length = 0;
 
-    // Attempt 2: mutate context mid-await inside settledRemoval(), then resolve with agent still present.
+    // Attempt 2: mutate context or return a fresh refusal from memberRoster() while cached UI still shows admin.
     let releaseRead!: () => void;
     const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
-    ctx.roster = async () => { await readGate; return ctx.serverRoster; };
+    ctx.roster = async () => {
+      await readGate;
+      if (kind === "fresh-demotion") throw new Error("roster offline");
+      return ctx.serverRoster;
+    };
     ctx.memberRoster = async () => {
       await readGate;
+      if (kind === "fresh-403") throw Object.assign(new Error("Forbidden"), { status: 403, code: "forbidden" });
+      if (kind === "fresh-no-membership") return { names: new Map(), members: [] };
+      if (kind === "fresh-demotion") return { names: new Map([[viewerId, "Ana Rivera"]]), members: [{ userId: viewerId, name: "Ana Rivera", role: "member" }] };
       return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
     };
     const retryPromise = btn.events.get("click")?.();
     if (kind === "account-switch") ctx.session = { user: { id: otherOwnerId } };
     else if (kind === "workspace-switch") ctx.activeWorkspaceId = "99999999-9999-4999-8999-999999999999";
     else if (kind === "authority-lost") mayManageNow = false;
-    else if (kind === "row-removed") ctx.agents = ctx.agents.filter((a: any) => a.principalId !== hostedId);
+    else if (kind === "row-removed") ctx.agents = ctx.agents.filter((a: any) => a.principalId !== targetForCase);
     else if (kind === "dialog-replaced") actions.confirmPeopleDialogAction("turn-off-key", localId, opener);
     releaseRead();
     await retryPromise;
-    assert.equal(removals.length, 0, `${kind}: must send 0 removal commands after context changed during settledRemoval()`);
+    assert.equal(removals.length, 0, `${kind}: must send 0 removal commands after context changed or fresh refusal`);
+    if (isFreshCase) {
+      assert.equal(mayManageNow, true, `${kind}: cached UI still showed admin, yet fresh refusal blocked the retry`);
+      assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /no longer available/i);
+    }
   }
 
   // 8. C3: Late readAgentRemovalScope response cannot overwrite a later turn-off-key, hosted remove-agent,
@@ -2152,18 +2168,24 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   await flush();
   const permBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Permanently remove agent");
   assert.ok(permBtn, "permanent scope enables Permanently remove agent");
-  // Attempt 1: lost reply + agent absent from workspace roster -> MUST stay uncertain (never claim permanently removed).
+  // Attempt 1: lost reply + agent absent from origin workspace roster (e.g., workspace-only removal while agent survives elsewhere)
+  // -> MUST NOT claim permanently removed; reports workspace absence plus permanent-removal uncertainty.
   await permBtn.events.get("click")?.();
   assert.equal(dialog.open, true, "C4: roster absence must not settle permanent retirement on lost reply");
   assert.equal(reloads.length, 0, "C4: no permanent-removed receipt emitted without authoritative reply");
-  assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /unknown/i);
-  // Attempt 2: retry still uncertain -> still must not settle from roster absence; reuses same command ID.
+  const c4Alert1 = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+  assert.match(c4Alert1, new RegExp(`no longer in ${workspaceName}`), "C4: reports workspace absence");
+  assert.match(c4Alert1, /permanent removal could not be confirmed/i, "C4: reports permanent-removal uncertainty");
+  assert.doesNotMatch(c4Alert1, /permanently removed/i, "C4: never claims permanent retirement from roster absence");
+  // Attempt 2: retry hits 409 while origin roster still omits agent -> still shows workspace absence + uncertainty, reuses command ID.
   await permBtn.events.get("click")?.();
   assert.equal(dialog.open, true, "C4: roster absence must not settle permanent retirement on uncertain retry");
   assert.equal(removals.length, 2);
   assert.equal(removals[0].commandId, removals[1].commandId);
   assert.equal(reloads.length, 0);
-  // Attempt 3: authoritative revoke_agent_principal receipt arrives -> now closes and claims permanently removed.
+  const c4Alert2 = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+  assert.match(c4Alert2, /permanent removal could not be confirmed/i, "C4: keeps uncertainty explicit across 409 retry");
+  // Attempt 3 (positive control): authoritative revoke_agent_principal 200 receipt arrives -> closes and claims permanently removed.
   await permBtn.events.get("click")?.();
   assert.equal(dialog.open, false, "C4: authoritative receipt closes permanent removal dialog");
   assert.equal(removals.length, 3);
