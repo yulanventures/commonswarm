@@ -71,6 +71,8 @@ export interface WaitingPanelVM {
   loading: boolean;
   complete: boolean;
   failed: boolean;
+  truncated?: boolean;
+  catchUpHref?: string;
   statusMessage: string;
   statusSeq: number;
 }
@@ -82,6 +84,7 @@ export interface WaitingPanelHandlers {
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
+  onOpenCatchUp?: (href: string) => void;
 }
 
 export const WAITING_PANEL_ID = "cs-waiting-panel";
@@ -328,8 +331,23 @@ export function renderWaitingPanel(
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
   if (!body) return;
 
+  const buildCatchUpLink = (): HTMLAnchorElement | null => {
+    if (!vm.catchUpHref) return null;
+    const href = vm.catchUpHref;
+    const link = node(doc, "a", "cs-waiting-panel__action", "Open Catch up");
+    link.href = href;
+    link.dataset.waitingOpenCatchup = "";
+    link.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!handlers.onOpenCatchUp) return;
+      event.preventDefault();
+      handlers.onOpenCatchUp(href);
+    });
+    return link;
+  };
+
   if (vm.items.length === 0) {
-    const emptyState = vm.failed ? "failed" : vm.loading || !vm.complete ? "loading" : "empty";
+    const emptyState = vm.failed ? "failed" : vm.truncated ? "truncated" : vm.loading || !vm.complete ? "loading" : "empty";
     const wsNum = formatScopeCount(vm.counts.workspace);
     const allNum = formatScopeCount(vm.counts.all);
     const emptyKey = JSON.stringify([
@@ -341,6 +359,7 @@ export function renderWaitingPanel(
       allNum,
       vm.counts.workspace.min,
       vm.counts.all.min,
+      vm.catchUpHref ?? "",
     ]);
     if (body.dataset.waitingEmptyKey === emptyKey) return;
     body.dataset.waitingEmptyKey = emptyKey;
@@ -354,6 +373,39 @@ export function renderWaitingPanel(
       retry.dataset.waitingRetry = "";
       retry.addEventListener("click", () => handlers.onRetryLoad());
       wrap.append(retry);
+    } else if (emptyState === "truncated") {
+      const text =
+        vm.scope === "channel"
+          ? `Showing the oldest 100 questions; newer ones in ${vm.place.label} may not be listed yet.`
+          : "Showing the oldest 100 questions; more are waiting.";
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", text));
+      const actions = node(doc, "div", "cs-waiting-panel__actions");
+      if (vm.scope === "channel" && vm.counts.workspace.min > 0) {
+        const showWs = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          `Show all channels (${wsNum})`,
+        );
+        showWs.type = "button";
+        showWs.dataset.waitingSwitchScope = "workspace";
+        showWs.addEventListener("click", () => handlers.onScopeChange("workspace"));
+        actions.append(showWs);
+      } else if (vm.scope !== "all" && vm.counts.all.min > 0) {
+        const showAll = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          `Show all workspaces (${allNum})`,
+        );
+        showAll.type = "button";
+        showAll.dataset.waitingSwitchScope = "all";
+        showAll.addEventListener("click", () => handlers.onScopeChange("all"));
+        actions.append(showAll);
+      }
+      const catchUp = buildCatchUpLink();
+      if (catchUp) actions.append(catchUp);
+      if (actions.children.length > 0) wrap.append(actions);
     } else if (emptyState === "loading") {
       wrap.append(node(doc, "p", "cs-waiting-panel__state-text", "Loading…"));
     } else {
@@ -458,6 +510,21 @@ export function renderWaitingPanel(
     }
   } else {
     existingNotice?.remove();
+  }
+
+  // Show an inline truncation notice whenever the server's 100-question page left more waiting.
+  const existingTruncated = body.querySelector<HTMLElement>("[data-waiting-truncated]");
+  if (vm.truncated && !vm.complete && !vm.failed) {
+    if (!existingTruncated) {
+      const notice = node(doc, "div", "cs-waiting-panel__incomplete");
+      notice.dataset.waitingTruncated = "";
+      notice.append(node(doc, "p", "cs-waiting-panel__state-text", "Showing the oldest 100 questions; more are waiting."));
+      const catchUp = buildCatchUpLink();
+      if (catchUp) notice.append(catchUp);
+      body.append(notice);
+    }
+  } else {
+    existingTruncated?.remove();
   }
 }
 

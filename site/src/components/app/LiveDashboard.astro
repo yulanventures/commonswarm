@@ -5615,6 +5615,7 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
+    const waitingPanelTruncatedWorkspaces = new Set<string>();
     const waitingWorkspaceChannels = new Map<string, Map<string, string>>();
     type WaitingChoiceTicket = { viewer: string; workspaceId: string; signalId: string };
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
@@ -5787,14 +5788,17 @@ import "../../styles/kylon-image-viewer.css";
       const allItems = allWaitingAskItems();
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
+      const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
       const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id));
       const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id));
+      const anyWsTruncated = workspaces.some(ws => waitingPanelTruncatedWorkspaces.has(ws.id));
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
+      const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
       waitingPanelMod.renderWaitingPanel(
         container,
         {
@@ -5806,9 +5810,11 @@ import "../../styles/kylon-image-viewer.css";
             workspace: { min: workspaceItems.length, complete: wsLoaded },
             all: { min: allItems.length, complete: allLoaded },
           },
-          loading: waitingInFlight && !complete,
+          loading: waitingInFlight && !complete && !truncated,
           complete,
           failed: failed && !waitingInFlight,
+          truncated,
+          catchUpHref: routeHref({ view: "catchup" }),
           statusMessage: waitingStatusMessage,
           statusSeq: waitingStatusSeq,
         },
@@ -5833,6 +5839,11 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDraftChoice: (item, draft) => {
             choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onOpenCatchUp: (href) => {
+            clearWaitingStatus();
+            waitingSurface?.close(false);
+            if (homeRoute.view !== "catchup") navigateHomeHref(href);
           },
         },
       );
@@ -5902,6 +5913,7 @@ import "../../styles/kylon-image-viewer.css";
         waitingPanelAsks.clear();
         waitingPanelLoadedWorkspaces.clear();
         waitingPanelFailedWorkspaces.clear();
+        waitingPanelTruncatedWorkspaces.clear();
         waitingPanelTickets.clear();
         waitingPanelErrors.clear();
         waitingPanelLastSubmissions.clear();
@@ -5925,6 +5937,7 @@ import "../../styles/kylon-image-viewer.css";
           if (!row) {
             counted.set(workspace.id, null);
             waitingPanelFailedWorkspaces.add(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
           } else if (row.needs_you.asks.length > 0) {
             counted.set(workspace.id, null);
             toRead.push(workspace);
@@ -5934,6 +5947,7 @@ import "../../styles/kylon-image-viewer.css";
             waitingPanelAsks.set(workspace.id, []);
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
+            waitingPanelTruncatedWorkspaces.delete(workspace.id);
           }
         }
         // Prioritize the active workspace so "This channel" paints immediately while background workspaces finish.
@@ -5948,16 +5962,18 @@ import "../../styles/kylon-image-viewer.css";
             if (!queue) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
               if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
               continue;
             }
-            const ids = queue.asks.slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+            const ids = queue.asks.map(ask => ask.signal_id);
             const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
             if (choices === null) {
               // A failed choices read must never become an exact zero or an empty channel.
               counted.set(workspace.id, null);
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
+              waitingPanelTruncatedWorkspaces.delete(workspace.id);
               if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
               continue;
             }
@@ -6048,11 +6064,17 @@ import "../../styles/kylon-image-viewer.css";
             });
             if (!live()) return;
             waitingPanelAsks.set(workspace.id, panelItems);
-            if (anyUnknownLocation) {
+            const queueTruncated = queue.truncated || queue.asks.length < queue.total;
+            if (queueTruncated) waitingPanelTruncatedWorkspaces.add(workspace.id);
+            else waitingPanelTruncatedWorkspaces.delete(workspace.id);
+            if (anyUnknownLocation || queueTruncated) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
-              waitingPanelFailedWorkspaces.add(workspace.id);
             } else {
               waitingPanelLoadedWorkspaces.add(workspace.id);
+            }
+            if (anyUnknownLocation) {
+              waitingPanelFailedWorkspaces.add(workspace.id);
+            } else {
               waitingPanelFailedWorkspaces.delete(workspace.id);
             }
             if (workspace.id === activeWorkspaceId) renderWaitingPanelView();

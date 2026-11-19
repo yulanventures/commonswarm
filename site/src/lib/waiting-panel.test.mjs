@@ -563,3 +563,76 @@ test("waiting button labels its badge as an all-workspace count and toggles role
   assert.equal(btn.getAttribute("role"), null);
   assert.equal(btn.getAttribute("aria-expanded"), null);
 });
+
+test("renderWaitingPanel keeps truncated queues incomplete, avoids false channel zero, and offers Catch up", () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const openedCatchUp = [];
+  const scopes = [];
+  const place = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "general", channelId: null, label: "#general" };
+  const handlers = {
+    onScopeChange: s => scopes.push(s),
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onOpenCatchUp: href => openedCatchUp.push(href),
+  };
+
+  // Truncated queue with 0 of the oldest 100 in #general: never shows This channel (0) or false empty state.
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    counts: {
+      channel: { min: 0, complete: false },
+      workspace: { min: 100, complete: false },
+      all: { min: 100, complete: false },
+    },
+    loading: false,
+    complete: false,
+    failed: false,
+    truncated: true,
+    catchUpHref: "/app",
+    statusMessage: "",
+    statusSeq: 0,
+  }, handlers);
+
+  const select = host.querySelector("[data-waiting-scope]");
+  assert.deepEqual(select.options.map(o => o.textContent), ["This channel", "All channels (99+)", "All workspaces (99+)"]);
+  assert.ok(host.querySelector('[data-waiting-state="truncated"]'));
+  assert.equal(host.querySelector('[data-waiting-state="empty"]'), null);
+  const switchWs = host.querySelector('[data-waiting-switch-scope="workspace"]');
+  assert.equal(switchWs.textContent, "Show all channels (99+)");
+  switchWs.click();
+  assert.deepEqual(scopes, ["workspace"]);
+  const catchUpLink = host.querySelector("[data-waiting-open-catchup]");
+  assert.equal(catchUpLink.textContent, "Open Catch up");
+  catchUpLink.click();
+  assert.deepEqual(openedCatchUp, ["/app"]);
+
+  // Loaded cards alongside a truncated queue keep an inline truncation notice with Open Catch up.
+  renderWaitingPanel(host, {
+    scope: "workspace",
+    place,
+    items: [sampleAsk()],
+    counts: {
+      channel: { min: 0, complete: false },
+      workspace: { min: 100, complete: false },
+      all: { min: 100, complete: false },
+    },
+    loading: false,
+    complete: false,
+    failed: false,
+    truncated: true,
+    catchUpHref: "/app",
+    statusMessage: "",
+    statusSeq: 0,
+  }, handlers);
+  assert.ok(host.querySelector('[data-waiting-card="ask-1"]'));
+  const truncatedNotice = host.querySelector("[data-waiting-truncated]");
+  assert.ok(truncatedNotice);
+  assert.ok(truncatedNotice.querySelector("[data-waiting-open-catchup]"));
+});
