@@ -181,6 +181,9 @@ svg{flex:none}
 .intro{display:flex;flex-direction:column;gap:10px}
 .intro .connect-row{margin-bottom:6px}
 .lede{font-size:17px;color:var(--muted);text-wrap:pretty}
+.lede strong{color:var(--ink)}
+.result-next{font-size:17px;color:var(--ink);text-wrap:pretty}
+.result-note{margin-top:10px;font-size:15px;color:var(--muted);text-wrap:pretty}
 .app-facts{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:14px;color:var(--muted)}
 .app-facts strong{color:var(--ink);overflow-wrap:anywhere}
 .warning{display:flex;gap:10px;align-items:flex-start;padding:14px 16px;border-radius:14px;font-size:15px;text-wrap:pretty}
@@ -267,12 +270,13 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
 .actions a{display:inline-flex;align-items:center;min-height:44px;color:var(--link);font-weight:600;font-size:15px;text-underline-offset:3px}
 .finish .actions a:not([aria-disabled="true"]){border:1px solid #2C2C42}
 .sign-in-actions{flex-direction:column;align-items:stretch}
-.sign-in-actions a{justify-content:center;min-height:52px;padding:0 30px;border:1px solid #2C2C42;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);text-decoration:none;font-weight:700}
+.sign-in-actions a{justify-content:center;min-height:52px;padding:12px 24px;border:1px solid #2C2C42;border-radius:26px;background:var(--primary-bg);color:var(--primary-fg);text-decoration:none;text-align:center;overflow-wrap:anywhere;font-weight:700}
 .sign-in-actions a:hover{background:var(--primary-hover);color:var(--primary-fg)}
 .sign-in-actions a.provider-secondary{background:transparent;color:var(--ink);border:1px solid var(--border)}
 .sign-in-actions a.provider-secondary:hover{background:var(--soft)}
 :focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:6px}
 .actions button:focus-visible,.switch-button:focus-visible{outline-offset:3px;border-radius:999px}
+.sign-in-actions a:focus-visible{outline-offset:3px;border-radius:26px}
 .workspace-pick:has(input:focus-visible),.home-choice:has(input:focus-visible){outline:3px solid var(--focus);outline-offset:1px}
 .workspace-pick input:focus-visible,.home-choice input:focus-visible{outline:0}
 @media (prefers-reduced-motion:no-preference){.switch-button,.actions button,.home-choice,.workspace-choice{transition:background-color .15s ease,color .15s ease,border-color .15s ease}}
@@ -289,7 +293,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
   .actions button{width:100%}
   .actions a{justify-content:center}
 }
-@media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination{border:1px solid CanvasText}}
+@media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination,.sign-in-actions a{border:1px solid CanvasText}}
 `;
 
 export function renderSignInPage({ interactionUid, providers, selectAccount = false }) {
@@ -315,15 +319,22 @@ export function renderDifferentAccountPage() {
 
 export function renderConsentResultPage({ completed = false, clientName, restartUrl } = {}) {
   const title = completed ? "Already approved" : "Start the connection again";
+  const app = escapeHtml(clientName || "your app");
+  const body = completed
+    ? (restartUrl
+      ? `<p class="lede">If your app did not finish connecting, start a new connection from that app.</p>`
+      : `<p class="result-next">Switch back to <strong>${app}</strong> to continue.</p>
+      <p class="result-note">If it did not finish connecting, start a new connection from that app.</p>`)
+    : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`;
+  const action = restartUrl
+    ? `<a href="${escapeHtml(restartUrl)}">Return to ${app}${completed ? "" : " to start again"}</a>`
+    : `<a${completed ? ' class="provider-secondary"' : ""} href="https://commonswarm.com/app">Return to CommonSwarm</a>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><title>${title}</title><style>${CONSENT_STYLES}</style></head>
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
     <div class="card"><h1>${title}</h1>
-    ${completed ? `<p class="lede">You can return to <strong>${escapeHtml(clientName || "your app")}</strong>.</p>
-      <p>If your app did not finish connecting, start a new connection from that app.</p>`
-      : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`}
-    <div class="actions sign-in-actions">${restartUrl ? `<a href="${escapeHtml(restartUrl)}">Return to ${escapeHtml(clientName || "your app")}${completed ? "" : " to start again"}</a>`
-      : '<a href="https://commonswarm.com/app">Return to CommonSwarm</a>'}</div></div></main></body></html>`;
+    ${body}
+    <div class="actions sign-in-actions">${action}</div></div></main></body></html>`;
 }
 
 export function renderConsentPage({
