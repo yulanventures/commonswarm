@@ -211,7 +211,7 @@ async function observeConversations3B() {
   };
   try {
     if (!f.step2b) {
-      await wait("fallback rail", () => !!one("[data-sidebar-participant-list]"));
+      await wait("fallback rail and composer", () => !!one("[data-sidebar-participant-list]") && visible(one("[data-composer]")));
       check(!one("[data-home-dms]"), "fallback should not render Step 2b DM section");
       check(visible(one("[data-composer]")), "fallback should keep composer visible");
       check(f.errors.length === 0, "fallback errors: " + f.errors.join(","));

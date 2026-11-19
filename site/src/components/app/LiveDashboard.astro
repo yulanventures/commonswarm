@@ -14320,12 +14320,15 @@ import "../../styles/kylon-image-viewer.css";
       channelDirectoryRestore = restore;
       dialog.close();
     };
-    const submitChannelJoin = async (channelId: string): Promise<void> => {
+    const submitChannelJoin = async (channelId: string, button: HTMLButtonElement | null): Promise<void> => {
       const workspaceId = activeWorkspaceId;
       const conv = conversationForChannel(channelId);
       if (!session || !workspaceId || !conv || channelJoinPending.has(channelId)) return;
       channelJoinPending.add(channelId);
       channelDirectoryErrors.delete(channelId);
+      if (button && document.activeElement === button) {
+        one<HTMLElement>(`[data-channel-directory-action="open:${CSS.escape(channelId)}"]`)?.focus({ preventScroll: true });
+      }
       renderChannelDirectoryDialog();
       let errorMessage = "";
       try {
@@ -14371,7 +14374,7 @@ import "../../styles/kylon-image-viewer.css";
       const count = renderChannelDirectory(list, rows, query, pending, channelDirectoryErrors, {
         open: id => { closeChannelDirectory(false); layout.closeNavigation(false); selectChannel(id); focusConversationHeading(); },
         unarchive: (id, button) => { void submitChannelUnarchive(id, "directory", button); },
-        join: id => { void submitChannelJoin(id); },
+        join: (id, button) => { void submitChannelJoin(id, button); },
       });
       const status = one<HTMLElement>("[data-channel-directory-status]");
       if (status) status.textContent = !channelsLoaded ? "Loading channels…" : channelListFailed ? CHANNELS_LOAD_FAILED : count === 0 ? "No channels found" : "";
