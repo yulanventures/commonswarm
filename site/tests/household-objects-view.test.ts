@@ -138,6 +138,28 @@ test('interrupted and pending saves keep their draft and reuse the original requ
   assert.equal(fixture.controller.getState().selected_id, null);
 });
 
+test('once the draft is recovered, the review replaces the page\'s own copy and the recovery prompt', async () => {
+  const fixture = setup('editor', { save: async () => ({ status: 'conflict', object_id: 'weekend',
+    current: fixture.conflict.current.revision, draft_id: 'draft-a' }) });
+  fixture.controller.select('weekend'); fixture.controller.stage(fixture.conflict.proposed);
+  await fixture.controller.save();
+  // Before recovery: the page's copy and the prompt to recover are both there.
+  let page = renderHouseholdObjects(fixture.controller.getState());
+  assert.match(page, /<p>Current revision<\/p>/);
+  assert.match(page, /data-hh-action="recover"/);
+  assert.match(fixture.controller.getState().notice, /Recover it/);
+  assert.equal(await fixture.controller.recoverDraft(), true);
+  // After: one "Current", the review's, and nothing asking to recover what is already open.
+  page = renderHouseholdObjects(fixture.controller.getState());
+  assert.doesNotMatch(page, /<p>Current revision<\/p>/, 'the page\'s possibly older copy is not shown as current');
+  assert.equal((page.match(/aria-label="Current"/g) ?? []).length, 1);
+  assert.doesNotMatch(page, /data-hh-action="recover"|Recover it|recover and review/);
+  assert.equal(fixture.controller.getState().notice, '');
+  assert.match(page, /<h3>[^<]+<\/h3>\s*<section class="hh-conflict"[^>]*><h3>Review the changes<\/h3>/, 'the title, then the review');
+  // The history stays below the review.
+  assert.ok(page.indexOf('aria-label="Object history"') > page.indexOf('class="hh-conflict"'));
+});
+
 test('revision ids are shown on request; the conflict review says who saved the original and Current and when', async () => {
   const fixture = setup('editor', { save: async () => ({ status: 'conflict', object_id: 'weekend',
     current: fixture.conflict.current.revision, draft_id: 'draft-a' }) });

@@ -206,6 +206,10 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const canEdit = householdCanUpdate(workspace) && !busy && state.save_state !== 'conflict';
   const canCreate = householdCanCreate(workspace) && !busy && state.save_state !== 'conflict';
   const content = state.opened_version?.content ?? object?.current.content ?? null;
+  /* While a recovered conflict is being reviewed, the review is the whole story: this page's own copy of the doc can
+     be older than the "Current" inside the review, so it is not shown above it under the same name. Before the draft
+     is recovered, the page and its recovery prompt stay as they are. */
+  const reviewing = state.save_state === 'conflict' && state.conflict !== null && renderHouseholdConflict(state) !== '';
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
   const createControls = canCreate ? `<div class="hh-create-bar">
@@ -221,7 +225,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
     <div class="hh-layout"><nav aria-label="Household objects">${createControls}${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
       `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy, item.object_id === state.selected_id)}</li>`).join('')}</ul>` : '<p class="hh-empty-note">No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
-    <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
+    <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>${reviewing ? '' : `
       <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
       ${canEdit && !state.opened_version && content?.kind === 'list'
@@ -231,7 +235,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
         : renderHouseholdContent(content)}
       ${!content ? button('revision', 'Open current revision', object.current.revision.token, busy) : ''}
       ${canEdit && !state.opened_version && content?.kind === 'doc' ? `<label class="hh-editor">Edit document
-        <textarea data-hh-document rows="8">${esc(state.proposed?.kind === 'doc' ? state.proposed.markdown : content.markdown)}</textarea></label>${button('save', 'Save document')}` : ''}
+        <textarea data-hh-document rows="8">${esc(state.proposed?.kind === 'doc' ? state.proposed.markdown : content.markdown)}</textarea></label>${button('save', 'Save document')}` : ''}`}
       ${!householdCanUpdate(workspace) ? '<p>You can read objects and history. Saving requires an editor content role and update permission.</p>' : ''}
       ${state.opened_version ? button('current', 'Back to current revision', '', busy) : ''}
       ${renderHouseholdConflict(state)}
@@ -416,7 +420,8 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
           || !bound(conflict.base.revision, state.workspace.workspace_id, object.object_id)
           || !sameRef(conflict.current.revision, state.conflict_current!)
           || conflict.base.content?.kind !== object.kind || conflict.current.content?.kind !== object.kind || conflict.proposed.kind !== object.kind) return false;
-        state.conflict = structuredClone(conflict); publish(); return true;
+        // Recovered: the review below says everything; the line asking to recover the draft is no longer true.
+        state.conflict = structuredClone(conflict); state.notice = ''; publish(); return true;
       } catch { if (active === generation && read === readGeneration) { state.notice = 'Your retained draft could not be loaded. Try recovering it again.'; publish(); } return false; }
     },
     async moreHistory() {
