@@ -414,7 +414,7 @@ async function observeConversations3C() {
 
       await openDrawerIfPhone();
       await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
-      await wait("1:1 dm open", () => location.search.includes(`dm=${f.ids.dmAlexConv}`) && visible(one("[data-composer]")));
+      await wait("1:1 dm open", () => !!one(`[data-rail-conversation="${f.ids.dmAlexConv}"][aria-current="page"]`) && visible(one("[data-composer]")));
       check(one<HTMLButtonElement>("[data-composer-attach]")?.disabled === true, "C1: attach button must be disabled in 1:1 DM");
       input.value = "DM with staged file";
       input.dispatchEvent(new Event("input", { bubbles: true }));

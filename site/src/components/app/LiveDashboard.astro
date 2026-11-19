@@ -14560,7 +14560,7 @@ import "../../styles/kylon-image-viewer.css";
         manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
       const allLive = liveChannels(channels);
       const live = workspaceConversations
-        ? allLive.filter(channel => conversationForChannel(channel.channelId)?.joined !== false)
+        ? allLive.filter(channel => conversationForChannel(channel.channelId)?.joined === true)
         : allLive;
       /* A starred place is listed once, under Starred, in the viewer's own order. A star on a channel that
          has since been archived or left shows nothing. */
