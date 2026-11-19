@@ -5937,6 +5937,7 @@ import "../../styles/kylon-image-viewer.css";
       recipients: readonly ComposerRecipient[] = [{ kind: entity.kind, id: entity.id }],
     ): Promise<void> => {
       if (!activeWorkspaceId) return;
+      if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       rememberPaletteVisit(`teammate:${entity.kind}:${entity.id}`);
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       /* A THREAD REPLY ENDS HERE. A reply left open would keep the composer posting into its
@@ -6341,6 +6342,7 @@ import "../../styles/kylon-image-viewer.css";
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;
+      if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -13519,24 +13521,34 @@ import "../../styles/kylon-image-viewer.css";
     };
     /** Open a Step 2b DM or group DM row from the rail. */
     const openDirectConversation = async (conversationId: string): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
       const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
-      if (!conv || !activeWorkspaceId) return;
+      if (!conv || !workspaceId) return;
       const viewerId = homeViewerId();
       const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
       if (conv.kind === "dm" && others.length === 1) {
         const other = others[0]!;
         await openDirectMessage({ kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef);
+        if (workspaceId !== activeWorkspaceId) return;
         activeDmConversationId = conversationId;
         renderHomeRail();
         return;
       }
-      activeDmConversationId = conversationId;
+      activeDm = null;
+      closeEntityPanel(false);
+      if (threadReplyRoot !== null) setThreadReplyRoot(null);
       activeChannelId = null;
       unknownChannelId = null;
-      if (homeRoute.view !== "chat") await navigateHome({ view: "chat", workspaceId: activeWorkspaceId, dmId: conversationId }, "push");
-      else window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId: activeWorkspaceId, dmId: conversationId }));
+      if (homeRoute.view !== "chat") {
+        await navigateHome({ view: "chat", workspaceId, dmId: conversationId }, "push");
+        if (workspaceId !== activeWorkspaceId) return;
+      } else {
+        window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId, dmId: conversationId }));
+      }
+      activeDmConversationId = conversationId;
       const recipients: ComposerRecipient[] = others.map(m => ({ kind: m.kind === "agent" ? "agent" : "person", id: m.id }));
-      if (recipients.length) syncComposerAddress(recipients);
+      syncComposerAddress(recipients);
+      renderFeed();
       renderHomeRail();
       renderHomeShell();
       renderChannelBlocked();
@@ -13546,11 +13558,14 @@ import "../../styles/kylon-image-viewer.css";
       const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
       const workspaceId = activeWorkspaceId;
       if (!conv || !session || !workspaceId || sampleMode) return;
+      const pinnedUserId = session.user.id;
       const title = conversationTitle(conv, homeViewerId(), lookupConversationMemberName);
       const runNotify = (change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean }): void => {
-        if (!session) return;
+        if (!session || session.user.id !== pinnedUserId) return;
         void setConversationNotify(session, uuid(), workspaceId, conversationId, change).then(res => {
-          if (res.ok && workspaceId === activeWorkspaceId) void refreshConversations(workspaceId, true);
+          if (res.ok && workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId) {
+            void refreshConversations(workspaceId, true);
+          }
         }).catch(() => {});
       };
       const items: (ContextMenuItem | null)[] = [];
@@ -13558,9 +13573,9 @@ import "../../styles/kylon-image-viewer.css";
         items.push({
           label: MARK_AS_READ_LABEL,
           run: () => {
-            if (!session) return;
+            if (!session || session.user.id !== pinnedUserId) return;
             void markConversationRead(session, uuid(), workspaceId, conversationId, conv.lastMessageId).then(res => {
-              if (!res.ok || workspaceId !== activeWorkspaceId) return;
+              if (!res.ok || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
               if (workspaceConversations) {
                 workspaceConversations = workspaceConversations.map(c =>
                   c.conversationId === conversationId ? { ...c, unreadCount: 0, mentionCount: 0 } : c,
@@ -13640,6 +13655,7 @@ import "../../styles/kylon-image-viewer.css";
     const submitGroupLeave = async (): Promise<void> => {
       const target = groupLeaveTarget;
       if (!target || !session || sampleMode || groupLeavePending || target.workspaceId !== activeWorkspaceId) return;
+      const pinnedUserId = session.user.id;
       groupLeavePending = true;
       const errorEl = one<HTMLElement>("[data-group-leave-error]");
       if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
@@ -13652,7 +13668,7 @@ import "../../styles/kylon-image-viewer.css";
         problem = readableError(error);
       }
       groupLeavePending = false;
-      if (target.workspaceId !== activeWorkspaceId) return;
+      if (target.workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId || groupLeaveTarget !== target) return;
       if (problem) {
         syncGroupLeaveDialogControls();
         if (errorEl) { errorEl.textContent = problem; errorEl.hidden = false; }
@@ -13663,9 +13679,10 @@ import "../../styles/kylon-image-viewer.css";
         workspaceConversations = workspaceConversations.filter(c => c.conversationId !== target.conversationId);
       }
       if (activeDmConversationId === target.conversationId) {
-        activeDmConversationId = null;
         signals = [];
+        // Keep activeDmConversationId set until selectChannel runs so leavingDm clears group recipients.
         selectChannel(GENERAL_CHANNEL_ID);
+        activeDmConversationId = null;
       } else {
         renderHomeRail();
       }
@@ -14046,12 +14063,15 @@ import "../../styles/kylon-image-viewer.css";
           if (mountedPreviewKey !== key) {
             mountedPreviewKey = key;
             const workspaceId = activeWorkspaceId;
+            const pinnedUserId = session?.user.id ?? "";
             const convId = unjoined.conversationId;
             const slug = unjoined.slug ?? activeChannel()?.slug ?? "channel";
             renderChannelPreviewBar(previewHost, {
               slug,
               onJoin: async () => {
-                if (!session || !workspaceId) return { ok: false, message: "Sign in to join this channel." };
+                if (!session || !workspaceId || session.user.id !== pinnedUserId) {
+                  return { ok: false, message: "Sign in to join this channel." };
+                }
                 try {
                   const res = await joinConversation(session, uuid(), workspaceId, convId);
                   return res.ok ? { ok: true } : { ok: false, message: res.message };
@@ -14060,13 +14080,15 @@ import "../../styles/kylon-image-viewer.css";
                 }
               },
               onJoined: () => {
-                if (workspaceId !== activeWorkspaceId) return;
+                if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
                 markConversationJoinedLocally(convId);
-                mountedPreviewKey = "";
-                renderChannelBlocked();
+                if (mountedPreviewKey === key) {
+                  mountedPreviewKey = "";
+                  renderChannelBlocked();
+                  one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+                }
                 renderHomeRail();
                 renderChannelDirectoryDialog();
-                one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
                 void refreshConversations(workspaceId, true);
               },
             });

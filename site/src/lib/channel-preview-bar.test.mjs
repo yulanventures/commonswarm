@@ -81,6 +81,19 @@ test("public channel preview bar joins once while busy, keeps preview open with 
   await button.listeners.click();
   assert.equal(calls, 2);
   assert.equal(joined, 1);
+
+  // Detached button after navigation must not steal focus on late failure.
+  const detached = previewRoot();
+  const prev = renderChannelPreviewBar(detached.root, {
+    slug: "design",
+    onJoin: async () => {
+      prev.button.isConnected = false;
+      return { ok: false, message: "Late error." };
+    },
+    onJoined: () => {},
+  });
+  await prev.button.listeners.click();
+  assert.equal(detached.focusCalls.length, 0);
 });
 
 test("membership retry bar runs once while busy and keeps Retry focused when read stays failed", async () => {

@@ -71,7 +71,7 @@ export function renderChannelPreviewBar(
     button.setAttribute("aria-label", `Retry joining ${channelLabel(options.slug)}`);
     button.dataset.channelPreviewRetry = "";
     error.hidden = false;
-    button.focus();
+    if (button.isConnected) button.focus();
   });
 
   bar.append(button, error);
