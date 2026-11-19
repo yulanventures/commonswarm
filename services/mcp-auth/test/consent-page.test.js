@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { createConnectionManager } from "../src/connections.js";
 import { createConsentOrchestrator } from "../src/consent.js";
-import { CONSENT_WARNING, renderConsentPage } from "../src/interaction-page.js";
+import { CONSENT_WARNING, renderConsentPage, renderConsentResultPage } from "../src/interaction-page.js";
 import { createInteractionHandler } from "../src/interactions.js";
 
 const USER = "10000000-0000-4000-8000-000000000001";
@@ -375,4 +375,40 @@ test("connection manager supplies verified identity separately and preserves gra
   assert.deepEqual(calls.map(([kind]) => kind), ["grant", "seat"]);
   assert.equal(calls[0][1].identity.userId, USER);
   assert.equal(calls[1][1].workspaceId, W2);
+});
+
+test("already-approved result page keeps one return link without repeating the app name and separates fallback without a link", () => {
+  const withLink = renderConsentResultPage({
+    completed: true,
+    clientName: "Reader app",
+    restartUrl: "https://reader.example/start",
+  });
+  assert.match(withLink, /<h1>Already approved<\/h1>/u);
+  assert.match(withLink, /If your app did not finish connecting, start a new connection from that app\./u);
+  assert.match(withLink, /<a href="https:\/\/reader\.example\/start">Return to Reader app<\/a>/u);
+  assert.equal(withLink.split("Reader app").length - 1, 1);
+  assert.doesNotMatch(withLink, /You can return to|Return to CommonSwarm/u);
+
+  const withoutLink = renderConsentResultPage({
+    completed: true,
+    clientName: 'Reader <app> & "friends"',
+  });
+  assert.match(withoutLink, /<h1>Already approved<\/h1>/u);
+  assert.match(withoutLink, /Switch back to <strong>Reader &lt;app&gt; &amp; &quot;friends&quot;<\/strong> to continue\./u);
+  assert.match(withoutLink, /If it did not finish connecting, start a new connection from that app\./u);
+  assert.match(withoutLink, /<a class="provider-secondary" href="https:\/\/commonswarm\.com\/app">Return to CommonSwarm<\/a>/u);
+  assert.equal(withoutLink.split("Reader &lt;app&gt; &amp; &quot;friends&quot;").length - 1, 1);
+  assert.doesNotMatch(withoutLink, /<app>|You can return to/u);
+
+  const unnamed = renderConsentResultPage({ completed: true });
+  assert.match(unnamed, /Switch back to <strong>your app<\/strong> to continue\./u);
+  assert.match(unnamed, /<a class="provider-secondary" href="https:\/\/commonswarm\.com\/app">Return to CommonSwarm<\/a>/u);
+
+  const expired = renderConsentResultPage({
+    completed: false,
+    clientName: "Reader app",
+    restartUrl: "https://reader.example/start",
+  });
+  assert.match(expired, /<h1>Start the connection again<\/h1>/u);
+  assert.match(expired, /<a href="https:\/\/reader\.example\/start">Return to Reader app to start again<\/a>/u);
 });

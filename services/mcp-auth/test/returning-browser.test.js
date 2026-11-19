@@ -410,7 +410,8 @@ test("repeat consent before and after provider consumption acknowledges approval
     assert.equal(repeat.statusCode, 409, repeat.body);
     assert.match(repeat.headers["content-type"], /text\/html/u);
     assert.match(repeat.body, /Already approved/u);
-    assert.match(repeat.body, /You can return to <strong>Test Client<\/strong>/u);
+    assert.match(repeat.body, /<a href="https:\/\/client\.example\/start">Return to Test Client<\/a>/u);
+    assert.equal(repeat.body.split("Test Client").length - 1, 1);
     assert.equal(repeat.headers["cache-control"], "no-store");
     assert.deepEqual(h.effects, { grants: 1, activations: 1 });
   }
