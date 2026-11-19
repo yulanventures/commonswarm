@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { waitingName, waitingText, waitingTotal } from "./waiting-count.ts";
+import { buildWaitingButton, updateWaitingButton, waitingName, waitingText, waitingTotal } from "./waiting-count.ts";
 
 test("the total counts every workspace, and an uncounted one makes it a minimum, never a zero", () => {
   const nine = Array.from({ length: 9 }, (_, n) => "W" + n);
@@ -29,4 +29,37 @@ test("the control's name starts with the words and the number drawn on it", () =
     assert.ok(waitingName(total).startsWith(shown), `${waitingName(total)} starts with ${shown}`);
   }
   assert.equal(waitingName({ min: 0, complete: false }), "Waiting on you, still counting");
+});
+
+test("buildWaitingButton separates Waiting on you from its count across zero, partial, and unknown counts", () => {
+  const makeEl = (tag) => ({
+    tag, className: "", href: "", title: "", textContent: "",
+    children: [], attrs: {}, dataset: {},
+    append(...nodes) { this.children.push(...nodes); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    toggleAttribute(name, force) { if (force) this.attrs[name] = ""; else delete this.attrs[name]; },
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector !== "[data-waiting-count]") return null;
+      return this.children.find(n => typeof n === "object" && n.dataset?.waitingCount !== undefined) ?? null;
+    },
+  });
+  const textOf = (node) => typeof node === "string"
+    ? node
+    : (node.textContent || "") + (node.children ?? []).map(textOf).join("");
+  const link = buildWaitingButton({ createElement: makeEl }, "/app?v=catchup", () => {});
+
+  // Unknown count: no number drawn; accessible name still starts with visible words.
+  assert.equal(textOf(link).trim(), "Waiting on you");
+  assert.equal(link.attrs["aria-label"], "Waiting on you, still counting");
+
+  // Zero count: real space between label and "0".
+  updateWaitingButton(link, { min: 0, complete: true });
+  assert.equal(textOf(link), "Waiting on you 0");
+  assert.equal(link.attrs["aria-label"], "Waiting on you 0");
+
+  // Partial count: real space between label and "3+".
+  updateWaitingButton(link, { min: 3, complete: false });
+  assert.equal(textOf(link), "Waiting on you 3+");
+  assert.equal(link.attrs["aria-label"], "Waiting on you 3+, still counting");
 });

@@ -46,7 +46,7 @@ export function buildWaitingButton(doc: Document, href: string, navigate: (href:
   const mark = doc.createElement("span"); mark.className = "hm-rail__icon"; mark.dataset.icon = "inbox"; mark.setAttribute("aria-hidden", "true");
   const label = doc.createElement("span"); label.className = "cs-waiting__label"; label.textContent = WAITING_LABEL;
   const count = doc.createElement("span"); count.className = "cs-waiting__count"; count.dataset.waitingCount = "";
-  link.append(mark, label, count);
+  link.append(mark, label, " ", count);
   link.addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();

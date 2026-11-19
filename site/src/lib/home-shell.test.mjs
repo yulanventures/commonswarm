@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOrganizationMenu, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { buildOrganizationMenu, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -225,4 +225,36 @@ test("without openSettings (sample mode) the picker has no gear and builds no sv
   assert.equal(svgs, 0);
   const all = node => [node, ...node.children.flatMap(all)];
   assert.ok(!all(picker).some(node => node.className === "cs-workspace-picker__settings" || node.className === "cs-workspace-picker__row"));
+});
+
+test("People & agents header buttons include the displayed member count in their accessible name", () => {
+  const element = tag => ({
+    tag, className: "", textContent: "", href: "", id: "", type: "", title: "", tabIndex: 0,
+    children: [], attrs: {}, listeners: {}, dataset: {}, style: {},
+    append(...children) { this.children.push(...children); },
+    prepend(...children) { this.children.unshift(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+  });
+  const doc = { createElement: element, createElementNS: (_ns, tag) => element(tag) };
+  const all = node => (node && typeof node === "object" ? [node, ...(node.children ?? []).flatMap(all)] : []);
+  const vm = {
+    sample: false, workspaceId: "w1", name: "Studio", pane: "chat", todosAvailable: false, hrefs,
+    menu: { settings: false, adminAccess: false },
+    people: [{ person: person("p1", "Alex Doe", true), agents: [agent("a1", "Claude")] }],
+    otherAgents: [agent("a2", "Codex")],
+  };
+  const callbacks = { openPeople() {}, navigate() {}, menu() {} };
+  const desktop = buildWorkspaceHeader(doc, vm, callbacks);
+  const desktopPeople = all(desktop).find(n => n.className === "hm-ws-header__people");
+  const textOf = node => typeof node === "string" ? node : (node.textContent || "") + (node.children ?? []).map(textOf).join("");
+  assert.equal(desktopPeople?.attrs["aria-label"], "People & agents, 3");
+  assert.equal(desktopPeople?.attrs["aria-description"], undefined);
+  assert.equal(textOf(desktopPeople), "3", "decorative avatar initials stay out of the button text");
+
+  const phone = buildPhoneTopBar(doc, vm, callbacks);
+  const phonePeople = all(phone).find(n => n.className === "hm-phone-bar__people");
+  assert.equal(phonePeople?.attrs["aria-label"], "People & agents, 3");
+  assert.equal(phonePeople?.attrs["aria-description"], undefined);
+  assert.equal(textOf(phonePeople), "3");
 });

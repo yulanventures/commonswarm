@@ -45,7 +45,8 @@ export function renderChannelDirectory(
       const item = node("li", "cm-directory-row");
       item.dataset.channelDirectoryRow = row.id;
       /* The channel's name is how it is opened: the name and its description are one link. There is no separate
-         "Open" beside every row. The link is named by the channel and described by its description. */
+         "Open" beside every row. Letting the link compute its name from its contents keeps the channel name first,
+         includes its description once, and matches the visible text (WCAG 2.5.3). */
       const copy = node("a", "cm-directory-copy");
       copy.href = row.href;
       copy.dataset.channelDirectoryAction = `open:${row.id}`;
@@ -54,8 +55,6 @@ export function renderChannelDirectory(
         event.preventDefault(); actions.open(row.id);
       });
       const name = node("span", "cm-directory-name", `#${row.slug}`);
-      name.id = `cm-directory-name-${row.id}`;
-      copy.setAttribute("aria-labelledby", name.id);
       copy.append(name);
       if (!archived && row.unread === true) {
         const unread = node("span", "cm-directory-unread");
@@ -64,9 +63,7 @@ export function renderChannelDirectory(
       }
       if (row.description) {
         const description = node("span", "cm-directory-description", row.description);
-        description.id = `cm-directory-description-${row.id}`;
-        copy.setAttribute("aria-describedby", description.id);
-        copy.append(description);
+        copy.append(" ", description);
       }
       const controls = node("div", "cm-directory-actions");
       if (!archived && row.joined === false && actions.join) {
