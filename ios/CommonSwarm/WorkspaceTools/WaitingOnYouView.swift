@@ -113,12 +113,12 @@ struct WaitingOnYouSheetView: View {
     let api: WaitingOnYouAPI
     let onDismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 scopePicker
-                    .padding(.horizontal)
                     .padding(.top, 8)
                     .padding(.bottom, 10)
 
@@ -162,14 +162,62 @@ struct WaitingOnYouSheetView: View {
         }
     }
 
+    private var selectedScopeBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.08, green: 0.40, blue: 0.80)
+            : Color(red: 0.00, green: 0.35, blue: 0.80)
+    }
+
+    private var unselectedScopeForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.94, green: 0.94, blue: 0.96)
+            : Color(red: 0.11, green: 0.11, blue: 0.12)
+    }
+
+    private var unselectedScopeBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.20, green: 0.20, blue: 0.22)
+            : Color(red: 0.90, green: 0.90, blue: 0.92)
+    }
+
     private var scopePicker: some View {
         let counts = store.counts
-        return Picker("Scope", selection: $store.scope) {
-            Text(counts.channel.optionTitle("This channel")).tag(WaitingScope.channel)
-            Text(counts.workspace.optionTitle("All channels")).tag(WaitingScope.workspace)
-            Text(counts.all.optionTitle("All")).tag(WaitingScope.all)
+        let options: [(scope: WaitingScope, title: String)] = [
+            (.channel, counts.channel.optionTitle("This channel")),
+            (.workspace, counts.workspace.optionTitle("All channels")),
+            (.all, counts.all.optionTitle("All workspaces")),
+        ]
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(options, id: \.scope) { option in
+                        let selected = store.scope == option.scope
+                        Button {
+                            store.scope = option.scope
+                        } label: {
+                            Text(option.title)
+                                .font(.footnote.weight(.semibold))
+                                .lineLimit(1)
+                                .foregroundStyle(selected ? Color.white : unselectedScopeForeground)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .background(
+                                    selected ? selectedScopeBackground : unselectedScopeBackground,
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .id(option.scope)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                        .accessibilityIdentifier("waiting-scope-\(option.scope.rawValue)")
+                    }
+                }
+                .padding(.horizontal)
+            }
+            .onChange(of: store.scope) { _, newScope in
+                proxy.scrollTo(newScope, anchor: .center)
+            }
         }
-        .pickerStyle(.segmented)
         .accessibilityLabel("Waiting on you scope")
     }
 
@@ -251,21 +299,24 @@ struct WaitingOnYouSheetView: View {
     @ViewBuilder
     private func incompleteEmptyState(counts: WaitingPanelCounts) -> some View {
         VStack(spacing: 14) {
-            RetryView(text: "Couldn’t check all waiting questions") {
-                await store.load(api: api)
+            Text("Couldn’t check all waiting questions")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            Button {
+                Task { await store.load(api: api) }
+            } label: {
+                Text("Retry")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(unselectedScopeForeground)
+                    .padding(.horizontal, 20)
+                    .frame(minWidth: 88, minHeight: 44)
+                    .background(unselectedScopeBackground, in: Capsule())
             }
+            .buttonStyle(.plain)
             if store.scope == .channel && counts.workspace.min > 0 {
-                Button("Show all channels (\(counts.workspace.badgeText))") {
-                    store.scope = .workspace
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
+                scopeJumpButton("Show all channels (\(counts.workspace.badgeText))", target: .workspace)
             } else if store.scope != .all && counts.all.min > 0 {
-                Button("Show all workspaces (\(counts.all.badgeText))") {
-                    store.scope = .all
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
+                scopeJumpButton("Show all workspaces (\(counts.all.badgeText))", target: .all)
             }
         }
         .padding()
@@ -280,21 +331,27 @@ struct WaitingOnYouSheetView: View {
                 systemImage: "checkmark.circle"
             )
             if store.scope == .channel && counts.workspace.min > 0 {
-                Button("Show all channels (\(counts.workspace.badgeText))") {
-                    store.scope = .workspace
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
+                scopeJumpButton("Show all channels (\(counts.workspace.badgeText))", target: .workspace)
             } else if store.scope != .all && counts.all.min > 0 {
-                Button("Show all workspaces (\(counts.all.badgeText))") {
-                    store.scope = .all
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
+                scopeJumpButton("Show all workspaces (\(counts.all.badgeText))", target: .all)
             }
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func scopeJumpButton(_ title: String, target: WaitingScope) -> some View {
+        Button {
+            store.scope = target
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .frame(minHeight: 44)
+                .background(selectedScopeBackground, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var emptyTitle: String {

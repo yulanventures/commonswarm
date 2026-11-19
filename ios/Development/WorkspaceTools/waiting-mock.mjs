@@ -113,24 +113,24 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
 
-    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-next") {
+    if (req.method === "POST" && url.pathname === "/fixture/fail-next") {
       failNextOnce = true;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/omit-location") {
+    if (req.method === "POST" && url.pathname === "/fixture/omit-location") {
       const id = (url.searchParams.get("id") || sigGeneralChoice).toLowerCase();
       omitLocationSignalIds.add(id);
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/restore-locations") {
+    if (req.method === "POST" && url.pathname === "/fixture/restore-locations") {
       omitLocationSignalIds = new Set();
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-decision-queue") {
+    if (req.method === "POST" && url.pathname === "/fixture/fail-decision-queue") {
       failDecisionQueueWs = url.searchParams.get("ws")?.toLowerCase() || null;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "GET" && url.pathname === "/fixture/commands") {
+    if (req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, receivedCommands);
     }
 
