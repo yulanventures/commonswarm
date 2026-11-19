@@ -184,7 +184,7 @@ const showBar = chrome || Boolean(label) || copy;
       if (txt) txt.textContent = ok ? "Copied" : "Select it";
       status.textContent = ok
         ? "Copied to clipboard"
-        : "Copy is unavailable here — select the text and press Command-C or Control-C";
+        : "Copy is unavailable here. Select the text and press Command-C or Control-C.";
 
       timer = window.setTimeout(() => {
         btn.classList.remove("is-done", "is-fail");
