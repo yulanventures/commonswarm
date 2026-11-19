@@ -339,7 +339,11 @@ async function observeConnectionApp() {
       // A real rerender (selecting the same agent again, or reopening the dialog) must retain the draft.
       const beforeRerender = editor();
       if (f.hosted) { one("[data-connected-apps-close]").click(); one("[data-connected-apps-open]").click(); }
-      else { one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click(); }
+      else {
+        one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click();
+        const more = one("[data-people-detail] [data-people-agent-more]") as HTMLDetailsElement | null;
+        if (more && !more.open) more.querySelector("summary")?.click();
+      }
       await wait(() => editor() && editor() !== beforeRerender && field("[data-end-date-value]")?.value === "2035-02-03T04:05", "draft across reread/rerender");
       if (f.scenario === "stale-family") {
         const oldForm = form(), oldEditor = editor();
