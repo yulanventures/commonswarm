@@ -26,6 +26,8 @@ export interface WorkspaceSettingsOptions {
   };
   /** Owners and admins: open the Clean up dialog. Absent for everyone else. */
   onCleanup?(): void;
+  /** Starting state of More. Omitted on a redraw of the same workspace, it keeps More as the person left it. */
+  moreOpen?: boolean;
   moveDestinations?: readonly { id: string; name: string }[];
   onMove?(orgId: string): Promise<void>;
   onCopy(): Promise<void>;
@@ -39,6 +41,21 @@ export interface WorkspaceSettingsControls {
 
 function countLabel(count: number, singular: string, plural: string): string {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function existingMoreOpen(root: HTMLElement): boolean {
+  if (typeof root.querySelector === "function") {
+    return root.querySelector<HTMLDetailsElement>("[data-workspace-more]")?.open === true;
+  }
+  const children = (root as unknown as {
+    children?: ArrayLike<{ dataset?: Record<string, string>; open?: boolean }>;
+  }).children;
+  if (!children) return false;
+  for (let i = 0; i < children.length; i += 1) {
+    const child = children[i];
+    if (child?.dataset && "workspaceMore" in child.dataset) return child.open === true;
+  }
+  return false;
 }
 
 /** Renders the real workspace settings panel and owns its exact-name close gate. */
@@ -179,13 +196,18 @@ export function renderWorkspaceSettings(
   identity.append(idLabel, id, copy, copyStatus);
   /* What a person comes here for stays in view: the name, who is in it, and who may create channels. Everything else
      is one press away under More: clean-up, moving the workspace, its ID, and closing it. More starts closed, so the
-     one action that cannot be undone is never the first thing on screen. */
+     one action that cannot be undone is never the first thing on screen; a redraw for the same workspace while the
+     dialog is open keeps More open if the person already opened it. */
+  const keepMoreOpen = options.moreOpen ??
+    (root.dataset?.workspaceSettingsId === options.workspaceId && existingMoreOpen(root));
   const more = document.createElement("details");
   more.className = "dashboard__workspace-more";
   more.dataset.workspaceMore = "";
+  if (keepMoreOpen) more.open = true;
   const moreSummary = document.createElement("summary");
   moreSummary.textContent = "More";
   more.append(moreSummary, cleanup);
+  if (root.dataset) root.dataset.workspaceSettingsId = options.workspaceId;
   root.replaceChildren(titleRow, counts);
   if (options.channelPolicy) root.append(channelPolicyControl(root, options.channelPolicy));
   root.append(more);

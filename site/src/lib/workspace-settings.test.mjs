@@ -250,3 +250,57 @@ test("a refused policy change goes back to the policy held and says why", async 
   assert.deepEqual(focusCalls.filter((node) => node === choice("members") || node === choice("admins")), [],
     "a refusal leaves focus where it is");
 });
+
+test("redrawing the same workspace keeps More open; switching workspaces or reopening starts it closed", () => {
+  const doc = {
+    createElement: (tag) => ({
+      tag,
+      children: [],
+      dataset: {},
+      listeners: {},
+      value: "",
+      attributes: {},
+      append(...nodes) { this.children.push(...nodes); },
+      replaceChildren(...nodes) { this.children = nodes; },
+      setAttribute(key, value) { this.attributes[key] = value; },
+      removeAttribute(key) { delete this.attributes[key]; },
+      addEventListener(key, value) { this.listeners[key] = value; },
+      focus() {},
+      select() {},
+    }),
+  };
+  const root = doc.createElement("div");
+  root.ownerDocument = doc;
+  const base = {
+    name: "Science",
+    workspaceId: "ws-1",
+    memberCount: 2,
+    agentCount: 1,
+    canClose: true,
+    onCopy: async () => {},
+    onClose: async () => {},
+  };
+  const moreOf = () => root.children.find((node) => "workspaceMore" in node.dataset);
+
+  renderWorkspaceSettings(root, base);
+  assert.notEqual(moreOf().open, true, "More starts closed");
+
+  // Person opens More; a roster or org redraw for the same workspace leaves it open.
+  moreOf().open = true;
+  renderWorkspaceSettings(root, {
+    ...base,
+    memberCount: 3,
+    moveDestinations: [{ id: "org-2", name: "Yulan" }],
+    onMove: async () => {},
+  });
+  assert.equal(moreOf().open, true, "More stays open across a same-workspace redraw");
+
+  // A fresh open for the same workspace explicitly resets More to closed.
+  renderWorkspaceSettings(root, { ...base, moreOpen: false });
+  assert.notEqual(moreOf().open, true, "fresh open closes More again");
+
+  // Switching to another workspace starts with More closed even when the previous workspace had it open.
+  moreOf().open = true;
+  renderWorkspaceSettings(root, { ...base, workspaceId: "ws-2", name: "Ops" });
+  assert.notEqual(moreOf().open, true, "a different workspace starts with More closed");
+});

@@ -8219,14 +8219,16 @@ import "../../styles/kylon-image-viewer.css";
       if(session && !sampleMode && workspace) {
         const userId=session.user.id;
         moveOrganizations=[];
-        renderWorkspaceSettingsPanel(workspace);
+        renderWorkspaceSettingsPanel(workspace, false);
         void refreshChannelPolicy(workspace.id).then(changed => {
           if (changed && session?.user.id === userId && activeWorkspaceId === workspace.id && dialog.open) renderWorkspaceSettingsPanel(workspace);
         });
         void myOrganizations().then(orgs=>{
           if(session?.user.id!==userId || activeWorkspaceId!==workspace.id || !dialog.open) return;
+          const before = workspaceMoveDestinations(workspace);
           moveOrganizations=orgs;
-          renderWorkspaceSettingsPanel(workspace);
+          const after = workspaceMoveDestinations(workspace);
+          if (JSON.stringify(before) !== JSON.stringify(after)) renderWorkspaceSettingsPanel(workspace);
         }).catch(()=>{ /* Existing settings remain usable during a failed org read. */ });
       }
       for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
@@ -11758,7 +11760,14 @@ import "../../styles/kylon-image-viewer.css";
       one<HTMLElement>("[data-cleanup-body]")?.replaceChildren();
     });
 
-    const renderWorkspaceSettingsPanel = (opened: Workspace): void => {
+    const workspaceMoveDestinations = (workspace: Workspace): { id: string; name: string }[] => {
+      const me = members.find((member) => member.userId === session?.user.id);
+      return !sampleMode && me?.role === "owner" && moveOrganizations.some(org => org.id === workspace.orgId && (org.role === "owner" || org.role === "admin"))
+        ? moveOrganizations.filter(org => org.id !== workspace.orgId && (org.role === "owner" || org.role === "admin")).map(org => ({ id: org.id, name: org.name }))
+        : [];
+    };
+
+    const renderWorkspaceSettingsPanel = (opened: Workspace, moreOpen?: boolean): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
       if (!root) return;
       // Callers hold the row they opened with; the list may have a newer one (a rename, a policy change).
@@ -11772,6 +11781,7 @@ import "../../styles/kylon-image-viewer.css";
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
         canRename: !sampleMode && (me?.role === "owner" || me?.role === "admin"),
+        moreOpen,
         channelPolicy: !sampleMode && session && (me?.role === "owner" || me?.role === "admin") ? {
           value: workspace.channelCreationPolicy === undefined ? "members" : workspace.channelCreationPolicy,
           onChange: async policy => {
@@ -11794,8 +11804,7 @@ import "../../styles/kylon-image-viewer.css";
           if (renamed) renderWorkspaceSettingsPanel(renamed);
           one<HTMLButtonElement>("[data-workspace-rename]")?.focus();
         },
-        moveDestinations: !sampleMode && me?.role === "owner" && moveOrganizations.some(org=>org.id===workspace.orgId && (org.role==="owner" || org.role==="admin"))
-          ? moveOrganizations.filter(org=>org.id!==workspace.orgId && (org.role==="owner" || org.role==="admin")) : [],
+        moveDestinations: workspaceMoveDestinations(workspace),
         onMove: async orgId=>{
           if(!session || sampleMode) return;
           // Keep the same command ID for a retry after an uncertain response.
@@ -16914,6 +16923,8 @@ import "../../styles/kylon-image-viewer.css";
         for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
           trigger.setAttribute("aria-expanded", "false");
         }
+        const more = one<HTMLDetailsElement>("[data-workspace-details-content] [data-workspace-more]");
+        if (more) more.open = false;
         if (dialog.open) return;
         const returnTo = workspaceSettingsReturn; workspaceSettingsReturn = null;
         if (returnTo !== null) focusWorkspaceSettingsReturn(returnTo);
