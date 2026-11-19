@@ -9,7 +9,7 @@
  * painted and reachable at rest, and its sentence opens as a card. It is placed, not laid out: a
  * receipt turning into a problem cannot move or resize a row (#385). The rules are at the end. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
-  --k-receipt-block: 28px;
+  --k-receipt-block: 26px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools {
   display: flex;
@@ -21,6 +21,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 /* Opened, the bar becomes a small card: the detail drops under the summary and the reply
  * control keeps its corner. It stays until it is closed or the reader clicks elsewhere. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt[open]) {
+  inset-block-start: -4px;
+  transform: none;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
@@ -70,7 +72,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .
 /* In the floating bar a closed receipt is a compact control; its full sentence is its title,
  * its accessible name and its opened detail. The footer of a problem receipt keeps the full width. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
-  max-inline-size: 16rem;
+  max-inline-size: 13rem;
 }
 /* Closed, the bar is one line at every width: on a phone the receipt gives up width (its label ellipses) rather
  * than wrap Add reaction and "Reply in thread" onto a second line over the message (the home sheet,
@@ -241,12 +243,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:has(> .dashboard__message-body > .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet])) .hm-message-time {
   display: none;
 }
-/* The reply control of such a row floats alone in the usual corner. */
+/* The reply control of such a row floats alone above the top-right edge, clear of message text. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
   position: absolute;
-  inset: -14px 16px auto auto;
+  inset: -2px 0 auto auto;
+  transform: translateY(-100%);
   z-index: 3;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid var(--carbon-line, var(--k-shell-line));
   border-radius: 8px;
   background: var(--k-shell-surface);
@@ -275,6 +278,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
-    inset-inline-end: 8px;
+    inset-inline-end: 0;
   }
 }

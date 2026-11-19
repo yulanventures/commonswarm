@@ -198,7 +198,10 @@ export function groupStreamMessage(row: HTMLElement, signal: GroupableSignal, pr
   row.dataset.streamGrouped = "";
   const time = row.querySelector<HTMLTimeElement>(".hm-author__when");
   if (time) {
-    const gutter = time.cloneNode(true) as HTMLElement; gutter.classList.add("hm-message-time");
+    const gutter = time.cloneNode(true) as HTMLElement;
+    // Own class only so .hm-author__when's 12px rule never widens the 10px gutter clock, and no title tooltip.
+    gutter.className = "hm-message-time";
+    gutter.removeAttribute("title");
     gutter.setAttribute("aria-hidden", "true"); row.append(gutter);
   }
 }
