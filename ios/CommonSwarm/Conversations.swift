@@ -122,8 +122,8 @@ struct ConversationAPI {
         return request
     }
 
-    func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let (data, response) = try await session.data(for: request)
+    func send<T: Decodable>(_ request: URLRequest, canDispatch: @MainActor @Sendable () -> Bool = { true }) async throws -> T {
+        let (data, response) = try await session.data(for: request, canDispatch: canDispatch)
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
         guard (200..<300).contains(status) else { throw APIError.refused(status) }
         return try JSONDecoder().decode(T.self, from: data)
@@ -230,24 +230,30 @@ struct ConversationAPI {
         return try await session.downloadStorage(url, size: grant.size_bytes)
     }
 
-    @discardableResult
+    @MainActor @discardableResult
     func post(_ post: Post, attachments: [FileReference] = []) async throws -> UUID {
         struct Receipt: Decodable {
             struct Signal: Decodable { let id: UUID }
             let status: String
             let signal: Signal
         }
+        let canDispatch: @MainActor @Sendable () -> Bool
         if let address = post.command["conversation_id"] ?? nil, let id = UUID(uuidString: address) {
-            let draft = await session.composer(workspace: post.workspace_id, conversation: .thread(id))
+            let draft = session.composer(workspace: post.workspace_id, conversation: .thread(id))
+            guard draft.access == .joined else { throw APIError.refused(403) }
+            let commandID = post.command_id
+            canDispatch = { draft.canDispatch(commandID) }
+            guard canDispatch() else { throw CancellationError() }
             guard let rows = try await conversationList(post.workspace_id),
-                  rows.contains(where: { $0.id == id && $0.access == .joined }),
-                  await draft.access == .joined else { throw APIError.refused(403) }
+                  rows.contains(where: { $0.id == id && $0.access == .joined }) else { throw APIError.refused(403) }
+        } else {
+            canDispatch = { true }
         }
         var request = request("functions/v1/command")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(post.envelope(attachments: attachments))
-        let receipt: Receipt = try await send(request)
+        let receipt: Receipt = try await send(request, canDispatch: canDispatch)
         guard receipt.status == "accepted" else { throw APIError.invalidResponse }
         return receipt.signal.id
     }

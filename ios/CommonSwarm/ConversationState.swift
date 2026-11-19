@@ -43,6 +43,14 @@ final class Composer: ObservableObject {
     }
     @Published private(set) var outgoing: [Outgoing] = []
 
+    func canDispatch(_ commandID: UUID) -> Bool {
+        guard access == .joined, let row = outgoing.first(where: { $0.id == commandID }) else { return false }
+        switch row.delivery {
+        case .sending, .retrying: return true
+        default: return false
+        }
+    }
+
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
         guard canSend else { return nil }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text

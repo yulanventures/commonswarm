@@ -193,13 +193,15 @@ final class HumanSession {
         self.bearer = bearer
     }
 
-    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+    func data(for request: URLRequest, canDispatch: @MainActor @Sendable () -> Bool = { true }) async throws -> (Data, URLResponse) {
         guard let bearer else { throw CancellationError() }
         let accessToken = try await bearer()
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()
         var authorized = request
         authorized.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
+        // Fetching the bearer can suspend after the membership preflight.
+        guard canDispatch() else { throw CancellationError() }
         let response = try await transport.data(for: authorized)
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()

@@ -75,6 +75,9 @@ const privateCheck = { conversation_id: randomUUID(), kind: "private_channel", c
 if (verify) threadRows.push(privateCheck);
 let privateDenied = false;
 let threadPosts = 0;
+let holdNextMembershipRead = false;
+const membershipReadHeld = Promise.withResolvers();
+const releaseMembershipRead = Promise.withResolvers();
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -99,6 +102,9 @@ const server = createServer(async (req, res) => {
       return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
     }
     if (verify && req.method === "GET" && url.pathname.startsWith("/fixture/")) {
+      if (url.pathname === "/fixture/hold-membership") { holdNextMembershipRead = true; return reply(200, 0); }
+      if (url.pathname === "/fixture/membership-held") { await membershipReadHeld.promise; return reply(200, 0); }
+      if (url.pathname === "/fixture/resume-membership") { releaseMembershipRead.resolve(); return reply(200, 0); }
       if (url.pathname === "/fixture/lose-public") {
         threadRows.find(r => r.slug === "garden").joined = false;
         return reply(200, threadPosts);
@@ -192,7 +198,16 @@ const server = createServer(async (req, res) => {
       }
       if (!conversationsEnabled || ws === secondWorkspace) return reply(400, { error: "invalid_request" });
       if (ws !== workspace) return reply(403, { error: "forbidden" });
-      if (body.resource === "conversations" && body.include_archived === false) return reply(200, { conversations: threadRows });
+      if (body.resource === "conversations" && body.include_archived === false) {
+        if (verify && holdNextMembershipRead) {
+          holdNextMembershipRead = false;
+          const snapshot = structuredClone(threadRows);
+          membershipReadHeld.resolve();
+          await releaseMembershipRead.promise;
+          return reply(200, { conversations: snapshot });
+        }
+        return reply(200, { conversations: threadRows });
+      }
       const row = threadRows.find(r => r.conversation_id === body.conversation_id?.toLowerCase());
       if (body.resource !== "conversation_history" || !row) return reply(404, { error: "conversation_not_found" });
       if (row === privateCheck) {
