@@ -912,9 +912,6 @@ export async function runArrivalWatch(options: {
   principalId: string;
   store: ArrivalCursorStore;
   readPage(request: ArrivalWatchPageRequest): Promise<AgentSignalPage>;
-  /** Optional cursor-independent reconciliation of currently open routed system alerts so
-   * commit-order or lock-wait skew behind the signal cursor never drops an open alert. */
-  readOpenAlerts?: () => Promise<readonly SignalRecord[]>;
   emit(signal: SignalRecord): Promise<void>;
   afterEmitBatch?: (signals: readonly SignalRecord[]) => Promise<void> | void;
   onReady?: () => Promise<void> | void;
@@ -1131,25 +1128,22 @@ export async function runArrivalWatch(options: {
         cursor = cursorOf(row);
         await options.store.write(cursor);
       }
-      if (!cancelled() && options.readOpenAlerts) {
-        try {
-          const openAlerts = await options.readOpenAlerts();
-          const stillOpen = new Set<string>();
-          for (const alertRow of openAlerts) {
-            if (cancelled()) break;
-            const alertId = alertRow.system_alert?.alert_id ?? alertRow.id;
-            stillOpen.add(alertId);
-            if (seenAlertRoutes.get(alertId) === alertRow.created_at) continue;
-            seenAlertRoutes.set(alertId, alertRow.created_at);
-            await options.emit(alertRow);
-            emittedSignals.push(alertRow);
-          }
-          for (const tracked of seenAlertRoutes.keys()) {
-            if (!stillOpen.has(tracked)) seenAlertRoutes.delete(tracked);
-          }
-        } catch {
-          // Open-alert reconciliation retries on the next cycle and never interrupts signal watch.
+      if (!cancelled() && page.openSystemAlerts !== undefined) {
+        const stillOpen = new Set<string>();
+        for (const alertRow of page.openSystemAlerts) {
+          if (cancelled()) break;
+          const alertId = alertRow.system_alert?.alert_id ?? alertRow.id;
+          stillOpen.add(alertId);
+          if (seenAlertRoutes.get(alertId) === alertRow.created_at) continue;
+          seenAlertRoutes.set(alertId, alertRow.created_at);
+          await options.emit(alertRow);
+          emittedSignals.push(alertRow);
         }
+        for (const tracked of seenAlertRoutes.keys()) {
+          if (!stillOpen.has(tracked)) seenAlertRoutes.delete(tracked);
+        }
+      } else if (page.openSystemAlerts === undefined) {
+        seenAlertRoutes.clear();
       }
       if (emittedSignals.length > 0) {
         await options.afterEmitBatch?.(emittedSignals);

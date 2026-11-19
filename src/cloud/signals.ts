@@ -162,6 +162,8 @@ export interface AgentSignalPage {
   pendingDeliveryCount: number | null;
   /** Optional wake join hint. 0.1.57 servers omit it. */
   wake?: WakeHint;
+  /** Open system alerts routed to this lead seat, cursor-independent for late-commit reconciliation. */
+  openSystemAlerts?: SignalRecord[];
 }
 
 /** Bounded CLI wait window for inbox --wait / ask --wait (seconds). */
@@ -1448,6 +1450,10 @@ async function agentSignalPage(
   } catch {
     throw plainMalformedError("signal read returned a malformed wake hint");
   }
+  const rawOpenAlerts = (body as Record<string, unknown>).open_system_alerts;
+  const openSystemAlerts = Array.isArray(rawOpenAlerts)
+    ? parseSignalRows(rawOpenAlerts, parseOptions).signals
+    : undefined;
   return {
     signals: sortSignals(
       rowsAfterCursor(parsedRows.signals, query.after),
@@ -1462,6 +1468,7 @@ async function agentSignalPage(
     malformedRows: parsedRows.malformedRows,
     pendingDeliveryCount,
     ...(wake === undefined ? {} : { wake }),
+    ...(openSystemAlerts === undefined ? {} : { openSystemAlerts }),
   };
 }
 

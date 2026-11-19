@@ -221,6 +221,7 @@ test("runArrivalWatch open-route reconciliation delivers an open routed alert ev
     },
     readPage: async () => ({
       signals: [],
+      openSystemAlerts: [skewedAlert],
       rawCount: 0,
       malformedRows: 0,
       pendingDeliveryCount: 0,
@@ -228,7 +229,6 @@ test("runArrivalWatch open-route reconciliation delivers an open routed alert ev
       capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
       legacyCursorFallback: false,
     }),
-    readOpenAlerts: async () => [skewedAlert],
     emit: async (row) => { emitted.push(row); },
   });
   assert.equal(emitted.length, 1, "open routed alert behind signal cursor must emit once and not duplicate on next cycle");

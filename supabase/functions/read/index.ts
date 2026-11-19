@@ -1661,8 +1661,10 @@ async function handle(
     `;
     /* Open system alerts routed to this lead seat reach its inbox as notes addressed to it,
      * through swarm_read.system_alerts under this agent's claims (so stale leads or lost channel
-     * access immediately return zero rows). Never includes resolution_note or message bodies. */
-    const systemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
+     * access immediately return zero rows). Never includes resolution_note or message bodies.
+     * Returned both cursor-merged into signals AND as open_system_alerts (when non-empty) so
+     * monotonic-cursor watchers reconcile late-committing reroutes in the same single HTTP read. */
+    const openSystemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
       SELECT
         a.alert_id AS id, a.workspace_id, a.affected_principal_id AS "from", 'agent' AS from_kind,
         NULL::uuid AS "to", ('system_alert:' || a.kind) AS about, 'note' AS kind,
@@ -1711,29 +1713,27 @@ async function handle(
         AND (${channelId}::uuid IS NULL OR a.channel_id = ${channelId}::uuid)
         AND (${unfiledOnly} = false OR a.channel_id IS NULL)
         AND (${body.since}::timestamptz IS NULL OR COALESCE(a.routed_at, a.opened_at) >= ${body.since}::timestamptz)
-        AND (
-          ${useAfterCursor} = false
-          OR date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) >
-            date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
-          OR (
-            date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) =
-              date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
-            AND a.alert_id > ${afterId}::uuid
-          )
-        )
       ORDER BY
         CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END ASC,
         CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END DESC,
         CASE WHEN ${orderAsc} THEN a.alert_id END ASC,
         CASE WHEN ${orderDesc} THEN a.alert_id END DESC
-      LIMIT ${body.limit}
+      LIMIT ${Math.max(body.limit, 50)}
     `;
+    const afterMs = useAfterCursor && afterCreatedAt ? new Date(afterCreatedAt).getTime() : null;
+    const systemAlertRows = !useAfterCursor || afterMs === null
+      ? openSystemAlertRows.slice(0, body.limit)
+      : openSystemAlertRows.filter((row) => {
+          const rowMs = new Date(row.created_at as string | Date).getTime();
+          return rowMs > afterMs || (rowMs === afterMs && String(row.id) > String(afterId));
+        }).slice(0, body.limit);
     const withReactions = reactionRows.length === 0 ? rows : mergeSignalPages(rows, reactionRows, orderAsc, body.limit);
     const mergedSignals = systemAlertRows.length === 0
       ? withReactions
       : mergeSignalPages(withReactions, systemAlertRows, orderAsc, body.limit);
     return json(200, {
       signals: mergedSignals,
+      ...(openSystemAlertRows.length > 0 ? { open_system_alerts: openSystemAlertRows } : {}),
       capabilities: body.inbox
         ? HOME_INBOX_SIGNAL_CAPABILITIES
         : SIGNAL_CAPABILITIES,

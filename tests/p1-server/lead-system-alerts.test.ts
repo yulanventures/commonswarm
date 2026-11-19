@@ -15,8 +15,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { readSystemAlerts, resolveSystemAlertCommand, systemAlertToSignalRecord } from "../../src/cloud/system-alerts.js";
+import { readSystemAlerts, resolveSystemAlertCommand } from "../../src/cloud/system-alerts.js";
 import { ThinCommandClient, type SignalRecord } from "../../src/cloud/command-client.js";
+import { readAgentSignalPage } from "../../src/cloud/signals.js";
 import { runArrivalWatch } from "../../src/cloud/arrival-watch.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
@@ -518,7 +519,7 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   );
 
   // MVCC commit-order skew witness: even when the listener's signal cursor is 60s PAST routed_at,
-  // runArrivalWatch open-route reconciliation (backed by real readSystemAlerts) still emits it once!
+  // a single served read?resource=signals returns open_system_alerts and runArrivalWatch emits it once!
   const watchCtrl = new AbortController();
   const watchEmitted: SignalRecord[] = [];
   let watchCycles = 0;
@@ -541,25 +542,23 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
       read: async () => futureCursor,
       write: async (next) => { futureCursor = next; },
     },
-    readPage: async () => ({
-      signals: [],
-      rawCount: 0,
-      malformedRows: 0,
-      pendingDeliveryCount: 0,
-      nextCursor: null,
-      capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
-      legacyCursorFallback: false,
-    }),
-    readOpenAlerts: async () => {
-      const res = await readSystemAlerts(watchTarget, wsLead.token, workspace);
-      return res.alerts
-        .filter((a) => a.routed_lead_principal_id === wsLead.principal && (a.resolved_at ?? null) === null)
-        .map((a) => systemAlertToSignalRecord(a, wsLead.principal));
-    },
+    readPage: async ({ after, baseline, limit }) =>
+      await readAgentSignalPage(
+        watchTarget,
+        { kind: "agent", token: wsLead.token },
+        {
+          workspaceId: workspace,
+          inbox: true,
+          limit,
+          includeStale: false,
+          ...(baseline ? {} : { ascending: true as const, ...(after === null ? {} : { after }) }),
+        },
+        { signal: watchCtrl.signal },
+      ),
     emit: async (row) => { watchEmitted.push(row); },
   });
   const matchingEmits = watchEmitted.filter((r) => r.id === beforeReroute!.alert_id);
-  assert.equal(matchingEmits.length, 1, "open-route reconciliation must deliver the routed alert once even when cursor is past routed_at");
+  assert.equal(matchingEmits.length, 1, "open_system_alerts reconciliation must deliver the routed alert once even when cursor is past routed_at");
 });
 
 test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404, identical audit_log visibility, and zero lock wait under contention for non-member admin", { timeout: 90_000 }, async () => {
