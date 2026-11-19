@@ -272,7 +272,7 @@ private struct HistoryView: View {
                             } else if case .unconfirmed = row.delivery {
                                 Button("Retry") { deliver(draft.retry(row.id)) }
                             } else if case .refused = row.delivery {
-                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty)
+                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
                             }
                         }.id(row.id)
                     }
