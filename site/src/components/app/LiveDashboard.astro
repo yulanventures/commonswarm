@@ -1579,6 +1579,7 @@ import "../../styles/kylon-image-viewer.css";
     type SignalLocation,
     channelUnread,
     ConversationsUnsupportedError,
+    ConversationUnavailableError,
     listConversations,
     OversightAuthRefusedError,
     OversightRequestRetiredError,
@@ -2097,9 +2098,10 @@ import "../../styles/kylon-image-viewer.css";
     let conversationsGeneration = 0;
     let conversationsReadAt = 0;
     let activeDmConversationId: string | null = null;
-    /** Step 3D-1: active `conversation_history` session state, cursor pair, and request generation. */
+    /** Step 3D-1: active `conversation_history` session state, cursor pair, epoch (bumped on switch/evict/reset), and request generation. */
     let conversationHistory: ConversationHistoryState<Signal> | null = null;
     let conversationHistoryGeneration = 0;
+    let conversationSessionEpoch = 0;
     /** A `?dm=<id>` that returned 404 conversation_not_found or lost access (uniform unavailable state). */
     let unavailableDmConversationId: string | null = null;
     let mountedPreviewKey = "";
@@ -4649,7 +4651,7 @@ import "../../styles/kylon-image-viewer.css";
       if (!owner) return null;
       if (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null &&
         typeof conversationDraftStorageKey === "function") {
-        return conversationDraftStorageKey(workspaceId, activeDmConversationId);
+        return conversationDraftStorageKey(owner, workspaceId, activeDmConversationId);
       }
       return `commonswarm:composer-draft:${owner}:${workspaceId}:${COMPOSER_DRAFT_SCOPE}`;
     };
@@ -13212,6 +13214,7 @@ import "../../styles/kylon-image-viewer.css";
             ? conversationHistory.nextBefore
             : signalCursor;
         if (reset) {
+          conversationSessionEpoch += 1;
           signalCursor = null;
           signalCutoff = new Date().toISOString();
           unavailableDmConversationId = null;
@@ -13219,9 +13222,7 @@ import "../../styles/kylon-image-viewer.css";
             conversationHistory = createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
           }
         }
-        const baseState = conversationHistory && conversationHistory.conversationId === convId
-          ? conversationHistory
-          : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+        const pinnedSessionEpoch = conversationSessionEpoch;
         const result = await readConversationHistory(workspaceId, convId, {
           ...(beforeCursor ? { before: beforeCursor } : {}),
           limit: 50,
@@ -13229,16 +13230,25 @@ import "../../styles/kylon-image-viewer.css";
           includeReactions: true,
         });
         const stillMatches = () => {
-          if (version !== requestVersion || workspaceId !== activeWorkspaceId || (session?.user.id ?? "") !== pinnedUserId) {
+          if (
+            pinnedSessionEpoch !== conversationSessionEpoch ||
+            version !== requestVersion ||
+            workspaceId !== activeWorkspaceId ||
+            (session?.user.id ?? "") !== pinnedUserId
+          ) {
             return false;
           }
           const nowTarget = activeConversationHistoryTarget();
           return nowTarget.mode === "conversation" && nowTarget.conversationId === convId;
         };
         if ((reset && histGen !== conversationHistoryGeneration) || !stillMatches()) return;
+        const liveState = conversationHistory && conversationHistory.conversationId === convId
+          ? conversationHistory
+          : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+        if (!reset && liveState.status === "unavailable") return;
         const next = reset
-          ? applyConversationHistoryInitial(baseState, result, optimisticRowsForConversation(convId))
-          : applyConversationHistoryOlder(baseState, result);
+          ? applyConversationHistoryInitial(liveState, result, optimisticRowsForConversation(convId))
+          : applyConversationHistoryOlder(liveState, result);
         conversationHistory = next;
         if (next.status === "unavailable") {
           if (typeof evictConversationLocalState === "function") {
@@ -13349,18 +13359,20 @@ import "../../styles/kylon-image-viewer.css";
         if (convTarget.mode === "conversation" && typeof readConversationHistory === "function") {
           const convId = convTarget.conversationId;
           const histGen = ++conversationHistoryGeneration;
-          const currentState = conversationHistory && conversationHistory.conversationId === convId &&
+          const pinnedSessionEpoch = conversationSessionEpoch;
+          const afterCursor = conversationHistory && conversationHistory.conversationId === convId &&
             conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
-            ? conversationHistory
-            : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+            ? conversationHistory.nextAfter
+            : null;
           const result = await readConversationHistory(workspaceId, convId, {
-            ...(currentState.nextAfter ? { after: currentState.nextAfter } : {}),
+            ...(afterCursor ? { after: afterCursor } : {}),
             limit: 50,
             includeMentions: true,
             includeReactions: true,
           });
           const nowTarget = activeConversationHistoryTarget();
           if (
+            pinnedSessionEpoch !== conversationSessionEpoch ||
             histGen !== conversationHistoryGeneration ||
             version !== requestVersion ||
             workspaceId !== activeWorkspaceId ||
@@ -13368,8 +13380,13 @@ import "../../styles/kylon-image-viewer.css";
             nowTarget.mode !== "conversation" ||
             nowTarget.conversationId !== convId
           ) return;
+          const liveState = conversationHistory && conversationHistory.conversationId === convId &&
+            conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
+            ? conversationHistory
+            : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+          if (liveState.status === "unavailable") return;
           const refreshed = applyConversationHistoryRefresh(
-            currentState,
+            liveState,
             result,
             optimisticRowsForConversation(convId),
           );
@@ -15801,6 +15818,7 @@ import "../../styles/kylon-image-viewer.css";
       activeDmConversationId = null;
       conversationHistory = null;
       conversationHistoryGeneration += 1;
+      conversationSessionEpoch += 1;
       unavailableDmConversationId = null;
       mountedPreviewKey = "";
       channelJoinPending.clear();
@@ -15818,8 +15836,8 @@ import "../../styles/kylon-image-viewer.css";
     /** Immediately wipe client-held rows, cursors, optimistic rows, and local draft for a left or revoked conversation. */
     const evictConversationLocalState = (workspaceId: string, conversationId: string, markUnavailable: boolean): void => {
       const pinnedUserId = session?.user.id ?? "";
-      if (typeof clearConversationDraftStorage === "function") {
-        clearConversationDraftStorage(window.localStorage, workspaceId, conversationId);
+      if (typeof clearConversationDraftStorage === "function" && pinnedUserId) {
+        clearConversationDraftStorage(window.localStorage, pinnedUserId, workspaceId, conversationId);
       }
       for (const [id, entry] of postedSinceReset.entries()) {
         if (entry.row.conversationId === conversationId) postedSinceReset.delete(id);
@@ -15832,6 +15850,7 @@ import "../../styles/kylon-image-viewer.css";
         (conversationHistory !== null && conversationHistory.conversationId === conversationId);
       if (viewingEvicted) {
         conversationHistoryGeneration += 1;
+        conversationSessionEpoch += 1;
         signals = [];
         signalCursor = null;
         signalHasMore = false;
@@ -15929,6 +15948,7 @@ import "../../styles/kylon-image-viewer.css";
       unavailableDmConversationId = null;
       conversationHistory = createConversationHistoryState<Signal>(workspaceId, pinnedUserId, conversationId);
       conversationHistoryGeneration += 1;
+      conversationSessionEpoch += 1;
       signals = [];
       signalCursor = null;
       signalHasMore = false;
@@ -16909,6 +16929,7 @@ import "../../styles/kylon-image-viewer.css";
         unavailableDmConversationId = null;
         conversationHistory = null;
         conversationHistoryGeneration += 1;
+        conversationSessionEpoch += 1;
         syncComposerAddress([]);
         closeEntityPanel(false);
       }
@@ -20261,6 +20282,13 @@ import "../../styles/kylon-image-viewer.css";
           : null;
       const freshPlacementChannelId = isStep2bDmPost ? null : destination.channelId;
       const freshPlacementThreadRootId = replyRoot?.id ?? null;
+      if (!sampleMode && !isStep2bDmPost && freshPlacementConversationId !== null) {
+        const targetConv = workspaceConversations?.find((c) => c.conversationId === freshPlacementConversationId) ?? null;
+        if (targetConv && !targetConv.joined) {
+          setComposerStatus("Join this channel to post.", "error");
+          return;
+        }
+      }
       /* NOTHING IS UPLOADED FOR A SEND THE SERVER WILL REFUSE. Files staged somewhere open stay staged when the
          place changes (another channel, a thread under a private root), so the check is here, where the send
          starts, and it reads the same placement the message will carry. The draft and its files are untouched. */
@@ -20718,7 +20746,8 @@ import "../../styles/kylon-image-viewer.css";
           }
           return;
         }
-        if (!landed && placementConversationId !== null && readableError(caught) === CONVERSATION_UNAVAILABLE_TEXT &&
+        if (!landed && placementConversationId !== null &&
+          (caught instanceof ConversationUnavailableError || readableError(caught) === CONVERSATION_UNAVAILABLE_TEXT) &&
           typeof evictConversationLocalState === "function") {
           for (const attachment of attachmentSnapshot) {
             if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);

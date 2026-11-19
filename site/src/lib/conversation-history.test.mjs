@@ -347,8 +347,13 @@ test("compareSignalsDesc breaks timestamp ties by id DESC and clearConversationD
   assert.deepEqual(sorted.map((r) => r.id), ["b", "a"]);
 
   const removed = [];
-  clearConversationDraftStorage({ removeItem: (key) => removed.push(key) }, ws, groupConvId);
-  assert.deepEqual(removed, [conversationDraftStorageKey(ws, groupConvId)]);
+  clearConversationDraftStorage({ removeItem: (key) => removed.push(key) }, viewer, ws, groupConvId);
+  assert.deepEqual(removed, [conversationDraftStorageKey(viewer, ws, groupConvId)]);
+  assert.notEqual(
+    conversationDraftStorageKey(viewer, ws, groupConvId),
+    conversationDraftStorageKey(peerAlex, ws, groupConvId),
+    "draft storage keys must stay isolated per signed-in viewer",
+  );
 });
 
 test("browserSignalCommand with conversationId emits conversation_id without channel/thread_root_id/broadcast_to_channel", () => {

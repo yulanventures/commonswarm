@@ -3674,6 +3674,13 @@ export function browserSignalCommand(
   };
 }
 
+export class ConversationUnavailableError extends Error {
+  constructor(message = "This conversation isn't available in this workspace.") {
+    super(message);
+    this.name = "ConversationUnavailableError";
+  }
+}
+
 /** Posts ONE browser-authored signal to the whole To: set, or to the workspace when it is empty. */
 export async function postBrowserSignal(
   session: Session,
@@ -3697,6 +3704,11 @@ export async function postBrowserSignal(
   );
   if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   if (status !== 200 || body.status !== "accepted") {
+    if (status === 404 && body.error === "conversation_not_found") {
+      throw new ConversationUnavailableError(
+        typeof body.message === "string" && body.message ? body.message : undefined,
+      );
+    }
     throw new Error(
       status === 403
         ? "That person or agent is no longer available here. Nothing was posted."

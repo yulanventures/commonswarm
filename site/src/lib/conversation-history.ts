@@ -413,19 +413,24 @@ export function directConversationSendRefusal(args: {
   return null;
 }
 
-/** Storage keys bound to a specific conversation so leave/revocation wipes local draft residue immediately. */
-export function conversationDraftStorageKey(workspaceId: string, conversationId: string): string {
-  return `commonswarm:composer-draft:${workspaceId}:conv:${conversationId}`;
+/** Storage keys bound to viewer + workspace + conversation so drafts never bleed across accounts and wipe cleanly on leave/revocation. */
+export function conversationDraftStorageKey(
+  viewerId: string,
+  workspaceId: string,
+  conversationId: string,
+): string {
+  return `commonswarm:composer-draft:${viewerId}:${workspaceId}:conv:${conversationId}`;
 }
 
 export function clearConversationDraftStorage(
   storage: Pick<Storage, "removeItem"> | null | undefined,
+  viewerId: string,
   workspaceId: string,
   conversationId: string,
 ): void {
-  if (!storage || !workspaceId || !conversationId) return;
+  if (!storage || !viewerId || !workspaceId || !conversationId) return;
   try {
-    storage.removeItem(conversationDraftStorageKey(workspaceId, conversationId));
+    storage.removeItem(conversationDraftStorageKey(viewerId, workspaceId, conversationId));
   } catch {
     // Storage access is optional in restricted browsing contexts.
   }

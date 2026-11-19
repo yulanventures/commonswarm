@@ -408,7 +408,7 @@ async function observeConversations3D() {
     input.value = "Secret unsent group draft";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("blur", { bubbles: true }));
-    const draftKey = `commonswarm:composer-draft:${f.workspace}:conv:${f.ids.dmGroupConv}`;
+    const draftKey = `commonswarm:composer-draft:${f.owner}:${f.workspace}:conv:${f.ids.dmGroupConv}`;
     await wait("group draft persisted", () => !!localStorage.getItem(draftKey));
 
     await openDrawerIfPhone();
