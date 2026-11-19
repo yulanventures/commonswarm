@@ -67,6 +67,7 @@ final class TodosUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(droppedTask.waitForExistence(timeout: 5), "Expected dropped to-do under All")
+        capture("todos-all")
         try tapButton("Open")
         XCTAssertTrue(taskTitle.waitForExistence(timeout: 5))
 

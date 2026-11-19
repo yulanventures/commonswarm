@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TodoStateBadge: View {
     let state: TodoState
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Text(state.label)
@@ -13,20 +14,28 @@ struct TodoStateBadge: View {
     }
 
     private var foreground: Color {
-        switch state {
-        case .open: .primary
-        case .doing: .accentColor
-        case .done: .green
-        case .dropped: .secondary
+        switch (state, colorScheme) {
+        case (.open, .dark): Color(red: 0.90, green: 0.93, blue: 0.95)
+        case (.open, _): Color(red: 0.12, green: 0.14, blue: 0.16)
+        case (.doing, .dark): Color(red: 0.49, green: 0.75, blue: 1.00)
+        case (.doing, _): Color(red: 0.00, green: 0.32, blue: 0.70)
+        case (.done, .dark): Color(red: 0.49, green: 0.91, blue: 0.53)
+        case (.done, _): Color(red: 0.07, green: 0.39, blue: 0.16)
+        case (.dropped, .dark): Color(red: 0.69, green: 0.73, blue: 0.77)
+        case (.dropped, _): Color(red: 0.34, green: 0.38, blue: 0.42)
         }
     }
 
     private var background: Color {
-        switch state {
-        case .open: Color(.secondarySystemFill)
-        case .doing: Color.accentColor.opacity(0.15)
-        case .done: Color.green.opacity(0.15)
-        case .dropped: Color(.tertiarySystemFill)
+        switch (state, colorScheme) {
+        case (.open, .dark): Color(red: 0.19, green: 0.21, blue: 0.24)
+        case (.open, _): Color(red: 0.92, green: 0.93, blue: 0.94)
+        case (.doing, .dark): Color(red: 0.08, green: 0.20, blue: 0.32)
+        case (.doing, _): Color(red: 0.89, green: 0.94, blue: 1.00)
+        case (.done, .dark): Color(red: 0.07, green: 0.21, blue: 0.11)
+        case (.done, _): Color(red: 0.89, green: 0.96, blue: 0.91)
+        case (.dropped, .dark): Color(red: 0.17, green: 0.19, blue: 0.21)
+        case (.dropped, _): Color(red: 0.94, green: 0.95, blue: 0.96)
         }
     }
 }
