@@ -8111,7 +8111,13 @@ import "../../styles/kylon-image-viewer.css";
         await revokeAgentToken(session, questionId ?? uuid(), workspaceId, pinnedKey.tokenId);
         receipt = `Key turned off. ${agent.name}’s key and its renewals stopped immediately for new requests.`;
       }
-      if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+      if (action === "remove-agent") {
+        if (!agent) throw new Error("This agent is no longer in this workspace. Go back and check the list.");
+        await revokeAgentPrincipal(session, questionId ?? uuid(), workspaceId, agent.principalId);
+        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
+        receipt = agent.transport === "hosted_mcp"
+          ? `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`
+          : `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
         ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;
@@ -22678,8 +22684,14 @@ import "../../styles/kylon-image-viewer.css";
     .pd-fact-row .pd-fact-action { grid-column: 2; grid-row: 2; }
     .pd-fact-row .pd-text-button, .pd-danger-button { font-size: 14px; }
     .pd-scroll-footer { padding: 9px 16px calc(9px + env(safe-area-inset-bottom)); }
-    .pd-confirm { padding: 24px; }
-    .pd-confirm-actions { flex-direction: column-reverse; }
+    .pd-confirm { padding: 20px; }
+    .pd-confirm-icon { margin-block-end: 12px; }
+    .pd-confirm h2 { font-size: 20px; line-height: 1.28; }
+    .pd-confirm-facts { margin: 14px 0 0; gap: 8px; }
+    .pd-confirm-facts li { line-height: 1.5; }
+    .pd-confirm-note { margin: 10px 0 0; line-height: 1.48; }
+    .pd-alternative { margin-block-start: 14px; padding: 12px; }
+    .pd-confirm-actions { flex-direction: column-reverse; margin-block-start: 16px; }
     .pd-confirm-actions .dashboard__button { inline-size: 100%; }
   }
   @media (prefers-reduced-motion: reduce) { .dashboard__roster-dialog, .pd-confirm { animation: none; transition: none; scroll-behavior: auto; } }

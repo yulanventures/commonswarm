@@ -2806,7 +2806,11 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "revoke_agent_principal"
+    }
   },
   {
     "id": "dialog.admin-history",

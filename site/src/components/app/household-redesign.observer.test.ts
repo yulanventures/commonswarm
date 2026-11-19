@@ -1783,3 +1783,142 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
   assert.equal(sent[1].kind, "code");
   assert.equal(sent[1].id, idB);
 });
+
+test("remove-agent confirmation distinguishes hosted workspace-only vs local permanent-origin removal, keeps Turn off key instead reachable where applicable, and reuses one command ID", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Rivera household & studio";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const otherOwnerId = "22222222-2222-4222-8222-222222222229";
+  const localId = "33333333-3333-4333-8333-333333333331";
+  const foreignLocalId = "33333333-3333-4333-8333-333333333332";
+  const hostedId = "33333333-3333-4333-8333-333333333333";
+  const grantId = "44444444-4444-4444-8444-444444444441";
+  const tokenId = "55555555-5555-4555-8555-555555555551";
+
+  let ids = 0, lose = false;
+  const removals: any[] = [], keyRevokes: any[] = [], reloads: any[] = [];
+  const makeLiveAgents = () => ([
+    { principalId: localId, ownerUserId: viewerId, name: "Sprout", transport: "local", work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } } },
+    { principalId: foreignLocalId, ownerUserId: otherOwnerId, name: "Peer", transport: "local", work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } } },
+    { principalId: hostedId, ownerUserId: viewerId, name: "Muse", transport: "hosted_mcp" },
+  ]);
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [],
+    agents: makeLiveAgents(),
+    accessStatuses: [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }],
+    catchUpData: [], removedAgents: new Map(), removedAgentOwners: new Map(),
+    requestVersion: 0, catchUpGeneration: 0, railOverviewGeneration: 0, homeWorkspaceRead: 0, livePromptPrincipalId: "",
+    renderRoster: () => {}, renderHomeSide: () => {}, renderHomeObjectPane: () => {}, renderMentionPicker: () => {},
+    peopleDialogModel: () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: true,
+      })),
+    }),
+    peopleDialogCanAct, homeConnectionAccess, homeConnectionTokenMatches, showPeopleConfirmation,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeAgentPrincipal: async (_s: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ commandId, wsId, id });
+      if (lose) throw new Error("lost");
+    },
+    revokeAgentToken: async (_s: any, commandId: string, wsId: string, tok: string) => {
+      keyRevokes.push({ commandId, wsId, tok });
+    },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => null,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  // 1. Hosted agent: workspace-only heading, 1 stop, quiet history/continuity note, no dead key alternative, Escape returns to opener with 0 removals.
+  const hostedOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Muse from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 1);
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
+    "Its history stays as “Muse (removed)”. Its app connection and other workspaces stay, and its owner can add it back here.");
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), hostedOpener);
+  assert.equal(removals.length, 0);
+
+  // 2. Own local agent with live key: warns of permanent original-workspace retirement, keeps retained history underneath,
+  //    and Turn off key instead opens the key confirmation WITHOUT removing the agent.
+  const localOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Remove Sprout?");
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 2);
+  assert.match(dialog.querySelectorAll("li")[1]?.children?.[1]?.textContent ?? "", /original workspace, its identity, keys, and connections everywhere end permanently/);
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
+    "Its history stays as “Sprout (removed)”. If it was added here from another workspace, its connection and other workspaces stay.");
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  const insteadBtn = dialog.querySelectorAll("button").find((b: any) => b.dataset?.turnOffKeyInstead !== undefined);
+  assert.ok(insteadBtn, "Turn off key instead is reachable for own local agent with a live key");
+  insteadBtn.click();
+  assert.equal(removals.length, 0, "switching to Turn off key instead never removes the agent");
+  assert.equal(keyRevokes.length, 0, "switching to Turn off key instead does not revoke a key until confirmed");
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Turn off Sprout’s key?");
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), localOpener, "Escape from the switched key dialog still returns to the original opener");
+  assert.equal(removals.length, 0);
+  assert.equal(keyRevokes.length, 0);
+
+  // 3. Another member's local agent: admin cannot turn off their local key, so Turn off key instead is omitted.
+  const peerOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("remove-agent", foreignLocalId, peerOpener);
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+
+  // 4. Confirmed hosted removal + lost-answer retry reuses one command ID and names the workspace in the receipt.
+  actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
+  const confirmBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+  lose = true;
+  await confirmBtn.events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(removals.length, 1);
+  lose = false;
+  await confirmBtn.events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(removals.length, 2);
+  assert.equal(removals[0].commandId, removals[1].commandId, "retry reuses one command ID");
+  assert.equal(reloads[0].receipt, `Muse removed from ${workspaceName}. Its history stays as “Muse (removed)”.`);
+});

@@ -64,10 +64,21 @@ test("read-only, elevated, owner and sample action gates are distinct", () => {
   data.sample = true; for (const action of ["new-key","remove-agent","withdraw","connected-apps","allow"]) assert.equal(peopleDialogCanAct(data, action, value.id), false);
   assert.equal(peopleDialogCanAct(data, "cancel-invite", "invite"), false);
 });
-test("confirm consequences distinguish permanent identity removal, key timing and reversible access", () => {
-  const removed = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true });
-  assert.deepEqual(removed.stops, ["Muse will lose access to this space. Its identity and every connection will end.", "This cannot be undone."]);
-  assert.deepEqual(removed.stays, ["Its history stays as “Muse (removed)”.", "Its owner can connect a new agent with the same name."]);
+test("confirm consequences distinguish workspace-only hosted removal, local permanent-origin removal, key timing and reversible access", () => {
+  const hostedRemoved = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true, workspaceName: "Herb garden" });
+  assert.equal(hostedRemoved.title, "Remove Muse from Herb garden?");
+  assert.equal(hostedRemoved.button, "Remove from workspace");
+  assert.deepEqual(hostedRemoved.stops, ["It loses access to this workspace immediately."]);
+  assert.deepEqual(hostedRemoved.stays, ["Its history stays as “Muse (removed)”. Its app connection and other workspaces stay, and its owner can add it back here."]);
+  assert.equal(peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true }).title, "Remove Muse?");
+  const localRemoved = peopleConfirmationCopy("remove-agent", { name: "Sprout", hosted: false, workspaceName: "Herb garden" });
+  assert.equal(localRemoved.title, "Remove Sprout?");
+  assert.equal(localRemoved.button, "Remove agent");
+  assert.deepEqual(localRemoved.stops, [
+    "It loses access to Herb garden immediately.",
+    "If this is its original workspace, its identity, keys, and connections everywhere end permanently. This cannot be undone.",
+  ]);
+  assert.deepEqual(localRemoved.stays, ["Its history stays as “Sprout (removed)”. If it was added here from another workspace, its connection and other workspaces stay."]);
   assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei", workspaceName: "Herb garden" }).stays[0], "Workspace history stays. They keep their other memberships.");
@@ -208,9 +219,12 @@ test("withdraw copy names the agent and workspace and keeps hosted and local con
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse", workspaceName: "   " }).title, "Withdraw Muse’s Lists & docs access?");
 });
 
-test('local workspace removal is scoped and only an owner can disconnect the reusable local key',()=>{
+test('local workspace removal warns about permanent origin-workspace retirement and only an owner can disconnect the reusable local key',()=>{
   const copy=peopleConfirmationCopy('remove-agent',{name:'Local',hosted:false});
-  assert.deepEqual(copy.stops,['Local will lose access to this workspace immediately.']);
+  assert.deepEqual(copy.stops,[
+    'It loses access to this workspace immediately.',
+    'If this is its original workspace, its identity, keys, and connections everywhere end permanently. This cannot be undone.',
+  ]);
   const data=model();data.agents[0].liveKey=true;data.agents[0].mayManage=true;data.agents[0].hosted=false;data.agents[0].own=false;
   assert.equal(peopleDialogCanAct(data,'remove-agent',data.agents[0].id),true);
   assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);
