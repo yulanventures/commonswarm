@@ -3360,6 +3360,121 @@
     ]
   },
   {
+    "id": "app.people.invite-made",
+    "kind": "view",
+    "path": "/app?w={invitesWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-pd-focus=\"page-invite\"]",
+        "click": "[data-people-context] [data-pd-focus=\"page-invite\"]"
+      },
+      {
+        "waitFor": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "type": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "text": "made.{unique}@example.test"
+      },
+      {
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-copy\"]"
+      },
+      {
+        "waitFor": "[data-people-context] button[aria-label=\"Cancel the invitation for made.{unique}@example.test\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-done\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_invites_workspace"
+    ],
+    "invitesIn": "{invitesWorkspace}",
+    "frame": [
+      "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-link\"]",
+      "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-copy\"]",
+      "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-done\"]"
+    ]
+  },
+  {
+    "id": "app.people.invite-cleared",
+    "kind": "view",
+    "path": "/app?w={invitesWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-pd-focus=\"page-invite\"]",
+        "click": "[data-people-context] [data-pd-focus=\"page-invite\"]"
+      },
+      {
+        "waitFor": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "type": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "text": "other.{unique}@example.test"
+      },
+      {
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-copy\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-done\"]",
+        "click": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-done\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-pd-focus=\"page-invite\"]",
+        "click": "[data-people-context] [data-pd-focus=\"page-invite\"]"
+      },
+      {
+        "waitFor": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "type": "[data-people-context] form[data-people-invite-form] [data-pd-focus=\"invite-email\"]",
+        "text": "made.{unique}@example.test"
+      },
+      {
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-made] [data-pd-focus=\"invite-copy\"]"
+      },
+      {
+        "waitFor": "[data-people-context] button[aria-label=\"Cancel the invitation for other.{unique}@example.test\"]",
+        "click": "[data-people-context] button[aria-label=\"Cancel the invitation for other.{unique}@example.test\"]"
+      },
+      {
+        "waitFor": "dialog[data-people-confirm][open] .pd-confirm-actions button:last-child",
+        "click": "dialog[data-people-confirm][open] .pd-confirm-actions button:last-child"
+      },
+      {
+        "waitFor": "[data-people-context] [data-people-invite-notice]:not([hidden])"
+      },
+      {
+        "waitFor": "[data-people-context] button[aria-label=\"Cancel the invitation for made.{unique}@example.test\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-people-invite-notice]",
+    "states": [
+      "notice"
+    ],
+    "requiresSeed": [
+      "seed_invites_workspace"
+    ],
+    "invitesIn": "{invitesWorkspace}",
+    "frame": [
+      "[data-people-context] [data-people-invite-notice]",
+      "[data-people-context] button[aria-label=\"Cancel the invitation for made.{unique}@example.test\"]"
+    ]
+  },
+  {
     "id": "app.people.admins",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",

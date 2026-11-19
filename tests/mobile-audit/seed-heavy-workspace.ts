@@ -166,6 +166,36 @@ export async function setHouseholdDoc(env: SeedEnvironment, owner: SeedResult["o
 }
 
 /**
+ * Cancels, as the owner and through the product's own revoke_invitation command, every invitation still pending in
+ * `workspaceId` whose address contains `marker`. Captures that create invitations call this when they finish, so each
+ * one leaves the workspace as it found it. Returns how many were cancelled; refusals are thrown.
+ */
+export async function cancelTestInvites(env: SeedEnvironment, owner: SeedResult["owner"], workspaceId: string, marker: string): Promise<number> {
+  assert.ok(loopback(env.apiUrl) && loopback(env.dbUrl), "local stack only");
+  if (!marker || !workspaceId) return 0;
+  const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
+  try {
+    const pending = await sql<{ invitation_id: string }[]>`SELECT invitation_id FROM swarm.invitations
+      WHERE workspace_id = ${workspaceId}::uuid AND consumed_at IS NULL AND revoked_at IS NULL AND email LIKE ${"%" + marker + "%"}`;
+    if (!pending.length) return 0;
+    const client = createClient(env.apiUrl, env.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+    const signedIn = await client.auth.signInWithPassword(owner);
+    if (signedIn.error || !signedIn.data.session) throw new Error(`invite cleanup sign-in: ${signedIn.error?.message}`);
+    for (const row of pending) {
+      const response = await fetch(`${env.apiUrl}/functions/v1/command`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${signedIn.data.session.access_token}`, apikey: env.anonKey, "content-type": "application/json" },
+        body: JSON.stringify({ command_id: `audit_${randomBytes(9).toString("base64url")}`, client_version: "0.1.0", workspace_id: workspaceId,
+          stream: { kind: "workspace" }, command: { kind: "revoke_invitation", invitation_id: row.invitation_id } }),
+      });
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status !== 200) throw new Error(`invite cleanup: HTTP ${response.status} ${JSON.stringify(body).slice(0, 200)}`);
+    }
+    return pending.length;
+  } finally { await sql.end(); }
+}
+
+/**
  * One delegated member invitation from `inviter` (owner of `workspaceId`) to `recipient`, made as the Deno fixture
  * tests/support/household-human-invites-server.mjs makes it: the protocol core decides the inviter's admin consent and grant,
  * and the real routine decision and adapter issue the invitation, so its preview passes like a real one.
@@ -1053,6 +1083,17 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         steps.push("seed_admin_grants");
       } else if (ready) note("seed_admin_grants", "the Workshop agents (one per owner) or its organization were not found");
     } catch (error) { note("seed_admin_grants", error); }
+    // Making an invite inside People & agents (app.people.invite-made, app.people.invite-cleared), in a workspace of its own
+    // with no invites of its own: each capture creates its invites with addresses unique to that capture, and the runner
+    // cancels them when the capture ends (cancelTestInvites), so the workspace is the same for every capture.
+    try {
+      const invitesWorkspace = randomUUID();
+      if (ok("create_workspace invites", await command(owner.token, { kind: "create_workspace", workspace_id: invitesWorkspace, name: "Greenhouse", org_id: workspace }, null))
+        && ok("household_permissions invites", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, invitesWorkspace))) {
+        ids.invitesWorkspace = invitesWorkspace;
+        steps.push("seed_invites_workspace");
+      }
+    } catch (error) { note("seed_invites_workspace", error); }
     // Two agents with one name on the Admins list (app.people.admins.same-name and the two screens after it), in a workspace
     // of its own. The product refuses a second agent with a name already in use, so the two are created under different
     // names and then given the same long one directly; that is how the list can meet it (an agent that left the roster and
