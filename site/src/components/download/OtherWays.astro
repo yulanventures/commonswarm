@@ -104,12 +104,10 @@ cswarm --version`;
 
       <Card as="article" title="npm" headingLevel={3} class="ow__card">
         <p class="ow__p">
-          The same single-file CLI, through the registry. This is the door for sandboxed
-          agent environments (Claude Cowork and similar) whose egress allowlists permit
-          package registries but block this site — <span class="mono">curl | sh</span> can
-          never arrive there. To actually connect, the sandbox must also reach
-          <span class="mono">commonswarm.com</span> and the deployment’s API host; installing
-          is the half npm solves.
+          The same single-file CLI from the npm registry. Use this in sandboxed agent environments
+          whose egress allowlists permit npm but block direct downloads from this site. To connect
+          afterward, the environment still needs access to <span class="mono">commonswarm.com</span>
+          and the API host.
         </p>
         <CodeBlock code={npmCmd} label="install from npm" prompt="$" wrap />
       </Card>
@@ -117,10 +115,10 @@ cswarm --version`;
       <Card as="article" title="Pin a version, or pick the directory" headingLevel={3} class="ow__card">
         <p class="ow__p">
           <span class="mono">CSWARM_VERSION</span> installs a specific release instead of the
-          latest. <span class="mono">CSWARM_INSTALL_DIR</span> puts the file somewhere other
-          than <span class="mono">~/.local/bin</span>. The assignment goes on
-          <span class="mono">sh</span>, not on <span class="mono">curl</span> — the two sides
-          of a pipe are separate processes.
+          latest. <span class="mono">CSWARM_INSTALL_DIR</span> installs somewhere other than
+          <span class="mono">~/.local/bin</span>. Put the assignment on
+          <span class="mono">sh</span>, not <span class="mono">curl</span>, because the two sides
+          of a pipe run as separate processes.
         </p>
         <CodeBlock code={pinCmd} label="pin a version" prompt="$" wrap />
         <CodeBlock code={dirCmd} label="choose a directory" prompt="$" wrap class="ow__second" />

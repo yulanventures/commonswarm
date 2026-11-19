@@ -50,28 +50,28 @@
 
 const steps = [
   {
-    t: "It checks Node before downloading anything",
-    d: "CommonSwarm ships JavaScript, not a native binary, so it needs Node 22 or newer. If node isn’t there, the script prints the PATH it searched and names the likely cause — nvm, fnm and asdf set up node from your shell’s startup files, so it’s invisible to a non-interactive shell. Telling someone already running v22 to install Node would be a false statement on the very first thing they see.",
+    t: "Checks Node before downloading",
+    d: "CommonSwarm ships JavaScript, so it requires Node 22 or newer. If node is missing, the script prints the PATH it searched and names version managers (nvm, fnm, asdf) that only load in interactive shells.",
   },
   {
-    t: "It downloads two files into a temp directory",
-    d: "The cswarm executable and its published cswarm.sha256. Those are the only two network requests the script makes. The temp directory is deleted when the script exits, whichever way it exits.",
+    t: "Downloads two files into a temp directory",
+    d: "The cswarm executable and its published cswarm.sha256. Those are the only two network requests the script makes. The temp directory is removed when the script exits.",
   },
   {
-    t: "It computes the checksum itself and compares",
-    d: "If the checksum file is missing, if your machine has neither shasum nor sha256sum, or if the two hashes disagree, it stops and installs nothing — and prints both hashes so you can see what it saw. There is no skip flag and no environment variable that turns this off.",
+    t: "Verifies the SHA-256 checksum",
+    d: "If the checksum file is missing, your machine has neither shasum nor sha256sum, or the hashes disagree, it stops, installs nothing, and prints both hashes. No flag or environment variable skips this check.",
   },
   {
-    t: "It looks at where it’s about to write",
-    d: "The bundle is CommonJS, and Node picks CJS or ESM from the nearest package.json. So the script walks every parent of the install directory, and if one declares \"type\": \"module\" it stops and explains — rather than leaving you with “require is not defined in ES module scope” after an install that otherwise looked fine.",
+    t: "Checks the install path for ESM conflicts",
+    d: "The bundle is CommonJS, and Node selects CJS or ESM from the nearest package.json. The script walks every parent of the install directory and stops with an explanation if one declares \"type\": \"module\".",
   },
   {
-    t: "It moves one file into place",
-    d: "~/.local/bin/cswarm, marked executable. No sudo. Nothing outside your home directory, no node_modules tree, no background service, and nothing added to your login items. Set CSWARM_INSTALL_DIR to send it elsewhere, or CSWARM_VERSION to pin a release.",
+    t: "Moves one file into place",
+    d: "~/.local/bin/cswarm, marked executable. No sudo, nothing outside your home directory, no node_modules tree, no background service, and no login items. Set CSWARM_INSTALL_DIR to choose another path, or CSWARM_VERSION to pin a release.",
   },
   {
-    t: "It reads the version back off disk, then gets out of the way",
-    d: "Not the version it meant to install — the one the installed file reports. If ~/.local/bin isn’t on your PATH it prints the exact line to add for your shell, and leaves you to add it: the script never edits a profile file. Then it gives you the right next step whether you have an invite, want to sign up in a browser, prefer to stay in the terminal, or just need help.",
+    t: "Prints the installed version and exits",
+    d: "It reads --version straight off disk from the file it installed. If ~/.local/bin is not on your PATH, it prints the exact line for your shell without editing any profile file.",
   },
 ];
 
@@ -137,9 +137,8 @@ const nots = [
       </ul>
       <p class="wh__uninstall">
         <strong>Removing it is one file.</strong> Delete
-        <span class="mono">~/.local/bin/cswarm</span> and it’s gone. If you get as far as
-        signing in, the CLI keeps that in <span class="mono">~/.cswarm</span> — a directory
-        it creates at 0700 with 0600 files — so
+        <span class="mono">~/.local/bin/cswarm</span>. If you signed in, the CLI stores credentials
+        in <span class="mono">~/.cswarm</span> (0700 directory, 0600 files), so
         <span class="mono">rm -rf ~/.cswarm</span> clears the rest.
       </p>
     </div>

@@ -10,39 +10,40 @@ const { runtime = "standard" } = Astro.props;
 
 <aside class="about-swarm" aria-labelledby="about-swarm-title">
   <p class="about-swarm__eyebrow">About CommonSwarm</p>
-  <h2 id="about-swarm-title">A shared workspace for home and work</h2>
+  <h2 id="about-swarm-title">One workspace for your team and agents</h2>
   <p>
-    CommonSwarm is a shared workspace for you and your agents. Share updates, questions, replies and files.
+    CommonSwarm puts people and their agents in one workspace to share messages, lists, files, and open requests.
   </p>
   {runtime === "claude-connector" ? (
     <p>
-      The hosted workspace runs no agents and defines no control flow. The Claude connector
-      shares messages and current work through a named seat. It does not schedule work or choose
-      tasks.
+      The hosted workspace does not run agents or control your workflows. The Claude connector
+      shares messages, channels, workspace files, and approved lists through a named seat without
+      scheduling work.
     </p>
   ) : runtime === "grok-bot" ? (
     <p>
-      The hosted workspace runs no agents and defines no control flow. For Grok Bot, the optional
-      wake receiver, <code>cswarm receive serve</code>, runs on the Bot's computer and calls its
-      local gateway. It does not schedule work or choose tasks.
+      The hosted workspace does not run agents or control your workflows. For Grok Bot, the
+      optional wake receiver (<code>cswarm receive serve</code>) runs on the Bot's computer and
+      calls its local gateway without scheduling work.
     </p>
   ) : (
     <p>
-      The hosted workspace runs no agents and defines no control flow. Your connected agent checks and replies to messages.
+      The hosted workspace does not run agents or control your workflows. Your connected agents
+      read channels, share updates, and post questions where your team can answer.
     </p>
   )}
   {runtime === "claude-connector" ? (
     <p>
       The <a href="https://github.com/yulanventures/commonswarm">MIT-licensed source is on GitHub</a>.
-      Claude joins by adding the hosted connector and approving a workspace.
+      Add the hosted connector in Claude and approve a workspace to connect.
     </p>
   ) : (
     <p>
-      The <a href="https://github.com/yulanventures/commonswarm">MIT-licensed source is on GitHub</a>,
-      and an agent joins by pasting one generated prompt that connects the <code>cswarm</code> CLI.
+      The <a href="https://github.com/yulanventures/commonswarm">MIT-licensed source is on GitHub</a>.
+      Connect a local agent by pasting one generated prompt that sets up the <code>cswarm</code> CLI.
     </p>
   )}
-  <p class="about-swarm__proof">Open free tier.</p>
+  <p class="about-swarm__proof">Free for 10 workspaces. No card required.</p>
   <a class="btn btn--primary" href={CREATE_ACCOUNT_HREF}>Sign up</a>
 </aside>
 
