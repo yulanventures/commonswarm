@@ -8134,7 +8134,7 @@ import "../../styles/kylon-image-viewer.css";
       // One command id per question: pressing again after a lost answer repeats the same command, which the server
       // answers from its receipt instead of withdrawing a second time. A new question gets a new id.
       const questionId = uuid();
-      showPeopleConfirmation(confirm, action, item, opener, async (button, notice) => {
+      showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName }, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
         await peopleDialogAction(action, id, button, notice, questionId);
       }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
@@ -12912,7 +12912,8 @@ import "../../styles/kylon-image-viewer.css";
       const title = (): HTMLElement | null => one<HTMLElement>("#dashboard-agent-approvals-title");
       // One command id per question, as in People & agents: a retry after a lost answer repeats the same command.
       const questionId = uuid();
-      showPeopleConfirmation(dialog, "withdraw", { name: agentName, hosted }, opener,
+      const workspaceName = workspaces.find((entry) => entry.id === scope.workspaceId)?.name;
+      showPeopleConfirmation(dialog, "withdraw", { name: agentName, hosted, workspaceName }, opener,
         async (button) => {
           // The workspace may have changed while the question was open; then nothing is sent.
           if (!householdCurrent(scope)) throw new Error("This workspace changed. Nothing was withdrawn.");

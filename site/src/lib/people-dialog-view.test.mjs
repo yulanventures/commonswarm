@@ -190,15 +190,19 @@ test("the self-change confirm is a native alertdialog with its own Escape, not a
   assert.match(source, /confirm\.showModal\(\)/);
 });
 
-test("withdraw copy for a hosted agent removes the stored approval and carries the hosted note; local copy is unchanged", async () => {
+test("withdraw copy names the agent and workspace and keeps hosted and local consequences", async () => {
   const { HOSTED_LISTS_NOTE } = await import("./agent-hosts");
-  const hosted = peopleConfirmationCopy("withdraw", { name: "Muse", hosted: true });
-  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Muse."]);
+  const hosted = peopleConfirmationCopy("withdraw", { name: "Thyme", hosted: true, workspaceName: "Herb garden" });
+  assert.equal(hosted.title, "Withdraw Thyme’s Lists & docs access in Herb garden?");
+  assert.deepEqual(hosted.stops, ["This removes the stored Lists & docs approval for Thyme."]);
   assert.deepEqual(hosted.stays, ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE]);
   assert.doesNotMatch(JSON.stringify(hosted), /no longer be able to use|allow access again/);
-  const local = peopleConfirmationCopy("withdraw", { name: "Muse" });
-  assert.deepEqual(local.stops, ["Muse will no longer be able to use Lists & docs here."]);
+  const local = peopleConfirmationCopy("withdraw", { name: "Thyme", workspaceName: "Herb garden" });
+  assert.equal(local.title, "Withdraw Thyme’s Lists & docs access in Herb garden?");
+  assert.deepEqual(local.stops, ["Thyme will no longer be able to use Lists & docs here."]);
   assert.deepEqual(local.stays, ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."]);
+  assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).title, "Withdraw Muse’s Lists & docs access?");
+  assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse", workspaceName: "   " }).title, "Withdraw Muse’s Lists & docs access?");
 });
 
 test('local workspace removal is scoped and only an owner can disconnect the reusable local key',()=>{

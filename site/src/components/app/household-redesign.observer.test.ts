@@ -241,7 +241,7 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
   assert.doesNotMatch(script, /window\.confirm/, "no browser prompt anywhere on the page");
   const askPeople = section(script, "const confirmPeopleDialogAction = ", "/** Open above the current view");
-  assert.match(askPeople, /const questionId = uuid\(\);\s*showPeopleConfirmation\(confirm, action/, "People & agents makes one command id per question, outside its commit");
+  assert.match(askPeople, /const questionId = uuid\(\);\s*showPeopleConfirmation\(confirm, action, \{ \.\.\.item, workspaceName: model\.workspaceName \}/, "People & agents makes one command id per question and passes the workspace name");
   assert.match(askPeople, /peopleDialogAction\(action, id, button, notice, questionId\)/, "and every press of that question uses it");
   assert.match(cards, /const hosted = connection.kind === "hosted";/);
   assert.match(cards, /askListsWithdraw\(principalId, agentName, hosted, withdraw, status\)/,
@@ -822,6 +822,7 @@ test("approval sends only connection consent, withdrawal asks in the shared conf
     },
     uuid: () => `command-${++ids}`, approvalUntil, accessRefusalMessage, withdrawRefusalMessage, readableError: (error: Error) => error.message,
     agents: [{ principalId: "principal", transport: "local" }], CSS: { escape: (value: string) => value },
+    workspaces: [{ id: "workspace", name: "Herb garden" }],
     householdReceipts: new Map(),
     one: (selector: string) => selector === "[data-lists-confirm]" ? dialog : selector === "[data-household-agents]" ? root
       : selector === "#dashboard-agent-approvals-title" ? title : selector === "[data-people-receipt]" ? receipt : null,
@@ -843,11 +844,11 @@ test("approval sends only connection consent, withdrawal asks in the shared conf
   commands.askListsWithdraw("principal", "Muse", false, opener, status);
   assert.equal(asked.length, 1);
   const [onDialog, action, item, from, commit, , , , host] = asked[0];
-  assert.equal(onDialog, dialog); assert.equal(action, "withdraw"); assert.deepEqual(JSON.parse(JSON.stringify(item)), { name: "Muse", hosted: false }); assert.equal(from, opener);
+  assert.equal(onDialog, dialog); assert.equal(action, "withdraw"); assert.deepEqual(JSON.parse(JSON.stringify(item)), { name: "Muse", hosted: false, workspaceName: "Herb garden" }); assert.equal(from, opener);
   assert.equal(host.root, root, "focus goes back within the approvals, to the same agent's button");
   host.fallback(); assert.equal(calls.length, 1, "going back, or Escape, sends nothing");
   commands.askListsWithdraw("principal", "Muse", true, opener, status);
-  assert.deepEqual(JSON.parse(JSON.stringify(asked[1][2])), { name: "Muse", hosted: true }, "a hosted row asks with the hosted consequences");
+  assert.deepEqual(JSON.parse(JSON.stringify(asked[1][2])), { name: "Muse", hosted: true, workspaceName: "Herb garden" }, "a hosted row asks with the hosted consequences and workspace name");
 
   // Confirming sends one withdrawal for that agent in that workspace.
   reply = { status: "committed", withdrawn: 1 };
