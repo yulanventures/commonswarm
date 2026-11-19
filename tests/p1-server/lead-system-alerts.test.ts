@@ -1382,3 +1382,96 @@ test("Condition 5 & Delivery: pinned roles, unclaimed vs serving hosted replacem
   const ownerEscalatedAfter = await readSystemAlerts(cliTarget, owner.jwt, workspace, { escalatedOnly: true });
   assert.equal(ownerEscalatedAfter.alerts.some((a) => a.alert_id === targetAlert.alert_id), false);
 });
+
+test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE without stalling ordinary commands or activity", { timeout: 60_000 }, async () => {
+  // Set up a second workspace for owner, a multi-workspace revoked local agent, a separate revoked agent
+  // for /functions/v1/activity, and a healthy sibling agent owned by the same owner (sharing swarm.users).
+  const ws2 = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${ws2}::uuid, 'LockHardeningWS2', ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${ws2}::uuid, ${owner.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${ws2}::uuid, 'workspace')`;
+  });
+
+  const healthySibling = await agentOf(owner.id, "lock-healthy-sibling");
+  const openCh = await createChannel(owner, "lock-open-ctrl");
+  const revokedCmd = await agentOf(owner.id, "lock-revoked-cmd");
+  const revokedAct = await agentOf(owner.id, "lock-revoked-act");
+  const revokedAfter = await agentOf(owner.id, "lock-revoked-after");
+
+  for (const ag of [revokedCmd, revokedAct, revokedAfter]) {
+    await sql`
+      INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${ag.principal}::uuid, ${ws2}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING
+    `;
+    await sql`UPDATE swarm.agent_tokens SET revoked_at = statement_timestamp() WHERE principal_id = ${ag.principal}::uuid`;
+  }
+
+  // Hold an exclusive FOR UPDATE lock on workspace's #general conversation row for 1.5s while firing
+  // revoked-token command + activity requests AND concurrent healthy commands for the same owner.
+  let holdReady!: () => void;
+  let releaseHold!: () => void;
+  const holdStarted = new Promise<void>((r) => { holdReady = r; });
+  const allowRelease = new Promise<void>((r) => { releaseHold = r; });
+
+  const generalHold = sql.begin(async (tx) => {
+    await tx`
+      SELECT conversation_id FROM swarm.conversations
+      WHERE workspace_id = ${workspace}::uuid AND kind = 'general'
+      FOR UPDATE
+    `;
+    holdReady();
+    await allowRelease;
+  });
+  await holdStarted;
+
+  const t0 = Date.now();
+  const [cmdRevokedRes, actRevokedRes, ...healthyResults] = await Promise.all([
+    send(revokedCmd.token, {
+      kind: "post_signal", signal_kind: "note", body: "revoked under contention",
+      to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+    }),
+    fetch(`${local.API_URL}/functions/v1/activity`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5_000),
+      headers: { authorization: `Bearer ${revokedAct.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspace, state: "working", summary: "revoked heartbeat" }),
+    }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) as Row })),
+    ...Array.from({ length: 4 }, (_, i) =>
+      send(healthySibling.token, {
+        kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: `healthy burst ${i}`,
+        to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+      })
+    ),
+  ]);
+  const elapsedMs = Date.now() - t0;
+
+  releaseHold();
+  await generalHold;
+
+  assert.ok(cmdRevokedRes.status === 401 || cmdRevokedRes.status === 403, `revoked command must refuse cleanly, got ${cmdRevokedRes.status}`);
+  assert.equal(actRevokedRes.status, 403, `revoked activity must return 403, got ${actRevokedRes.status}`);
+  assert.ok(elapsedMs < 3_000, `best-effort 250ms alert lock_timeout must prevent 5s stall or hang (took ${elapsedMs}ms)`);
+  for (const res of healthyResults) {
+    assert.equal(res.status, 200, `concurrent healthy commands for same owner must return 200 (zero 503), got ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  // Once #general is unlocked, a fresh revoked multi-workspace call records alerts cleanly across both workspaces.
+  const afterRes = await send(revokedAfter.token, {
+    kind: "post_signal", signal_kind: "note", body: "revoked after unlock",
+    to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+  });
+  assert.ok(afterRes.status === 401 || afterRes.status === 403);
+  const recorded = await sql<{ workspace_id: string }[]>`
+    SELECT workspace_id::text AS workspace_id
+    FROM swarm.system_alerts
+    WHERE kind = 'local_credential_revoked' AND affected_principal_id = ${revokedAfter.principal}::uuid
+    ORDER BY workspace_id ASC
+  `;
+  assert.deepEqual(
+    recorded.map((r) => r.workspace_id),
+    [workspace, ws2].sort(),
+    "revoked multi-workspace credential must record alerts across both workspaces in deterministic workspace_id ASC order once unlocked",
+  );
+});

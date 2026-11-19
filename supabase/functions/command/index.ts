@@ -27,6 +27,8 @@ import {
   planLocalOperation, localAgentWorkspaceLive, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
   planHostedClaimPrefix,
+  BEST_EFFORT_ALERT_LOCK_TIMEOUT,
+  recordBestEffortSystemAlert,
   reportRevokedLocalCredential,
   type AgentAuthRow,
 } from "../_shared/agent-auth.ts";
@@ -1967,6 +1969,20 @@ async function setTransaction(tx: Sql): Promise<void> {
   `;
 }
 
+async function setBestEffortAlertTransaction(tx: Sql): Promise<void> {
+  await tx`
+    SELECT
+      set_config('role', 'swarm_command', true),
+      set_config('search_path', 'swarm, pg_catalog', true),
+      set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)
+  `;
+}
+
+const pendingRenewalSupersededHooks = new WeakMap<
+  Sql,
+  (workspaceId: string, principalId: string) => void
+>();
+
 /**
  * Current wake topic for a principal, for mint/renew/claim responses (W3).
  * The topic is a credential: this helper must not log the row.
@@ -2003,19 +2019,9 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
     logAccessLost({ class: "local_renewal_superseded",
       principal_ref: auth?.actor.agent_principal ?? null, owner_ref: null, grant_ref: null });
     if (audit.workspaceId && auth?.actor.agent_principal) {
-      try {
-        await tx.savepoint(async (sp) => {
-          await sp`
-            SELECT swarm.record_system_alert(
-              ${audit.workspaceId}::uuid,
-              'local_renewal_superseded',
-              ${auth.actor.agent_principal}::uuid
-            )
-          `;
-        });
-      } catch {
-        // Alert recording must never disrupt audit logging or refusal responses.
-      }
+      // Defer alert recording until after this command transaction commits so system-alert locks
+      // never compose with or hold outer renewal locks.
+      pendingRenewalSupersededHooks.get(tx)?.(audit.workspaceId, auth.actor.agent_principal);
     }
   }
   const auditCredentialKind = auth === null
@@ -16118,11 +16124,17 @@ async function handleTransaction(
   const commandId = String(body.command_id);
   let recoverSavedPending = false;
   let localCredentialDenied = false;
+  let renewalSupersededAlert: { workspaceId: string; principalId: string } | null = null;
   const timer = new CommandTimer();
   const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
     timer.attempt();
     recoverSavedPending = false;
     localCredentialDenied = false;
+    renewalSupersededAlert = null;
+    const captureRenewalSuperseded = (workspaceId: string, principalId: string) => {
+      renewalSupersededAlert = { workspaceId, principalId };
+    };
+    pendingRenewalSupersededHooks.set(tx, captureRenewalSuperseded);
     // Only explicit, completed domain decisions may commit a refusal. Unknown
     // failures and credential/session denials still unwind the whole transaction.
     type LocalOutcome = {kind:'rollback'} | {kind:'decided';result:HttpResult};
@@ -16385,6 +16397,7 @@ async function handleTransaction(
     // all later business effects belong to this savepoint.
     try {
     const executeAuthenticated = async (tx: Sql): Promise<HttpResult> => {
+    pendingRenewalSupersededHooks.set(tx, captureRenewalSuperseded);
     await beforeStep(3);
     const auth = hostedSeat !== null
       ? hostedSeatAuth(hostedSeat)
@@ -19867,6 +19880,7 @@ async function handleTransaction(
   }).catch((error: unknown): HttpResult => {
     // postgres.js rejects begin only after rollback: no authority/content,
     // idempotency, presence, audit or notice effects survive this refusal.
+    renewalSupersededAlert = null;
     // Discovery rejects malformed target/family bindings before authorization.
     // Only this owned code/detail pair is a refusal; never expose which binding
     // failed, retry it, or turn unrelated invalid-parameter errors into denials.
@@ -19896,9 +19910,17 @@ async function handleTransaction(
     // Failure path only: discovery's RAISE aborted the refused transaction.
     await reportRevokedLocalCredential(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
       await db.begin("isolation level read committed", async (tx) => {
-        await setTransaction(tx);
+        await setBestEffortAlertTransaction(tx);
         return await run(tx);
       }) as unknown as T, agentTokenHash);
+  }
+  if (renewalSupersededAlert !== null) {
+    const alertTarget = renewalSupersededAlert as { workspaceId: string; principalId: string };
+    await recordBestEffortSystemAlert(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
+      await db.begin("isolation level read committed", async (tx) => {
+        await setBestEffortAlertTransaction(tx);
+        return await run(tx);
+      }) as unknown as T, alertTarget.workspaceId, "local_renewal_superseded", alertTarget.principalId);
   }
   return recoverSavedPending && response.status===204
     ? await handleTransaction(body,verifiedHuman,agentTokenHash,joinCredentialHash,sessionProofParse,acquireProofParse,hostedSeatCapability)
