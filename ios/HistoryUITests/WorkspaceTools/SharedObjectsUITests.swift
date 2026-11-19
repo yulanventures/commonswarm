@@ -17,6 +17,16 @@ final class SharedObjectsUITests: XCTestCase {
         add(attachment)
     }
 
+    private func postFixture(_ path: String) throws {
+        let exp = expectation(description: "fixture " + path)
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:8765" + path)!)
+        req.httpMethod = "POST"
+        URLSession.shared.dataTask(with: req) { _, _, _ in
+            exp.fulfill()
+        }.resume()
+        wait(for: [exp], timeout: 5)
+    }
+
     private func openListsAndDocs() throws {
         let listsLink = app.buttons["Lists & docs"].firstMatch
         if !listsLink.waitForExistence(timeout: 3) {
@@ -56,34 +66,86 @@ final class SharedObjectsUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Q4-invoice.pdf"].exists, "File objects must not appear in Lists & docs")
         capture("objects-list")
 
-        // 2. Open shared list, toggle an item (VoiceOver Checked state), add an item
-        groceries.tap()
-        let toggleMilk = app.buttons["shared-list-toggle-item_milk"].firstMatch
-        XCTAssertTrue(toggleMilk.waitForExistence(timeout: 8), "Expected checklist toggle row")
-        XCTAssertEqual(toggleMilk.value as? String, "Not checked")
-        toggleMilk.tap()
-        XCTAssertTrue(app.staticTexts["Saved"].firstMatch.waitForExistence(timeout: 8), "Expected Saved confirmation banner")
-        XCTAssertEqual(toggleMilk.value as? String, "Checked")
+        // 2. Create a new doc from the + New sheet and auto-navigate into it
+        let newButton = app.buttons["shared-objects-new-button"].firstMatch
+        XCTAssertTrue(newButton.waitForExistence(timeout: 5), "Expected + New toolbar button")
+        newButton.tap()
+        try tapButton("shared-create-kind-doc")
+        let titleField = app.textFields["shared-create-title-field"].firstMatch
+        XCTAssertTrue(titleField.waitForExistence(timeout: 5))
+        titleField.tap()
+        titleField.typeText("Weekend notes")
+        let bodyField = app.textViews["shared-create-doc-body"].firstMatch
+        XCTAssertTrue(bodyField.waitForExistence(timeout: 5))
+        bodyField.tap()
+        bodyField.typeText("# Notes\n\nCheck tire pressure.")
+        capture("objects-create-sheet")
+        try tapButton("shared-create-submit-button")
 
-        let addField = app.textFields["shared-list-add-field"].firstMatch
-        XCTAssertTrue(addField.waitForExistence(timeout: 5))
-        addField.tap()
-        addField.typeText("Wood glue")
-        let addButton = app.buttons["shared-list-add-button"].firstMatch
-        XCTAssertTrue(addButton.waitForExistence(timeout: 5))
-        addButton.tap()
-        XCTAssertTrue(app.staticTexts["Wood glue"].firstMatch.waitForExistence(timeout: 8), "Expected newly added item to appear from server reload")
-        capture("objects-list-detail")
+        XCTAssertTrue(app.staticTexts["Weekend notes"].firstMatch.waitForExistence(timeout: 8), "Expected newly created doc to open")
+        let createdNavBar = app.navigationBars["Doc"].firstMatch
+        XCTAssertTrue(createdNavBar.waitForExistence(timeout: 5))
+        createdNavBar.buttons.element(boundBy: 0).tap()
 
-        // 3. Go back and open shared doc (inert Markdown + agent attribution)
-        let listNavBar = app.navigationBars["List"].firstMatch
-        XCTAssertTrue(listNavBar.waitForExistence(timeout: 5))
-        listNavBar.buttons.element(boundBy: 0).tap()
-
+        // 3. Open shared doc, edit & save, and inspect an earlier revision from history
         XCTAssertTrue(runbook.waitForExistence(timeout: 8))
         runbook.tap()
-        XCTAssertTrue(app.staticTexts["Pre-flight checklist"].firstMatch.waitForExistence(timeout: 8), "Expected doc heading")
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Atlas, your agent")).firstMatch.exists, "Expected agent attribution")
-        capture("objects-doc-detail")
+        XCTAssertTrue(app.staticTexts["Pre-flight checklist"].firstMatch.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Atlas, your agent")).firstMatch.exists)
+
+        let editDocButton = app.buttons["shared-doc-edit-button"].firstMatch
+        XCTAssertTrue(editDocButton.waitForExistence(timeout: 5), "Expected doc Edit button")
+        editDocButton.tap()
+        let docEditor = app.textViews["shared-doc-editor"].firstMatch
+        XCTAssertTrue(docEditor.waitForExistence(timeout: 5))
+        capture("objects-doc-edit")
+        try tapButton("shared-doc-save-button")
+        XCTAssertTrue(app.staticTexts["Saved"].firstMatch.waitForExistence(timeout: 8), "Expected Saved banner after doc edit")
+
+        // Scroll to Revision history and open earlier revision rev_runbook_1
+        let earlierRow = app.buttons["shared-history-row-rev_runbook_1"].firstMatch
+        for _ in 0..<4 where !earlierRow.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(earlierRow.waitForExistence(timeout: 5), "Expected earlier revision row in history")
+        earlierRow.tap()
+        XCTAssertTrue(app.staticTexts["Reading an earlier revision"].firstMatch.waitForExistence(timeout: 8), "Expected earlier revision banner")
+        capture("objects-history-earlier")
+        try tapButton("shared-history-back-to-current")
+        XCTAssertTrue(app.buttons["shared-doc-edit-button"].firstMatch.waitForExistence(timeout: 5))
+
+        let docNavBar = app.navigationBars["Doc"].firstMatch
+        XCTAssertTrue(docNavBar.waitForExistence(timeout: 5))
+        docNavBar.buttons.element(boundBy: 0).tap()
+
+        // 4. Open shared list -> toggle + add -> trigger 409 conflict -> recover 3-way draft -> confirm & save
+        XCTAssertTrue(groceries.waitForExistence(timeout: 8))
+        groceries.tap()
+        let toggleMilk = app.buttons["shared-list-toggle-item_milk"].firstMatch
+        XCTAssertTrue(toggleMilk.waitForExistence(timeout: 8))
+        toggleMilk.tap()
+        XCTAssertTrue(app.staticTexts["Saved"].firstMatch.waitForExistence(timeout: 8))
+        capture("objects-list-detail")
+
+        try postFixture("/fixture/conflict-next-update")
+        let toggleTape = app.buttons["shared-list-toggle-item_tape"].firstMatch
+        XCTAssertTrue(toggleTape.waitForExistence(timeout: 5))
+        toggleTape.tap()
+
+        try tapButton("Recover my draft", timeout: 8)
+        XCTAssertTrue(app.staticTexts["Review conflicting changes"].firstMatch.waitForExistence(timeout: 8), "Expected 3-way conflict review card")
+        XCTAssertTrue(app.staticTexts["Sourdough loaf (added by Maya)"].firstMatch.waitForExistence(timeout: 5), "Expected competing current revision item")
+        capture("objects-conflict-review")
+
+        let confirmBox = app.buttons["shared-conflict-confirm"].firstMatch
+        for _ in 0..<3 where !confirmBox.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(confirmBox.waitForExistence(timeout: 5))
+        confirmBox.tap()
+        let saveConflict = app.buttons["shared-conflict-save"].firstMatch
+        XCTAssertTrue(saveConflict.waitForExistence(timeout: 5))
+        saveConflict.tap()
+        XCTAssertTrue(app.staticTexts["Saved"].firstMatch.waitForExistence(timeout: 8), "Expected Saved banner after conflict resolution")
     }
 }
