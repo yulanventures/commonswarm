@@ -204,6 +204,11 @@ async function componentView(fetcher: typeof fetch, adminPostCommand?: (...args:
         export const postCommand = (...args) => { if (globalThis.adminPostCommand) return globalThis.adminPostCommand(...args); throw new Error("Unexpected command"); };
         export const myOrganizations = async () => [];
         export const myWorkspaces = async () => [];
+        export const isMultiAccountEnabled = () => false;
+        export const pinAccountContext = () => null;
+        export const bootstrapMultiAccountAuth = async () => null;
+        export const onAuthChange = () => () => {};
+        export const onAccountForcedTeardown = () => () => {};
       ` }));
     } }] });
   const elements = new Map<string, ViewElement>();

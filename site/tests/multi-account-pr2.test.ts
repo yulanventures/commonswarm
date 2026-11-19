@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
@@ -9,6 +10,7 @@ import {
   AccountManager,
   InactiveAccountBadgePoller,
   MULTI_ACCOUNT_ENABLED,
+  MultiAccountWorkspaceMismatch,
   deploymentOriginHash,
   isMultiAccountEnabled,
   postPinnedCommand,
@@ -451,4 +453,207 @@ test("PR 2 password-change-completion removes ONLY the changed account's local l
   assert.equal(outcome.kind, "signed-out");
   assert.deepEqual(removed, [{ userId: "user-a", loginId: "login-a-1" }]);
   setMultiAccountEnabledForTesting(null);
+});
+
+test("PR 2 Lead fix (1): /invite OAuth preserves allowlisted ?resume= across authorize & callback scrub, refuses invalid resume, and strips on /app", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "invitee@example.test", "Invitee");
+  const live = new Map<string, typeof userA>();
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "pkce") {
+      const at = makeJwt(url, userA.id, userA.email, "sid-inv-1");
+      live.set(at, userA);
+      return Response.json({
+        access_token: at, refresh_token: "rt-inv-1", expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: userA,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ code: "session_not_found" }, { status: 403 });
+      return Response.json(who);
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const ls = new MemoryStorage();
+  const ss = new MemoryStorage();
+  const mgr = new AccountManager(deployment, {
+    localStorage: ls, sessionStorage: ss, fetcher, webLocks: createLocks(), createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+
+  const { attemptId, authorizeUrl } = await mgr.startOAuthAttempt({
+    provider: "google",
+    purpose: "signed-out",
+    returnRoute: "/invite",
+    origin: "https://commonswarm.com",
+    resume: "resume_abc-123",
+  });
+  const redirectTo = new URL(new URL(authorizeUrl).searchParams.get("redirect_to")!);
+  assert.equal(redirectTo.pathname, "/invite");
+  assert.equal(redirectTo.searchParams.get("resume"), "resume_abc-123");
+  assert.equal(redirectTo.searchParams.get("cs_attempt"), attemptId);
+
+  // Callback scrub preserves ?resume= while stripping code & cs_attempt!
+  redirectTo.searchParams.set("code", "pkce-code-ok");
+  const nav = makeLocation(redirectTo.href);
+  const res = await mgr.consumeAuthCallbackBootstrap(nav.location, nav.history);
+  assert.equal(res.kind, "promoted");
+  assert.equal(nav.location.search, "?resume=resume_abc-123", "resume preserved while auth params scrubbed");
+
+  // Non-/invite routes never carry ?resume=; invalid characters refused on /invite.
+  const appStart = await mgr.startOAuthAttempt({
+    provider: "google",
+    purpose: "add-account",
+    returnRoute: "/app",
+    origin: "https://commonswarm.com",
+    resume: "ignored_on_app",
+  });
+  const appRedirect = new URL(new URL(appStart.authorizeUrl).searchParams.get("redirect_to")!);
+  assert.equal(appRedirect.searchParams.get("resume"), null);
+  await assert.rejects(
+    () => mgr.startOAuthAttempt({
+      provider: "google",
+      purpose: "signed-out",
+      returnRoute: "/invite",
+      origin: "https://commonswarm.com",
+      resume: "bad value/../../x",
+    }),
+    /Invalid invitation resume token/,
+  );
+
+  mgr.destroy();
+});
+
+test("PR 2 Lead fix (3): account-routed-workspace allows Connected Apps / Your Agents targeting non-active workspace W2 while failing closed on account switch & workspace mismatch", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "owner@example.test", "Owner");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "other@example.test", "Other");
+  const live = new Map<string, typeof userA>();
+  const sentBodies: Record<string, unknown>[] = [];
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ code: "session_not_found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/functions/v1/command")) {
+      sentBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ status: "accepted", ok: true });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const mgr = new AccountManager(deployment, {
+    localStorage: new MemoryStorage(),
+    sessionStorage: new MemoryStorage(),
+    fetcher,
+    webLocks: createLocks(),
+    createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+  await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+  await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  mgr.switchActiveAccount(userA.id);
+  // Active rail workspace is W1, while account-wide Connected Apps targets W2!
+  mgr.setActiveWorkspace("ws-active-1");
+  const pinnedA = mgr.pinContext({ userId: userA.id });
+  assert.ok(pinnedA);
+
+  const res = await postPinnedCommand(
+    pinnedA,
+    "cmd-revoke-seat-1",
+    { kind: "revoke_hosted_mcp_seat", grant_id: "g-1", seat_id: "s-1" },
+    {
+      scope: { kind: "account-routed-workspace", workspaceId: "ws-other-2" },
+      extra: { workspace_id: "ws-other-2", stream: { kind: "workspace" } },
+      fetcher,
+    },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(sentBodies.length, 1);
+  assert.equal(sentBodies[0]!.workspace_id, "ws-other-2");
+
+  // Mismatched embedded workspace_id is STILL refused before network!
+  await assert.rejects(
+    () => postPinnedCommand(
+      pinnedA,
+      "cmd-mismatch",
+      { kind: "revoke_hosted_mcp_seat", workspace_id: "ws-wrong-3" },
+      { scope: { kind: "account-routed-workspace", workspaceId: "ws-other-2" }, fetcher },
+    ),
+    MultiAccountWorkspaceMismatch,
+  );
+  assert.equal(sentBodies.length, 1);
+
+  // Switching accounts A -> B -> A STILL invalidates pinnedA!
+  mgr.switchActiveAccount(userB.id);
+  mgr.switchActiveAccount(userA.id);
+  await assert.rejects(
+    () => postPinnedCommand(
+      pinnedA,
+      "cmd-stale-after-aba",
+      { kind: "revoke_hosted_mcp_seat", grant_id: "g-1", seat_id: "s-1" },
+      { scope: { kind: "account-routed-workspace", workspaceId: "ws-other-2" }, fetcher },
+    ),
+    /could not check your sign-in/i,
+  );
+  assert.equal(sentBodies.length, 1);
+
+  mgr.destroy();
+});
+
+test("PR 2 Lead fixes (2), (4), (5), (6): source wiring assertions for signed-out OTP, seat-admin signOutActiveAccount, teardown + notice preservation, householdSurface/loadAdminRecovery pinning, and inbox bootstrap", async () => {
+  const [liveDash, inviteOnramp, inbox, homeClient, adminDeleg, commonswarmSrc, connectedApps] = await Promise.all([
+    readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/invite/InviteOnramp.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/invite/HumanInvitationInbox.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/home/client.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/admin-delegations.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/commonswarm.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/connected-apps.ts", import.meta.url), "utf8"),
+  ]);
+
+  // (2) Signed-out /app and /invite OTP inputs wired to verifyEmailOtpSignIn, plus Add-account OTP reset on refusal
+  assert.ok(liveDash.includes("data-signed-out-otp-row") && liveDash.includes("data-signed-out-otp-verify"));
+  assert.ok(inviteOnramp.includes("data-invite-otp-row") && inviteOnramp.includes("data-invite-otp-verify") && inviteOnramp.includes("verifyEmailOtpSignIn("));
+  assert.ok(liveDash.includes("resetAddAccountOtp();"));
+
+  // (3) Account-wide Connected Apps & Your Agents pass accountWideWorkspace: true
+  assert.ok(connectedApps.includes("accountWideWorkspace: true"));
+  assert.ok(commonswarmSrc.includes("accountWideWorkspace: true"));
+
+  // (4) Seat-admin re-auth routes through signOutActiveAccount when multi-account enabled
+  assert.ok(liveDash.includes("const signOutRes = await signOutActiveAccount();"));
+
+  // (5) Account A teardown before boot, notice preservation across forced teardown + onAuthChange, InviteOnramp never overwrites unusable()
+  assert.ok(liveDash.includes("teardownActiveAccountView()"));
+  assert.ok(liveDash.includes("pendingForcedNotice"));
+  assert.ok(inviteOnramp.includes('if (host.dataset.state !== "unusable")'));
+
+  // (6) householdSurface + loadAdminRecovery pinned, inbox awaits bootstrapMultiAccountAuth, signed-in refused OAuth surfaced, multiAccountBootPromise cleared on rejection
+  assert.ok(homeClient.slice(homeClient.indexOf("async function householdSurface")).includes("pinAccountContext("));
+  assert.ok(adminDeleg.slice(adminDeleg.indexOf("export async function loadAdminRecovery")).includes("pinAccountContext("));
+  assert.ok(inbox.includes("bootstrapMultiAccountAuth(window.location, window.history)"));
+  assert.ok(liveDash.includes("refusedAddAccountMessage"));
+  assert.ok(commonswarmSrc.includes("if (multiAccountBootPromise === pending) {\n        multiAccountBootPromise = null;"));
 });

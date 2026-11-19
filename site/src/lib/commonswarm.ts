@@ -521,6 +521,7 @@ export function accountManager(): AccountManager | null {
   }
   sharedAccountManager?.destroy();
   sharedAccountManagerOrigin = originKey;
+  multiAccountBootPromise = null;
   sharedAccountManager = new AccountManager(d, {
     onOwnershipChange: (accounts, active) => {
       for (const listener of [...ownershipListeners]) {
@@ -569,13 +570,19 @@ export async function bootstrapMultiAccountAuth(
   const mgr = accountManager();
   if (!mgr) return null;
   if (!multiAccountBootPromise) {
-    multiAccountBootPromise = (async () => {
+    const pending = (async () => {
       const init = await mgr.initialize();
       const callback: CallbackBootstrapResult = location && history
         ? await mgr.consumeAuthCallbackBootstrap(location, history)
         : { kind: "none" };
       return { cutoverClearedLegacy: init.cutoverClearedLegacy, callback };
     })();
+    multiAccountBootPromise = pending;
+    pending.catch(() => {
+      if (multiAccountBootPromise === pending) {
+        multiAccountBootPromise = null;
+      }
+    });
   }
   return multiAccountBootPromise;
 }
@@ -947,11 +954,14 @@ export async function signInWithProvider(
     const target = new URL(redirectTo, typeof window !== "undefined" ? window.location.origin : "https://commonswarm.com");
     const effectivePurpose: SignInPurpose =
       purpose === "signed-out" && mgr.listAccounts().length > 0 ? "add-account" : purpose;
+    const normalizedPath = target.pathname.replace(/\/+$/, "") || "/";
+    const resume = normalizedPath === "/invite" ? (target.searchParams.get("resume") ?? undefined) : undefined;
     const { authorizeUrl } = await mgr.startOAuthAttempt({
       provider: entry.id,
       purpose: effectivePurpose,
       returnRoute: target.pathname,
       origin: target.origin,
+      ...(resume ? { resume } : {}),
     });
     if (typeof window !== "undefined") {
       window.location.assign(authorizeUrl);
@@ -1463,14 +1473,19 @@ export async function postCommand(
   command: Record<string, unknown>,
   extra: Record<string, unknown> = {},
   unknownOutcome?: string,
-  pinnedOrOptions?: PinnedAccountContext | { pinned?: PinnedAccountContext | null; isAlive?: () => boolean } | null,
+  pinnedOrOptions?: PinnedAccountContext | { pinned?: PinnedAccountContext | null; isAlive?: () => boolean; accountWideWorkspace?: boolean } | null,
+  options?: { accountWideWorkspace?: boolean; isAlive?: () => boolean },
 ): Promise<CommandResult> {
   const d = deployment();
   if (!d) throw new NoDeployment();
   const pinned: PinnedAccountContext | null | undefined =
     pinnedOrOptions && "runtime" in pinnedOrOptions ? pinnedOrOptions : pinnedOrOptions?.pinned;
   const isAlive =
-    pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.isAlive : undefined;
+    options?.isAlive ??
+    (pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.isAlive : undefined);
+  const accountWideWorkspace =
+    options?.accountWideWorkspace ??
+    (pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.accountWideWorkspace : undefined);
   if (isAlive && !isAlive()) {
     return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
   }
@@ -1487,12 +1502,14 @@ export async function postCommand(
     ) {
       scope = { kind: "create-workspace", newWorkspaceId: command.workspace_id };
     } else if (typeof extra.workspace_id === "string" && extra.workspace_id.trim()) {
-      scope = { workspaceId: extra.workspace_id.trim() };
+      scope = accountWideWorkspace
+        ? { kind: "account-routed-workspace", workspaceId: extra.workspace_id.trim() }
+        : { workspaceId: extra.workspace_id.trim() };
     } else {
       scope = "account";
     }
     const ctx = pinned ?? mgr.pinContext(
-      scope !== "account" && "workspaceId" in scope
+      scope !== "account" && !("kind" in scope)
         ? { userId: session.user.id, workspaceId: scope.workspaceId }
         : { userId: session.user.id },
     );
@@ -1946,7 +1963,9 @@ export async function setConnectionExpiry(
     kind: "set_connection_expiry", connection_kind: connectionKind,
     grant_id: grantId, connection_expires_at: connectionExpiresAt,
   }, { workspace_id: workspaceId, stream: { kind: "workspace" } },
-  "The end date result is unknown. Check the connection before saving again.");
+  "The end date result is unknown. Check the connection before saving again.",
+  undefined,
+  { accountWideWorkspace: true });
   if (result.status === 400) {
     if (result.body.error === "invalid_connection_expiry") {
       throw new ConnectionExpiryRefused("Choose a future end date after the server's current time. Nothing was changed.");
@@ -4332,7 +4351,7 @@ export async function mintAgentReconnectCode(
     seat_cap: 1,
     ttl_hours: 1,
     principal_id: principalId,
-  }, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, undefined, { accountWideWorkspace: true });
   if (status === 200 && body.status === "accepted" && typeof body.join_credential === "string") {
     return {
       joinCode: body.join_credential,

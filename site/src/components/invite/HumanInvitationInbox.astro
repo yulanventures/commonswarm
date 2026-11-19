@@ -637,6 +637,7 @@ import "../../styles/kylon-invitation-inbox.css";
 
 <script>
   import {
+    bootstrapMultiAccountAuth,
     currentSession,
     client,
     deployment,
@@ -831,6 +832,11 @@ import "../../styles/kylon-invitation-inbox.css";
       ++authGeneration;controller.setAccount(null);if(dialog.open)dialog.close();account=null;
     });
     const version=authGeneration;
-    void currentSession().then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);}).catch(()=>{setAccount(null);});
+    void (isMultiAccountEnabled()
+      ? bootstrapMultiAccountAuth(window.location, window.history).catch(()=>null)
+      : Promise.resolve(null))
+      .then(()=>currentSession())
+      .then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);})
+      .catch(()=>{setAccount(null);});
   }
 </script>

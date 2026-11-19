@@ -126,6 +126,8 @@ export async function revokeConnectedAppGrant(
     { kind: "revoke_hosted_mcp_grant", grant_id: connection.grantId },
     { workspace_id: connection.homeWorkspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the result of disconnecting the app. Reload Connected apps before trying again.",
+    undefined,
+    { accountWideWorkspace: true },
   );
   accepted(result.status, result.body, "disconnect the app");
 }
@@ -145,6 +147,8 @@ export async function revokeConnectedAppSeat(
     },
     { workspace_id: seat.workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the result of removing the agent. Reload Connected apps before trying again.",
+    undefined,
+    { accountWideWorkspace: true },
   );
   accepted(result.status, result.body, "remove the agent");
 }

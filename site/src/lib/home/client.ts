@@ -166,7 +166,23 @@ async function householdSurface(
   command: Record<string, unknown>,
   unknownOutcome: string,
 ): Promise<Record<string, unknown>> {
-  const { status, body } = await deps.postCommand(session, requestId, command, workspaceExtra(workspaceId), unknownOutcome);
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
+  const { status, body } = await deps.postCommand(
+    session,
+    requestId,
+    command,
+    workspaceExtra(workspaceId),
+    unknownOutcome,
+    pinned,
+  );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 

@@ -1109,7 +1109,8 @@ export class AccountSessionRuntime {
 export type PinnedOperationScope =
   | "account"
   | { workspaceId: string }
-  | { kind: "create-workspace"; newWorkspaceId: string };
+  | { kind: "create-workspace"; newWorkspaceId: string }
+  | { kind: "account-routed-workspace"; workspaceId: string };
 
 export interface PinnedAccountContext {
   readonly runtime: AccountSessionRuntime;
@@ -1449,11 +1450,19 @@ export class AccountManager {
     purpose: SignInPurpose;
     returnRoute: string;
     origin: string;
+    resume?: string;
   }): Promise<{ attemptId: string; authorizeUrl: string }> {
     const entry = authProvider(options.provider);
     const route = normalizeReturnRoute(options.returnRoute);
     if (!ALLOWED_AUTH_RETURN_ROUTES.has(route)) {
       throw new Error("Unsupported sign-in return route.");
+    }
+    const allowlistedResume =
+      route === "/invite" && typeof options.resume === "string"
+        ? options.resume.trim()
+        : "";
+    if (allowlistedResume && !/^[A-Za-z0-9._-]{1,128}$/.test(allowlistedResume)) {
+      throw new Error("Invalid invitation resume token.");
     }
     // Pin initiation generation synchronously BEFORE the first await.
     const allSignOutGenAtStart = this.readRequiredAllSignOutGen();
@@ -1480,6 +1489,9 @@ export class AccountManager {
     this.writeAttempt(attempt);
 
     const returnUrl = new URL(route, options.origin);
+    if (allowlistedResume) {
+      returnUrl.searchParams.set("resume", allowlistedResume);
+    }
     returnUrl.searchParams.set("cs_attempt", attemptId);
 
     const authorize = new URL(`${this.deployment.url.replace(/\/+$/, "")}/auth/v1/authorize`);
@@ -3097,7 +3109,13 @@ function collectEmbeddedWorkspaceIds(value: unknown, depth = 0, out: string[] = 
 function isPinnedScopeCurrent(ctx: PinnedAccountContext, scope: PinnedOperationScope): boolean {
   if (scope === "account") return ctx.isCurrent();
   if ("kind" in scope) {
-    return scope.kind === "create-workspace" && Boolean(scope.newWorkspaceId?.trim()) && ctx.isCurrent();
+    if (scope.kind === "create-workspace") {
+      return Boolean(scope.newWorkspaceId?.trim()) && ctx.isCurrent();
+    }
+    if (scope.kind === "account-routed-workspace") {
+      return Boolean(scope.workspaceId?.trim()) && ctx.isCurrent();
+    }
+    return false;
   }
   const targetWorkspace = scope.workspaceId?.trim();
   if (!targetWorkspace) return false;
@@ -3153,7 +3171,7 @@ export async function postPinnedCommand(
     if (embeddedWorkspaceIds.length > 0) {
       throw new MultiAccountWorkspaceMismatch();
     }
-  } else if ("kind" in options.scope) {
+  } else if ("kind" in options.scope && options.scope.kind === "create-workspace") {
     // Expresses the exact create_workspace edge envelope (supabase/functions/command/index.ts:6560):
     // NO top-level workspace_id or stream, command.kind === "create_workspace", and command.workspace_id === newWorkspaceId.
     const expectedNewWs = options.scope.newWorkspaceId?.trim();
@@ -3161,7 +3179,6 @@ export async function postPinnedCommand(
       ? (validatedEnvelope.command as Record<string, unknown>)
       : null;
     if (
-      options.scope.kind !== "create-workspace" ||
       !expectedNewWs ||
       validatedEnvelope.workspace_id !== undefined ||
       validatedEnvelope.stream !== undefined ||
@@ -3177,7 +3194,22 @@ export async function postPinnedCommand(
       }
     }
     wireBody = JSON.stringify(validatedEnvelope);
-  } else {
+  } else if ("kind" in options.scope && options.scope.kind === "account-routed-workspace") {
+    // Account-wide dialogs (Connected Apps, Your Agents) route to an explicit workspace owned by the
+    // pinned account even when a different workspace is open in the rail. Still pinned to the exact
+    // {userId, loginId, viewGeneration} and refuses any mismatched embedded workspace_id.
+    const targetWorkspace = options.scope.workspaceId?.trim();
+    if (!targetWorkspace) {
+      throw new MultiAccountWorkspaceMismatch();
+    }
+    for (const foundWs of embeddedWorkspaceIds) {
+      if (foundWs !== targetWorkspace) {
+        throw new MultiAccountWorkspaceMismatch();
+      }
+    }
+    validatedEnvelope.workspace_id = targetWorkspace;
+    wireBody = JSON.stringify(validatedEnvelope);
+  } else if (!("kind" in options.scope)) {
     const pinnedWorkspace = options.scope.workspaceId?.trim();
     if (!pinnedWorkspace || ctx.workspaceId !== pinnedWorkspace) {
       throw new MultiAccountWorkspaceMismatch();
@@ -3190,6 +3222,8 @@ export async function postPinnedCommand(
     // Derive envelope workspace_id directly from the verified workspace pin and freeze final wire bytes.
     validatedEnvelope.workspace_id = pinnedWorkspace;
     wireBody = JSON.stringify(validatedEnvelope);
+  } else {
+    throw new MultiAccountWorkspaceMismatch();
   }
 
   if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();

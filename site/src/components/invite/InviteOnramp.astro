@@ -77,6 +77,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <input id="invite-password" name="password" type="password" autocomplete="current-password" required />
       <button class="invite-onramp__button" type="submit" data-password-signin>Sign in</button>
       <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-email-link>Email me a sign-in link</button>
+      <div class="invite-onramp__otp" data-invite-otp-row hidden>
+        <label for="invite-otp">Email sign-in code</label>
+        <input id="invite-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
+        <button class="invite-onramp__button" type="button" data-invite-otp-verify>Verify code</button>
+      </div>
     </form>
     <p class="invite-onramp__status" data-auth-status role="status" aria-live="polite"></p>
     <p class="invite-onramp__error" data-auth-error role="alert" hidden></p>
@@ -248,6 +253,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     signInWithEmail,
     signInWithPassword,
     signInWithProvider,
+    verifyEmailOtpSignIn,
+    accountManager,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
   import {
@@ -746,20 +753,40 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       await accept();
     };
 
+    let inviteOtpAttemptId: string | null = null;
+    const resetInviteOtp = (): void => {
+      inviteOtpAttemptId = null;
+      const otpRow = one<HTMLElement>("[data-invite-otp-row]");
+      const otpInput = one<HTMLInputElement>("#invite-otp");
+      if (otpRow) otpRow.hidden = true;
+      if (otpInput) otpInput.value = "";
+    };
+
     /* The email link reads only the address, so an empty password never blocks it. */
     one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async () => {
       const input = one<HTMLInputElement>("#invite-email");
       const error = one<HTMLElement>("[data-auth-error]");
       const status = one<HTMLElement>("[data-auth-status]");
+      const otpRow = one<HTMLElement>("[data-invite-otp-row]");
+      const otpInput = one<HTMLInputElement>("#invite-otp");
       if (!input || !resumeId) return;
       if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
       if (error) error.hidden = true;
       try {
         const redirect = new URL("/invite", window.location.origin);
         redirect.searchParams.set("resume", resumeId);
-        await signInWithEmail(input.value.trim(), redirect.href);
-        if (status) status.textContent = `Check ${input.value.trim()} for your sign-in link.`;
+        const started = await signInWithEmail(input.value.trim(), redirect.href);
+        if (isMultiAccountEnabled() && started && typeof started === "object" && started.attemptId) {
+          inviteOtpAttemptId = started.attemptId;
+          if (otpRow) otpRow.hidden = false;
+          if (otpInput) { otpInput.value = ""; otpInput.focus(); }
+          if (status) status.textContent = `Enter the sign-in code sent to ${input.value.trim()}.`;
+        } else {
+          resetInviteOtp();
+          if (status) status.textContent = `Check ${input.value.trim()} for your sign-in link.`;
+        }
       } catch (caught) {
+        resetInviteOtp();
         const choices = listSentence(renderedProviderNames());
         if (error) {
           error.textContent = caught instanceof EmailRateLimited
@@ -773,6 +800,42 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
             : "CommonSwarm could not send the sign-in link.";
           error.hidden = false;
         }
+      }
+    });
+
+    one<HTMLButtonElement>("[data-invite-otp-verify]")?.addEventListener("click", async () => {
+      const otpInput = one<HTMLInputElement>("#invite-otp");
+      const verifyBtn = one<HTMLButtonElement>("[data-invite-otp-verify]");
+      const error = one<HTMLElement>("[data-auth-error]");
+      const status = one<HTMLElement>("[data-auth-status]");
+      if (!inviteOtpAttemptId || !otpInput || !resumeId) return;
+      const code = otpInput.value.trim();
+      if (!code) {
+        if (error) { error.textContent = "Enter the emailed sign-in code."; error.hidden = false; }
+        otpInput.focus();
+        return;
+      }
+      if (error) error.hidden = true;
+      if (verifyBtn) verifyBtn.disabled = true;
+      const attemptId = inviteOtpAttemptId;
+      try {
+        const outcome = await verifyEmailOtpSignIn(attemptId, code);
+        resetInviteOtp();
+        if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+          if (status) status.textContent = "";
+          await boot();
+        } else if (error) {
+          error.textContent = outcome.message || "That sign-in code did not work or expired. Request a new code.";
+          error.hidden = false;
+        }
+      } catch (caught) {
+        resetInviteOtp();
+        if (error) {
+          error.textContent = caught instanceof Error ? caught.message : "Sign-in could not be completed.";
+          error.hidden = false;
+        }
+      } finally {
+        if (verifyBtn) verifyBtn.disabled = false;
       }
     });
 
@@ -923,12 +986,21 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     });
     onAccountForcedTeardown(() => {
       ++authGeneration;
+      resetInviteOtp();
       preview = null;
       prepared = null;
       authUser = null;
       authEmail = null;
       resetReview();
-      show("auth");
+      if (!payload || !resumeId) {
+        if (host.dataset.state !== "unusable") {
+          unusable("Sign in as the invited person and reopen the invitation.");
+        }
+        return;
+      }
+      if (!accountManager()?.activeAccount()) {
+        show("auth");
+      }
     });
     void boot();
   }

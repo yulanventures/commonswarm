@@ -209,6 +209,7 @@ const {
     /* Attributes present in the markup fire attributeChangedCallback during upgrade, BEFORE
        connectedCallback — so without this the element would load twice on every page. */
     #ready = false;
+    #unsubForcedTeardown: (() => void) | null = null;
 
     connectedCallback() {
       if (this.#ready) return;
@@ -218,6 +219,8 @@ const {
     }
 
     disconnectedCallback() {
+      this.#unsubForcedTeardown?.();
+      this.#unsubForcedTeardown = null;
       this.retirePending();
       window.clearTimeout(this.#copyTimer);
       window.clearInterval(this.#pollTimer);
@@ -299,10 +302,12 @@ const {
       });
       // Rev 4 §4: Forced teardown (cross-tab sign-out, Sign out all, terminal expiry)
       // immediately clears any displayed connect credential & retires in-flight mints.
-      onAccountForcedTeardown(() => {
-        this.clearPrompt();
-        this.retirePending();
-      });
+      if (typeof onAccountForcedTeardown === "function") {
+        this.#unsubForcedTeardown = onAccountForcedTeardown(() => {
+          this.clearPrompt();
+          this.retirePending();
+        });
+      }
       if (h0LinkJoinEnabled) {
         window.addEventListener("pagehide", () => {
           if (this.#joinActive) this.finishPrompt("done");
@@ -669,10 +674,11 @@ const {
     async #mintGuarded(request: MintRequest) {
       this.#formError(null);
       const named = "name" in request;
-      const pinned = isMultiAccountEnabled()
+      const multiEnabled = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const pinned = multiEnabled
         ? pinAccountContext({ userId: request.userId, workspaceId: this.#workspaceId })
         : null;
-      if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(this.#workspaceId))) {
+      if (multiEnabled && (!pinned || !pinned.isCurrent(this.#workspaceId))) {
         this.#abandon();
         return;
       }
