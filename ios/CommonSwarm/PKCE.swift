@@ -12,7 +12,12 @@ enum BrowserProvider: String {
     var callback: URL {
         switch self {
         case .github: URL(string: "com.commonswarm.ios://auth/callback")!
-        case .google: URL(string: "https://commonswarm.com/ios/auth/callback")!
+        case .google:
+            #if DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB
+            URL(string: "commonswarm://auth/callback")!
+            #else
+            URL(string: "https://commonswarm.com/ios/auth/callback")!
+            #endif
         }
     }
 }

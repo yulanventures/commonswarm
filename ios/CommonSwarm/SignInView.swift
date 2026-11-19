@@ -45,8 +45,8 @@ struct SignInView: View {
         guard deployment != nil, window != nil, !auth.pending else { return false }
         switch provider {
         case .google:
-            // Enable only on a build signed for the verified, claimed HTTPS return.
-            #if COMMONSWARM_GOOGLE_HTTPS
+            // The custom Google return is confined to a separately enabled USB Debug build.
+            #if COMMONSWARM_GOOGLE_HTTPS || (DEBUG && COMMONSWARM_USB_TEST && COMMONSWARM_GOOGLE_USB)
             return true
             #else
             return false

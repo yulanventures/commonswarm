@@ -38,9 +38,14 @@ final class SignIn: ObservableObject {
         failed = false
         pending = true
         let callback: ASWebAuthenticationSession.Callback
-        switch provider {
-        case .google: callback = .https(host: "commonswarm.com", path: "/ios/auth/callback")
-        case .github: callback = .customScheme("com.commonswarm.ios")
+        let target = provider.callback
+        if target.scheme == "https", let host = target.host {
+            callback = .https(host: host, path: target.path)
+        } else if let scheme = target.scheme {
+            callback = .customScheme(scheme)
+        } else {
+            finish(failed: true)
+            return
         }
         let browser = ASWebAuthenticationSession(url: attempt.authorize(at: origin), callback: callback) {
             [weak self] url, error in
