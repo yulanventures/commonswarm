@@ -2342,3 +2342,23 @@ test('organization load skips a no-op redraw and preserves More when destination
   assert.equal(movable.renders[1]?.moreOpen, undefined, 'redraw omits moreOpen so an open More stays open');
   assert.deepEqual(movable.renders[1]?.moveDestinations, [{ id: 'org-2', name: 'Yulan' }]);
 });
+
+test('keepFeedFocus identity ignores transient picture preview state across feed rebuilds', async () => {
+  const code = await dashboardFunctions(['controlIdentity']);
+  const context = createContext({});
+  runInContext(code, context);
+  const idOf = runInContext('controlIdentity', context) as (el: { tagName: string; className: string; getAttribute(n: string): string | null; attributes: { name: string; value: string }[] }) => string;
+  const link = (fileId: string, previewState?: string) => ({
+    tagName: 'A',
+    className: 'hm-extras__image',
+    getAttribute: () => null,
+    attributes: [
+      { name: 'data-stream-image', value: fileId },
+      { name: 'data-stream-image-version', value: '1' },
+      ...(previewState ? [{ name: 'data-preview-state', value: previewState }] : []),
+    ],
+  });
+  assert.equal(idOf(link('file-a')), idOf(link('file-a', 'loading')), 'a loaded picture matches its rebuilt loading copy');
+  assert.equal(idOf(link('file-a')), idOf(link('file-a', 'waiting')), 'a loaded picture matches its rebuilt waiting copy');
+  assert.notEqual(idOf(link('file-a')), idOf(link('file-b')), 'different pictures keep distinct identities');
+});

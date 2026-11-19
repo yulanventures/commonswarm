@@ -10024,7 +10024,7 @@ import "../../styles/kylon-image-viewer.css";
        control is gone, nothing moves. */
     const FEED_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
     const controlIdentity = (el: Element): string => JSON.stringify([el.tagName, el.className, el.getAttribute("aria-label"),
-      Array.from(el.attributes).filter(a => a.name.startsWith("data-") && !a.name.startsWith("data-audit")).map(a => [a.name, a.value])]);
+      Array.from(el.attributes).filter(a => a.name.startsWith("data-") && !a.name.startsWith("data-audit") && a.name !== "data-preview-state").map(a => [a.name, a.value])]);
     const feedIdentity = (): string => JSON.stringify([homeRoute, activeWorkspaceId, activeChannelId, signalFilter, activeWorkspaceView]);
     /* Back-to-back rebuilds: the latest one owns the restore, so the restore always runs after the
        frame in which that rebuild adds its deferred controls. A remembered control survives a
