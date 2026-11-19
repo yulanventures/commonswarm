@@ -3447,6 +3447,8 @@ export async function attachPinnedRealtime<TSub>(
  */
 export class InactiveAccountBadgePoller {
   private readonly counts = new Map<string, number | null>();
+  private readonly expired = new Set<string>();
+  private readonly expiredRecords = new Map<string, AccountRecord>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
   private stopped = false;
@@ -3465,6 +3467,35 @@ export class InactiveAccountBadgePoller {
     return `${userId}\0${loginId}`;
   }
 
+  /** Whether an inactive owned or recently expired login needs "Sign in again". */
+  isExpired(userId: string, loginId: string): boolean {
+    const key = this.keyFor(userId, loginId);
+    if (this.expired.has(key)) return true;
+    const rec = this.expiredRecords.get(userId);
+    return Boolean(rec && rec.loginId === loginId);
+  }
+
+  /** Non-secret display records for inactive logins that expired in this tab and are no longer live-owned. */
+  expiredAccounts(): AccountRecord[] {
+    const liveUsers = new Set(this.manager.listAccounts().map((a) => a.userId));
+    const out: AccountRecord[] = [];
+    for (const [userId, rec] of this.expiredRecords) {
+      if (liveUsers.has(userId)) {
+        this.expiredRecords.delete(userId);
+        continue;
+      }
+      out.push(rec);
+    }
+    return out;
+  }
+
+  /** Forget an expired display cue (e.g. after explicit sign-out). */
+  forgetExpired(userId: string): void {
+    if (this.expiredRecords.delete(userId)) {
+      this.options.onUpdate?.();
+    }
+  }
+
   /** Return waiting count for an owned { userId, loginId } pair, or null if unknown/unowned. */
   waitingCount(userId: string, loginId: string): number | null {
     const owned = this.manager.listAccounts().some((a) => a.userId === userId && a.loginId === loginId);
@@ -3475,9 +3506,11 @@ export class InactiveAccountBadgePoller {
     return this.counts.get(this.keyFor(userId, loginId)) ?? null;
   }
 
-  /** Drop counts for any account no longer owned (call on ownership change / sign-out / teardown). */
+  /** Drop counts for any account no longer owned, and clear expired cues once a user re-signs in. */
   prune(): void {
-    const ownedKeys = new Set(this.manager.listAccounts().map((a) => this.keyFor(a.userId, a.loginId)));
+    const accounts = this.manager.listAccounts();
+    const ownedKeys = new Set(accounts.map((a) => this.keyFor(a.userId, a.loginId)));
+    const liveUsers = new Set(accounts.map((a) => a.userId));
     let changed = false;
     for (const key of [...this.counts.keys()]) {
       if (!ownedKeys.has(key)) {
@@ -3485,12 +3518,26 @@ export class InactiveAccountBadgePoller {
         changed = true;
       }
     }
+    for (const key of [...this.expired]) {
+      if (!ownedKeys.has(key)) {
+        this.expired.delete(key);
+        changed = true;
+      }
+    }
+    for (const userId of [...this.expiredRecords.keys()]) {
+      if (liveUsers.has(userId)) {
+        this.expiredRecords.delete(userId);
+        changed = true;
+      }
+    }
     if (changed) this.options.onUpdate?.();
   }
 
   clear(): void {
-    if (this.counts.size === 0) return;
+    if (this.counts.size === 0 && this.expired.size === 0 && this.expiredRecords.size === 0) return;
     this.counts.clear();
+    this.expired.clear();
+    this.expiredRecords.clear();
     this.options.onUpdate?.();
   }
 
@@ -3508,6 +3555,8 @@ export class InactiveAccountBadgePoller {
       this.timer = null;
     }
     this.counts.clear();
+    this.expired.clear();
+    this.expiredRecords.clear();
   }
 
   async pollOnce(): Promise<void> {
@@ -3533,8 +3582,15 @@ export class InactiveAccountBadgePoller {
           const verified = await runtime.verifySession();
           if (this.stopped || !verified || verified.user.id !== account.userId || !runtime.isLiveOwned()) {
             if (this.counts.delete(key)) updated = true;
+            if (!verified) {
+              this.expired.add(key);
+              this.expiredRecords.set(account.userId, { ...account });
+              updated = true;
+            }
             continue;
           }
+          if (this.expired.delete(key)) updated = true;
+          if (this.expiredRecords.delete(account.userId)) updated = true;
           const count = await this.fetchWaitingCount(runtime);
           // Recheck ownership & that this login is still live and still inactive before committing!
           const stillOwned = this.manager.listAccounts().some(
@@ -3552,6 +3608,9 @@ export class InactiveAccountBadgePoller {
         } catch (error) {
           if (error instanceof MultiAccountSessionExpired) {
             if (this.counts.delete(key)) updated = true;
+            this.expired.add(key);
+            this.expiredRecords.set(account.userId, { ...account });
+            updated = true;
           }
           // Transient error: leave existing unknown/previous state without leaking across accounts.
         }

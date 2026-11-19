@@ -374,7 +374,14 @@
 .dashboard__org-menu-item { display: flex; align-items: center; gap: 10px; inline-size: 100%; }
 .dashboard__org-menu-name { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard__org-check { margin-inline-start: auto; }
-.dashboard__user-trigger-brand { flex: 1; text-align: start; }
+.dashboard__user-trigger-text { display: grid; flex: 1; min-inline-size: 0; gap: 1px; text-align: start; }
+.dashboard__user-trigger-brand { flex: 1; min-inline-size: 0; text-align: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard__user-trigger-sub {
+  font-size: 11px; font-weight: 400; line-height: 1.25;
+  color: var(--home-ink-muted, var(--text-muted));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dashboard__user-trigger-sub[hidden] { display: none; }
 @media (width > 52rem) {
   .hm-frame__rail .dashboard__user-trigger .dashboard__org-mark { display: grid; }
 }
@@ -413,17 +420,33 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hm-account-row__secondary {
-  font-size: 12px; line-height: 1.25; color: var(--home-ink-muted, var(--text-muted));
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; line-height: 1.3; color: var(--home-ink-muted, var(--text-muted));
+  white-space: normal; overflow-wrap: anywhere;
 }
 .hm-account-row__badge {
-  flex: none; display: inline-grid; place-items: center; min-inline-size: 20px; block-size: 20px;
-  padding-inline: 6px; border-radius: 999px; background: var(--home-ink); color: var(--home-canvas);
-  font-size: 11px; font-weight: 700; line-height: 1;
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  padding: 2px 8px; border-radius: 999px; background: var(--home-ink); color: var(--home-canvas);
+  font-size: 11px; font-weight: 600; line-height: 1.3; white-space: nowrap;
 }
-.hm-account-row__check { flex: none; font-size: 13px; font-weight: 700; color: var(--home-ink); }
+.hm-account-row__current {
+  flex: none; font-size: 11px; font-weight: 600; line-height: 1.3;
+  color: var(--home-accent-text); white-space: nowrap;
+}
+.hm-account-row__expired {
+  flex: none; font-size: 11px; font-weight: 600; line-height: 1.3;
+  color: var(--danger, #b91c1c); white-space: nowrap;
+}
+.hm-menu-item--identified {
+  display: grid; gap: 1px; text-align: start;
+}
+.hm-menu-item__sub {
+  font-size: 12px; font-weight: 400; line-height: 1.3;
+  color: var(--home-ink-muted, var(--text-muted)); overflow-wrap: anywhere;
+}
+[data-user-menu] {
+  max-block-size: calc(100dvh - 5rem); overflow-y: auto; overscroll-behavior: contain;
+}
 .hm-account-add { font-weight: 600; color: var(--home-accent-text); }
-.hm-account-cap { margin: 2px 0; padding: 4px 10px; font-size: 12px; color: var(--home-ink-muted, var(--text-muted)); }
-.dashboard__add-account-dialog { width: min(26rem, calc(100vw - 2rem)); }
-.dashboard__add-account-body { display: grid; gap: 12px; margin-top: 12px; }
+.hm-account-cap { margin: 2px 0; padding: 6px 10px; font-size: 12px; line-height: 1.4; color: var(--home-ink-muted, var(--text-muted)); }
+.dashboard__add-account-body { display: grid; gap: 12px; }
 .dashboard__add-account-otp { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }

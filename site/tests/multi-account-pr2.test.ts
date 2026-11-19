@@ -640,7 +640,7 @@ test("PR 2 Lead fixes (2), (4), (5), (6): source wiring assertions for signed-ou
 
   // (2) Signed-out /app and /invite OTP inputs wired to verifyEmailOtpSignIn, plus Add-account OTP reset on refusal
   assert.ok(liveDash.includes("data-signed-out-otp-row") && liveDash.includes("data-signed-out-otp-verify"));
-  assert.ok(inviteOnramp.includes("data-invite-otp-row") && inviteOnramp.includes("data-invite-otp-verify") && inviteOnramp.includes("verifyEmailOtpSignIn("));
+  assert.ok(inviteOnramp.includes("data-invite-otp-form") && inviteOnramp.includes("data-invite-otp-verify") && inviteOnramp.includes("verifyEmailOtpSignIn("));
   assert.ok(liveDash.includes("resetAddAccountOtp();"));
 
   // (3) Account-wide Connected Apps & Your Agents pass accountWideWorkspace: true
@@ -1170,4 +1170,101 @@ test("PR 2 HezSec C6 witness: callback URL credentials are scrubbed SYNCHRONOUSL
     bootFn.indexOf("scrubCallbackUrlImmediate(") < bootFn.indexOf("await mgr.initialize()"),
     "bootstrapMultiAccountAuth must scrub callback URL BEFORE awaiting mgr.initialize()",
   );
+});
+
+test("PR 2 Designer CHANGES (1)-(4) + HezSec C3 signed-out copy: distinct code step, centered dialogs & focus return, identifiable accounts + expired badge poller, and /invite identity change notice", async () => {
+  // 1. Runtime test: InactiveAccountBadgePoller tracks expired inactive logins cleanly!
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "Alex");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "Alex");
+  const expiredTokens = new Set<string>();
+  const live = new Map<string, typeof userA>();
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      if (expiredTokens.has(bearer)) {
+        return Response.json({ error_code: "session_not_found", msg: "Session from session_id claim in JWT does not exist" }, { status: 403 });
+      }
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found", msg: "Session not found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "refresh_token") {
+      return Response.json({ error: "invalid_grant", error_description: "Refresh Token Not Found" }, { status: 400 });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const mgr = new AccountManager(deployment, {
+    localStorage: new MemoryStorage(),
+    sessionStorage: new MemoryStorage(),
+    fetcher,
+    webLocks: createLocks(),
+    createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+  const aProm = await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+  const bProm = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  assert.equal(aProm.kind, "promoted");
+  assert.equal(bProm.kind, "promoted");
+  mgr.switchActiveAccount(userA.id);
+
+  // Expire B's token so inactive badge poller detects expired session!
+  const bToken = mgr.runtimeFor(userB.id)!.peekAccessToken()!;
+  expiredTokens.add(bToken);
+  const poller = new InactiveAccountBadgePoller(mgr, async () => 2, { intervalMs: 0 });
+  assert.equal(poller.isExpired(userB.id, bProm.account.loginId), false);
+  await poller.pollOnce();
+  assert.equal(poller.isExpired(userB.id, bProm.account.loginId), true, "proven expired inactive account must surface Sign in again");
+  assert.equal(poller.waitingCount(userB.id, bProm.account.loginId), null, "expired inactive account must not show stale waiting count");
+  assert.deepEqual(
+    poller.expiredAccounts().map((a) => ({ userId: a.userId, secondary: a.secondary })),
+    [{ userId: userB.id, secondary: userB.email }],
+    "expired inactive account remains surfaced for Sign in again until re-signed in or cleared",
+  );
+  poller.clear();
+  assert.equal(poller.expiredAccounts().length, 0, "clear wipes expired cues on sign-out-all");
+  mgr.destroy();
+
+  // 2. Source & CSS contract assertions for all 4 Designer CHANGES + HezSec C3 signed-out copy!
+  const [liveDash, inviteOnramp, dialogCss, shellCss, homeShell] = await Promise.all([
+    readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/invite/InviteOnramp.astro", import.meta.url), "utf8"),
+    readFile(new URL("../src/styles/kylon-account-dialogs.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/styles/home/shell.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/home-shell.ts", import.meta.url), "utf8"),
+  ]);
+
+  // Designer #1: Distinct emailed-code step with pinned address captured before await, separate <form>, Enter = Verify code, Send new code + Change email, matching signed-out copy!
+  assert.ok(liveDash.includes("data-add-account-code-step") && liveDash.includes("data-add-account-code-email") && liveDash.includes("data-add-account-otp-change") && liveDash.includes("data-add-account-otp-resend"));
+  assert.ok(liveDash.includes('if (titleEl) titleEl.textContent = "Enter your sign-in code.";'));
+  assert.ok(liveDash.includes('We sent a sign-in code to ') && liveDash.includes('data-signed-out-otp-resend'));
+  assert.ok(inviteOnramp.includes("data-invite-otp-form") && inviteOnramp.includes("data-invite-otp-email") && inviteOnramp.includes("data-invite-otp-resend") && inviteOnramp.includes("data-invite-otp-change"));
+
+  // Designer #2: Dialog centering, field insets, focus rings, and focus return on Escape/Cancel
+  assert.ok(dialogCss.includes("[data-add-account-dialog]") && dialogCss.includes("[data-signout-all-dialog]"));
+  assert.ok(liveDash.includes("focusVisibleAccountTrigger()"));
+
+  // Designer #3: Visible "Current", "N waiting", "Sign in again", wrapping full email, active identifier on trigger & single-account sign-out actions, 5-account cap guidance, switch live announcement
+  assert.ok(liveDash.includes('currentEl.textContent = "Current"') && liveDash.includes('badge.textContent = `${waiting} waiting`') && liveDash.includes('expiredEl.textContent = "Sign in again"'));
+  assert.ok(liveDash.includes("data-signout-sub") && liveDash.includes("data-signout-others-sub") && liveDash.includes("data-rail-account-email") && liveDash.includes("data-account-live"));
+  assert.ok(liveDash.includes("Sign out of an account to add another."));
+  assert.ok(homeShell.includes('"hm-account-row__current", "Current"') && homeShell.includes('`${acct.waitingCount} waiting`') && homeShell.includes('"Sign in again"') && homeShell.includes("activeAccountIdentifier"));
+  assert.ok(shellCss.includes("overflow-wrap: anywhere") && shellCss.includes(".hm-account-row__expired") && shellCss.includes("[data-user-menu]"));
+
+  // Designer #4: Name new identity on invitation review after identity change
+  assert.ok(inviteOnramp.includes("data-review-identity-notice") && inviteOnramp.includes("You’re now joining as ${authEmail || \"this account\"}. Review this invitation again."));
 });

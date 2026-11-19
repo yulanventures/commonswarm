@@ -77,11 +77,14 @@ export interface AccountSwitcherMenuItem {
   initials: string;
   active: boolean;
   waitingCount: number | null;
+  expired?: boolean;
 }
 
 export interface AccountMenuState {
   /** Who is signed in, as the account menu already says it ("Your account" until known). */
   signedInAs: string;
+  /** Active account identifier (email/secondary) shown beside single-account sign-out actions. */
+  activeAccountIdentifier?: string;
   organizations?: OrganizationMenuItem[];
   /** Signed-in accounts in this browser when multi-account sign-in is enabled. */
   accounts?: readonly AccountSwitcherMenuItem[];
@@ -111,6 +114,7 @@ export type AccountMenuAction =
   | "sign-out-all"
   | "add-account"
   | { kind: "switch-account"; userId: string }
+  | { kind: "reauth-account"; email: string }
   | { kind: "organization"; workspaceId: string };
 
 export interface OrganizationMenuItem {
@@ -534,18 +538,21 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
           meta.append(node(doc, "span", "hm-account-row__secondary", acct.secondary));
         }
         btn.append(avatar, meta);
-        if (!acct.active && typeof acct.waitingCount === "number" && acct.waitingCount > 0) {
-          const badge = node(doc, "span", "hm-account-row__badge", String(acct.waitingCount));
-          badge.setAttribute("aria-label", `${acct.waitingCount} waiting`);
+        if (acct.expired) {
+          btn.append(node(doc, "span", "hm-account-row__expired", "Sign in again"));
+        } else if (!acct.active && typeof acct.waitingCount === "number" && acct.waitingCount > 0) {
+          const badge = node(doc, "span", "hm-account-row__badge", `${acct.waitingCount} waiting`);
           btn.append(badge);
         } else if (acct.active) {
-          const check = node(doc, "span", "hm-account-row__check", "✓");
-          check.setAttribute("aria-hidden", "true");
-          btn.append(check);
+          btn.append(node(doc, "span", "hm-account-row__current", "Current"));
         }
         btn.addEventListener("click", () => {
           close(true);
-          if (!acct.active) callbacks.accountAction?.({ kind: "switch-account", userId: acct.userId });
+          if (acct.expired) {
+            callbacks.accountAction?.({ kind: "reauth-account", email: acct.secondary || acct.label });
+          } else if (!acct.active) {
+            callbacks.accountAction?.({ kind: "switch-account", userId: acct.userId });
+          }
         });
         li.append(btn); list.append(li); accountButtons.push(btn);
       }
@@ -569,20 +576,26 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       who.setAttribute("role", "presentation");
       built.push(who);
     }
-    const entry = (text: string, action: AccountMenuAction, hook: string) => {
+    const entry = (text: string, action: AccountMenuAction, hook: string, sub?: string) => {
       const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none");
-      const button = node(doc, "button", "hm-menu__item", text);
+      const button = node(doc, "button", sub ? "hm-menu__item hm-menu-item--identified" : "hm-menu__item");
       button.type = "button"; button.tabIndex = -1; button.setAttribute("role", "menuitem");
       button.dataset[hook] = "";
+      if (sub) {
+        button.append(node(doc, "span", "", text), node(doc, "span", "hm-menu-item__sub", sub));
+      } else {
+        button.textContent = text;
+      }
       button.addEventListener("click", () => { close(true); callbacks.accountAction?.(action); });
       li.append(button); built.push(li); accountButtons.push(button);
     };
+    const activeIdent = state.activeAccountIdentifier || undefined;
     if (state.theme) entry(state.theme, "theme", "menuTheme");
     if (state.yourAgents) entry("Your agents", "your-agents", "menuYourAgents");
     if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
     if (state.password) entry("Password", "password", "menuPassword");
-    if (state.signOutOthers) entry("Sign out other devices", "sign-out-others", "menuSignOutOthers");
-    if (state.signOut) entry(state.signOutLabel ?? "Sign out", "sign-out", "menuSignOut");
+    if (state.signOutOthers) entry("Sign out other devices", "sign-out-others", "menuSignOutOthers", activeIdent);
+    if (state.signOut) entry(state.signOutLabel ?? "Sign out", "sign-out", "menuSignOut", activeIdent);
     if (typeof state.signOutAllCount === "number" && state.signOutAllCount >= 2) {
       entry(`Sign out all ${state.signOutAllCount} accounts on this device`, "sign-out-all", "menuSignOutAll");
     }

@@ -149,16 +149,19 @@ import "../../styles/kylon-image-viewer.css";
       </div>
 
       <div class="dashboard__auth dashboard__email-sent" data-auth-view="email-sent" hidden>
-        <p class="dashboard__email-sent-title">Check your inbox.</p>
+        <p class="dashboard__email-sent-title" data-email-sent-title>Check your inbox.</p>
         <p data-email-sent-copy>
           We sent a sign-in link to <strong data-auth-email>your email</strong>. Open it in this
           browser — it brings you straight back here.
         </p>
-        <div class="dashboard__add-account-otp" data-signed-out-otp-row hidden>
+        <form class="dashboard__add-account-code-step" method="post" data-signed-out-otp-row hidden>
           <label for="dashboard-signin-otp">Email sign-in code</label>
-          <input id="dashboard-signin-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
-          <button class="dashboard__button dashboard__button--primary" type="button" data-signed-out-otp-verify>Verify code</button>
-        </div>
+          <input id="dashboard-signin-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required />
+          <div class="dashboard__email-row">
+            <button class="dashboard__button dashboard__button--primary" type="submit" data-signed-out-otp-verify>Verify code</button>
+            <button class="dashboard__button dashboard__button--secondary" type="button" data-signed-out-otp-resend>Send new code</button>
+          </div>
+        </form>
         <button class="dashboard__text-button" type="button" data-use-email>
           Send another link or use a different address
         </button>
@@ -287,7 +290,10 @@ import "../../styles/kylon-image-viewer.css";
               {/* The initials are drawn from the attribute (home/shell.css), not written as text: the button's visible
                   words are then the name alone, which its accessible name contains (WCAG 2.5.3). */}
               <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark data-user-avatar data-initials="U" aria-hidden="true"></span>
-              <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
+              <span class="dashboard__user-trigger-text">
+                <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
+                <span class="dashboard__user-trigger-sub" data-rail-account-email hidden></span>
+              </span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
               </svg>
@@ -318,11 +324,18 @@ import "../../styles/kylon-image-viewer.css";
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-account-agents-open>Your agents</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-password-open hidden>Password</button>
-              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>Sign out other devices</button>
-              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>
+                <span data-signout-others-label>Sign out other devices</span>
+                <span class="hm-menu-item__sub" data-signout-others-sub hidden></span>
+              </button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>
+                <span data-signout-label>Sign out</span>
+                <span class="hm-menu-item__sub" data-signout-sub hidden></span>
+              </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-all-open hidden>Sign out all accounts on this device</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
+            <p class="visually-hidden" data-account-live role="status" aria-live="polite"></p>
           </div>
 
           <div class="hm-frame__rail-content" data-home-rail-slot></div>
@@ -1245,24 +1258,21 @@ import "../../styles/kylon-image-viewer.css";
         </svg>
       </button>
     </header>
-    <div class="dashboard__add-account-body" data-add-account-providers>
-      <ProviderButtons
-        primaryClass="dashboard__button dashboard__button--primary"
-        secondaryClass="dashboard__button dashboard__button--secondary"
-        listClass="dashboard__providers"
-      >
-        <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
-      </ProviderButtons>
+    <div class="dashboard__add-account-body" data-add-account-entry>
+      <div data-add-account-providers>
+        <ProviderButtons
+          primaryClass="dashboard__button dashboard__button--primary"
+          secondaryClass="dashboard__button dashboard__button--secondary"
+          listClass="dashboard__providers"
+        >
+          <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
+        </ProviderButtons>
+      </div>
       <form class="dashboard__email" method="post" data-add-account-form>
         <label for="add-account-email">Email</label>
         <input id="add-account-email" name="email" type="email" autocomplete="username" inputmode="email" required />
         <label for="add-account-password">Password</label>
         <input id="add-account-password" name="password" type="password" autocomplete="current-password" />
-        <div class="dashboard__add-account-otp" data-add-account-otp-row hidden>
-          <label for="add-account-otp">Email sign-in code</label>
-          <input id="add-account-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
-          <button class="dashboard__button dashboard__button--primary" type="button" data-add-account-otp-verify>Verify code</button>
-        </div>
         <p class="dashboard__connected-apps-status" data-add-account-status role="status" aria-live="polite"></p>
         <div class="dashboard__signout-others-actions">
           <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-password-submit>Sign in</button>
@@ -1270,6 +1280,19 @@ import "../../styles/kylon-image-viewer.css";
         </div>
       </form>
     </div>
+    <form class="dashboard__add-account-code-step" method="post" data-add-account-code-step hidden>
+      <p class="dashboard__add-account-code-lead">
+        Enter the sign-in code sent to <strong data-add-account-code-email></strong>.
+      </p>
+      <label for="add-account-otp">Email sign-in code</label>
+      <input id="add-account-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required />
+      <p class="dashboard__connected-apps-status" data-add-account-code-status role="status" aria-live="polite"></p>
+      <div class="dashboard__signout-others-actions">
+        <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-otp-verify>Verify code</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-add-account-otp-resend>Send new code</button>
+      </div>
+      <button class="dashboard__text-button" type="button" data-add-account-otp-change>Change email</button>
+    </form>
   </dialog>
 
   <dialog data-account-agents-dialog aria-labelledby="dashboard-account-agents-title">
@@ -2887,22 +2910,38 @@ import "../../styles/kylon-image-viewer.css";
         : null;
       const accounts = multi ? multi.listAccounts() : [];
       const activeAcct = multi ? multi.activeAccount() : null;
+      const activeRecord = activeAcct
+        ? accounts.find((a) => a.userId === activeAcct.userId && a.loginId === activeAcct.loginId) ?? null
+        : null;
       return {
         organizations: organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId),
         signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
         ...(multi && accounts.length > 0
           ? {
-              accounts: accounts.map((acct) => ({
-                userId: acct.userId,
-                label: acct.label,
-                secondary: acct.secondary,
-                initials: viewerInitials(acct.label || acct.secondary),
-                active: Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId),
-                waitingCount: inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null,
-              })),
+              activeAccountIdentifier: activeRecord?.secondary || activeRecord?.label || undefined,
+              accounts: [
+                ...accounts.map((acct) => ({
+                  userId: acct.userId,
+                  label: acct.label,
+                  secondary: acct.secondary,
+                  initials: viewerInitials(acct.label || acct.secondary),
+                  active: Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId),
+                  waitingCount: inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null,
+                  expired: inactiveBadgePoller?.isExpired(acct.userId, acct.loginId) ?? false,
+                })),
+                ...(inactiveBadgePoller?.expiredAccounts() ?? []).map((acct) => ({
+                  userId: acct.userId,
+                  label: acct.label,
+                  secondary: acct.secondary,
+                  initials: viewerInitials(acct.label || acct.secondary),
+                  active: false,
+                  waitingCount: null,
+                  expired: true,
+                })),
+              ],
               canAddAccount: accounts.length < MAX_SIGNED_IN_ACCOUNTS,
               accountCapNote: accounts.length >= MAX_SIGNED_IN_ACCOUNTS
-                ? `Signed in to ${MAX_SIGNED_IN_ACCOUNTS} accounts (maximum)`
+                ? `${MAX_SIGNED_IN_ACCOUNTS} of ${MAX_SIGNED_IN_ACCOUNTS} accounts signed in. Sign out of an account to add another.`
                 : undefined,
               signOutLabel: "Sign out on this device",
               signOutAllCount: accounts.length >= 2 ? accounts.length : 0,
@@ -2919,6 +2958,7 @@ import "../../styles/kylon-image-viewer.css";
     const accountMenuAction = (action: AccountMenuAction): void => {
       if (typeof action === "object") {
         if (action.kind === "switch-account") { void switchToAccount(action.userId); return; }
+        if (action.kind === "reauth-account") { openAddAccountDialog(action.email, "Your session expired. Sign in again."); return; }
         void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push");
       }
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
@@ -3048,7 +3088,11 @@ import "../../styles/kylon-image-viewer.css";
       const password = one<HTMLInputElement>("#dashboard-password");
       if (password) password.disabled = entry === "create";
       const emailLink = one<HTMLButtonElement>("[data-email-link]");
-      if (emailLink) emailLink.textContent = copy.emailLink;
+      if (emailLink) {
+        emailLink.textContent = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
+          ? "Send sign-in code"
+          : copy.emailLink;
+      }
       const other = one<HTMLAnchorElement>("[data-auth-entry-switch]");
       if (other) { other.textContent = copy.otherLabel; other.href = copy.otherHref; }
     };
@@ -6334,7 +6378,23 @@ import "../../styles/kylon-image-viewer.css";
       if (name) name.textContent = viewerLabel;
       const mark = one<HTMLElement>("[data-org-mark]");
       if (mark) { mark.dataset.initials = avatarMark; mark.textContent = ""; }
-      one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${viewerLabel}, profile and account settings`);
+      const triggerEl = one<HTMLElement>("[data-user-menu-trigger]");
+      const activeEmail = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !sampleMode
+        ? (session?.user.email ?? "")
+        : "";
+      const triggerIdentity = activeEmail && activeEmail !== viewerLabel ? `${viewerLabel} (${activeEmail})` : viewerLabel;
+      triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
+      if (triggerEl && activeEmail) triggerEl.title = triggerIdentity;
+      const triggerEmailSub = one<HTMLElement>("[data-rail-account-email]");
+      if (triggerEmailSub) {
+        if (activeEmail && activeEmail !== viewerLabel) {
+          triggerEmailSub.textContent = activeEmail;
+          triggerEmailSub.hidden = false;
+        } else {
+          triggerEmailSub.textContent = "";
+          triggerEmailSub.hidden = true;
+        }
+      }
       const orgSlot = one<HTMLElement>("[data-org-menu]");
       const orgKey = JSON.stringify(orgs);
       if (orgSlot && orgSlot.dataset.orgKey !== orgKey) {
@@ -16478,21 +16538,52 @@ import "../../styles/kylon-image-viewer.css";
 
 
     let activeSignedOutOtpAttemptId: string | null = null;
+    let activeSignedOutOtpEmail = "";
+    const renderSignedOutEmailSentCopy = (mode: "code" | "link", targetEmail: string): void => {
+      const titleEl = one<HTMLElement>("[data-email-sent-title]");
+      const copyEl = one<HTMLElement>("[data-email-sent-copy]");
+      const backBtn = one<HTMLButtonElement>("[data-use-email]");
+      const strong = document.createElement("strong");
+      strong.dataset.authEmail = "";
+      strong.textContent = targetEmail || "your email";
+      if (mode === "code") {
+        if (titleEl) titleEl.textContent = "Enter your sign-in code.";
+        if (copyEl) {
+          copyEl.replaceChildren("We sent a sign-in code to ", strong, ". Enter it below to sign in.");
+        }
+        if (backBtn) backBtn.textContent = "Change email";
+      } else {
+        if (titleEl) titleEl.textContent = "Check your inbox.";
+        if (copyEl) {
+          copyEl.replaceChildren(
+            "We sent a sign-in link to ",
+            strong,
+            ". Open it in this browser — it brings you straight back here.",
+          );
+        }
+        if (backBtn) backBtn.textContent = "Send another link or use a different address";
+      }
+    };
     const resetSignedOutOtp = (cancelAttempt = false): void => {
       if (cancelAttempt && activeSignedOutOtpAttemptId) {
         accountManager()?.cancelAttempt(activeSignedOutOtpAttemptId);
       }
       activeSignedOutOtpAttemptId = null;
-      const otpRow = one<HTMLElement>("[data-signed-out-otp-row]");
+      activeSignedOutOtpEmail = "";
+      const otpRow = one<HTMLFormElement>("[data-signed-out-otp-row]");
       const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
+      const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
       if (otpRow) otpRow.hidden = true;
       if (otpInput) otpInput.value = "";
+      if (verifyBtn) verifyBtn.disabled = false;
+      renderSignedOutEmailSentCopy("link", one<HTMLInputElement>("#dashboard-email")?.value.trim() || "your email");
     };
 
     for (const button of all<HTMLButtonElement>("[data-use-email]")) {
       button.addEventListener("click", () => {
         resetSignedOutOtp(true);
         showAuthView("choices");
+        one<HTMLInputElement>("#dashboard-email")?.focus();
       });
     }
 
@@ -16510,62 +16601,97 @@ import "../../styles/kylon-image-viewer.css";
       if (on) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
     };
 
-    /* The email link reads only the address, so an empty password never blocks it. */
-    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      const input = one<HTMLInputElement>("#dashboard-email");
-      if (!input) return;
-      if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
-      busy(button, true);
+    const sendSignedOutEmailCodeOrLink = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
+      busy(trigger, true);
       authError(null);
       try {
-        const started = await signInWithEmail(input.value.trim(), new URL("/app", window.location.origin).href);
-        const email = one<HTMLElement>("[data-auth-email]");
-        if (email) email.textContent = input.value.trim();
-        const otpRow = one<HTMLElement>("[data-signed-out-otp-row]");
+        const started = await signInWithEmail(requestedEmail, new URL("/app", window.location.origin).href);
+        const otpRow = one<HTMLFormElement>("[data-signed-out-otp-row]");
         const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
+        const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
         if (isMultiAccountEnabled() && started && typeof started === "object" && started.attemptId) {
           activeSignedOutOtpAttemptId = started.attemptId;
+          activeSignedOutOtpEmail = requestedEmail;
+          renderSignedOutEmailSentCopy("code", requestedEmail);
           if (otpRow) otpRow.hidden = false;
+          if (verifyBtn) verifyBtn.disabled = false;
           if (otpInput) otpInput.value = "";
           showAuthView("email-sent");
           otpInput?.focus();
         } else {
           resetSignedOutOtp(false);
+          renderSignedOutEmailSentCopy("link", requestedEmail);
           showAuthView("email-sent");
         }
       } catch (error) {
         resetSignedOutOtp(false);
         authError(readableError(error));
       } finally {
-        busy(button, false);
+        busy(trigger, false);
       }
+    };
+
+    /* The email link reads only the address, so an empty password never blocks it. */
+    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const input = one<HTMLInputElement>("#dashboard-email");
+      if (!input) return;
+      const requestedEmail = input.value.trim();
+      if (!requestedEmail || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+      await sendSignedOutEmailCodeOrLink(requestedEmail, button);
     });
 
-    one<HTMLButtonElement>("[data-signed-out-otp-verify]")?.addEventListener("click", async (event) => {
+    one<HTMLButtonElement>("[data-signed-out-otp-resend]")?.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
+      const requestedEmail = activeSignedOutOtpEmail || one<HTMLInputElement>("#dashboard-email")?.value.trim() || "";
+      if (!requestedEmail) {
+        resetSignedOutOtp(true);
+        showAuthView("choices");
+        one<HTMLInputElement>("#dashboard-email")?.focus();
+        return;
+      }
+      if (activeSignedOutOtpAttemptId) {
+        accountManager()?.cancelAttempt(activeSignedOutOtpAttemptId);
+        activeSignedOutOtpAttemptId = null;
+      }
+      await sendSignedOutEmailCodeOrLink(requestedEmail, button);
+    });
+
+    one<HTMLFormElement>("[data-signed-out-otp-row]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
+      const resendBtn = one<HTMLButtonElement>("[data-signed-out-otp-resend]");
       const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
-      if (!activeSignedOutOtpAttemptId || !otpInput) return;
+      if (!otpInput) return;
+      if (!activeSignedOutOtpAttemptId) {
+        authError("That sign-in code is no longer active. Send a new code.");
+        resendBtn?.focus();
+        return;
+      }
       const code = otpInput.value.trim();
       if (!code) { authError("Enter the emailed sign-in code."); otpInput.focus(); return; }
-      busy(button, true);
+      busy(verifyBtn, true);
       authError(null);
       const attemptId = activeSignedOutOtpAttemptId;
       try {
         const outcome = await verifyEmailOtpSignIn(attemptId, code);
-        resetSignedOutOtp(false);
         if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+          resetSignedOutOtp(false);
           if (!authReloadQueued) runBoot();
         } else {
-          showAuthView("choices");
-          authError(outcome.message || "That sign-in code did not work or expired. Try again.");
+          activeSignedOutOtpAttemptId = null;
+          if (verifyBtn) verifyBtn.disabled = true;
+          authError(outcome.message || "That sign-in code did not work or expired. Send a new code.");
+          resendBtn?.focus();
         }
       } catch (error) {
-        resetSignedOutOtp(false);
-        showAuthView("choices");
+        activeSignedOutOtpAttemptId = null;
+        if (verifyBtn) verifyBtn.disabled = true;
         authError(readableError(error));
+        resendBtn?.focus();
       } finally {
-        busy(button, false);
+        if (verifyBtn) verifyBtn.removeAttribute("aria-busy");
+        if (verifyBtn && activeSignedOutOtpAttemptId) verifyBtn.disabled = false;
       }
     });
 
@@ -16636,6 +16762,7 @@ import "../../styles/kylon-image-viewer.css";
         button.disabled = true;
         const signingOutUserId = renderedAuthUserId || session?.user.id || "";
         const signingOutLoginId = renderedAuthLoginId;
+        if (signingOutUserId) inactiveBadgePoller?.forgetExpired(signingOutUserId);
         pendingSeatAdminReauthNotice = false;
         pendingForcedNotice = null;
         passwordChangeNotice = null;
@@ -16784,12 +16911,39 @@ import "../../styles/kylon-image-viewer.css";
       session = null;
     };
 
+    const focusVisibleAccountTrigger = (): void => {
+      const desktopTrigger = one<HTMLButtonElement>("[data-user-menu-trigger]");
+      if (desktopTrigger && desktopTrigger.getClientRects().length > 0 && !desktopTrigger.closest("[hidden], [inert]")) {
+        desktopTrigger.focus({ preventScroll: true });
+        return;
+      }
+      const phoneTrigger = document.querySelector<HTMLButtonElement>(".hm-phone-bar .hm-menu__trigger");
+      if (phoneTrigger && phoneTrigger.getClientRects().length > 0 && !phoneTrigger.closest("[hidden], [inert]")) {
+        phoneTrigger.focus({ preventScroll: true });
+        return;
+      }
+      desktopTrigger?.focus({ preventScroll: true });
+    };
+
+    const announceAccountChange = (message: string): void => {
+      const live = one<HTMLElement>("[data-account-live]");
+      if (!live) return;
+      live.textContent = "";
+      live.textContent = message;
+    };
+
     const renderAccountSwitcher = (): void => {
       const container = one<HTMLElement>("[data-account-switcher]");
       const sep = one<HTMLElement>("[data-account-switcher-sep]");
       const signOutAllBtn = one<HTMLButtonElement>("[data-signout-all-open]");
       const railSignOutBtn = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const railSignOutLabel = one<HTMLElement>("[data-signout-label]");
+      const railSignOutSub = one<HTMLElement>("[data-signout-sub]");
+      const railSignOutOthersBtn = one<HTMLButtonElement>("[data-signout-others-open]");
+      const railSignOutOthersSub = one<HTMLElement>("[data-signout-others-sub]");
       const railLabel = one<HTMLElement>(".dashboard__user-menu-account");
+      const triggerEl = one<HTMLElement>("[data-user-menu-trigger]");
+      const triggerEmailSub = one<HTMLElement>("[data-rail-account-email]");
       const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof accountManager === "function"
         ? accountManager()
         : null;
@@ -16798,12 +16952,49 @@ import "../../styles/kylon-image-viewer.css";
         if (sep) sep.hidden = true;
         if (signOutAllBtn) signOutAllBtn.hidden = true;
         if (railLabel) railLabel.hidden = false;
-        if (railSignOutBtn) railSignOutBtn.textContent = "Sign out";
+        if (railSignOutLabel) railSignOutLabel.textContent = "Sign out";
+        else if (railSignOutBtn) railSignOutBtn.textContent = "Sign out";
+        if (railSignOutSub) { railSignOutSub.textContent = ""; railSignOutSub.hidden = true; }
+        if (railSignOutOthersSub) { railSignOutOthersSub.textContent = ""; railSignOutOthersSub.hidden = true; }
+        railSignOutBtn?.classList.remove("hm-menu-item--identified");
+        railSignOutOthersBtn?.classList.remove("hm-menu-item--identified");
+        if (triggerEmailSub) { triggerEmailSub.textContent = ""; triggerEmailSub.hidden = true; }
         return;
       }
       const accounts = multi.listAccounts();
       const activeAcct = multi.activeAccount();
-      if (railSignOutBtn) railSignOutBtn.textContent = "Sign out on this device";
+      const activeRecord = activeAcct
+        ? accounts.find((acct) => acct.userId === activeAcct.userId && acct.loginId === activeAcct.loginId) ?? null
+        : null;
+      const activeIdentifier = activeRecord?.secondary || activeRecord?.label || "";
+      if (activeRecord) {
+        const triggerIdentity = activeRecord.secondary && activeRecord.secondary !== activeRecord.label
+          ? `${activeRecord.label} (${activeRecord.secondary})`
+          : activeRecord.label;
+        triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
+        if (triggerEl) triggerEl.title = triggerIdentity;
+        if (triggerEmailSub) {
+          if (activeRecord.secondary && activeRecord.secondary !== activeRecord.label) {
+            triggerEmailSub.textContent = activeRecord.secondary;
+            triggerEmailSub.hidden = false;
+          } else {
+            triggerEmailSub.textContent = "";
+            triggerEmailSub.hidden = true;
+          }
+        }
+      }
+      if (railSignOutLabel) railSignOutLabel.textContent = "Sign out on this device";
+      else if (railSignOutBtn) railSignOutBtn.textContent = "Sign out on this device";
+      if (railSignOutSub) {
+        railSignOutSub.textContent = activeIdentifier;
+        railSignOutSub.hidden = !activeIdentifier;
+      }
+      if (railSignOutOthersSub) {
+        railSignOutOthersSub.textContent = activeIdentifier;
+        railSignOutOthersSub.hidden = !activeIdentifier;
+      }
+      railSignOutBtn?.classList.toggle("hm-menu-item--identified", Boolean(activeIdentifier));
+      railSignOutOthersBtn?.classList.toggle("hm-menu-item--identified", Boolean(activeIdentifier));
       if (signOutAllBtn) {
         signOutAllBtn.hidden = accounts.length < 2;
         if (accounts.length >= 2) {
@@ -16825,14 +17016,21 @@ import "../../styles/kylon-image-viewer.css";
       list.className = "hm-account-list";
       list.setAttribute("role", "group");
       list.setAttribute("aria-label", "Signed-in accounts");
-      for (const acct of accounts) {
-        const isCurrent = Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId);
+      const expiredExtras = inactiveBadgePoller?.expiredAccounts() ?? [];
+      const displayAccounts = [
+        ...accounts.map((acct) => ({ acct, expiredOnly: false })),
+        ...expiredExtras.map((acct) => ({ acct, expiredOnly: true })),
+      ];
+      for (const { acct, expiredOnly } of displayAccounts) {
+        const isCurrent = !expiredOnly && Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId);
+        const isExpired = expiredOnly || (!isCurrent && (inactiveBadgePoller?.isExpired(acct.userId, acct.loginId) ?? false));
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = isCurrent ? "dashboard__user-menu-item hm-account-row hm-account-row--active" : "dashboard__user-menu-item hm-account-row";
         btn.setAttribute("role", "menuitemradio");
         btn.setAttribute("aria-checked", String(isCurrent));
         btn.dataset.accountSwitch = acct.userId;
+        if (isExpired) btn.dataset.accountExpired = "true";
 
         const avatar = document.createElement("span");
         avatar.className = "hm-account-row__avatar";
@@ -16853,24 +17051,31 @@ import "../../styles/kylon-image-viewer.css";
         }
         btn.append(avatar, meta);
 
-        const waiting = !isCurrent ? inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null : null;
-        if (typeof waiting === "number" && waiting > 0) {
+        const waiting = !isCurrent && !isExpired ? inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null : null;
+        if (isExpired) {
+          const expiredEl = document.createElement("span");
+          expiredEl.className = "hm-account-row__expired";
+          expiredEl.textContent = "Sign in again";
+          btn.append(expiredEl);
+        } else if (typeof waiting === "number" && waiting > 0) {
           const badge = document.createElement("span");
           badge.className = "hm-account-row__badge";
-          badge.textContent = String(waiting);
-          badge.setAttribute("aria-label", `${waiting} waiting`);
+          badge.textContent = `${waiting} waiting`;
           btn.append(badge);
         } else if (isCurrent) {
-          const check = document.createElement("span");
-          check.className = "hm-account-row__check";
-          check.textContent = "✓";
-          check.setAttribute("aria-hidden", "true");
-          btn.append(check);
+          const currentEl = document.createElement("span");
+          currentEl.className = "hm-account-row__current";
+          currentEl.textContent = "Current";
+          btn.append(currentEl);
         }
         btn.addEventListener("click", () => {
           const menu = one<HTMLElement>("[data-user-menu]");
           if (menu) menu.hidden = true;
           one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+          if (isExpired) {
+            openAddAccountDialog(acct.secondary || acct.label, "Your session expired. Sign in again.");
+            return;
+          }
           if (!isCurrent) void switchToAccount(acct.userId);
         });
         list.append(btn);
@@ -16892,7 +17097,7 @@ import "../../styles/kylon-image-viewer.css";
       } else {
         const cap = document.createElement("p");
         cap.className = "hm-account-cap";
-        cap.textContent = `Signed in to ${MAX_SIGNED_IN_ACCOUNTS} accounts (maximum)`;
+        cap.textContent = `${MAX_SIGNED_IN_ACCOUNTS} of ${MAX_SIGNED_IN_ACCOUNTS} accounts signed in. Sign out of an account to add another.`;
         list.append(cap);
       }
       container.replaceChildren(list);
@@ -16901,23 +17106,44 @@ import "../../styles/kylon-image-viewer.css";
     const switchToAccount = async (targetUserId: string): Promise<void> => {
       const mgr = accountManager();
       if (!mgr || sampleMode) return;
+      const targetRecord = mgr.listAccounts().find((acct) => acct.userId === targetUserId) ?? null;
       pendingSeatAdminReauthNotice = false;
       pendingForcedNotice = null;
       passwordChangeNotice = null;
       teardownActiveAccountView();
       mgr.switchActiveAccount(targetUserId);
       renderAccountSwitcher();
+      if (targetRecord) {
+        const suffix = targetRecord.secondary && targetRecord.secondary !== targetRecord.label
+          ? ` (${targetRecord.secondary})`
+          : "";
+        announceAccountChange(`Switched to ${targetRecord.label}${suffix}.`);
+      }
       if (!authReloadQueued) runBoot();
       void inactiveBadgePoller?.pollOnce();
     };
 
     let activeAddAccountOtpAttemptId: string | null = null;
+    let activeAddAccountOtpEmail = "";
+    let addAccountClosingForPromotion = false;
+    const showAddAccountStep = (step: "entry" | "code"): void => {
+      const entry = one<HTMLElement>("[data-add-account-entry]");
+      const codeStep = one<HTMLFormElement>("[data-add-account-code-step]");
+      if (entry) entry.hidden = step !== "entry";
+      if (codeStep) codeStep.hidden = step !== "code";
+    };
     const resetAddAccountOtp = (): void => {
       activeAddAccountOtpAttemptId = null;
-      const otpRow = one<HTMLElement>("[data-add-account-otp-row]");
+      activeAddAccountOtpEmail = "";
       const otpInput = one<HTMLInputElement>("#add-account-otp");
-      if (otpRow) otpRow.hidden = true;
+      const codeEmail = one<HTMLElement>("[data-add-account-code-email]");
+      const codeStatus = one<HTMLElement>("[data-add-account-code-status]");
+      const verifyBtn = one<HTMLButtonElement>("[data-add-account-otp-verify]");
       if (otpInput) otpInput.value = "";
+      if (codeEmail) codeEmail.textContent = "";
+      if (codeStatus) codeStatus.textContent = "";
+      if (verifyBtn) verifyBtn.disabled = false;
+      showAddAccountStep("entry");
     };
     const openAddAccountDialog = (prefillEmail = "", initialStatus = ""): void => {
       if (!isMultiAccountEnabled() || sampleMode) return;
@@ -16926,6 +17152,7 @@ import "../../styles/kylon-image-viewer.css";
       const emailInput = one<HTMLInputElement>("#add-account-email");
       const status = one<HTMLElement>("[data-add-account-status]");
       if (!dialog) return;
+      addAccountClosingForPromotion = false;
       resetAddAccountOtp();
       form?.reset();
       if (emailInput && prefillEmail) emailInput.value = prefillEmail;
@@ -16946,21 +17173,59 @@ import "../../styles/kylon-image-viewer.css";
       }
     });
 
-    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP, password staging, and cancel on close).
+    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP step, password staging, cancel + focus return).
     {
       const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
       const form = one<HTMLFormElement>("[data-add-account-form]");
+      const codeStepForm = one<HTMLFormElement>("[data-add-account-code-step]");
       const emailInput = one<HTMLInputElement>("#add-account-email");
       const pwInput = one<HTMLInputElement>("#add-account-password");
-      const otpRow = one<HTMLElement>("[data-add-account-otp-row]");
       const otpInput = one<HTMLInputElement>("#add-account-otp");
       const status = one<HTMLElement>("[data-add-account-status]");
+      const codeEmailEl = one<HTMLElement>("[data-add-account-code-email]");
+      const codeStatusEl = one<HTMLElement>("[data-add-account-code-status]");
       const emailCodeBtn = one<HTMLButtonElement>("[data-add-account-email-code]");
       const otpVerifyBtn = one<HTMLButtonElement>("[data-add-account-otp-verify]");
+      const otpResendBtn = one<HTMLButtonElement>("[data-add-account-otp-resend]");
+      const otpChangeBtn = one<HTMLButtonElement>("[data-add-account-otp-change]");
       const pwSubmitBtn = one<HTMLButtonElement>("[data-add-account-password-submit]");
+
+      const sendAddAccountCode = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
+        if (!status) return;
+        if (trigger) trigger.disabled = true;
+        status.textContent = "";
+        if (codeStatusEl) codeStatusEl.textContent = "";
+        try {
+          const started = await signInWithEmail(
+            requestedEmail,
+            new URL("/app", window.location.origin).href,
+            "add-account",
+          );
+          if (started && typeof started === "object" && started.attemptId) {
+            activeAddAccountOtpAttemptId = started.attemptId;
+            activeAddAccountOtpEmail = requestedEmail;
+            if (codeEmailEl) codeEmailEl.textContent = requestedEmail;
+            if (codeStatusEl) codeStatusEl.textContent = "";
+            if (otpVerifyBtn) otpVerifyBtn.disabled = false;
+            showAddAccountStep("code");
+            if (otpInput) { otpInput.value = ""; otpInput.focus(); }
+          }
+        } catch (error) {
+          if (activeAddAccountOtpEmail) {
+            if (codeStatusEl) codeStatusEl.textContent = readableError(error);
+          } else {
+            resetAddAccountOtp();
+            status.textContent = readableError(error);
+          }
+        } finally {
+          if (trigger) trigger.disabled = false;
+        }
+      };
 
       one<HTMLButtonElement>("[data-add-account-close]")?.addEventListener("click", () => dialog?.close());
       dialog?.addEventListener("close", () => {
+        const promoted = addAccountClosingForPromotion;
+        addAccountClosingForPromotion = false;
         if (activeAddAccountOtpAttemptId) {
           accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
         }
@@ -16968,6 +17233,7 @@ import "../../styles/kylon-image-viewer.css";
         accountManager()?.cancelAttempt();
         form?.reset();
         if (status) status.textContent = "";
+        if (!promoted && session) focusVisibleAccountTrigger();
       });
       dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
 
@@ -16989,42 +17255,53 @@ import "../../styles/kylon-image-viewer.css";
       }
 
       emailCodeBtn?.addEventListener("click", async () => {
-        if (!emailInput || !status || !otpRow) return;
-        if (!emailInput.value.trim() || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
-        emailCodeBtn.disabled = true;
-        status.textContent = "";
-        try {
-          const started = await signInWithEmail(
-            emailInput.value.trim(),
-            new URL("/app", window.location.origin).href,
-            "add-account",
-          );
-          if (started && typeof started === "object" && started.attemptId) {
-            activeAddAccountOtpAttemptId = started.attemptId;
-            otpRow.hidden = false;
-            if (otpInput) { otpInput.value = ""; otpInput.focus(); }
-            status.textContent = `Enter the sign-in code sent to ${emailInput.value.trim()}.`;
-          }
-        } catch (error) {
-          resetAddAccountOtp();
-          status.textContent = readableError(error);
-        } finally {
-          emailCodeBtn.disabled = false;
-        }
+        if (!emailInput) return;
+        const requestedEmail = emailInput.value.trim();
+        if (!requestedEmail || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        await sendAddAccountCode(requestedEmail, emailCodeBtn);
       });
 
-      otpVerifyBtn?.addEventListener("click", async () => {
-        if (!activeAddAccountOtpAttemptId || !otpInput || !status) return;
+      otpResendBtn?.addEventListener("click", async () => {
+        const requestedEmail = activeAddAccountOtpEmail || emailInput?.value.trim() || "";
+        if (!requestedEmail) {
+          resetAddAccountOtp();
+          emailInput?.focus();
+          return;
+        }
+        if (activeAddAccountOtpAttemptId) {
+          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+          activeAddAccountOtpAttemptId = null;
+        }
+        await sendAddAccountCode(requestedEmail, otpResendBtn);
+      });
+
+      otpChangeBtn?.addEventListener("click", () => {
+        if (activeAddAccountOtpAttemptId) {
+          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+        }
+        resetAddAccountOtp();
+        emailInput?.focus();
+      });
+
+      codeStepForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!otpInput || !codeStatusEl) return;
+        if (!activeAddAccountOtpAttemptId) {
+          codeStatusEl.textContent = "That sign-in code is no longer active. Send a new code.";
+          otpResendBtn?.focus();
+          return;
+        }
         const token = otpInput.value.trim();
-        if (!token) { status.textContent = "Enter the emailed sign-in code."; otpInput.focus(); return; }
-        otpVerifyBtn.disabled = true;
-        status.textContent = "";
+        if (!token) { codeStatusEl.textContent = "Enter the emailed sign-in code."; otpInput.focus(); return; }
+        if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+        codeStatusEl.textContent = "";
         const attemptId = activeAddAccountOtpAttemptId;
         const priorUserId = session?.user.id ?? "";
         try {
           const outcome = await verifyEmailOtpSignIn(attemptId, token);
-          resetAddAccountOtp();
           if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+            addAccountClosingForPromotion = true;
+            resetAddAccountOtp();
             const promotedUserId = outcome.account.userId;
             if (promotedUserId !== priorUserId) {
               teardownActiveAccountView();
@@ -17034,27 +17311,34 @@ import "../../styles/kylon-image-viewer.css";
             renderAccountSwitcher();
             if (!authReloadQueued && promotedUserId !== priorUserId) runBoot();
           } else {
-            status.textContent = outcome.message || "That sign-in code did not work or expired. Send a new code.";
+            activeAddAccountOtpAttemptId = null;
+            if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+            codeStatusEl.textContent = outcome.message || "That sign-in code did not work or expired. Send a new code.";
+            otpResendBtn?.focus();
           }
         } catch (error) {
-          resetAddAccountOtp();
-          status.textContent = readableError(error);
+          activeAddAccountOtpAttemptId = null;
+          if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+          codeStatusEl.textContent = readableError(error);
+          otpResendBtn?.focus();
         } finally {
-          otpVerifyBtn.disabled = false;
+          if (otpVerifyBtn && activeAddAccountOtpAttemptId) otpVerifyBtn.disabled = false;
         }
       });
 
       form?.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!emailInput || !pwInput || !status || !pwSubmitBtn) return;
-        if (!emailInput.value.trim() || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        const requestedEmail = emailInput.value.trim();
+        if (!requestedEmail || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
         if (!pwInput.value) { status.textContent = "Enter your password or send a sign-in code."; pwInput.focus(); return; }
         pwSubmitBtn.disabled = true;
         status.textContent = "";
         const priorUserId = session?.user.id ?? "";
         try {
-          await signInWithPassword(emailInput.value.trim(), pwInput.value, undefined, { purpose: "add-account", returnRoute: "/app" });
+          await signInWithPassword(requestedEmail, pwInput.value, undefined, { purpose: "add-account", returnRoute: "/app" });
           const nextUserId = accountManager()?.activeAccount()?.userId ?? "";
+          addAccountClosingForPromotion = true;
           if (nextUserId && nextUserId !== priorUserId) {
             teardownActiveAccountView();
           } else {
@@ -17096,6 +17380,10 @@ import "../../styles/kylon-image-viewer.css";
         cancel.focus();
       });
       cancel?.addEventListener("click", () => dialog?.close());
+      dialog?.addEventListener("close", () => {
+        if (session) focusVisibleAccountTrigger();
+      });
+      dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
       confirm?.addEventListener("click", async () => {
         if (!confirm || !cancel || !status || confirm.disabled) return;
         confirm.disabled = true;
