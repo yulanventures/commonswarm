@@ -80,7 +80,9 @@ final class WaitingOnYouUITests: XCTestCase {
         capture("waiting-todo-detail")
 
         // Return to Waiting on you sheet and mark the assigned to-do done
-        let backButton = app.navigationBars.buttons.element(boundBy: 0)
+        let detailNavBar = app.navigationBars["To-do"].firstMatch
+        XCTAssertTrue(detailNavBar.waitForExistence(timeout: 5))
+        let backButton = detailNavBar.buttons.element(boundBy: 0)
         XCTAssertTrue(backButton.waitForExistence(timeout: 5))
         backButton.tap()
 
@@ -108,5 +110,16 @@ final class WaitingOnYouUITests: XCTestCase {
         }
         XCTAssertTrue(mobileTodo.exists, "Expected #mobile waiting to-do in All channels")
         capture("waiting-workspace")
+
+        // Switch to All workspaces scope pill and verify cross-workspace to-do appears
+        let allWorkspacesScope = app.buttons["waiting-scope-all"].firstMatch
+        XCTAssertTrue(allWorkspacesScope.waitForExistence(timeout: 5))
+        allWorkspacesScope.tap()
+        let secondWsTodo = app.staticTexts["Unpause nightly staging sync job"].firstMatch
+        for _ in 0..<6 where !secondWsTodo.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(secondWsTodo.exists, "Expected Second workspace waiting to-do in All workspaces")
+        capture("waiting-all-workspaces")
     }
 }

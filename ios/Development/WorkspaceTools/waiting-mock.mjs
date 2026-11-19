@@ -215,47 +215,47 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
 
-    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-next") {
+    if (req.method === "POST" && url.pathname === "/fixture/fail-next") {
       failNextOnce = true;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-next-todo") {
+    if (req.method === "POST" && url.pathname === "/fixture/fail-next-todo") {
       failNextTodoOnce = true;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/conflict-next-todo") {
+    if (req.method === "POST" && url.pathname === "/fixture/conflict-next-todo") {
       conflictNextTodoOnce = true;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/hide-waiting-todos-rpc") {
+    if (req.method === "POST" && url.pathname === "/fixture/hide-waiting-todos-rpc") {
       hideWaitingTodosRpc = true;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/show-waiting-todos-rpc") {
+    if (req.method === "POST" && url.pathname === "/fixture/show-waiting-todos-rpc") {
       hideWaitingTodosRpc = false;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/todos-page-size") {
+    if (req.method === "POST" && url.pathname === "/fixture/todos-page-size") {
       forceTodosPageSize = Number(url.searchParams.get("n") || "1");
       return reply(200, { ok: true, pageSize: forceTodosPageSize });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/omit-location") {
+    if (req.method === "POST" && url.pathname === "/fixture/omit-location") {
       const id = (url.searchParams.get("id") || sigGeneralChoice).toLowerCase();
       omitLocationSignalIds.add(id);
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/restore-locations") {
+    if (req.method === "POST" && url.pathname === "/fixture/restore-locations") {
       omitLocationSignalIds = new Set();
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "POST" && url.pathname === "/fixture/fail-decision-queue") {
+    if (req.method === "POST" && url.pathname === "/fixture/fail-decision-queue") {
       failDecisionQueueWs = url.searchParams.get("ws")?.toLowerCase() || null;
       return reply(200, { ok: true });
     }
-    if (verify && req.method === "GET" && url.pathname === "/fixture/commands") {
+    if (req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, receivedCommands);
     }
-    if (verify && req.method === "GET" && url.pathname === "/fixture/todo-commands") {
+    if (req.method === "GET" && url.pathname === "/fixture/todo-commands") {
       return reply(200, receivedTodoCommands);
     }
 
