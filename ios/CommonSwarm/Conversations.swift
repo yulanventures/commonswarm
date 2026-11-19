@@ -7,11 +7,12 @@ struct Workspace: Decodable, Hashable, Identifiable {
 }
 
 struct Conversation: Hashable, Identifiable {
-    enum Destination: Hashable { case general, channel(UUID, String), person(UUID), agent(UUID) }
-    enum ID: Hashable { case general, channel(UUID), person(UUID), agent(UUID) }
+    enum Destination: Hashable { case general, channel(UUID, String), person(UUID), agent(UUID), thread(UUID, ConversationKind) }
+    enum ID: Hashable { case general, channel(UUID), person(UUID), agent(UUID), thread(UUID) }
     let destination: Destination
     var id: ID {
         switch destination {
+        case .thread(let id, _): .thread(id)
         case .general: .general
         case .channel(let uuid, _): .channel(uuid)
         case .person(let uuid): .person(uuid)
@@ -21,7 +22,8 @@ struct Conversation: Hashable, Identifiable {
     let name: String
     let symbol: String
     var isDirect: Bool {
-        switch id { case .person, .agent: true; default: false }
+        if case .thread(_, let kind) = destination { return kind.direct }
+        return switch id { case .person, .agent: true; default: false }
     }
 }
 
@@ -61,6 +63,7 @@ struct Post: Encodable {
                                          "to_user_id": nil, "to_agent_principal_id": nil,
                                          "in_reply_to": nil, "about": nil]
         switch destination {
+        case .thread(let id, _): fields["conversation_id"] = id.uuidString.lowercased()
         case .general: break
         case .channel(let id, let slug):
             fields["channel"] = slug
@@ -159,6 +162,7 @@ struct ConversationAPI {
                      "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {
+        case .thread(let id, _): return try await threadHistory(workspace, id: id, before: before)
         case .general:
             query["channel_id"] = "is.null"
             query["to"] = "is.null"

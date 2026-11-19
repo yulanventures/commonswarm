@@ -241,6 +241,13 @@ final class HumanSession {
         return http.statusCode
     }
 
+    private var supportedWorkspaces = Set<UUID>()
+
+    func recordConversationCapability(workspace: UUID, supported: Bool) throws {
+        if supported { supportedWorkspaces.insert(workspace) }
+        else if supportedWorkspaces.contains(workspace) { throw APIError.invalidResponse }
+    }
+
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
         let key = DraftKey(workspace: workspace, conversation: conversation)
         if let draft = drafts[key] { return draft }

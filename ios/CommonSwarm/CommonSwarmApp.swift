@@ -110,7 +110,7 @@ private struct WorkspacesView: View {
     }
 }
 
-private struct RetryView: View {
+struct RetryView: View {
     let text: String
     let action: () async -> Void
     var body: some View {
@@ -118,7 +118,7 @@ private struct RetryView: View {
     }
 }
 
-private struct DirectoryView: View {
+struct LegacyDirectoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
     @ViewState private var directory: [Conversation]?
@@ -211,7 +211,7 @@ private struct HistoryRowPosition: View {
     }
 }
 
-private struct HistoryView: View {
+struct HistoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
     let item: Conversation
@@ -317,7 +317,7 @@ private struct HistoryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: item.symbol != "lock", send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
             }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
