@@ -5256,13 +5256,30 @@ export class OversightAuthRefusedError extends Error {
   }
 }
 
+/** Raised when a pinned read resolves a different signed-in account before dispatching fetch. */
+export class SessionIdentityMismatch extends Error {
+  constructor() {
+    super("Signed-in account changed before the read started.");
+    this.name = "SessionIdentityMismatch";
+  }
+}
+
 async function postConversationRead(
   payload: Record<string, unknown>,
   label: string,
-  guard?: OversightDispatchGuard,
+  guardOrExpectedUserId?: OversightDispatchGuard | string,
+  isAlive?: () => boolean,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  const guard = typeof guardOrExpectedUserId === "object" && guardOrExpectedUserId !== null
+    ? guardOrExpectedUserId
+    : undefined;
+  const expectedUserId = typeof guardOrExpectedUserId === "string"
+    ? guardOrExpectedUserId
+    : undefined;
   const d = deployment();
   if (!d) throw new NoDeployment();
+  if (guard && !guard.isScopeLive()) throw new OversightRequestRetiredError();
+  if (isAlive && !isAlive()) throw new SessionIdentityMismatch();
   const session = await currentSession();
   if (!session) throw new SessionExpired();
   if (guard) {
@@ -5270,6 +5287,9 @@ async function postConversationRead(
     if (liveViewer !== guard.expectedViewerUserId.toLowerCase() || !guard.isScopeLive()) {
       throw new OversightRequestRetiredError();
     }
+  }
+  if ((expectedUserId && session.user.id !== expectedUserId) || (isAlive && !isAlive())) {
+    throw new SessionIdentityMismatch();
   }
   const deadline = requestDeadline();
   try {
@@ -5288,7 +5308,14 @@ async function postConversationRead(
     const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
     return { status: response.status, body };
   } catch (error) {
-    if (error instanceof SessionExpired || error instanceof NoDeployment || error instanceof OversightRequestRetiredError) throw error;
+    if (
+      error instanceof SessionExpired ||
+      error instanceof NoDeployment ||
+      error instanceof OversightRequestRetiredError ||
+      error instanceof SessionIdentityMismatch
+    ) {
+      throw error;
+    }
     if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
     throw error;
   } finally {
@@ -5308,17 +5335,18 @@ export class ConversationsUnsupportedError extends Error {
 export async function listConversations(
   workspaceId: string,
   includeArchived = false,
+  expectedUserId?: string,
 ): Promise<ConversationSummary[]> {
   const request = buildListConversationsRequest(workspaceId, includeArchived);
   let result: { status: number; body: Record<string, unknown> };
   try {
-    result = await postConversationRead(request, "conversations");
+    result = await postConversationRead(request, "conversations", expectedUserId);
   } catch (error) {
     // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
     // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
     // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
     if (!(error instanceof TypeError)) throw error;
-    result = await postConversationRead(request, "conversations");
+    result = await postConversationRead(request, "conversations", expectedUserId);
   }
   const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
@@ -5330,11 +5358,13 @@ export async function listConversations(
 export async function readConversationHistory(
   workspaceId: string,
   conversationId: string,
-  options: ConversationHistoryOptions = {},
+  options: ConversationHistoryOptions & { expectedUserId?: string } = {},
 ): Promise<ConversationHistoryResult<Signal>> {
+  const { expectedUserId, ...reqOptions } = options;
   const { status, body } = await postConversationRead(
-    buildConversationHistoryRequest(workspaceId, conversationId, options),
+    buildConversationHistoryRequest(workspaceId, conversationId, reqOptions),
     "conversation history",
+    expectedUserId,
   );
   return parseConversationHistoryResponse(status, body, browserSignalFromRow);
 }

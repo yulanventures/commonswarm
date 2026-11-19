@@ -265,16 +265,30 @@ export function applyConversationHistoryRefresh<T extends ConversationHistorySig
   };
 }
 
+export interface DirectExclusionOptions {
+  /** True ONLY when the server explicitly returned ConversationsUnsupportedError (pre-Step-2b). */
+  legacyUnsupported?: boolean;
+}
+
 /**
  * Determine whether a signal belongs to a direct message or group DM and must therefore be
  * excluded from `#general` and `All messages`.
+ *
+ * Fail-closed on modern servers: even when `conversations` is `null` (discovery pending or 503)
+ * and the legacy PostgREST projection omits `conversation_id`, unfiled addressed rows
+ * (`channelId === null && (to !== null || toAgent !== null)`) are excluded unless the server
+ * explicitly declared pre-Step-2b `legacyUnsupported`.
  */
 export function isDirectConversationRow(
   row: ConversationHistorySignal,
   conversations: readonly ConversationSummary[] | null,
+  options?: DirectExclusionOptions,
 ): boolean {
   if (row.conversationKind === "dm" || row.conversationKind === "group_dm") return true;
-  if (!conversations) return false;
+  if (conversations === null) {
+    if (options?.legacyUnsupported === true) return false;
+    return row.channelId === null && (row.to !== null || row.toAgent !== null);
+  }
   let generalId: string | null = null;
   for (const conv of conversations) {
     if (conv.kind === "general") generalId = conv.conversationId;
@@ -291,17 +305,19 @@ export function isDirectConversationRow(
 }
 
 /**
- * Filter rows for `#general` or `All messages` so DM and group DM rows never leak into either view.
+ * Filter rows for `#general` or `All messages` so DM and group DM rows never leak into either view,
+ * including during a failed or pending Step 2b `conversations` list read.
  */
 export function excludeDirectConversationRows<T extends ConversationHistorySignal>(
   rows: readonly T[],
   conversations: readonly ConversationSummary[] | null,
   activeChannelId: string | null,
+  options?: DirectExclusionOptions,
 ): T[] {
-  if (!conversations) return [...rows];
-  const generalId = conversations.find((c) => c.kind === "general")?.conversationId ?? null;
+  if (conversations === null && options?.legacyUnsupported === true) return [...rows];
+  const generalId = conversations?.find((c) => c.kind === "general")?.conversationId ?? null;
   const dmIds = new Set(
-    conversations.filter((c) => isDirectKind(c.kind)).map((c) => c.conversationId),
+    (conversations ?? []).filter((c) => isDirectKind(c.kind)).map((c) => c.conversationId),
   );
   return rows.filter((row) => {
     if (row.conversationKind === "dm" || row.conversationKind === "group_dm") return false;
@@ -411,6 +427,49 @@ export function directConversationSendRefusal(args: {
     return DM_ATTACHMENTS_REFUSAL_TEXT;
   }
   return null;
+}
+
+/**
+ * Fail-closed channel membership submit guard covering both top-level sends and thread replies.
+ * Only allows pre-Step-2b fallback when the server explicitly reported `unsupported`.
+ */
+export function channelMembershipSendRefusal(args: {
+  channelId: string | null;
+  generalId: string;
+  conversations: readonly ConversationSummary[] | null;
+  conversationsReadState: "idle" | "pending" | "ready" | "unsupported" | "failed";
+}): string | null {
+  const { channelId, generalId, conversations, conversationsReadState } = args;
+  if (channelId === null || channelId === generalId) return null;
+  if (conversationsReadState === "unsupported") return null;
+  if (conversations === null) {
+    return conversationsReadState === "failed"
+      ? "Couldn't check channel membership. Retry before posting."
+      : "Checking channel membership. Try again in a moment.";
+  }
+  const conv = conversations.find((c) => c.channelId === channelId) ?? null;
+  if (!conv) return CONVERSATION_UNAVAILABLE_TEXT;
+  if (!conv.joined) return "Join this channel to post.";
+  return null;
+}
+
+/**
+ * Honest direct-message audience sentence accounting for Step 2b agent-owner read-only oversight.
+ * Agent-free DMs keep the exclusive promise; DMs containing an agent state the oversight exception.
+ */
+export function directConversationAudienceSentence(
+  conv: Pick<ConversationSummary, "members">,
+  viewerId: string,
+  title: string,
+): string {
+  const live = conv.members.filter((m) => !m.leftAt);
+  const others = live.filter((m) => !(m.kind === "user" && m.id === viewerId));
+  if (others.length === 0) return "Only you can read this.";
+  const hasAgent = live.some((m) => m.kind === "agent");
+  if (hasAgent) {
+    return `Direct message with ${title}. Agent owners can read their agents' DMs.`;
+  }
+  return `Only ${title} and you can read this.`;
 }
 
 /** Storage keys bound to viewer + workspace + conversation so drafts never bleed across accounts and wipe cleanly on leave/revocation. */

@@ -6,16 +6,18 @@ import {
   applyConversationHistoryInitial,
   applyConversationHistoryOlder,
   applyConversationHistoryRefresh,
+  channelMembershipSendRefusal,
   clearConversationDraftStorage,
   compareSignalsDesc,
   conversationDraftStorageKey,
   createConversationHistoryState,
+  directConversationAudienceSentence,
   directConversationSendRefusal,
   excludeDirectConversationRows,
   isDirectConversationRow,
   resolveActiveConversationHistoryTarget,
 } from "./conversation-history.ts";
-import { browserSignalCommand } from "./commonswarm.ts";
+import { SessionIdentityMismatch, browserSignalCommand } from "./commonswarm.ts";
 
 const ws = "11111111-1111-4111-8111-111111111111";
 const viewer = "33333333-3333-4333-8333-333333333333";
@@ -373,4 +375,132 @@ test("browserSignalCommand with conversationId emits conversation_id without cha
   assert.deepEqual(chanCmd.mentions, [{ kind: "agent", id: peerLead }]);
   assert.equal("channel" in chanCmd, false);
   assert.equal("to" in chanCmd, false);
+
+  // Lead #1: addressed post in #general or a channel omits conversation_id so the server never returns 400 conversation_address.
+  const addressedGeneralCmd = browserSignalCommand("Hey Alex", [{ kind: "person", id: peerAlex }], "ask", [], {});
+  assert.equal("conversation_id" in addressedGeneralCmd, false);
+  assert.deepEqual(addressedGeneralCmd.to, [{ kind: "user", id: peerAlex }]);
+});
+
+test("HezSec #4: DM exclusion fails closed during 503 discovery failure with production legacy projection (no conversation_id)", () => {
+  // Production PostgREST projection omits conversation_id and conversation_kind.
+  const publicRow = makeRow("sig-pub", "2026-11-19T16:10:00Z", { channelId: null, to: null, toAgent: null });
+  const channelRow = makeRow("sig-ops", "2026-11-19T16:09:00Z", { channelId: opsChannelId, to: null, toAgent: null });
+  const legacyDmRow = makeRow("sig-dm", "2026-11-19T16:08:00Z", { channelId: null, to: viewer, toAgent: null });
+  const legacyAgentDmRow = makeRow("sig-agent-dm", "2026-11-19T16:07:00Z", { channelId: null, to: null, toAgent: peerLead });
+
+  // Modern server with failed/pending conversations read (workspaceConversations === null, legacyUnsupported === false):
+  assert.equal(isDirectConversationRow(legacyDmRow, null), true);
+  assert.equal(isDirectConversationRow(legacyAgentDmRow, null), true);
+  assert.equal(isDirectConversationRow(publicRow, null), false);
+
+  const generalFiltered = excludeDirectConversationRows(
+    [publicRow, channelRow, legacyDmRow, legacyAgentDmRow],
+    null,
+    GENERAL_CHANNEL_ID,
+  );
+  assert.deepEqual(generalFiltered.map((r) => r.id), ["sig-pub"]);
+
+  const allFiltered = excludeDirectConversationRows(
+    [publicRow, channelRow, legacyDmRow, legacyAgentDmRow],
+    null,
+    null,
+  );
+  assert.deepEqual(allFiltered.map((r) => r.id), ["sig-pub", "sig-ops"]);
+
+  // Explicit pre-Step-2b server (legacyUnsupported: true) keeps old behavior.
+  assert.equal(isDirectConversationRow(legacyDmRow, null, { legacyUnsupported: true }), false);
+  assert.deepEqual(
+    excludeDirectConversationRows([publicRow, legacyDmRow], null, null, { legacyUnsupported: true }).map((r) => r.id),
+    ["sig-pub", "sig-dm"],
+  );
+});
+
+test("HezSec #5: channelMembershipSendRefusal gates unjoined, pending, failed, and missing channels fail-closed", () => {
+  const unjoinedOps = makeConv({
+    conversationId: opsConvId,
+    kind: "public_channel",
+    channelId: opsChannelId,
+    slug: "ops",
+    joined: false,
+  });
+  const joinedOps = { ...unjoinedOps, joined: true };
+
+  // #general and unfiled always allowed.
+  assert.equal(
+    channelMembershipSendRefusal({ channelId: GENERAL_CHANNEL_ID, generalId: GENERAL_CHANNEL_ID, conversations: null, conversationsReadState: "failed" }),
+    null,
+  );
+  // Explicit pre-Step-2b server allowed.
+  assert.equal(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: null, conversationsReadState: "unsupported" }),
+    null,
+  );
+  // Pending or failed membership read refuses fail-closed.
+  assert.ok(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: null, conversationsReadState: "pending" }),
+  );
+  assert.ok(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: null, conversationsReadState: "failed" }),
+  );
+  // Unjoined channel refuses fail-closed.
+  assert.equal(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: [unjoinedOps], conversationsReadState: "ready" }),
+    "Join this channel to post.",
+  );
+  // Missing channel refuses fail-closed.
+  assert.equal(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: [], conversationsReadState: "ready" }),
+    CONVERSATION_UNAVAILABLE_TEXT,
+  );
+  // Joined channel allowed.
+  assert.equal(
+    channelMembershipSendRefusal({ channelId: opsChannelId, generalId: GENERAL_CHANNEL_ID, conversations: [joinedOps], conversationsReadState: "ready" }),
+    null,
+  );
+});
+
+test("HezSec #6: directConversationAudienceSentence accounts for agent-owner oversight while preserving human-only and self promises", () => {
+  const selfConv = makeConv({
+    conversationId: notesConvId,
+    kind: "dm",
+    members: [{ kind: "user", id: viewer, name: "Owner", leftAt: null }],
+  });
+  const humanDm = makeConv({
+    conversationId: dmConvId,
+    kind: "dm",
+    members: [
+      { kind: "user", id: viewer, name: "Owner", leftAt: null },
+      { kind: "user", id: peerAlex, name: "Alex", leftAt: null },
+    ],
+  });
+  const agentGroupDm = makeConv({
+    conversationId: groupConvId,
+    kind: "group_dm",
+    members: [
+      { kind: "user", id: viewer, name: "Owner", leftAt: null },
+      { kind: "user", id: peerAlex, name: "Alex", leftAt: null },
+      { kind: "agent", id: peerLead, name: "Lead", leftAt: null },
+    ],
+  });
+  const agent1to1Dm = makeConv({
+    conversationId: "dddd4444-4444-4444-8444-444444444444",
+    kind: "dm",
+    members: [
+      { kind: "user", id: viewer, name: "Owner", leftAt: null },
+      { kind: "agent", id: peerLead, name: "Lead", leftAt: null },
+    ],
+  });
+
+  assert.equal(directConversationAudienceSentence(selfConv, viewer, "Notes to self"), "Only you can read this.");
+  assert.equal(directConversationAudienceSentence(humanDm, viewer, "Alex"), "Only Alex and you can read this.");
+  assert.equal(
+    directConversationAudienceSentence(agentGroupDm, viewer, "Alex and Lead"),
+    "Direct message with Alex and Lead. Agent owners can read their agents' DMs.",
+  );
+  assert.equal(
+    directConversationAudienceSentence(agent1to1Dm, viewer, "Lead"),
+    "Direct message with Lead. Agent owners can read their agents' DMs.",
+  );
+  assert.equal(new SessionIdentityMismatch().name, "SessionIdentityMismatch");
 });
