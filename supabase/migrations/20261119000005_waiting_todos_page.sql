@@ -1,20 +1,52 @@
--- Keyset-paginated waiting/assigned to-dos read for the Waiting on you panel and top-bar count.
---
--- swarm_read.home_overview caps needs_you.assigned and needs_you.waiting at 20 rows per workspace
--- with no pagination cursor or truncation flag, so item 21 is unreachable and exact totals cannot
--- be established. This RPC returns a unified, deduplicated, keyset-paginated list of every open or
--- doing to-do that needs the signed-in person (same reason precedence as home-map.ts pushNeed and
--- the same household_human_can_read gate and multi-workspace agent seat check as home_overview),
--- together with exact total and truncated flags.
---
--- For each row on the bounded page, a LATERAL lookup against swarm_read.signals resolves an
--- authoritative channel or #general conversation placement from the latest viewer-visible signal
--- carrying about = 'todo:' || todo_id. Addressed channel_id IS NULL notices (such as automatic
--- householdNotice notifications) are excluded so they never clobber a channel placement or turn a
--- workspace-only to-do into a channel/DM item. Explicit s.workspace_id and s.about predicates let
--- PostgreSQL push the lookup into signals_about_newest before the security_barrier filter.
---
--- Rollback: DROP FUNCTION IF EXISTS swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid);
+-- Paginated waiting/assigned to-dos read for the Waiting on you panel.
+-- 1. Stores an immutable originating channel link on swarm.household_todos so a to-do's
+--    origin channel is stable across later discussions and workspace-only tasks are never
+--    promoted into a channel just by being mentioned there.
+-- 2. Reaches beyond home_overview's 20-item cap with deterministic keyset pagination
+--    (state_at DESC, todo_id ASC), resolving exact microsecond state_at from the viewer's
+--    own candidate rows so millisecond-precision client cursors never repeat a boundary.
+-- 3. Mirrors home_overview's exact household_human_can_read gate, human-only JWT check,
+--    and waiting-reason precedence (including multi-workspace agent seat checks), and
+--    redacts private origin_channel_id to ('workspace', NULL) when the viewer lacks access.
+
+ALTER TABLE swarm.household_todos
+ ADD COLUMN IF NOT EXISTS origin_placement text NOT NULL DEFAULT 'workspace',
+ ADD COLUMN IF NOT EXISTS origin_channel_id uuid;
+
+DO $$
+BEGIN
+ IF NOT EXISTS (
+  SELECT 1 FROM pg_constraint
+  WHERE conname = 'household_todos_origin_placement_check'
+    AND conrelid = 'swarm.household_todos'::regclass
+ ) THEN
+  ALTER TABLE swarm.household_todos
+   ADD CONSTRAINT household_todos_origin_placement_check
+   CHECK (origin_placement IN ('workspace', 'general', 'channel'));
+ END IF;
+
+ IF NOT EXISTS (
+  SELECT 1 FROM pg_constraint
+  WHERE conname = 'household_todos_origin_shape_check'
+    AND conrelid = 'swarm.household_todos'::regclass
+ ) THEN
+  ALTER TABLE swarm.household_todos
+   ADD CONSTRAINT household_todos_origin_shape_check
+   CHECK ((origin_placement = 'channel') = (origin_channel_id IS NOT NULL));
+ END IF;
+
+ IF NOT EXISTS (
+  SELECT 1 FROM pg_constraint
+  WHERE conname = 'household_todos_origin_channel_fk'
+    AND conrelid = 'swarm.household_todos'::regclass
+ ) THEN
+  ALTER TABLE swarm.household_todos
+   ADD CONSTRAINT household_todos_origin_channel_fk
+   FOREIGN KEY (origin_channel_id, workspace_id)
+   REFERENCES swarm.channels(channel_id, workspace_id);
+ END IF;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION swarm_read.waiting_todos_page(
  p_workspace_id uuid,
@@ -39,12 +71,15 @@ BEGIN
   RETURN NULL;
  END IF;
  viewer := (claims->>'sub')::uuid;
- IF p_workspace_id IS NULL OR NOT swarm.is_member(p_workspace_id, viewer) THEN RETURN NULL; END IF;
- IF (p_after_state_at IS NULL) <> (p_after_todo_id IS NULL) THEN
-  RAISE EXCEPTION 'waiting_todos_cursor_invalid' USING ERRCODE = '22023';
+
+ IF p_workspace_id IS NULL OR NOT swarm.is_member(p_workspace_id, viewer) THEN
+  RETURN NULL;
  END IF;
- page_limit := greatest(1, least(coalesce(p_limit, 50), 100));
- -- Match home_overview: members without household content read access see no to-dos.
+ IF (p_after_state_at IS NULL) <> (p_after_todo_id IS NULL) THEN
+  RAISE EXCEPTION 'waiting_todos_page cursor requires both p_after_state_at and p_after_todo_id' USING ERRCODE = '22023';
+ END IF;
+
+ -- Match home_overview's exact household read gate (live member, shared boundary, confirmed role).
  IF NOT swarm.household_human_can_read(p_workspace_id, viewer) THEN
   RETURN jsonb_build_object(
    'workspace_id', p_workspace_id,
@@ -55,6 +90,8 @@ BEGIN
   );
  END IF;
 
+ page_limit := greatest(1, least(coalesce(p_limit, 50), 100));
+
  WITH candidate_todos AS MATERIALIZED (
   SELECT
    t.todo_id,
@@ -62,6 +99,8 @@ BEGIN
    t.state,
    t.due_on,
    t.state_at,
+   t.origin_placement,
+   t.origin_channel_id,
    reason.kind AS reason,
    CASE
     WHEN reason.kind = 'request' THEN t.offer_principal
@@ -131,47 +170,40 @@ BEGIN
    'reason', p.reason,
    'agent_id', p.agent_id,
    'state_at', p.state_at,
-   'placement', coalesce(loc.placement_kind, 'workspace'),
-   'channel_id', loc.channel_id
+   'placement', vis.placement,
+   'channel_id', vis.channel_id
   ) ORDER BY p.state_at DESC, p.todo_id ASC), '[]'::jsonb)
  INTO total, has_more, rows
  FROM page p
- LEFT JOIN LATERAL (
-  -- Authoritative conversation placement from viewer-visible signals referencing this to-do.
-  -- Explicit workspace_id + about push into signals_about_newest before security_barrier.
+ CROSS JOIN LATERAL (
   SELECT
-   s.channel_id,
-   CASE WHEN s.channel_id IS NOT NULL THEN 'channel' ELSE 'general' END AS placement_kind
-  FROM swarm_read.signals s
-  WHERE s.workspace_id = p_workspace_id
-   AND s.about = 'todo:' || p.todo_id::text
-   AND (
-    s.channel_id IS NOT NULL
-    OR (
-     s.thread_root_id IS NULL
-     AND s."to" IS NULL
-     AND s.to_agent IS NULL
-     AND NOT EXISTS (
-      SELECT 1 FROM swarm.signal_recipients r
-      WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
-     )
-    )
-   )
-  ORDER BY s.created_at DESC, s.id DESC
-  LIMIT 1
- ) loc ON true;
+   CASE
+    WHEN p.origin_placement = 'channel'
+     AND p.origin_channel_id IS NOT NULL
+     AND swarm.claims_can_access_channel(p_workspace_id, p.origin_channel_id)
+    THEN 'channel'
+    WHEN p.origin_placement = 'general' THEN 'general'
+    ELSE 'workspace'
+   END AS placement,
+   CASE
+    WHEN p.origin_placement = 'channel'
+     AND p.origin_channel_id IS NOT NULL
+     AND swarm.claims_can_access_channel(p_workspace_id, p.origin_channel_id)
+    THEN p.origin_channel_id
+    ELSE NULL
+   END AS channel_id
+ ) vis;
 
  RETURN jsonb_build_object(
   'workspace_id', p_workspace_id,
   'generated_at', read_at,
-  'total', total,
-  'truncated', has_more,
-  'todos', rows
+  'total', coalesce(total, 0),
+  'truncated', coalesce(has_more, false),
+  'todos', coalesce(rows, '[]'::jsonb)
  );
 END;
 $$;
 
 ALTER FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid)
-  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) FROM PUBLIC, anon, authenticated, swarm_read;
 GRANT EXECUTE ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) TO authenticated;

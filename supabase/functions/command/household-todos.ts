@@ -40,6 +40,12 @@ const gateFromRow = (row: Record<string, unknown>): TodoGate => row.gate_kind ==
   : row.gate_kind === 'after' ? { kind: 'after', todo_id: String(row.gate_todo_id) }
     : row.gate_kind === 'at' ? { kind: 'at', at: iso(row.gate_at) } : { kind: 'none' };
 function todoFromRow(r: Record<string, unknown>): Todo {
+  const originPlacement = r.origin_placement === 'channel' || r.origin_placement === 'general'
+    ? r.origin_placement
+    : 'workspace';
+  const originChannelId = originPlacement === 'channel' && r.origin_channel_id != null
+    ? String(r.origin_channel_id).toLowerCase()
+    : null;
   return { workspace_id: String(r.workspace_id), todo_id: String(r.todo_id), version: Number(r.version), title: String(r.title), notes: String(r.notes),
     state: r.state as Todo['state'], due_on: r.due_on == null ? null : r.due_on instanceof Date ? iso(r.due_on).slice(0, 10) : String(r.due_on).slice(0, 10),
     created_by: actor(r.created_by_user, r.created_by_principal), created_at: iso(r.created_at), assignee: party(r.assignee_user, r.assignee_principal),
@@ -47,7 +53,8 @@ function todoFromRow(r: Record<string, unknown>): Todo {
     offer: r.offer_id == null ? null : { offer_id: String(r.offer_id), to: party(r.offer_user, r.offer_principal)!, decider_user_id: String(r.offer_decider),
       start: r.offer_start as 'queue' | 'now', gate: r.offer_gate as TodoGate, by: actor(r.offer_by_user, r.offer_by_principal), at: iso(r.offered_at) },
     gate: gateFromRow(r), gate_set_by: r.gate_set_by as string | null, queue_rank: r.queue_rank == null ? null : Number(r.queue_rank),
-    state_by: actor(r.state_by_user, r.state_by_principal), state_at: iso(r.state_at), comment_count: Number(r.comment_count) };
+    state_by: actor(r.state_by_user, r.state_by_principal), state_at: iso(r.state_at), comment_count: Number(r.comment_count),
+    origin_placement: originPlacement, origin_channel_id: originChannelId };
 }
 const commentFromRow = (r: Record<string, unknown>): TodoComment => ({ comment_id: String(r.comment_id),
   target: { kind: r.target_kind, id: String(r.target_id) } as TodoComment['target'], author: actor(r.author_user, r.author_principal),
@@ -90,6 +97,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
   }
   async function saveTodo(tx: Sql, todo: Todo, lastSeq: number) {
     const gate = todo.gate, offer = todo.offer;
+    const originPlacement = todo.origin_placement === 'channel' || todo.origin_placement === 'general' ? todo.origin_placement : 'workspace';
+    const originChannelId = originPlacement === 'channel' && todo.origin_channel_id ? todo.origin_channel_id.toLowerCase() : null;
     const record = { workspace_id: todo.workspace_id, todo_id: todo.todo_id, version: todo.version, title: todo.title, notes: todo.notes, state: todo.state, due_on: todo.due_on,
       created_by_user: todo.created_by.user_id, created_by_principal: todo.created_by.principal_id, created_at: todo.created_at,
       assignee_user: todo.assignee?.kind === 'user' ? todo.assignee.id : null, assignee_principal: todo.assignee?.kind === 'agent' ? todo.assignee.id : null,
@@ -99,8 +108,13 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       offer_by_user: offer?.by.user_id ?? null, offer_by_principal: offer?.by.principal_id ?? null, offered_at: offer?.at ?? null,
       gate_kind: gate.kind, gate_note: gate.kind === 'hold' ? gate.note : null, gate_todo_id: gate.kind === 'after' ? gate.todo_id : null,
       gate_at: gate.kind === 'at' ? gate.at : null, gate_set_by: todo.gate_set_by, queue_rank: todo.queue_rank,
-      state_by_user: todo.state_by.user_id, state_by_principal: todo.state_by.principal_id, state_at: todo.state_at, comment_count: todo.comment_count, last_seq: lastSeq };
-    await tx`INSERT INTO swarm.household_todos ${tx(record)} ON CONFLICT(workspace_id,todo_id) DO UPDATE SET ${tx(record, ...Object.keys(record).filter(k => k !== 'workspace_id' && k !== 'todo_id') as (keyof typeof record)[])}`;
+      state_by_user: todo.state_by.user_id, state_by_principal: todo.state_by.principal_id, state_at: todo.state_at, comment_count: todo.comment_count, last_seq: lastSeq,
+      origin_placement: originPlacement, origin_channel_id: originChannelId };
+    // origin_placement and origin_channel_id are immutable creation provenance: never overwritten on UPDATE.
+    const mutableKeys = Object.keys(record).filter(k =>
+      k !== 'workspace_id' && k !== 'todo_id' && k !== 'origin_placement' && k !== 'origin_channel_id',
+    ) as (keyof typeof record)[];
+    await tx`INSERT INTO swarm.household_todos ${tx(record)} ON CONFLICT(workspace_id,todo_id) DO UPDATE SET ${tx(record, ...mutableKeys)}`;
   }
   async function write(tx: Sql, workspaceId: string, identity: HouseholdIdentity, requestId: string, command: TodoCommand) {
     const op = command.kind === 'todo_create' || command.kind === 'todo_comment' ? 'create' : 'update';
@@ -127,11 +141,30 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const projection = objects?.projection as { objects?: Record<string, { object_id: string; kind: 'list' | 'doc' | 'file' }> } | undefined;
     const identityAttempts = await rate(tx, `todo:${identity.principal_id ? 'agent' : 'user'}:${principal.toLowerCase()}`, core.TODO_IDENTITY_WRITE_HOURLY_LIMIT);
     const workspaceAttempts = await rate(tx, `todo:ws:${workspaceId.toLowerCase()}`, core.TODO_WORKSPACE_WRITE_HOURLY_LIMIT);
+    let originChannelAccessible = false;
+    if (
+      command.kind === 'todo_create' &&
+      command.origin_placement === 'channel' &&
+      typeof command.origin_channel_id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(command.origin_channel_id)
+    ) {
+      const [accessRow] = await tx<{ ok: boolean }[]>`
+        SELECT swarm.actor_can_access_channel(
+          ${workspaceId}::uuid,
+          ${command.origin_channel_id}::uuid,
+          ${identity.principal_id ? 'agent' : 'user'},
+          ${(identity.principal_id ?? identity.user_id)}::uuid
+        ) AS ok
+      `;
+      originChannelAccessible = accessRow?.ok === true;
+    }
     const decision = core.decideTodo(current, command, { access: checked!.facts, now: checked!.now, command_id: requestId, request_digest: digest,
       seq: current.last_seq + 1, event_ids: Array.from({ length: 16 }, () => crypto.randomUUID()), todo_id: crypto.randomUUID(), offer_id: crypto.randomUUID(), comment_id: crypto.randomUUID(),
       members: members.map(r => ({ user_id: String(r.user_id), workspace_id: String(r.workspace_id), revoked_at: stamp(r.revoked_at), role: r.role as 'owner' | 'admin' | 'member' })),
       agents: agents.map(r => ({ principal_id: String(r.principal_id), workspace_id: String(r.workspace_id), owner_user_id: String(r.owner_user_id), revoked_at: stamp(r.revoked_at) })),
-      objects: Object.values(projection?.objects ?? {}).map(o => ({ kind: o.kind, id: o.object_id })), identity_write_attempts: identityAttempts, workspace_write_attempts: workspaceAttempts });
+      objects: Object.values(projection?.objects ?? {}).map(o => ({ kind: o.kind, id: o.object_id })),
+      origin_channel_accessible: originChannelAccessible,
+      identity_write_attempts: identityAttempts, workspace_write_attempts: workspaceAttempts });
     if (decision.notices.length > 1) throw new RangeError('A to-do command may post at most one notice.');
     const next = core.reduceTodoEvents(current, decision.events);
     for (const event of decision.events) await tx`INSERT INTO swarm.household_todo_events(workspace_id,seq,event_id,occurred_at,event)
@@ -155,7 +188,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
   function view(todo: Todo, current: HouseholdTodoState, now: number) {
     const upNext = Object.values(current.todos).filter(t => t.state === 'open' && t.assignee?.kind === 'agent' && t.assignee.id === todo.assignee?.id && t.queue_rank !== null && core.evaluateGate(t.gate, current.todos, now))
       .sort((a, b) => a.queue_rank! - b.queue_rank! || a.todo_id.localeCompare(b.todo_id));
-    const { queue_rank: _rank, gate_set_by: _setter, ...fields } = todo;
+    const { queue_rank: _rank, gate_set_by: _setter, origin_placement: _originPlacement, origin_channel_id: _originChannelId, ...fields } = todo;
     return { ...fields, gate_clear: core.evaluateGate(todo.gate, current.todos, now), queue_position: upNext.findIndex(t => t.todo_id === todo.todo_id) + 1 || null };
   }
   function summary(todo: Todo, current: HouseholdTodoState, now: number) {

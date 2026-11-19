@@ -14,6 +14,7 @@ export interface TodoActor {
 }
 export type TodoState = 'open' | 'doing' | 'done' | 'dropped';
 export type TodoStart = 'queue' | 'now';
+export type TodoOriginPlacement = 'workspace' | 'general' | 'channel';
 export type TodoGate = {
     kind: 'none';
 } | {
@@ -56,6 +57,8 @@ export interface Todo {
     state_by: TodoActor;
     state_at: string;
     comment_count: number;
+    origin_placement?: TodoOriginPlacement;
+    origin_channel_id?: string | null;
 }
 export type CommentTarget = {
     kind: 'todo';
@@ -178,6 +181,8 @@ export type TodoCommand = {
     notes?: string;
     due_on?: string | null;
     assign?: AssignInput;
+    origin_placement?: TodoOriginPlacement;
+    origin_channel_id?: string | null;
 } | {
     kind: 'todo_update';
     todo_id: string;
@@ -250,6 +255,8 @@ export interface DecideTodoContext {
         kind: 'list' | 'doc' | 'file';
         id: string;
     }[];
+    /** Verified in-transaction channel access for todo_create when origin_placement === 'channel'. */
+    origin_channel_accessible?: boolean;
     identity_write_attempts: number;
     workspace_write_attempts: number;
 }
