@@ -1,6 +1,7 @@
 -- Rollback for 20261120000001_conversations_reads.sql.
 -- Roll back the read and command edge functions first, then run this script to drop the Step 2b
--- read functions and restore Step 2a's conversation_check_route and file_conversation_signal.
+-- read functions and restore Step 2a's exact conversation_check_route, file_conversation_signal,
+-- and conversation_mark_read bodies.
 SET search_path = swarm, pg_catalog, public;
 
 DROP FUNCTION IF EXISTS swarm_read.conversation_oversight_history(uuid, uuid, uuid, timestamptz, uuid, timestamptz, uuid, integer, boolean, boolean);
@@ -16,7 +17,6 @@ DROP FUNCTION IF EXISTS swarm.conversation_signal_visible_to(uuid, uuid, text, t
 DROP FUNCTION IF EXISTS swarm.conversation_oversight_actor(uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.conversation_read_actor(uuid);
 
--- Restore Step 2a bodies of conversation_check_route and file_conversation_signal.
 CREATE OR REPLACE FUNCTION swarm.conversation_check_route(p_workspace uuid, p_signal uuid, p_conversation uuid) RETURNS void
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
@@ -69,12 +69,15 @@ BEGIN
     v_problem := 'the sender is not a live member';
   ELSE
     IF v_kind = 'dm' AND v_founders = 1 THEN
+      -- A note to oneself.
       v_want_users := v_live_users;
       v_want_agents := v_live_agents;
     ELSIF v_kind = 'dm' OR v_signal.from_kind = 'user' THEN
+      -- Everyone else: a person's post, and either member's post in a 1:1.
       v_want_users := CASE WHEN v_signal.from_kind = 'user' THEN array_remove(v_live_users, v_signal.from_principal) ELSE v_live_users END;
       v_want_agents := CASE WHEN v_signal.from_kind = 'agent' THEN array_remove(v_live_agents, v_signal.from_principal) ELSE v_live_agents END;
     ELSE
+      -- An agent's group post: every live person, and only the live agents it named, never itself.
       v_want_users := v_live_users;
       v_want_agents := CASE WHEN v_agents <@ array_remove(v_live_agents, v_signal.from_principal) THEN v_agents
         ELSE array_remove(v_live_agents, v_signal.from_principal) END;
@@ -101,6 +104,7 @@ DECLARE
   v_row record;
   v_explicit record;
 BEGIN
+  -- The server stamp the recipient and mention guards read (20261022000992): new in this transaction.
   v_new := EXISTS (
     SELECT 1 FROM swarm.signals AS s
     WHERE s.id = p_signal AND s.workspace_id = p_workspace
@@ -134,6 +138,8 @@ BEGIN
     RETURN;
   END IF;
   IF v_expected.conversation_id IS NULL THEN
+    -- Every new message belongs to exactly one conversation: one that cannot be placed aborts its
+    -- transaction. (Only new messages reach here; history is filed by the backfill, which counts it.)
     RAISE EXCEPTION 'message % cannot be filed in a conversation', p_signal
       USING ERRCODE = 'CV001', CONSTRAINT = 'conversation_unfilable',
         DETAIL = 'conversation_unfilable: ' || coalesce(v_expected.unplaced, 'unknown');
@@ -143,7 +149,6 @@ BEGIN
 END;
 $$;
 
--- Restore Step 2a body of conversation_mark_read (before conversation_signal_visible_to).
 CREATE OR REPLACE FUNCTION swarm.conversation_mark_read(p_workspace uuid, p_actor_kind text, p_actor uuid, p_conversation uuid,
   p_through uuid) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
@@ -164,6 +169,8 @@ BEGIN
     FROM swarm.conversation_signals AS cs
     JOIN swarm.signals AS s ON s.id = cs.signal_id AND s.workspace_id = cs.workspace_id
     WHERE cs.signal_id = p_through AND cs.conversation_id = p_conversation AND cs.workspace_id = p_workspace
+      -- The read rule 2a serves (swarm_read.signals): a message for everyone, or one the caller sent or is
+      -- addressed by. A group post's all-member audience is read by step 2b, not yet.
       AND ((s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.in_reply_to IS NULL
           AND NOT EXISTS (SELECT 1 FROM swarm.signal_recipients AS any_r
             WHERE any_r.signal_id = s.id AND any_r.workspace_id = s.workspace_id))
