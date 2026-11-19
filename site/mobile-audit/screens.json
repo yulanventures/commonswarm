@@ -3536,6 +3536,119 @@
     }
   },
   {
+    "id": "app.people.admins.same-name",
+    "kind": "view",
+    "path": "/app?w={sameNameWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_same_name_admins"
+    ],
+    "frame": [
+      "[data-people-context] [data-admin-access=\"all\"] [data-admin-grant=\"{sameNameGrant}\"] [data-admin-grant-id]",
+      "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]",
+      "[data-people-context] [data-admin-access=\"all\"] [data-admin-grant=\"{sameNameOtherGrant}\"] [data-admin-grant-id]",
+      "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameOtherGrant}\"]"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
+    "id": "dialog.people-admins-end.same-name",
+    "kind": "dialog",
+    "path": "/app?w={sameNameWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]",
+        "click": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]"
+      }
+    ],
+    "ready": "dialog.sa-confirm[data-seat-admin-end=\"workspace\"][open]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_same_name_admins"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
+    "id": "app.people.admins.unverified",
+    "kind": "view",
+    "path": "/app?w={sameNameWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]",
+        "click": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]"
+      },
+      {
+        "waitFor": "dialog.sa-confirm[data-seat-admin-end=\"workspace\"][open]"
+      },
+      {
+        "fault": "hold"
+      },
+      {
+        "dispatch": "commonswarm:seat-admin-changed"
+      },
+      {
+        "wait": 400
+      },
+      {
+        "click": "dialog.sa-confirm[data-seat-admin-end=\"workspace\"][open] button[type=\"submit\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"all\"] [data-admin-grant=\"{sameNameGrant}\"] [data-admin-grant-notice]:not([hidden])",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-admin-access=\"all\"] [data-admin-grant=\"{sameNameGrant}\"] [data-admin-grant-notice]:not([hidden])",
+    "states": [
+      "notice"
+    ],
+    "requiresSeed": [
+      "seed_same_name_admins"
+    ],
+    "frame": [
+      "[data-people-context] [data-admin-access=\"all\"] [data-admin-grant=\"{sameNameGrant}\"] [data-admin-grant-notice]:not([hidden])"
+    ],
+    "fault": {
+      "request": "**/rest/v1/rpc/workspace_seat_admin_grants*",
+      "start": "pass",
+      "recover": {
+        "expect": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{sameNameGrant}\"]"
+      }
+    },
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
     "id": "app.people.agents-error",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",

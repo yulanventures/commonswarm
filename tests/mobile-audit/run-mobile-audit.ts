@@ -75,7 +75,7 @@ type Route = { request(): { postData(): string | null; resourceType(): string };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
 /** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
- *  (with option), press, scroll, storage, fault, wait, settle.
+ *  (with option), press, scroll, storage, fault, dispatch, wait, settle.
  *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
  *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
  *  focus: the element takes focus (element.focus()), with no pointer and no hit test: for a control that a hover or a tap
@@ -96,7 +96,10 @@ type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: {
    *  the reload in sessionStorage and written after that clearing, by the same init script. */
   storage?: { key: string; value: string };
   /** From here on the screen's faulted read waits instead of failing (see Screen.fault); it is let through after the screenshot. */
-  fault?: "hold" };
+  fault?: "hold";
+  /** Sends the page one of the app's own window events by name, as another part of the app would (for example
+   *  "commonswarm:seat-admin-changed" after admin access is changed elsewhere). Nothing else is evaluated in the page. */
+  dispatch?: string };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
   noJs?: true;
@@ -112,7 +115,10 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
    *  After the screenshot and witnesses the fault is let go, `recover.click` (when given) is pressed, and `recover.expect`
    *  must become visible: the proof that the real rows come back. The handler is removed and anything still waiting is
    *  let through before the page closes, also when the capture fails. Not available on `alone` screens. */
-  fault?: { request: string; recover: { click?: string; expect: string } };
+  fault?: { request: string; recover: { click?: string; expect: string };
+    /** "pass": matching requests go through until a {"fault":"hold"} step, for a state that needs a good first read and a
+     *  later one that waits. The default fails them from the start. */
+    start?: "fail" | "pass" };
   /** A request this capture must never send: `request` is a part of its URL and `body` a text its body contains (a command's
    *  kind, for example). Watched from before the page loads to the end of the witnesses; one match is a capture error. */
   never?: { request: string; body: string };
@@ -700,9 +706,9 @@ async function main(): Promise<void> {
         return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
       }, undefined, { timeout: 30_000 });
       /** Screen.fault for one page. Counts say what the handler did, so a fault that never met its read is a capture error. */
-      const armFault = async (page: any, request: string) => {
+      const armFault = async (page: any, request: string, start: "fail" | "pass" = "fail") => {
         const counts = { failed: 0, held: 0, passed: 0 };
-        let mode: "fail" | "hold" | "pass" = "fail";
+        let mode: "fail" | "hold" | "pass" = start;
         const waiting: Array<() => void> = [];
         const handler = async (route: Route) => {
           if (mode === "fail") { counts.failed += 1; return route.abort("failed").catch(() => {}); }
@@ -850,6 +856,7 @@ async function main(): Promise<void> {
             await appBooted(page);
           }
           if (step.fault === "hold") { if (!fault) throw new Error("a fault step needs the screen's fault"); fault.hold(); }
+          if (step.dispatch) await page.evaluate((name: string) => { window.dispatchEvent(new CustomEvent(name)); }, step.dispatch);
           if (step.wait) await page.waitForTimeout(step.wait);
           if (step.settle) await settle(page);
         }
@@ -958,7 +965,7 @@ async function main(): Promise<void> {
           try {
             if (screen.fault) {
               if (screen.alone) throw new Error("fault is not available on an alone screen");
-              fault = await armFault(page, fill(screen.fault.request, seed.ids));
+              fault = await armFault(page, fill(screen.fault.request, seed.ids), screen.fault.start ?? "fail");
             }
             entry.settledBeforeChecks = await openScreen(page, screen, fault);
             // The page's own scripts are off, not the audit's: give CHECKS and the witness their __name shim (a string, so
@@ -1006,7 +1013,7 @@ async function main(): Promise<void> {
             }
             if (fault && screen.fault) {
               const holds = (screen.setup ?? []).some(step => step.fault === "hold");
-              if (fault.counts.failed === 0) throw new Error("the fault never met its read");
+              if ((screen.fault.start ?? "fail") === "fail" && fault.counts.failed === 0) throw new Error("the fault never met its read");
               if (holds && fault.counts.held === 0) throw new Error("the held read was never asked for");
               // Let the read through, then prove the real rows come back: by Retry after a failure, by themselves after a hold.
               fault.release();
