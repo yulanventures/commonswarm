@@ -27,6 +27,8 @@ function installOversightFixture() {
   f.releaseHistoryA = null as null | (() => void);
   f.historyACount = 0;
   f.olderCalls = 0;
+  f.olderHeld = false;
+  f.releaseOlder = null as null | (() => void);
 
   const replacementOwner = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const peerAlex = "dddd4444-4444-4444-8444-444444444444";
@@ -329,6 +331,10 @@ function installOversightFixture() {
                 { status: 403 },
               );
             }
+            if (f.oversightMode === "older_no_focus_steal") {
+              f.olderHeld = true;
+              await new Promise<void>(resolve => { f.releaseOlder = resolve; });
+            }
             return Response.json({
               conversation: leadOversightList[0],
               messages: [
@@ -559,6 +565,48 @@ async function observeOversight() {
       return;
     }
 
+    // Designer desktop focus witness 1: pressing Enter on a desktop conversation row keeps focus on the row (never drops to body).
+    if (f.oversightMode === "desktop_enter_row_focus") {
+      await wait("initial transcript ready", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      const row = one<HTMLButtonElement>(`[data-oversight-conv="${f.ids.oversightGroup}"]`);
+      check(!!row, "group row exists");
+      row!.focus();
+      check(document.activeElement === row, "group row focused before Enter");
+      await key("Enter");
+      await wait("group transcript rendered", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("Summary posted to the group thread"));
+      const activeConv = document.activeElement?.getAttribute("data-oversight-conv");
+      const activeIsDetailTitle = document.activeElement?.hasAttribute("data-oversight-detail-title");
+      check(
+        activeConv === f.ids.oversightGroup || activeIsDetailTitle === true,
+        "Enter on desktop row must keep focus on the row or move into detail heading, got: " + document.activeElement?.outerHTML.slice(0, 180),
+      );
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "desktop_enter_row_focus", activeConv });
+      return;
+    }
+
+    // Designer desktop focus witness 2: completing an older read while focus moved to the sidebar must not steal focus back.
+    if (f.oversightMode === "older_no_focus_steal") {
+      await wait("initial transcript ready", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      const loadOlderBtn = one<HTMLButtonElement>("[data-oversight-load-older]");
+      check(!!loadOlderBtn, "Load older button visible");
+      loadOlderBtn!.focus();
+      await key("Enter");
+      await wait("older read in flight", () => f.olderHeld === true);
+      // User tabs out of the panel to the sidebar rail while the older read is still in flight:
+      const sidebarLink = one<HTMLAnchorElement>('a[href*="c=general"]');
+      check(!!sidebarLink && visible(sidebarLink), "sidebar general link visible");
+      sidebarLink!.focus();
+      check(document.activeElement === sidebarLink, "focus moved to sidebar before older read completes");
+      f.releaseOlder?.();
+      await wait("older messages rendered", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("Can you pull the Q4 deploy notes"));
+      check(
+        document.activeElement === sidebarLink,
+        "completing Load older must not steal focus from the sidebar, got: " + document.activeElement?.outerHTML.slice(0, 180),
+      );
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "older_no_focus_steal" });
+      return;
+    }
+
     // Condition 1b witness: held success for A arriving after A -> B -> A fresh denial is discarded by history generation.
     if (f.oversightMode === "aba_held_then_deny") {
       await wait("first request for A held", () => f.heldHistoryA === true);
@@ -778,6 +826,8 @@ test("Step 3D-3 signed-in read-only agent oversight UI enforces isolation, curso
       { name: "denied-older-page-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=deny_older` },
       { name: "auth-refusal-and-transient-older-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=auth_refusal_older` },
       { name: "human-signin-refusal-older-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=human_signin_older` },
+      { name: "desktop-enter-row-focus-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=desktop_enter_row_focus` },
+      { name: "older-load-no-focus-steal-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=older_no_focus_steal` },
       { name: "held-success-after-aba-denial-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=aba_held_then_deny` },
       { name: "nav-retire-before-await-reenter-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=nav_retire_reenter` },
       { name: "held-session-list-guard-1024", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&oversight_mode=held_session_list` },

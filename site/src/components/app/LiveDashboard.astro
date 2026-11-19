@@ -5536,11 +5536,65 @@ import "../../styles/kylon-image-viewer.css";
       return raw && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw) ? raw : "Agent";
     };
 
-    const renderOversightSlot = (): void => {
+    const captureOversightFocusKey = (slotEl: HTMLElement): string | null => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !slotEl.contains(active)) return null;
+      const convId = active.getAttribute("data-oversight-conv");
+      if (convId) return `conv:${convId}`;
+      if (active.hasAttribute("data-oversight-load-older")) return "load-older";
+      if (active.hasAttribute("data-oversight-detail-title")) return "detail-title";
+      if (active.hasAttribute("data-oversight-back")) return "back";
+      if (active.hasAttribute("data-oversight-retry-list")) return "retry-list";
+      if (active.hasAttribute("data-oversight-retry-history")) return "retry-history";
+      return "panel";
+    };
+
+    const restoreOversightFocusKey = (slotEl: HTMLElement, key: string | null): void => {
+      if (!key) return;
+      let target: HTMLElement | null = null;
+      if (key.startsWith("conv:")) {
+        const id = key.slice(5);
+        target =
+          slotEl.querySelector<HTMLElement>(`[data-oversight-conv="${CSS.escape(id)}"]`) ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+      } else if (key === "load-older") {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-load-older]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-back]");
+      } else if (key === "detail-title") {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-back]");
+      } else if (key === "back") {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-back]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]");
+      } else if (key === "retry-list") {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-retry-list]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+      } else if (key === "retry-history") {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-retry-history]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]");
+      } else {
+        target =
+          slotEl.querySelector<HTMLElement>("[data-oversight-detail-title]") ??
+          slotEl.querySelector<HTMLElement>("[data-oversight-conv]");
+      }
+      if (target && !target.closest("[hidden]") && target.getClientRects().length > 0) {
+        target.focus({ preventScroll: true });
+      }
+    };
+
+    const renderOversightSlot = (explicitFocusKey?: string | null): void => {
       if (!oversightMod || !oversightState?.pin) return;
       const pin = oversightState.pin;
       const slotEl = one<HTMLElement>(`[data-oversight-slot="${pin.agentPrincipalId}"]`);
       if (!slotEl) return;
+      const preservedKey = explicitFocusKey !== undefined ? explicitFocusKey : captureOversightFocusKey(slotEl);
       oversightMod.renderOversightPanel(
         slotEl,
         {
@@ -5574,15 +5628,11 @@ import "../../styles/kylon-image-viewer.css";
             if (!isOversightPinLive(pin) || !oversightState) return;
             const prevId = oversightState.selectedId;
             oversightState = { ...oversightState, phoneDetailOpen: false };
-            renderOversightSlot();
-            const target = prevId
-              ? (slotEl.querySelector<HTMLElement>(`[data-oversight-conv="${prevId}"]`) ??
-                slotEl.querySelector<HTMLElement>("[data-oversight-conv]"))
-              : null;
-            target?.focus({ preventScroll: true });
+            renderOversightSlot(prevId ? `conv:${prevId}` : null);
           },
         },
       );
+      restoreOversightFocusKey(slotEl, preservedKey);
     };
 
     const loadOversightHistory = async (
@@ -5619,15 +5669,10 @@ import "../../styles/kylon-image-viewer.css";
         !!oversightState &&
         oversightState.selectedId === conversationId;
       const slotSelector = `[data-oversight-slot="${pin.agentPrincipalId}"]`;
-      const focusWasInDetail = !!document.activeElement?.closest(`${slotSelector} [data-oversight-detail]`);
-      const focusWasOnLoadOlder = !!document.activeElement?.closest(`${slotSelector} [data-oversight-load-older]`);
       const slotBefore = loadingOlder ? one<HTMLElement>(`${slotSelector} [data-oversight-transcript]`) : null;
       const prevScrollHeight = slotBefore?.scrollHeight ?? 0;
       const prevScrollTop = slotBefore?.scrollTop ?? 0;
-      renderOversightSlot();
-      if (loadingOlder && focusWasOnLoadOlder) {
-        one<HTMLElement>(`${slotSelector} [data-oversight-load-older]`)?.focus({ preventScroll: true });
-      }
+      renderOversightSlot(!loadingOlder && focusDetailTitle && openPhoneDetail ? "detail-title" : undefined);
       let result: Awaited<ReturnType<typeof readOversightConversationHistory>>;
       try {
         result = await readOversightConversationHistory(
@@ -5650,7 +5695,6 @@ import "../../styles/kylon-image-viewer.css";
         result = { ok: false, code: "other", message: readableError(error) || "Could not load messages." };
       }
       if (!isHistoryLive() || !oversightMod || !oversightState) return;
-      const focusStillInDetail = focusWasInDetail || !!document.activeElement?.closest(`${slotSelector} [data-oversight-detail]`);
       if (!result.ok) {
         if (result.code === "conversation_not_found") {
           oversightHistoryGen += 1;
@@ -5668,11 +5712,6 @@ import "../../styles/kylon-image-viewer.css";
           };
         }
         renderOversightSlot();
-        if (focusStillInDetail || (focusDetailTitle && openPhoneDetail)) {
-          (one<HTMLElement>(`${slotSelector} [data-oversight-load-older]`) ??
-            one<HTMLElement>(`${slotSelector} [data-oversight-detail-title]`) ??
-            one<HTMLElement>(`${slotSelector} [data-oversight-back]`))?.focus({ preventScroll: true });
-        }
         return;
       }
       const incoming: OversightMessage[] = result.messages.map(sig => ({
@@ -5704,12 +5743,6 @@ import "../../styles/kylon-image-viewer.css";
           const delta = transcript.scrollHeight - prevScrollHeight;
           if (delta > 0) transcript.scrollTop = prevScrollTop + delta;
         }
-        if (focusStillInDetail) {
-          (one<HTMLElement>(`${slotSelector} [data-oversight-load-older]`) ??
-            one<HTMLElement>(`${slotSelector} [data-oversight-detail-title]`))?.focus({ preventScroll: true });
-        }
-      } else if (focusDetailTitle && openPhoneDetail) {
-        one<HTMLElement>(`${slotSelector} [data-oversight-detail-title]`)?.focus({ preventScroll: true });
       }
     };
 
