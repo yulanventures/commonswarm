@@ -99,6 +99,7 @@ private final class UploadProgress: NSObject, URLSessionTaskDelegate {
 }
 
 private struct FileEnvelope<Command: Encodable>: Encodable {
+    let client_version = ConversationAPI.clientVersion
     let command_id, workspace_id: UUID
     let stream = ["kind": "workspace"]
     let command: Command
