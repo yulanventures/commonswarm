@@ -73,7 +73,24 @@ function shell({ clientDisplay, title, content, script = "" }) {
 .finish .actions button:disabled{background:var(--soft);border-color:var(--hair);color:var(--muted);cursor:default}
 .finish .actions a:focus-visible{outline-offset:3px;border-radius:26px}
 .finish .actions button:focus-visible{outline-offset:3px;border-radius:999px}
-@media (max-width:560px){.finish-row{grid-template-columns:1fr;gap:2px;padding:10px 0}}
+@media (max-width:560px){
+  .page{padding:12px 16px 20px}
+  .top{padding-bottom:10px}
+  .card.finish>*+*{margin-top:14px}
+  .finish .intro{gap:6px}
+  .finish .intro .connect-row{margin-bottom:0}
+  .finish .app-facts{gap:2px 12px;line-height:1.35}
+  .finish .unverified-warning{padding:10px 12px;font-size:14px;line-height:1.35}
+  .finish h1{font-size:26px}
+  .finish section>*+*{margin-top:10px}
+  .finish-summary{margin-top:12px;padding:2px 14px}
+  .finish-row{grid-template-columns:minmax(108px,auto) minmax(0,1fr);gap:2px 12px;padding:8px 0;font-size:14px;line-height:1.35}
+  .finish-row dt{font-size:13px}
+  .finish-return-status{font-size:14px;line-height:1.35}
+  .finish .actions{padding-top:12px;gap:8px}
+  .finish .actions a{min-height:46px;padding:10px 18px;font-size:15px;line-height:1.25}
+  .finish .actions button{min-height:44px;padding:8px 16px;font-size:14px}
+}
 @media (forced-colors:active){.finish-summary,.finish .actions a,.finish .actions button{border:1px solid CanvasText}}
 [hidden]{display:none!important}
 </style></head><body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
