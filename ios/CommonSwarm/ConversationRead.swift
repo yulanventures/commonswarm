@@ -61,17 +61,19 @@ extension ConversationAPI {
             let include_archived = false
         }
         struct Reply: Decodable { let conversations: [ConversationSummary] }
-        struct Refusal: Decodable { let error: String }
         let (data, response) = try await session.data(for: readRequest(Query(workspace_id: workspace)))
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
-        if status == 404 { return nil }
-        if status == 400, let code = try? JSONDecoder().decode(Refusal.self, from: data).error,
-           ["invalid_request", "invalid_resource", "unsupported_resource", "not_found"].contains(code) { return nil }
+        if status == 400, let refusal = try? JSONDecoder().decode([String: String].self, from: data),
+           refusal == ["error": "invalid_request"] || ["unsupported_resource", "invalid_resource"].contains(refusal["error"] ?? "") {
+            try await session.recordConversationCapability(workspace: workspace, supported: false)
+            return nil
+        }
         guard status == 200 else { throw APIError.refused(status) }
         let rows = try JSONDecoder().decode(Reply.self, from: data).conversations
         guard Set(rows.map(\.id)).count == rows.count,
               rows.allSatisfy({ $0.kind != .publicChannel && $0.kind != .privateChannel || $0.channel_id != nil })
         else { throw APIError.invalidResponse }
+        try await session.recordConversationCapability(workspace: workspace, supported: true)
         return rows
     }
 

@@ -99,6 +99,17 @@ enum Verify {
             _ = try await api.conversationList(UUID())
             throw Failure.mismatch("permission failure selected the legacy directory")
         } catch APIError.refused(403) {}
+        let probe = UUID(uuidString: "00000000-0000-4000-8000-000000000091")!
+        let supported = try await api.conversationList(probe)
+        try expect(supported?.isEmpty == true, "empty list is supported")
+        do {
+            _ = try await api.conversationList(probe)
+            throw Failure.mismatch("ambiguous 404 exposed the legacy directory")
+        } catch APIError.refused(404) {}
+        do {
+            _ = try await api.conversationList(probe)
+            throw Failure.mismatch("known-supported workspace downgraded on refresh")
+        } catch APIError.invalidResponse {}
         let canonical = thread.item(viewer: session.userID)
         let canonicalPost = Post(id: UUID(), workspace: ws.id, destination: canonical.destination, body: "Canonical DM")
         let canonicalID = try await api.post(canonicalPost)

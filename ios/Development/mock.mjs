@@ -55,6 +55,8 @@ const signedPath = "/storage/v1/object/sign/swarm-files/" + workspace + "/" + fi
 const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_type: "text/plain", size_bytes: fileBytes.length };
 
 const members = [{ kind: "user", id: me, name: "You" }, { kind: "agent", id: agent, name: "Atlas" }];
+let capabilityProbeReads = 0;
+const capabilityProbe = "00000000-0000-4000-8000-000000000091";
 const threadRows = [
   { conversation_id: randomUUID(), kind: "general", slug: "general", joined: true },
   { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true },
@@ -172,7 +174,13 @@ const server = createServer(async (req, res) => {
     authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/read") {
       const ws = body.workspace_id?.toLowerCase();
-      if (!conversationsEnabled || ws === secondWorkspace) return reply(400, { error: "invalid_resource" });
+      if (verify && ws === capabilityProbe) {
+        capabilityProbeReads++;
+        if (capabilityProbeReads === 1) return reply(200, { conversations: [] });
+        if (capabilityProbeReads === 2) return reply(404, { error: "forbidden" });
+        return reply(400, { error: "invalid_request" });
+      }
+      if (!conversationsEnabled || ws === secondWorkspace) return reply(400, { error: "invalid_request" });
       if (ws !== workspace) return reply(403, { error: "forbidden" });
       if (body.resource === "conversations" && body.include_archived === false) return reply(200, { conversations: threadRows });
       const row = threadRows.find(r => r.conversation_id === body.conversation_id?.toLowerCase());
