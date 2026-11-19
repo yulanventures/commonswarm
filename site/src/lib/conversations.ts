@@ -45,15 +45,73 @@ export interface ConversationSummary {
   archivedAt: string | null;
   joined: boolean;
   generation?: number;
+  leadMode?: "workspace" | "agent" | "none" | null;
+  leadAgentPrincipalId?: string | null;
   members: readonly ConversationMember[];
   notifyLevel: ConversationNotifyLevel;
   starred: boolean;
   starRank: number | null;
+  readThroughAt?: string | null;
+  readThroughId?: string | null;
   unreadCount: number | null;
   mentionCount: number | null;
   lastMessageAt: string | null;
   lastMessageId: string | null;
 }
+
+/**
+ * Read-only owner oversight row (Step 2b `conversation_oversight`). Deliberately omits personal
+ * notification, star, read-mark, and unread fields so oversight rows cannot enter personal sidebar
+ * or unread state (V4 C2).
+ */
+export interface OversightConversationSummary {
+  conversationId: string;
+  kind: ConversationKind;
+  channelId: string | null;
+  slug: string | null;
+  description: string | null;
+  archivedAt: string | null;
+  generation: number;
+  members: readonly ConversationMember[];
+  lastMessageAt: string | null;
+  lastMessageId: string | null;
+  readOnly: true;
+}
+
+export interface ConversationCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface ConversationHistoryOptions {
+  before?: ConversationCursor | null;
+  after?: ConversationCursor | null;
+  limit?: number;
+  includeMentions?: boolean;
+  includeReactions?: boolean;
+}
+
+export type ConversationHistoryResult<T> =
+  | {
+    ok: true;
+    conversation: ConversationSummary;
+    messages: T[];
+    hasMore: boolean;
+    nextBefore: ConversationCursor | null;
+    nextAfter: ConversationCursor | null;
+  }
+  | { ok: false; code: "conversation_not_found" | "other"; message: string };
+
+export type OversightHistoryResult<T> =
+  | {
+    ok: true;
+    conversation: OversightConversationSummary;
+    messages: T[];
+    hasMore: boolean;
+    nextBefore: ConversationCursor | null;
+    nextAfter: ConversationCursor | null;
+  }
+  | { ok: false; code: "conversation_not_found" | "other"; message: string };
 
 export interface OpenedConversation {
   conversationId: string;
@@ -411,3 +469,244 @@ export function parseConversationActionResponse(
     message: errorSentence(body, fallbackMessage),
   };
 }
+
+/* ── Step 2b read request builders & decoders (`POST /functions/v1/read`) ────────────────── */
+
+export function buildListConversationsRequest(
+  workspaceId: string,
+  includeArchived = false,
+): Record<string, unknown> {
+  return {
+    resource: "conversations",
+    workspace_id: workspaceId.toLowerCase(),
+    include_archived: includeArchived,
+  };
+}
+
+function historyCursorFields(options: ConversationHistoryOptions = {}): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  if (options.before) {
+    fields.before_created_at = options.before.createdAt;
+    fields.before_id = options.before.id.toLowerCase();
+  }
+  if (options.after) {
+    fields.after_created_at = options.after.createdAt;
+    fields.after_id = options.after.id.toLowerCase();
+  }
+  if (options.limit !== undefined) fields.limit = options.limit;
+  if (options.includeMentions !== undefined) fields.include_mentions = options.includeMentions;
+  if (options.includeReactions !== undefined) fields.include_reactions = options.includeReactions;
+  return fields;
+}
+
+export function buildConversationHistoryRequest(
+  workspaceId: string,
+  conversationId: string,
+  options: ConversationHistoryOptions = {},
+): Record<string, unknown> {
+  return {
+    resource: "conversation_history",
+    workspace_id: workspaceId.toLowerCase(),
+    conversation_id: conversationId.toLowerCase(),
+    ...historyCursorFields(options),
+  };
+}
+
+export function buildOversightListRequest(
+  workspaceId: string,
+  agentPrincipalId: string,
+): Record<string, unknown> {
+  return {
+    resource: "conversation_oversight",
+    workspace_id: workspaceId.toLowerCase(),
+    agent_principal_id: agentPrincipalId.toLowerCase(),
+  };
+}
+
+export function buildOversightHistoryRequest(
+  workspaceId: string,
+  conversationId: string,
+  agentPrincipalId: string,
+  options: ConversationHistoryOptions = {},
+): Record<string, unknown> {
+  return {
+    resource: "conversation_oversight_history",
+    workspace_id: workspaceId.toLowerCase(),
+    conversation_id: conversationId.toLowerCase(),
+    agent_principal_id: agentPrincipalId.toLowerCase(),
+    ...historyCursorFields(options),
+  };
+}
+
+function nullableText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseConversationMembers(value: unknown): ConversationMember[] {
+  if (!Array.isArray(value)) return [];
+  const out: ConversationMember[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if ((row.kind === "user" || row.kind === "agent") && typeof row.id === "string") {
+      out.push({
+        kind: row.kind,
+        id: row.id.toLowerCase(),
+        name: nullableText(row.name),
+        leftAt: nullableText(row.left_at),
+      });
+    }
+  }
+  return out;
+}
+
+function parseCursor(value: unknown): ConversationCursor | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.created_at !== "string" || typeof row.id !== "string") return null;
+  return { createdAt: row.created_at, id: row.id.toLowerCase() };
+}
+
+export function parseConversationSummary(value: unknown): ConversationSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.conversation_id !== "string") return null;
+  if (!(CONVERSATION_KINDS as readonly unknown[]).includes(row.kind)) return null;
+  const notifyLevel = (CONVERSATION_NOTIFY_LEVELS as readonly unknown[]).includes(row.notify_level)
+    ? (row.notify_level as ConversationNotifyLevel)
+    : "everything";
+  const leadMode = row.lead_mode === "workspace" || row.lead_mode === "agent" || row.lead_mode === "none"
+    ? row.lead_mode
+    : null;
+  return {
+    conversationId: row.conversation_id.toLowerCase(),
+    kind: row.kind as ConversationKind,
+    channelId: nullableText(row.channel_id)?.toLowerCase() ?? null,
+    slug: nullableText(row.slug),
+    description: nullableText(row.description),
+    archivedAt: nullableText(row.archived_at),
+    joined: row.joined === true,
+    generation: typeof row.generation === "number" ? row.generation : 0,
+    leadMode,
+    leadAgentPrincipalId: nullableText(row.lead_agent_principal_id)?.toLowerCase() ?? null,
+    members: parseConversationMembers(row.members),
+    notifyLevel,
+    starred: row.starred === true,
+    starRank: nullableNumber(row.star_rank),
+    readThroughAt: nullableText(row.read_through_at),
+    readThroughId: nullableText(row.read_through_id)?.toLowerCase() ?? null,
+    unreadCount: nullableNumber(row.unread_count),
+    mentionCount: nullableNumber(row.mention_count),
+    lastMessageAt: nullableText(row.last_message_at),
+    lastMessageId: nullableText(row.last_message_id)?.toLowerCase() ?? null,
+  };
+}
+
+export function parseOversightConversationSummary(value: unknown): OversightConversationSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.conversation_id !== "string") return null;
+  if (!(CONVERSATION_KINDS as readonly unknown[]).includes(row.kind)) return null;
+  return {
+    conversationId: row.conversation_id.toLowerCase(),
+    kind: row.kind as ConversationKind,
+    channelId: nullableText(row.channel_id)?.toLowerCase() ?? null,
+    slug: nullableText(row.slug),
+    description: nullableText(row.description),
+    archivedAt: nullableText(row.archived_at),
+    generation: typeof row.generation === "number" ? row.generation : 0,
+    members: parseConversationMembers(row.members),
+    lastMessageAt: nullableText(row.last_message_at),
+    lastMessageId: nullableText(row.last_message_id)?.toLowerCase() ?? null,
+    readOnly: true,
+  };
+}
+
+export function parseConversationsListResponse(body: Record<string, unknown>): ConversationSummary[] {
+  if (!Array.isArray(body.conversations)) return [];
+  const out: ConversationSummary[] = [];
+  for (const row of body.conversations) {
+    const parsed = parseConversationSummary(row);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
+export function parseOversightListResponse(body: Record<string, unknown>): OversightConversationSummary[] {
+  if (!Array.isArray(body.conversations)) return [];
+  const out: OversightConversationSummary[] = [];
+  for (const row of body.conversations) {
+    const parsed = parseOversightConversationSummary(row);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
+export function parseConversationHistoryResponse<T>(
+  status: number,
+  body: Record<string, unknown>,
+  mapMessage: (row: Record<string, unknown>) => T,
+): ConversationHistoryResult<T> {
+  if (status === 404 || body.error === "conversation_not_found") {
+    return {
+      ok: false,
+      code: "conversation_not_found",
+      message: errorSentence(body, CONVERSATION_UNAVAILABLE_TEXT),
+    };
+  }
+  const conversation = parseConversationSummary(body.conversation);
+  if (status === 200 && conversation && Array.isArray(body.messages)) {
+    return {
+      ok: true,
+      conversation,
+      messages: body.messages
+        .filter((row): row is Record<string, unknown> => row !== null && typeof row === "object")
+        .map(mapMessage),
+      hasMore: body.has_more === true,
+      nextBefore: parseCursor(body.next_before),
+      nextAfter: parseCursor(body.next_after),
+    };
+  }
+  return {
+    ok: false,
+    code: "other",
+    message: errorSentence(body, "CommonSwarm could not load this conversation."),
+  };
+}
+
+export function parseOversightHistoryResponse<T>(
+  status: number,
+  body: Record<string, unknown>,
+  mapMessage: (row: Record<string, unknown>) => T,
+): OversightHistoryResult<T> {
+  if (status === 404 || body.error === "conversation_not_found") {
+    return {
+      ok: false,
+      code: "conversation_not_found",
+      message: errorSentence(body, CONVERSATION_UNAVAILABLE_TEXT),
+    };
+  }
+  const conversation = parseOversightConversationSummary(body.conversation);
+  if (status === 200 && conversation && Array.isArray(body.messages)) {
+    return {
+      ok: true,
+      conversation,
+      messages: body.messages
+        .filter((row): row is Record<string, unknown> => row !== null && typeof row === "object")
+        .map(mapMessage),
+      hasMore: body.has_more === true,
+      nextBefore: parseCursor(body.next_before),
+      nextAfter: parseCursor(body.next_after),
+    };
+  }
+  return {
+    ok: false,
+    code: "other",
+    message: errorSentence(body, "CommonSwarm could not load this conversation."),
+  };
+}
+

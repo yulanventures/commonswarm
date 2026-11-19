@@ -42,19 +42,32 @@ import {
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
 import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
 import {
+  buildConversationHistoryRequest,
   buildInviteConversationCommand,
   buildJoinConversationCommand,
   buildLeaveConversationCommand,
+  buildListConversationsRequest,
   buildMarkConversationReadCommand,
   buildOpenConversationCommand,
+  buildOversightHistoryRequest,
+  buildOversightListRequest,
   buildRemoveConversationCommand,
   buildSetConversationNotifyCommand,
   parseConversationActionResponse,
+  parseConversationHistoryResponse,
   parseConversationOpenResponse,
+  parseConversationsListResponse,
+  parseOversightHistoryResponse,
+  parseOversightListResponse,
   type ConversationActionResult,
+  type ConversationHistoryOptions,
+  type ConversationHistoryResult,
   type ConversationMemberRef,
   type ConversationNotifyLevel,
   type ConversationOpenResult,
+  type ConversationSummary,
+  type OversightConversationSummary,
+  type OversightHistoryResult,
 } from "./conversations.js";
 import type { ReactionActor, ReactionGroup } from "./reactions";
 import {
@@ -4362,6 +4375,97 @@ export async function setConversationNotify(
     buildSetConversationNotifyCommand(conversationId, change),
     "CommonSwarm could not save those notification settings.",
   );
+}
+
+async function postConversationRead(
+  payload: Record<string, unknown>,
+  label: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const session = await currentSession();
+  if (!session) throw new SessionExpired();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/functions/v1/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: deadline.controller.signal,
+    });
+    if (response.status === 401) throw new SessionExpired();
+    const raw = await response.json().catch(() => ({}));
+    const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    return { status: response.status, body };
+  } catch (error) {
+    if (error instanceof SessionExpired || error instanceof NoDeployment) throw error;
+    if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
+    throw error;
+  } finally {
+    deadline.clear();
+  }
+}
+
+/** Step 2b `resource: "conversations"`: sidebar and directory list for the viewer. */
+export async function listConversations(
+  workspaceId: string,
+  includeArchived = false,
+): Promise<ConversationSummary[]> {
+  const { status, body } = await postConversationRead(
+    buildListConversationsRequest(workspaceId, includeArchived),
+    "conversations",
+  );
+  if (status !== 200) {
+    throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load conversations (HTTP ${status}).`);
+  }
+  return parseConversationsListResponse(body);
+}
+
+/** Step 2b `resource: "conversation_history"`: cursor-paged messages for one conversation. */
+export async function readConversationHistory(
+  workspaceId: string,
+  conversationId: string,
+  options: ConversationHistoryOptions = {},
+): Promise<ConversationHistoryResult<Signal>> {
+  const { status, body } = await postConversationRead(
+    buildConversationHistoryRequest(workspaceId, conversationId, options),
+    "conversation history",
+  );
+  return parseConversationHistoryResponse(status, body, browserSignalFromRow);
+}
+
+/** Step 2b `resource: "conversation_oversight"`: read-only DMs for one owned agent. */
+export async function listOversightConversations(
+  workspaceId: string,
+  agentPrincipalId: string,
+): Promise<OversightConversationSummary[]> {
+  const { status, body } = await postConversationRead(
+    buildOversightListRequest(workspaceId, agentPrincipalId),
+    "agent conversations",
+  );
+  if (status === 404) return [];
+  if (status !== 200) {
+    throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load agent conversations (HTTP ${status}).`);
+  }
+  return parseOversightListResponse(body);
+}
+
+/** Step 2b `resource: "conversation_oversight_history"`: read-only history bound to one owned agent. */
+export async function readOversightConversationHistory(
+  workspaceId: string,
+  conversationId: string,
+  agentPrincipalId: string,
+  options: ConversationHistoryOptions = {},
+): Promise<OversightHistoryResult<Signal>> {
+  const { status, body } = await postConversationRead(
+    buildOversightHistoryRequest(workspaceId, conversationId, agentPrincipalId, options),
+    "agent conversation history",
+  );
+  return parseOversightHistoryResponse(status, body, browserSignalFromRow);
 }
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */
