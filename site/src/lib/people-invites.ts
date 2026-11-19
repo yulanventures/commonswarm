@@ -81,7 +81,31 @@ export function peopleInvites(input: PeopleInvitesInput): PeopleInvite[] {
         entry.expiresAt ? `ends ${relative(entry.expiresAt)}` : null),
       mayCancel: mine(entry.ownerUserId) });
   }
-  return rows;
+  return rows.map((row) => row.kind === "code" ? { ...row, detail: peopleInviteDisplayDetail(row, rows) } : row);
+}
+
+/**
+ * When two connect codes in a workspace share identical displayed details (same creator, rounded times
+ * and seat count), prepend a stable non-secret prefix of the credential record id ("code 11111111") so
+ * the row, accessible Cancel button and confirmation stay distinguishable without ever showing the code value.
+ */
+function uniqueCodePrefix(id: string, siblings: readonly string[]): string {
+  const clean = id.trim();
+  for (let len = 8; len <= clean.length; len += 4) {
+    const prefix = clean.slice(0, len);
+    if (siblings.every((other) => other === clean || !other.startsWith(prefix))) return prefix;
+  }
+  return clean;
+}
+export function peopleInviteDisplayDetail(
+  invite: Pick<PeopleInvite, "kind" | "id" | "detail">,
+  all: readonly Pick<PeopleInvite, "kind" | "id" | "detail">[],
+): string {
+  if (invite.kind !== "code") return invite.detail;
+  const matching = all.filter((other) => other.kind === "code" && other.detail === invite.detail);
+  if (matching.length < 2 || matching.every((other) => other.id === invite.id)) return invite.detail;
+  const tag = `code ${uniqueCodePrefix(invite.id, matching.map((other) => other.id))}`;
+  return invite.detail ? `${tag} · ${invite.detail}` : tag;
 }
 
 /** The three ways an invite ends. Each takes the id its row carries: an invitation, a key, a connect code.
@@ -97,10 +121,11 @@ export function cancelPeopleInvite(invite: Pick<PeopleInvite, "kind" | "id">, se
 }
 
 /** The Cancel button's accessible name. */
-export function peopleInviteCancelLabel(invite: Pick<PeopleInvite, "kind" | "name">): string {
+export function peopleInviteCancelLabel(invite: Pick<PeopleInvite, "kind" | "name"> & { detail?: string }): string {
   if (invite.kind === "person") return `Cancel the invitation for ${invite.name}`;
   if (invite.kind === "key") return `Cancel the unused key for ${invite.name}`;
-  return "Cancel this connect code";
+  const detail = invite.detail?.trim();
+  return detail ? `Cancel connect code: ${detail}` : "Cancel this connect code";
 }
 export function peopleInviteReceipt(invite: Pick<PeopleInvite, "kind" | "name">): string {
   if (invite.kind === "person") return "Invitation canceled.";
@@ -108,16 +133,20 @@ export function peopleInviteReceipt(invite: Pick<PeopleInvite, "kind" | "name">)
   return "Connect code canceled.";
 }
 /** What the confirmation says stops and what stays, for each kind of invite. */
-export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "name">) {
+export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "name"> & { workspaceName?: string; detail?: string }) {
   const name = invite.name;
-  if (invite.kind === "person") return { title: "Cancel this invitation?", button: "Cancel invitation",
-    stops: [`The invitation for ${name} stops working and leaves this list. No one has joined with it.`],
+  if (invite.kind === "person") return { title: `Cancel the invitation for ${name}?`, button: "Cancel invitation",
+    stops: ["Cancelling this invitation stops the email link from working."],
     stays: ["You can send a new invitation later."] };
   // The key was unused when this list loaded. The server revokes it either way, so say what that means if it has been used since.
-  if (invite.kind === "key") return { title: "Cancel this key?", button: "Cancel key",
-    stops: [`The key for ${name} stops working and leaves this list. If ${name} has connected with it since this list loaded, ${name} is cut off, along with any access renewed from this key.`],
+  if (invite.kind === "key") return { title: `Cancel the key for ${name}?`, button: "Cancel key",
+    stops: [`This key stops working and leaves this list. If ${name} has connected with it since this list loaded, turning it off cuts off ${name} and any access renewed from this key.`],
     stays: ["You can create a new key later."] };
-  return { title: "Cancel this connect code?", button: "Cancel code",
-    stops: ["The connect code stops working and leaves this list. No more agents can join with it."],
-    stays: ["Agents that already joined with it stay.", "You can make a new code later."] };
+  const workspace = invite.workspaceName?.trim();
+  const context = invite.detail?.trim() || undefined;
+  return { title: workspace ? `Cancel this connect code for ${workspace}?` : "Cancel this connect code?",
+    ...(context ? { context } : {}),
+    button: "Cancel code",
+    stops: ["This connect code stops working and leaves this list. No more agents can join with it."],
+    stays: ["Agents that already joined with it stay. You can make a new code later."] };
 }

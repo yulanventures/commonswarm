@@ -1573,7 +1573,7 @@ import "../../styles/kylon-image-viewer.css";
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
-  import { cancelPeopleInvite, peopleInvites, peopleInviteReceipt } from "../../lib/people-invites";
+  import { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInvites, peopleInviteReceipt, type PeopleInvite } from "../../lib/people-invites";
   import {
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
@@ -8139,9 +8139,9 @@ import "../../styles/kylon-image-viewer.css";
         if (!invite || invite.workspaceId !== workspaceId) throw new Error("This invite is no longer here. Go back and check the list.");
         const value = session;
         await cancelPeopleInvite(invite, {
-          person: (invitationId) => revokeWorkspaceInvitation(value, uuid(), workspaceId, invitationId),
-          key: (tokenId) => revokeAgentToken(value, uuid(), workspaceId, tokenId),
-          code: (joinCredentialId) => revokeAgentJoinCredential(value, uuid(), workspaceId, joinCredentialId),
+          person: (invitationId) => revokeWorkspaceInvitation(value, questionId ?? uuid(), workspaceId, invitationId),
+          key: (tokenId) => revokeAgentToken(value, questionId ?? uuid(), workspaceId, tokenId),
+          code: (joinCredentialId) => revokeAgentJoinCredential(value, questionId ?? uuid(), workspaceId, joinCredentialId),
         });
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         receipt = peopleInviteReceipt(invite); }
@@ -8150,7 +8150,8 @@ import "../../styles/kylon-image-viewer.css";
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
-      const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const found = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const item = found && action === "cancel-invite" ? { ...found, detail: peopleInviteDisplayDetail(found as PeopleInvite, model.invites) } : found;
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
       const workspaceId = activeWorkspaceId, userId = session?.user.id;
       let pinnedKey: { tokenId: string; grantId: string | null } | undefined;
@@ -22639,6 +22640,7 @@ import "../../styles/kylon-image-viewer.css";
   .pd-confirm::backdrop { background: color-mix(in srgb,var(--text) 24%,transparent); backdrop-filter: blur(2px); }
   .pd-confirm-icon { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 50%; color: var(--danger); background: var(--danger-dim); margin-block-end: 18px; }
   .pd-confirm h2 { font-size: 23px; line-height: 1.3; letter-spacing: -.6px; overflow-wrap: anywhere; }
+  .pd-confirm-context { margin: 8px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
   .pd-confirm-facts { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
   .pd-confirm-facts li { position: relative; padding-inline-start: 21px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
   .pd-confirm-facts li::before { content: ""; position: absolute; inset-inline-start: 0; inset-block-start: 8px; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--danger); }

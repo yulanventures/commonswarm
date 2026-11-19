@@ -7,7 +7,8 @@ import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
 import { buildPeoplePage } from "./people-page";
-import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
+import { peopleInviteCancelLabel, peopleInviteConfirmCopy, peopleInviteDisplayDetail, type PeopleInvite } from "./people-invites";
+export { peopleInviteDisplayDetail };
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
 import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
@@ -151,9 +152,9 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleRowAc
   return action === "remove-agent" && agent.mayManage;
 }
 /** Confirmation heading, button label and consequences for destructive People & agents and Lists & docs actions. */
-export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string; workspaceName?: string }) {
+export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string; workspaceName?: string; detail?: string }) {
   const name = item.name;
-  if (action === "cancel-invite") return peopleInviteConfirmCopy({ name, kind: (item.kind ?? "person") as PeopleInvite["kind"] });
+  if (action === "cancel-invite") return peopleInviteConfirmCopy({ name, kind: (item.kind ?? "person") as PeopleInvite["kind"], workspaceName: item.workspaceName, detail: item.detail });
   if (action === "remove-agent") return { title: `Remove ${name}?`, button: `Remove ${name}`,
     stops: item.hosted ? [`${name} will lose access to this space. Its identity and every connection will end.`, "This cannot be undone."] : [`${name} will lose access to this workspace immediately.`],
     stays: [`Its history stays as “${name} (removed)”.`, ...(item.hosted ? ["Its owner can connect a new agent with the same name."] : [])] };
@@ -707,13 +708,14 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const count = node(doc, "span", "", String(invites.length)); count.dataset.dialogAccessCount = ""; invitedTitle.append(count);
   const inviteList = node(doc, "ul", "pd-invite-list"); inviteList.dataset.dialogAccessList = "";
   for (const invite of invites) {
+    const detailText = peopleInviteDisplayDetail(invite, model.invites);
     const row = node(doc, "li", "pd-invite"); row.dataset.inviteKind = invite.kind;
     const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "person" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
     if (invite.kind === "person") symbol.append(inviteIcon(doc));
     const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "key" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
-    copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
+    copy.append(name, node(doc, "span", "pd-muted", detailText)); row.append(symbol, copy);
     if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
-      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel(invite)); row.append(cancel); }
+      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel({ ...invite, detail: detailText })); row.append(cancel); }
     inviteList.append(row);
   }
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
@@ -886,7 +888,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
 
 /** Native nested confirm, with its own Escape and a safe initial focus. */
 export function showPeopleConfirmation(dialog: HTMLDialogElement, action: PeopleConfirmAction,
-  item: { name: string; hosted?: boolean; kind?: string; liveKey?: boolean; workspaceName?: string }, opener: HTMLElement,
+  item: { name: string; hosted?: boolean; kind?: string; liveKey?: boolean; workspaceName?: string; detail?: string }, opener: HTMLElement,
   commit: (button: HTMLButtonElement, notice: HTMLElement) => Promise<void>,
   formatError: (error: unknown) => string, alternative?: () => void, focusAfterCommit?: () => void,
   /** Another part of the page that opens this question (the Lists & docs approvals, for example). Focus then returns
@@ -897,8 +899,9 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   dialog.replaceChildren(); dialog.setAttribute("role", "alertdialog"); dialog.setAttribute("aria-labelledby", "pd-confirm-title"); dialog.setAttribute("aria-describedby", "pd-confirm-description");
   const symbol = node(doc, "span", "pd-confirm-icon", action === "withdraw" ? "▤" : "⚠"); symbol.setAttribute("aria-hidden", "true");
   const title = node(doc, "h2", "", copy.title); title.id = "pd-confirm-title";
-  if (action === "turn-off-key" || action === "remove-person") {
+  if (action === "turn-off-key" || action === "remove-person" || action === "cancel-invite") {
     const description = node(doc, "div", "pd-confirm-body"); description.id = "pd-confirm-description";
+    if ("context" in copy && copy.context) description.append(node(doc, "p", "pd-confirm-context", copy.context));
     const facts = node(doc, "ul", "pd-confirm-facts");
     for (const text of copy.stops) {
       const row = node(doc, "li", "stop");

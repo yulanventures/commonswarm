@@ -1641,3 +1641,145 @@ test("remove-person confirmation names the workspace, reuses one command ID, and
   assert.equal(removals[0].memberUserId, targetId);
   assert.equal(reloads[0].receipt, `Sam Rivera removed from ${workspaceName}. They keep their other memberships.`);
 });
+
+test("cancel-invite confirmation identifies each invite kind, keeps Go back focused, cancels with zero sends, and reuses one command ID", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt } = await import("../../lib/people-invites.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Herb garden";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const invites = [
+    { kind: "person", id: "inv-1", workspaceId, name: "mei@example.test", detail: "You invited · 2 days ago · ends in 5 days", mayCancel: true },
+    { kind: "key", id: "key-1", workspaceId, name: "Sprout", detail: "Sam’s agent · made 3 days ago · ends in 4 days", mayCancel: true },
+    { kind: "code", id: "code-1", workspaceId, name: "Connect code", detail: "Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours", mayCancel: true },
+  ];
+
+  let ids = 0, lose = false;
+  const sent: any[] = [], reloads: any[] = [];
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [], agents: [], accessStatuses: [],
+    activeInvites: [...invites],
+    peopleDialogModel: () => ({ sample: false, workspaceName, people: [], agents: [], invites: ctx.activeInvites }),
+    peopleDialogCanAct, showPeopleConfirmation, cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeWorkspaceInvitation: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "person", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    revokeAgentToken: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "key", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    revokeAgentJoinCredential: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "code", commandId, wsId, id }); if (lose) throw new Error("lost"); },
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => { reloads.push({ wsId, id, receipt, action }); },
+    peopleDialogFocusTarget: () => null,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+
+  for (const invite of invites) {
+    const opener: any = doc.createElement("button");
+    opener.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`;
+    actions.confirmPeopleDialogAction("cancel-invite", invite.id, opener);
+    assert.equal(dialog.open, true);
+    const title = dialog.querySelectorAll("h2")[0]?.textContent;
+    const context = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+    const note = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent;
+    if (invite.kind === "person") {
+      assert.equal(title, "Cancel the invitation for mei@example.test?");
+      assert.equal(context, undefined);
+      assert.equal(note, "You can send a new invitation later.");
+    } else if (invite.kind === "key") {
+      assert.equal(title, "Cancel the key for Sprout?");
+      assert.equal(context, undefined);
+      assert.equal(note, "You can create a new key later.");
+    } else {
+      assert.equal(title, "Cancel this connect code for Herb garden?");
+      assert.equal(context, invite.detail);
+      assert.equal(note, "Agents that already joined with it stay. You can make a new code later.");
+    }
+    const buttons = dialog.querySelectorAll("button");
+    assert.equal(buttons[0].textContent, "Go back");
+    assert.equal(focused.at(-1), buttons[0], `Go back focused on open for ${invite.kind}`);
+    let prevented = false, stopped = false;
+    dialog.oncancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+    assert.equal(prevented && stopped, true);
+    assert.equal(dialog.open, false);
+    assert.equal(focused.at(-1), opener, `Escape returns focus to the same ${invite.kind} row`);
+    assert.equal(sent.length, 0, `Escape sends nothing for ${invite.kind}`);
+  }
+
+  // Disappeared invite refuses with zero sends.
+  const codeOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("cancel-invite", "code-1", codeOpener);
+  ctx.activeInvites = invites.slice(0, 2);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 0, "missing invite sends nothing");
+  dialog.querySelectorAll("button")[0].click();
+
+  // Confirmed cancel + lost-answer retry reuses one command ID for the exact row kind.
+  ctx.activeInvites = [...invites];
+  actions.confirmPeopleDialogAction("cancel-invite", "code-1", codeOpener);
+  const buttons = dialog.querySelectorAll("button");
+  lose = true;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(sent.length, 1);
+  lose = false;
+  await buttons[1].events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].commandId, sent[1].commandId, "retry reuses one command ID");
+  assert.deepEqual(sent[0], { kind: "code", commandId: sent[0].commandId, wsId: workspaceId, id: "code-1" });
+  assert.equal(reloads[0].receipt, "Connect code canceled.");
+
+  // Two connect codes with identical creator, displayed times, capacity and use count stay distinguishable and each sends only its own ID.
+  const idA = "11111111-1111-4111-8111-111111111111";
+  const idB = "22222222-2222-4222-8222-222222222222";
+  const sameDetail = "Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours";
+  ctx.activeInvites = [
+    { kind: "code", id: idA, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+    { kind: "code", id: idB, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+  ];
+  sent.length = 0;
+  const openerA: any = doc.createElement("button");
+  const openerB: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("cancel-invite", idA, openerA);
+  const ctxA = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxA, `code 11111111 · ${sameDetail}`);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "code");
+  assert.equal(sent[0].id, idA);
+
+  actions.confirmPeopleDialogAction("cancel-invite", idB, openerB);
+  const ctxB = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxB, `code 22222222 · ${sameDetail}`);
+  assert.notEqual(ctxA, ctxB);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].kind, "code");
+  assert.equal(sent[1].id, idB);
+});

@@ -52,7 +52,14 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
           status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
         const longWorkspace = 'Rivera household & studio — shared with everyone, including the agents';
-        const model = { workspaceName: longWorkspace, people: [{ id: 'person', name: 'Mei Langridge', role: 'owner', own: true, mayRemove: false }, { id: 'sam', name: 'Sam Rivera', role: 'member', own: false, mayRemove: true }], agents: [agent, local], invites: [], sample: false, pendingFailed: false };
+        const sameCodeDetail = 'Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours';
+        const invites = [
+          { kind: 'person', id: 'inv-person', workspaceId: 'ws-1', name: 'pending.invitee.with.a.long.address@example.test', detail: 'You invited · 2 days ago · ends in 5 days', mayCancel: true },
+          { kind: 'key', id: 'inv-key', workspaceId: 'ws-1', name: 'Sprout', detail: 'Sam’s agent · made 3 days ago · ends in 4 days', mayCancel: true },
+          { kind: 'code', id: '11111111-1111-4111-8111-111111111111', workspaceId: 'ws-1', name: 'Connect code', detail: sameCodeDetail, mayCancel: true },
+          { kind: 'code', id: '22222222-2222-4222-8222-222222222222', workspaceId: 'ws-1', name: 'Connect code', detail: sameCodeDetail, mayCancel: true },
+        ];
+        const model = { workspaceName: longWorkspace, people: [{ id: 'person', name: 'Mei Langridge', role: 'owner', own: true, mayRemove: false }, { id: 'sam', name: 'Sam Rivera', role: 'member', own: false, mayRemove: true }], agents: [agent, local], invites, sample: false, pendingFailed: false };
         const state = { selected: null, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [], modalCommits = [];
@@ -101,8 +108,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const pageCallbacks = { render: () => PeopleView.renderPeopleDialog(pageRoot,pageDetail,model,pageState,pageCallbacks,{ page:{homeLabel:'Controlled local geometry',homeHref:'#'}}),
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
           confirm: (action,id,opener) => {
-            const target = action === 'remove-person' ? model.people.find(item => item.id === id) : model.agents.find(item => item.id === id);
-            PeopleView.showPeopleConfirmation(pageConfirm,action,{ ...target, workspaceName: model.workspaceName },opener,
+            const target = action === 'remove-person' ? model.people.find(item => item.id === id) : action === 'cancel-invite' ? model.invites.find(item => item.id === id) : model.agents.find(item => item.id === id);
+            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) } : { ...target, workspaceName: model.workspaceName };
+            PeopleView.showPeopleConfirmation(pageConfirm,action,item,opener,
               async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.');
           } };
         const number = value => Number.parseFloat(value) || 0;
@@ -189,6 +197,33 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           pageConfirm.addEventListener('cancel',event=>{pRow.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
           pRow.returned=!pageConfirm.open && document.activeElement===personOpener;
           document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+          pageState.selected=null; pageState.tab='invites'; pageCallbacks.render();
+          for (const [kind, pendingId] of [['cancel-person','inv-person'], ['cancel-key','inv-key'], ['cancel-code-a','11111111-1111-4111-8111-111111111111'], ['cancel-code-b','22222222-2222-4222-8222-222222222222']]) {
+            const invOpener=pageRoot.querySelector('button[data-pending-id="'+pendingId+'"]'); invOpener.focus(); invOpener.click();
+            pageConfirm.getBoundingClientRect();
+            const invDeadline=performance.now()+2000;
+            while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check(getComputedStyle(pageConfirm.querySelector('.pd-confirm-actions button')).font)) {
+              if (performance.now()>=invDeadline) throw Error('Invite confirmation readiness: '+kind);
+              await new Promise(resolve=>setTimeout(resolve,20));
+            }
+            const iButtons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], iCancel=iButtons[0];
+            const iDescribed=pageConfirm.querySelector('#'+pageConfirm.getAttribute('aria-describedby'));
+            const iRow={dark,id:pendingId,kind,width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
+              pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
+              openerLabel:invOpener.getAttribute('aria-label'),
+              rowDetail:invOpener.closest('li')?.querySelector('.pd-muted')?.textContent ?? null,
+              contextText:pageConfirm.querySelector('.pd-confirm-context')?.textContent ?? null,
+              stopCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.stop').length,
+              keepCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.keep').length,
+              noteCount:pageConfirm.querySelectorAll('.pd-confirm-note').length,
+              noteText:pageConfirm.querySelector('.pd-confirm-note')?.textContent ?? null,
+              describedByHasBoth:!!(iDescribed && iDescribed.querySelector('.pd-confirm-facts') && iDescribed.querySelector('.pd-confirm-note')),
+              actions:iButtons.map(naturalAction),initial:modalPaint(iCancel),cancelled:false,returned:false};
+            pageRows.push(iRow); document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+            pageConfirm.addEventListener('cancel',event=>{iRow.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
+            iRow.returned=!pageConfirm.open && document.activeElement===invOpener;
+            document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+          }
         }
         document.documentElement.dataset.pageModal=btoa(unescape(encodeURIComponent(JSON.stringify({rows:pageRows,commits}))));
       })().catch(error => { document.documentElement.dataset.pageModalError=String(error.stack || error); });
@@ -229,6 +264,26 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           assert.equal(row.keepCount, 0, facts);
           assert.equal(row.noteCount, 1, facts);
           assert.equal(row.noteText, 'Workspace history stays. They keep their other memberships.', facts);
+          assert.equal(row.describedByHasBoth, true, facts);
+        } else if (row.kind === 'cancel-person') {
+          assert.equal(row.title, 'Cancel the invitation for pending.invitee.with.a.long.address@example.test?', facts);
+          assert.equal(row.contextText, null, facts);
+          assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+          assert.equal(row.describedByHasBoth, true, facts);
+        } else if (row.kind === 'cancel-key') {
+          assert.equal(row.title, 'Cancel the key for Sprout?', facts);
+          assert.equal(row.contextText, null, facts);
+          assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+          assert.equal(row.describedByHasBoth, true, facts);
+        } else if (row.kind === 'cancel-code-a' || row.kind === 'cancel-code-b') {
+          const expectedTag = row.kind === 'cancel-code-a' ? 'code 11111111' : 'code 22222222';
+          const expectedDetail = `${expectedTag} · Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours`;
+          assert.equal(row.title, 'Cancel this connect code for Rivera household & studio — shared with everyone, including the agents?', facts);
+          assert.equal(row.rowDetail, expectedDetail, facts);
+          assert.equal(row.openerLabel, `Cancel connect code: ${expectedDetail}`, facts);
+          assert.equal(row.contextText, expectedDetail, facts);
+          assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+          assert.equal(row.noteText, 'Agents that already joined with it stay. You can make a new code later.', facts);
           assert.equal(row.describedByHasBoth, true, facts);
         } else {
           const name = row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent';

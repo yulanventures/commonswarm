@@ -71,8 +71,11 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei", workspaceName: "Herb garden" }).stays[0], "Workspace history stays. They keep their other memberships.");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this key?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "mei@example.test", kind: "person" }).title, "Cancel the invitation for mei@example.test?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel the key for Muse?");
+  const codeConfirm = peopleConfirmationCopy("cancel-invite", { name: "Connect code", kind: "code", workspaceName: "Herb garden", detail: "Sam made it · today" });
+  assert.equal(codeConfirm.title, "Cancel this connect code for Herb garden?");
+  assert.equal(codeConfirm.context, "Sam made it · today");
 });
 
 // Role change (UI-SPEC 3.6). Expected strings are the spec's literals, not read back from the code under test.

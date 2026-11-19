@@ -322,6 +322,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],
   border-color: var(--k-shell-line); border-radius: var(--k-shell-radius); background: var(--k-shell-subtle);
 }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-alternative p,
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-context,
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-note { color: var(--k-shell-secondary); }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions { flex-wrap: wrap; gap: 12px; }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) :is(.pd-confirm-actions,.pd-alternative) button {
