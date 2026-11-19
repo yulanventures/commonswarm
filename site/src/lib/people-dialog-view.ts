@@ -159,7 +159,7 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
     stays: [`Its history stays as “${name} (removed)”.`, ...(item.hosted ? ["Its owner can connect a new agent with the same name."] : [])] };
   if (action === "turn-off-key") return { title: `Turn off ${name}’s key?`, button: "Turn off key",
     stops: [`${name} stops when its current access ends.`, "This key cannot be used again."],
-    stays: ["Its identity and history stay here.", "Its owner can get a new key to bring it back."] };
+    stays: ["Its identity and history stay here. Its owner can get a new key to bring it back."] };
   if (action === "withdraw") {
     const workspace = item.workspaceName?.trim();
     const title = workspace ? `Withdraw ${name}’s Lists & docs access in ${workspace}?` : `Withdraw ${name}’s Lists & docs access?`;
@@ -896,11 +896,24 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   dialog.replaceChildren(); dialog.setAttribute("role", "alertdialog"); dialog.setAttribute("aria-labelledby", "pd-confirm-title"); dialog.setAttribute("aria-describedby", "pd-confirm-description");
   const symbol = node(doc, "span", "pd-confirm-icon", action === "withdraw" ? "▤" : "⚠"); symbol.setAttribute("aria-hidden", "true");
   const title = node(doc, "h2", "", copy.title); title.id = "pd-confirm-title";
-  const facts = node(doc, "ul", "pd-confirm-facts"); facts.id = "pd-confirm-description";
-  // A2 keeps the stop/stay sequence readable, with text alternatives for the dots.
-  const addFact = (text: string, keep: boolean) => { const row = node(doc, "li", keep ? "keep" : "stop"); row.append(node(doc, "span", "pd-sr-only", keep ? "Stays or can be restored: " : "Stops or cannot be undone: "), node(doc, "span", "", text)); facts.append(row); };
-  copy.stops.forEach((text, index) => { addFact(text, false); if (copy.stays[index]) addFact(copy.stays[index]!, true); });
-  copy.stays.slice(copy.stops.length).forEach((text) => addFact(text, true)); dialog.append(symbol, title, facts);
+  if (action === "turn-off-key") {
+    const description = node(doc, "div", "pd-confirm-body"); description.id = "pd-confirm-description";
+    const facts = node(doc, "ul", "pd-confirm-facts");
+    for (const text of copy.stops) {
+      const row = node(doc, "li", "stop");
+      row.append(node(doc, "span", "pd-sr-only", "Stops or cannot be undone: "), node(doc, "span", "", text));
+      facts.append(row);
+    }
+    description.append(facts);
+    for (const text of copy.stays) description.append(node(doc, "p", "pd-confirm-note", text));
+    dialog.append(symbol, title, description);
+  } else {
+    const facts = node(doc, "ul", "pd-confirm-facts"); facts.id = "pd-confirm-description";
+    // A2 keeps the stop/stay sequence readable, with text alternatives for the dots.
+    const addFact = (text: string, keep: boolean) => { const row = node(doc, "li", keep ? "keep" : "stop"); row.append(node(doc, "span", "pd-sr-only", keep ? "Stays or can be restored: " : "Stops or cannot be undone: "), node(doc, "span", "", text)); facts.append(row); };
+    copy.stops.forEach((text, index) => { addFact(text, false); if (copy.stays[index]) addFact(copy.stays[index]!, true); });
+    copy.stays.slice(copy.stops.length).forEach((text) => addFact(text, true)); dialog.append(symbol, title, facts);
+  }
   if (action === "remove-agent" && item.hosted && item.liveKey && alternative) { const option = node(doc, "section", "pd-alternative"); option.append(node(doc, "h3", "", "Would turning off the key be enough?"), node(doc, "p", "", `Keep ${item.name} and its history here. It stops when its current access ends; a new key can bring it back.`), button(doc, "Turn off key instead →", () => alternative())); dialog.append(option); }
   const notice = node(doc, "p", "pd-error"); notice.setAttribute("role", "alert"); notice.hidden = true;
   let pending = false;

@@ -213,3 +213,16 @@ test('local workspace removal is scoped and only an owner can disconnect the reu
   assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);
   data.agents[0].own=true;assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),true);
 });
+
+test("turn-off-key confirmation puts both consequences together first and follows with one quiet recovery line", () => {
+  const copy = peopleConfirmationCopy("turn-off-key", { name: "Sprout" });
+  assert.equal(copy.title, "Turn off Sprout’s key?");
+  assert.equal(copy.button, "Turn off key");
+  assert.deepEqual(copy.stops, [
+    "Sprout stops when its current access ends.",
+    "This key cannot be used again.",
+  ]);
+  assert.deepEqual(copy.stays, [
+    "Its identity and history stay here. Its owner can get a new key to bring it back.",
+  ]);
+});
