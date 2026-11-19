@@ -248,6 +248,10 @@ before(async () => {
     kind: "post_signal",
     signal_kind: "note",
     body: "broadcast signal for sibling receipts",
+    to_user_id: null,
+    about: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
   });
   assert.equal(posted.status, 200, `warmup post_signal: ${JSON.stringify(posted.body)}`);
   const [sigRow] = await sql<{ id: string }[]>`
@@ -284,21 +288,25 @@ test(
     const directPosted = await send(owner.jwt, {
       kind: "post_signal",
       signal_kind: "note",
+      to_user_id: null,
+      about: null,
       to_agent_principal_id: parkedAgent.principal,
+      in_reply_to: null,
       body: "direct delivery to hold mid-transaction",
     });
     assert.equal(directPosted.status, 200, JSON.stringify(directPosted.body));
 
+    const parkedListener = randomUUID();
     const claim = await send(parkedAgent.token, {
       kind: "claim_agent_inbox",
-      listener_instance_id: randomUUID(),
+      listener_instance_id: parkedListener,
       limit: 5,
     });
     assert.equal(claim.status, 200, JSON.stringify(claim.body));
     const deliveries = (claim.body.deliveries ?? []) as Row[];
     assert.ok(deliveries.length >= 1, `expected leased delivery: ${JSON.stringify(claim.body)}`);
     const leasedSignalId = String(deliveries[0]!.signal_id);
-    const leaseToken = String(deliveries[0]!.lease_token);
+    const leaseId = String(deliveries[0]!.lease_id);
 
     let deliveryLock: HeldLock | null = null;
     let ownerLock: HeldLock | null = null;
@@ -318,7 +326,9 @@ test(
       parkedAckPromise = send(parkedAgent.token, {
         kind: "ack_agent_delivery",
         signal_id: leasedSignalId,
-        lease_token: leaseToken,
+        lease_id: leaseId,
+        listener_instance_id: parkedListener,
+        outcome: "observed",
       }).then((res) => {
         parkedAckSettled = true;
         return res;

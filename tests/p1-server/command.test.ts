@@ -12211,7 +12211,7 @@ async function runPhaseCSerializedRace(
     const result: PhaseCRaceResult = {
       mode,
       windowStart,
-      serializedObserved: claimAtOwner[0]!.blockingPids.includes(ackRequestPid),
+      serializedObserved: claimAtPrincipal[0]!.blockingPids.includes(ackRequestPid),
       ack,
       claim,
       ackCountAfterWinner,
