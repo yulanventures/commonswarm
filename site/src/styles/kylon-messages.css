@@ -951,7 +951,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboa
   content: "";
   position: absolute;
   inset-block: 0;
-  inset-inline-start: 10px;
+  inset-inline-start: 6px;
   border-inline-start: 1px solid var(--k-shell-control);
   pointer-events: none;
 }

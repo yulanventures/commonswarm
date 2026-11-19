@@ -84,10 +84,10 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-group
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped]:not(:has(.dashboard__message-target:not([data-target-kind="everyone"]))) .hm-author:not(:focus-within) * {
   opacity: 0; pointer-events: none;
 }
-/* Grouped continuation clock: right-aligned between the person-cue edge (10..12px) and message text (68px),
-   never capturing hover for stray tooltips over the message above. */
+/* Grouped continuation clock: right-aligned flush with the avatar edge (56px), leaving the full 10px column gap
+   before message text (66px) and clear space after the person-cue edge (6..8px), never capturing hover for tooltips. */
 live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
-  position: absolute; inset: 7px auto auto 16px; inline-size: 46px; text-align: end; white-space: nowrap;
+  position: absolute; inset: 7px auto auto 10px; inline-size: 46px; text-align: end; white-space: nowrap;
   font: 10px/1.6 var(--k-shell-font); font-variant-numeric: tabular-nums;
   color: var(--k-shell-muted, var(--k-shell-secondary)); opacity: 0; pointer-events: none;
 }
@@ -186,7 +186,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
   live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet[open] { position: fixed; inset: auto 0 0; margin: 0; inline-size: 100%; max-inline-size: none; max-block-size: 88dvh; border-radius: 16px 16px 0 0; overflow-y: auto; }
   live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet > .hm-frame__side { display: block; border: 0; }
   live-dashboard.dashboard[data-kylon-shell] .hm-side :is(a, summary) { min-block-size: 44px; }
-  live-dashboard.dashboard[data-kylon-shell] .hm-message-time { inset-inline-start: 11px; inline-size: 42px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-message-time { inset-inline-start: 9px; inline-size: 43px; font-size: 9.5px; }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { inset-inline-end: 0; }
 }
 

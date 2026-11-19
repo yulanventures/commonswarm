@@ -402,8 +402,8 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
             const cueRight = row.getBoundingClientRect().left + cueInset + cueWidth;
             if (gLeft < cueRight + 0.5) hoverCover.push(`grouped gutter time (${round(gLeft)}) overlaps person-cue edge (${round(cueRight)})`);
           }
-          if (body && gRight > body.getBoundingClientRect().left - 0.5) {
-            hoverCover.push(`grouped gutter time (${round(gRight)}) overlaps message body (${round(body.getBoundingClientRect().left)})`);
+          if (body && gRight > body.getBoundingClientRect().left - 2) {
+            hoverCover.push(`grouped gutter time (${round(gRight)}) crowds message body (${round(body.getBoundingClientRect().left)})`);
           }
         }
       }
