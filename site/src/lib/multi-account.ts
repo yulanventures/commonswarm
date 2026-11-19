@@ -100,6 +100,7 @@ export interface SignInAttempt {
   allSignOutGenAtStart: number;
   createdAt: number;
   expiresAt: number;
+  exchanging?: boolean;
 }
 
 export interface MinimizedSession {
@@ -149,6 +150,13 @@ export class AccountCapReachedError extends Error {
   override name = "AccountCapReachedError";
   constructor() {
     super(`You can stay signed in to up to ${MAX_SIGNED_IN_ACCOUNTS} accounts at once. Sign out of one to add another.`);
+  }
+}
+
+export class MultiAccountDeploymentMismatch extends Error {
+  override name = "DeploymentMismatch";
+  constructor() {
+    super("Refused to send credentials to a mismatched deployment.");
   }
 }
 
@@ -213,10 +221,19 @@ export interface SignOutAllResult {
   notice?: string;
 }
 
+export type PromotionRefusalReason =
+  | "cap_reached"
+  | "fenced_by_signout_all"
+  | "identity_unverified"
+  | "ownership_write_failed"
+  | "storage_unavailable"
+  | "attempt_cancelled"
+  | "expired_attempt";
+
 export type PromotionOutcome =
   | { kind: "promoted"; account: AccountRecord; replacedLoginId?: string }
   | { kind: "kept-existing"; account: AccountRecord; stagingRevoked: RemoteRevocationResult }
-  | { kind: "refused"; reason: "cap_reached" | "fenced_by_signout_all" | "identity_unverified" | "ownership_write_failed"; stagingRevoked: RemoteRevocationResult };
+  | { kind: "refused"; reason: PromotionRefusalReason; stagingRevoked: RemoteRevocationResult };
 
 export type CallbackBootstrapResult =
   | { kind: "none" }
@@ -226,18 +243,22 @@ export type CallbackBootstrapResult =
       kind: "refused";
       reason:
         | "bearer_fragment"
+        | "bearer_query"
+        | "url_scrub_failed"
         | "token_hash_refused"
         | "unsupported_callback_type"
         | "missing_attempt"
         | "invalid_attempt"
         | "expired_attempt"
+        | "attempt_cancelled"
         | "separate_context_email"
         | "provider_error"
         | "exchange_failed"
         | "identity_unverified"
         | "fenced_by_signout_all"
         | "cap_reached"
-        | "ownership_write_failed";
+        | "ownership_write_failed"
+        | "storage_unavailable";
       message: string;
     };
 
@@ -492,6 +513,7 @@ function defaultEnv(): MultiAccountEnv {
  * Owns its own storage slot, SDK client, Web Lock (`lock:${slotKey}`), authFetch, and Realtime socket.
  */
 export class AccountSessionRuntime {
+  readonly deployment: MultiAccountDeployment;
   readonly userId: string;
   readonly loginId: string;
   readonly allSignOutGen: number;
@@ -515,7 +537,6 @@ export class AccountSessionRuntime {
   private authSubscription: { unsubscribe: () => void } | null = null;
   private initialized: Promise<void>;
 
-  private readonly deployment: MultiAccountDeployment;
   private readonly env: MultiAccountEnv;
   private readonly checkOwned: () => boolean;
   private readonly onSessionUpdated: (event: string, session: Session | null) => void;
@@ -613,6 +634,10 @@ export class AccountSessionRuntime {
     return this.disposed;
   }
 
+  isDead(): boolean {
+    return this.deadSession;
+  }
+
   isLiveOwned(): boolean {
     return !this.disposed && !this.deadSession && this.checkOwned();
   }
@@ -621,26 +646,50 @@ export class AccountSessionRuntime {
     await this.initialized;
   }
 
-  /** Reconcile this login's memory with disk after a peer tab rotated its refresh token. */
-  reconcileFromDisk(): Session | null {
+  /**
+   * Reconcile this login's memory with disk through the exact SDK login lock (`lock:${slotKey}`)
+   * and successor-aware comparison:
+   *  - If a rotated successor is still pending write and disk still holds its expected predecessor,
+   *    KEEP the rotated successor in memory (and attempt to flush it) rather than restoring the spent token.
+   *  - If another tab independently committed a different (newer) token to disk, adopt that newer token.
+   */
+  reconcileFromDisk(): Promise<Session | null> {
     if (this.disposed || !this.checkOwned()) {
       this.authMemory.clear();
       this.pendingStorageWrites.clear();
-      return null;
+      return Promise.resolve(null);
     }
     if (!this.persistent) {
-      return parseSavedSession(this.authMemory.get(this.slotKey) ?? null);
+      return Promise.resolve(parseSavedSession(this.authMemory.get(this.slotKey) ?? null));
     }
-    const disk = this.readDisk(this.slotKey);
-    if (disk !== undefined) {
-      this.removedStorageKeys.delete(this.slotKey);
-      this.acceptDisk(this.slotKey, disk);
-    }
-    const latest = parseSavedSession(this.authMemory.get(this.slotKey) ?? null);
-    if (latest && !this.disposed && this.checkOwned()) {
-      void this.client.realtime.setAuth(latest.access_token);
-    }
-    return latest;
+    const lockImpl = this.env.webLocks ?? processLock;
+    return lockImpl(this.lockName, 0, async () => {
+      if (this.disposed || !this.checkOwned()) {
+        this.authMemory.clear();
+        this.pendingStorageWrites.clear();
+        return null;
+      }
+      const disk = this.readDisk(this.slotKey);
+      if (disk !== undefined) {
+        this.removedStorageKeys.delete(this.slotKey);
+        this.reconcileKey(this.slotKey);
+        // If our rotated successor is still pending and storage recovered, flush it under the lock.
+        const pending = this.pendingStorageWrites.get(this.slotKey);
+        if (pending && pending.expected !== undefined && disk === pending.expected && this.env.localStorage) {
+          try {
+            this.env.localStorage.setItem(this.slotKey, pending.value);
+            if (this.env.localStorage.getItem(this.slotKey) === pending.value) {
+              this.acceptDisk(this.slotKey, pending.value);
+            }
+          } catch { /* keep successor in memory & retry on schedule */ }
+        }
+      }
+      const latest = parseSavedSession(this.authMemory.get(this.slotKey) ?? null);
+      if (latest && !this.disposed && this.checkOwned()) {
+        void this.client.realtime.setAuth(latest.access_token);
+      }
+      return latest;
+    }).catch(() => parseSavedSession(this.authMemory.get(this.slotKey) ?? null));
   }
 
   /** Return current access_token from memory/disk if still live and owned (for best-effort logout). */
@@ -988,7 +1037,11 @@ export class AccountSessionRuntime {
       const latest = await this.client.auth.getSession();
       if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
       if (error) {
-        if (latest.data.session && !sameCredentials(session, latest.data.session)) {
+        const diskCandidate = this.persistent ? parseSavedSession(this.readDisk(this.slotKey) ?? null) : null;
+        if (
+          (latest.data.session && !sameCredentials(session, latest.data.session)) ||
+          (diskCandidate && !sameCredentials(session, diskCandidate))
+        ) {
           throw new MultiAccountAuthRecoveryRequired();
         }
         if (isAuthSessionMissingError(error)) {
@@ -1018,12 +1071,15 @@ export class AccountSessionRuntime {
   }
 }
 
+export type PinnedOperationScope = "account" | { workspaceId: string };
+
 export interface PinnedAccountContext {
   readonly runtime: AccountSessionRuntime;
   readonly userId: string;
   readonly loginId: string;
+  readonly workspaceId: string | null;
   readonly viewGeneration: number;
-  isCurrent(): boolean;
+  isCurrent(expectedWorkspaceId?: string | null): boolean;
 }
 
 /**
@@ -1044,6 +1100,7 @@ export class AccountManager {
   private memoryOwnership: DurableOwnershipTable = { version: 1, allSignOutGen: 1, accounts: [] };
   private readonly tabFencedLoginIds = new Set<string>();
   private tabActive: { userId: string; loginId: string } | null = null;
+  private activeWorkspaceId: string | null = null;
   private viewGeneration = 0;
   private destroyed = false;
 
@@ -1188,13 +1245,29 @@ export class AccountManager {
     return { userId: chosen.userId, loginId: chosen.loginId };
   }
 
+  /** Current tab's active workspace ID (for C2 workspace fencing). */
+  activeWorkspace(): string | null {
+    return this.activeWorkspaceId;
+  }
+
+  /** Set this tab's active workspace (bumps viewGeneration so workspace A->B->A invalidates old pins). */
+  setActiveWorkspace(workspaceId: string | null): void {
+    const normalized = workspaceId && workspaceId.trim() ? workspaceId.trim() : null;
+    if (this.activeWorkspaceId === normalized) return;
+    this.activeWorkspaceId = normalized;
+    this.viewGeneration += 1;
+  }
+
   /** Switch this tab's active account (bumps viewGeneration so A->B->A cannot revive stale operations). */
   switchActiveAccount(userId: string): AccountRecord | null {
     const accounts = this.listAccounts();
     const target = accounts.find((a) => a.userId === userId);
     if (!target) return null;
     const changed = !this.tabActive || this.tabActive.userId !== target.userId || this.tabActive.loginId !== target.loginId;
-    if (changed) this.viewGeneration += 1;
+    if (changed) {
+      this.activeWorkspaceId = null;
+      this.viewGeneration += 1;
+    }
     this.setTabActiveInternal(target.userId, target.loginId, true);
     this.ensureRuntime(target);
     this.env.onOwnershipChange?.(accounts, { userId: target.userId, loginId: target.loginId });
@@ -1202,10 +1275,18 @@ export class AccountManager {
   }
 
   /**
-   * Synchronous entry-point helper (C2): pin the active (or specified) runtime + loginId + viewGeneration
-   * BEFORE the first `await`, returning `isCurrent()` to recheck before every send, retry, join, or commit.
+   * Synchronous entry-point helper (C2): pin the active (or specified) runtime + loginId +
+   * workspaceId + viewGeneration BEFORE the first `await`, returning `isCurrent(expectedWorkspaceId?)`
+   * to recheck before every send, retry, join, or commit.
    */
-  pinContext(userId?: string): PinnedAccountContext | null {
+  pinContext(options?: string | { userId?: string; workspaceId?: string | null }): PinnedAccountContext | null {
+    const userId = typeof options === "string" ? options : options?.userId;
+    const requestedWorkspace =
+      options && typeof options === "object" && "workspaceId" in options
+        ? (options.workspaceId && options.workspaceId.trim() ? options.workspaceId.trim() : null)
+        : this.activeWorkspaceId;
+    if (requestedWorkspace !== this.activeWorkspaceId) return null;
+
     const target = userId
       ? this.listAccounts().find((a) => a.userId === userId) ?? null
       : (() => {
@@ -1218,17 +1299,22 @@ export class AccountManager {
     const pinnedViewGen = this.viewGeneration;
     const pinnedUserId = target.userId;
     const pinnedLoginId = target.loginId;
+    const pinnedWorkspaceId = requestedWorkspace;
     return {
       runtime,
       userId: pinnedUserId,
       loginId: pinnedLoginId,
+      workspaceId: pinnedWorkspaceId,
       viewGeneration: pinnedViewGen,
-      isCurrent: () => {
+      isCurrent: (expectedWorkspaceId?: string | null) => {
         if (this.destroyed || runtime.isDisposed()) return false;
         if (this.viewGeneration !== pinnedViewGen) return false;
         if (!runtime.isLiveOwned()) return false;
         const active = this.tabActive;
-        return Boolean(active && active.userId === pinnedUserId && active.loginId === pinnedLoginId);
+        if (!active || active.userId !== pinnedUserId || active.loginId !== pinnedLoginId) return false;
+        if (this.activeWorkspaceId !== pinnedWorkspaceId) return false;
+        if (expectedWorkspaceId !== undefined && pinnedWorkspaceId !== expectedWorkspaceId) return false;
+        return true;
       },
     };
   }
@@ -1292,7 +1378,7 @@ export class AccountManager {
         runtime.dispose();
         this.runtimes.delete(loginId);
       } else {
-        runtime.reconcileFromDisk();
+        void runtime.reconcileFromDisk();
       }
     }
 
@@ -1316,8 +1402,8 @@ export class AccountManager {
   // ── C1: Direct GoTrue PKCE / Pinned-Email OTP / Password Staging ──────────────────────────────
 
   /**
-   * Start an OAuth sign-in attempt (S256 PKCE). Stores ONLY attempt metadata + codeVerifier in
-   * sessionStorage; returns the GoTrue authorize URL to navigate to.
+   * Start an OAuth sign-in attempt (S256 PKCE). Snapshots allSignOutGen BEFORE the first await,
+   * stores ONLY attempt metadata + codeVerifier in sessionStorage, and returns the GoTrue authorize URL.
    */
   async startOAuthAttempt(options: {
     provider: string;
@@ -1330,10 +1416,17 @@ export class AccountManager {
     if (!ALLOWED_AUTH_RETURN_ROUTES.has(route)) {
       throw new Error("Unsupported sign-in return route.");
     }
-    const { codeVerifier, codeChallenge } = await generatePkcePair(this.env);
-    const attemptId = this.env.randomUUID();
+    // Pin initiation generation synchronously BEFORE the first await.
+    const allSignOutGenAtStart = this.readRequiredAllSignOutGen();
+    if (allSignOutGenAtStart === null) {
+      throw new DurableOwnershipWriteError("Sign-in storage is unavailable.");
+    }
     const createdAt = this.env.now();
-    const allSignOutGenAtStart = this.currentAllSignOutGen();
+    const { codeVerifier, codeChallenge } = await generatePkcePair(this.env);
+    if (this.destroyed || this.readRequiredAllSignOutGen() !== allSignOutGenAtStart) {
+      throw new Error("Sign-in was cancelled because you signed out.");
+    }
+    const attemptId = this.env.randomUUID();
     const attempt: SignInAttempt = {
       attemptId,
       originHash: this.originHash,
@@ -1362,8 +1455,8 @@ export class AccountManager {
   }
 
   /**
-   * Start a pinned-email OTP sign-in attempt. Pins normalized email and purpose in sessionStorage
-   * and requests an email OTP code directly from GoTrue (no persistent staging client).
+   * Start a pinned-email OTP sign-in attempt. Pins normalized email, purpose, and allSignOutGen
+   * in sessionStorage BEFORE the first await and requests an email OTP code directly from GoTrue.
    */
   async startEmailOtpAttempt(options: {
     email: string;
@@ -1376,6 +1469,10 @@ export class AccountManager {
     if (!ALLOWED_AUTH_RETURN_ROUTES.has(route)) {
       throw new Error("Unsupported sign-in return route.");
     }
+    const allSignOutGenAtStart = this.readRequiredAllSignOutGen();
+    if (allSignOutGenAtStart === null) {
+      throw new DurableOwnershipWriteError("Sign-in storage is unavailable.");
+    }
     const attemptId = this.env.randomUUID();
     const createdAt = this.env.now();
     const attempt: SignInAttempt = {
@@ -1385,7 +1482,7 @@ export class AccountManager {
       returnRoute: route,
       method: "email-otp",
       email: normalizedEmail,
-      allSignOutGenAtStart: this.currentAllSignOutGen(),
+      allSignOutGenAtStart,
       createdAt,
       expiresAt: createdAt + SIGN_IN_ATTEMPT_TTL_MS,
     };
@@ -1410,12 +1507,17 @@ export class AccountManager {
       err.code = errBody?.error_code ?? errBody?.code;
       throw err;
     }
+    if (this.destroyed || this.readRequiredAllSignOutGen() !== allSignOutGenAtStart || !this.readAttempt(attemptId)) {
+      this.clearAttempt(attemptId);
+      throw new Error("Sign-in was cancelled.");
+    }
     return { attemptId };
   }
 
   /**
    * Verify a pinned-email OTP code in the initiating tab using the attempt's pinned email address.
-   * Keeps credentials strictly in memory until verified via GET /auth/v1/user and promoted under lock.
+   * Keeps the attempt live (marked exchanging) through promotion so cancelling or signing out mid-exchange
+   * fences promotion and locally revokes the late staging session.
    */
   async verifyEmailOtpAttempt(options: {
     attemptId: string;
@@ -1423,81 +1525,237 @@ export class AccountManager {
     replaceExisting?: boolean;
   }): Promise<PromotionOutcome | { kind: "refused"; reason: "missing_attempt" | "invalid_attempt" | "expired_attempt" | "exchange_failed" }> {
     const attempt = this.readAttempt(options.attemptId);
-    this.clearAttempt(options.attemptId);
     if (!attempt) return { kind: "refused", reason: "missing_attempt" };
-    if (attempt.originHash !== this.originHash || attempt.method !== "email-otp" || !attempt.email) {
+    if (attempt.originHash !== this.originHash || attempt.method !== "email-otp" || !attempt.email || attempt.exchanging) {
       return { kind: "refused", reason: "invalid_attempt" };
     }
-    if (this.env.now() > attempt.expiresAt) return { kind: "refused", reason: "expired_attempt" };
-    if (attempt.allSignOutGenAtStart !== this.currentAllSignOutGen()) {
+    if (this.env.now() > attempt.expiresAt) {
+      this.clearAttempt(options.attemptId);
+      return { kind: "refused", reason: "expired_attempt" };
+    }
+    const currentGen = this.readRequiredAllSignOutGen();
+    if (currentGen === null) {
+      this.clearAttempt(options.attemptId);
+      return { kind: "refused", reason: "storage_unavailable", stagingRevoked: { status: "skipped" } };
+    }
+    if (attempt.allSignOutGenAtStart !== currentGen) {
+      this.clearAttempt(options.attemptId);
       return { kind: "refused", reason: "fenced_by_signout_all", stagingRevoked: { status: "skipped" } };
     }
 
-    const response = await this.env.fetcher(
-      `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/verify`,
-      {
-        method: "POST",
-        headers: {
-          apikey: this.deployment.anonKey,
-          "content-type": "application/json",
+    // Mark in-flight (prevents replay while staying cancellable until promotion completes).
+    const liveAttempt: SignInAttempt = { ...attempt, exchanging: true };
+    try {
+      this.writeAttempt(liveAttempt);
+    } catch {
+      this.clearAttempt(options.attemptId);
+      return { kind: "refused", reason: "storage_unavailable", stagingRevoked: { status: "skipped" } };
+    }
+
+    try {
+      const response = await this.env.fetcher(
+        `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/verify`,
+        {
+          method: "POST",
+          headers: {
+            apikey: this.deployment.anonKey,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            email: attempt.email,
+            token: options.token.trim(),
+            type: "email",
+          }),
         },
-        body: JSON.stringify({
-          email: attempt.email,
-          token: options.token.trim(),
-          type: "email",
-        }),
-      },
-    );
-    if (!response.ok) return { kind: "refused", reason: "exchange_failed" };
-    const payload = await response.json().catch(() => null);
-    return this.verifyAndPromoteStagingSession(payload, attempt.allSignOutGenAtStart, Boolean(options.replaceExisting));
+      );
+      if (!response.ok) return { kind: "refused", reason: "exchange_failed" };
+      const payload = await response.json().catch(() => null);
+      return await this.verifyAndPromoteStagingSession(
+        payload,
+        {
+          attemptId: liveAttempt.attemptId,
+          method: "email-otp",
+          purpose: liveAttempt.purpose,
+          allSignOutGenAtStart: liveAttempt.allSignOutGenAtStart,
+          expiresAt: liveAttempt.expiresAt,
+        },
+        Boolean(options.replaceExisting),
+      );
+    } finally {
+      this.clearAttempt(options.attemptId);
+    }
+  }
+
+  /**
+   * Create an explicit cancellable password sign-in attempt before submitting credentials.
+   */
+  startPasswordAttempt(options: {
+    purpose: SignInPurpose;
+    returnRoute?: string;
+  }): { attemptId: string } {
+    const route = normalizeReturnRoute(options.returnRoute ?? "/app");
+    if (!ALLOWED_AUTH_RETURN_ROUTES.has(route)) {
+      throw new Error("Unsupported sign-in return route.");
+    }
+    const allSignOutGenAtStart = this.readRequiredAllSignOutGen();
+    if (allSignOutGenAtStart === null) {
+      throw new DurableOwnershipWriteError("Sign-in storage is unavailable.");
+    }
+    const attemptId = this.env.randomUUID();
+    const createdAt = this.env.now();
+    this.writeAttempt({
+      attemptId,
+      originHash: this.originHash,
+      purpose: options.purpose,
+      returnRoute: route,
+      method: "password",
+      allSignOutGenAtStart,
+      createdAt,
+      expiresAt: createdAt + SIGN_IN_ATTEMPT_TTL_MS,
+    });
+    return { attemptId };
   }
 
   /**
    * Sign in with email and password directly against GoTrue in memory (zero staging client/broadcast).
+   * Always binds to a live cancellable attempt in sessionStorage through promotion.
    */
   async signInWithPasswordStaging(options: {
     email: string;
     password: string;
+    purpose?: SignInPurpose;
+    returnRoute?: string;
+    attemptId?: string;
     replaceExisting?: boolean;
-  }): Promise<PromotionOutcome | { kind: "refused"; reason: "exchange_failed"; status: number; code?: string }> {
-    const allSignOutGenAtStart = this.currentAllSignOutGen();
-    const response = await this.env.fetcher(
-      `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/token?grant_type=password`,
-      {
-        method: "POST",
-        headers: {
-          apikey: this.deployment.anonKey,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ email: options.email.trim(), password: options.password }),
-      },
-    );
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as { error_code?: string; code?: string } | null;
-      return { kind: "refused", reason: "exchange_failed", status: response.status, code: body?.error_code ?? body?.code };
+  }): Promise<
+    | PromotionOutcome
+    | { kind: "refused"; reason: "exchange_failed"; status: number; code?: string }
+    | { kind: "refused"; reason: "missing_attempt" | "invalid_attempt" | "expired_attempt" }
+  > {
+    let attempt: SignInAttempt;
+    if (options.attemptId) {
+      const found = this.readAttempt(options.attemptId);
+      if (!found) return { kind: "refused", reason: "missing_attempt" };
+      if (found.originHash !== this.originHash || found.method !== "password" || found.exchanging) {
+        return { kind: "refused", reason: "invalid_attempt" };
+      }
+      if (this.env.now() > found.expiresAt) {
+        this.clearAttempt(options.attemptId);
+        return { kind: "refused", reason: "expired_attempt" };
+      }
+      const currentGen = this.readRequiredAllSignOutGen();
+      if (currentGen === null) {
+        this.clearAttempt(options.attemptId);
+        return { kind: "refused", reason: "storage_unavailable", stagingRevoked: { status: "skipped" } };
+      }
+      if (found.allSignOutGenAtStart !== currentGen) {
+        this.clearAttempt(options.attemptId);
+        return { kind: "refused", reason: "fenced_by_signout_all", stagingRevoked: { status: "skipped" } };
+      }
+      attempt = { ...found, exchanging: true };
+    } else {
+      const currentGen = this.readRequiredAllSignOutGen();
+      if (currentGen === null) {
+        return { kind: "refused", reason: "storage_unavailable", stagingRevoked: { status: "skipped" } };
+      }
+      const createdAt = this.env.now();
+      const route = normalizeReturnRoute(options.returnRoute ?? "/app");
+      attempt = {
+        attemptId: this.env.randomUUID(),
+        originHash: this.originHash,
+        purpose: options.purpose ?? (this.listAccounts().length > 0 ? "add-account" : "signed-out"),
+        returnRoute: ALLOWED_AUTH_RETURN_ROUTES.has(route) ? route : "/app",
+        method: "password",
+        allSignOutGenAtStart: currentGen,
+        createdAt,
+        expiresAt: createdAt + SIGN_IN_ATTEMPT_TTL_MS,
+        exchanging: true,
+      };
     }
-    const payload = await response.json().catch(() => null);
-    return this.verifyAndPromoteStagingSession(payload, allSignOutGenAtStart, Boolean(options.replaceExisting));
+
+    try {
+      this.writeAttempt(attempt);
+    } catch {
+      this.clearAttempt(attempt.attemptId);
+      return { kind: "refused", reason: "storage_unavailable", stagingRevoked: { status: "skipped" } };
+    }
+
+    try {
+      const response = await this.env.fetcher(
+        `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/token?grant_type=password`,
+        {
+          method: "POST",
+          headers: {
+            apikey: this.deployment.anonKey,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ email: options.email.trim(), password: options.password }),
+        },
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error_code?: string; code?: string } | null;
+        return { kind: "refused", reason: "exchange_failed", status: response.status, code: body?.error_code ?? body?.code };
+      }
+      const payload = await response.json().catch(() => null);
+      return await this.verifyAndPromoteStagingSession(
+        payload,
+        {
+          attemptId: attempt.attemptId,
+          method: "password",
+          purpose: attempt.purpose,
+          allSignOutGenAtStart: attempt.allSignOutGenAtStart,
+          expiresAt: attempt.expiresAt,
+        },
+        Boolean(options.replaceExisting),
+      );
+    } finally {
+      this.clearAttempt(attempt.attemptId);
+    }
   }
 
-  /** Cancel an in-progress attempt and erase its verifier from sessionStorage. */
-  cancelAttempt(attemptId: string): void {
-    this.clearAttempt(attemptId);
+  /** Cancel an in-progress attempt (or all in-tab attempts if omitted) and erase its verifier from sessionStorage. */
+  cancelAttempt(attemptId?: string): void {
+    if (attemptId) this.clearAttempt(attemptId);
+    else this.clearAllInTabAttempts();
   }
 
   /**
    * Dedicated startup callback bootstrap (C1).
-   * Runs BEFORE app init or analytics: captures callback params, immediately scrubs them from the URL,
-   * refuses bearer fragments / token_hash / recovery / email_change, validates the one-use attempt in
-   * sessionStorage, exchanges S256 PKCE code directly with GoTrue in memory, verifies identity, strips
-   * provider tokens, and promotes under the strict lock order.
+   * Runs BEFORE app init or analytics: captures callback params, immediately scrubs ALL credential-bearing
+   * and auth params from BOTH query and fragment (refusing the exchange if scrubbing fails), refuses bearer
+   * fragments / bearer query fields / token_hash / recovery / email_change, keeps the one-use attempt live
+   * (minus its secret verifier) through promotion, exchanges S256 PKCE code directly with GoTrue in memory,
+   * verifies identity, strips provider tokens, and promotes under the strict lock order.
    */
   async consumeAuthCallbackBootstrap(location: LocationLike, history: HistoryLike): Promise<CallbackBootstrapResult> {
     const search = new URLSearchParams(location.search.replace(/^\?/, ""));
     const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
 
-    const hasBearerFragment = hash.has("access_token") || hash.has("refresh_token");
+    const CREDENTIAL_URL_PARAMS = [
+      "access_token",
+      "refresh_token",
+      "provider_token",
+      "provider_refresh_token",
+      "id_token",
+    ] as const;
+    const ALL_AUTH_URL_PARAMS = [
+      ...CREDENTIAL_URL_PARAMS,
+      "token",
+      "expires_in",
+      "expires_at",
+      "token_type",
+      "code",
+      "state",
+      "cs_attempt",
+      "token_hash",
+      "type",
+      "error",
+      "error_code",
+      "error_description",
+    ] as const;
+
+    const hasBearerFragment = CREDENTIAL_URL_PARAMS.some((k) => hash.has(k));
+    const hasBearerQuery = CREDENTIAL_URL_PARAMS.some((k) => search.has(k));
     const hasTokenHash = search.has("token_hash") || hash.has("token_hash");
     const callbackType = (search.get("type") ?? hash.get("type") ?? "").toLowerCase();
     const code = search.get("code");
@@ -1506,6 +1764,7 @@ export class AccountManager {
 
     const hasAnyAuthParam =
       hasBearerFragment ||
+      hasBearerQuery ||
       hasTokenHash ||
       Boolean(code) ||
       Boolean(attemptId) ||
@@ -1514,21 +1773,44 @@ export class AccountManager {
 
     if (!hasAnyAuthParam) return { kind: "none" };
 
-    // Scrub ALL credential-bearing and attempt params immediately before any network/app work.
+    // Scrub ALL credential-bearing and auth params from BOTH query and fragment immediately before any network/app work.
     const cleanSearch = new URLSearchParams(search);
-    for (const key of ["code", "cs_attempt", "token_hash", "type", "error", "error_code", "error_description"]) {
+    for (const key of ALL_AUTH_URL_PARAMS) {
       cleanSearch.delete(key);
     }
     const qs = cleanSearch.toString();
     const cleanUrl = `${location.pathname}${qs ? `?${qs}` : ""}`;
-    try { history.replaceState(null, "", cleanUrl); } catch { /* ignore */ }
+    let scrubbed = false;
+    try {
+      history.replaceState(null, "", cleanUrl);
+      const afterSearch = new URLSearchParams(location.search.replace(/^\?/, ""));
+      const afterHash = new URLSearchParams(location.hash.replace(/^#/, ""));
+      scrubbed =
+        !ALL_AUTH_URL_PARAMS.some((k) => afterSearch.has(k) || afterHash.has(k)) &&
+        !location.hash;
+    } catch {
+      scrubbed = false;
+    }
+
+    if (!scrubbed) {
+      if (attemptId) this.clearAttempt(attemptId);
+      return {
+        kind: "refused",
+        reason: "url_scrub_failed",
+        message: "Could not clear sign-in details from the address bar. Try again.",
+      };
+    }
 
     const currentRoute = normalizeReturnRoute(location.pathname);
 
-    // Refuse bearer fragments (#access_token=...) outright on multi-account callback bootstrap.
+    // Refuse bearer fragments (#access_token=...) and bearer query fields (?access_token=...) outright.
     if (hasBearerFragment) {
       if (attemptId) this.clearAttempt(attemptId);
       return { kind: "refused", reason: "bearer_fragment", message: "That sign-in callback is not supported. Start sign-in from CommonSwarm." };
+    }
+    if (hasBearerQuery) {
+      if (attemptId) this.clearAttempt(attemptId);
+      return { kind: "refused", reason: "bearer_query", message: "That sign-in callback is not supported. Start sign-in from CommonSwarm." };
     }
 
     // Refuse recovery and email_change callbacks on this path.
@@ -1572,9 +1854,6 @@ export class AccountManager {
     }
 
     const attempt = this.readAttempt(attemptId);
-    // One-use: clear attempt & verifier from sessionStorage immediately before network exchange.
-    this.clearAttempt(attemptId);
-
     if (!attempt) {
       return {
         kind: "refused",
@@ -1586,53 +1865,87 @@ export class AccountManager {
       attempt.originHash !== this.originHash ||
       attempt.method !== "oauth" ||
       !attempt.codeVerifier ||
+      attempt.exchanging ||
       attempt.returnRoute !== currentRoute
     ) {
+      if (!attempt.exchanging) this.clearAttempt(attemptId);
       return { kind: "refused", reason: "invalid_attempt", message: "That sign-in attempt did not match this page." };
     }
     if (this.env.now() > attempt.expiresAt) {
+      this.clearAttempt(attemptId);
       return { kind: "refused", reason: "expired_attempt", message: "That sign-in attempt expired. Try again." };
     }
-    if (attempt.allSignOutGenAtStart !== this.currentAllSignOutGen()) {
+    const currentGen = this.readRequiredAllSignOutGen();
+    if (currentGen === null) {
+      this.clearAttempt(attemptId);
+      return { kind: "refused", reason: "storage_unavailable", message: "Sign-in could not be completed. Try again." };
+    }
+    if (attempt.allSignOutGenAtStart !== currentGen) {
+      this.clearAttempt(attemptId);
       return { kind: "refused", reason: "fenced_by_signout_all", message: "Sign-in was cancelled because you signed out." };
     }
 
-    // Exchange S256 PKCE code directly with GoTrue; keep credentials strictly in memory until promotion.
-    let exchangeResp: Response;
+    // Move verifier strictly into memory, erase it from sessionStorage, and keep the live
+    // in-flight attempt marker through promotion so cancellation or Sign out all fences promotion.
+    const verifier = attempt.codeVerifier;
+    const liveAttempt: SignInAttempt = { ...attempt, codeVerifier: undefined, exchanging: true };
     try {
-      exchangeResp = await this.env.fetcher(
-        `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/token?grant_type=pkce`,
-        {
-          method: "POST",
-          headers: {
-            apikey: this.deployment.anonKey,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ auth_code: code, code_verifier: attempt.codeVerifier }),
-        },
-      );
+      this.writeAttempt(liveAttempt);
     } catch {
-      return { kind: "refused", reason: "exchange_failed", message: "Could not complete sign-in. Try again." };
+      this.clearAttempt(attemptId);
+      return { kind: "refused", reason: "storage_unavailable", message: "Sign-in could not be completed. Try again." };
     }
 
-    if (!exchangeResp.ok) {
-      return { kind: "refused", reason: "exchange_failed", message: "Could not complete sign-in. Try again." };
+    try {
+      // Exchange S256 PKCE code directly with GoTrue; keep credentials strictly in memory until promotion.
+      let exchangeResp: Response;
+      try {
+        exchangeResp = await this.env.fetcher(
+          `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/token?grant_type=pkce`,
+          {
+            method: "POST",
+            headers: {
+              apikey: this.deployment.anonKey,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
+          },
+        );
+      } catch {
+        return { kind: "refused", reason: "exchange_failed", message: "Could not complete sign-in. Try again." };
+      }
+
+      if (!exchangeResp.ok) {
+        return { kind: "refused", reason: "exchange_failed", message: "Could not complete sign-in. Try again." };
+      }
+      const payload = await exchangeResp.json().catch(() => null);
+      const outcome = await this.verifyAndPromoteStagingSession(
+        payload,
+        {
+          attemptId: liveAttempt.attemptId,
+          method: "oauth",
+          purpose: liveAttempt.purpose,
+          allSignOutGenAtStart: liveAttempt.allSignOutGenAtStart,
+          expiresAt: liveAttempt.expiresAt,
+        },
+        false,
+      );
+      if (outcome.kind === "promoted") {
+        return { kind: "promoted", account: outcome.account, purpose: attempt.purpose, replacedLoginId: outcome.replacedLoginId };
+      }
+      if (outcome.kind === "kept-existing") {
+        return { kind: "kept-existing", account: outcome.account, purpose: attempt.purpose, stagingRevoked: outcome.stagingRevoked };
+      }
+      return {
+        kind: "refused",
+        reason: outcome.reason,
+        message: outcome.reason === "cap_reached"
+          ? new AccountCapReachedError().message
+          : "Sign-in could not be completed. Try again.",
+      };
+    } finally {
+      this.clearAttempt(attemptId);
     }
-    const payload = await exchangeResp.json().catch(() => null);
-    const outcome = await this.verifyAndPromoteStagingSession(payload, attempt.allSignOutGenAtStart, false);
-    if (outcome.kind === "promoted") {
-      return { kind: "promoted", account: outcome.account, purpose: attempt.purpose, replacedLoginId: outcome.replacedLoginId };
-    }
-    if (outcome.kind === "kept-existing") {
-      return { kind: "kept-existing", account: outcome.account, purpose: attempt.purpose, stagingRevoked: outcome.stagingRevoked };
-    }
-    return {
-      kind: "refused",
-      reason: outcome.reason,
-      message: outcome.reason === "cap_reached"
-        ? new AccountCapReachedError().message
-        : "Sign-in could not be completed. Try again.",
-    };
   }
 
   // ── C3 & C5: Authoritative Durable Sign-Out (One Account vs All Accounts) ────────────────────
@@ -1646,19 +1959,25 @@ export class AccountManager {
    *         credential-free ownership-changed, and perform bounded best-effort remote scope=local logout.
    */
   async signOutAccount(userId: string, loginId: string): Promise<SignOutAccountResult> {
-    const existingRuntime = this.runtimes.get(loginId) ?? null;
-    let capturedAccessToken = existingRuntime?.peekAccessToken() ?? null;
-    if (!capturedAccessToken && this.sharedPersistenceAvailable) {
-      capturedAccessToken = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, loginId)))?.access_token ?? null;
-    }
-
+    let authorized = false;
+    let unreadableOwnership = false;
     let step1Succeeded = false;
     let nextGen = this.currentAllSignOutGen();
     let remainingAccounts: AccountRecord[] = [];
+    let capturedAccessToken: string | null = null;
+    let matchedRuntime: AccountSessionRuntime | null = null;
 
     try {
       await this.withRegistryLock(async () => {
         if (!this.sharedPersistenceAvailable) {
+          const match = this.memoryOwnership.accounts.find((a) => a.userId === userId && a.loginId === loginId);
+          if (!match) return;
+          authorized = true;
+          const rt = this.runtimes.get(loginId) ?? null;
+          if (rt && rt.userId === userId && rt.loginId === loginId) {
+            matchedRuntime = rt;
+            capturedAccessToken = rt.peekAccessToken();
+          }
           this.memoryOwnership = {
             ...this.memoryOwnership,
             accounts: this.memoryOwnership.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId)),
@@ -1668,8 +1987,29 @@ export class AccountManager {
           step1Succeeded = true;
           return;
         }
+
         const read = this.readDurableOwnership();
-        if (!read.ok) throw new DurableOwnershipWriteError();
+        if (!read.ok) {
+          unreadableOwnership = true;
+          throw new DurableOwnershipWriteError();
+        }
+        // C5: Authorize the exact { userId, loginId } pair under registry lock BEFORE any side effect!
+        const match = read.state.accounts.find((a) => a.userId === userId && a.loginId === loginId);
+        if (!match) return;
+        authorized = true;
+
+        const rt = this.runtimes.get(loginId) ?? null;
+        if (rt && rt.userId === userId && rt.loginId === loginId) {
+          matchedRuntime = rt;
+          capturedAccessToken = rt.peekAccessToken();
+        }
+        if (!capturedAccessToken) {
+          const parsedSlot = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, loginId)));
+          if (parsedSlot && parsedSlot.user.id === userId) {
+            capturedAccessToken = parsedSlot.access_token;
+          }
+        }
+
         const nextAccounts = read.state.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId));
         const nextTable: DurableOwnershipTable = {
           version: 1,
@@ -1680,13 +2020,48 @@ export class AccountManager {
         this.writeDurableOwnership(nextTable);
         remainingAccounts = nextAccounts;
         nextGen = nextTable.allSignOutGen;
+        if (this.safeLocalGet(activeAccountStorageKey(this.originHash)) === userId) {
+          if (remainingAccounts.length > 0) {
+            this.safeLocalSet(activeAccountStorageKey(this.originHash), remainingAccounts[0]!.userId);
+          } else {
+            this.safeLocalRemove(activeAccountStorageKey(this.originHash));
+          }
+        }
         step1Succeeded = true;
       });
     } catch {
       step1Succeeded = false;
     }
 
-    // Always tear down the current tab immediately regardless of storage failure!
+    // C5: Mismatched or stale { userId, loginId } pair -> refuse with ZERO side effects!
+    if (!authorized && !unreadableOwnership) {
+      return {
+        browserSignedOut: false,
+        localTabTornDown: false,
+        slotDeleted: false,
+        remoteRevocation: { status: "skipped" },
+        nextActive: this.activeAccount(),
+      };
+    }
+
+    // If ownership was unreadable, only tear down locally if this tab actually holds that exact { userId, loginId } pair.
+    if (!authorized && unreadableOwnership) {
+      const rt = this.runtimes.get(loginId) ?? null;
+      const matchesRt = Boolean(rt && rt.userId === userId && rt.loginId === loginId);
+      const matchesTab = Boolean(this.tabActive && this.tabActive.userId === userId && this.tabActive.loginId === loginId);
+      if (!matchesRt && !matchesTab) {
+        return {
+          browserSignedOut: false,
+          localTabTornDown: false,
+          slotDeleted: false,
+          remoteRevocation: { status: "skipped" },
+          nextActive: this.activeAccount(),
+        };
+      }
+      if (matchesRt) matchedRuntime = rt;
+    }
+
+    // Always tear down the current tab immediately for an authorized (or locally active unreadable) sign-out.
     // If Step 1 failed, fence this loginId locally in this tab so activeAccount()/runtimeFor()/pinContext()
     // cannot resurrect it from the unchanged durable table.
     if (step1Succeeded) {
@@ -1694,8 +2069,11 @@ export class AccountManager {
     } else {
       this.tabFencedLoginIds.add(loginId);
     }
-    existingRuntime?.dispose();
-    this.runtimes.delete(loginId);
+    const runtimeToDispose = matchedRuntime as AccountSessionRuntime | null;
+    runtimeToDispose?.dispose();
+    if (this.runtimes.get(loginId) === runtimeToDispose) {
+      this.runtimes.delete(loginId);
+    }
     const wasActive = Boolean(this.tabActive && this.tabActive.userId === userId && this.tabActive.loginId === loginId);
     if (wasActive) {
       this.tabActive = null;
@@ -1717,8 +2095,8 @@ export class AccountManager {
       };
     }
 
-    // Step 2: Durable ownership removal is verified -> now delete slot without blocking behind a slow
-    // peer refresh (durable ownership already fences any peer holding lock:${slotKey}).
+    // Step 2: Durable ownership removal is verified -> now delete ONLY this authorized slot without blocking
+    // behind a slow peer refresh (durable ownership already fences any peer holding lock:${slotKey}).
     let slotDeleted = true;
     if (this.sharedPersistenceAvailable) {
       try {
@@ -1733,13 +2111,6 @@ export class AccountManager {
           slotDeleted = false;
         }
       }
-      if (this.safeLocalGet(activeAccountStorageKey(this.originHash)) === userId) {
-        if (remainingAccounts.length > 0) {
-          this.safeLocalSet(activeAccountStorageKey(this.originHash), remainingAccounts[0]!.userId);
-        } else {
-          this.safeLocalRemove(activeAccountStorageKey(this.originHash));
-        }
-      }
     }
 
     this.broadcast({
@@ -1751,7 +2122,7 @@ export class AccountManager {
     });
 
     const nextActive = this.activeAccount();
-    this.env.onOwnershipChange?.(remainingAccounts, nextActive);
+    this.env.onOwnershipChange?.(this.listAccounts(), nextActive);
 
     // Best-effort remote scope=local revocation AFTER durable local fencing & teardown.
     const remoteRevocation = await this.bestEffortRemoteLocalLogout(capturedAccessToken);
@@ -1771,15 +2142,17 @@ export class AccountManager {
 
   /**
    * "Sign out all accounts on this device" (scope=local for each browser-registered session).
-   * Step 1: Advance allSignOutGen and clear durable accounts FIRST (verified read-back) under
-   *         `registry -> lock:${legacyKey}`. If Step 1 fails, DO NOT delete slots or claim
-   *         browser-wide sign-out; tear down the current tab immediately and report unconfirmed.
-   * Step 2: Only after Step 1 verifies, remove legacyKey, all login:* slots (ascending loginId),
-   *         active pointer, and all in-tab attempt:* verifiers; broadcast; run bounded parallel
-   *         best-effort remote scope=local revocations.
+   * Step 1: Advance allSignOutGen, snapshot fenced loginIds, clear durable accounts, legacyKey, and
+   *         activeAccount pointer INSIDE `registry -> lock:${legacyKey}` (verified read-back).
+   *         If Step 1 fails, DO NOT delete slots or claim browser-wide sign-out; tear down the current
+   *         tab immediately, suppress locally, and report unconfirmed.
+   * Step 2: Only after Step 1 verifies, remove ONLY the fenced login:* slots captured under the lock
+   *         (preserving any next-generation login promoted after Step 1 released the lock); broadcast;
+   *         run bounded parallel best-effort remote scope=local revocations.
    */
   async signOutAllAccounts(): Promise<SignOutAllResult> {
     const capturedSessions: Array<{ userId: string; loginId: string; accessToken: string | null }> = [];
+    let fencedLoginIds: string[] = [];
     let step1Succeeded = false;
     let nextGen = this.currentAllSignOutGen() + 1;
 
@@ -1794,6 +2167,7 @@ export class AccountManager {
                 accessToken: this.runtimes.get(rec.loginId)?.peekAccessToken() ?? null,
               });
             }
+            fencedLoginIds = capturedSessions.map((s) => s.loginId).sort();
             nextGen = this.memoryOwnership.allSignOutGen + 1;
             this.memoryOwnership = { version: 1, allSignOutGen: nextGen, accounts: [] };
             step1Succeeded = true;
@@ -1804,18 +2178,28 @@ export class AccountManager {
           if (!read.ok && read.reason !== "missing") throw new DurableOwnershipWriteError();
           const currentAccounts = read.ok ? read.state.accounts : [];
           for (const rec of currentAccounts) {
+            const rt = this.runtimes.get(rec.loginId);
             const tok =
-              this.runtimes.get(rec.loginId)?.peekAccessToken() ??
-              parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, rec.loginId)))?.access_token ??
-              null;
+              (rt && rt.userId === rec.userId ? rt.peekAccessToken() : null) ??
+              (() => {
+                const parsed = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, rec.loginId)));
+                return parsed && parsed.user.id === rec.userId ? parsed.access_token : null;
+              })();
             capturedSessions.push({ userId: rec.userId, loginId: rec.loginId, accessToken: tok });
           }
+          // C3: Snapshot the exact fenced login set INSIDE the registry lock so Step 2 never touches next-gen logins!
+          fencedLoginIds = [...new Set([
+            ...capturedSessions.map((s) => s.loginId),
+            ...this.listStoredLoginIds(),
+          ])].sort();
           nextGen = (read.ok ? read.state.allSignOutGen : 1) + 1;
           // Step 1: Write & verify durable ownership clear + allSignOutGen bump FIRST.
           this.writeDurableOwnership({ version: 1, allSignOutGen: nextGen, accounts: [] });
           step1Succeeded = true;
-          // Step 2a (still holding registry -> lock:${legacyKey}): remove any stray legacyKey.
+          // Step 2a (still holding registry -> lock:${legacyKey}): remove any stray legacyKey & active pointer
+          // BEFORE releasing the lock so a next-generation promotion's active pointer is never clobbered.
           this.safeLocalRemove(this.legacyKey);
+          this.safeLocalRemove(activeAccountStorageKey(this.originHash));
         });
       });
     } catch {
@@ -1836,6 +2220,7 @@ export class AccountManager {
     for (const runtime of this.runtimes.values()) runtime.dispose();
     this.runtimes.clear();
     this.tabActive = null;
+    this.activeWorkspaceId = null;
     this.clearTabAccount();
     this.clearAllInTabAttempts();
     this.viewGeneration += 1;
@@ -1851,15 +2236,10 @@ export class AccountManager {
       };
     }
 
-    // Step 2b: Durable ownership fence verified -> clear all login:* slots (ascending loginId) & active pointer.
+    // Step 2b: Durable ownership fence verified -> clear ONLY the fenced login:* slots snapshotted under lock.
     let slotsDeleted = 0;
     if (this.sharedPersistenceAvailable) {
-      const loginIds = [...new Set([
-        ...capturedSessions.map((s) => s.loginId),
-        ...this.listStoredLoginIds(),
-      ])].sort();
-
-      for (const loginId of loginIds) {
+      for (const loginId of fencedLoginIds) {
         try {
           await this.tryWithLoginLock(loginId, async () => {
             this.env.localStorage!.removeItem(slotStorageKey(this.originHash, loginId));
@@ -1872,7 +2252,6 @@ export class AccountManager {
           } catch { /* durable fence already blocks this loginId */ }
         }
       }
-      this.safeLocalRemove(activeAccountStorageKey(this.originHash));
     }
 
     this.broadcast({
@@ -1880,7 +2259,8 @@ export class AccountManager {
       originHash: this.originHash,
       allSignOutGen: nextGen,
     });
-    this.env.onOwnershipChange?.([], null);
+    const postAccounts = this.listAccounts();
+    this.env.onOwnershipChange?.(postAccounts, postAccounts.length > 0 ? this.activeAccount() : null);
 
     // Bounded parallel best-effort remote scope=local revocations for browser-registered sessions only.
     const remoteRevocations = await Promise.all(
@@ -1904,9 +2284,137 @@ export class AccountManager {
 
   // ── Internal helpers ─────────────────────────────────────────────────────────────────────────
 
+  private isAttemptGuardLive(guard: {
+    attemptId: string;
+    method: SignInMethod;
+    purpose: SignInPurpose;
+    allSignOutGenAtStart: number;
+    expiresAt: number;
+  }): { ok: true } | { ok: false; reason: "attempt_cancelled" | "expired_attempt" } {
+    const live = this.readAttempt(guard.attemptId);
+    if (
+      !live ||
+      live.attemptId !== guard.attemptId ||
+      live.originHash !== this.originHash ||
+      live.method !== guard.method ||
+      live.purpose !== guard.purpose ||
+      live.allSignOutGenAtStart !== guard.allSignOutGenAtStart ||
+      !live.exchanging
+    ) {
+      return { ok: false, reason: "attempt_cancelled" };
+    }
+    if (this.env.now() > Math.min(live.expiresAt, guard.expiresAt)) {
+      return { ok: false, reason: "expired_attempt" };
+    }
+    return { ok: true };
+  }
+
+  private async verifyExistingRecordLive(existing: AccountRecord): Promise<"live" | "expired"> {
+    if (this.tabFencedLoginIds.has(existing.loginId)) return "expired";
+    const existingRuntime = this.runtimes.get(existing.loginId);
+    if (existingRuntime?.isDead()) return "expired";
+    let token = existingRuntime && existingRuntime.userId === existing.userId
+      ? existingRuntime.peekAccessToken()
+      : null;
+    if (!token && this.sharedPersistenceAvailable) {
+      const parsed = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, existing.loginId)));
+      if (!parsed || parsed.user.id !== existing.userId) return "expired";
+      token = parsed.access_token;
+    }
+    if (!token) return "expired";
+    try {
+      const response = await this.env.fetcher(
+        `${this.deployment.url.replace(/\/+$/, "")}/auth/v1/user`,
+        {
+          method: "GET",
+          headers: {
+            apikey: this.deployment.anonKey,
+            authorization: `Bearer ${token}`,
+          },
+          signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+        },
+      );
+      if (response.ok) {
+        const body = await response.json().catch(() => null) as User | null;
+        return body && body.id === existing.userId ? "live" : "expired";
+      }
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        return "expired";
+      }
+      // Transient 5xx: conservatively keep existing live session.
+      return "live";
+    } catch {
+      // Transient network error: conservatively keep existing live session.
+      return "live";
+    }
+  }
+
+  private async retireExpiredLogin(userId: string, loginId: string, expectedAllSignOutGen: number): Promise<void> {
+    if (this.destroyed) return;
+    let removed = false;
+    try {
+      await this.withRegistryLock(async () => {
+        if (!this.sharedPersistenceAvailable) {
+          if (this.memoryOwnership.allSignOutGen !== expectedAllSignOutGen) return;
+          const hasExact = this.memoryOwnership.accounts.some((a) => a.userId === userId && a.loginId === loginId);
+          if (!hasExact) return;
+          this.memoryOwnership = {
+            ...this.memoryOwnership,
+            accounts: this.memoryOwnership.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId)),
+          };
+          removed = true;
+          return;
+        }
+        const read = this.readDurableOwnership();
+        if (!read.ok || read.state.allSignOutGen !== expectedAllSignOutGen) return;
+        const hasExact = read.state.accounts.some((a) => a.userId === userId && a.loginId === loginId);
+        if (!hasExact) return;
+        const nextAccounts = read.state.accounts.filter((a) => !(a.userId === userId && a.loginId === loginId));
+        this.writeDurableOwnership({
+          version: 1,
+          allSignOutGen: read.state.allSignOutGen,
+          accounts: nextAccounts,
+        });
+        if (this.safeLocalGet(activeAccountStorageKey(this.originHash)) === userId) {
+          if (nextAccounts.length > 0) {
+            this.safeLocalSet(activeAccountStorageKey(this.originHash), nextAccounts[0]!.userId);
+          } else {
+            this.safeLocalRemove(activeAccountStorageKey(this.originHash));
+          }
+        }
+        removed = true;
+      });
+    } catch {
+      removed = false;
+    }
+    if (!removed) return;
+    if (this.sharedPersistenceAvailable) {
+      try {
+        await this.tryWithLoginLock(loginId, async () => {
+          this.env.localStorage!.removeItem(slotStorageKey(this.originHash, loginId));
+        });
+      } catch {
+        this.safeLocalRemove(slotStorageKey(this.originHash, loginId));
+      }
+    }
+    this.broadcast({
+      type: "ownership-changed",
+      originHash: this.originHash,
+      userId,
+      loginId,
+      allSignOutGen: expectedAllSignOutGen,
+    });
+  }
+
   private async verifyAndPromoteStagingSession(
     rawPayload: unknown,
-    allSignOutGenAtStart: number,
+    attemptGuard: {
+      attemptId: string;
+      method: SignInMethod;
+      purpose: SignInPurpose;
+      allSignOutGenAtStart: number;
+      expiresAt: number;
+    },
     replaceExisting: boolean,
   ): Promise<PromotionOutcome> {
     const rawAccess =
@@ -1916,6 +2424,13 @@ export class AccountManager {
 
     if (!rawAccess) {
       return { kind: "refused", reason: "identity_unverified", stagingRevoked: { status: "skipped" } };
+    }
+
+    // Fast-fail if attempt was already cancelled/expired before identity verification; still revoke the late session!
+    const preCheck = this.isAttemptGuardLive(attemptGuard);
+    if (!preCheck.ok) {
+      const stagingRevoked = await this.bestEffortRemoteLocalLogout(rawAccess);
+      return { kind: "refused", reason: preCheck.reason, stagingRevoked };
     }
 
     // Verify human identity against configured GoTrue with this access token before promotion.
@@ -1936,86 +2451,116 @@ export class AccountManager {
     type LockedResult =
       | { kind: "promoted"; account: AccountRecord; replacedLoginId?: string; allSignOutGen: number; session: MinimizedSession }
       | { kind: "kept-existing"; account: AccountRecord }
-      | { kind: "refused"; reason: "cap_reached" | "fenced_by_signout_all" | "ownership_write_failed" };
+      | { kind: "needs-liveness-check"; existing: AccountRecord }
+      | { kind: "refused"; reason: PromotionRefusalReason };
 
-    const lockedResult: LockedResult = await this.withRegistryLock(async () => {
-      const read = this.sharedPersistenceAvailable
-        ? this.readDurableOwnership()
-        : ({ ok: true, state: this.memoryOwnership } as const);
+    const verifiedExistingLiveness = new Map<string, "live" | "expired">();
 
-      let current: DurableOwnershipTable;
-      if (read.ok) {
-        current = read.state;
-      } else if (!this.sharedPersistenceAvailable) {
-        current = this.memoryOwnership;
-      } else if (read.reason === "missing") {
-        current = { version: 1, allSignOutGen: allSignOutGenAtStart, accounts: [] };
-      } else {
-        return { kind: "refused", reason: "ownership_write_failed" };
-      }
+    const runLockedPromotion = async (): Promise<LockedResult> =>
+      this.withRegistryLock(async () => {
+        // C1: Verify exact attempt + purpose + method + expiry are STILL live at promotion time!
+        const liveCheck = this.isAttemptGuardLive(attemptGuard);
+        if (!liveCheck.ok) {
+          return { kind: "refused", reason: liveCheck.reason };
+        }
 
-      if (current.allSignOutGen !== allSignOutGenAtStart) {
-        return { kind: "refused", reason: "fenced_by_signout_all" };
-      }
+        const read = this.sharedPersistenceAvailable
+          ? this.readDurableOwnership()
+          : ({ ok: true, state: this.memoryOwnership } as const);
 
-      const existing = current.accounts.find((a) => a.userId === verifiedUser.id);
-      if (existing && !replaceExisting) {
-        return { kind: "kept-existing", account: existing };
-      }
+        // C1: Refuse promotion if persistence is unreadable OR the attempt's registry disappeared (NEVER rebuild!).
+        if (!read.ok) {
+          return { kind: "refused", reason: "storage_unavailable" };
+        }
+        const current = read.state;
 
-      if (!existing && current.accounts.length >= MAX_SIGNED_IN_ACCOUNTS) {
-        return { kind: "refused", reason: "cap_reached" };
-      }
+        if (current.allSignOutGen !== attemptGuard.allSignOutGenAtStart) {
+          return { kind: "refused", reason: "fenced_by_signout_all" };
+        }
 
-      const newLoginId = this.env.randomUUID();
-      const newRecord: AccountRecord = {
-        userId: verifiedUser.id,
-        loginId: newLoginId,
-        label,
-        secondary,
-        addedAt: this.env.now(),
-      };
-      const nextAccounts = existing
-        ? current.accounts.map((a) => (a.userId === verifiedUser.id ? newRecord : a))
-        : [...current.accounts, newRecord];
-      const nextTable: DurableOwnershipTable = {
-        version: 1,
-        allSignOutGen: current.allSignOutGen,
-        accounts: nextAccounts,
-      };
-
-      if (this.sharedPersistenceAvailable) {
-        const slot = slotStorageKey(this.originHash, newLoginId);
-        const serializedSession = JSON.stringify(minimized);
-        try {
-          await this.withLoginLock(newLoginId, async () => {
-            this.env.localStorage!.setItem(slot, serializedSession);
-            if (this.env.localStorage!.getItem(slot) !== serializedSession) {
-              throw new DurableOwnershipWriteError();
+        const existing = current.accounts.find((a) => a.userId === verifiedUser.id);
+        if (existing && !replaceExisting) {
+          const locallyDead =
+            this.tabFencedLoginIds.has(existing.loginId) ||
+            Boolean(this.runtimes.get(existing.loginId)?.isDead()) ||
+            (this.sharedPersistenceAvailable && this.safeLocalGet(slotStorageKey(this.originHash, existing.loginId)) === null);
+          if (!locallyDead) {
+            const knownLiveness = verifiedExistingLiveness.get(existing.loginId);
+            if (!knownLiveness) {
+              return { kind: "needs-liveness-check", existing };
             }
-          });
-          // Publish durable ownership only after the new slot is safely written and read back.
-          this.writeDurableOwnership(nextTable);
-        } catch {
-          this.safeLocalRemove(slot);
-          return { kind: "refused", reason: "ownership_write_failed" };
+            if (knownLiveness === "live") {
+              return { kind: "kept-existing", account: existing };
+            }
+          }
+          // Existing row is expired/dead -> fall through and replace it with the fresh sign-in!
         }
-        if (existing) {
-          this.safeLocalRemove(slotStorageKey(this.originHash, existing.loginId));
-        }
-        this.sweepOrphanSlots(nextAccounts);
-      } else {
-        this.memoryOwnership = nextTable;
-      }
 
-      return {
-        kind: "promoted",
-        account: newRecord,
-        replacedLoginId: existing?.loginId,
-        allSignOutGen: nextTable.allSignOutGen,
-        session: minimized,
-      };
-    });
+        if (!existing && current.accounts.length >= MAX_SIGNED_IN_ACCOUNTS) {
+          return { kind: "refused", reason: "cap_reached" };
+        }
+
+        const newLoginId = this.env.randomUUID();
+        const newRecord: AccountRecord = {
+          userId: verifiedUser.id,
+          loginId: newLoginId,
+          label,
+          secondary,
+          addedAt: this.env.now(),
+        };
+        const nextAccounts = existing
+          ? current.accounts.map((a) => (a.userId === verifiedUser.id ? newRecord : a))
+          : [...current.accounts, newRecord];
+        const nextTable: DurableOwnershipTable = {
+          version: 1,
+          allSignOutGen: current.allSignOutGen,
+          accounts: nextAccounts,
+        };
+
+        if (this.sharedPersistenceAvailable) {
+          const slot = slotStorageKey(this.originHash, newLoginId);
+          const serializedSession = JSON.stringify(minimized);
+          try {
+            await this.withLoginLock(newLoginId, async () => {
+              this.env.localStorage!.setItem(slot, serializedSession);
+              if (this.env.localStorage!.getItem(slot) !== serializedSession) {
+                throw new DurableOwnershipWriteError();
+              }
+            });
+            // Publish durable ownership only after the new slot is safely written and read back.
+            this.writeDurableOwnership(nextTable);
+          } catch {
+            this.safeLocalRemove(slot);
+            return { kind: "refused", reason: "ownership_write_failed" };
+          }
+          if (existing) {
+            this.safeLocalRemove(slotStorageKey(this.originHash, existing.loginId));
+          }
+          this.sweepOrphanSlots(nextAccounts);
+        } else {
+          this.memoryOwnership = nextTable;
+        }
+
+        return {
+          kind: "promoted",
+          account: newRecord,
+          replacedLoginId: existing?.loginId,
+          allSignOutGen: nextTable.allSignOutGen,
+          session: minimized,
+        };
+      });
+
+    let lockedResult = await runLockedPromotion();
+    // C2: Verify existing duplicate session liveness OUTSIDE the registry lock so expired rows never block fresh sign-in.
+    for (let rounds = 0; rounds < 2 && lockedResult.kind === "needs-liveness-check"; rounds += 1) {
+      const target = lockedResult.existing;
+      const status = await this.verifyExistingRecordLive(target);
+      verifiedExistingLiveness.set(target.loginId, status);
+      lockedResult = await runLockedPromotion();
+    }
+    if (lockedResult.kind === "needs-liveness-check") {
+      lockedResult = { kind: "kept-existing", account: lockedResult.existing };
+    }
 
     if (lockedResult.kind === "kept-existing") {
       // C1/C4: Duplicate user keeps existing live session intact; remotely revoke ONLY the unused staging session.
@@ -2030,6 +2575,7 @@ export class AccountManager {
     }
 
     if (lockedResult.replacedLoginId) {
+      this.tabFencedLoginIds.delete(lockedResult.replacedLoginId);
       this.runtimes.get(lockedResult.replacedLoginId)?.dispose();
       this.runtimes.delete(lockedResult.replacedLoginId);
     }
@@ -2135,10 +2681,13 @@ export class AccountManager {
         expired?.dispose();
         if (this.tabActive?.loginId === record.loginId) {
           this.tabActive = null;
+          this.activeWorkspaceId = null;
           this.clearTabAccount();
           this.viewGeneration += 1;
           this.env.onForcedTeardown?.({ reason: "expired", userId: record.userId, loginId: record.loginId });
         }
+        // Retire the exact expired loginId from durable ownership in the background without touching any successor.
+        void this.retireExpiredLogin(record.userId, record.loginId, allSignOutGen);
       },
     });
     this.runtimes.set(record.loginId, runtime);
@@ -2164,6 +2713,12 @@ export class AccountManager {
     if (!this.sharedPersistenceAvailable) return this.memoryOwnership.allSignOutGen;
     const read = this.readDurableOwnership();
     return read.ok ? read.state.allSignOutGen : 1;
+  }
+
+  private readRequiredAllSignOutGen(): number | null {
+    if (!this.sharedPersistenceAvailable) return this.memoryOwnership.allSignOutGen;
+    const read = this.readDurableOwnership();
+    return read.ok ? read.state.allSignOutGen : null;
   }
 
   private readDurableOwnership(): OwnershipReadResult {
@@ -2313,26 +2868,52 @@ export class AccountManager {
   }
 }
 
+function sameDeployment(a: MultiAccountDeployment, b: MultiAccountDeployment): boolean {
+  try {
+    return (
+      new URL(a.url).origin.toLowerCase() === new URL(b.url).origin.toLowerCase() &&
+      a.url.replace(/\/+$/, "").toLowerCase() === b.url.replace(/\/+$/, "").toLowerCase() &&
+      a.anonKey === b.anonKey
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPinnedScopeCurrent(ctx: PinnedAccountContext, scope: PinnedOperationScope): boolean {
+  if (scope === "account") return ctx.isCurrent();
+  const targetWorkspace = scope.workspaceId?.trim();
+  if (!targetWorkspace) return false;
+  return ctx.workspaceId === targetWorkspace && ctx.isCurrent(targetWorkspace);
+}
+
 /**
- * C2: Execute a credentialed command strictly bound to the initiating PinnedAccountContext.
- * On 401 unauthenticated, refreshes ONLY on `ctx.runtime` (never the ambient active account)
- * and rechecks `ctx.isCurrent()` before the retry send so A -> B -> A, sign-out, or same-user
- * re-sign-in cannot send under a different login or revive an old confirmation.
+ * C2: Execute a credentialed command strictly bound to the initiating PinnedAccountContext and scope.
+ * Derives the destination URL and apikey strictly from `ctx.runtime.deployment` (refusing any mismatched
+ * deployment before sending), enforces an explicit workspace/account scope guard, refreshes ONLY on
+ * `ctx.runtime` on 401 unauthenticated, and rechecks `isPinnedScopeCurrent` before every send and retry
+ * so account or workspace A -> B -> A, sign-out, expiry, or same-user re-sign-in cannot send under a
+ * different login/workspace or revive an old confirmation.
  */
 export async function postPinnedCommand(
   ctx: PinnedAccountContext,
-  deployment: MultiAccountDeployment,
   commandId: string,
   command: Record<string, unknown>,
   options: {
+    scope: PinnedOperationScope;
+    expectedDeployment?: MultiAccountDeployment;
     clientVersion?: string;
     extra?: Record<string, unknown>;
     fetcher?: typeof fetch;
-  } = {},
+  },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (!ctx.isCurrent()) throw new MultiAccountAuthRecoveryRequired();
+  const verifiedDeployment = ctx.runtime.deployment;
+  if (options.expectedDeployment && !sameDeployment(options.expectedDeployment, verifiedDeployment)) {
+    throw new MultiAccountDeploymentMismatch();
+  }
+  if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
   const initial = await ctx.runtime.verifySession();
-  if (!initial || !ctx.isCurrent() || initial.user.id !== ctx.userId) {
+  if (!initial || !isPinnedScopeCurrent(ctx, options.scope) || initial.user.id !== ctx.userId) {
     throw new MultiAccountAuthRecoveryRequired();
   }
   const wireBody = JSON.stringify({
@@ -2342,14 +2923,15 @@ export async function postPinnedCommand(
     ...(options.extra ?? {}),
   });
   const fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+  const endpoint = `${verifiedDeployment.url.replace(/\/+$/, "")}/functions/v1/command`;
   let credential = initial;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (!ctx.isCurrent()) throw new MultiAccountAuthRecoveryRequired();
-    const response = await fetcher(`${deployment.url.replace(/\/+$/, "")}/functions/v1/command`, {
+    if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
+    const response = await fetcher(endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${credential.access_token}`,
-        apikey: deployment.anonKey,
+        apikey: verifiedDeployment.anonKey,
         "content-type": "application/json",
       },
       body: wireBody,
@@ -2359,9 +2941,9 @@ export async function postPinnedCommand(
     try { body = text ? (JSON.parse(text) as Record<string, unknown>) : {}; } catch { body = { error: "unreadable_response" }; }
 
     if (response.status === 401 && body.error === "unauthenticated") {
-      if (attempt !== 0 || !ctx.isCurrent()) throw new MultiAccountAuthRecoveryRequired();
+      if (attempt !== 0 || !isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
       const recovered = await ctx.runtime.client.auth.getSession();
-      if (!ctx.isCurrent()) throw new MultiAccountAuthRecoveryRequired();
+      if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
       if (recovered.error || !recovered.data.session || recovered.data.session.user.id !== ctx.userId) {
         throw new MultiAccountSessionExpired();
       }
@@ -2369,7 +2951,7 @@ export async function postPinnedCommand(
         credential = recovered.data.session;
       } else {
         const refreshed = await ctx.runtime.client.auth.refreshSession();
-        if (!ctx.isCurrent()) throw new MultiAccountAuthRecoveryRequired();
+        if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
         if (refreshed.error || !refreshed.data.session || refreshed.data.session.user.id !== ctx.userId) {
           throw new MultiAccountAuthRecoveryRequired();
         }
@@ -2383,19 +2965,20 @@ export async function postPinnedCommand(
 }
 
 /**
- * C2: Attach a Realtime subscription strictly from ONE pinned AccountSessionRuntime
- * (both client and verified session come from `ctx.runtime`; rechecks `ctx.isCurrent()`
- * before setting socket auth and joining, and before delivering frames).
+ * C2: Attach a Realtime subscription strictly from ONE pinned AccountSessionRuntime and explicit scope
+ * (both client and verified session come from `ctx.runtime`; rechecks `isPinnedScopeCurrent`
+ * before verify, before setting socket auth, and before joining).
  */
 export async function attachPinnedRealtime<TSub>(
   ctx: PinnedAccountContext,
+  scope: PinnedOperationScope,
   join: (client: SupabaseClient, session: Session) => TSub,
 ): Promise<TSub | null> {
-  if (!ctx.isCurrent()) return null;
+  if (!isPinnedScopeCurrent(ctx, scope)) return null;
   const active = await ctx.runtime.verifySession();
-  if (!active || !ctx.isCurrent() || active.user.id !== ctx.userId) return null;
+  if (!active || !isPinnedScopeCurrent(ctx, scope) || active.user.id !== ctx.userId) return null;
   await ctx.runtime.client.realtime.setAuth(active.access_token);
-  if (!ctx.isCurrent()) return null;
+  if (!isPinnedScopeCurrent(ctx, scope)) return null;
   return join(ctx.runtime.client, active);
 }
 

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { NavigatorLockAcquireTimeoutError } from "@supabase/supabase-js";
+import { createClient, NavigatorLockAcquireTimeoutError } from "@supabase/supabase-js";
 import {
   AccountManager,
   MAX_SIGNED_IN_ACCOUNTS,
   MULTI_ACCOUNT_ENABLED,
   SIGN_IN_ATTEMPT_TTL_MS,
   accountsStorageKey,
+  activeAccountStorageKey,
   attachPinnedRealtime,
   attemptStorageKey,
   deploymentOriginHash,
@@ -159,10 +160,15 @@ interface MockGoTrueState {
   pkceCodes: Map<string, { challenge: string; user: ReturnType<typeof makeUser>; providerToken?: string }>;
   otpRequests: Array<{ email: string }>;
   otpVerifies: Array<{ email: string; token: string; type: string }>;
+  pkceExchanges: number;
   logouts: Array<{ scope: string | null; token: string }>;
   logoutMode: "ok" | "offline" | "500" | "session_not_found";
   refreshCount: number;
   refreshGate: Promise<void> | null;
+  otpVerifyGate: Promise<void> | null;
+  passwordGate: Promise<void> | null;
+  pkceGate: Promise<void> | null;
+  userGetGate: Promise<void> | null;
   commandResponses: Array<() => Response>;
   commandRequests: Array<{ auth: string; body: Record<string, unknown> }>;
 }
@@ -175,10 +181,15 @@ function createMockGoTrue() {
     pkceCodes: new Map(),
     otpRequests: [],
     otpVerifies: [],
+    pkceExchanges: 0,
     logouts: [],
     logoutMode: "ok",
     refreshCount: 0,
     refreshGate: null,
+    otpVerifyGate: null,
+    passwordGate: null,
+    pkceGate: null,
+    userGetGate: null,
     commandResponses: [],
     commandRequests: [],
   };
@@ -207,6 +218,7 @@ function createMockGoTrue() {
     const bearer = headers.get("authorization")?.replace(/^Bearer /i, "") ?? "";
 
     if (method === "GET" && url.pathname.endsWith("/auth/v1/user")) {
+      if (state.userGetGate) await state.userGetGate;
       const found = state.sessionsByAccess.get(bearer);
       if (!found) {
         return Response.json({ code: "session_not_found", error_code: "session_not_found" }, { status: 403 });
@@ -215,6 +227,8 @@ function createMockGoTrue() {
     }
 
     if (method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "pkce") {
+      state.pkceExchanges += 1;
+      if (state.pkceGate) await state.pkceGate;
       const body = JSON.parse(String(init?.body ?? "{}")) as { auth_code?: string; code_verifier?: string };
       const pending = body.auth_code ? state.pkceCodes.get(body.auth_code) : undefined;
       if (!pending || !body.code_verifier) {
@@ -233,6 +247,7 @@ function createMockGoTrue() {
     }
 
     if (method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "password") {
+      if (state.passwordGate) await state.passwordGate;
       const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string; password?: string };
       if (!body.email || body.password !== "correct-horse-battery") {
         return Response.json({ error_code: "invalid_credentials" }, { status: 400 });
@@ -272,6 +287,7 @@ function createMockGoTrue() {
     }
 
     if (method === "POST" && url.pathname.endsWith("/auth/v1/verify")) {
+      if (state.otpVerifyGate) await state.otpVerifyGate;
       const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string; token?: string; type?: string };
       state.otpVerifies.push({ email: body.email ?? "", token: body.token ?? "", type: body.type ?? "" });
       if (body.token !== "123456") return Response.json({ error_code: "otp_expired" }, { status: 400 });
@@ -501,18 +517,85 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   assert.equal(pinnedA.isCurrent(), false, "A -> B -> A must never revive an old confirmation or invite");
 
   // Held 401 command retry: switch to B while refresh is held -> 0 retry sends!
-  const pinnedFor401 = mgr.pinContext();
+  mgr.setActiveWorkspace("ws-alpha");
+  const pinnedFor401 = mgr.pinContext({ workspaceId: "ws-alpha" });
   assert.ok(pinnedFor401);
+
+  // Wrong-destination refusal (C2): mismatched URL or anonKey refuses BEFORE any fetch!
+  const requestsBeforeMismatch = mock.state.commandRequests.length;
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-wrong-url", { kind: "test" }, {
+      scope: { workspaceId: "ws-alpha" },
+      expectedDeployment: { url: "https://evil.example.test", anonKey: DEPLOYMENT.anonKey },
+      fetcher: mock.fetcher,
+    }),
+    { name: "DeploymentMismatch" },
+  );
+  await assert.rejects(
+    postPinnedCommand(pinnedFor401, "cmd-wrong-key", { kind: "test" }, {
+      scope: { workspaceId: "ws-alpha" },
+      expectedDeployment: { url: DEPLOYMENT.url, anonKey: "wrong-anon-key" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "DeploymentMismatch" },
+  );
+  assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "wrong deployment sends 0 requests");
+
+  // Workspace A -> B -> A invalidates pinned workspace context for sends and Realtime!
+  const pinnedWs = mgr.pinContext({ workspaceId: "ws-alpha" });
+  assert.ok(pinnedWs && pinnedWs.isCurrent("ws-alpha"));
+  mgr.setActiveWorkspace("ws-beta");
+  assert.equal(pinnedWs.isCurrent("ws-alpha"), false);
+  mgr.setActiveWorkspace("ws-alpha");
+  assert.equal(pinnedWs.isCurrent("ws-alpha"), false, "workspace A -> B -> A must invalidate old pin");
+  await assert.rejects(
+    postPinnedCommand(pinnedWs, "cmd-stale-ws", { kind: "test" }, {
+      scope: { workspaceId: "ws-alpha" },
+      fetcher: mock.fetcher,
+    }),
+    { name: "AuthRecoveryRequired" },
+  );
+  let wsJoinCalled = false;
+  assert.equal(await attachPinnedRealtime(pinnedWs, { workspaceId: "ws-alpha" }, () => { wsJoinCalled = true; return {}; }), null);
+  assert.equal(wsJoinCalled, false, "stale workspace pin cannot join Realtime");
+  assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "stale workspace sends 0 commands");
+
+  // Re-pin fresh context on ws-alpha and test held 401 retry invalidated by account switch!
+  const pinnedFresh401 = mgr.pinContext({ workspaceId: "ws-alpha" });
+  assert.ok(pinnedFresh401);
   let releaseRefresh!: () => void;
   mock.state.refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
   mock.state.commandResponses.push(() => Response.json({ error: "unauthenticated" }, { status: 401 }));
-  const cmdPromise = postPinnedCommand(pinnedFor401, DEPLOYMENT, "cmd-1", { kind: "test" }, { fetcher: mock.fetcher });
+  const cmdPromise = postPinnedCommand(pinnedFresh401, "cmd-1", { kind: "test" }, {
+    scope: { workspaceId: "ws-alpha" },
+    expectedDeployment: DEPLOYMENT,
+    fetcher: mock.fetcher,
+  });
   // Wait for first 401 to trigger refresh on A's runtime, then switch tab to B before refresh resolves!
   await new Promise((r) => setTimeout(r, 30));
   mgr.switchActiveAccount(b.account.userId);
   releaseRefresh();
   await assert.rejects(cmdPromise, { name: "AuthRecoveryRequired" });
   assert.equal(mock.state.commandRequests.length, 1, "must not resend command after switching to B during 401 refresh");
+
+  // Held 401 retry ALSO aborted by workspace A -> B -> A while refresh is in flight!
+  mgr.switchActiveAccount(a.account.userId);
+  mgr.setActiveWorkspace("ws-alpha");
+  const pinnedWs401 = mgr.pinContext({ workspaceId: "ws-alpha" });
+  assert.ok(pinnedWs401);
+  let releaseWsRefresh!: () => void;
+  mock.state.refreshGate = new Promise<void>((resolve) => { releaseWsRefresh = resolve; });
+  mock.state.commandResponses.push(() => Response.json({ error: "unauthenticated" }, { status: 401 }));
+  const wsCmdPromise = postPinnedCommand(pinnedWs401, "cmd-ws-401", { kind: "test" }, {
+    scope: { workspaceId: "ws-alpha" },
+    fetcher: mock.fetcher,
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  mgr.setActiveWorkspace("ws-beta");
+  mgr.setActiveWorkspace("ws-alpha");
+  releaseWsRefresh();
+  await assert.rejects(wsCmdPromise, { name: "AuthRecoveryRequired" });
+  assert.equal(mock.state.commandRequests.length, 2, "must not resend command after workspace A->B->A during 401 refresh");
 
   // Realtime join aborted if account signs out and same user re-signs-in (new loginId) mid-verify!
   mock.state.refreshGate = null;
@@ -524,7 +607,7 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   const a2 = await mgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
   assert.equal(a2.kind, "promoted");
   assert.notEqual(a2.account.loginId, a.account.loginId, "re-sign-in mints a fresh loginId");
-  const sub = await attachPinnedRealtime(pinnedRt, () => { joinCalled = true; return {}; });
+  const sub = await attachPinnedRealtime(pinnedRt, "account", () => { joinCalled = true; return {}; });
   assert.equal(sub, null);
   assert.equal(joinCalled, false, "old loginId cannot join Realtime after same-user re-sign-in");
   mgr.destroy();
@@ -580,7 +663,55 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   assert.equal(expTeardowns[0]!.disposedAtCallback, true, "runtime disposed BEFORE onForcedTeardown");
   assert.equal(expTeardowns[0]!.activeAtCallback, null, "tabActive cleared BEFORE onForcedTeardown");
   assert.equal(expTeardowns[0]!.pinnedCurrentAtCallback, false, "viewGeneration bumped BEFORE onForcedTeardown");
+
+  // Fresh sign-in after terminal expiry succeeds and replaces expired login (even if an expired row sat in durable registry!).
+  const freshAfterExp = await expMgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(freshAfterExp.kind, "promoted", "fresh sign-in after expiry must promote instead of keeping expired row");
+  assert.notEqual(freshAfterExp.account.loginId, expA.account.loginId);
+  // Also test stale expired row still in durable registry from another tab/restart (never locally verified yet):
+  const staleRt = expMgr.runtimeFor(freshAfterExp.account.userId)!;
+  await staleRt.ready();
+  mock.state.sessionsByAccess.delete(staleRt.peekAccessToken()!);
+  const freshMgr2 = new AccountManager(DEPLOYMENT, {
+    localStorage: lsExp, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  await freshMgr2.initialize();
+  const replacedStale = await freshMgr2.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(replacedStale.kind, "promoted", "expired durable registry row must NOT block a fresh sign-in");
+  assert.equal(replacedStale.replacedLoginId, freshAfterExp.account.loginId);
+  assert.notEqual(replacedStale.account.loginId, freshAfterExp.account.loginId);
+  freshMgr2.destroy();
   expMgr.destroy();
+
+  // Terminal expiry preserves an independently verified successor rotated to disk while getUser() was in flight!
+  const lsSucc = new MemoryStorage();
+  const succTeardowns: unknown[] = [];
+  const succMgr = new AccountManager(DEPLOYMENT, {
+    localStorage: lsSucc, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+    onForcedTeardown: (d) => succTeardowns.push(d),
+  });
+  await succMgr.initialize();
+  const succA = await succMgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(succA.kind, "promoted");
+  const succRt = succMgr.runtimeFor(succA.account.userId)!;
+  await succRt.ready();
+  const oldTok = succRt.peekAccessToken()!;
+  let releaseUserGet!: () => void;
+  mock.state.userGetGate = new Promise<void>((resolve) => { releaseUserGet = resolve; });
+  const verifyInFlight = succRt.verifySession();
+  await new Promise((r) => setTimeout(r, 20));
+  // Simulate peer tab rotating session on disk & invalidating old access token while getUser() is in flight!
+  mock.state.sessionsByAccess.delete(oldTok);
+  const newerSession = mock.mintSession(makeUser(succA.account.userId, "first@example.test", "First Owner"));
+  lsSucc.rawSet(slotStorageKey(ORIGIN_HASH, succA.account.loginId), JSON.stringify(newerSession));
+  releaseUserGet();
+  mock.state.userGetGate = null;
+  await assert.rejects(verifyInFlight, { name: "AuthRecoveryRequired" }, "must preserve rotated successor instead of retiring");
+  assert.equal(succRt.isDisposed(), false, "successor runtime must NOT be disposed");
+  assert.equal(succTeardowns.length, 0, "must NOT fire forced expiry teardown when successor exists");
+  succMgr.destroy();
 
   // initialize() fails closed cleanly on DurableOwnershipWriteError during first-load cutover.
   const lsFailInit = new MemoryStorage();
@@ -682,8 +813,38 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
     assert.equal(refreshed.error, null);
     assert.equal(sdkChannelsForSlot1[0]!.posts.length, 0, "0 posts on SDK BroadcastChannel across INITIAL_SESSION + TOKEN_REFRESHED");
 
-    // Assert ZERO access_token or refresh_token strings ever crossed ANY BroadcastChannel (SDK or app)!
+    // Browser-path POSITIVE CONTROL (HezSec C3/C4): without pre-init BroadcastChannel suppression,
+    // a plain GoTrueClient in this exact same stubbed browser env DOES post credentials over SpyBroadcastChannel!
+    const controlKey = "commonswarm:control:unsuppressed-bc";
+    const controlStorage = new MemoryStorage();
+    const controlSeed = mock.mintSession(makeUser("77777777-7777-4777-8777-777777777777", "control@example.test", "Control"));
+    controlStorage.rawSet(controlKey, JSON.stringify(controlSeed));
+    const controlClient = createClient(DEPLOYMENT.url, DEPLOYMENT.anonKey, {
+      global: { fetch: mock.fetcher },
+      auth: {
+        storageKey: controlKey,
+        persistSession: true,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        storage: controlStorage,
+        lock: locks.lock,
+        skipAutoInitialize: true,
+      },
+    });
+    await controlClient.auth.initialize();
+    const controlRefresh = await controlClient.auth.refreshSession();
+    assert.equal(controlRefresh.error, null);
+    const controlChannels = constructedChannels.filter((c) => c.name === controlKey);
+    assert.equal(controlChannels.length, 1, "control SDK constructed BroadcastChannel(controlKey)");
+    assert.ok(
+      controlChannels[0]!.posts.some((m) => JSON.stringify(m).includes("access_token")),
+      "positive control proves SpyBroadcastChannel observes real SDK credential broadcasts when suppression is absent",
+    );
+    await controlClient.auth.dispose();
+
+    // Assert ZERO access_token or refresh_token strings ever crossed ANY non-control BroadcastChannel (SDK or app)!
     for (const msg of [...globalPosts, ...hub.posted.map((p) => ({ name: p.channel, data: p.message }))]) {
+      if (msg.name === controlKey) continue;
       const text = JSON.stringify(msg.data);
       assert.equal(text.includes("access_token"), false, "no access_token on BroadcastChannel");
       assert.equal(text.includes("refresh_token"), false, "no refresh_token on BroadcastChannel");
@@ -988,4 +1149,338 @@ test("C4: fresh-sign-in cutover waits on exact legacy lock, clears sb-<ref>-auth
   assert.equal(memSignIn.kind, "promoted");
   assert.equal(lsNoLock.length, 0, "no rotating tokens persisted to localStorage without cross-context Web Locks");
   memMgr.destroy();
+});
+
+test("C1 hardening: held OTP/password/OAuth cancellation, Sign out all during PKCE, missing registry at promotion, bearer query scrub, and URL scrub failure", async () => {
+  const ls = new MemoryStorage();
+  const ss = new MemoryStorage();
+  const locks = new TestWebLocks();
+  const hub = new TestBroadcastHub();
+  const mock = createMockGoTrue();
+
+  const mgr = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: ss, fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  await mgr.initialize();
+
+  // 1. Held OTP cancelled mid-exchange -> refused (attempt_cancelled) + late staging session locally revoked!
+  const otp = await mgr.startEmailOtpAttempt({ email: "second@example.test", purpose: "add-account", returnRoute: "/app" });
+  let releaseOtp!: () => void;
+  mock.state.otpVerifyGate = new Promise<void>((resolve) => { releaseOtp = resolve; });
+  const logoutsBeforeOtp = mock.state.logouts.length;
+  const otpPromise = mgr.verifyEmailOtpAttempt({ attemptId: otp.attemptId, token: "123456" });
+  await new Promise((r) => setTimeout(r, 15));
+  mgr.cancelAttempt(otp.attemptId);
+  releaseOtp();
+  mock.state.otpVerifyGate = null;
+  const otpRes = await otpPromise;
+  assert.equal(otpRes.kind, "refused");
+  assert.equal(otpRes.reason, "attempt_cancelled");
+  assert.equal(mgr.listAccounts().length, 0, "cancelled OTP must NOT promote");
+  assert.equal(mock.state.logouts.length, logoutsBeforeOtp + 1, "cancelled OTP must locally revoke late staging session");
+  assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+
+  // 2. Held password sign-in cancelled mid-exchange -> refused (attempt_cancelled) + late session locally revoked!
+  const pwAttempt = mgr.startPasswordAttempt({ purpose: "signed-out", returnRoute: "/app" });
+  let releasePw!: () => void;
+  mock.state.passwordGate = new Promise<void>((resolve) => { releasePw = resolve; });
+  const logoutsBeforePw = mock.state.logouts.length;
+  const pwPromise = mgr.signInWithPasswordStaging({
+    email: "first@example.test", password: "correct-horse-battery", attemptId: pwAttempt.attemptId,
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  mgr.cancelAttempt(pwAttempt.attemptId);
+  releasePw();
+  mock.state.passwordGate = null;
+  const pwRes = await pwPromise;
+  assert.equal(pwRes.kind, "refused");
+  assert.equal(pwRes.reason, "attempt_cancelled");
+  assert.equal(mgr.listAccounts().length, 0, "cancelled password sign-in must NOT promote");
+  assert.equal(mock.state.logouts.length, logoutsBeforePw + 1, "cancelled password must locally revoke late session");
+  assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+
+  // 3. Held OAuth PKCE callback cancelled mid-exchange -> refused (attempt_cancelled) + late session locally revoked!
+  const oauth = await mgr.startOAuthAttempt({
+    provider: "google", purpose: "add-account", returnRoute: "/app", origin: "https://commonswarm.com",
+  });
+  const challenge = new URL(oauth.authorizeUrl).searchParams.get("code_challenge")!;
+  mock.state.pkceCodes.set("held-oauth-code", {
+    challenge,
+    user: makeUser("11111111-1111-4111-8111-111111111111", "first@example.test", "First Owner"),
+  });
+  let releasePkce!: () => void;
+  mock.state.pkceGate = new Promise<void>((resolve) => { releasePkce = resolve; });
+  const logoutsBeforePkce = mock.state.logouts.length;
+  const heldNav = makeLocation(`https://commonswarm.com/app?code=held-oauth-code&cs_attempt=${oauth.attemptId}`);
+  const pkcePromise = mgr.consumeAuthCallbackBootstrap(heldNav.location, heldNav.history);
+  await new Promise((r) => setTimeout(r, 15));
+  mgr.cancelAttempt(oauth.attemptId);
+  releasePkce();
+  mock.state.pkceGate = null;
+  const pkceRes = await pkcePromise;
+  assert.equal(pkceRes.kind, "refused");
+  assert.equal(pkceRes.reason, "attempt_cancelled");
+  assert.equal(mgr.listAccounts().length, 0, "cancelled OAuth must NOT promote");
+  assert.equal(mock.state.logouts.length, logoutsBeforePkce + 1, "cancelled OAuth must locally revoke late session");
+  assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+
+  // 4. Sign out all during PKCE creation (subtle.digest held) -> startOAuthAttempt refuses & writes NO attempt!
+  let releaseDigest!: () => void;
+  const digestGate = new Promise<void>((resolve) => { releaseDigest = resolve; });
+  const holdingSubtle = {
+    digest: async (alg: AlgorithmIdentifier, data: BufferSource) => {
+      await digestGate;
+      return crypto.subtle.digest(alg, data);
+    },
+  } as unknown as SubtleCrypto;
+  const pkceRaceMgr = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: ss, fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create, subtle: holdingSubtle,
+  });
+  const startPromise = pkceRaceMgr.startOAuthAttempt({
+    provider: "github", purpose: "add-account", returnRoute: "/app", origin: "https://commonswarm.com",
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  await mgr.signOutAllAccounts();
+  releaseDigest();
+  await assert.rejects(startPromise, /cancelled|signed out/i);
+  assert.equal(ss.keys().some((k) => k.includes(":attempt:")), false, "fenced PKCE start must store no attempt");
+  pkceRaceMgr.destroy();
+
+  // 5. Missing registry at promotion time -> refused (storage_unavailable), NOT rebuilt, late session revoked!
+  const missingPw = mgr.startPasswordAttempt({ purpose: "signed-out", returnRoute: "/app" });
+  let releaseMissing!: () => void;
+  mock.state.passwordGate = new Promise<void>((resolve) => { releaseMissing = resolve; });
+  const logoutsBeforeMissing = mock.state.logouts.length;
+  const missingPromise = mgr.signInWithPasswordStaging({
+    email: "first@example.test", password: "correct-horse-battery", attemptId: missingPw.attemptId,
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  ls.removeItem(accountsStorageKey(ORIGIN_HASH));
+  releaseMissing();
+  mock.state.passwordGate = null;
+  const missingRes = await missingPromise;
+  assert.equal(missingRes.kind, "refused");
+  assert.equal(missingRes.reason, "storage_unavailable");
+  assert.equal(ls.rawGet(accountsStorageKey(ORIGIN_HASH)), null, "promotion must NEVER rebuild a missing registry");
+  assert.equal(mock.state.logouts.length, logoutsBeforeMissing + 1, "refused missing-registry session must be locally revoked");
+
+  // Re-initialize clean registry for callback URL scrub tests.
+  await mgr.initialize();
+
+  // 6. Bearer fields in query string are scrubbed completely and refused with 0 PKCE exchanges!
+  const exchangesBeforeQuery = mock.state.pkceExchanges;
+  const bearerQueryNav = makeLocation(
+    "https://commonswarm.com/app?access_token=evil-at&refresh_token=evil-rt&provider_token=evil-pt&code=c1&keep=1",
+  );
+  const bearerQueryRes = await mgr.consumeAuthCallbackBootstrap(bearerQueryNav.location, bearerQueryNav.history);
+  assert.equal(bearerQueryRes.kind, "refused");
+  assert.equal(bearerQueryRes.reason, "bearer_query");
+  assert.equal(bearerQueryNav.location.search, "?keep=1", "all bearer & auth query params scrubbed");
+  assert.equal(mock.state.pkceExchanges, exchangesBeforeQuery, "0 PKCE exchanges on bearer query");
+
+  // 7. If history.replaceState throws during URL scrub, REFUSE the exchange with 0 PKCE calls!
+  const oauth2 = await mgr.startOAuthAttempt({
+    provider: "google", purpose: "signed-out", returnRoute: "/app", origin: "https://commonswarm.com",
+  });
+  const scrubFailNav = makeLocation(`https://commonswarm.com/app?code=some-code&cs_attempt=${oauth2.attemptId}`);
+  const throwingHistory: HistoryLike = {
+    replaceState() { throw new Error("SecurityError: replaceState blocked"); },
+  };
+  const scrubFailRes = await mgr.consumeAuthCallbackBootstrap(scrubFailNav.location, throwingHistory);
+  assert.equal(scrubFailRes.kind, "refused");
+  assert.equal(scrubFailRes.reason, "url_scrub_failed");
+  assert.equal(mock.state.pkceExchanges, exchangesBeforeQuery, "0 PKCE exchanges when URL scrubbing fails");
+  assert.equal(ss.rawGet(attemptStorageKey(ORIGIN_HASH, oauth2.attemptId)), null, "attempt cleared on scrub failure");
+
+  mgr.destroy();
+});
+
+test("C3 bulk sweep: Sign out all Step 2 deletes ONLY fenced logins and preserves next-generation promotion in another tab", async () => {
+  const ls = new MemoryStorage();
+  const locks = new TestWebLocks();
+  const hub = new TestBroadcastHub();
+  const mock = createMockGoTrue();
+
+  const tab1 = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  const tab2 = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  await Promise.all([tab1.initialize(), tab2.initialize()]);
+
+  const oldA = await tab1.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(oldA.kind, "promoted");
+  const oldSlotKey = slotStorageKey(ORIGIN_HASH, oldA.account.loginId);
+
+  // Intercept the Step 2 login lock for oldA.loginId to pause tab1 AFTER Step 1 released the registry lock
+  // and BEFORE Step 2 deletes oldSlotKey — while tab2 promotes a brand-new next-generation account!
+  let pausedAtStep2!: () => void;
+  const reachedStep2 = new Promise<void>((resolve) => { pausedAtStep2 = resolve; });
+  let releaseStep2!: () => void;
+  const step2Gate = new Promise<void>((resolve) => { releaseStep2 = resolve; });
+  let interceptNextOldLock = true;
+  const pausingLock: LockLike = async (name, timeout, fn) => {
+    if (interceptNextOldLock && name === loginLockName(ORIGIN_HASH, oldA.account.loginId) && timeout === 0) {
+      interceptNextOldLock = false;
+      pausedAtStep2();
+      await step2Gate;
+    }
+    return locks.lock(name, timeout, fn);
+  };
+  const tab1Paused = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: pausingLock, createBroadcastChannel: hub.create,
+  });
+  await tab1Paused.initialize();
+
+  const bulkPromise = tab1Paused.signOutAllAccounts();
+  await reachedStep2;
+
+  // Tab 2 promotes a brand-new account B in the NEXT generation while tab1's Step 2 is still pending!
+  const nextGenB = await tab2.signInWithPasswordStaging({ email: "second@example.test", password: "correct-horse-battery" });
+  assert.equal(nextGenB.kind, "promoted");
+  const nextGenSlotKey = slotStorageKey(ORIGIN_HASH, nextGenB.account.loginId);
+  assert.ok(ls.rawGet(nextGenSlotKey));
+  assert.equal(ls.rawGet(activeAccountStorageKey(ORIGIN_HASH)), nextGenB.account.userId);
+
+  // Resume tab1's Step 2 cleanup & late broadcast!
+  releaseStep2();
+  const bulkRes = await bulkPromise;
+  assert.equal(bulkRes.browserSignedOut, true);
+  assert.equal(bulkRes.slotsDeleted, 1, "Step 2 must delete ONLY the 1 old fenced slot");
+  assert.equal(ls.rawGet(oldSlotKey), null, "old fenced slot deleted");
+  assert.ok(ls.rawGet(nextGenSlotKey), "next-generation slot MUST survive late bulk sweep");
+  assert.equal(ls.rawGet(activeAccountStorageKey(ORIGIN_HASH)), nextGenB.account.userId, "next-gen active pointer preserved");
+  assert.equal(tab2.listAccounts().length, 1);
+  assert.equal(tab2.listAccounts()[0]!.loginId, nextGenB.account.loginId);
+  assert.equal(tab2.runtimeFor(nextGenB.account.userId)?.isLiveOwned(), true, "next-gen runtime stays live through late broadcast");
+
+  tab1.destroy();
+  tab1Paused.destroy();
+  tab2.destroy();
+});
+
+test("C3/C4 reconciliation: preserves rotated successor on slot write failure and adopts independently committed newer token under exact SDK lock", async () => {
+  const ls = new MemoryStorage();
+  const locks = new TestWebLocks();
+  const hub = new TestBroadcastHub();
+  const mock = createMockGoTrue();
+
+  const mgr = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  await mgr.initialize();
+  const p = await mgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(p.kind, "promoted");
+  const rt = mgr.runtimeFor(p.account.userId)!;
+  await rt.ready();
+
+  const slotKey = slotStorageKey(ORIGIN_HASH, p.account.loginId);
+  const exactLock = loginLockName(ORIGIN_HASH, p.account.loginId);
+  const initialDiskRaw = ls.rawGet(slotKey)!;
+  const initialToken = rt.peekAccessToken()!;
+
+  // Case 1: Inject slot write failure during SDK refresh -> rotated successor stays in memory while predecessor remains on disk.
+  ls.failSetKeys.add(slotKey);
+  const refreshed = await rt.client.auth.refreshSession();
+  assert.equal(refreshed.error, null);
+  const rotatedToken = refreshed.data.session!.access_token;
+  assert.notEqual(rotatedToken, initialToken);
+  assert.equal(ls.rawGet(slotKey), initialDiskRaw, "disk still holds spent predecessor due to injected write failure");
+  assert.equal(rt.peekAccessToken(), rotatedToken, "memory holds rotated successor");
+
+  // Reconciling now MUST acquire exact lock:<slotKey> and MUST NOT clobber rotatedToken with spent predecessor!
+  const acquiredBefore = locks.acquired.length;
+  const reconciled1 = await rt.reconcileFromDisk();
+  assert.ok(locks.acquired.slice(acquiredBefore).includes(exactLock), "reconcileFromDisk must acquire exact SDK lock:<slotKey>");
+  assert.equal(reconciled1?.access_token, rotatedToken, "reconciliation must preserve pending rotated successor");
+  assert.equal(rt.peekAccessToken(), rotatedToken, "spent predecessor must NOT overwrite rotated successor");
+
+  // Once disk recovers, reconcileFromDisk flushes the rotated successor cleanly to disk!
+  ls.failSetKeys.clear();
+  await rt.reconcileFromDisk();
+  assert.ok((ls.rawGet(slotKey) ?? "").includes(rotatedToken), "rotated successor flushed to disk after recovery");
+
+  // Case 2: Another tab independently commits a newer token to disk -> reconcileFromDisk adopts that newer token!
+  const peerNewer = mock.mintSession(makeUser(p.account.userId, "first@example.test", "First Owner"));
+  ls.rawSet(slotKey, JSON.stringify(peerNewer));
+  const acquiredBefore2 = locks.acquired.length;
+  const reconciled2 = await rt.reconcileFromDisk();
+  assert.ok(locks.acquired.slice(acquiredBefore2).includes(exactLock), "reconcileFromDisk acquires exact SDK lock:<slotKey>");
+  assert.equal(reconciled2?.access_token, peerNewer.access_token, "independently committed newer token adopted");
+  assert.equal(rt.peekAccessToken(), peerNewer.access_token);
+
+  mgr.destroy();
+});
+
+test("C5 signOutAccount authorization: refuses mismatched {userId, loginId} and stale same-user loginId with 0 side effects; allows exact-pair control", async () => {
+  const ls = new MemoryStorage();
+  const locks = new TestWebLocks();
+  const hub = new TestBroadcastHub();
+  const mock = createMockGoTrue();
+
+  const mgr = new AccountManager(DEPLOYMENT, {
+    localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+    webLocks: locks.lock, createBroadcastChannel: hub.create,
+  });
+  await mgr.initialize();
+  const a = await mgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  const b = await mgr.signInWithPasswordStaging({ email: "second@example.test", password: "correct-horse-battery" });
+  assert.equal(a.kind, "promoted");
+  assert.equal(b.kind, "promoted");
+  const rtB = mgr.runtimeFor(b.account.userId)!;
+  await rtB.ready();
+  const slotB = slotStorageKey(ORIGIN_HASH, b.account.loginId);
+  const logoutsBefore = mock.state.logouts.length;
+
+  // 1. Mismatched pair (userA.id + userB.loginId): ZERO side effects!
+  const mismatch = await mgr.signOutAccount(a.account.userId, b.account.loginId);
+  assert.equal(mismatch.browserSignedOut, false);
+  assert.equal(mismatch.localTabTornDown, false);
+  assert.equal(mismatch.slotDeleted, false);
+  assert.equal(mismatch.remoteRevocation.status, "skipped");
+  assert.equal(mock.state.logouts.length, logoutsBefore, "mismatched pair must send 0 GoTrue logouts");
+  assert.ok(ls.rawGet(slotB), "mismatched pair must NOT delete userB's slot");
+  assert.equal(rtB.isDisposed(), false, "mismatched pair must NOT dispose userB's runtime");
+  assert.equal(mgr.listAccounts().length, 2, "both accounts remain intact");
+
+  // 2. Stale same-user loginId after A signs out & re-signs-in: ZERO side effects on new loginId!
+  const oldLoginIdA = a.account.loginId;
+  await mgr.signOutAccount(a.account.userId, oldLoginIdA);
+  const aNew = await mgr.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+  assert.equal(aNew.kind, "promoted");
+  assert.notEqual(aNew.account.loginId, oldLoginIdA);
+  const rtANew = mgr.runtimeFor(aNew.account.userId)!;
+  await rtANew.ready();
+  const slotANew = slotStorageKey(ORIGIN_HASH, aNew.account.loginId);
+  const logoutsBeforeStale = mock.state.logouts.length;
+
+  const staleRes = await mgr.signOutAccount(aNew.account.userId, oldLoginIdA);
+  assert.equal(staleRes.browserSignedOut, false);
+  assert.equal(staleRes.localTabTornDown, false);
+  assert.equal(staleRes.slotDeleted, false);
+  assert.equal(staleRes.remoteRevocation.status, "skipped");
+  assert.equal(mock.state.logouts.length, logoutsBeforeStale, "stale loginId must send 0 GoTrue logouts");
+  assert.ok(ls.rawGet(slotANew), "stale loginId must NOT delete new loginId's slot");
+  assert.equal(rtANew.isDisposed(), false, "stale loginId must NOT dispose new loginId's runtime");
+
+  // 3. Correct-target control: exact { userB.id, userB.loginId } succeeds cleanly!
+  const controlRes = await mgr.signOutAccount(b.account.userId, b.account.loginId);
+  assert.equal(controlRes.browserSignedOut, true);
+  assert.equal(controlRes.localTabTornDown, true);
+  assert.equal(controlRes.slotDeleted, true);
+  assert.equal(controlRes.remoteRevocation.status, "confirmed");
+  assert.equal(mock.state.logouts.length, logoutsBeforeStale + 1);
+  assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+  assert.equal(ls.rawGet(slotB), null, "exact-pair control deletes userB's slot");
+  assert.equal(mgr.listAccounts().length, 1);
+  assert.equal(mgr.listAccounts()[0]!.loginId, aNew.account.loginId);
+
+  mgr.destroy();
 });
