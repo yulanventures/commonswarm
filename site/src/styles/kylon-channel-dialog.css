@@ -94,6 +94,16 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
   background: var(--k-shell-accent-hover);
   border-color: var(--k-shell-accent-hover);
 }
+live-dashboard.dashboard[data-kylon-shell] [data-group-leave-dialog] .dashboard__channel-form .dashboard__button--danger {
+  color: var(--danger);
+  background: var(--danger-dim);
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--border-interactive));
+}
+live-dashboard.dashboard[data-kylon-shell] [data-group-leave-dialog] .dashboard__channel-form .dashboard__button--danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 18%, var(--k-shell-surface));
+  border-color: var(--danger);
+}
 @media not (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) :is(button, input, select):focus-visible {
     outline: 2px solid var(--k-shell-focus);
