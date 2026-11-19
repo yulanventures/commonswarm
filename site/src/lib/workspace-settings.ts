@@ -39,23 +39,62 @@ export interface WorkspaceSettingsControls {
   closeButton: HTMLButtonElement;
 }
 
+interface PreviousRender {
+  workspaceId: string;
+  name: string;
+  canClose: boolean;
+  canRename: boolean;
+}
+
+interface TextDraft {
+  value: string;
+  focused: boolean;
+  start: number | null;
+  end: number | null;
+  direction: "forward" | "backward" | "none" | null;
+}
+
+const previousRender = new WeakMap<HTMLElement, PreviousRender>();
+
 function countLabel(count: number, singular: string, plural: string): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-function existingMoreOpen(root: HTMLElement): boolean {
+function findByDataset<T extends HTMLElement>(root: HTMLElement, attr: string, key: string): T | null {
   if (typeof root.querySelector === "function") {
-    return root.querySelector<HTMLDetailsElement>("[data-workspace-more]")?.open === true;
+    return root.querySelector<T>(`[data-${attr}]`);
   }
-  const children = (root as unknown as {
-    children?: ArrayLike<{ dataset?: Record<string, string>; open?: boolean }>;
-  }).children;
-  if (!children) return false;
-  for (let i = 0; i < children.length; i += 1) {
-    const child = children[i];
-    if (child?.dataset && "workspaceMore" in child.dataset) return child.open === true;
+  type NodeLike = { children?: ArrayLike<NodeLike>; dataset?: Record<string, string> };
+  const visit = (node: NodeLike): NodeLike | null => {
+    if (node.dataset && key in node.dataset) return node;
+    if (!node.children) return null;
+    for (let i = 0; i < node.children.length; i += 1) {
+      const hit = visit(node.children[i]);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return visit(root as unknown as NodeLike) as T | null;
+}
+
+function captureDraft(input: HTMLInputElement | null, active: Element | null | undefined): TextDraft | null {
+  if (!input || input.disabled) return null;
+  const focused = active === input;
+  return {
+    value: input.value,
+    focused,
+    start: focused ? (input.selectionStart ?? null) : null,
+    end: focused ? (input.selectionEnd ?? null) : null,
+    direction: focused ? (input.selectionDirection ?? null) : null,
+  };
+}
+
+function restoreFocus(input: HTMLInputElement, draft: TextDraft | null): void {
+  if (!draft?.focused) return;
+  input.focus({ preventScroll: true });
+  if (draft.start !== null && draft.end !== null && typeof input.setSelectionRange === "function") {
+    input.setSelectionRange(draft.start, draft.end, draft.direction ?? undefined);
   }
-  return false;
 }
 
 /** Renders the real workspace settings panel and owns its exact-name close gate. */
@@ -64,13 +103,31 @@ export function renderWorkspaceSettings(
   options: WorkspaceSettingsOptions,
 ): WorkspaceSettingsControls {
   const document = root.ownerDocument;
+  const prev = previousRender.get(root);
+  const sameWorkspace = prev?.workspaceId === options.workspaceId;
+  const sameContext = options.moreOpen !== false && sameWorkspace && prev?.name === options.name;
+  const canRename = Boolean(options.canRename && options.onRename);
+  const prevMoreOpen = sameWorkspace &&
+    findByDataset<HTMLDetailsElement>(root, "workspace-more", "workspaceMore")?.open === true;
+  const closeDraft = sameContext && prev.canClose && options.canClose
+    ? captureDraft(findByDataset<HTMLInputElement>(root, "workspace-close-confirm", "workspaceCloseConfirm"), document.activeElement)
+    : null;
+  const renameDraft = sameContext && prev.canRename && canRename
+    ? captureDraft(findByDataset<HTMLInputElement>(root, "workspace-rename-input", "workspaceRenameInput"), document.activeElement)
+    : null;
+
   const heading = document.createElement("h2");
   heading.className = "dashboard__workspace-settings-title";
   heading.textContent = options.name;
   const titleRow = document.createElement("div");
   titleRow.className = "dashboard__workspace-settings-title-row";
   titleRow.append(heading);
-  if (options.canRename && options.onRename) titleRow.append(renameControl(root, heading, titleRow, options.name, options.onRename));
+  let renameInput: HTMLInputElement | null = null;
+  if (canRename && options.onRename) {
+    const rename = renameControl(root, heading, titleRow, options.name, options.onRename);
+    titleRow.append(rename.button);
+    if (renameDraft !== null) renameInput = rename.openForm(renameDraft.value);
+  }
 
   const counts = document.createElement("p");
   counts.className = "dashboard__workspace-settings-counts";
@@ -165,6 +222,10 @@ export function renderWorkspaceSettings(
   const syncGate = (): void => {
     button.disabled = !options.canClose || input.value !== options.name;
   };
+  if (closeDraft !== null) {
+    input.value = closeDraft.value;
+    syncGate();
+  }
   input.addEventListener("input", syncGate);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -198,8 +259,7 @@ export function renderWorkspaceSettings(
      is one press away under More: clean-up, moving the workspace, its ID, and closing it. More starts closed, so the
      one action that cannot be undone is never the first thing on screen; a redraw for the same workspace while the
      dialog is open keeps More open if the person already opened it. */
-  const keepMoreOpen = options.moreOpen ??
-    (root.dataset?.workspaceSettingsId === options.workspaceId && existingMoreOpen(root));
+  const keepMoreOpen = options.moreOpen ?? prevMoreOpen;
   const more = document.createElement("details");
   more.className = "dashboard__workspace-more";
   more.dataset.workspaceMore = "";
@@ -207,7 +267,6 @@ export function renderWorkspaceSettings(
   const moreSummary = document.createElement("summary");
   moreSummary.textContent = "More";
   more.append(moreSummary, cleanup);
-  if (root.dataset) root.dataset.workspaceSettingsId = options.workspaceId;
   root.replaceChildren(titleRow, counts);
   if (options.channelPolicy) root.append(channelPolicyControl(root, options.channelPolicy));
   root.append(more);
@@ -271,6 +330,14 @@ export function renderWorkspaceSettings(
   // The workspace ID is for support and for setting up an agent by hand. Close workspace is last, with its typed
   // confirmation beside it.
   more.append(identity, danger);
+  previousRender.set(root, {
+    workspaceId: options.workspaceId,
+    name: options.name,
+    canClose: options.canClose,
+    canRename,
+  });
+  if (renameInput) restoreFocus(renameInput, renameDraft);
+  restoreFocus(input, closeDraft);
   return { confirmInput: input, closeButton: button };
 }
 
@@ -343,20 +410,20 @@ function channelPolicyControl(root: HTMLElement,
 
 /** A Rename button that swaps the title for a name field; Escape or Cancel puts the title back. */
 function renameControl(root: HTMLElement, heading: HTMLElement, titleRow: HTMLElement, current: string,
-  onRename: (name: string) => Promise<void>): HTMLButtonElement {
+  onRename: (name: string) => Promise<void>): { button: HTMLButtonElement; openForm(draft?: string): HTMLInputElement } {
   const document = root.ownerDocument;
   const open = document.createElement("button");
   open.type = "button";
   open.className = "dashboard__text-button";
   open.dataset.workspaceRename = "";
   open.textContent = "Rename";
-  open.addEventListener("click", () => {
+  const openForm = (draft?: string): HTMLInputElement => {
     const form = document.createElement("form");
     form.className = "dashboard__workspace-rename";
     form.dataset.workspaceRenameForm = "";
     const input = document.createElement("input");
     input.type = "text";
-    input.value = current;
+    input.value = draft ?? current;
     input.maxLength = 80;
     input.required = true;
     input.autocomplete = "off";
@@ -404,8 +471,12 @@ function renameControl(root: HTMLElement, heading: HTMLElement, titleRow: HTMLEl
     form.append(input, save, cancel, error);
     titleRow.replaceChildren(form);
     sync();
-    input.focus();
-    input.select();
-  });
-  return open;
+    if (draft === undefined) {
+      input.focus();
+      input.select();
+    }
+    return input;
+  };
+  open.addEventListener("click", () => { openForm(); });
+  return { button: open, openForm };
 }

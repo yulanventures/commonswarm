@@ -20,6 +20,15 @@ interface SettingsSnapshot {
   moreAfterSameWorkspaceRedraw: boolean;
   moreAfterReset: boolean;
   moreAfterSwitch: boolean;
+  partialValueAfterOrgArrival: string;
+  partialDisabledAfterOrgArrival: boolean;
+  closeFocusedAfterOrgArrival: boolean;
+  closeSelectionAfterOrgArrival: [number | null, number | null];
+  valueAfterNameChange: string;
+  valueAfterPermissionLoss: string;
+  renameValueAfterOrgArrival: string;
+  renameFocusedAfterOrgArrival: boolean;
+  renameSelectionAfterOrgArrival: [number | null, number | null];
 }
 
 async function renderSettingsFixture(): Promise<SettingsSnapshot> {
@@ -47,6 +56,8 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
         memberCount: 3,
         agentCount: 2,
         canClose: true,
+        canRename: true,
+        onRename: async () => {},
         onCopy: async () => {},
         onClose: async () => { closeCalls += 1; },
       };
@@ -62,11 +73,51 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
       const exactDisabled = controls.closeButton.disabled;
       root.querySelector("form").requestSubmit();
       setTimeout(() => {
+        WorkspaceSettings.renderWorkspaceSettings(root, { ...base, moreOpen: false });
         more().querySelector("summary").click();
-        WorkspaceSettings.renderWorkspaceSettings(root, { ...base, memberCount: 4 });
+        const closeInput = root.querySelector("[data-workspace-close-confirm]");
+        closeInput.focus();
+        closeInput.value = "Science";
+        closeInput.setSelectionRange(3, 7);
+        closeInput.dispatchEvent(new Event("input"));
+        const afterOrg = WorkspaceSettings.renderWorkspaceSettings(root, {
+          ...base,
+          moveDestinations: [{ id: "org-2", name: "Yulan" }],
+          onMove: async () => {},
+        });
         const moreAfterSameWorkspaceRedraw = more().open;
+        const partialValueAfterOrgArrival = afterOrg.confirmInput.value;
+        const partialDisabledAfterOrgArrival = afterOrg.closeButton.disabled;
+        const closeFocusedAfterOrgArrival = document.activeElement === afterOrg.confirmInput;
+        const closeSelectionAfterOrgArrival = [afterOrg.confirmInput.selectionStart, afterOrg.confirmInput.selectionEnd];
+
+        const afterNameChange = WorkspaceSettings.renderWorkspaceSettings(root, { ...base, name: "Science Lab" });
+        const valueAfterNameChange = afterNameChange.confirmInput.value;
+
+        afterNameChange.confirmInput.focus();
+        afterNameChange.confirmInput.value = "Science Lab";
+        const afterPermLoss = WorkspaceSettings.renderWorkspaceSettings(root, { ...base, name: "Science Lab", canClose: false });
+        const valueAfterPermissionLoss = afterPermLoss.confirmInput.value;
+
         WorkspaceSettings.renderWorkspaceSettings(root, { ...base, moreOpen: false });
         const moreAfterReset = more().open;
+        root.querySelector("[data-workspace-rename]").click();
+        const renameInput = root.querySelector("[data-workspace-rename-input]");
+        renameInput.value = "Science L";
+        renameInput.setSelectionRange(9, 9);
+        renameInput.dispatchEvent(new Event("input"));
+        WorkspaceSettings.renderWorkspaceSettings(root, {
+          ...base,
+          moveDestinations: [{ id: "org-2", name: "Yulan" }],
+          onMove: async () => {},
+        });
+        const renameAfterOrg = root.querySelector("[data-workspace-rename-input]");
+        const renameValueAfterOrgArrival = renameAfterOrg ? renameAfterOrg.value : "";
+        const renameFocusedAfterOrgArrival = document.activeElement === renameAfterOrg;
+        const renameSelectionAfterOrgArrival = renameAfterOrg
+          ? [renameAfterOrg.selectionStart, renameAfterOrg.selectionEnd]
+          : [null, null];
+
         more().querySelector("summary").click();
         WorkspaceSettings.renderWorkspaceSettings(root, {
           ...base,
@@ -83,6 +134,15 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
           moreAfterSameWorkspaceRedraw,
           moreAfterReset,
           moreAfterSwitch,
+          partialValueAfterOrgArrival,
+          partialDisabledAfterOrgArrival,
+          closeFocusedAfterOrgArrival,
+          closeSelectionAfterOrgArrival,
+          valueAfterNameChange,
+          valueAfterPermissionLoss,
+          renameValueAfterOrgArrival,
+          renameFocusedAfterOrgArrival,
+          renameSelectionAfterOrgArrival,
         };
         document.documentElement.dataset.fixture = encodeURIComponent(JSON.stringify(snapshot));
       }, 0);
@@ -105,7 +165,7 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
   }
 }
 
-test("the real settings renderer gates close on the exact workspace name and keeps More open across same-workspace redraws", async () => {
+test("the real settings renderer gates close on the exact workspace name and preserves More, partial entry, and focus across same-workspace redraws", async () => {
   const snapshot = await renderSettingsFixture();
   assert.equal(snapshot.initialDisabled, true);
   assert.equal(snapshot.partialDisabled, true);
@@ -115,4 +175,13 @@ test("the real settings renderer gates close on the exact workspace name and kee
   assert.equal(snapshot.moreAfterSameWorkspaceRedraw, true);
   assert.equal(snapshot.moreAfterReset, false);
   assert.equal(snapshot.moreAfterSwitch, false);
+  assert.equal(snapshot.partialValueAfterOrgArrival, "Science");
+  assert.equal(snapshot.partialDisabledAfterOrgArrival, true);
+  assert.equal(snapshot.closeFocusedAfterOrgArrival, true);
+  assert.deepEqual(snapshot.closeSelectionAfterOrgArrival, [3, 7]);
+  assert.equal(snapshot.valueAfterNameChange, "");
+  assert.equal(snapshot.valueAfterPermissionLoss, "");
+  assert.equal(snapshot.renameValueAfterOrgArrival, "Science L");
+  assert.equal(snapshot.renameFocusedAfterOrgArrival, true);
+  assert.deepEqual(snapshot.renameSelectionAfterOrgArrival, [9, 9]);
 });

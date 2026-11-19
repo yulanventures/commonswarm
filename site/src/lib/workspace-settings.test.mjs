@@ -304,3 +304,168 @@ test("redrawing the same workspace keeps More open; switching workspaces or reop
   renderWorkspaceSettings(root, { ...base, workspaceId: "ws-2", name: "Ops" });
   assert.notEqual(moreOf().open, true, "a different workspace starts with More closed");
 });
+
+function interactiveRoot() {
+  const doc = {
+    activeElement: null,
+    createElement(tag) {
+      const node = {
+        tag,
+        children: [],
+        dataset: {},
+        listeners: {},
+        value: "",
+        attributes: {},
+        selectionStart: null,
+        selectionEnd: null,
+        selectionDirection: null,
+        append(...nodes) { this.children.push(...nodes); },
+        replaceChildren(...nodes) { this.children = nodes; },
+        setAttribute(key, value) { this.attributes[key] = value; },
+        removeAttribute(key) { delete this.attributes[key]; },
+        addEventListener(key, value) { this.listeners[key] = value; },
+        focus() { doc.activeElement = node; },
+        select() { this.selectionStart = 0; this.selectionEnd = this.value.length; },
+        setSelectionRange(start, end, direction = null) {
+          this.selectionStart = start;
+          this.selectionEnd = end;
+          this.selectionDirection = direction;
+        },
+      };
+      return node;
+    },
+  };
+  const root = doc.createElement("div");
+  root.ownerDocument = doc;
+  const find = (key) => {
+    const visit = (node) => {
+      if (node.dataset && key in node.dataset) return node;
+      for (const child of node.children ?? []) {
+        const hit = visit(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return visit(root);
+  };
+  return { doc, root, find };
+}
+
+test("organization destinations arriving preserve partial close confirmation and focus only for the same workspace, name and permissions", () => {
+  const { doc, root, find } = interactiveRoot();
+  const base = {
+    name: "Science Swarm",
+    workspaceId: "ws-1",
+    memberCount: 2,
+    agentCount: 1,
+    canClose: true,
+    onCopy: async () => {},
+    onClose: async () => {},
+  };
+  const destinations = [{ id: "org-2", name: "Yulan" }];
+
+  let controls = renderWorkspaceSettings(root, { ...base, moreOpen: false });
+  find("workspaceMore").open = true;
+  controls.confirmInput.focus();
+  controls.confirmInput.value = "Science";
+  controls.confirmInput.setSelectionRange(4, 7, "forward");
+  controls.confirmInput.listeners.input();
+  assert.equal(controls.closeButton.disabled, true, "partial text never unlocks Close workspace");
+
+  // Organization destinations arrive for the same workspace, name and close permission.
+  controls = renderWorkspaceSettings(root, { ...base, moveDestinations: destinations, onMove: async () => {} });
+  assert.equal(find("workspaceMore").open, true);
+  assert.equal(controls.confirmInput.value, "Science", "partial confirmation survives org arrival");
+  assert.equal(controls.closeButton.disabled, true, "exact-name gate remains locked for partial text");
+  assert.equal(doc.activeElement, controls.confirmInput, "keyboard focus stays in the confirmation input");
+  assert.deepEqual(
+    [controls.confirmInput.selectionStart, controls.confirmInput.selectionEnd, controls.confirmInput.selectionDirection],
+    [4, 7, "forward"],
+  );
+
+  // Exact match stays unlocked across a same-context redraw, without stealing focus when the person moved away.
+  controls.confirmInput.value = "Science Swarm";
+  controls.confirmInput.listeners.input();
+  const otherControl = find("copyWorkspaceId");
+  otherControl.focus();
+  controls = renderWorkspaceSettings(root, { ...base, memberCount: 3, moveDestinations: destinations, onMove: async () => {} });
+  assert.equal(controls.confirmInput.value, "Science Swarm");
+  assert.equal(controls.closeButton.disabled, false, "exact name stays confirmed");
+  assert.notEqual(doc.activeElement, controls.confirmInput, "redraw does not steal focus when the input was not focused");
+
+  // Different name drops the old entry and relocks the gate.
+  controls.confirmInput.focus();
+  controls = renderWorkspaceSettings(root, { ...base, name: "Science Lab", moveDestinations: destinations, onMove: async () => {} });
+  assert.equal(controls.confirmInput.value, "");
+  assert.equal(controls.closeButton.disabled, true);
+  assert.notEqual(doc.activeElement, controls.confirmInput);
+
+  // Losing close permission drops the partial entry and keeps Close disabled.
+  controls.confirmInput.focus();
+  controls.confirmInput.value = "Science Lab";
+  controls.confirmInput.listeners.input();
+  controls = renderWorkspaceSettings(root, { ...base, name: "Science Lab", canClose: false });
+  assert.equal(controls.confirmInput.value, "");
+  assert.equal(controls.closeButton.disabled, true);
+  assert.notEqual(doc.activeElement, controls.confirmInput);
+
+  // Different workspace drops the partial entry.
+  controls = renderWorkspaceSettings(root, { ...base, moreOpen: false });
+  find("workspaceMore").open = true;
+  controls.confirmInput.focus();
+  controls.confirmInput.value = "Science";
+  controls = renderWorkspaceSettings(root, { ...base, workspaceId: "ws-2" });
+  assert.equal(controls.confirmInput.value, "");
+  assert.equal(controls.closeButton.disabled, true);
+  assert.notEqual(doc.activeElement, controls.confirmInput);
+
+  // Fresh open (moreOpen: false) drops any stale partial entry for the same workspace.
+  find("workspaceMore").open = true;
+  controls.confirmInput.focus();
+  controls.confirmInput.value = "Science";
+  controls = renderWorkspaceSettings(root, { ...base, workspaceId: "ws-2", moreOpen: false });
+  assert.equal(controls.confirmInput.value, "");
+  assert.equal(controls.closeButton.disabled, true);
+  assert.notEqual(doc.activeElement, controls.confirmInput);
+});
+
+test("organization destinations arriving preserve an in-progress rename and focus only for the same workspace, name and permissions", () => {
+  const { doc, root, find } = interactiveRoot();
+  const base = {
+    name: "Science Swarm",
+    workspaceId: "ws-1",
+    memberCount: 2,
+    agentCount: 1,
+    canClose: true,
+    canRename: true,
+    onRename: async () => {},
+    onCopy: async () => {},
+    onClose: async () => {},
+  };
+
+  renderWorkspaceSettings(root, { ...base, moreOpen: false });
+  find("workspaceRename").listeners.click();
+  const initialInput = find("workspaceRenameInput");
+  initialInput.value = "Science Lab";
+  initialInput.setSelectionRange(7, 7, "none");
+  initialInput.listeners.input();
+  assert.equal(doc.activeElement, initialInput);
+
+  // Org destinations arrive: partial rename, Save state, and focus/caret survive.
+  renderWorkspaceSettings(root, { ...base, moveDestinations: [{ id: "org-2", name: "Yulan" }], onMove: async () => {} });
+  const redrawnInput = find("workspaceRenameInput");
+  assert.ok(redrawnInput, "rename form stays open");
+  assert.equal(redrawnInput.value, "Science Lab");
+  assert.equal(doc.activeElement, redrawnInput);
+  assert.deepEqual([redrawnInput.selectionStart, redrawnInput.selectionEnd], [7, 7]);
+  const saveButton = find("workspaceRenameForm").children.find((node) => node.type === "submit");
+  assert.equal(saveButton.disabled, false);
+
+  // Once the workspace name actually changes (or rename permission is lost, or workspace switches), the form resets.
+  renderWorkspaceSettings(root, { ...base, name: "Science Lab" });
+  assert.equal(find("workspaceRenameInput"), null, "a new workspace name closes the rename form");
+  find("workspaceRename").listeners.click();
+  find("workspaceRenameInput").value = "Another";
+  renderWorkspaceSettings(root, { ...base, name: "Science Lab", canRename: false });
+  assert.equal(find("workspaceRenameInput"), null, "losing rename permission closes the rename form");
+});
