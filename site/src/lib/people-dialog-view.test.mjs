@@ -68,7 +68,7 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   const removed = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true });
   assert.deepEqual(removed.stops, ["Muse will lose access to this space. Its identity and every connection will end.", "This cannot be undone."]);
   assert.deepEqual(removed.stays, ["Its history stays as “Muse (removed)”.", "Its owner can connect a new agent with the same name."]);
-  assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "Muse stops when its current access ends.");
+  assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei" }).stays[0], "History stays. Their other spaces are unaffected.");
   assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
@@ -212,4 +212,17 @@ test('local workspace removal is scoped and only an owner can disconnect the reu
   assert.equal(peopleDialogCanAct(data,'remove-agent',data.agents[0].id),true);
   assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);
   data.agents[0].own=true;assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),true);
+});
+
+test("turn-off-key confirmation puts both consequences together first and follows with one quiet recovery line", () => {
+  const copy = peopleConfirmationCopy("turn-off-key", { name: "Sprout" });
+  assert.equal(copy.title, "Turn off Sprout’s key?");
+  assert.equal(copy.button, "Turn off key");
+  assert.deepEqual(copy.stops, [
+    "This key and its renewals stop immediately for new requests, in any workspace where it is used.",
+    "This key cannot be used again.",
+  ]);
+  assert.deepEqual(copy.stays, [
+    "Its identity and history stay here. Its owner can get a new key to bring it back.",
+  ]);
 });

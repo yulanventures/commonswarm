@@ -8086,7 +8086,7 @@ import "../../styles/kylon-image-viewer.css";
         resolve("asked");
       }));
     };
-    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string): Promise<void> => {
+    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
       const agent = agents.find((entry) => entry.principalId === id);
@@ -8104,7 +8104,13 @@ import "../../styles/kylon-image-viewer.css";
       let receipt = "";
       if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, questionId ?? uuid()); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
-      if (action === "turn-off-key" && grant && agent && homeConnectionTokenMatches(agent, grant)) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
+      if (action === "turn-off-key") {
+        if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !pinnedKey || grant.tokenId !== pinnedKey.tokenId || (grant.grantId ?? null) !== pinnedKey.grantId) {
+          throw new Error("This key has changed. Go back and check the details.");
+        }
+        await revokeAgentToken(session, questionId ?? uuid(), workspaceId, pinnedKey.tokenId);
+        receipt = `Key turned off. ${agent.name}’s key and its renewals stopped immediately for new requests.`;
+      }
       if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
         // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
@@ -8143,12 +8149,19 @@ import "../../styles/kylon-image-viewer.css";
       const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
       const workspaceId = activeWorkspaceId, userId = session?.user.id;
+      let pinnedKey: { tokenId: string; grantId: string | null } | undefined;
+      if (action === "turn-off-key") {
+        const agent = agents.find((entry) => entry.principalId === id);
+        const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
+        if (!agent || !grant || !homeConnectionTokenMatches(agent, grant) || !grant.tokenId) return;
+        pinnedKey = { tokenId: grant.tokenId, grantId: grant.grantId ?? null };
+      }
       // One command id per question: pressing again after a lost answer repeats the same command, which the server
-      // answers from its receipt instead of withdrawing a second time. A new question gets a new id.
+      // answers from its receipt instead of revoking or withdrawing a second time. A new question gets a new id.
       const questionId = uuid();
       showPeopleConfirmation(confirm, action, { ...item, workspaceName: model.workspaceName }, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
-        await peopleDialogAction(action, id, button, notice, questionId);
+        await peopleDialogAction(action, id, button, notice, questionId, pinnedKey);
       }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
         () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
     };
@@ -22626,6 +22639,7 @@ import "../../styles/kylon-image-viewer.css";
   .pd-confirm-facts li { position: relative; padding-inline-start: 21px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
   .pd-confirm-facts li::before { content: ""; position: absolute; inset-inline-start: 0; inset-block-start: 8px; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--danger); }
   .pd-confirm-facts li.keep::before { background: var(--success); }
+  .pd-confirm-note { margin: 14px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
   .pd-alternative { margin-block-start: 20px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--canvas); }
   .pd-alternative h3 { font-size: 13px; }
   .pd-alternative p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin-block-start: 6px; }
