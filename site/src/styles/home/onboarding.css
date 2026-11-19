@@ -769,6 +769,9 @@
   background: transparent;
 }
 
+.hm-ahp__button--text:not(:focus-visible),
+.hm-ahp__button--done:not(:focus-visible) { box-shadow: none; }
+
 :is(.hm-ahp__button--text):hover { color: var(--home-link-hover); background: transparent; }
 
 /* The blue completion pill (the canvas footer action): Done, once the agent has joined. */
@@ -952,6 +955,16 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+}
+
+.hm-ahp__optional-access:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  align-self: stretch;
+  padding-block-start: 16px;
+  border-block-start: 1px solid var(--home-hairline);
 }
 
 /* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the

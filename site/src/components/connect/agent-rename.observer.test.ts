@@ -145,10 +145,12 @@ function picker(extra?: (el: any) => any[]) {
   const { el } = dom;
   const title = el("h2", { ahpJoinedTitle: "" }, [el("span", { ahpJoinedName: "" }), el("span", { ahpJoinedRest: "" })]);
   const renameButton = el("button", { ahpRename: "" }); renameButton.hidden = true;
+  const approveWrap = el("div", { ahpApproveWrap: "" }, [el("button", { ahpApprove: "" }), el("p", { ahpApproveStatus: "" })]);
+  approveWrap.hidden = true;
   element.append(
     el("div", { ahpView: "form" }),
-    el("section", { ahpJoined: "" }, [title, el("div", { ahpRenameSlot: "" }), el("button", { ahpDone: "" }), el("button", { ahpApprove: "" }),
-      el("button", { ahpAnother: "" }), renameButton, el("p", { ahpApproveStatus: "" })]),
+    el("section", { ahpJoined: "" }, [title, el("div", { ahpRenameSlot: "" }), el("button", { ahpDone: "" }),
+      el("button", { ahpAnother: "" }), renameButton, approveWrap]),
     ...(extra?.(el) ?? []),
   );
   element.connectedCallback();
@@ -257,6 +259,26 @@ test("joined card: without a rename handler there is no Rename, and a late answe
   await p.answer({ ok: true });
   assert.equal(p.field(), null);
   assert.equal(p.name().textContent, "Claude", "the card moved on; the answer does not write into it");
+});
+
+test("joined card: optional Lists & docs access sits separate from Done and hides when ineligible or after reset", () => {
+  const joinedTemplate = PICKER.slice(PICKER.indexOf("data-ahp-joined"), PICKER.indexOf("</section>", PICKER.indexOf("data-ahp-joined")));
+  const actionsEnd = joinedTemplate.indexOf("</div>", joinedTemplate.indexOf('class="hm-ahp__actions"'));
+  const approveWrapIndex = joinedTemplate.indexOf("data-ahp-approve-wrap");
+  assert.ok(actionsEnd > 0 && approveWrapIndex > actionsEnd, "Allow Lists & docs lives in its own wrapper outside the Done action row");
+
+  const p = picker();
+  p.element.showJoined({ name: "River", principalId: "p1", canApprove: true, hosted: false });
+  assert.equal(p.q("[data-ahp-approve-wrap]").hidden, false, "eligible local agent shows the separate Lists & docs block");
+  assert.equal(p.q("[data-ahp-approve]").hidden, false);
+
+  p.element.showJoined({ name: "Orbit", principalId: "p2", canApprove: true, hosted: true });
+  assert.equal(p.q("[data-ahp-approve-wrap]").hidden, true, "ineligible hosted agent hides the Lists & docs block");
+  assert.equal(p.q("[data-ahp-approve]").hidden, true);
+
+  p.element.showJoined({ name: "River", principalId: "p1", canApprove: true, hosted: false });
+  p.element.reset();
+  assert.equal(p.q("[data-ahp-approve-wrap]").hidden, true, "reset clears the optional Lists & docs block");
 });
 
 /* ------------------------------------------------------------------------------------------------ */
