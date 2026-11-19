@@ -1615,10 +1615,12 @@ import "../../styles/kylon-image-viewer.css";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
   import { renderChannelMembershipRetryBar, renderChannelPreviewBar } from "../../lib/channel-preview-bar";
   import {
+    DM_ATTACHMENTS_REFUSAL_TEXT,
     GROUP_LEAVE_CONFIRM_BODY,
     canLeaveConversation,
     conversationTitle,
     sortDirectConversations,
+    trueDmSendRefusal,
     type ConversationMemberRef,
     type ConversationNotifyLevel,
     type ConversationSummary,
@@ -2238,6 +2240,7 @@ import "../../styles/kylon-image-viewer.css";
        everyone in the place; an @tag in it is a MENTION, which tells the people and agents it
        names. Only a Direct Message is addressed. */
     const composerIsPublic = (): boolean =>
+      !(typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) &&
       composerReach(typeof activeDm === "undefined" ? null : activeDm, composerIsReplying()) === "public";
     let mentionPickerIndex = 0;
     let composerIntent: {
@@ -4705,10 +4708,16 @@ import "../../styles/kylon-image-viewer.css";
     /* Where the message being written will be filed: the open channel, or the thread root's channel for a reply.
        Files upload when Send is pressed, before the message is posted, and workspace files are readable by every
        member, so a place that is not known to be open takes no files. */
-    const composerFilesRefusal = (): string => attachmentsRefusal(placementVisibility(channels, sendDestination({
-      activeChannelId, generalId: GENERAL_CHANNEL_ID,
-      ...(threadReplyRoot === null ? {} : { replyRootChannelId: threadReplyRoot.channelId }),
-    }).channelId));
+    const composerFilesRefusal = (): string => {
+      if ((typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
+        (typeof activeDm !== "undefined" && activeDm !== null)) {
+        return DM_ATTACHMENTS_REFUSAL_TEXT;
+      }
+      return attachmentsRefusal(placementVisibility(channels, sendDestination({
+        activeChannelId, generalId: GENERAL_CHANNEL_ID,
+        ...(threadReplyRoot === null ? {} : { replyRootChannelId: threadReplyRoot.channelId }),
+      }).channelId));
+    };
     /** The paperclip follows the place. Sending owns it while a send is in flight. */
     const syncComposerAttach = (): void => {
       const attach = one<HTMLButtonElement>("[data-composer-attach]");
@@ -6413,11 +6422,24 @@ import "../../styles/kylon-image-viewer.css";
       entity: EntityRef,
       /** The whole set the Direct Message opens addressed to; the teammate alone by default. */
       recipients: readonly ComposerRecipient[] = [{ kind: entity.kind, id: entity.id }],
+      /** Optional single-operation lifetime guard carried from Step 3C picker open -> navigate (C3). */
+      isAlive?: () => boolean,
     ): Promise<void> => {
       if (!activeWorkspaceId) return;
+      const pinnedWorkspaceId = activeWorkspaceId;
+      const pinnedUserId = session?.user.id ?? "";
+      const pinnedVersion = requestVersion;
+      if (isAlive && !isAlive()) return;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
       rememberPaletteVisit(`teammate:${entity.kind}:${entity.id}`);
-      if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+      if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: pinnedWorkspaceId }, "push");
+      if (
+        pinnedWorkspaceId !== activeWorkspaceId ||
+        (session?.user.id ?? "") !== pinnedUserId ||
+        pinnedVersion !== requestVersion ||
+        (isAlive && !isAlive())
+      ) return;
       /* A THREAD REPLY ENDS HERE. A reply left open would keep the composer posting into its
          thread, in public, under a Direct Message's header. Closing it also retires a retry
          that was promised to the thread. The body in the box stays. */
@@ -6453,7 +6475,8 @@ import "../../styles/kylon-image-viewer.css";
       const copy = one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__copy");
       copy?.querySelector("[data-channel-lead-pill]")?.remove();
       // The lead belongs to the channels. A direct message is between two parties and shows only who it is with.
-      if (!copy || homeRoute.view !== "chat" || sampleMode || (typeof activeDm !== "undefined" && activeDm)) return;
+      if (!copy || homeRoute.view !== "chat" || sampleMode || (typeof activeDm !== "undefined" && activeDm) ||
+        (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null)) return;
       const inNamedChannel = activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID;
       const named = inNamedChannel && unknownChannelId === null ? activeChannel() : null;
       // A channel not read yet, or not found: its lead is not known.
@@ -6864,6 +6887,7 @@ import "../../styles/kylon-image-viewer.css";
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -14023,6 +14047,7 @@ import "../../styles/kylon-image-viewer.css";
       const leaveDialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
       if (leaveDialog?.open) leaveDialog.close();
       conversationDialogsEpoch += 1;
+      openMembersSheetState = null;
       conversationDialogsBridge?.closeAll();
       one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
     };
@@ -14067,20 +14092,34 @@ import "../../styles/kylon-image-viewer.css";
       }));
       return { rows };
     };
-    /** Open a Step 2b DM or group DM row from the rail. */
-    const openDirectConversation = async (conversationId: string): Promise<void> => {
+    /** Open a Step 2b DM or group DM row from the rail or New message picker. */
+    const openDirectConversation = async (conversationId: string, isAlive?: () => boolean): Promise<void> => {
       const workspaceId = activeWorkspaceId;
+      const pinnedUserId = session?.user.id ?? "";
+      const pinnedVersion = requestVersion;
+      if (isAlive && !isAlive()) return;
       const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
       if (!conv || !workspaceId) return;
+      const stillAlive = (): boolean =>
+        workspaceId === activeWorkspaceId &&
+        (session?.user.id ?? "") === pinnedUserId &&
+        pinnedVersion === requestVersion &&
+        (!isAlive || isAlive());
       const viewerId = homeViewerId();
       const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
       if (conv.kind === "dm" && others.length === 1) {
         const other = others[0]!;
-        await openDirectMessage({ kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef);
-        if (workspaceId !== activeWorkspaceId) return;
+        await openDirectMessage(
+          { kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef,
+          [{ kind: other.kind === "agent" ? "agent" : "person", id: other.id }],
+          stillAlive,
+        );
+        if (!stillAlive()) return;
         activeDmConversationId = conversationId;
+        reconcileOpenMembersSheet();
         renderHomeRail();
         renderHomeShell();
+        renderChannelBlocked();
         return;
       }
       activeDm = null;
@@ -14090,13 +14129,14 @@ import "../../styles/kylon-image-viewer.css";
       unknownChannelId = null;
       if (homeRoute.view !== "chat") {
         await navigateHome({ view: "chat", workspaceId, dmId: conversationId }, "push");
-        if (workspaceId !== activeWorkspaceId) return;
+        if (!stillAlive()) return;
       } else {
         window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId, dmId: conversationId }));
       }
       activeDmConversationId = conversationId;
-      const recipients: ComposerRecipient[] = others.map(m => ({ kind: m.kind === "agent" ? "agent" : "person", id: m.id }));
-      syncComposerAddress(recipients);
+      /* Group DMs and Notes to self stay read-only until Step 3D posts by exact conversation_id (C1). */
+      syncComposerAddress([]);
+      reconcileOpenMembersSheet();
       renderFeed();
       renderHomeRail();
       renderHomeShell();
@@ -14242,15 +14282,20 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     type ConversationDialogsBridge = import("../../lib/conversation-dialogs").ConversationDialogsBridge;
+    type OpenMembersSnapshot = import("../../lib/conversation-dialogs").OpenMembersSnapshot;
     let conversationDialogsBridge: ConversationDialogsBridge | null = null;
     let conversationDialogsPromise: Promise<ConversationDialogsBridge> | null = null;
     let conversationDialogsEpoch = 0;
+    let openMembersSheetState: (OpenMembersSnapshot & { workspaceId: string; userId: string }) | null = null;
 
     const loadConversationDialogs = (): Promise<ConversationDialogsBridge> => {
       if (conversationDialogsBridge) return Promise.resolve(conversationDialogsBridge);
       conversationDialogsPromise ??= import("../../lib/conversation-dialogs").then((mod) => {
         conversationDialogsBridge = mod.createConversationDialogsBridge();
         return conversationDialogsBridge;
+      }, (error) => {
+        conversationDialogsPromise = null;
+        throw error;
       });
       return conversationDialogsPromise;
     };
@@ -14266,6 +14311,67 @@ import "../../styles/kylon-image-viewer.css";
       return conversationForChannel(activeChannelId);
     };
 
+    const ownedAgentIdsFor = (userId: string): Set<string> => {
+      const target = userId.toLowerCase();
+      const owned = new Set<string>();
+      for (const agent of agents) {
+        if (agent.ownerUserId && agent.ownerUserId.toLowerCase() === target) {
+          owned.add(agent.principalId.toLowerCase());
+        }
+      }
+      for (const [principalId, ownerId] of removedAgentOwners.entries()) {
+        if (ownerId && ownerId.toLowerCase() === target) {
+          owned.add(principalId.toLowerCase());
+        }
+      }
+      return owned;
+    };
+
+    const resolveChannelManageContext = (channelId: string | null, userId: string): import("../../lib/conversation-dialogs").ChannelManageContext => {
+      const matched = channelId ? channelById(channels, channelId) : null;
+      return {
+        channel: matched ? { createdByKind: matched.createdByKind, createdByPrincipal: matched.createdByPrincipal } : null,
+        viewerRole: viewerWorkspaceRole(),
+        ownedAgentIds: ownedAgentIdsFor(userId),
+      };
+    };
+
+    /** Close/invalidate an open Members sheet whenever route, access, archive, or management facts change (C2). */
+    const reconcileOpenMembersSheet = (): void => {
+      const snap = openMembersSheetState;
+      if (!snap) return;
+      const live = activeConversationSummary();
+      if (
+        !live ||
+        !session ||
+        snap.workspaceId !== activeWorkspaceId ||
+        snap.userId !== session.user.id ||
+        live.conversationId !== snap.conversationId ||
+        live.archivedAt !== snap.archivedAt ||
+        live.joined !== snap.joined
+      ) {
+        openMembersSheetState = null;
+        conversationDialogsEpoch += 1;
+        conversationDialogsBridge?.closeMembers(false);
+        return;
+      }
+      if (conversationDialogsBridge) {
+        const manageCtx = resolveChannelManageContext(live.channelId, snap.userId);
+        const viewerRow = live.members.find(m => !m.leftAt && m.kind === "user" && m.id.toLowerCase() === snap.userId.toLowerCase());
+        const perms = conversationDialogsBridge.computePermissions({
+          conv: live,
+          viewerUserId: snap.userId,
+          manageContext: manageCtx,
+          isPromotedPrivateManager: viewerRow?.isManager === true,
+        });
+        if (perms.canAdd !== snap.canAdd || perms.canRemove !== snap.canRemove) {
+          openMembersSheetState = null;
+          conversationDialogsEpoch += 1;
+          conversationDialogsBridge.closeMembers(false);
+        }
+      }
+    };
+
     /** Open the lazy-loaded Step 3C New message / DM / Group DM picker dialog. */
     const openNewMessagePicker = async (opener: HTMLElement | null = null): Promise<void> => {
       const dialog = one<HTMLDialogElement>("[data-conversation-picker-dialog]");
@@ -14277,7 +14383,13 @@ import "../../styles/kylon-image-viewer.css";
       }
       const workspaceId = activeWorkspaceId;
       const pinnedUserId = session.user.id;
+      const pinnedVersion = requestVersion;
       const epoch = ++conversationDialogsEpoch;
+      const isHostAlive = (): boolean =>
+        epoch === conversationDialogsEpoch &&
+        workspaceId === activeWorkspaceId &&
+        session?.user.id === pinnedUserId &&
+        pinnedVersion === requestVersion;
       const back = channelFocusReturn(opener);
       if (back.drawer) layout.closeNavigation(false);
       let bridge: ConversationDialogsBridge;
@@ -14286,7 +14398,7 @@ import "../../styles/kylon-image-viewer.css";
       } catch {
         return;
       }
-      if (epoch !== conversationDialogsEpoch || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+      if (!isHostAlive()) return;
       bridge.openNewMessage({
         dialog,
         workspaceId,
@@ -14294,14 +14406,14 @@ import "../../styles/kylon-image-viewer.css";
         roster: { viewerUserId: pinnedUserId, members, people, agents },
         lookupName: lookupConversationMemberName,
         getSession: () => session,
-        isCurrent: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId,
+        isHostAlive,
         uuid,
-        onOpened: (summary) => {
-          if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+        onOpened: (summary, isAlive) => {
+          if (!isAlive()) return;
           if (workspaceConversations && !workspaceConversations.some(c => c.conversationId === summary.conversationId)) {
             workspaceConversations = [summary, ...workspaceConversations];
           }
-          void openDirectConversation(summary.conversationId);
+          void openDirectConversation(summary.conversationId, isAlive);
           void refreshConversations(workspaceId, true);
         },
         restoreFocus: () => { if (!restoreChannelFocus(back)) focusConversationHeading(); },
@@ -14311,12 +14423,18 @@ import "../../styles/kylon-image-viewer.css";
     /** Open the lazy-loaded Step 3C Channel / Conversation Members & Invite sheet. */
     const openConversationMembersSheet = async (opener: HTMLElement | null = null): Promise<void> => {
       const dialog = one<HTMLDialogElement>("[data-conversation-members-dialog]");
-      const conv = activeConversationSummary();
-      if (!dialog || !conv || sampleMode || !session || !activeWorkspaceId) return;
+      const initialConv = activeConversationSummary();
+      if (!dialog || !initialConv || sampleMode || !session || !activeWorkspaceId) return;
       const workspaceId = activeWorkspaceId;
       const pinnedUserId = session.user.id;
-      const convId = conv.conversationId;
+      const pinnedVersion = requestVersion;
+      const requestedConvId = initialConv.conversationId;
       const epoch = ++conversationDialogsEpoch;
+      const isHostAlive = (): boolean =>
+        epoch === conversationDialogsEpoch &&
+        workspaceId === activeWorkspaceId &&
+        session?.user.id === pinnedUserId &&
+        pinnedVersion === requestVersion;
       const back = channelFocusReturn(opener);
       if (back.drawer) layout.closeNavigation(false);
       let bridge: ConversationDialogsBridge;
@@ -14325,24 +14443,39 @@ import "../../styles/kylon-image-viewer.css";
       } catch {
         return;
       }
-      if (epoch !== conversationDialogsEpoch || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
-      const matchedChannel = conv.channelId ? channelById(channels, conv.channelId) : null;
-      bridge.openMembers({
+      if (!isHostAlive()) return;
+      await bridge.openMembers({
         dialog,
         workspaceId,
         pinnedUserId,
-        conv,
-        viewerCanManage: matchedChannel ? viewerMayManageChannel(matchedChannel) : false,
+        requestedConvId,
+        resolveActiveConversation: activeConversationSummary,
+        resolveManageContext: (chId) => resolveChannelManageContext(chId, pinnedUserId),
         roster: { viewerUserId: pinnedUserId, members, people, agents },
         lookupName: lookupConversationMemberName,
         getSession: () => session,
-        isCurrent: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId,
+        isHostAlive,
         uuid,
-        onChanged: (nextMembers) => {
+        onFreshConversations: (rows) => {
           if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+          workspaceConversations = rows;
+          renderHomeRail();
+          renderHomeShell();
+          renderChannelBlocked();
+        },
+        onOpenedSnapshot: (snapshot) => {
+          openMembersSheetState = { ...snapshot, workspaceId, userId: pinnedUserId };
+        },
+        onClosed: () => {
+          if (openMembersSheetState?.conversationId === requestedConvId) {
+            openMembersSheetState = null;
+          }
+        },
+        onChanged: (nextMembers) => {
+          if (!isHostAlive()) return;
           if (workspaceConversations) {
             workspaceConversations = workspaceConversations.map(c =>
-              c.conversationId === convId
+              c.conversationId === requestedConvId
                 ? { ...c, members: nextMembers.map(m => ({ kind: m.kind, id: m.id, name: m.name, leftAt: null })) }
                 : c,
             );
@@ -14765,7 +14898,10 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       const composer = one<HTMLFormElement>("[data-composer]");
-      const blocked = archived || membershipFailed || membershipPending || unjoined !== null;
+      const dmReadOnly = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null &&
+        !(typeof activeDm !== "undefined" && activeDm);
+      const blocked = archived || membershipFailed || membershipPending || unjoined !== null || dmReadOnly;
       if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") {
         composer.hidden = blocked || unknownChannelId !== null;
       }
@@ -14773,6 +14909,7 @@ import "../../styles/kylon-image-viewer.css";
         composer.hidden = true;
         closeMentionPicker();
       }
+      if (typeof syncComposerAttach === "function") syncComposerAttach();
     };
 
     const renderChannelRail = (): void => {
@@ -14873,6 +15010,7 @@ import "../../styles/kylon-image-viewer.css";
       activeChannelId = next;
       unknownChannelId = null;
       disarmChannelArchive();
+      reconcileOpenMembersSheet();
       /* An unfinished send is addressed to the channel it was started in, and the composer is
          about to promise this one. Replaying the old address from a box that says
          "Message #ops" is the contradiction; the intent is retired here instead, so a send
@@ -15387,6 +15525,7 @@ import "../../styles/kylon-image-viewer.css";
       workspaceConversations = rows;
       conversationsReadState = "ready";
       conversationsReadError = "";
+      reconcileOpenMembersSheet();
       if (render) {
         renderHomeRail();
         renderHomeShell();
@@ -15466,6 +15605,7 @@ import "../../styles/kylon-image-viewer.css";
       /* A channel archived while it is open STAYS open: its messages still read, the composer
          gives way to the Archived state, and its row is revealed under Archived channels. */
       if (activeChannelArchived()) railArchivedOpen = true;
+      reconcileOpenMembersSheet();
       renderChannelRail();
       renderChannelHead();
       renderHomeShell();
@@ -17053,6 +17193,19 @@ import "../../styles/kylon-image-viewer.css";
         );
         return;
       }
+      /* Fail-closed submit guard for true DMs (Step 3C C1): group DMs and Notes to self stay
+         read-only until Step 3D posts by conversation_id, stale/unavailable true DMs refuse
+         immediately, and workspace-readable attachments are refused on every DM before upload. */
+      const dmSendProblem = sampleMode ? null : trueDmSendRefusal({
+        activeDmConversationId: typeof activeDmConversationId === "undefined" ? null : activeDmConversationId,
+        activeDm: typeof activeDm === "undefined" ? null : activeDm,
+        workspaceConversations,
+        hasAttachments: stagedAttachments.length > 0,
+      });
+      if (dmSendProblem !== null) {
+        setComposerStatus(dmSendProblem, "error");
+        return;
+      }
       /* A TAG TYPED IN THE LAST 150ms IS STILL A RECIPIENT. The tag-to-chip pass is
          debounced, so a reader who types "@Wren" and presses Enter at once would otherwise
          send to a set that had not caught up. Run it now, then read the set. */
@@ -17365,6 +17518,10 @@ import "../../styles/kylon-image-viewer.css";
             }))
           : [];
         if (!sampleMode) {
+          if (attachmentSnapshot.length > 0 && ((typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
+            (typeof activeDm !== "undefined" && activeDm !== null))) {
+            throw new AttachmentsRefused(DM_ATTACHMENTS_REFUSAL_TEXT);
+          }
           /* THE LIST IS NOT PERMISSION TO UPLOAD. It can be stale: the channel may have been made private from
              another client since this page last read it. The destination's visibility is read again here, for
              this send's own pinned placement, and nothing is uploaded unless that read says open. A refusal
@@ -17911,6 +18068,7 @@ import "../../styles/kylon-image-viewer.css";
       channels = [...channels.filter(row => row.channelId !== channel.channelId), channel];
       channelsLoaded = true;
       if (activeChannelArchived()) railArchivedOpen = true;
+      reconcileOpenMembersSheet();
       renderChannelRail(); renderChannelHead(); renderHomeShell(); renderChannelDirectoryDialog();
       void refreshChannels(workspaceId, version, true).catch(() => {});
     };

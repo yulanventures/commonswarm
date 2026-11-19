@@ -279,3 +279,55 @@ test("New message picker enforces single-flight busy state and blocks Escape can
   assert.equal(submit.disabled, false);
   assert.equal(dialog.querySelector("[data-conversation-picker-error]").textContent, "Temporary error.");
 });
+
+test("New message picker disambiguates duplicate names, reuses commandId across transient retries, and retires lifetime on close", async () => {
+  const { dialog } = makeDialogHarness();
+  const ctrl = createConversationPickerController(dialog);
+  let seq = 0;
+  const seenCmdIds = [];
+  let retired = 0;
+  const dupA = "aaaa1111-1111-4111-8111-111111111111";
+  const dupB = "bbbb2222-2222-4222-8222-222222222222";
+
+  ctrl.open({
+    viewerUserId: VIEWER_ID,
+    candidates: [
+      { kind: "user", id: dupA, name: "Alex" },
+      { kind: "user", id: dupB, name: "Alex" },
+    ],
+    newCommandId: () => `cmd-${++seq}`,
+    onOpen: async (_members, _newGroup, commandId) => {
+      seenCmdIds.push(commandId);
+      return { ok: false, code: "other", message: "Lost receipt.", canStartNewGroup: false };
+    },
+    onOpened: () => {},
+    onRetire: () => { retired += 1; },
+  });
+
+  const optA = dialog.querySelector(`[data-conversation-picker-option="user:${dupA}"]`);
+  const optB = dialog.querySelector(`[data-conversation-picker-option="user:${dupB}"]`);
+  assert.equal(optA.children[0].textContent, "Alex · aaaa11");
+  assert.equal(optB.children[0].textContent, "Alex · bbbb22");
+
+  // Retry unchanged selection after transient failure reuses the same commandId.
+  optA.click();
+  const submit = dialog.querySelector("[data-conversation-picker-submit]");
+  submit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  submit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(seenCmdIds, ["cmd-1", "cmd-1"]);
+
+  // Editing selection mints a fresh commandId.
+  optB.click();
+  submit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(seenCmdIds, ["cmd-1", "cmd-1", "cmd-2"]);
+
+  // Explicit reset close(false) retires the operation lifetime.
+  ctrl.close(false);
+  assert.equal(retired, 1);
+});

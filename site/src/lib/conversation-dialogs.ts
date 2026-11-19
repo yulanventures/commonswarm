@@ -1,18 +1,29 @@
 /**
  * Lazy-loaded Step 3C dialog bridge (New message picker + Channel/DM Members & Invite sheet).
- * Imported on demand by LiveDashboard so neither the dialog controllers nor their 5 command
+ * Imported on demand by LiveDashboard so neither the dialog controllers nor their command
  * wrappers add to /app's initial JS bundle.
+ *
+ * Enforces HezSec Step 3C invariants:
+ * - C2: Re-resolves active conversation after lazy load / manager check, runs a fresh
+ *   authoritative read (access, joined, archive, manager) before every Add/Remove dispatch,
+ *   admits promoted private-channel managers and creator-agent owners, and invalidates stale
+ *   open sheets on route/list/role change.
+ * - C3: Carries one operation lifetime across lazy load, submit, 401 auth retry, and final
+ *   navigation, retiring it on close, replacement, or workspace/account reset, and preserves
+ *   commandId across unchanged retries of an open action.
  */
 import type { Session } from "@supabase/supabase-js";
-import { channelLabel, GENERAL_CHANNEL_SLUG } from "./channels.js";
+import { channelLabel, GENERAL_CHANNEL_SLUG, type WorkspaceRole } from "./channels.js";
 import {
   addChannelMembers,
   inviteToConversation,
+  isPromotedPrivateChannelManager,
+  listConversations,
   openConversation,
   removeChannelMember,
   removeFromConversation,
 } from "./commonswarm.js";
-import type { ConversationMemberRef, ConversationSummary, OpenedConversation } from "./conversations.js";
+import type { ConversationMemberRef, ConversationSummary } from "./conversations.js";
 import {
   createConversationPickerController,
   type ConversationCandidate,
@@ -21,7 +32,9 @@ import {
 import {
   channelMembersPermissions,
   createChannelMembersDialogController,
+  viewerCanManageConversationChannel,
   type ChannelMembersDialogController,
+  type ChannelMembersPermissions,
   type ConversationMemberEntry,
 } from "./channel-members-dialog.js";
 
@@ -29,7 +42,22 @@ export interface DialogWorkspaceRoster {
   viewerUserId: string;
   members: readonly { userId: string; displayName: string }[];
   people: ReadonlyMap<string, string>;
-  agents: readonly { principalId: string; name: string }[];
+  agents: readonly { principalId: string; name: string; ownerUserId?: string | null }[];
+}
+
+export interface ChannelManageContext {
+  channel: { createdByKind: "user" | "agent"; createdByPrincipal: string } | null;
+  viewerRole: WorkspaceRole | null;
+  ownedAgentIds: ReadonlySet<string>;
+}
+
+export interface OpenMembersSnapshot {
+  conversationId: string;
+  channelId: string | null;
+  archivedAt: string | null;
+  joined: boolean;
+  canAdd: boolean;
+  canRemove: boolean;
 }
 
 export function buildConversationCandidates(roster: DialogWorkspaceRoster): ConversationCandidate[] {
@@ -64,6 +92,19 @@ export function buildConversationCandidates(roster: DialogWorkspaceRoster): Conv
   return [...users, ...liveAgents];
 }
 
+export interface OperationLifetime {
+  isAlive: () => boolean;
+  retire: () => void;
+}
+
+export function createOperationLifetime(isHostAlive: () => boolean): OperationLifetime {
+  let retired = false;
+  return {
+    isAlive: () => !retired && isHostAlive(),
+    retire: () => { retired = true; },
+  };
+}
+
 export interface ConversationDialogsBridge {
   openNewMessage: (args: {
     dialog: HTMLDialogElement;
@@ -72,25 +113,36 @@ export interface ConversationDialogsBridge {
     roster: DialogWorkspaceRoster;
     lookupName: (ref: ConversationMemberRef) => string | null;
     getSession: () => Session | null;
-    isCurrent: () => boolean;
+    isHostAlive: () => boolean;
     uuid: () => string;
-    onOpened: (summary: ConversationSummary) => void;
+    onOpened: (summary: ConversationSummary, isAlive: () => boolean) => void;
     restoreFocus: () => void;
   }) => void;
   openMembers: (args: {
     dialog: HTMLDialogElement;
     workspaceId: string;
     pinnedUserId: string;
-    conv: ConversationSummary;
-    viewerCanManage: boolean;
+    requestedConvId: string;
+    resolveActiveConversation: () => ConversationSummary | null;
+    resolveManageContext: (channelId: string | null) => ChannelManageContext;
     roster: DialogWorkspaceRoster;
     lookupName: (ref: ConversationMemberRef) => string | null;
     getSession: () => Session | null;
-    isCurrent: () => boolean;
+    isHostAlive: () => boolean;
     uuid: () => string;
+    onFreshConversations: (rows: ConversationSummary[]) => void;
+    onOpenedSnapshot: (snapshot: OpenMembersSnapshot) => void;
+    onClosed: () => void;
     onChanged: (nextMembers: ConversationMemberEntry[]) => void;
     restoreFocus: () => void;
-  }) => void;
+  }) => Promise<void>;
+  computePermissions: (args: {
+    conv: ConversationSummary;
+    viewerUserId: string;
+    manageContext: ChannelManageContext;
+    isPromotedPrivateManager?: boolean;
+  }) => ChannelMembersPermissions;
+  closeMembers: (restoreFocus?: boolean) => void;
   closeAll: () => void;
 }
 
@@ -98,20 +150,44 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
   let pickerCtrl: ConversationPickerController | null = null;
   let membersCtrl: ChannelMembersDialogController | null = null;
 
+  const computePermissions: ConversationDialogsBridge["computePermissions"] = ({
+    conv,
+    viewerUserId,
+    manageContext,
+    isPromotedPrivateManager,
+  }) => {
+    const canManage = viewerCanManageConversationChannel({
+      channel: manageContext.channel,
+      conv,
+      viewerUserId,
+      viewerRole: manageContext.viewerRole,
+      ownedAgentIds: manageContext.ownedAgentIds,
+      isPromotedPrivateManager,
+    });
+    return channelMembersPermissions(conv, canManage);
+  };
+
   return {
+    computePermissions,
     openNewMessage(args) {
+      const lifetime = createOperationLifetime(args.isHostAlive);
+      if (!lifetime.isAlive()) return;
       pickerCtrl ??= createConversationPickerController(args.dialog);
       pickerCtrl.open({
         viewerUserId: args.pinnedUserId,
         candidates: buildConversationCandidates(args.roster),
-        onOpen: async (picked, newGroup) => {
+        newCommandId: args.uuid,
+        onOpen: async (picked, newGroup, commandId) => {
           const session = args.getSession();
-          if (!session || !args.isCurrent()) {
-            return { ok: false, code: "other", message: "Sign in to start a conversation.", canStartNewGroup: false };
+          if (!session || !lifetime.isAlive()) {
+            return { ok: false, code: "other", message: "Action cancelled.", canStartNewGroup: false };
           }
-          return await openConversation(session, args.uuid(), args.workspaceId, picked, newGroup);
+          return await openConversation(session, commandId, args.workspaceId, picked, newGroup, {
+            isAlive: lifetime.isAlive,
+          });
         },
         onOpened: (opened) => {
+          if (!lifetime.isAlive()) return;
           args.onOpened({
             conversationId: opened.conversationId,
             kind: opened.kind,
@@ -134,16 +210,52 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
             mentionCount: 0,
             lastMessageAt: new Date().toISOString(),
             lastMessageId: null,
-          });
+          }, lifetime.isAlive);
         },
+        onRetire: lifetime.retire,
         restoreFocus: args.restoreFocus,
       });
     },
-    openMembers(args) {
-      const { conv, workspaceId, pinnedUserId } = args;
-      const permissions = channelMembersPermissions(conv, args.viewerCanManage);
+    async openMembers(args) {
+      const lifetime = createOperationLifetime(args.isHostAlive);
+      if (!lifetime.isAlive()) return;
+      const resolvedInitial = args.resolveActiveConversation();
+      if (!resolvedInitial || resolvedInitial.conversationId !== args.requestedConvId) return;
+
+      const manageCtxInitial = args.resolveManageContext(resolvedInitial.channelId);
+      let promotedManager = false;
+      if (resolvedInitial.kind === "private_channel" && resolvedInitial.channelId) {
+        const alreadyManager = viewerCanManageConversationChannel({
+          channel: manageCtxInitial.channel,
+          conv: resolvedInitial,
+          viewerUserId: args.pinnedUserId,
+          viewerRole: manageCtxInitial.viewerRole,
+          ownedAgentIds: manageCtxInitial.ownedAgentIds,
+        });
+        if (!alreadyManager) {
+          promotedManager = await isPromotedPrivateChannelManager(
+            args.workspaceId,
+            resolvedInitial.channelId,
+            args.pinnedUserId,
+          );
+          if (!lifetime.isAlive()) return;
+        }
+      }
+
+      // Re-resolve active conversation after any await (C2).
+      const conv = args.resolveActiveConversation();
+      if (!conv || conv.conversationId !== args.requestedConvId) return;
+      const manageCtx = args.resolveManageContext(conv.channelId);
+      const permissions = computePermissions({
+        conv,
+        viewerUserId: args.pinnedUserId,
+        manageContext: manageCtx,
+        isPromotedPrivateManager: promotedManager,
+      });
+      const convId = conv.conversationId;
+      const channelId = conv.channelId;
       const candidates = buildConversationCandidates(args.roster);
-      const viewerIdLower = pinnedUserId.toLowerCase();
+      const viewerIdLower = args.pinnedUserId.toLowerCase();
       const liveMembers = conv.members.filter((m) => !m.leftAt);
       const initialMembers: ConversationMemberEntry[] =
         conv.kind === "general" && liveMembers.length === 0
@@ -157,40 +269,128 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
       const sheetTitle = conv.kind === "dm" || conv.kind === "group_dm"
         ? "Members"
         : `${channelLabel(conv.slug ?? GENERAL_CHANNEL_SLUG)} members`;
+
+      // Fresh authoritative pre-dispatch gate (C2): checks live access, joined, archive, and role.
+      const revalidateForMutation = async (
+        action: "add" | "remove",
+      ): Promise<{ ok: true; freshConv: ConversationSummary; perms: ChannelMembersPermissions } | { ok: false; message: string }> => {
+        if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
+        let freshRows: ConversationSummary[];
+        try {
+          freshRows = await listConversations(args.workspaceId, true);
+        } catch {
+          return { ok: false, message: "Couldn't verify channel access. Try again." };
+        }
+        if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
+        args.onFreshConversations(freshRows);
+        const freshConv = freshRows.find((c) => c.conversationId === convId) ?? null;
+        if (!freshConv || !freshConv.joined || freshConv.archivedAt !== null) {
+          membersCtrl?.close(false);
+          return {
+            ok: false,
+            message: freshConv?.archivedAt
+              ? "That channel is archived, so its members can't be changed."
+              : "This channel isn't available anymore.",
+          };
+        }
+        const freshManageCtx = args.resolveManageContext(freshConv.channelId);
+        let freshPromoted = false;
+        if (freshConv.kind === "private_channel" && freshConv.channelId) {
+          const already = viewerCanManageConversationChannel({
+            channel: freshManageCtx.channel,
+            conv: freshConv,
+            viewerUserId: args.pinnedUserId,
+            viewerRole: freshManageCtx.viewerRole,
+            ownedAgentIds: freshManageCtx.ownedAgentIds,
+          });
+          if (!already) {
+            freshPromoted = await isPromotedPrivateChannelManager(
+              args.workspaceId,
+              freshConv.channelId,
+              args.pinnedUserId,
+            );
+            if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
+          }
+        }
+        const freshPerms = computePermissions({
+          conv: freshConv,
+          viewerUserId: args.pinnedUserId,
+          manageContext: freshManageCtx,
+          isPromotedPrivateManager: freshPromoted,
+        });
+        const allowed = action === "add" ? freshPerms.canAdd : freshPerms.canRemove;
+        if (!allowed) {
+          membersCtrl?.close(false);
+          return { ok: false, message: "You can no longer change members in this channel." };
+        }
+        return { ok: true, freshConv, perms: freshPerms };
+      };
+
       membersCtrl ??= createChannelMembersDialogController(args.dialog);
+      args.onOpenedSnapshot({
+        conversationId: convId,
+        channelId,
+        archivedAt: conv.archivedAt,
+        joined: conv.joined,
+        canAdd: permissions.canAdd,
+        canRemove: permissions.canRemove,
+      });
       membersCtrl.open({
         title: sheetTitle,
-        viewerUserId: pinnedUserId,
+        viewerUserId: args.pinnedUserId,
         permissions,
         members: initialMembers,
         candidates,
+        newCommandId: args.uuid,
         onAdd: permissions.canAdd
-          ? async (added) => {
+          ? async (added, commandId) => {
+            const gate = await revalidateForMutation("add");
+            if (!gate.ok) return { ok: false, code: "forbidden", message: gate.message };
             const session = args.getSession();
-            if (!session || !args.isCurrent()) {
-              return { ok: false, code: "other", message: "Sign in to add members." };
+            if (!session || !lifetime.isAlive()) {
+              return { ok: false, code: "other", message: "Action cancelled." };
             }
-            if (permissions.route === "private_channel" && conv.channelId) {
-              return await addChannelMembers(session, args.uuid(), workspaceId, conv.channelId, added);
+            if (gate.perms.route === "private_channel" && gate.freshConv.channelId) {
+              return await addChannelMembers(session, commandId, args.workspaceId, gate.freshConv.channelId, added, {
+                isAlive: lifetime.isAlive,
+              });
             }
-            return await inviteToConversation(session, args.uuid(), workspaceId, conv.conversationId, added);
+            return await inviteToConversation(session, commandId, args.workspaceId, convId, added, {
+              isAlive: lifetime.isAlive,
+            });
           }
           : undefined,
         onRemove: permissions.canRemove
-          ? async (removed) => {
+          ? async (removed, commandId) => {
+            const gate = await revalidateForMutation("remove");
+            if (!gate.ok) return { ok: false, code: "forbidden", message: gate.message };
             const session = args.getSession();
-            if (!session || !args.isCurrent()) {
-              return { ok: false, code: "other", message: "Sign in to remove members." };
+            if (!session || !lifetime.isAlive()) {
+              return { ok: false, code: "other", message: "Action cancelled." };
             }
-            if (permissions.route === "private_channel" && conv.channelId) {
-              return await removeChannelMember(session, args.uuid(), workspaceId, conv.channelId, removed);
+            if (gate.perms.route === "private_channel" && gate.freshConv.channelId) {
+              return await removeChannelMember(session, commandId, args.workspaceId, gate.freshConv.channelId, removed, {
+                isAlive: lifetime.isAlive,
+              });
             }
-            return await removeFromConversation(session, args.uuid(), workspaceId, conv.conversationId, removed);
+            return await removeFromConversation(session, commandId, args.workspaceId, convId, removed, {
+              isAlive: lifetime.isAlive,
+            });
           }
           : undefined,
-        onChanged: args.onChanged,
+        onChanged: (nextMembers) => {
+          if (!lifetime.isAlive()) return;
+          args.onChanged(nextMembers);
+        },
+        onRetire: () => {
+          lifetime.retire();
+          args.onClosed();
+        },
         restoreFocus: args.restoreFocus,
       });
+    },
+    closeMembers(restoreFocus = false) {
+      membersCtrl?.close(restoreFocus);
     },
     closeAll() {
       pickerCtrl?.close(false);

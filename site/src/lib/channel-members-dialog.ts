@@ -8,10 +8,12 @@
 import {
   canInviteToConversation,
   CONVERSATION_INVITE_MAX,
+  disambiguateMemberLabels,
   type ConversationActionResult,
   type ConversationMemberRef,
   type ConversationSummary,
 } from "./conversations.js";
+import type { WorkspaceRole } from "./channels.js";
 import { memberRefKey, type ConversationCandidate } from "./conversation-picker.js";
 
 export interface ConversationMemberEntry {
@@ -25,6 +27,37 @@ export interface ChannelMembersPermissions {
   canAdd: boolean;
   canRemove: boolean;
   route: "conversation" | "private_channel" | "readonly";
+}
+
+/**
+ * Mirrors server `canManageChannel` (`supabase/functions/command/index.ts:11067-11112`):
+ * admits workspace owners/admins, human creators, owners of the creator agent, and promoted
+ * private-channel managers (`channel_members.is_manager = true`).
+ */
+export function viewerCanManageConversationChannel(args: {
+  channel: { createdByKind: "user" | "agent"; createdByPrincipal: string } | null;
+  conv: Pick<ConversationSummary, "kind" | "members">;
+  viewerUserId: string | null;
+  viewerRole: WorkspaceRole | null;
+  ownedAgentIds?: ReadonlySet<string>;
+  isPromotedPrivateManager?: boolean;
+}): boolean {
+  const { channel, conv, viewerUserId, viewerRole, ownedAgentIds, isPromotedPrivateManager } = args;
+  if (!viewerUserId) return false;
+  if (viewerRole === "owner" || viewerRole === "admin") return true;
+  const viewerId = viewerUserId.toLowerCase();
+  if (channel) {
+    const creatorId = channel.createdByPrincipal.toLowerCase();
+    if (channel.createdByKind === "user" && creatorId === viewerId) return true;
+    if (channel.createdByKind === "agent" && ownedAgentIds?.has(creatorId)) return true;
+  }
+  if (conv.kind === "private_channel") {
+    if (isPromotedPrivateManager === true) return true;
+    if (conv.members.some((m) => !m.leftAt && m.kind === "user" && m.id.toLowerCase() === viewerId && m.isManager === true)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -77,9 +110,11 @@ export interface ChannelMembersDialogOptions {
   permissions: ChannelMembersPermissions;
   members: readonly ConversationMemberEntry[];
   candidates: readonly ConversationCandidate[];
-  onAdd?: (members: ConversationMemberRef[]) => Promise<ConversationActionResult>;
-  onRemove?: (member: ConversationMemberRef) => Promise<ConversationActionResult>;
+  newCommandId?: () => string;
+  onAdd?: (members: ConversationMemberRef[], commandId: string) => Promise<ConversationActionResult>;
+  onRemove?: (member: ConversationMemberRef, commandId: string) => Promise<ConversationActionResult>;
   onChanged?: (nextMembers: ConversationMemberEntry[]) => void;
+  onRetire?: () => void;
   restoreFocus?: () => void;
 }
 
@@ -100,6 +135,21 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
   let errorText = "";
   let generation = 0;
   let suppressRestoreOnClose = false;
+  let pendingAddKey = "";
+  let pendingAddCommandId = "";
+  let pendingRemoveKey = "";
+  let pendingRemoveCommandId = "";
+  let displayLabels = new Map<string, string>();
+  const clearPendingAdd = (): void => { pendingAddKey = ""; pendingAddCommandId = ""; };
+  const clearPendingRemove = (): void => { pendingRemoveKey = ""; pendingRemoveCommandId = ""; };
+  const refreshDisplayLabels = (): void => {
+    const byKey = new Map<string, { kind: "user" | "agent"; id: string; name: string }>();
+    for (const c of activeOptions?.candidates ?? []) byKey.set(memberRefKey(c), c);
+    for (const m of members) if (!byKey.has(memberRefKey(m))) byKey.set(memberRefKey(m), m);
+    displayLabels = disambiguateMemberLabels([...byKey.values()]);
+  };
+  const labelFor = (entry: { kind: "user" | "agent"; id: string; name: string }): string =>
+    displayLabels.get(memberRefKey(entry)) ?? entry.name;
 
   const head = doc.createElement("header");
   head.className = "cm-dialog-head";
@@ -221,7 +271,8 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
 
       const name = doc.createElement("span");
       name.className = "cm-picker-row__name";
-      name.textContent = candidate.self ? `${candidate.name} (you)` : candidate.name;
+      const displayName = labelFor(candidate);
+      name.textContent = candidate.self ? `${displayName} (you)` : displayName;
       button.append(name);
 
       if (candidate.kind === "agent") {
@@ -247,6 +298,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
           return;
         }
         errorText = "";
+        clearPendingAdd();
         render();
         const same = addList.querySelector<HTMLButtonElement>(`[data-conversation-members-candidate="${key}"]`);
         same?.focus({ preventScroll: true });
@@ -280,9 +332,10 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
 
       const copy = doc.createElement("div");
       copy.className = "cm-member-row__copy";
+      const displayName = labelFor(member);
       const name = doc.createElement("span");
       name.className = "cm-member-row__name";
-      name.textContent = isSelf ? `${member.name} (you)` : member.name;
+      name.textContent = isSelf ? `${displayName} (you)` : displayName;
       copy.append(name);
       if (member.kind === "agent") {
         const badge = doc.createElement("span");
@@ -300,7 +353,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
 
           const prompt = doc.createElement("span");
           prompt.className = "cm-member-row__confirm-text";
-          prompt.textContent = `Remove ${member.name}?`;
+          prompt.textContent = `Remove ${displayName}?`;
 
           const cancelBtn = doc.createElement("button");
           cancelBtn.type = "button";
@@ -311,6 +364,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
           cancelBtn.addEventListener("click", () => {
             if (busy) return;
             confirmingRemoveKey = null;
+            clearPendingRemove();
             errorText = "";
             render();
             const removeTrigger = memberList.querySelector<HTMLButtonElement>(
@@ -337,11 +391,12 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
           removeBtn.type = "button";
           removeBtn.className = "dashboard__button dashboard__button--secondary cm-member-row__remove";
           removeBtn.dataset.conversationMemberRemove = key;
-          removeBtn.setAttribute("aria-label", `Remove ${member.name}`);
+          removeBtn.setAttribute("aria-label", `Remove ${displayName}`);
           removeBtn.disabled = busy;
           removeBtn.textContent = "Remove";
           removeBtn.addEventListener("click", () => {
             if (busy) return;
+            if (confirmingRemoveKey !== key) clearPendingRemove();
             confirmingRemoveKey = key;
             errorText = "";
             render();
@@ -372,12 +427,18 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     const runGen = generation;
     const picked = [...addSelected];
     const refs: ConversationMemberRef[] = picked.map((item) => ({ kind: item.kind, id: item.id.toLowerCase() }));
+    const addKey = refs.map(memberRefKey).sort().join(",");
+    if (pendingAddKey !== addKey || !pendingAddCommandId) {
+      pendingAddKey = addKey;
+      pendingAddCommandId = opts.newCommandId ? opts.newCommandId() : `${Date.now()}-add-${runGen}`;
+    }
+    const commandId = pendingAddCommandId;
     busy = true;
     errorText = "";
     render();
     let result: ConversationActionResult;
     try {
-      result = await opts.onAdd!(refs);
+      result = await opts.onAdd!(refs, commandId);
     } catch (err) {
       result = {
         ok: false,
@@ -388,6 +449,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     if (runGen !== generation) return;
     busy = false;
     if (result.ok) {
+      clearPendingAdd();
       const existing = new Set(members.map(memberRefKey));
       for (const item of picked) {
         const key = memberRefKey(item);
@@ -395,6 +457,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
         existing.add(key);
         members = [...members, { kind: item.kind, id: item.id.toLowerCase(), name: item.name, self: item.self }];
       }
+      refreshDisplayLabels();
       addSelected = [];
       addQuery = "";
       addSearch.value = "";
@@ -416,12 +479,17 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     const runGen = generation;
     const key = memberRefKey(member);
     const removedIndex = members.findIndex((entry) => memberRefKey(entry) === key);
+    if (pendingRemoveKey !== key || !pendingRemoveCommandId) {
+      pendingRemoveKey = key;
+      pendingRemoveCommandId = opts.newCommandId ? opts.newCommandId() : `${Date.now()}-rm-${runGen}`;
+    }
+    const commandId = pendingRemoveCommandId;
     busy = true;
     errorText = "";
     render();
     let result: ConversationActionResult;
     try {
-      result = await opts.onRemove!({ kind: member.kind, id: member.id.toLowerCase() });
+      result = await opts.onRemove!({ kind: member.kind, id: member.id.toLowerCase() }, commandId);
     } catch (err) {
       result = {
         ok: false,
@@ -432,8 +500,10 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     if (runGen !== generation) return;
     busy = false;
     if (result.ok) {
+      clearPendingRemove();
       members = members.filter((entry) => memberRefKey(entry) !== key);
       confirmingRemoveKey = null;
+      refreshDisplayLabels();
       render();
       opts.onChanged?.([...members]);
       const remaining = memberList.querySelectorAll<HTMLButtonElement>("[data-conversation-member-remove]");
@@ -453,6 +523,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     if (busy) return;
     addOpen = true;
     confirmingRemoveKey = null;
+    clearPendingRemove();
     errorText = "";
     render();
     addSearch.focus({ preventScroll: true });
@@ -469,6 +540,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     addSelected = [];
     addQuery = "";
     addSearch.value = "";
+    clearPendingAdd();
     errorText = "";
     render();
     if (addToggle.isConnected && !addToggleWrap.hidden) addToggle.focus({ preventScroll: true });
@@ -481,8 +553,14 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
   const close = (restoreFocus = true): void => {
     generation += 1;
     busy = false;
+    clearPendingAdd();
+    clearPendingRemove();
     suppressRestoreOnClose = !restoreFocus;
-    if (dialog.open) dialog.close();
+    if (dialog.open) {
+      dialog.close();
+    } else {
+      activeOptions?.onRetire?.();
+    }
   };
 
   closeButton.addEventListener("click", () => close(true));
@@ -498,14 +576,19 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
 
   dialog.addEventListener("close", () => {
     const restore = activeOptions?.restoreFocus;
+    const retire = activeOptions?.onRetire;
     const shouldRestore = !suppressRestoreOnClose;
     suppressRestoreOnClose = false;
     generation += 1;
     busy = false;
+    clearPendingAdd();
+    clearPendingRemove();
+    retire?.();
     if (shouldRestore) restore?.();
   });
 
   const open = (options: ChannelMembersDialogOptions): void => {
+    activeOptions?.onRetire?.();
     generation += 1;
     activeOptions = options;
     members = [...options.members];
@@ -516,6 +599,9 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     busy = false;
     errorText = "";
     suppressRestoreOnClose = false;
+    clearPendingAdd();
+    clearPendingRemove();
+    refreshDisplayLabels();
     addSearch.value = "";
     title.textContent = options.title;
     render();

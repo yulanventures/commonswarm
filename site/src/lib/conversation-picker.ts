@@ -6,6 +6,7 @@
  */
 import {
   CONVERSATION_MEMBER_MAX,
+  disambiguateMemberLabels,
   type ConversationMemberRef,
   type ConversationOpenResult,
   type OpenedConversation,
@@ -21,8 +22,10 @@ export interface ConversationCandidate {
 export interface ConversationPickerOptions {
   viewerUserId: string;
   candidates: readonly ConversationCandidate[];
-  onOpen: (members: ConversationMemberRef[], newGroup: boolean) => Promise<ConversationOpenResult>;
+  newCommandId?: () => string;
+  onOpen: (members: ConversationMemberRef[], newGroup: boolean, commandId: string) => Promise<ConversationOpenResult>;
   onOpened: (conversation: OpenedConversation) => void;
+  onRetire?: () => void;
   restoreFocus?: () => void;
 }
 
@@ -89,6 +92,18 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
   let canStartNewGroup = false;
   let generation = 0;
   let suppressRestoreOnClose = false;
+  let keepAliveOnClose = false;
+  let pendingCommandKey = "";
+  let pendingCommandId = "";
+  let displayLabels = new Map<string, string>();
+  const clearPendingCommand = (): void => {
+    pendingCommandKey = "";
+    pendingCommandId = "";
+  };
+  const labelFor = (item: Pick<ConversationCandidate, "kind" | "id" | "name" | "self">): string => {
+    const base = displayLabels.get(memberRefKey(item)) ?? item.name;
+    return item.self ? `${base} (you)` : base;
+  };
 
   const head = doc.createElement("header");
   head.className = "cm-dialog-head";
@@ -168,9 +183,9 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
       chip.className = "cm-picker-chip";
       chip.dataset.conversationPickerChip = memberRefKey(item);
       chip.disabled = busy;
-      chip.setAttribute("aria-label", `Remove ${item.name}`);
+      chip.setAttribute("aria-label", `Remove ${labelFor(item)}`);
       const label = doc.createElement("span");
-      label.textContent = item.self ? `${item.name} (you)` : item.name;
+      label.textContent = labelFor(item);
       const cross = doc.createElement("span");
       cross.className = "cm-picker-chip__x";
       cross.setAttribute("aria-hidden", "true");
@@ -184,6 +199,7 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
         selected = selected.filter((entry) => memberRefKey(entry) !== key);
         errorText = "";
         canStartNewGroup = false;
+        clearPendingCommand();
         render();
         const remaining = chips.querySelectorAll<HTMLButtonElement>("[data-conversation-picker-chip]");
         const nextFocus = remaining[Math.min(index, remaining.length - 1)] ?? search;
@@ -220,7 +236,7 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
 
       const copy = doc.createElement("span");
       copy.className = "cm-picker-row__name";
-      copy.textContent = candidate.self ? `${candidate.name} (you)` : candidate.name;
+      copy.textContent = labelFor(candidate);
       button.append(copy);
 
       if (candidate.kind === "agent") {
@@ -247,6 +263,7 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
         }
         errorText = "";
         canStartNewGroup = false;
+        clearPendingCommand();
         render();
         const same = list.querySelector<HTMLButtonElement>(`[data-conversation-picker-option="${key}"]`);
         same?.focus({ preventScroll: true });
@@ -291,12 +308,18 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
     const runGen = generation;
     const members = buildOpenMembersPayload(selected);
     if (members.length === 0) return;
+    const cmdKey = `${newGroup ? "new" : "open"}:${members.map(memberRefKey).sort().join(",")}`;
+    if (pendingCommandKey !== cmdKey || !pendingCommandId) {
+      pendingCommandKey = cmdKey;
+      pendingCommandId = opts.newCommandId ? opts.newCommandId() : `${Date.now()}-${runGen}`;
+    }
+    const commandId = pendingCommandId;
     busy = true;
     errorText = "";
     render();
     let result: ConversationOpenResult;
     try {
-      result = await opts.onOpen(members, newGroup);
+      result = await opts.onOpen(members, newGroup, commandId);
     } catch (err) {
       result = {
         ok: false,
@@ -308,11 +331,15 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
     if (runGen !== generation) return;
     busy = false;
     if (result.ok) {
+      clearPendingCommand();
       suppressRestoreOnClose = true;
+      keepAliveOnClose = true;
       if (dialog.open) dialog.close();
       opts.onOpened(result.conversation);
       return;
     }
+    // Definite server refusals (409/403/400) retire the command id; only transient/unknown retries reuse it.
+    if (result.code !== "other") clearPendingCommand();
     errorText = result.message;
     canStartNewGroup = result.canStartNewGroup === true;
     render();
@@ -339,8 +366,14 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
   const close = (restoreFocus = true): void => {
     generation += 1;
     busy = false;
+    clearPendingCommand();
     suppressRestoreOnClose = !restoreFocus;
-    if (dialog.open) dialog.close();
+    keepAliveOnClose = false;
+    if (dialog.open) {
+      dialog.close();
+    } else {
+      activeOptions?.onRetire?.();
+    }
   };
 
   closeButton.addEventListener("click", () => close(true));
@@ -353,26 +386,35 @@ export function createConversationPickerController(dialog: HTMLDialogElement): C
     }
     generation += 1;
     suppressRestoreOnClose = false;
+    keepAliveOnClose = false;
   });
 
   dialog.addEventListener("close", () => {
     const restore = activeOptions?.restoreFocus;
+    const retire = activeOptions?.onRetire;
     const shouldRestore = !suppressRestoreOnClose;
+    const shouldRetire = !keepAliveOnClose;
     suppressRestoreOnClose = false;
+    keepAliveOnClose = false;
     generation += 1;
     busy = false;
+    clearPendingCommand();
+    if (shouldRetire) retire?.();
     if (shouldRestore) restore?.();
   });
 
   const open = (options: ConversationPickerOptions): void => {
+    activeOptions?.onRetire?.();
     generation += 1;
     activeOptions = options;
+    displayLabels = disambiguateMemberLabels(options.candidates);
     selected = [];
     query = "";
     busy = false;
     errorText = "";
     canStartNewGroup = false;
     suppressRestoreOnClose = false;
+    clearPendingCommand();
     search.value = "";
     render();
     if (!dialog.open) {

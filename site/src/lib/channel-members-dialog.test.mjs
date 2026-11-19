@@ -5,6 +5,7 @@ import {
   channelMembersPermissions,
   createChannelMembersDialogController,
   filterAddableMembers,
+  viewerCanManageConversationChannel,
 } from "./channel-members-dialog.ts";
 
 function makeDialogHarness() {
@@ -249,4 +250,102 @@ test("Channel Members sheet adds members, confirms before removing non-self memb
   assert.equal(dialog.querySelector("[data-conversation-members-add-panel]").hidden, true);
   assert.equal(dialog.querySelectorAll("[data-conversation-member-remove]").length, 0);
   assert.equal(dialog.querySelectorAll("[data-conversation-member-row]").length, 3);
+});
+
+test("viewerCanManageConversationChannel admits all 4 server manager arms including promoted private manager and creator-agent owner (C2)", () => {
+  const agentCreator = { createdByKind: "agent", createdByPrincipal: LEAD_ID };
+  const humanOther = { createdByKind: "user", createdByPrincipal: ALEX_ID };
+  const privateConv = { kind: "private_channel", members: [{ kind: "user", id: VIEWER_ID, isManager: true }] };
+  const privateNonMgr = { kind: "private_channel", members: [{ kind: "user", id: VIEWER_ID }] };
+  const publicConv = { kind: "public_channel", members: [] };
+
+  // 1. Workspace owner/admin.
+  assert.equal(viewerCanManageConversationChannel({ channel: humanOther, conv: publicConv, viewerUserId: VIEWER_ID, viewerRole: "admin" }), true);
+  // 2. Human creator.
+  assert.equal(viewerCanManageConversationChannel({ channel: { createdByKind: "user", createdByPrincipal: VIEWER_ID }, conv: publicConv, viewerUserId: VIEWER_ID, viewerRole: "member" }), true);
+  // 3. Owner of creator agent.
+  assert.equal(viewerCanManageConversationChannel({ channel: agentCreator, conv: publicConv, viewerUserId: VIEWER_ID, viewerRole: "member", ownedAgentIds: new Set([LEAD_ID]) }), true);
+  assert.equal(viewerCanManageConversationChannel({ channel: agentCreator, conv: publicConv, viewerUserId: VIEWER_ID, viewerRole: "member", ownedAgentIds: new Set() }), false);
+  // 4. Promoted private-channel manager (via conv.members.isManager or explicit flag).
+  assert.equal(viewerCanManageConversationChannel({ channel: humanOther, conv: privateConv, viewerUserId: VIEWER_ID, viewerRole: "member" }), true);
+  assert.equal(viewerCanManageConversationChannel({ channel: humanOther, conv: privateNonMgr, viewerUserId: VIEWER_ID, viewerRole: "member", isPromotedPrivateManager: true }), true);
+  assert.equal(viewerCanManageConversationChannel({ channel: humanOther, conv: privateNonMgr, viewerUserId: VIEWER_ID, viewerRole: "member", isPromotedPrivateManager: false }), false);
+});
+
+test("Channel Members preserves commandId across unchanged Add/Remove retries and disambiguates duplicate names (C2/C3)", async () => {
+  const { dialog } = makeDialogHarness();
+  const ctrl = createChannelMembersDialogController(dialog);
+  let seq = 0;
+  const addCmdIds = [];
+  const removeCmdIds = [];
+  const dupA = "aaaa1111-1111-4111-8111-111111111111";
+  const dupB = "bbbb2222-2222-4222-8222-222222222222";
+  const dupC = "cccc3333-3333-4333-8333-333333333333";
+
+  ctrl.open({
+    title: "#secrets members",
+    viewerUserId: VIEWER_ID,
+    permissions: { canAdd: true, canRemove: true, route: "private_channel" },
+    members: [
+      { kind: "user", id: VIEWER_ID, name: "Owner", self: true },
+      { kind: "user", id: dupA, name: "Alex" },
+    ],
+    candidates: [
+      { kind: "user", id: VIEWER_ID, name: "Owner", self: true },
+      { kind: "user", id: dupA, name: "Alex" },
+      { kind: "user", id: dupB, name: "Alex" },
+      { kind: "user", id: dupC, name: "Sam" },
+    ],
+    newCommandId: () => `mcmd-${++seq}`,
+    onAdd: async (_members, commandId) => {
+      addCmdIds.push(commandId);
+      return { ok: false, code: "other", message: "Lost receipt." };
+    },
+    onRemove: async (_member, commandId) => {
+      removeCmdIds.push(commandId);
+      return { ok: false, code: "other", message: "Lost receipt." };
+    },
+  });
+
+  // Duplicate-name Remove confirmation clearly shows stable short ID discriminator.
+  dialog.querySelector(`[data-conversation-member-remove="user:${dupA}"]`).click();
+  const confirmWrap = dialog.querySelector(`[data-conversation-member-confirm="user:${dupA}"]`);
+  assert.equal(confirmWrap.children[0].textContent, "Remove Alex · aaaa11?");
+
+  // Retrying unchanged still-open Remove preserves commandId; Cancel + re-open mints a new one.
+  dialog.querySelector(`[data-conversation-member-remove-confirm="user:${dupA}"]`).click();
+  await Promise.resolve();
+  await Promise.resolve();
+  dialog.querySelector(`[data-conversation-member-remove-confirm="user:${dupA}"]`).click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(removeCmdIds, ["mcmd-1", "mcmd-1"]);
+
+  dialog.querySelector(`[data-conversation-member-remove-cancel="user:${dupA}"]`).click();
+  dialog.querySelector(`[data-conversation-member-remove="user:${dupA}"]`).click();
+  dialog.querySelector(`[data-conversation-member-remove-confirm="user:${dupA}"]`).click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(removeCmdIds, ["mcmd-1", "mcmd-1", "mcmd-2"]);
+
+  // Add panel disambiguates duplicate candidate name and preserves commandId across unchanged retry.
+  dialog.querySelector("[data-conversation-members-add-toggle]").click();
+  const candB = dialog.querySelector(`[data-conversation-members-candidate="user:${dupB}"]`);
+  assert.equal(candB.children[0].textContent, "Alex · bbbb22");
+  candB.click();
+  const addSubmit = dialog.querySelector("[data-conversation-members-add-submit]");
+  addSubmit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  addSubmit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(addCmdIds, ["mcmd-3", "mcmd-3"]);
+
+  // Changing Add selection mints a fresh commandId.
+  dialog.querySelector(`[data-conversation-members-candidate="user:${dupC}"]`).click();
+  addSubmit.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(addCmdIds, ["mcmd-3", "mcmd-3", "mcmd-4"]);
 });
