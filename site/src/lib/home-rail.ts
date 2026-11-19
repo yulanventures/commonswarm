@@ -4,12 +4,14 @@
 import { agentOrb, personAvatar, statusLine } from "./home-primitives";
 import type { AgentVM, CapsuleVM, Id, PersonVM, RailVM } from "./home-types";
 import { ARCHIVED_CHANNELS_LABEL, CHANNELS_LOAD_FAILED, CHANNELS_TITLE, NEW_CHANNEL_LABEL, STARRED_TITLE, channelLabel, channelRowName, railSlice } from "./channels";
+import { conversationUnreadBadge } from "./conversations";
 
 export const RAIL_OWNERSHIP_NOTE = "Every agent belongs to a person, who connects it.";
 export const RAIL_CATCH_UP_PEOPLE_TITLE = "You and your agents";
 /** The selected workspace's channels, then people and agents as 1:1 Direct messages. Workspaces are switched in the
  *  picker above the rail, never here. */
 export const RAIL_DIRECT_MESSAGES_TITLE = "Direct messages";
+export const NEW_DIRECT_MESSAGE_LABEL = "New message";
 
 type RailWorkspace = RailVM["workspaces"][number];
 type RailPeople = NonNullable<RailVM["people"]>;
@@ -40,6 +42,30 @@ export interface RailCallbacks {
   retryChannels?: () => void;
   /** Right-click (or Shift+F10 / the Menu key) on a Direct messages row. The page decides the actions. */
   contextMenu?: (target: { kind: "person" | "agent"; id: Id }, event: MouseEvent, row: HTMLElement) => void;
+  /** A plain click on a Step 2b conversation DM or group DM row. */
+  selectConversation?: (conversationId: string, event: MouseEvent) => void;
+  /** The ⋯ button or right-click on a Step 2b DM or group DM row. */
+  conversationMenu?: (conversationId: string, event: MouseEvent, button: HTMLElement) => void;
+  /** The Direct messages heading's +. */
+  newDirectMessage?: (button: HTMLElement) => void;
+}
+
+/** One Step 2b direct message or group DM row in the rail. */
+export interface RailDirectMessageRowVM {
+  id: string;
+  kind: "dm" | "group_dm";
+  title: string;
+  href: string;
+  current: boolean;
+  unreadCount: number | null;
+  mentionCount: number | null;
+  muted?: boolean;
+  /** Member count for a group DM (used in the compact row badge and accessible name). */
+  memberCount?: number;
+}
+
+export interface RailDirectMessagesVM {
+  rows: readonly RailDirectMessageRowVM[];
 }
 
 /** The rail model plus the agent whose page is open (home-types.ts RailVM is frozen). */
@@ -51,6 +77,8 @@ export type HomeRailVM = RailVM & {
   leadAgentId?: Id;
   /** The selected workspace's channels. Absent where no workspace is selected (Catch up). */
   channels?: RailChannelsVM;
+  /** Step 2b direct messages and group DMs sorted by latest activity. When present, replaces legacy roster DMs. */
+  directMessages?: RailDirectMessagesVM;
 };
 
 /** One channel row. `id` is the view id: GENERAL_CHANNEL_ID for #general, otherwise the channel's id. */
@@ -61,6 +89,8 @@ export interface RailChannelRowVM {
   current: boolean;
   /** As the per-channel read reported it. null is unknown: no dot and no claim of "read". */
   unread: boolean | null;
+  /** Unread @mentions naming the viewer in this channel. Shown as a numeric badge unless muted. */
+  mentionCount?: number | null;
   /** Rename and archive are offered (the creator, or a workspace owner or admin). */
   manageable: boolean;
   /** The viewer muted this channel: the row is quiet and never shows unread. */
@@ -268,13 +298,23 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   if (row.current) link.setAttribute("aria-current", "page");
   const muted = !archived && row.muted === true;
   const unread = archived ? null : muted ? false : row.unread;
-  if (unread === true) link.dataset.unread = "";
+  const mentions = !archived && !muted && (row.mentionCount ?? 0) > 0 ? Math.floor(row.mentionCount!) : 0;
+  if (unread === true || mentions > 0) link.dataset.unread = "";
   if (muted) link.dataset.muted = "";
-  link.setAttribute("aria-label", channelRowName(row.slug, unread, muted));
+  const baseLabel = channelRowName(row.slug, mentions > 0 ? false : unread, muted);
+  link.setAttribute("aria-label", mentions > 0 ? `${baseLabel}, ${mentions} ${mentions === 1 ? "mention" : "mentions"}` : baseLabel);
   link.title = channelLabel(row.slug);
   const name = node(doc, "span", "hm-rail__name", row.slug);
   link.append(icon(doc, archived ? "archive" : "workspace"), name);
-  if (unread === true) { const dot = node(doc, "span", "hm-rail__unread"); dot.setAttribute("aria-hidden", "true"); link.append(dot); }
+  if (mentions > 0) {
+    const mark = node(doc, "span", "hm-rail__badge hm-rail__mention-badge", mentions > 99 ? "99+" : String(mentions));
+    mark.setAttribute("aria-hidden", "true");
+    link.append(mark);
+  } else if (unread === true) {
+    const dot = node(doc, "span", "hm-rail__unread");
+    dot.setAttribute("aria-hidden", "true");
+    link.append(dot);
+  }
   if (muted) { const off = node(doc, "span", "hm-rail__muted"); off.setAttribute("aria-hidden", "true"); link.append(off); }
   link.addEventListener("click", (event) => {
     if (!callbacks.selectChannel || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -473,6 +513,106 @@ function channelsSection(doc: Document, vm: RailChannelsVM, sample: boolean, cal
   return section;
 }
 
+function directMessageItem(doc: Document, row: RailDirectMessageRowVM, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+  const item = node(doc, "li", "hm-rail__channel-item hm-rail__dm-item");
+  const anchor = node(doc, "a", "hm-rail__link hm-rail__channel hm-rail__dm");
+  anchor.href = row.href;
+  anchor.dataset.railConversation = row.id;
+  anchor.dataset.railConversationKind = row.kind;
+  if (row.current) anchor.setAttribute("aria-current", "page");
+  const muted = row.muted === true;
+  const indicator = conversationUnreadBadge({
+    archivedAt: null,
+    notifyLevel: muted ? "muted" : "everything",
+    unreadCount: row.unreadCount,
+    mentionCount: row.mentionCount,
+  });
+  if (indicator.kind !== "none") anchor.dataset.unread = "";
+  if (muted) anchor.dataset.muted = "";
+  const labelParts = [
+    row.title,
+    row.kind === "group_dm" && (row.memberCount ?? 0) > 2 ? `${row.memberCount} members` : "",
+    muted ? "muted" : indicator.kind !== "none" ? indicator.label : "",
+  ].filter(Boolean);
+  anchor.setAttribute("aria-label", labelParts.join(", "));
+  anchor.title = row.title;
+
+  const mark = node(
+    doc,
+    "span",
+    "hm-rail__dm-mark",
+    row.kind === "group_dm"
+      ? String(row.memberCount ?? 3)
+      : Array.from(row.title.trim())[0]?.toLocaleUpperCase() ?? "D",
+  );
+  mark.setAttribute("aria-hidden", "true");
+  const name = node(doc, "span", "hm-rail__name", row.title);
+  anchor.append(mark, name);
+
+  if (indicator.kind === "mentions") {
+    const count = node(doc, "span", "hm-rail__badge hm-rail__mention-badge", indicator.text);
+    count.setAttribute("aria-hidden", "true");
+    anchor.append(count);
+  } else if (indicator.kind === "dot") {
+    const dot = node(doc, "span", "hm-rail__unread");
+    dot.setAttribute("aria-hidden", "true");
+    anchor.append(dot);
+  }
+  if (muted) {
+    const off = node(doc, "span", "hm-rail__muted");
+    off.setAttribute("aria-hidden", "true");
+    anchor.append(off);
+  }
+  anchor.addEventListener("click", (event) => {
+    if (!callbacks.selectConversation || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    callbacks.selectConversation(row.id, event);
+  });
+  if (!sample && callbacks.conversationMenu) {
+    anchor.addEventListener("contextmenu", (event) => callbacks.conversationMenu?.(row.id, event, anchor));
+  }
+  item.append(anchor);
+  if (!sample && callbacks.conversationMenu) {
+    const actions = node(doc, "button", "hm-rail__channel-actions hm-rail__dm-actions");
+    actions.type = "button";
+    actions.dataset.railConversationMenu = row.id;
+    actions.setAttribute("aria-haspopup", "menu");
+    actions.setAttribute("aria-label", `${row.title} options`);
+    actions.title = `${row.title} options`;
+    const glyph = node(doc, "span", "", "⋯");
+    glyph.setAttribute("aria-hidden", "true");
+    actions.append(glyph);
+    actions.addEventListener("click", (event) => callbacks.conversationMenu?.(row.id, event, actions));
+    item.append(actions);
+  }
+  return item;
+}
+
+function directMessagesSection(doc: Document, vm: RailDirectMessagesVM, sample: boolean, callbacks: RailCallbacks): HTMLElement {
+  const section = node(doc, "section", "hm-rail__channels hm-rail__dms");
+  section.dataset.homeDms = "";
+  section.setAttribute("aria-labelledby", "hm-rail-dms-title");
+  const head = node(doc, "div", "hm-rail__section-head");
+  const title = node(doc, "h2", "hm-rail__heading", RAIL_DIRECT_MESSAGES_TITLE);
+  title.id = "hm-rail-dms-title";
+  head.append(title);
+  if (!sample && callbacks.newDirectMessage) {
+    const create = node(doc, "button", "hm-rail__new");
+    create.type = "button";
+    create.dataset.homeNewDm = "";
+    create.setAttribute("aria-label", NEW_DIRECT_MESSAGE_LABEL);
+    create.title = NEW_DIRECT_MESSAGE_LABEL;
+    create.append(icon(doc, "plus"));
+    create.addEventListener("click", () => callbacks.newDirectMessage?.(create));
+    head.append(create);
+  }
+  const list = node(doc, "ul", "hm-rail__channel-list hm-rail__dm-list");
+  list.dataset.homeDmList = "";
+  for (const row of vm.rows) list.append(directMessageItem(doc, row, sample, callbacks));
+  section.append(head, list);
+  return section;
+}
+
 /** The left rail: brand row, Catch up, the selected workspace's Channels, then Direct messages. The ownership line is
  *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
 export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
@@ -495,9 +635,10 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
 
   if (vm.channels?.starred?.length && vm.channels.state !== "loading") nav.append(starredSection(doc, vm.channels.starred, vm.sample, callbacks));
   if (vm.channels) nav.append(channelsSection(doc, vm.channels, vm.sample, callbacks, options));
+  if (vm.directMessages) nav.append(directMessagesSection(doc, vm.directMessages, vm.sample, callbacks));
   root.append(nav);
 
-  if (vm.people) {
+  if (vm.people && !vm.directMessages) {
     const people = orderRailPeople(vm.people);
     const section = node(doc, "section", "hm-rail__people");
     section.setAttribute("aria-labelledby", "hm-rail-people-title");

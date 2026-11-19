@@ -55,6 +55,8 @@ function markFocusKeys(root: HTMLElement, region: string): void {
       kind = "workspace"; id = element.dataset.railWorkspace ?? element.dataset.workspaceId!;
     } else if (element.hasAttribute("data-rail-channel")) { kind = "channel"; id = element.dataset.railChannel!; }
     else if (element.hasAttribute("data-rail-channel-menu")) { kind = "channel"; id = element.dataset.railChannelMenu!; action = "menu"; }
+    else if (element.hasAttribute("data-rail-conversation")) { kind = "conversation"; id = element.dataset.railConversation!; }
+    else if (element.hasAttribute("data-rail-conversation-menu")) { kind = "conversation"; id = element.dataset.railConversationMenu!; action = "menu"; }
     else if (element.hasAttribute("data-rail-person")) { kind = "person"; id = element.dataset.railPerson!; }
     else if (element.hasAttribute("data-rail-agent")) { kind = "agent"; id = element.dataset.railAgent!; }
     else if (element.hasAttribute("data-home-pane")) {

@@ -56,6 +56,7 @@ import {
   parseConversationActionResponse,
   parseConversationHistoryResponse,
   parseConversationOpenResponse,
+  parseConversationsListOutcome,
   parseConversationsListResponse,
   parseOversightHistoryResponse,
   parseOversightListResponse,
@@ -4492,6 +4493,14 @@ async function postConversationRead(
   }
 }
 
+/** Raised when the backend does not expose Step 2b `resource: "conversations"` yet. */
+export class ConversationsUnsupportedError extends Error {
+  constructor(message = "Conversations read is not available on this server.") {
+    super(message);
+    this.name = "ConversationsUnsupportedError";
+  }
+}
+
 /** Step 2b `resource: "conversations"`: sidebar and directory list for the viewer. */
 export async function listConversations(
   workspaceId: string,
@@ -4501,10 +4510,10 @@ export async function listConversations(
     buildListConversationsRequest(workspaceId, includeArchived),
     "conversations",
   );
-  if (status !== 200) {
-    throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load conversations (HTTP ${status}).`);
-  }
-  return parseConversationsListResponse(body);
+  const outcome = parseConversationsListOutcome(status, body);
+  if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
+  if (outcome.status === "failed") throw new Error(outcome.message);
+  return outcome.conversations;
 }
 
 /** Step 2b `resource: "conversation_history"`: cursor-paged messages for one conversation. */

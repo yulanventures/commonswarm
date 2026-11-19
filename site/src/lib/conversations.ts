@@ -574,8 +574,13 @@ function parseCursor(value: unknown): ConversationCursor | null {
 export function parseConversationSummary(value: unknown): ConversationSummary | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
-  if (typeof row.conversation_id !== "string") return null;
+  if (typeof row.conversation_id !== "string" || !row.conversation_id.trim()) return null;
   if (!(CONVERSATION_KINDS as readonly unknown[]).includes(row.kind)) return null;
+  if (typeof row.joined !== "boolean") return null;
+  const kind = row.kind as ConversationKind;
+  if ((kind === "public_channel" || kind === "private_channel") && (typeof row.channel_id !== "string" || !row.channel_id.trim())) {
+    return null;
+  }
   const notifyLevel = (CONVERSATION_NOTIFY_LEVELS as readonly unknown[]).includes(row.notify_level)
     ? (row.notify_level as ConversationNotifyLevel)
     : "everything";
@@ -584,12 +589,12 @@ export function parseConversationSummary(value: unknown): ConversationSummary | 
     : null;
   return {
     conversationId: row.conversation_id.toLowerCase(),
-    kind: row.kind as ConversationKind,
+    kind,
     channelId: nullableText(row.channel_id)?.toLowerCase() ?? null,
     slug: nullableText(row.slug),
     description: nullableText(row.description),
     archivedAt: nullableText(row.archived_at),
-    joined: row.joined === true,
+    joined: row.joined,
     generation: typeof row.generation === "number" ? row.generation : 0,
     leadMode,
     leadAgentPrincipalId: nullableText(row.lead_agent_principal_id)?.toLowerCase() ?? null,
@@ -634,6 +639,45 @@ export function parseConversationsListResponse(body: Record<string, unknown>): C
     if (parsed) out.push(parsed);
   }
   return out;
+}
+
+export type ConversationsListOutcome =
+  | { status: "ready"; conversations: ConversationSummary[] }
+  | { status: "unsupported"; message: string }
+  | { status: "failed"; message: string };
+
+const UNSUPPORTED_CONVERSATIONS_READ_ERRORS = new Set([
+  "invalid_request",
+  "invalid_resource",
+  "unsupported_resource",
+  "not_found",
+]);
+
+/**
+ * Classifies a `POST /functions/v1/read` (`resource: "conversations"`) response.
+ * Only an explicit pre-Step-2b not-supported refusal selects `"unsupported"`.
+ * An empty 200, malformed 200 (missing `conversations` array), or any transient/unexpected error
+ * returns `"failed"` so the UI shows Retry and never exposes the legacy composer.
+ */
+export function parseConversationsListOutcome(
+  status: number,
+  body: Record<string, unknown>,
+): ConversationsListOutcome {
+  if (status === 200) {
+    if (Array.isArray(body.conversations)) {
+      const conversations = parseConversationsListResponse(body);
+      if (conversations.length !== body.conversations.length) {
+        return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
+      }
+      return { status: "ready", conversations };
+    }
+    return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
+  }
+  const code = typeof body.error === "string" ? body.error : "";
+  if (status === 404 || (status === 400 && UNSUPPORTED_CONVERSATIONS_READ_ERRORS.has(code))) {
+    return { status: "unsupported", message: errorSentence(body, `Conversations read unavailable (HTTP ${status}).`) };
+  }
+  return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
 }
 
 export function parseOversightListResponse(body: Record<string, unknown>): OversightConversationSummary[] {

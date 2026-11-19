@@ -7,6 +7,8 @@ export interface DirectoryChannel {
   archived: boolean;
   unread: boolean | null;
   manageable: boolean;
+  /** True when the viewer is a live member, false when browsing an unjoined public channel, omitted on legacy reads. */
+  joined?: boolean;
 }
 
 export function renderChannelDirectory(
@@ -15,7 +17,11 @@ export function renderChannelDirectory(
   query: string,
   pending: ReadonlySet<string>,
   errors: ReadonlyMap<string, string>,
-  actions: { open: (id: string) => void; unarchive: (id: string, button: HTMLButtonElement) => void },
+  actions: {
+    open: (id: string) => void;
+    unarchive: (id: string, button: HTMLButtonElement) => void;
+    join?: (id: string, button: HTMLButtonElement) => void;
+  },
 ): number {
   const doc = host.ownerDocument;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string) => {
@@ -63,6 +69,19 @@ export function renderChannelDirectory(
         copy.append(description);
       }
       const controls = node("div", "cm-directory-actions");
+      if (!archived && row.joined === false && actions.join) {
+        const join = node("button", "cm-directory-join", pending.has(row.id) ? "Joining…" : "Join");
+        join.type = "button"; join.disabled = pending.has(row.id);
+        join.setAttribute("aria-label", `Join #${row.slug}`);
+        join.dataset.channelDirectoryAction = `join:${row.id}`;
+        if (pending.has(row.id)) join.setAttribute("aria-busy", "true");
+        join.addEventListener("click", () => actions.join?.(row.id, join));
+        controls.append(join);
+      } else if (!archived && row.joined === true) {
+        const joined = node("span", "cm-directory-joined", "Joined");
+        joined.dataset.channelDirectoryJoined = row.id;
+        controls.append(joined);
+      }
       if (archived && row.manageable) {
         const unarchive = node("button", "cm-directory-unarchive", "Unarchive");
         unarchive.type = "button"; unarchive.disabled = pending.has(row.id);
@@ -85,7 +104,7 @@ export function renderChannelDirectory(
     const target = [...host.querySelectorAll<HTMLElement>("[data-channel-directory-action]")]
       .find(el => el.dataset.channelDirectoryAction === focused)
       ?? [...host.querySelectorAll<HTMLElement>("[data-channel-directory-action]")]
-        .find(el => el.dataset.channelDirectoryAction === focused.replace(/^unarchive:/, "open:"));
+        .find(el => el.dataset.channelDirectoryAction === focused.replace(/^(?:unarchive|join):/, "open:"));
     target?.focus({ preventScroll: true });
   }
   return matches.length;

@@ -49,6 +49,7 @@
   min-block-size: 0;
   max-block-size: 60%;
 }
+.hm-rail__nav:has(.hm-rail__dms) { max-block-size: none; }
 
 /* Channels share the rail's one scroll region: no list here scrolls on its own. */
 .hm-rail__channels { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
@@ -152,6 +153,18 @@
 .hm-rail__channel[data-unread] { font-weight: 700; }
 .hm-rail__channel[data-unread]:not([aria-current="page"]) { color: var(--home-rail-strong); }
 .hm-rail__unread { flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: currentColor; }
+.hm-rail__dm-mark {
+  display: inline-grid; place-items: center; flex: none;
+  inline-size: 22px; block-size: 22px; border-radius: 6px;
+  background: var(--home-rail-raised); color: var(--home-rail-strong);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+.hm-rail__mention-badge {
+  display: inline-grid; place-items: center; flex: none;
+  min-inline-size: 20px; block-size: 20px; padding-inline: 6px;
+  border-radius: 999px; background: var(--home-rail-strong); color: var(--home-rail-bg);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
 .hm-rail__channel-actions {
   position: absolute;
   inset-block: 0;

@@ -138,7 +138,10 @@ function installReceiptFixture() {
       return Response.json(rows);
     }
     if (url.pathname.startsWith("/rest/v1/")) return Response.json([]);
-    if (url.pathname === "/functions/v1/read") return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    if (url.pathname === "/functions/v1/read") {
+      if (body?.resource === "conversations") return Response.json({ error: "unsupported_resource" }, { status: 400 });
+      return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    }
     if (url.pathname === "/functions/v1/command") return Response.json({ status: "refused", reason: "content_consent_required" });
     f.unexpected.push(request.method + " " + url.pathname);
     return Response.json({ error: "unexpected_fixture_request" }, { status: 404 });
