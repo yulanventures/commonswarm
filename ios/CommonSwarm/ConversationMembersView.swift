@@ -42,15 +42,15 @@ struct ConversationMembersView: View {
     private var retryTitle: String {
         guard let change = edit.pending else { return "Retry" }
         let refs: [MemberRef]
-        let action: String
+        let action, preposition: String
         switch change {
-        case .add(let items): refs = items; action = "Retry adding "
-        case .remove(let item): refs = [item]; action = "Retry removing "
+        case .add(let items): refs = items; action = "Retry adding "; preposition = " to "
+        case .remove(let item): refs = [item]; action = "Retry removing "; preposition = " from "
         }
         let names = refs.map { ref in
             (choices + members).first(where: { $0.id == ref }).map(display) ?? ref.id.uuidString
         }
-        return action + names.joined(separator: ", ") + (action == "Retry adding " ? " to " : " from ") + destination
+        return action + names.joined(separator: ", ") + preposition + destination
     }
 
     var body: some View {
@@ -132,11 +132,11 @@ struct ConversationMembersView: View {
 
     private func retry() async {
         guard !busy else { return }
-        guard let change = edit.pending else { await load(); return }
+        guard edit.pending != nil else { await load(); return }
         busy = true
         defer { busy = false }
         do {
-            try await api.changeMembers(change, workspace: workspace, row: row, commandID: edit.commandID)
+            guard try await edit.dispatchPending(api: api, workspace: workspace, row: row) else { return }
             guard let fresh = try await api.conversationList(workspace), let current = fresh.first(where: { $0.id == row.id }) else {
                 throw APIError.invalidResponse
             }
@@ -148,5 +148,23 @@ struct ConversationMembersView: View {
             query = ""
             await load()
         } catch { if !Task.isCancelled { self.error = "Couldn’t confirm the membership change." } }
+    }
+}
+
+struct MembersButton: View {
+    let api: ConversationAPI
+    let workspace: UUID
+    let row: ConversationSummary
+    @ObservedObject var draft: Composer
+    let updated: ([ConversationSummary]) -> Void
+    @SwiftUI.State private var showing = false
+
+    var body: some View {
+        Button { showing = true } label: { Label("Members", systemImage: "person.2") }
+            .disabled(draft.access == .unavailable || draft.access == .checking)
+            .onChange(of: draft.access) { showing = false }
+            .sheet(isPresented: $showing) {
+                ConversationMembersView(api: api, workspace: workspace, row: row, updated: updated)
+            }
     }
 }

@@ -103,13 +103,15 @@ enum Verify {
         let supported = try await api.conversationList(probe)
         try expect(supported?.isEmpty == true, "empty list is supported")
         do {
-            _ = try await api.conversationList(probe)
+            if try await api.conversationList(probe) == nil { _ = try await api.directory(probe) }
             throw Failure.mismatch("ambiguous 404 exposed the legacy directory")
         } catch APIError.refused(404) {}
         do {
-            _ = try await api.conversationList(probe)
+            if try await api.conversationList(probe) == nil { _ = try await api.directory(probe) }
             throw Failure.mismatch("known-supported workspace downgraded on refresh")
         } catch APIError.invalidResponse {}
+        let legacyReads = try await control("probe-legacy-requests")
+        try expect(legacyReads == 0, "no legacy requests after a refused supported list")
         guard let preview = modern.first(where: { !$0.joined && $0.kind == .publicChannel }) else { throw Failure.mismatch("preview") }
         _ = try await api.history(ws.id, preview.item(viewer: session.userID).destination)
         try await api.join(workspace: ws.id, conversation: preview.id, commandID: UUID())
@@ -188,6 +190,29 @@ enum Verify {
             try await api.changeMembers(.remove(atlas.id), workspace: ws.id, row: channel, commandID: UUID())
             let removed = try await api.conversationList(ws.id)?.first(where: { $0.id == channel.id })
             try expect(removed?.members?.contains(where: { $0.id == atlas.id.id }) == false, "removed recipient disappears")
+        }
+        guard let target = modern.first(where: { $0.slug == "design" }) else { throw Failure.mismatch("private member test channel") }
+        for (index, twin) in twins.enumerated() {
+            var edit = MemberEditIntent()
+            edit.toggle(twin.id)
+            edit.begin(.add(edit.selected))
+            let before = try await control("lose-member-reply")
+            do {
+                _ = try await edit.dispatchPending(api: api, workspace: ws.id, row: target)
+                throw Failure.mismatch("membership fixture did not lose reply")
+            } catch APIError.refused(503) {}
+            let originalID = edit.commandID
+            edit.begin(.add(edit.selected))
+            try expect(edit.commandID == originalID, "same visible retry keeps its command ID")
+            if index == 0 { edit.cancel() } else { edit.toggle(atlas.id) }
+            let replayed = try await edit.dispatchPending(api: api, workspace: ws.id, row: target)
+            let writes = try await control("member-writes")
+            try expect(!replayed && writes == before + 1, "cancel or changed selection retires the lost grant")
+            let fresh = try await api.conversationList(ws.id)?.first(where: { $0.id == target.id })
+            try expect(fresh?.members?.filter({ $0.name == twin.name }).map(\.id) == [twin.id.id], "only the selected look-alike got access")
+            try await api.changeMembers(.remove(twin.id), workspace: ws.id, row: target, commandID: UUID())
+            let removed = try await api.conversationList(ws.id)?.first(where: { $0.id == target.id })
+            try expect(removed?.members?.contains(where: { $0.id == twin.id.id }) == false, "the confirmed same-name target was removed")
         }
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)

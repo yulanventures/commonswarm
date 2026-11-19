@@ -90,6 +90,13 @@ struct MemberEditIntent {
 
     mutating func retire() { pending = nil; commandID = UUID() }
 
+    @discardableResult
+    func dispatchPending(api: ConversationAPI, workspace: UUID, row: ConversationSummary) async throws -> Bool {
+        guard let pending else { return false }
+        try await api.changeMembers(pending, workspace: workspace, row: row, commandID: commandID)
+        return true
+    }
+
     mutating func begin(_ change: MemberChange) {
         if case .add(let refs) = change, refs != selected || refs.isEmpty { return }
         if pending != change { commandID = UUID(); pending = change }

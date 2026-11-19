@@ -57,6 +57,7 @@ const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_ty
 
 const members = [{ kind: "user", id: me, name: "You" }, { kind: "agent", id: agent, name: "Atlas" }];
 let capabilityProbeReads = 0;
+let probeLegacyRequests = 0;
 const capabilityProbe = "00000000-0000-4000-8000-000000000091";
 const teammate = { kind: "user", id: "00000000-0000-4000-8000-000000000088", name: "Morgan" };
 const twins = ["012345ab-0000-4000-8000-000000000001", "012345cd-0000-4000-8000-000000000002"]
@@ -83,6 +84,8 @@ let threadPosts = 0;
 let holdNextMembershipRead = false;
 const membershipReadHeld = Promise.withResolvers();
 const releaseMembershipRead = Promise.withResolvers();
+let memberWrites = 0;
+let loseMemberReply = false;
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -110,6 +113,9 @@ const server = createServer(async (req, res) => {
       if (url.pathname === "/fixture/hold-membership") { holdNextMembershipRead = true; return reply(200, 0); }
       if (url.pathname === "/fixture/membership-held") { await membershipReadHeld.promise; return reply(200, 0); }
       if (url.pathname === "/fixture/resume-membership") { releaseMembershipRead.resolve(); return reply(200, 0); }
+      if (url.pathname === "/fixture/probe-legacy-requests") return reply(200, probeLegacyRequests);
+      if (url.pathname === "/fixture/lose-member-reply") { loseMemberReply = true; return reply(200, memberWrites); }
+      if (url.pathname === "/fixture/member-writes") return reply(200, memberWrites);
       if (url.pathname === "/fixture/lose-public") {
         threadRows.find(r => r.slug === "garden").joined = false;
         return reply(200, threadPosts);
@@ -237,7 +243,7 @@ const server = createServer(async (req, res) => {
       const cmd = body.command;
       if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
       if (verify && ["conversation_join", "conversation_open", "conversation_invite", "conversation_remove"].includes(cmd?.kind)) {
-        conversationWire.set(cmd.kind, cmd);
+        if (cmd.kind !== "conversation_open" || cmd.members.length > 1) conversationWire.set(cmd.kind, cmd);
       }
       if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
         const candidates = [...members, teammate, ...twins];
@@ -260,13 +266,15 @@ const server = createServer(async (req, res) => {
         if (!target || !target.joined) return reply(403, {});
         if (cmd.members) {
           for (const ref of cmd.members) {
-            if (ref.kind !== "agent" || ref.id.toLowerCase() !== agent) return reply(400, {});
-            if (!target.members.includes(members[1])) target.members.push(members[1]);
+            const person = [...members, teammate, ...twins].find(m => m.kind === ref.kind && m.id === ref.id.toLowerCase());
+            if (!person) return reply(400, {});
+            if (!target.members.includes(person)) target.members.push(person);
           }
         } else {
-          if (cmd.member.kind !== "agent" || cmd.member.id.toLowerCase() !== agent) return reply(400, {});
-          target.members = target.members.filter(m => m !== members[1]);
+          target.members = target.members.filter(m => m.kind !== cmd.member.kind || m.id !== cmd.member.id.toLowerCase());
         }
+        memberWrites++;
+        if (loseMemberReply) { loseMemberReply = false; return reply(503, {}); }
         return reply(200, isPrivate ? { status: "accepted" } : { status: "accepted", conversation_id: target.conversation_id });
       }
       if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
@@ -318,6 +326,9 @@ const server = createServer(async (req, res) => {
         }
       }
       return reply(200, { status: "accepted", signal: receipts.get(body.command_id).signal });
+    }
+    if (url.pathname.startsWith("/rest/v1/") && url.searchParams.get("workspace_id")?.toLowerCase() === "eq." + capabilityProbe) {
+      probeLegacyRequests++;
     }
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
