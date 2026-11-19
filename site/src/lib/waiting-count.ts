@@ -52,6 +52,11 @@ export function buildWaitingButton(doc: Document, href: string, navigate: (href:
     event.preventDefault();
     navigate(href, event);
   });
+  link.addEventListener("keydown", (event) => {
+    if (event.key !== " " || link.getAttribute("role") !== "button") return;
+    event.preventDefault();
+    link.click();
+  });
   updateWaitingButton(link, { min: 0, complete: false });
   return link;
 }
@@ -62,4 +67,19 @@ export function updateWaitingButton(link: HTMLElement, total: WaitingTotal): voi
   // Something is waiting: the control reads as ink, not as chrome.
   link.toggleAttribute("data-waiting", total.min > 0);
   link.setAttribute("aria-label", waitingName(total));
+  link.setAttribute("aria-description", "Count across all workspaces");
+  link.title = "Waiting on you across all workspaces";
+}
+
+/** In a channel view the control toggles the Waiting on you column or phone sheet; elsewhere it stays a link to Catch up. */
+export function syncWaitingButtonToggle(link: HTMLElement, toggle: { active: boolean; expanded: boolean; controlsId: string }): void {
+  if (toggle.active) {
+    link.setAttribute("role", "button");
+    link.setAttribute("aria-expanded", String(toggle.expanded));
+    link.setAttribute("aria-controls", toggle.controlsId);
+  } else {
+    link.removeAttribute("role");
+    link.removeAttribute("aria-expanded");
+    link.removeAttribute("aria-controls");
+  }
 }

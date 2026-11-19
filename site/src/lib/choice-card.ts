@@ -23,6 +23,8 @@ export interface ChoiceCardVM {
   answeredAt?: { text: string; iso: string } | null;
   /** Distinguishes two copies of one ask on a page (element ids). */
   scope?: string;
+  /** Label on the submit button when shown (defaults to "Done"). */
+  submitLabel?: string;
 }
 
 export interface ChoiceCardHandlers {
@@ -210,7 +212,7 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
   if (vm.error) { const error = node(doc, "p", "hm-decision__error", vm.error); error.setAttribute("role", "alert"); form.append(error); }
   /* One Done, last and at the right, only where an answer needs it: always on multi-select, and on single choice while
      Something else is open (a lettered row answers on its own tap). */
-  const submit = node(doc, "button", "hm-button hm-decision__submit", pending ? "Sending…" : "Done"); submit.type = "submit";
+  const submit = node(doc, "button", "hm-button hm-decision__submit", pending ? "Sending…" : (vm.submitLabel ?? "Done")); submit.type = "submit";
   submit.dataset.primary = "true"; submit.dataset.decisionSubmit = ""; block(submit);
   form.append(submit);
   // An answer on its way is shown once (on Done when Done shows, else on this line) and always announced.

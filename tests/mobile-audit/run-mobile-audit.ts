@@ -481,6 +481,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     require: ['[data-signal-id="{message.choiceMultiAnswered}"]:has(li[data-decision-other][data-chosen="true"])'], max: 1 }],
   "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
     require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
+  "app.chat.waiting-panel": [{ name: "waiting-panel", rows: "[data-waiting-panel]:not([hidden]) [data-waiting-card]",
+    prefer: '[data-waiting-card="{message.choiceOpen}"]', require: ['[data-waiting-card="{message.choiceOpen}"]'], max: 1, focus: true,
+    focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
   /* Typed Something else text survives a real feed rebuild: its field is focused, a note in this channel makes the app's
      own poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while
      the card's Done is shown and enabled, which it is only while the draft still holds the typed text. Last on the page,

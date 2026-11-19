@@ -3219,6 +3219,39 @@ export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
 }
 
 /**
+ * Resolves the channel id for a small batch of signal ids in one workspace. Used by the Waiting on you
+ * channel panel so asks older than the loaded feed page still know which channel they belong to.
+ */
+export async function signalChannels(
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<Map<string, string | null>> {
+  const unique = [...new Set(signalIds.filter(Boolean))];
+  const out = new Map<string, string | null>();
+  if (!unique.length) return out;
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline(
+    "signal channels",
+    (signal) =>
+      c
+        .schema("swarm_read")
+        .from("signals")
+        .select("id,channel_id")
+        .eq("workspace_id", workspaceId)
+        .in("id", unique)
+        .abortSignal(signal),
+  );
+  if (error) throw new Error(error.message);
+  for (const row of (data ?? []) as Array<{ id?: unknown; channel_id?: unknown }>) {
+    if (typeof row.id === "string") {
+      out.set(row.id, typeof row.channel_id === "string" ? row.channel_id : null);
+    }
+  }
+  return out;
+}
+
+/**
  * The newest messages between the viewer and one teammate, by the same rule as `signalIsDirectBetween`, which the
  * screen still applies over what this returns. Narrowed in the query, so a conversation is not limited to whatever
  * of it falls in the newest page of the whole workspace. The view is the authorization; this only narrows it.
