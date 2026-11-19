@@ -67,6 +67,13 @@ export interface ThreadRootRow {
   toAgent: string | null;
   threadRootId: string | null;
   until: string | null;
+  conversationId?: string | null;
+  conversationKind?: "general" | "public_channel" | "private_channel" | "dm" | "group_dm" | null;
+}
+
+export interface ThreadRootOptions {
+  /** True when the row belongs to a Step 2b 1:1 DM, Notes to self, or group DM. */
+  directConversation?: boolean;
 }
 
 /**
@@ -77,6 +84,9 @@ export interface ThreadRootRow {
  * is not an oracle for which ids exist — then the 409 archive, then the 400 already-a-reply.
  * A reader who meets a block therefore meets the rule the server would have named.
  *
+ * In a Step 2b `dm` or `group_dm`, top-level messages carry canonical recipients (`to`/`toAgent`)
+ * and still allow 1-level threads via `post_signal({ conversation_id, thread_root_id })`.
+ *
  * `channelArchived` is an argument rather than a field because the row does not carry it:
  * the browser learns it from `swarm_read.channels`, which is a different read. Passing it in
  * keeps this function pure and keeps the caller honest about where the answer came from.
@@ -85,14 +95,17 @@ export const threadRootBlock = (
   signal: ThreadRootRow,
   now: number,
   channelArchived: boolean,
+  options?: ThreadRootOptions,
 ): ThreadRootBlock | null => {
+  const isDirectConversation =
+    options?.directConversation === true ||
+    signal.conversationKind === "dm" ||
+    signal.conversationKind === "group_dm";
   /* An `in_reply_to` row is stored DIRECTED — `resolveSignalWriteTarget` re-addresses it to
    * the referenced signal's author — so this one test covers the server's `to_user_id`,
-   * `to_agent_principal_id` AND `in_reply_to` arms. The browser's `Signal` carries no
-   * `in_reply_to` field, and it does not need one: there is no row that is undirected here
-   * and directed there. The server asserts all three anyway, which is where the property is
-   * enforced; this is the affordance that follows it. */
-  if (signal.to !== null || signal.toAgent !== null) return "directed";
+   * `to_agent_principal_id` AND `in_reply_to` arms outside Step 2b DMs. Inside a Step 2b
+   * DM or group DM, top-level rows carry canonical recipients and still root 1-level threads. */
+  if (!isDirectConversation && (signal.to !== null || signal.toAgent !== null)) return "directed";
   if (signal.until !== null) {
     const until = new Date(signal.until).getTime();
     /* A row whose `until` does not parse is left alone rather than called expired: the feed
@@ -100,7 +113,7 @@ export const threadRootBlock = (
      * value would take a control off a message that is still there. */
     if (Number.isFinite(until) && until <= now + THREAD_ROOT_LIVE_MARGIN_MS) return "expiring";
   }
-  if (channelArchived) return "channel-archived";
+  if (!isDirectConversation && channelArchived) return "channel-archived";
   if (signal.threadRootId !== null) return "already-a-reply";
   return null;
 };
@@ -110,7 +123,8 @@ export const canStartThread = (
   signal: ThreadRootRow,
   now: number,
   channelArchived: boolean,
-): boolean => threadRootBlock(signal, now, channelArchived) === null;
+  options?: ThreadRootOptions,
+): boolean => threadRootBlock(signal, now, channelArchived, options) === null;
 
 /**
  * What the composer says when a reply cannot be sent after all.
@@ -156,34 +170,35 @@ export interface ThreadReplyRoot {
   channelId: string | null;
   /** The root's expiry, or `null` when it does not expire. The ceiling the server clamps to. */
   until: string | null;
+  /** Step 2b conversation id when replying inside a 1:1 DM, Notes to self, or group DM. */
+  conversationId?: string | null;
+  /** Step 2b conversation kind captured when opening a DM/group DM thread reply. */
+  conversationKind?: "dm" | "group_dm" | null;
 }
 
 /**
- * WHERE THE REPLY GOES. THREE STATES, NOT TWO.
+ * WHERE THE REPLY GOES. FOUR STATES.
  *
- * A thread reply is filed in its ROOT's channel by the server — the client may not file it
- * anywhere else, and the edge refuses a body that names a channel alongside a thread root. So
- * the bar states the place rather than offering one, and it takes the SLUG from the live
- * channel list so a rename between opening a reply and sending it is reflected instead of
- * frozen.
- *
- * The third state is why this is a type and not a nullable slug. The channel read SOFT-FAILS
- * to an empty list, by design, so a channel outage cannot take the feed down — and a thread in
- * a real channel then has a `channelId` the page cannot resolve to a name. Collapsing that into
- * the unfiled case made the bar say "in #all-signals" about a reply that lands in a channel,
- * which is a false statement about where the reader's message goes.
+ * A thread reply is filed in its ROOT's channel or direct conversation by the server — the client
+ * may not file it anywhere else, and the edge refuses a body that names a channel alongside a
+ * thread root. So the bar states the place rather than offering one, and reads the live channel
+ * slug or direct conversation title so a rename between opening and sending is reflected.
  */
 export type ThreadReplyPlace =
   | { kind: "unfiled" }
   | { kind: "channel"; slug: string }
+  | { kind: "direct"; title: string }
   | { kind: "unknown" };
 
-/** The three states, decided in one place from the two things the caller can know. */
+/** Decided in one place from the root's channel/slug or direct conversation title. */
 export const threadReplyPlace = (
   channelId: string | null,
   slug: string | null,
+  directTitle: string | null = null,
 ): ThreadReplyPlace =>
-  channelId === null
+  directTitle !== null && directTitle.trim() !== ""
+    ? { kind: "direct", title: directTitle }
+    : channelId === null
     ? { kind: "unfiled" }
     : slug === null
     ? { kind: "unknown" }
@@ -191,7 +206,11 @@ export const threadReplyPlace = (
 
 /** How a place is written where it can be written. An unfiled thread is the whole feed. */
 export const threadReplyPlaceLabel = (place: ThreadReplyPlace): string =>
-  place.kind === "channel" ? channelLabel(place.slug) : channelLabel(ALL_SIGNALS_SLUG);
+  place.kind === "direct"
+    ? place.title
+    : place.kind === "channel"
+    ? channelLabel(place.slug)
+    : channelLabel(ALL_SIGNALS_SLUG);
 
 /**
  * The bar's first sentence: who is being answered, and where the reply lands.
