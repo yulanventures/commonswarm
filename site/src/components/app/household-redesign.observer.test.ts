@@ -6,7 +6,7 @@ import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
-import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -237,12 +237,11 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /"pd-quiet-link"/);
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
-  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, true\)/,
-    "the dialog's nested confirmation suppresses the card's native confirmation");
+  assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice\)/);
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
-  assert.match(withdraw, /window.confirm\(withdrawConfirmText\(agentName, hosted\)\)/);
+  assert.doesNotMatch(script, /window\.confirm/, "no browser prompt anywhere on the page");
   assert.match(cards, /const hosted = connection.kind === "hosted";/);
-  assert.match(cards, /withdrawAgent\(principalId, agentName, hosted, withdraw, status\)/,
+  assert.match(cards, /askListsWithdraw\(principalId, agentName, hosted, withdraw, status\)/,
     "a card row decides hosted from its own connection, not from a roster lookup");
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
   assert.match(withdraw, /withdrawRefusalMessage\(result.body.reason\)/);
@@ -781,21 +780,26 @@ test("the Just me warning is final, names the way out, and clears when Shared is
   f.radios[1].checked = false; f.radios[0].checked = true; sync(); assert.equal(f.warning.textContent, "");
 });
 
-test("approval sends only connection consent, withdrawal uses the principal, and cancelled withdrawal sends nothing", async () => {
-  const calls: any[] = [], messages: string[] = [], confirms: string[] = [], receipt = { textContent: "" };
+test("approval sends only connection consent, withdrawal asks in the shared confirmation, and going back sends nothing", async () => {
+  const calls: any[] = [], messages: string[] = [], asked: any[] = [], receipt = { textContent: "" };
   const scope = { workspaceId: "workspace", session: { user: { id: "person" } } };
-  let current = true, confirm = true, reply: any = { status: "committed", expires_at: null };
+  let current = true, reply: any = { status: "committed", expires_at: null };
+  const dialog = {}, root = {}, title = { focused: 0, focus() { this.focused += 1; } };
   const ctx = {
     householdScope: () => scope, householdCurrent: () => current,
     postCommand: async (_session: any, _id: string, body: any, envelope: any) => {
       calls.push(JSON.parse(JSON.stringify({ body, envelope }))); return { status: 200, body: reply };
     },
-    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage, withdrawConfirmText,
-    agents: [{ principalId: "principal", transport: "local" }],
-    householdReceipts: new Map(), one: () => receipt,
-    loadHouseholdConnections: async () => messages.push("reload"), window: { confirm: (text: string) => { confirms.push(text); return confirm; } },
+    uuid: () => "command-id", approvalUntil, accessRefusalMessage, withdrawRefusalMessage, readableError: (error: Error) => error.message,
+    agents: [{ principalId: "principal", transport: "local" }], CSS: { escape: (value: string) => value },
+    householdReceipts: new Map(),
+    one: (selector: string) => selector === "[data-lists-confirm]" ? dialog : selector === "[data-household-agents]" ? root
+      : selector === "#dashboard-agent-approvals-title" ? title : selector === "[data-people-receipt]" ? receipt : null,
+    // The shared confirmation itself is tested with People & agents; here it records what it was asked and hands back its answer.
+    showPeopleConfirmation: (...args: any[]) => { asked.push(args); },
+    loadHouseholdConnections: async () => messages.push("reload"),
   };
-  const commands = execute(`${section(script, "const approveAgent = async", "let householdConfirms =")}; ({ approveAgent, withdrawAgent });`, ctx);
+  const commands = execute(`${section(script, "const approveAgent = async", "let householdConfirms =")}; ({ approveAgent, withdrawAgent, askListsWithdraw });`, ctx);
   const connection = { kind: "hosted", connection_id: "connection", grant_id: "grant", principal_id: "principal" };
   const button = { disabled: false }, status = { textContent: "" };
   await commands.approveAgent(connection, ["read"], button, status);
@@ -803,27 +807,42 @@ test("approval sends only connection consent, withdrawal uses the principal, and
   assert.equal(status.textContent, "Allowed until you withdraw it.");
   assert.deepEqual(messages, ["reload"]);
   assert.equal(receipt.textContent, "", "approval is announced only on its card");
-  confirm = false;
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(confirms, [withdrawConfirmText("Muse", false)], "a local agent sees the local confirm text");
-  confirm = true; reply = { status: "refused", reason: "connection_access_refused" };
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
+
+  // Withdraw on the card asks in the shared confirmation, with the agent's name and its kind.
+  const opener = { disabled: false };
+  commands.askListsWithdraw("principal", "Muse", false, opener, status);
+  assert.equal(asked.length, 1);
+  const [onDialog, action, item, from, commit, , , , host] = asked[0];
+  assert.equal(onDialog, dialog); assert.equal(action, "withdraw"); assert.deepEqual(JSON.parse(JSON.stringify(item)), { name: "Muse", hosted: false }); assert.equal(from, opener);
+  assert.equal(host.root, root, "focus goes back within the approvals, to the same agent's button");
+  host.fallback(); assert.equal(calls.length, 1, "going back, or Escape, sends nothing");
+  commands.askListsWithdraw("principal", "Muse", true, opener, status);
+  assert.deepEqual(JSON.parse(JSON.stringify(asked[1][2])), { name: "Muse", hosted: true }, "a hosted row asks with the hosted consequences");
+
+  // Confirming sends one withdrawal for that agent in that workspace.
   reply = { status: "committed", withdrawn: 1 };
-  await commands.withdrawAgent("principal", "Muse", false, button, status);
-  assert.deepEqual(calls[2].body, { kind: "household_withdraw_connection", principal_id: "principal" });
+  await commit(button, status);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], { body: { kind: "household_withdraw_connection", principal_id: "principal" }, envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } });
   assert.equal(status.textContent, "Withdrawn. Muse can no longer use Lists & docs here.");
-  /* The fixture's roster entry is local while the connection is hosted: the row's own flag decides. */
-  confirm = false;
-  await commands.withdrawAgent("principal", "Muse", true, button, status);
-  assert.deepEqual(confirms.at(-1), withdrawConfirmText("Muse", true), "a hosted row sees the hosted confirm text");
-  confirm = true;
-  await commands.withdrawAgent("principal", "Muse", true, button, status);
+
+  // A refusal keeps its own sentence and is thrown, so the confirmation stays open and says it.
+  reply = { status: "refused", reason: "connection_access_refused" };
+  await assert.rejects(commit(button, status), /Only the person who connected this agent/);
+  assert.equal(status.textContent, "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed.");
+  assert.equal(button.disabled, false);
+
+  // A hosted withdrawal reports the stored approval.
+  reply = { status: "committed", withdrawn: 1 };
+  await asked[1][4](button, status);
   assert.equal(status.textContent, "Withdrawn. The stored Lists & docs approval for Muse was removed.");
   assert.equal(receipt.textContent, "", "withdrawal has no duplicate section receipt");
   assert.deepEqual(messages, ["reload", "reload", "reload"]);
+
+  // A question confirmed after the workspace changed sends nothing.
   current = false;
+  await assert.rejects(asked[0][4](button, status), /This workspace changed/);
+  assert.equal(calls.length, 4);
   status.textContent = "other workspace";
   await commands.approveAgent(connection, ["read"], button, status);
   assert.equal(messages.length, 3, "stale committed replies do not reload the current workspace");

@@ -1046,6 +1046,38 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         steps.push("seed_lists_approval");
       } else if (ready) note("seed_lists_approval", "the Sprout or Fern agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_approval", error); }
+    // Withdrawing Lists & docs access (dialog.lists-withdraw, dialog.people-withdraw), in a workspace of its own: one own local
+    // agent, Thyme, with a live connection, whose Lists access the owner allows here through the product's own commands
+    // (household_connections, then household_approve_connection), so both pages offer Withdraw. Neither screen sends the
+    // withdrawal, so the approval stays for every capture.
+    try {
+      const withdrawWorkspace = randomUUID();
+      const ready = ok("create_workspace withdraw", await command(owner.token, { kind: "create_workspace", workspace_id: withdrawWorkspace, name: "Herb garden", org_id: workspace }, null))
+        && ok("create_agent_principal withdraw", await command(owner.token, { kind: "create_agent_principal", name: "Thyme", model: "claude-opus-5-5" }, withdrawWorkspace))
+        && ok("household_permissions withdraw", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, withdrawWorkspace));
+      const [thyme] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${withdrawWorkspace}::uuid AND name = 'Thyme' AND transport = 'local'` : [];
+      if (thyme) {
+        const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'Audit laptop')`;
+          await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${thyme.principal_id}::uuid, ${device}::uuid)`;
+          await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, created_by, horizon_expires_at, max_successors)
+            VALUES (${family}::uuid, ${withdrawWorkspace}::uuid, ${thyme.principal_id}::uuid, ${run}::uuid, ${owner.id}::uuid, clock_timestamp() + interval '30 days', 800)`;
+          await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id, renewal_grant_id)
+            VALUES (${token}::uuid, ${thyme.principal_id}::uuid, ${run}::uuid, '["post_signal"]', ${createHash("sha256").update(randomBytes(32)).digest()},
+              clock_timestamp() + interval '1 day', ${randomUUID()}::uuid, ${family}::uuid)`;
+        });
+        const listed = await command(owner.token, { kind: "household_connections" }, withdrawWorkspace);
+        const connections = Array.isArray(listed.body.connections) ? listed.body.connections as Record<string, unknown>[] : [];
+        const connection = connections.find((entry) => String(entry.principal_id ?? "") === thyme.principal_id);
+        if (connection && ok("household_approve_connection withdraw", await command(owner.token, { kind: "household_approve_connection",
+          connection: { kind: connection.kind, connection_id: connection.connection_id, grant_id: connection.grant_id, principal_id: connection.principal_id, operations: ["read"] } }, withdrawWorkspace))) {
+          Object.assign(ids, { withdrawWorkspace, withdrawAgent: thyme.principal_id });
+          steps.push("seed_lists_withdraw");
+        } else if (!connection) note("seed_lists_withdraw", `no connection listed for Thyme: HTTP ${listed.status} ${JSON.stringify(listed.body).slice(0, 200)}`);
+      } else if (ready) note("seed_lists_withdraw", "the Thyme agent principal was not found as a local agent");
+    } catch (error) { note("seed_lists_withdraw", error); }
     // The Admins tab with grants on record (app.people.admins.grants and the two dialog.people-admins-end screens), in a
     // workspace of its own. Every grant is one the product could have written: a second person joins the workspace, adds an
     // agent of their own and gives it workspace and organization admin; the viewer gives their own agent workspace admin with

@@ -220,6 +220,25 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-pd-focus="row-remove-agent-{agent}"]' } },
   }],
+  // Withdraw access on Lists & docs: the shared confirmation opens on Go back; Escape sends nothing and returns to the same agent's button.
+  "dialog.lists-withdraw": [{
+    name: "lists-withdraw-escape-returns-to-agent",
+    start: { active: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-lists-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-household-agent-list] [data-pd-focus="lists-withdraw-{withdrawAgent}"]' } },
+  }],
+  "dialog.people-withdraw": [{
+    name: "people-withdraw-escape-returns-to-agent",
+    start: { active: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-people-detail] [data-pd-focus="withdraw-{withdrawAgent}"]' } },
+  }],
   // Lowering your own role: the app focuses Go back; Escape goes back to the role select, nothing is saved.
   "dialog.role-confirm": [{
     name: "role-confirm-escape-keeps-role",

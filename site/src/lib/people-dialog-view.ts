@@ -151,10 +151,6 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleRowAc
   return action === "remove-agent" && agent.mayManage;
 }
 /** The `window.confirm` text of the withdraw button on the Lists & docs card. */
-export function withdrawConfirmText(name: string, hosted: boolean): string {
-  return hosted ? `Remove the stored Lists & docs approval for ${name}? ${HOSTED_LISTS_NOTE}`
-    : `Withdraw Lists & docs access for ${name}? It can no longer see or change lists and docs here until you allow it again.`;
-}
 export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string }) {
   const name = item.name;
   if (action === "cancel-invite") return peopleInviteConfirmCopy({ name, kind: (item.kind ?? "person") as PeopleInvite["kind"] });
@@ -858,7 +854,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
 export function showPeopleConfirmation(dialog: HTMLDialogElement, action: PeopleConfirmAction,
   item: { name: string; hosted?: boolean; kind?: string; liveKey?: boolean }, opener: HTMLElement,
   commit: (button: HTMLButtonElement, notice: HTMLElement) => Promise<void>,
-  formatError: (error: unknown) => string, alternative?: () => void, focusAfterCommit?: () => void): void {
+  formatError: (error: unknown) => string, alternative?: () => void, focusAfterCommit?: () => void,
+  /** Another part of the page that opens this question (the Lists & docs approvals, for example). Focus then returns
+   *  to the opener there, or to the same control by its focus key after a redraw, or to `fallback`; and after a
+   *  confirmed answer `focusAfterCommit` is used. Without it the question belongs to People & agents. */
+  host?: { root: HTMLElement; fallback: () => HTMLElement | null }): void {
   const doc = dialog.ownerDocument; const copy = peopleConfirmationCopy(action, item);
   dialog.replaceChildren(); dialog.setAttribute("role", "alertdialog"); dialog.setAttribute("aria-labelledby", "pd-confirm-title"); dialog.setAttribute("aria-describedby", "pd-confirm-description");
   const symbol = node(doc, "span", "pd-confirm-icon", action === "withdraw" ? "▤" : "⚠"); symbol.setAttribute("aria-hidden", "true");
@@ -872,16 +872,16 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   const notice = node(doc, "p", "pd-error"); notice.setAttribute("role", "alert"); notice.hidden = true;
   let pending = false;
   // The page layout has no outer dialog: its host is the current People & agents page (a render replaces the element).
-  const pageHost = () => dialog.closest("[data-roster-dialog]") ? null : doc.querySelector<HTMLElement>("[data-people-page]");
+  const pageHost = () => host || dialog.closest("[data-roster-dialog]") ? null : doc.querySelector<HTMLElement>("[data-people-page]");
   dialog.toggleAttribute("data-people-page-confirm", !!pageHost());
   const close = () => { if (pending) return; dialog.close();
     const outer = dialog.closest<HTMLDialogElement>("[data-roster-dialog]");
-    const fallback = outer?.querySelector<HTMLElement>("#pd-detail-title") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title")
+    const fallback = host ? host.fallback() : outer?.querySelector<HTMLElement>("#pd-detail-title") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title")
       ?? pageHost()?.querySelector<HTMLElement>("#pd-detail-title") ?? (pageHost() ? pageHeading(doc) : null);
     // A background refresh can redraw the roster while this question is open. Focus then returns to the same control
     // by its focus key, not to the heading because the node that opened the question is gone.
     const key = opener.dataset.pdFocus;
-    const redrawn = !opener.isConnected && key ? [...(outer ?? pageHost() ?? doc.body).querySelectorAll<HTMLElement>("[data-pd-focus]")]
+    const redrawn = !opener.isConnected && key ? [...(outer ?? host?.root ?? pageHost() ?? doc.body).querySelectorAll<HTMLElement>("[data-pd-focus]")]
       .find((control) => control.dataset.pdFocus === key && control.getClientRects().length > 0) ?? null : null;
     const target = opener.isConnected ? opener : redrawn;
     if (target && !target.closest("[inert]")) target.focus({ preventScroll: true }); else fallback?.focus({ preventScroll: true }); };
@@ -892,7 +892,8 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
     [...dialog.querySelectorAll<HTMLButtonElement>("button")].forEach((control) => control.disabled = true);
     try { await commit(accept, notice); if (dialog.open) dialog.close();
       const outer = dialog.closest<HTMLDialogElement>("[data-roster-dialog]");
-      if (outer?.open) {
+      if (host) { if (focusAfterCommit) focusAfterCommit(); else host.fallback()?.focus({ preventScroll: true }); }
+      else if (outer?.open) {
         if (focusAfterCommit) focusAfterCommit();
         else (outer.querySelector<HTMLElement>("#pd-detail-title") ?? outer.querySelector<HTMLElement>("#dashboard-roster-title"))?.focus({ preventScroll: true });
       } else if (!outer) { const host = pageHost();
