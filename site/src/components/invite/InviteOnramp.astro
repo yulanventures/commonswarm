@@ -236,7 +236,12 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   import {
     EmailAddressRejected,
     EmailRateLimited,
+    bootstrapMultiAccountAuth,
     currentSession,
+    isMultiAccountEnabled,
+    onAccountForcedTeardown,
+    onAuthChange,
+    pinAccountContext,
     client,
     deployment,
     myWorkspaces,
@@ -607,8 +612,9 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     const accept = async (confirmed = false): Promise<void> => {
       if (!payload) return unusable();
       const sender = payload.inviter_display_name;
+      const pinned = isMultiAccountEnabled() ? pinAccountContext() : null;
       const session = await currentSession();
-      if (!session) return show("auth");
+      if (!session || (pinned && !pinned.isCurrent())) return show("auth");
       authUser = session.user.id;
       authEmail = session.user.email ?? null;
       const generation = authGeneration;
@@ -621,17 +627,17 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         const existing = (await myWorkspaces()).find(
           (workspace) => workspace.id === payload?.workspace_id,
         );
-        if (generation !== authGeneration) return;
+        if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
         if (existing) {
           forgetInvite(resumeId, localStorage);
           continueToAgent(existing.id, existing.name);
           return;
         }
-        const invitations = browserHumanInvitations();
+        const invitations = browserHumanInvitations({ pinned });
         if (!confirmed) {
           prepared = null;
           const value = await invitations.preview({source:'link',token:payload.invitation_token});
-          if (generation !== authGeneration) return;
+          if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
           if (value.status === 'joined') return continueToAgent(value.workspace_id, value.workspace_name);
           preview = value;
           const you = one<HTMLElement>("[data-viewer-initial]");
@@ -653,7 +659,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         lockReview(true);
         prepared ??= invitations.prepareAcceptance({source:'link',token:payload.invitation_token},preview,role);
         const accepted = await prepared.send();
-        if (generation !== authGeneration) return;
+        if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
         const workspaceId = String(accepted.workspace_id);
         const workspaceName = String(accepted.workspace_name);
         forgetInvite(resumeId, localStorage);
@@ -686,6 +692,14 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       const target = deployment();
       if (!target) {
         return unusable("This saved page is not connected to a CommonSwarm deployment.");
+      }
+      if (isMultiAccountEnabled()) {
+        // C1: Scrub callback params & run direct PKCE bootstrap BEFORE reading resume/app state!
+        const bootRes = await bootstrapMultiAccountAuth(window.location, window.history);
+        if (bootRes?.callback.kind === "refused") {
+          const errEl = one<HTMLElement>("[data-auth-error]");
+          if (errEl) { errEl.textContent = bootRes.callback.message; errEl.hidden = false; }
+        }
       }
       const url = new URL(window.location.href);
       const encoded = url.hash.startsWith("#invite=")
@@ -885,14 +899,36 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       show("complete");
     });
 
-    client()?.auth.onAuthStateChange((event, session) => {
+    onAuthChange((event, session) => {
       const user = session?.user.id ?? null;
-      if (event === 'SIGNED_OUT' || authUser !== null && user !== authUser) {
-        ++authGeneration; preview = null; prepared = null; payload = null;
+      if (event === 'SIGNED_OUT' || (authUser !== null && user !== authUser)) {
+        ++authGeneration;
+        preview = null;
+        prepared = null;
+        authUser = user;
+        authEmail = session?.user.email ?? null;
+        // Rev 4 §3: If fallback or account switch changes the displayed identity on /invite,
+        // require fresh explicit user confirmation under the new identity (never auto-accept).
+        if (isMultiAccountEnabled() && payload && session) {
+          resetReview();
+          void accept(false);
+          return;
+        }
+        payload = null;
         unusable('Sign in as the invited person and reopen the invitation.');
+        return;
       }
       authUser = user;
       authEmail = session?.user.email ?? null;
+    });
+    onAccountForcedTeardown(() => {
+      ++authGeneration;
+      preview = null;
+      prepared = null;
+      authUser = null;
+      authEmail = null;
+      resetReview();
+      show("auth");
     });
     void boot();
   }

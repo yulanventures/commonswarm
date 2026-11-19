@@ -40,8 +40,20 @@ import {
 } from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
 
-/** Dormant feature gate for PR 1. Flipped to true in PR 2 once all account-sensitive routes wire in. */
+/** Dormant feature gate until PR 2 passes HezSec, Designer, and Lead reviews. */
 export const MULTI_ACCOUNT_ENABLED = false;
+
+let multiAccountTestOverride: boolean | null = null;
+
+/** Authoritative multi-account gate (module-internal override exists strictly for test/capture harnesses). */
+export function isMultiAccountEnabled(): boolean {
+  return multiAccountTestOverride ?? MULTI_ACCOUNT_ENABLED;
+}
+
+/** Test-only override for exercising enabled PR 2 flows while MULTI_ACCOUNT_ENABLED stays false. */
+export function setMultiAccountEnabledForTesting(enabled: boolean | null): void {
+  multiAccountTestOverride = enabled;
+}
 
 /** Maximum simultaneous signed-in accounts per browser profile. */
 export const MAX_SIGNED_IN_ACCOUNTS = 5;
@@ -1094,7 +1106,10 @@ export class AccountSessionRuntime {
   }
 }
 
-export type PinnedOperationScope = "account" | { workspaceId: string };
+export type PinnedOperationScope =
+  | "account"
+  | { workspaceId: string }
+  | { kind: "create-workspace"; newWorkspaceId: string };
 
 export interface PinnedAccountContext {
   readonly runtime: AccountSessionRuntime;
@@ -3081,6 +3096,9 @@ function collectEmbeddedWorkspaceIds(value: unknown, depth = 0, out: string[] = 
 
 function isPinnedScopeCurrent(ctx: PinnedAccountContext, scope: PinnedOperationScope): boolean {
   if (scope === "account") return ctx.isCurrent();
+  if ("kind" in scope) {
+    return scope.kind === "create-workspace" && Boolean(scope.newWorkspaceId?.trim()) && ctx.isCurrent();
+  }
   const targetWorkspace = scope.workspaceId?.trim();
   if (!targetWorkspace) return false;
   return ctx.workspaceId === targetWorkspace && ctx.isCurrent(targetWorkspace);
@@ -3135,6 +3153,30 @@ export async function postPinnedCommand(
     if (embeddedWorkspaceIds.length > 0) {
       throw new MultiAccountWorkspaceMismatch();
     }
+  } else if ("kind" in options.scope) {
+    // Expresses the exact create_workspace edge envelope (supabase/functions/command/index.ts:6560):
+    // NO top-level workspace_id or stream, command.kind === "create_workspace", and command.workspace_id === newWorkspaceId.
+    const expectedNewWs = options.scope.newWorkspaceId?.trim();
+    const cmdObj = validatedEnvelope.command && typeof validatedEnvelope.command === "object"
+      ? (validatedEnvelope.command as Record<string, unknown>)
+      : null;
+    if (
+      options.scope.kind !== "create-workspace" ||
+      !expectedNewWs ||
+      validatedEnvelope.workspace_id !== undefined ||
+      validatedEnvelope.stream !== undefined ||
+      !cmdObj ||
+      cmdObj.kind !== "create_workspace" ||
+      cmdObj.workspace_id !== expectedNewWs
+    ) {
+      throw new MultiAccountWorkspaceMismatch();
+    }
+    for (const foundWs of embeddedWorkspaceIds) {
+      if (foundWs !== expectedNewWs) {
+        throw new MultiAccountWorkspaceMismatch();
+      }
+    }
+    wireBody = JSON.stringify(validatedEnvelope);
   } else {
     const pinnedWorkspace = options.scope.workspaceId?.trim();
     if (!pinnedWorkspace || ctx.workspaceId !== pinnedWorkspace) {
@@ -3213,5 +3255,129 @@ export async function attachPinnedRealtime<TSub>(
   await ctx.runtime.client.realtime.setAuth(active.access_token);
   if (!isPinnedScopeCurrent(ctx, scope)) return null;
   return join(ctx.runtime.client, active);
+}
+
+/**
+ * Active-only Realtime companion (Rev 4 §3, PR 2):
+ * Polls lightweight `homeOverview()` waiting counts ONLY for inactive verified accounts,
+ * pauses while hidden, verifies ownership + session before & after each read, and clears
+ * stale badges immediately on sign-out, loginId change, or membership loss.
+ */
+export class InactiveAccountBadgePoller {
+  private readonly counts = new Map<string, number | null>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private inFlight = false;
+  private stopped = false;
+
+  constructor(
+    private readonly manager: AccountManager,
+    private readonly fetchWaitingCount: (runtime: AccountSessionRuntime) => Promise<number | null>,
+    private readonly options: {
+      intervalMs?: number;
+      isHidden?: () => boolean;
+      onUpdate?: () => void;
+    } = {},
+  ) {}
+
+  private keyFor(userId: string, loginId: string): string {
+    return `${userId}\0${loginId}`;
+  }
+
+  /** Return waiting count for an owned { userId, loginId } pair, or null if unknown/unowned. */
+  waitingCount(userId: string, loginId: string): number | null {
+    const owned = this.manager.listAccounts().some((a) => a.userId === userId && a.loginId === loginId);
+    if (!owned) {
+      this.counts.delete(this.keyFor(userId, loginId));
+      return null;
+    }
+    return this.counts.get(this.keyFor(userId, loginId)) ?? null;
+  }
+
+  /** Drop counts for any account no longer owned (call on ownership change / sign-out / teardown). */
+  prune(): void {
+    const ownedKeys = new Set(this.manager.listAccounts().map((a) => this.keyFor(a.userId, a.loginId)));
+    let changed = false;
+    for (const key of [...this.counts.keys()]) {
+      if (!ownedKeys.has(key)) {
+        this.counts.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) this.options.onUpdate?.();
+  }
+
+  clear(): void {
+    if (this.counts.size === 0) return;
+    this.counts.clear();
+    this.options.onUpdate?.();
+  }
+
+  start(): void {
+    if (this.stopped || this.timer !== null) return;
+    const interval = this.options.intervalMs ?? 45_000;
+    this.timer = setInterval(() => { void this.pollOnce(); }, interval);
+    (this.timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.counts.clear();
+  }
+
+  async pollOnce(): Promise<void> {
+    if (this.stopped || this.inFlight) return;
+    if (this.options.isHidden?.()) return;
+    this.inFlight = true;
+    try {
+      this.prune();
+      const active = this.manager.activeAccount();
+      const inactiveAccounts = this.manager.listAccounts().filter(
+        (a) => !active || a.userId !== active.userId || a.loginId !== active.loginId,
+      );
+      let updated = false;
+      for (const account of inactiveAccounts) {
+        if (this.stopped || this.options.isHidden?.()) break;
+        const runtime = this.manager.runtimeForLogin(account.userId, account.loginId);
+        const key = this.keyFor(account.userId, account.loginId);
+        if (!runtime || !runtime.isLiveOwned()) {
+          if (this.counts.delete(key)) updated = true;
+          continue;
+        }
+        try {
+          const verified = await runtime.verifySession();
+          if (this.stopped || !verified || verified.user.id !== account.userId || !runtime.isLiveOwned()) {
+            if (this.counts.delete(key)) updated = true;
+            continue;
+          }
+          const count = await this.fetchWaitingCount(runtime);
+          // Recheck ownership & that this login is still live and still inactive before committing!
+          const stillOwned = this.manager.listAccounts().some(
+            (a) => a.userId === account.userId && a.loginId === account.loginId,
+          );
+          if (!stillOwned || !runtime.isLiveOwned()) {
+            if (this.counts.delete(key)) updated = true;
+            continue;
+          }
+          const normalized = count !== null && Number.isFinite(count) && count >= 0 ? Math.trunc(count) : null;
+          if (this.counts.get(key) !== normalized) {
+            this.counts.set(key, normalized);
+            updated = true;
+          }
+        } catch (error) {
+          if (error instanceof MultiAccountSessionExpired) {
+            if (this.counts.delete(key)) updated = true;
+          }
+          // Transient error: leave existing unknown/previous state without leaking across accounts.
+        }
+      }
+      if (updated) this.options.onUpdate?.();
+    } finally {
+      this.inFlight = false;
+    }
+  }
 }
 

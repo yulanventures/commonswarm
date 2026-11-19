@@ -67,7 +67,18 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
 
 <script>
   import type { Session } from "@supabase/supabase-js";
-  import { client, currentSession, uuid, CommandOutcomeUnknown, myOrganizations, myWorkspaces } from "../../lib/commonswarm";
+  import {
+    bootstrapMultiAccountAuth,
+    client,
+    currentSession,
+    isMultiAccountEnabled,
+    onAccountForcedTeardown,
+    onAuthChange,
+    uuid,
+    CommandOutcomeUnknown,
+    myOrganizations,
+    myWorkspaces,
+  } from "../../lib/commonswarm";
   import { loadAdminRecovery, revokeAdminGrant, changeAdminClientApproval, readAdminIssuanceGate, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView, type AdminClientView, type AdminWorkerView, type AdminCoverageView } from "../../lib/admin-delegations";
   import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList, seatAdminGrantLive } from "../../lib/seat-admin";
 
@@ -541,22 +552,25 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     let wantsHistory = false;
     try { wantsHistory = new URLSearchParams(window.location.search).get("admin") === "history"; } catch { /* ignore */ }
     const openFromLink = (): void => { if (wantsHistory && session) { wantsHistory = false; open("account", "history"); } };
-    const auth = client();
-    auth?.auth.onAuthStateChange((_event, next) => {
-      const changed = session?.user.id !== next?.user.id;
+    const applyAuthChange = (next: Session | null): void => {
+      const changed = session?.user.id !== next?.user.id || session?.access_token !== next?.access_token;
       session = next; root.hidden = !session;
       if (changed) { clear(); forgetNames(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
       if (session) window.setTimeout(() => { void indicator(); openFromLink(); }, 0);
-    });
+    };
+    onAuthChange((_event, next) => applyAuthChange(next));
+    onAccountForcedTeardown(() => applyAuthChange(null));
     const initialGeneration = generation;
-    void currentSession().then(next => {
+    void (async () => {
+      if (isMultiAccountEnabled()) await bootstrapMultiAccountAuth();
+      const next = await currentSession();
       if (generation !== initialGeneration) return;
       session = next; root.hidden = !next;
       if (next) {
         void indicator();
         openFromLink();
       }
-    }).catch(() => { if (generation === initialGeneration) root.hidden = true; });
+    })().catch(() => { if (generation === initialGeneration) root.hidden = true; });
     // Human-facing status refresh, independent of the delegated runtime being online.
     window.setInterval(() => { if (!document.hidden) void indicator(); }, 30_000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) void indicator(); });

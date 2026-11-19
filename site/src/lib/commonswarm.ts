@@ -34,6 +34,41 @@ import {
 } from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
 import {
+  AccountManager,
+  AccountSessionRuntime,
+  InactiveAccountBadgePoller,
+  MAX_SIGNED_IN_ACCOUNTS,
+  MULTI_ACCOUNT_ENABLED,
+  MultiAccountAuthRecoveryRequired,
+  MultiAccountDeploymentMismatch,
+  MultiAccountSessionExpired,
+  MultiAccountWorkspaceMismatch,
+  attachPinnedRealtime,
+  isMultiAccountEnabled,
+  postPinnedCommand,
+  type AccountRecord,
+  type CallbackBootstrapResult,
+  type HistoryLike,
+  type LocationLike,
+  type PinnedAccountContext,
+  type PinnedOperationScope,
+  type SignInPurpose,
+  type SignOutAccountResult,
+  type SignOutAllResult,
+} from "./multi-account.js";
+export {
+  InactiveAccountBadgePoller,
+  MAX_SIGNED_IN_ACCOUNTS,
+  MULTI_ACCOUNT_ENABLED,
+  isMultiAccountEnabled,
+  type AccountRecord,
+  type CallbackBootstrapResult,
+  type PinnedAccountContext,
+  type SignInPurpose,
+  type SignOutAccountResult,
+  type SignOutAllResult,
+};
+import {
   scalarRecipient,
   scalarRecipientFields,
   toWireRecipients,
@@ -463,8 +498,148 @@ async function boundedAuth<T>(operation: Promise<T>): Promise<T> {
   } finally { clearTimeout(timer); }
 }
 
+type ForcedTeardownDetail = {
+  reason: "signed-out" | "all-signed-out" | "expired" | "storage-unavailable";
+  userId?: string;
+  loginId?: string;
+};
+
+let sharedAccountManager: AccountManager | null = null;
+let sharedAccountManagerOrigin = "";
+let multiAccountBootPromise: Promise<{ cutoverClearedLegacy: boolean; callback: CallbackBootstrapResult }> | null = null;
+const ownershipListeners = new Set<(accounts: readonly AccountRecord[], active: { userId: string; loginId: string } | null) => void>();
+const forcedTeardownListeners = new Set<(detail: ForcedTeardownDetail) => void>();
+
+/** Shared multi-account runtime manager (active only when isMultiAccountEnabled() is true). */
+export function accountManager(): AccountManager | null {
+  if (!isMultiAccountEnabled()) return null;
+  const d = deployment();
+  if (!d) return null;
+  const originKey = `${d.url}\0${d.anonKey}`;
+  if (sharedAccountManager && sharedAccountManagerOrigin === originKey) {
+    return sharedAccountManager;
+  }
+  sharedAccountManager?.destroy();
+  sharedAccountManagerOrigin = originKey;
+  sharedAccountManager = new AccountManager(d, {
+    onOwnershipChange: (accounts, active) => {
+      for (const listener of [...ownershipListeners]) {
+        try { listener(accounts, active); } catch { /* isolate listener errors */ }
+      }
+    },
+    onForcedTeardown: (detail) => {
+      for (const listener of [...forcedTeardownListeners]) {
+        try { listener(detail); } catch { /* isolate listener errors */ }
+      }
+    },
+  });
+  return sharedAccountManager;
+}
+
+/** Test-only reset for the shared multi-account manager. */
+export function resetAccountManagerForTesting(): void {
+  sharedAccountManager?.destroy();
+  sharedAccountManager = null;
+  sharedAccountManagerOrigin = "";
+  multiAccountBootPromise = null;
+  ownershipListeners.clear();
+  forcedTeardownListeners.clear();
+}
+
+export function onAccountOwnershipChange(
+  listener: (accounts: readonly AccountRecord[], active: { userId: string; loginId: string } | null) => void,
+): () => void {
+  ownershipListeners.add(listener);
+  return () => ownershipListeners.delete(listener);
+}
+
+export function onAccountForcedTeardown(listener: (detail: ForcedTeardownDetail) => void): () => void {
+  forcedTeardownListeners.add(listener);
+  return () => forcedTeardownListeners.delete(listener);
+}
+
+/**
+ * Startup multi-account bootstrap (C1 & C4): runs initialize() (fresh-sign-in cutover) and
+ * consumeAuthCallbackBootstrap() (immediate URL scrub + direct PKCE exchange) once before app reads.
+ */
+export async function bootstrapMultiAccountAuth(
+  location: LocationLike | undefined = typeof window !== "undefined" ? window.location : undefined,
+  history: HistoryLike | undefined = typeof window !== "undefined" ? window.history : undefined,
+): Promise<{ cutoverClearedLegacy: boolean; callback: CallbackBootstrapResult } | null> {
+  const mgr = accountManager();
+  if (!mgr) return null;
+  if (!multiAccountBootPromise) {
+    multiAccountBootPromise = (async () => {
+      const init = await mgr.initialize();
+      const callback: CallbackBootstrapResult = location && history
+        ? await mgr.consumeAuthCallbackBootstrap(location, history)
+        : { kind: "none" };
+      return { cutoverClearedLegacy: init.cutoverClearedLegacy, callback };
+    })();
+  }
+  return multiAccountBootPromise;
+}
+
+export function setActiveWorkspaceScope(workspaceId: string | null): void {
+  accountManager()?.setActiveWorkspace(workspaceId);
+}
+
+export function pinAccountContext(
+  options?: string | { userId?: string; workspaceId?: string | null },
+): PinnedAccountContext | null {
+  return accountManager()?.pinContext(options) ?? null;
+}
+
+/** Unified auth-change subscription across single-account (flag off) and multi-account (flag on) modes. */
+export function onAuthChange(listener: (event: string, session: Session | null) => void): () => void {
+  if (!isMultiAccountEnabled()) {
+    const auth = client();
+    if (!auth) return () => undefined;
+    const { data } = auth.auth.onAuthStateChange((event, next) => listener(event, next));
+    return () => data.subscription.unsubscribe();
+  }
+  const mgr = accountManager();
+  if (!mgr) return () => undefined;
+  let lastKey: string | null = null;
+  const emitActive = () => {
+    const active = mgr.activeAccount();
+    const key = active ? `${active.userId}:${active.loginId}` : null;
+    if (key === lastKey) return;
+    lastKey = key;
+    if (!active) {
+      listener("SIGNED_OUT", null);
+      return;
+    }
+    const rt = mgr.runtimeForLogin(active.userId, active.loginId);
+    if (!rt) {
+      listener("SIGNED_OUT", null);
+      return;
+    }
+    void rt.verifySession()
+      .then((verified) => {
+        const nowActive = mgr.activeAccount();
+        if (!nowActive || `${nowActive.userId}:${nowActive.loginId}` !== key) return;
+        listener(verified ? "SIGNED_IN" : "SIGNED_OUT", verified);
+      })
+      .catch(() => {
+        const nowActive = mgr.activeAccount();
+        if (!nowActive || `${nowActive.userId}:${nowActive.loginId}` !== key) return;
+        listener("SIGNED_OUT", null);
+      });
+  };
+  const offOwn = onAccountOwnershipChange(() => emitActive());
+  const offTear = onAccountForcedTeardown(() => {
+    lastKey = null;
+    listener("SIGNED_OUT", null);
+  });
+  return () => { offOwn(); offTear(); };
+}
+
 /** One client per page. Returns null when the build has no backend configured. */
 export function client(): SupabaseClient | null {
+  if (isMultiAccountEnabled()) {
+    return accountManager()?.runtimeFor()?.client ?? null;
+  }
   if (cached) return cached;
   const d = deployment();
   if (!d) return null;
@@ -523,6 +698,17 @@ export function authReturnError(location: { hash: string; search: string }): str
 }
 
 export function currentSession(): Promise<Session | null> {
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) return Promise.resolve(null);
+    const rt = mgr.runtimeFor();
+    if (!rt) return Promise.resolve(null);
+    return rt.verifySession().catch((error) => {
+      if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
+      if (error instanceof MultiAccountAuthRecoveryRequired) throw new AuthRecoveryRequired();
+      throw new AuthRecoveryRequired();
+    });
+  }
   return boundedAuth(verifiedSession());
 }
 
@@ -582,7 +768,58 @@ export async function subscribeAgentActivity(
   onFrame: (frame: AgentActivityFrame) => void,
   onState: (state: AgentActivityConnectionState) => void,
   onStatus?: (event: AgentStatusEvent) => void,
+  pinned?: PinnedAccountContext | null,
 ): Promise<AgentActivitySubscription> {
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    mgr.setActiveWorkspace(workspaceId);
+    const ctx = pinned ?? mgr.pinContext({ workspaceId });
+    if (!ctx) throw new SessionExpired();
+    let sub: AgentActivitySubscription | null = null;
+    try {
+      sub = await attachPinnedRealtime(ctx, { workspaceId }, (pinnedClient) => {
+        let removed = false;
+        const channel = pinnedClient.channel(agentActivityTopic(workspaceId), {
+          config: {
+            private: true,
+            broadcast: { ack: false, self: false },
+          },
+        });
+        channel.on("broadcast", { event: "activity" }, (message) => {
+          if (removed || !ctx.isCurrent(workspaceId)) return;
+          const status = parseAgentStatusEvent(message.payload, workspaceId);
+          if (status !== null) {
+            onStatus?.(status);
+            return;
+          }
+          const frame = parseAgentActivityFrame(message.payload, workspaceId);
+          if (frame !== null) onFrame(frame);
+        });
+        onState("connecting");
+        channel.subscribe((status) => {
+          if (removed || !ctx.isCurrent(workspaceId)) return;
+          if (status === "SUBSCRIBED") onState("subscribed");
+          else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            onState("unavailable");
+          }
+        });
+        return {
+          async unsubscribe(): Promise<void> {
+            if (removed) return;
+            removed = true;
+            await pinnedClient.removeChannel(channel);
+          },
+        };
+      });
+    } catch (error) {
+      if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
+      if (error instanceof MultiAccountAuthRecoveryRequired) throw new AuthRecoveryRequired();
+      throw error;
+    }
+    if (!sub) throw new AuthRecoveryRequired();
+    return sub;
+  }
   const c = client();
   if (!c) throw new NoDeployment();
   const active = await currentSession();
@@ -633,7 +870,33 @@ export async function subscribeWorkspaceSignals(
   workspaceId: string,
   onEvent: () => void,
   onStatus: (status: string) => void,
+  pinned?: PinnedAccountContext | null,
 ): Promise<WorkspaceSignalsSubscription> {
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    mgr.setActiveWorkspace(workspaceId);
+    const ctx = pinned ?? mgr.pinContext({ workspaceId });
+    if (!ctx) throw new SessionExpired();
+    let sub: WorkspaceSignalsSubscription | null = null;
+    try {
+      sub = await attachPinnedRealtime(ctx, { workspaceId }, (pinnedClient, active) =>
+        attachFeedChannels(
+          pinnedClient,
+          workspaceId,
+          active.user.id,
+          () => { if (ctx.isCurrent(workspaceId)) onEvent(); },
+          (status) => { if (ctx.isCurrent(workspaceId)) onStatus(status); },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
+      if (error instanceof MultiAccountAuthRecoveryRequired) throw new AuthRecoveryRequired();
+      throw error;
+    }
+    if (!sub) throw new AuthRecoveryRequired();
+    return sub;
+  }
   const c = client();
   if (!c) throw new NoDeployment();
   const workspaceForJoin = workspaceId;
@@ -675,8 +938,26 @@ export async function subscribeWorkspaceSignals(
 export async function signInWithProvider(
   provider: string,
   redirectTo: string,
+  purpose: SignInPurpose = "signed-out",
 ): Promise<void> {
   const entry = authProvider(provider);
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    const target = new URL(redirectTo, typeof window !== "undefined" ? window.location.origin : "https://commonswarm.com");
+    const effectivePurpose: SignInPurpose =
+      purpose === "signed-out" && mgr.listAccounts().length > 0 ? "add-account" : purpose;
+    const { authorizeUrl } = await mgr.startOAuthAttempt({
+      provider: entry.id,
+      purpose: effectivePurpose,
+      returnRoute: target.pathname,
+      origin: target.origin,
+    });
+    if (typeof window !== "undefined") {
+      window.location.assign(authorizeUrl);
+    }
+    return;
+  }
   const c = client();
   if (!c) throw new NoDeployment();
   const { error } = await c.auth.signInWithOAuth({
@@ -739,8 +1020,38 @@ export class PasswordSignInRefused extends Error {
 export async function signInWithPassword(
   email: string,
   password: string,
-  auth: Pick<SupabaseClient["auth"], "signInWithPassword"> | undefined = client()?.auth,
+  auth: Pick<SupabaseClient["auth"], "signInWithPassword"> | undefined = isMultiAccountEnabled() ? undefined : client()?.auth,
+  options: { purpose?: SignInPurpose; returnRoute?: string; attemptId?: string } = {},
 ): Promise<void> {
+  if (isMultiAccountEnabled() && !auth) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    const res = await mgr.signInWithPasswordStaging({
+      email,
+      password,
+      purpose: options.purpose,
+      returnRoute: options.returnRoute,
+      attemptId: options.attemptId,
+    });
+    if (res.kind === "promoted" || res.kind === "kept-existing") return;
+    if (res.reason === "cap_reached") {
+      throw new Error(`You can stay signed in to up to ${MAX_SIGNED_IN_ACCOUNTS} accounts at once. Sign out of one to add another.`);
+    }
+    if (res.reason === "exchange_failed") {
+      const status = res.status;
+      const code = res.code ?? "";
+      if (status === 429 || code === "over_request_rate_limit") {
+        throw new Error("Too many sign-in attempts. Wait a few minutes, or use the email link.");
+      }
+      if (code === "email_not_confirmed") {
+        throw new PasswordSignInRefused("Confirm your address first: use the email link.");
+      }
+      if (status === 400 || status === 401 || status === 422 || code === "invalid_credentials") {
+        throw new PasswordSignInRefused();
+      }
+    }
+    throw new Error("Sign-in could not be completed. Try again, or use the email link.");
+  }
   if (!auth) throw new NoDeployment();
   const { error } = await auth.signInWithPassword({ email, password });
   if (!error) return;
@@ -788,7 +1099,27 @@ export async function signInWithPassword(
 export async function signInWithEmail(
   email: string,
   redirectTo: string,
-): Promise<void> {
+  purpose: SignInPurpose = "signed-out",
+): Promise<{ attemptId?: string } | void> {
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    const target = new URL(redirectTo, typeof window !== "undefined" ? window.location.origin : "https://commonswarm.com");
+    try {
+      return await mgr.startEmailOtpAttempt({
+        email,
+        purpose: purpose === "signed-out" && mgr.listAccounts().length > 0 ? "add-account" : purpose,
+        returnRoute: target.pathname,
+      });
+    } catch (error) {
+      const status = (error as { status?: number }).status ?? 0;
+      const code = (error as { code?: string }).code ?? "";
+      const message = error instanceof Error ? error.message : "Could not send sign-in code.";
+      if (status === 429 || code === "over_email_send_rate_limit") throw new EmailRateLimited(message);
+      if (status === 400 || status === 422) throw new EmailAddressRejected(message);
+      throw new Error(message);
+    }
+  }
   const c = client();
   if (!c) throw new NoDeployment();
   const { error } = await c.auth.signInWithOtp({
@@ -805,6 +1136,13 @@ export async function signInWithEmail(
     throw new EmailAddressRejected(error.message);
   }
   throw new Error(error.message);
+}
+
+/** Verify a pinned-email OTP code in multi-account mode. */
+export async function verifyEmailOtpSignIn(attemptId: string, token: string) {
+  const mgr = accountManager();
+  if (!mgr) throw new NoDeployment();
+  return mgr.verifyEmailOtpAttempt({ attemptId, token });
 }
 
 /** Ends every other session of this account: GoTrue `POST /auth/v1/logout?scope=others` with this
@@ -957,7 +1295,25 @@ export async function sendPasswordCode(
   await passwordRequest(session, "reauthenticate", { method: "GET" }, "The code could not be sent. Try again.", options);
 }
 
+export async function signOutActiveAccount(): Promise<SignOutAccountResult | null> {
+  const mgr = accountManager();
+  if (!mgr) return null;
+  const active = mgr.activeAccount();
+  if (!active) return null;
+  return mgr.signOutAccount(active.userId, active.loginId);
+}
+
+export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | null> {
+  const mgr = accountManager();
+  if (!mgr) return null;
+  return mgr.signOutAllAccounts();
+}
+
 export async function signOut(): Promise<void> {
+  if (isMultiAccountEnabled()) {
+    await signOutActiveAccount();
+    return;
+  }
   deadSession = false;
   await client()?.auth.signOut();
   deadSession = false;
@@ -1107,13 +1463,59 @@ export async function postCommand(
   command: Record<string, unknown>,
   extra: Record<string, unknown> = {},
   unknownOutcome?: string,
-  options?: { isAlive?: () => boolean },
+  pinnedOrOptions?: PinnedAccountContext | { pinned?: PinnedAccountContext | null; isAlive?: () => boolean } | null,
 ): Promise<CommandResult> {
   const d = deployment();
   if (!d) throw new NoDeployment();
-  const isAlive = options?.isAlive;
+  const pinned: PinnedAccountContext | null | undefined =
+    pinnedOrOptions && "runtime" in pinnedOrOptions ? pinnedOrOptions : pinnedOrOptions?.pinned;
+  const isAlive =
+    pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.isAlive : undefined;
   if (isAlive && !isAlive()) {
     return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+  }
+
+  if (isMultiAccountEnabled()) {
+    const mgr = accountManager();
+    if (!mgr) throw new NoDeployment();
+    let scope: PinnedOperationScope;
+    if (
+      command.kind === "create_workspace" &&
+      typeof command.workspace_id === "string" &&
+      extra.workspace_id === undefined &&
+      extra.stream === undefined
+    ) {
+      scope = { kind: "create-workspace", newWorkspaceId: command.workspace_id };
+    } else if (typeof extra.workspace_id === "string" && extra.workspace_id.trim()) {
+      scope = { workspaceId: extra.workspace_id.trim() };
+    } else {
+      scope = "account";
+    }
+    const ctx = pinned ?? mgr.pinContext(
+      scope !== "account" && "workspaceId" in scope
+        ? { userId: session.user.id, workspaceId: scope.workspaceId }
+        : { userId: session.user.id },
+    );
+    if (!ctx) throw new AuthRecoveryRequired();
+    try {
+      return await postPinnedCommand(ctx, commandId, command, {
+        scope,
+        expectedDeployment: d,
+        clientVersion: WEB_CLIENT_VERSION,
+        extra,
+      });
+    } catch (error) {
+      if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
+      if (
+        error instanceof MultiAccountAuthRecoveryRequired ||
+        error instanceof MultiAccountDeploymentMismatch ||
+        error instanceof MultiAccountWorkspaceMismatch
+      ) {
+        throw new AuthRecoveryRequired();
+      }
+      if (unknownOutcome) throw new CommandOutcomeUnknown(unknownOutcome);
+      throw new CommandOutcomeUnknown("Command outcome could not be confirmed.");
+    }
   }
 
   const wireBody = JSON.stringify({
@@ -4015,8 +4417,8 @@ export async function myWorkspaces(): Promise<MyWorkspace[]> {
 }
 
 /** Optional rollout read. Missing RPCs use the older workspace reads; other failures stay failures. */
-export async function homeOverview(): Promise<HomeOverview | null> {
-  const api = client();
+export async function homeOverview(explicitRuntime?: AccountSessionRuntime | null): Promise<HomeOverview | null> {
+  const api = explicitRuntime ? explicitRuntime.client : client();
   if (!api) throw new NoDeployment();
   const result = await readWithDeadline("Catch up", signal =>
     api.schema("swarm_read").rpc("home_overview").abortSignal(signal));

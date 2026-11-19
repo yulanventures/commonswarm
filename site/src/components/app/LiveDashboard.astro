@@ -297,6 +297,8 @@ import "../../styles/kylon-image-viewer.css";
             >
               <div data-org-menu></div>
               <div class="hm-menu__separator" role="separator"></div>
+              <div class="dashboard__account-switcher" data-account-switcher hidden></div>
+              <div class="hm-menu__separator" role="separator" data-account-switcher-sep hidden></div>
               <p class="dashboard__user-menu-account" data-rail-account>Your account</p>
               <button
                 class="dashboard__theme-toggle"
@@ -313,6 +315,7 @@ import "../../styles/kylon-image-viewer.css";
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-password-open hidden>Password</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>Sign out other devices</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-all-open hidden>Sign out all accounts on this device</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
           </div>
@@ -1182,18 +1185,85 @@ import "../../styles/kylon-image-viewer.css";
     aria-describedby="dashboard-signout-others-description"
   >
     <header class="dashboard__workspace-details-dialog-head">
-      <h2 id="dashboard-signout-others-title">Sign out other devices?</h2>
+      <h2 id="dashboard-signout-others-title" data-signout-others-title>Sign out other devices?</h2>
     </header>
     {/* Which sessions end and which one stays, as two lines: the same facts the one sentence gave. Both lines are
         the dialog's description. */}
     <div class="dashboard__connected-apps-intro dashboard__signout-others-effect" id="dashboard-signout-others-description">
-      <p><strong>Signed out:</strong> every other browser and device signed in to your account. They lose access within an hour.</p>
+      <p><strong>Signed out:</strong> <span data-signout-others-target>every other browser and device signed in to your account.</span> They lose access within an hour.</p>
       <p><strong>Stays signed in:</strong> this one.</p>
     </div>
     <p class="dashboard__connected-apps-status" data-signout-others-status role="status" aria-live="polite"></p>
     <div class="dashboard__signout-others-actions">
       <button class="dashboard__danger-button" type="button" data-signout-others-confirm>Sign out other devices</button>
       <button class="dashboard__button dashboard__button--secondary" type="button" data-signout-others-cancel>Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__signout-others-dialog"
+    data-signout-all-dialog
+    role="alertdialog"
+    aria-labelledby="dashboard-signout-all-title"
+    aria-describedby="dashboard-signout-all-description"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-signout-all-title" data-signout-all-title>Sign out all accounts on this device?</h2>
+    </header>
+    <div class="dashboard__connected-apps-intro dashboard__signout-others-effect" id="dashboard-signout-all-description">
+      <p><strong>Signed out:</strong> <span data-signout-all-target>every account signed in to this browser on this device.</span></p>
+      <p><strong>Stays signed in:</strong> your other browsers and devices.</p>
+    </div>
+    <p class="dashboard__connected-apps-status" data-signout-all-status role="status" aria-live="polite"></p>
+    <div class="dashboard__signout-others-actions">
+      <button class="dashboard__danger-button" type="button" data-signout-all-confirm>Sign out all accounts</button>
+      <button class="dashboard__button dashboard__button--secondary" type="button" data-signout-all-cancel>Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__add-account-dialog"
+    data-add-account-dialog
+    aria-labelledby="dashboard-add-account-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-add-account-title">Add account</h2>
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-add-account-close
+        aria-label="Close Add account"
+        title="Close Add account"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="dashboard__add-account-body" data-add-account-providers>
+      <ProviderButtons
+        primaryClass="dashboard__button dashboard__button--primary"
+        secondaryClass="dashboard__button dashboard__button--secondary"
+        listClass="dashboard__providers"
+      >
+        <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
+      </ProviderButtons>
+      <form class="dashboard__email" method="post" data-add-account-form>
+        <label for="add-account-email">Email</label>
+        <input id="add-account-email" name="email" type="email" autocomplete="username" inputmode="email" required />
+        <label for="add-account-password">Password</label>
+        <input id="add-account-password" name="password" type="password" autocomplete="current-password" />
+        <div class="dashboard__add-account-otp" data-add-account-otp-row hidden>
+          <label for="add-account-otp">Email sign-in code</label>
+          <input id="add-account-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
+          <button class="dashboard__button dashboard__button--primary" type="button" data-add-account-otp-verify>Verify code</button>
+        </div>
+        <p class="dashboard__connected-apps-status" data-add-account-status role="status" aria-live="polite"></p>
+        <div class="dashboard__signout-others-actions">
+          <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-password-submit>Sign in</button>
+          <button class="dashboard__button dashboard__button--secondary" type="button" data-add-account-email-code>Send sign-in code</button>
+        </div>
+      </form>
     </div>
   </dialog>
 
@@ -1437,9 +1507,23 @@ import "../../styles/kylon-image-viewer.css";
     signInWithEmail,
     signInWithPassword,
     signInWithProvider,
+    accountManager,
+    bootstrapMultiAccountAuth,
+    InactiveAccountBadgePoller,
+    isMultiAccountEnabled,
+    MAX_SIGNED_IN_ACCOUNTS,
+    onAccountForcedTeardown,
+    onAccountOwnershipChange,
+    onAuthChange,
+    pinAccountContext,
+    setActiveWorkspaceScope,
     signOut,
+    signOutActiveAccount,
+    signOutAllBrowserAccounts,
     signOutEverywhere,
     signOutOtherDevices,
+    verifyEmailOtpSignIn,
+    type AccountRecord,
     setPassword,
     sendPasswordCode,
     PasswordCodeRequired,
@@ -2785,25 +2869,53 @@ import "../../styles/kylon-image-viewer.css";
       if (sampleMode) return null;
       const theme = one<HTMLButtonElement>("[data-theme-toggle]");
       const themeLabel = (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim();
-      const signOut = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const signOutBtn = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
       const apps = one<HTMLButtonElement>("[data-connected-apps-open]");
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof accountManager === "function"
+        ? accountManager()
+        : null;
+      const accounts = multi ? multi.listAccounts() : [];
+      const activeAcct = multi ? multi.activeAccount() : null;
       return {
         organizations: organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId),
         signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
+        ...(multi && accounts.length > 0
+          ? {
+              accounts: accounts.map((acct) => ({
+                userId: acct.userId,
+                label: acct.label,
+                secondary: acct.secondary,
+                initials: viewerInitials(acct.label || acct.secondary),
+                active: Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId),
+                waitingCount: inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null,
+              })),
+              canAddAccount: accounts.length < MAX_SIGNED_IN_ACCOUNTS,
+              accountCapNote: accounts.length >= MAX_SIGNED_IN_ACCOUNTS
+                ? `Signed in to ${MAX_SIGNED_IN_ACCOUNTS} accounts (maximum)`
+                : undefined,
+              signOutLabel: "Sign out on this device",
+              signOutAllCount: accounts.length >= 2 ? accounts.length : 0,
+            }
+          : {}),
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
         yourAgents: !!session,
         password: !!session && !sampleMode,
         signOutOthers: !!session && !sampleMode,
-        signOut: !!signOut && !signOut.hidden,
+        signOut: !!signOutBtn && !signOutBtn.hidden,
       };
     };
     const accountMenuAction = (action: AccountMenuAction): void => {
-      if (typeof action === "object") { void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push"); }
+      if (typeof action === "object") {
+        if (action.kind === "switch-account") { void switchToAccount(action.userId); return; }
+        void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push");
+      }
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
       else if (action === "sign-out-others") one<HTMLButtonElement>("[data-signout-others-open]")?.click();
+      else if (action === "sign-out-all") one<HTMLButtonElement>("[data-signout-all-open]")?.click();
+      else if (action === "add-account") openAddAccountDialog();
       else if (action === "password") one<HTMLButtonElement>("[data-password-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
@@ -11922,6 +12034,7 @@ import "../../styles/kylon-image-viewer.css";
       disposeCleanup();
       activeWorkspaceId = "";
       delete app.dataset.adminWorkspace;
+      if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(null);
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
       restoredComposerKey = "";
       focusedComposerWorkspaceId = "";
@@ -12521,7 +12634,8 @@ import "../../styles/kylon-image-viewer.css";
           disposeCleanup();
           activeWorkspaceId = "";
           delete app.dataset.adminWorkspace;
-          window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
+          if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(null);
+      window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
           one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
           const next = closed.nextWorkspace;
           if (next) {
@@ -12725,6 +12839,7 @@ import "../../styles/kylon-image-viewer.css";
       homeWorkClaims = [];
       homePeopleReadState = "pending";
       app.dataset.adminWorkspace = selected.id;
+      if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(selected.id);
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: selected.id } }));
       syncConnectWorkspace(selected);
       const version = ++requestVersion;
@@ -16078,9 +16193,23 @@ import "../../styles/kylon-image-viewer.css";
 
     const boot = async (): Promise<void> => {
       const version = ++requestVersion;
-      if (!client()) {
+      if (isMultiAccountEnabled() ? !deployment() : !client()) {
         renderSample();
         return;
+      }
+
+      if (isMultiAccountEnabled()) {
+        // C1 & C4: Run startup multi-account cutover & callback URL scrub BEFORE any app reads!
+        const bootMulti = await bootstrapMultiAccountAuth(window.location, window.history);
+        if (version !== requestVersion) return;
+        if (bootMulti?.cutoverClearedLegacy) {
+          dropUnscopedLegacyConvenienceKeys();
+        }
+        if (bootMulti?.callback.kind === "refused" && !returnedAuthError) {
+          returnedAuthError = bootMulti.callback.message;
+        }
+        ensureInactiveBadgePoller();
+        renderAccountSwitcher();
       }
 
       authRecoveryActive = false;
@@ -16092,6 +16221,7 @@ import "../../styles/kylon-image-viewer.css";
         if (version !== requestVersion) return;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
+        if (isMultiAccountEnabled()) renderAccountSwitcher();
         if (!session) {
           resetWorkspaceSessionState();
           showAuthView("choices");
@@ -16307,19 +16437,458 @@ import "../../styles/kylon-image-viewer.css";
       await createFromIntent(session, intent);
     };
 
+    // ── Multi-account UI helpers (switcher, per-user private key cleanup, inactive badge polling) ──
+    let inactiveBadgePoller: InactiveAccountBadgePoller | null = null;
+
+    const clearPerUserPrivateConvenienceKeys = (userId: string): void => {
+      if (!userId) return;
+      try {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i += 1) {
+          const key = window.localStorage.key(i);
+          if (!key) continue;
+          if (
+            key.startsWith(`commonswarm:composer-draft:${userId}:`) ||
+            key.startsWith(`commonswarm:composer-to:${userId}:`) ||
+            key.startsWith(`commonswarm:palette-recent:${userId}:`) ||
+            key.startsWith(`commonswarm:household-purpose:${userId}:`) ||
+            key.startsWith(`commonswarm:channel-rail-expanded:${userId}:`) ||
+            key.startsWith(`commonswarm:household-setup-needed:v1:${userId}:`)
+          ) {
+            toRemove.push(key);
+          }
+        }
+        for (const key of toRemove) window.localStorage.removeItem(key);
+      } catch { /* storage unavailable */ }
+    };
+
+    const dropUnscopedLegacyConvenienceKeys = (): void => {
+      const uuidSeg = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const prefixes = [
+        "commonswarm:composer-draft:",
+        "commonswarm:composer-to:",
+        "commonswarm:palette-recent:",
+        "commonswarm:household-purpose:",
+        "commonswarm:channel-rail-expanded:",
+      ];
+      try {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i += 1) {
+          const key = window.localStorage.key(i);
+          if (!key) continue;
+          for (const prefix of prefixes) {
+            if (!key.startsWith(prefix)) continue;
+            const firstSeg = key.slice(prefix.length).split(":")[0] ?? "";
+            if (firstSeg !== "sample" && firstSeg !== "sample-owner" && !uuidSeg.test(firstSeg)) {
+              toRemove.push(key);
+            }
+          }
+        }
+        for (const key of toRemove) window.localStorage.removeItem(key);
+      } catch { /* storage unavailable */ }
+    };
+
+    const ensureInactiveBadgePoller = (): void => {
+      if (!isMultiAccountEnabled() || inactiveBadgePoller) return;
+      const mgr = accountManager();
+      if (!mgr) return;
+      inactiveBadgePoller = new InactiveAccountBadgePoller(
+        mgr,
+        async (rt) => {
+          const overview = await homeOverview(rt);
+          if (!overview || !Array.isArray(overview.workspaces)) return null;
+          let total = 0;
+          for (const entry of overview.workspaces) {
+            total += homeNeedsYouCount(entry);
+          }
+          return total;
+        },
+        {
+          intervalMs: 45_000,
+          isHidden: () => typeof document !== "undefined" && document.hidden,
+          onUpdate: () => renderAccountSwitcher(),
+        },
+      );
+      inactiveBadgePoller.start();
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) void inactiveBadgePoller?.pollOnce();
+      });
+    };
+
+    const dismissAllAccountDialogsAndSecrets = (): void => {
+      closePasswordDialog();
+      for (const selector of [
+        "[data-signout-others-dialog]",
+        "[data-signout-all-dialog]",
+        "[data-add-account-dialog]",
+        "[data-account-agents-dialog]",
+      ]) {
+        const dlg = one<HTMLDialogElement>(selector);
+        if (dlg?.open) dlg.close();
+      }
+      for (const connectEl of all<HTMLElement & { clearPrompt?: () => void; retirePending?: () => void }>("agent-connect")) {
+        connectEl.clearPrompt?.();
+        connectEl.retirePending?.();
+      }
+    };
+
+    const renderAccountSwitcher = (): void => {
+      const container = one<HTMLElement>("[data-account-switcher]");
+      const sep = one<HTMLElement>("[data-account-switcher-sep]");
+      const signOutAllBtn = one<HTMLButtonElement>("[data-signout-all-open]");
+      const railSignOutBtn = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const railLabel = one<HTMLElement>(".dashboard__user-menu-account");
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof accountManager === "function"
+        ? accountManager()
+        : null;
+      if (!multi || sampleMode) {
+        if (container) { container.hidden = true; container.replaceChildren(); }
+        if (sep) sep.hidden = true;
+        if (signOutAllBtn) signOutAllBtn.hidden = true;
+        if (railLabel) railLabel.hidden = false;
+        if (railSignOutBtn) railSignOutBtn.textContent = "Sign out";
+        return;
+      }
+      const accounts = multi.listAccounts();
+      const activeAcct = multi.activeAccount();
+      if (railSignOutBtn) railSignOutBtn.textContent = "Sign out on this device";
+      if (signOutAllBtn) {
+        signOutAllBtn.hidden = accounts.length < 2;
+        if (accounts.length >= 2) {
+          signOutAllBtn.textContent = `Sign out all ${accounts.length} accounts on this device`;
+        }
+      }
+      if (!container) return;
+      if (accounts.length === 0) {
+        container.hidden = true;
+        container.replaceChildren();
+        if (sep) sep.hidden = true;
+        if (railLabel) railLabel.hidden = false;
+        return;
+      }
+      if (railLabel) railLabel.hidden = true;
+      container.hidden = false;
+      if (sep) sep.hidden = false;
+      const list = document.createElement("div");
+      list.className = "hm-account-list";
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", "Signed-in accounts");
+      for (const acct of accounts) {
+        const isCurrent = Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = isCurrent ? "dashboard__user-menu-item hm-account-row hm-account-row--active" : "dashboard__user-menu-item hm-account-row";
+        btn.setAttribute("role", "menuitemradio");
+        btn.setAttribute("aria-checked", String(isCurrent));
+        btn.dataset.accountSwitch = acct.userId;
+
+        const avatar = document.createElement("span");
+        avatar.className = "hm-account-row__avatar";
+        avatar.dataset.initials = viewerInitials(acct.label || acct.secondary);
+        avatar.setAttribute("aria-hidden", "true");
+
+        const meta = document.createElement("span");
+        meta.className = "hm-account-row__meta";
+        const nameEl = document.createElement("span");
+        nameEl.className = "hm-account-row__name";
+        nameEl.textContent = acct.label;
+        meta.append(nameEl);
+        if (acct.secondary && acct.secondary !== acct.label) {
+          const secEl = document.createElement("span");
+          secEl.className = "hm-account-row__secondary";
+          secEl.textContent = acct.secondary;
+          meta.append(secEl);
+        }
+        btn.append(avatar, meta);
+
+        const waiting = !isCurrent ? inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null : null;
+        if (typeof waiting === "number" && waiting > 0) {
+          const badge = document.createElement("span");
+          badge.className = "hm-account-row__badge";
+          badge.textContent = String(waiting);
+          badge.setAttribute("aria-label", `${waiting} waiting`);
+          btn.append(badge);
+        } else if (isCurrent) {
+          const check = document.createElement("span");
+          check.className = "hm-account-row__check";
+          check.textContent = "✓";
+          check.setAttribute("aria-hidden", "true");
+          btn.append(check);
+        }
+        btn.addEventListener("click", () => {
+          const menu = one<HTMLElement>("[data-user-menu]");
+          if (menu) menu.hidden = true;
+          one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+          if (!isCurrent) void switchToAccount(acct.userId);
+        });
+        list.append(btn);
+      }
+      if (accounts.length < MAX_SIGNED_IN_ACCOUNTS) {
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "dashboard__text-button dashboard__user-menu-item hm-account-add";
+        addBtn.setAttribute("role", "menuitem");
+        addBtn.dataset.addAccountOpen = "";
+        addBtn.textContent = "Add account";
+        addBtn.addEventListener("click", () => {
+          const menu = one<HTMLElement>("[data-user-menu]");
+          if (menu) menu.hidden = true;
+          one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+          openAddAccountDialog();
+        });
+        list.append(addBtn);
+      } else {
+        const cap = document.createElement("p");
+        cap.className = "hm-account-cap";
+        cap.textContent = `Signed in to ${MAX_SIGNED_IN_ACCOUNTS} accounts (maximum)`;
+        list.append(cap);
+      }
+      container.replaceChildren(list);
+    };
+
+    const switchToAccount = async (targetUserId: string): Promise<void> => {
+      const mgr = accountManager();
+      if (!mgr || sampleMode) return;
+      dismissAllAccountDialogsAndSecrets();
+      pendingSeatAdminReauthNotice = false;
+      passwordChangeNotice = null;
+      requestVersion += 1;
+      householdDashboard?.clear();
+      homeOverviewCounts.clear();
+      renderedAuthUserId = "";
+      resetWorkspaceSessionState();
+      session = null;
+      mgr.switchActiveAccount(targetUserId);
+      inactiveBadgePoller?.prune();
+      renderAccountSwitcher();
+      runBoot();
+      void inactiveBadgePoller?.pollOnce();
+    };
+
+    let activeAddAccountOtpAttemptId: string | null = null;
+    const openAddAccountDialog = (): void => {
+      if (!isMultiAccountEnabled() || sampleMode) return;
+      const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
+      const form = one<HTMLFormElement>("[data-add-account-form]");
+      const otpRow = one<HTMLElement>("[data-add-account-otp-row]");
+      const status = one<HTMLElement>("[data-add-account-status]");
+      if (!dialog) return;
+      activeAddAccountOtpAttemptId = null;
+      form?.reset();
+      if (otpRow) otpRow.hidden = true;
+      if (status) status.textContent = "";
+      dialog.showModal();
+      one<HTMLInputElement>("#add-account-email")?.focus();
+    };
+
+    // Poll inactive account badges when opening the desktop account menu.
+    one<HTMLButtonElement>("[data-user-menu-trigger]")?.addEventListener("click", () => {
+      if (isMultiAccountEnabled()) {
+        renderAccountSwitcher();
+        void inactiveBadgePoller?.pollOnce();
+      }
+    });
+
+    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP, password staging, and cancel on close).
+    {
+      const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
+      const form = one<HTMLFormElement>("[data-add-account-form]");
+      const emailInput = one<HTMLInputElement>("#add-account-email");
+      const pwInput = one<HTMLInputElement>("#add-account-password");
+      const otpRow = one<HTMLElement>("[data-add-account-otp-row]");
+      const otpInput = one<HTMLInputElement>("#add-account-otp");
+      const status = one<HTMLElement>("[data-add-account-status]");
+      const emailCodeBtn = one<HTMLButtonElement>("[data-add-account-email-code]");
+      const otpVerifyBtn = one<HTMLButtonElement>("[data-add-account-otp-verify]");
+      const pwSubmitBtn = one<HTMLButtonElement>("[data-add-account-password-submit]");
+
+      one<HTMLButtonElement>("[data-add-account-close]")?.addEventListener("click", () => dialog?.close());
+      dialog?.addEventListener("close", () => {
+        if (activeAddAccountOtpAttemptId) {
+          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+          activeAddAccountOtpAttemptId = null;
+        }
+        accountManager()?.cancelAttempt();
+        form?.reset();
+        if (otpRow) otpRow.hidden = true;
+        if (status) status.textContent = "";
+      });
+      dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+
+      for (const button of all<HTMLButtonElement>("[data-add-account-dialog] [data-signin-provider]")) {
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          if (status) status.textContent = "";
+          try {
+            await signInWithProvider(
+              button.dataset.signinProvider ?? "",
+              new URL("/app", window.location.origin).href,
+              "add-account",
+            );
+          } catch (error) {
+            if (status) status.textContent = readableError(error);
+            button.disabled = false;
+          }
+        });
+      }
+
+      emailCodeBtn?.addEventListener("click", async () => {
+        if (!emailInput || !status || !otpRow) return;
+        if (!emailInput.value.trim() || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        emailCodeBtn.disabled = true;
+        status.textContent = "";
+        try {
+          const started = await signInWithEmail(
+            emailInput.value.trim(),
+            new URL("/app", window.location.origin).href,
+            "add-account",
+          );
+          if (started && typeof started === "object" && started.attemptId) {
+            activeAddAccountOtpAttemptId = started.attemptId;
+            otpRow.hidden = false;
+            if (otpInput) { otpInput.value = ""; otpInput.focus(); }
+            status.textContent = `Enter the sign-in code sent to ${emailInput.value.trim()}.`;
+          }
+        } catch (error) {
+          status.textContent = readableError(error);
+        } finally {
+          emailCodeBtn.disabled = false;
+        }
+      });
+
+      otpVerifyBtn?.addEventListener("click", async () => {
+        if (!activeAddAccountOtpAttemptId || !otpInput || !status) return;
+        const token = otpInput.value.trim();
+        if (!token) { status.textContent = "Enter the emailed sign-in code."; otpInput.focus(); return; }
+        otpVerifyBtn.disabled = true;
+        status.textContent = "";
+        try {
+          const outcome = await verifyEmailOtpSignIn(activeAddAccountOtpAttemptId, token);
+          activeAddAccountOtpAttemptId = null;
+          if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+            dialog?.close();
+            renderAccountSwitcher();
+            runBoot();
+          } else {
+            status.textContent = "That sign-in code did not work or expired. Try again.";
+          }
+        } catch (error) {
+          status.textContent = readableError(error);
+        } finally {
+          otpVerifyBtn.disabled = false;
+        }
+      });
+
+      form?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!emailInput || !pwInput || !status || !pwSubmitBtn) return;
+        if (!emailInput.value.trim() || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        if (!pwInput.value) { status.textContent = "Enter your password or send a sign-in code."; pwInput.focus(); return; }
+        pwSubmitBtn.disabled = true;
+        status.textContent = "";
+        try {
+          await signInWithPassword(emailInput.value.trim(), pwInput.value, undefined, { purpose: "add-account", returnRoute: "/app" });
+          dialog?.close();
+          renderAccountSwitcher();
+          runBoot();
+        } catch (error) {
+          status.textContent = readableError(error);
+        } finally {
+          pwSubmitBtn.disabled = false;
+        }
+      });
+    }
+
+    // Wire "Sign out all accounts on this device" confirmation dialog (C5).
+    {
+      const dialog = one<HTMLDialogElement>("[data-signout-all-dialog]");
+      const titleEl = one<HTMLElement>("[data-signout-all-title]");
+      const targetEl = one<HTMLElement>("[data-signout-all-target]");
+      const confirm = one<HTMLButtonElement>("[data-signout-all-confirm]");
+      const cancel = one<HTMLButtonElement>("[data-signout-all-cancel]");
+      const status = one<HTMLElement>("[data-signout-all-status]");
+      one<HTMLButtonElement>("[data-signout-all-open]")?.addEventListener("click", () => {
+        const mgr = accountManager();
+        if (!dialog || !confirm || !cancel || !status || !mgr || sampleMode) return;
+        const count = mgr.listAccounts().length;
+        if (count < 2) return;
+        const menu = one<HTMLElement>("[data-user-menu]");
+        if (menu) menu.hidden = true;
+        one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+        if (titleEl) titleEl.textContent = `Sign out all ${count} accounts on this device?`;
+        if (targetEl) targetEl.textContent = `all ${count} accounts signed in to this browser on this device.`;
+        status.textContent = "";
+        confirm.hidden = false;
+        confirm.disabled = false;
+        cancel.textContent = "Cancel";
+        dialog.showModal();
+        cancel.focus();
+      });
+      cancel?.addEventListener("click", () => dialog?.close());
+      confirm?.addEventListener("click", async () => {
+        if (!confirm || !cancel || !status || confirm.disabled) return;
+        confirm.disabled = true;
+        confirm.setAttribute("aria-busy", "true");
+        const accountsBefore = accountManager()?.listAccounts() ?? [];
+        dismissAllAccountDialogsAndSecrets();
+        pendingSeatAdminReauthNotice = false;
+        passwordChangeNotice = null;
+        clearSeatAdminReauthIntent();
+        for (const acct of accountsBefore) {
+          clearCreateIntent(acct.userId);
+          forgetAddAgent(addAgentStore(), acct.userId);
+          clearPerUserPrivateConvenienceKeys(acct.userId);
+        }
+        requestVersion += 1;
+        householdDashboard?.clear();
+        homeOverviewCounts.clear();
+        inactiveBadgePoller?.clear();
+        renderedAuthUserId = "";
+        resetWorkspaceSessionState();
+        const res = await signOutAllBrowserAccounts();
+        session = null;
+        renderAccountSwitcher();
+        showAuthView("choices");
+        showPanel("signed-out");
+        if (res?.notice) authError(res.notice);
+        confirm.removeAttribute("aria-busy");
+        confirm.disabled = false;
+      });
+    }
+
     for (const button of all<HTMLButtonElement>("[data-signout]")) {
       button.addEventListener("click", async () => {
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
+        const signingOutUserId = session?.user.id ?? "";
         pendingSeatAdminReauthNotice = false;
         passwordChangeNotice = null;
         clearSeatAdminReauthIntent();
-        if (session) clearCreateIntent(session.user.id);
-        if (session) forgetAddAgent(addAgentStore(), session.user.id);
+        if (signingOutUserId) {
+          clearCreateIntent(signingOutUserId);
+          forgetAddAgent(addAgentStore(), signingOutUserId);
+          if (isMultiAccountEnabled()) clearPerUserPrivateConvenienceKeys(signingOutUserId);
+        }
         requestVersion += 1;
         householdDashboard?.clear();
+        homeOverviewCounts.clear();
         renderedAuthUserId = "";
         resetWorkspaceSessionState();
+        if (isMultiAccountEnabled()) {
+          const result = await signOutActiveAccount();
+          inactiveBadgePoller?.prune();
+          session = null;
+          renderAccountSwitcher();
+          button.disabled = false;
+          if (result?.nextActive) {
+            runBoot();
+            return;
+          }
+          showAuthView("choices");
+          showPanel("signed-out");
+          if (result?.notice) authError(result.notice);
+          return;
+        }
         await signOut();
         session = null;
         showAuthView("choices");
@@ -16596,6 +17165,13 @@ import "../../styles/kylon-image-viewer.css";
       const status = one<HTMLElement>("[data-signout-others-status]");
       one<HTMLButtonElement>("[data-signout-others-open]")?.addEventListener("click", () => {
         if (!dialog || !confirm || !cancel || !status || !session || sampleMode) return;
+        if (isMultiAccountEnabled()) {
+          const who = accountName(session);
+          const titleEl = one<HTMLElement>("[data-signout-others-title]");
+          const targetEl = one<HTMLElement>("[data-signout-others-target]");
+          if (titleEl) titleEl.textContent = `Sign out other devices for ${who}?`;
+          if (targetEl) targetEl.textContent = `every other browser and device signed in to ${who}.`;
+        }
         status.textContent = ""; confirm.hidden = false; confirm.disabled = false; cancel.textContent = "Cancel";
         dialog.showModal(); cancel.focus();
       });
@@ -16681,12 +17257,24 @@ import "../../styles/kylon-image-viewer.css";
           const opening = ownSession(ticket);
           if (!opening) return;
           const notice = { userId: opening.user.id, email: opening.user.email ?? "" };
+          const openingLoginId = isMultiAccountEnabled() ? accountManager()?.activeAccount()?.loginId : undefined;
           passwordChangeNotice = notice;
-          const outcome = await completePasswordChange({ userId: notice.userId, accessToken: opening.access_token }, {
-            signOutEverywhere: (accessToken) => signOutEverywhere({ access_token: accessToken }),
-            verifyCurrent: verifyCurrentForPasswordChange,
-            live: () => passwordChangeNotice === notice && (session === null || session.user.id === notice.userId),
-          });
+          const outcome = await completePasswordChange(
+            { userId: notice.userId, accessToken: opening.access_token, loginId: openingLoginId },
+            {
+              signOutEverywhere: (accessToken) => signOutEverywhere({ access_token: accessToken }),
+              verifyCurrent: verifyCurrentForPasswordChange,
+              live: () => passwordChangeNotice === notice && (session === null || session.user.id === notice.userId),
+              removeLocalLogin: isMultiAccountEnabled()
+                ? async (u, l) => {
+                    await accountManager()?.signOutAccount(u, l);
+                    clearPerUserPrivateConvenienceKeys(u);
+                    inactiveBadgePoller?.prune();
+                    renderAccountSwitcher();
+                  }
+                : undefined,
+            },
+          );
           // Signed out: the signed-out render shows the notice. If this page has not seen the
           // sign-out yet (no SDK session was left to remove), close the dialog and render it now.
           if (outcome.kind === "signed-out") {
@@ -18650,7 +19238,7 @@ import "../../styles/kylon-image-viewer.css";
 
     /* /start now preserves its query and hash while handing old callbacks to /app, so this
        listener is the one auth-return controller for both current and compatibility links. */
-    client()?.auth.onAuthStateChange((event, nextSession) => {
+    onAuthChange((event, nextSession) => {
       // A sign-out or a different account in any tab ends an open Password dialog.
       if (passwordGuard.observeAuth(event, nextSession?.user.id)) closePasswordDialog();
       // SDK events can carry saved, unverified identity during initialization.
@@ -18667,6 +19255,37 @@ import "../../styles/kylon-image-viewer.css";
         queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }
     });
+
+    if (isMultiAccountEnabled()) {
+      onAccountOwnershipChange(() => {
+        inactiveBadgePoller?.prune();
+        renderAccountSwitcher();
+      });
+      // Rev 4 §4: Forced teardown (cross-tab sign-out, Sign out all, terminal expiry)
+      // overrides keepConnectCredentialVisible() and immediately clears all private DOM/secrets!
+      onAccountForcedTeardown((detail) => {
+        dismissAllAccountDialogsAndSecrets();
+        inactiveBadgePoller?.prune();
+        pendingSeatAdminReauthNotice = false;
+        requestVersion += 1;
+        householdDashboard?.clear();
+        homeOverviewCounts.clear();
+        renderedAuthUserId = "";
+        resetWorkspaceSessionState();
+        session = null;
+        renderAccountSwitcher();
+        const nextActive = accountManager()?.activeAccount();
+        if (nextActive && detail.reason === "signed-out") {
+          runBoot();
+          return;
+        }
+        showAuthView("choices");
+        showPanel("signed-out");
+        if (detail.reason === "expired") {
+          authError(new SessionExpired().message);
+        }
+      });
+    }
 
     /*
      * THIS PAGE IS NOT WHAT THE SERVER IS SERVING. Not "newer" — a rollback serves a different

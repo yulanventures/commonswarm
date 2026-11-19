@@ -32,7 +32,15 @@ import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants
  */
 
 import type { Session } from "@supabase/supabase-js";
-import { CLIENT_PROTOCOL_VERSION, NoDeployment, client, deployment, uuid } from "./commonswarm";
+import {
+  CLIENT_PROTOCOL_VERSION,
+  NoDeployment,
+  client,
+  deployment,
+  isMultiAccountEnabled,
+  pinAccountContext,
+  uuid,
+} from "./commonswarm";
 import { createAgentPrincipalCommand } from "./identity-label";
 
 export { ALLOW_DUPLICATE_NAME_FIELD, createAgentPrincipalCommand } from "./identity-label";
@@ -182,8 +190,39 @@ async function postCommand(
   command: Record<string, unknown>,
   routing: Record<string, unknown> = {},
 ): Promise<CommandOutcome> {
-  const d = deployment();
+  const routingWorkspace =
+    typeof routing.workspace_id === "string" && routing.workspace_id.trim()
+      ? routing.workspace_id.trim()
+      : null;
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext(routingWorkspace ? { userId: session.user.id, workspaceId: routingWorkspace } : { userId: session.user.id })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !(routingWorkspace ? pinned.isCurrent(routingWorkspace) : pinned.isCurrent()))) {
+    throw new AgentConnectRefused("mint-credential", "Your active account or workspace changed. Confirm again to create a key.");
+  }
+  const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
+
+  // Freeze immutable wire bytes BEFORE awaiting identity verification or network (C2).
+  const wireBody = JSON.stringify({
+    command_id: commandId,
+    client_version: CLIENT_PROTOCOL_VERSION,
+    ...routing,
+    command,
+  });
+
+  let activeToken = session.access_token;
+  if (pinned) {
+    const verified = await pinned.runtime.verifySession();
+    if (
+      !verified ||
+      verified.user.id !== session.user.id ||
+      !(routingWorkspace ? pinned.isCurrent(routingWorkspace) : pinned.isCurrent())
+    ) {
+      throw new AgentConnectRefused("mint-credential", "Your active account or workspace changed. Confirm again to create a key.");
+    }
+    activeToken = verified.access_token;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
@@ -192,16 +231,11 @@ async function postCommand(
     response = await fetch(`${d.url}/functions/v1/command`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${session.access_token}`,
+        authorization: `Bearer ${activeToken}`,
         apikey: d.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        command_id: commandId,
-        client_version: CLIENT_PROTOCOL_VERSION,
-        ...routing,
-        command,
-      }),
+      body: wireBody,
       signal: controller.signal,
     });
   } catch {
@@ -211,6 +245,10 @@ async function postCommand(
     );
   } finally {
     clearTimeout(timer);
+  }
+
+  if (pinned && !(routingWorkspace ? pinned.isCurrent(routingWorkspace) : pinned.isCurrent())) {
+    throw new AgentConnectRefused("mint-credential", "Your active account or workspace changed before the answer returned.");
   }
 
   const text = await response.text().catch(() => "");
@@ -315,7 +353,13 @@ export interface AgentIdentity {
  * the database (supabase/migrations/20260723000001_p1_schema.sql:662).
  */
 export async function myAgents(session: Session, workspaceId: string): Promise<AgentIdentity[]> {
-  const c = client();
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new AgentConnectRefused("create-identity", "Your active account or workspace changed.");
+  }
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const { data, error } = await c
     .schema("swarm_read")
@@ -325,6 +369,9 @@ export async function myAgents(session: Session, workspaceId: string): Promise<A
     .eq("owner_user_id", session.user.id)
     .is("revoked_at", null)
     .limit(50);
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new AgentConnectRefused("create-identity", "Your active account or workspace changed.");
+  }
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => ({
     principalId: String(row.principal_id),
@@ -347,7 +394,11 @@ export async function myAgents(session: Session, workspaceId: string): Promise<A
  * into somebody else's session on a shared machine.
  */
 export async function ensureBrowserDevice(session: Session): Promise<string> {
-  const c = client();
+  const pinned = isMultiAccountEnabled() ? pinAccountContext({ userId: session.user.id }) : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent())) {
+    throw new AgentConnectRefused("register-device", "Your active account changed. Confirm again to register this browser.");
+  }
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const { data, error } = await c
     .schema("swarm_read")
@@ -356,6 +407,9 @@ export async function ensureBrowserDevice(session: Session): Promise<string> {
     .eq("label", WEB_DEVICE_LABEL)
     .is("revoked_at", null)
     .limit(1);
+  if (pinned && !pinned.isCurrent()) {
+    throw new AgentConnectRefused("register-device", "Your active account changed. Confirm again to register this browser.");
+  }
   if (error) throw new Error(error.message);
   const existing = data?.[0];
   if (existing?.device_id) return String(existing.device_id);

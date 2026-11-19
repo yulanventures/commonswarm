@@ -148,6 +148,9 @@ const {
     NoDeployment,
     agentAccessStatuses,
     currentSession,
+    isMultiAccountEnabled,
+    onAccountForcedTeardown,
+    pinAccountContext,
     deployment,
     myWorkspaces,
     uuid,
@@ -293,6 +296,12 @@ const {
       });
       this.#q<HTMLButtonElement>('[data-action="done"]')?.addEventListener("click", () => {
         this.finishPrompt("done");
+      });
+      // Rev 4 §4: Forced teardown (cross-tab sign-out, Sign out all, terminal expiry)
+      // immediately clears any displayed connect credential & retires in-flight mints.
+      onAccountForcedTeardown(() => {
+        this.clearPrompt();
+        this.retirePending();
       });
       if (h0LinkJoinEnabled) {
         window.addEventListener("pagehide", () => {
@@ -660,9 +669,16 @@ const {
     async #mintGuarded(request: MintRequest) {
       this.#formError(null);
       const named = "name" in request;
+      const pinned = isMultiAccountEnabled()
+        ? pinAccountContext({ userId: request.userId, workspaceId: this.#workspaceId })
+        : null;
+      if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(this.#workspaceId))) {
+        this.#abandon();
+        return;
+      }
 
       const session = await currentSession();
-      if (request.intent !== this.#intentGeneration) {
+      if (request.intent !== this.#intentGeneration || (pinned && !pinned.isCurrent(this.#workspaceId))) {
         this.#abandon();
         return;
       }
@@ -697,7 +713,7 @@ const {
       try {
         // The device has to exist before the mint will be accepted at all.
         const deviceId = await ensureBrowserDevice(session);
-        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
+        if (!this.#stillAsked(request, session.user.id) || (pinned && !pinned.isCurrent(this.#workspaceId))) return this.#abandon();
 
         const identity: AgentIdentity = "principalId" in request
           ? this.#agents.find((agent) => agent.principalId === request.principalId) ?? {
@@ -706,13 +722,15 @@ const {
             model: null,
           }
           : await createAgentIdentity(session, identityCommandId, this.#workspaceId, request.name);
-        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
+        if (!this.#stillAsked(request, session.user.id) || (pinned && !pinned.isCurrent(this.#workspaceId))) return this.#abandon();
 
         const credential = await mintAgentCredential(
           session, mintCommandId, this.#workspaceId, identity, deviceId, AGENT_TOKEN_MAX_TTL_MS,
         );
         /* Before the secret is shown or copied: the same request, and the same account signed in. */
-        if (!this.#stillAsked(request, (await currentSession())?.user.id)) return this.#abandon();
+        if (!this.#stillAsked(request, (await currentSession())?.user.id) || (pinned && !pinned.isCurrent(this.#workspaceId))) {
+          return this.#abandon();
+        }
 
         const target = deployment();
         if (!target) throw new NoDeployment();

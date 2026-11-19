@@ -386,3 +386,44 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__button--primary):hover:not(:disabled) {
   background: var(--home-onramp-cta-hover); color: var(--home-onramp-cta-ink); border-color: var(--home-onramp-cta-ink);
 }
+
+/* Multi-account switcher (desktop rail popover & phone top bar menu). */
+.dashboard__account-switcher { display: grid; gap: 2px; }
+.hm-account-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.hm-account-row {
+  display: flex; align-items: center; gap: 10px; inline-size: 100%;
+  min-block-size: 44px; padding: 6px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--home-ink); text-align: start; cursor: pointer;
+}
+.hm-account-row:hover { background: var(--home-hover); }
+.hm-account-row:focus-visible { outline: none; box-shadow: var(--home-focus-ring); }
+.hm-account-row--active { background: var(--home-rail-raised); }
+.hm-account-row__avatar {
+  display: inline-grid; place-items: center; flex: none; inline-size: 26px; block-size: 26px;
+  border-radius: 7px; background: var(--home-rail-raised); color: var(--home-accent-text);
+  font-size: 12px; font-weight: 700; line-height: 1;
+}
+.hm-account-row--active .hm-account-row__avatar {
+  background: var(--home-ink); color: var(--home-canvas);
+}
+.hm-account-row__avatar::before { content: attr(data-initials); }
+.hm-account-row__meta { display: grid; flex: 1; min-inline-size: 0; gap: 1px; }
+.hm-account-row__name {
+  font-size: 13px; font-weight: 600; line-height: 1.25; color: var(--home-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hm-account-row__secondary {
+  font-size: 12px; line-height: 1.25; color: var(--home-ink-muted, var(--text-muted));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hm-account-row__badge {
+  flex: none; display: inline-grid; place-items: center; min-inline-size: 20px; block-size: 20px;
+  padding-inline: 6px; border-radius: 999px; background: var(--home-ink); color: var(--home-canvas);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+.hm-account-row__check { flex: none; font-size: 13px; font-weight: 700; color: var(--home-ink); }
+.hm-account-add { font-weight: 600; color: var(--home-accent-text); }
+.hm-account-cap { margin: 2px 0; padding: 4px 10px; font-size: 12px; color: var(--home-ink-muted, var(--text-muted)); }
+.dashboard__add-account-dialog { width: min(26rem, calc(100vw - 2rem)); }
+.dashboard__add-account-body { display: grid; gap: 12px; margin-top: 12px; }
+.dashboard__add-account-otp { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }

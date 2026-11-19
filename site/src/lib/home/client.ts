@@ -1,6 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../../src/protocol/household-tool-registry.ts';
-import { client, postCommand } from '../commonswarm.ts';
+import { client, isMultiAccountEnabled, pinAccountContext, postCommand } from '../commonswarm.ts';
 import type {
   ActivityItem,
   AgentQueue,
@@ -136,6 +136,12 @@ async function householdTool(
   unknownOutcome: string,
   write = false,
 ): Promise<Record<string, unknown>> {
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   const toolArgs: Record<string, unknown> = { seat: HOUSEHOLD_LOCAL_SEAT, ...args };
   if (write) toolArgs.request_id = requestId;
   const { status, body } = await deps.postCommand(
@@ -144,7 +150,11 @@ async function householdTool(
     { kind: 'household_tool', tool, arguments: toolArgs },
     workspaceExtra(workspaceId),
     unknownOutcome,
+    pinned,
   );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 
