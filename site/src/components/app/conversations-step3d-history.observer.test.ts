@@ -333,6 +333,10 @@ function installConversations3DFixture() {
         f.conversations = f.conversations.filter((c: any) => c.conversation_id !== command.conversation_id);
         return Response.json({ status: "accepted", conversation_id: command.conversation_id, changed: true });
       }
+      if (command?.kind === "conversation_set_notify") {
+        f.convCommands.push(command);
+        return Response.json({ status: "accepted", conversation_id: command.conversation_id, changed: true });
+      }
       if (command?.kind === "signals_seen" || command?.kind === "conversation_mark_read") {
         return Response.json({ status: "accepted" });
       }
@@ -461,32 +465,6 @@ async function observeConversations3D() {
       await new Promise((r) => setTimeout(r, 80));
       check(f.signalCommands.length === 0, "HezSec C1: Enter in #general after popstate must send 0 commands");
 
-      // HezSec C1 (held visibility upload): stage file in open #ops, hold fresh visibility read, switch away -> 0 create/PUT/commit/post!
-      await click(`a[href*="c=${f.ids.opsChannel}"]:visible`);
-      await wait("#ops loaded for held visibility upload", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-composer]")));
-      const opsPicker = one<HTMLInputElement>("[data-composer-file-input]")!;
-      const opsDt = new DataTransfer();
-      opsDt.items.add(new File(["sensitive"], "ops-report.txt", { type: "text/plain" }));
-      opsPicker.files = opsDt.files;
-      opsPicker.dispatchEvent(new Event("change", { bubbles: true }));
-      await wait("staged file chip in #ops", () => !!one("[data-composer-attachments] button"));
-      input.value = "Ops message with staged file";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      f.holdNextChannelVisibility = true;
-      await click("[data-composer-send]:visible");
-      await wait("channel visibility read held", () => typeof f.releaseChannelVisibility === "function");
-      // Switch to Group DM while visibility check is held -> retires the #ops upload scope!
-      await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
-      await wait("switched to group dm while visibility held", () => location.search.includes(`dm=${f.ids.dmGroupConv}`));
-      f.releaseChannelVisibility();
-      await new Promise((r) => setTimeout(r, 140));
-      check(
-        f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0 && f.signalCommands.length === 0,
-        `HezSec C1: held visibility across scope retirement must emit 0 file_create(${f.fileCreateCalls}), 0 PUT(${f.storagePutCalls}), 0 commit(${f.fileCommitCalls}), 0 post(${f.signalCommands.length})`,
-      );
-      await click('a[href*="c=general"]:visible');
-      await wait("back in #general after upload check", () => location.search.includes("c=general"));
-
       // Switch to human-only 1:1 DM (Alex) -> keeps exclusive sentence and empty draft.
       await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
       await wait("1:1 DM Alex loaded", () => (one("[data-feed-list]")?.textContent ?? "").includes("Private 1:1 DM from Alex."));
@@ -498,10 +476,10 @@ async function observeConversations3D() {
       );
       check(input.value === "", "1:1 DM must not inherit group DM draft");
 
-      // Switch back to Group DM -> original draft restored!
+      // Switch back to Group DM -> latest group DM draft ("Private popstate draft") restored!
       await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
       await wait("returned to group dm", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22"));
-      check(input.value === "Confidential group draft", "group DM draft must restore on return, got: " + input.value);
+      check(input.value === "Private popstate draft", "group DM draft must restore on return, got: " + input.value);
 
       // Held failing DM send across navigation to #general -> must NOT write failed DM text into #general!
       f.holdNextPost = true;
@@ -535,6 +513,30 @@ async function observeConversations3D() {
       check(input.value === "", "HezSec #1: held failed send after eviction must not populate textarea");
       check(localStorage.getItem(groupDraftKey) === null, "HezSec #1: held failed send after eviction must discard revoked localStorage draft");
 
+      // HezSec C1 (held visibility upload): stage file in open #ops, hold fresh visibility read, switch away -> 0 create/PUT/commit/post!
+      await click(`a[href*="c=${f.ids.opsChannel}"]:visible`);
+      await wait("#ops loaded for held visibility upload", () => (location.search.includes(`c=${f.ids.opsChannel}`) || location.search.includes("c=ops")) && visible(one("[data-composer]")));
+      const opsPicker = one<HTMLInputElement>("[data-composer-file-input]")!;
+      const opsDt = new DataTransfer();
+      opsDt.items.add(new File(["sensitive"], "ops-report.txt", { type: "text/plain" }));
+      opsPicker.files = opsDt.files;
+      opsPicker.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait("staged file chip in #ops", () => !!one("[data-composer-attachments] button"));
+      input.value = "Ops message with staged file";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      f.holdNextChannelVisibility = true;
+      await click("[data-composer-send]:visible");
+      await wait("channel visibility read held", () => typeof f.releaseChannelVisibility === "function");
+      // Switch to 1:1 DM Alex while visibility check is held -> retires the #ops upload scope!
+      await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
+      await wait("switched to 1:1 dm while visibility held", () => location.search.includes(`dm=${f.ids.dmAlexConv}`));
+      f.releaseChannelVisibility();
+      await new Promise((r) => setTimeout(r, 140));
+      check(
+        f.fileCreateCalls === 0 && f.storagePutCalls === 0 && f.fileCommitCalls === 0 && f.signalCommands.length === 0,
+        `HezSec C1: held visibility across scope retirement must emit 0 file_create(${f.fileCreateCalls}), 0 PUT(${f.storagePutCalls}), 0 commit(${f.fileCommitCalls}), 0 post(${f.signalCommands.length})`,
+      );
+
       document.documentElement.dataset.step3dObservation = JSON.stringify({ ok: true, capture: f.capture });
       return;
     }
@@ -543,20 +545,17 @@ async function observeConversations3D() {
     if (f.capture === "hezsec-held-omission-and-fences") {
       const notesDraftKey = `commonswarm:composer-draft:${f.owner}:${f.workspace}:conv:${f.ids.notesConv}`;
       localStorage.setItem(notesDraftKey, JSON.stringify({ body: "Background notes secret" }));
-      await wait("first group history page held", () => typeof f.releaseFirstHistory === "function");
-      // Trigger a fresh conversations refresh omitting BOTH the loading group DM AND background Notes to self.
+      await wait(
+        "first group history page held and rail populated",
+        () => typeof f.releaseFirstHistory === "function" && !!one(`[data-rail-conversation-menu="${f.ids.dmAlexConv}"]`),
+      );
+      // Trigger a fresh authoritative `refreshConversations(workspaceId, true)` while STAYING on the loading group DM
+      // by starring another conversation row in the rail (dmAlexConv), with BOTH dmGroupConv and notesConv omitted.
+      await click(`[data-rail-conversation-menu="${f.ids.dmAlexConv}"]:visible`);
+      await wait("alex rail menu open while group history held", () => visible(one(".cs-context-menu")));
       f.omitFromNextConversations.add(f.ids.dmGroupConv);
       f.omitFromNextConversations.add(f.ids.notesConv);
-      // Force refresh via visibilitychange/manual conversations check by opening All messages? No: open Members / reload conversations via dispatch!
-      // Instead, trigger real visibilitychange + online refresh path or refresh button:
-      window.dispatchEvent(new Event("focus"));
-      // Wait for fresh omission or invoke a second conversations read via channel rail refresh if throttled; reset throttle by opening & closing channel dialog?
-      // Better: click Go to another conversation? No, we want to STAY on the loading group DM while conversations refreshes!
-      // Clicking the header Members button triggers a real Step 3C preflight `listConversations` committed via `commitWorkspaceConversations`!
-      const membersBtn = one<HTMLButtonElement>("[data-conversation-members-open]");
-      if (membersBtn && visible(membersBtn)) {
-        await click("[data-conversation-members-open]:visible");
-      }
+      await click('.cs-context-menu__item:has-text("Star")');
       await wait("group DM evicted while first page still held", () => !!one("[data-channel-unavailable]"));
       check(localStorage.getItem(notesDraftKey) === null, "HezSec #2: background omitted DM draft must be wiped immediately");
       // Now release the held first history page -> must paint NOTHING and never re-add the group DM to rail!
