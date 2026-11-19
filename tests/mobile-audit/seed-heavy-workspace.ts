@@ -1048,16 +1048,21 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     } catch (error) { note("seed_lists_approval", error); }
     // Withdrawing Lists & docs access (dialog.lists-withdraw, dialog.people-withdraw), in a workspace of its own: one own local
     // agent, Thyme, with a live connection, whose Lists access the owner allows here through the product's own commands
-    // (household_connections, then household_approve_connection), so both pages offer Withdraw. Neither screen sends the
+    // (household_connections, then household_approve_connection), so both pages offer Withdraw. A second own local agent,
+    // Basil, has no connection: pressing Basil's Allow in People & agents opens the Lists approvals card via the setup
+    // fallback (listsAllowLanding), revealing Thyme's Withdraw button without approving anything. Neither screen sends the
     // withdrawal, so the approval stays for every capture.
     try {
       const withdrawWorkspace = randomUUID();
       const ready = ok("create_workspace withdraw", await command(owner.token, { kind: "create_workspace", workspace_id: withdrawWorkspace, name: "Herb garden", org_id: workspace }, null))
         && ok("create_agent_principal withdraw", await command(owner.token, { kind: "create_agent_principal", name: "Thyme", model: "claude-opus-5-5" }, withdrawWorkspace))
+        && ok("create_agent_principal withdraw setup", await command(owner.token, { kind: "create_agent_principal", name: "Basil", model: "claude-opus-5-5" }, withdrawWorkspace))
         && ok("household_permissions withdraw", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, withdrawWorkspace));
       const [thyme] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
         WHERE workspace_id = ${withdrawWorkspace}::uuid AND name = 'Thyme' AND transport = 'local'` : [];
-      if (thyme) {
+      const [setupAgent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${withdrawWorkspace}::uuid AND name = 'Basil' AND transport = 'local'` : [];
+      if (thyme && setupAgent) {
         const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
         await sql.begin(async (tx) => {
           await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'Audit laptop')`;
@@ -1073,10 +1078,10 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         const connection = connections.find((entry) => String(entry.principal_id ?? "") === thyme.principal_id);
         if (connection && ok("household_approve_connection withdraw", await command(owner.token, { kind: "household_approve_connection",
           connection: { kind: connection.kind, connection_id: connection.connection_id, grant_id: connection.grant_id, principal_id: connection.principal_id, operations: ["read"] } }, withdrawWorkspace))) {
-          Object.assign(ids, { withdrawWorkspace, withdrawAgent: thyme.principal_id });
+          Object.assign(ids, { withdrawWorkspace, withdrawAgent: thyme.principal_id, withdrawSetupAgent: setupAgent.principal_id });
           steps.push("seed_lists_withdraw");
         } else if (!connection) note("seed_lists_withdraw", `no connection listed for Thyme: HTTP ${listed.status} ${JSON.stringify(listed.body).slice(0, 200)}`);
-      } else if (ready) note("seed_lists_withdraw", "the Thyme agent principal was not found as a local agent");
+      } else if (ready) note("seed_lists_withdraw", "the Thyme or Basil agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_withdraw", error); }
     // The Admins tab with grants on record (app.people.admins.grants and the two dialog.people-admins-end screens), in a
     // workspace of its own. Every grant is one the product could have written: a second person joins the workspace, adds an

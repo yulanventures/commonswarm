@@ -2311,8 +2311,16 @@
   {
     "id": "dialog.lists-withdraw",
     "kind": "dialog",
-    "path": "/app?w={withdrawWorkspace}&v=lists",
+    "path": "/app?w={withdrawWorkspace}&v=people",
     "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{withdrawSetupAgent}",
+        "click": "#pd-agent-{withdrawSetupAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{withdrawSetupAgent}\"]"
+      },
       {
         "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] [data-withdraw-approval=\"{withdrawAgent}\"]",
         "settle": true
