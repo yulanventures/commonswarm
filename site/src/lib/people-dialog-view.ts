@@ -150,8 +150,8 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleRowAc
   if (action === "turn-off-key") return agent.liveKey && (agent.hosted ? agent.mayManage : agent.own);
   return action === "remove-agent" && agent.mayManage;
 }
-/** The `window.confirm` text of the withdraw button on the Lists & docs card. */
-export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string }) {
+/** Confirmation heading, button label and consequences for destructive People & agents and Lists & docs actions. */
+export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string; workspaceName?: string }) {
   const name = item.name;
   if (action === "cancel-invite") return peopleInviteConfirmCopy({ name, kind: (item.kind ?? "person") as PeopleInvite["kind"] });
   if (action === "remove-agent") return { title: `Remove ${name}?`, button: `Remove ${name}`,
@@ -160,12 +160,16 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
   if (action === "turn-off-key") return { title: `Turn off ${name}’s key?`, button: "Turn off key",
     stops: [`${name} stops when its current access ends.`, "This key cannot be used again."],
     stays: ["Its identity and history stay here.", "Its owner can get a new key to bring it back."] };
-  if (action === "withdraw" && item.hosted) return { title: "Withdraw Lists & docs?", button: "Withdraw access",
-    stops: [`This removes the stored Lists & docs approval for ${name}.`],
-    stays: ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE] };
-  if (action === "withdraw") return { title: "Withdraw Lists & docs?", button: "Withdraw access",
-    stops: [`${name} will no longer be able to use Lists & docs here.`],
-    stays: ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."] };
+  if (action === "withdraw") {
+    const workspace = item.workspaceName?.trim();
+    const title = workspace ? `Withdraw ${name}’s Lists & docs access in ${workspace}?` : `Withdraw ${name}’s Lists & docs access?`;
+    if (item.hosted) return { title, button: "Withdraw access",
+      stops: [`This removes the stored Lists & docs approval for ${name}.`],
+      stays: ["Existing lists, docs and history stay.", HOSTED_LISTS_NOTE] };
+    return { title, button: "Withdraw access",
+      stops: [`${name} will no longer be able to use Lists & docs here.`],
+      stays: ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."] };
+  }
   return { title: `Remove ${name}?`, button: `Remove ${name}`,
     stops: [`${name} will lose membership of this space.`, "This removal cannot be undone; they would need a new invitation to join again."],
     stays: ["History stays. Their other spaces are unaffected."] };
@@ -867,7 +871,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
 
 /** Native nested confirm, with its own Escape and a safe initial focus. */
 export function showPeopleConfirmation(dialog: HTMLDialogElement, action: PeopleConfirmAction,
-  item: { name: string; hosted?: boolean; kind?: string; liveKey?: boolean }, opener: HTMLElement,
+  item: { name: string; hosted?: boolean; kind?: string; liveKey?: boolean; workspaceName?: string }, opener: HTMLElement,
   commit: (button: HTMLButtonElement, notice: HTMLElement) => Promise<void>,
   formatError: (error: unknown) => string, alternative?: () => void, focusAfterCommit?: () => void,
   /** Another part of the page that opens this question (the Lists & docs approvals, for example). Focus then returns
