@@ -574,8 +574,13 @@ function parseCursor(value: unknown): ConversationCursor | null {
 export function parseConversationSummary(value: unknown): ConversationSummary | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
-  if (typeof row.conversation_id !== "string") return null;
+  if (typeof row.conversation_id !== "string" || !row.conversation_id.trim()) return null;
   if (!(CONVERSATION_KINDS as readonly unknown[]).includes(row.kind)) return null;
+  if (typeof row.joined !== "boolean") return null;
+  const kind = row.kind as ConversationKind;
+  if ((kind === "public_channel" || kind === "private_channel") && (typeof row.channel_id !== "string" || !row.channel_id.trim())) {
+    return null;
+  }
   const notifyLevel = (CONVERSATION_NOTIFY_LEVELS as readonly unknown[]).includes(row.notify_level)
     ? (row.notify_level as ConversationNotifyLevel)
     : "everything";
@@ -584,12 +589,12 @@ export function parseConversationSummary(value: unknown): ConversationSummary | 
     : null;
   return {
     conversationId: row.conversation_id.toLowerCase(),
-    kind: row.kind as ConversationKind,
+    kind,
     channelId: nullableText(row.channel_id)?.toLowerCase() ?? null,
     slug: nullableText(row.slug),
     description: nullableText(row.description),
     archivedAt: nullableText(row.archived_at),
-    joined: row.joined === true,
+    joined: row.joined,
     generation: typeof row.generation === "number" ? row.generation : 0,
     leadMode,
     leadAgentPrincipalId: nullableText(row.lead_agent_principal_id)?.toLowerCase() ?? null,
@@ -660,7 +665,11 @@ export function parseConversationsListOutcome(
 ): ConversationsListOutcome {
   if (status === 200) {
     if (Array.isArray(body.conversations)) {
-      return { status: "ready", conversations: parseConversationsListResponse(body) };
+      const conversations = parseConversationsListResponse(body);
+      if (conversations.length !== body.conversations.length) {
+        return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
+      }
+      return { status: "ready", conversations };
     }
     return { status: "failed", message: errorSentence(body, "Couldn't check channel membership.") };
   }

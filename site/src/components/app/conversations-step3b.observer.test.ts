@@ -18,6 +18,7 @@ function installConversations3BFixture() {
   f.failNextPreviewJoin = params.get("fail_join") === "1";
   f.failConvReadCount = Number(params.get("fail_conv_read") ?? "0");
   f.malformedConvReadCount = Number(params.get("malformed_conv_200") ?? "0");
+  f.malformedRowReadCount = Number(params.get("malformed_row") ?? "0");
   f.convCommands = [] as any[];
 
   const opsChannel = "66666666-6666-4666-8666-666666666666";
@@ -152,6 +153,15 @@ function installConversations3BFixture() {
           f.malformedConvReadCount -= 1;
           return Response.json({ unexpected: true }, { status: 200 });
         }
+        if (f.malformedRowReadCount > 0) {
+          f.malformedRowReadCount -= 1;
+          return Response.json({
+            conversations: [
+              f.conversations[0],
+              { channel_id: previewChannel, slug: "preview-only", joined: false },
+            ],
+          }, { status: 200 });
+        }
         return Response.json({ conversations: f.conversations });
       }
     }
@@ -239,6 +249,7 @@ async function observeConversations3B() {
       if (new URL(location.href).searchParams.get("recover") === "1") {
         f.failConvReadCount = 0;
         f.malformedConvReadCount = 0;
+        f.malformedRowReadCount = 0;
         await click("[data-channel-membership-retry]:visible");
         await wait("recovered to Join preview bar", () => visible(one("[data-channel-preview-bar]")) && !visible(one("[data-channel-membership-retry-bar]")));
         check(!visible(one("[data-composer]")), "unjoined channel must still hide composer after recovery");
@@ -453,6 +464,7 @@ test("Step 3B signed-in dashboard wires Step 2b DM rail, All channels Join, prev
       { name: "1024x1366-light-membership-retry", width: 1024, height: 1366, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&fail_conv_read=99`, screenshot: true },
       { name: "membership-retry-recover-390", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&fail_conv_read=99&recover=1` },
       { name: "membership-retry-malformed-200", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&malformed_conv_200=99&recover=1` },
+      { name: "membership-retry-malformed-row", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&malformed_row=99&recover=1` },
     ];
     for (const item of cases) {
       const context = await browser.newContext({ viewport: { width: item.width, height: item.height }, hasTouch: item.width < 1024 });
