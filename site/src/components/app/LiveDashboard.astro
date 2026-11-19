@@ -1419,7 +1419,7 @@ import "../../styles/kylon-image-viewer.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
-  import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
+  import { buildWaitingButton, classifyAskConversation, conversationParticipantKey, indexDirectConversations, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
   import type { OversightListOutcome, OversightMessage, OversightPanelState, OversightScopePin } from "../../lib/conversation-oversight";
   import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
@@ -6581,9 +6581,64 @@ import "../../styles/kylon-image-viewer.css";
       const workspaceId = ws?.id ?? "";
       const workspaceName = ws?.name ?? "Workspace";
       const dm = typeof activeDm === "undefined" ? null : activeDm;
+      const routeDmId = homeRoute.view === "chat" && !dm && activeChannelId === null ? (homeRoute.dmId ?? null) : null;
+      const dmConvId = (typeof activeDmConversationId === "string" && activeDmConversationId ? activeDmConversationId : routeDmId)?.toLowerCase() ?? null;
+      const directList = typeof workspaceConversations !== "undefined" ? workspaceConversations : null;
+      if (dmConvId) {
+        const conv = directList?.find(c => c.conversationId === dmConvId && (c.kind === "dm" || c.kind === "group_dm")) ?? null;
+        if (conv) {
+          const viewerId = homeViewerId();
+          const label = conversationTitle(conv, viewerId, lookupConversationMemberName);
+          const rawParticipantKey = conversationParticipantKey(conv.members);
+          const uniqueParticipantKey = rawParticipantKey &&
+            (!directList || indexDirectConversations(directList).get(rawParticipantKey) !== null)
+            ? rawParticipantKey
+            : "";
+          if (conv.kind === "group_dm") {
+            return {
+              workspaceId,
+              workspaceName,
+              kind: "group_dm",
+              channelId: null,
+              label,
+              conversationId: conv.conversationId,
+              ...(uniqueParticipantKey ? { participantKey: uniqueParticipantKey } : {}),
+            };
+          }
+          const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
+          const partner = others.length === 1
+            ? { kind: others[0]!.kind === "agent" ? "agent" as const : "person" as const, id: others[0]!.id }
+            : (others.length === 0 && viewerId ? { kind: "person" as const, id: viewerId } : undefined);
+          return {
+            workspaceId,
+            workspaceName,
+            kind: "dm",
+            channelId: null,
+            label,
+            conversationId: conv.conversationId,
+            ...(rawParticipantKey ? { participantKey: rawParticipantKey } : {}),
+            ...(partner ? { dm: partner } : {}),
+          };
+        }
+        return { workspaceId, workspaceName, kind: "dm", channelId: null, label: "Direct message", conversationId: dmConvId };
+      }
       if (dm) {
+        const viewerId = homeViewerId();
         const label = typeof entityName === "function" ? entityName(dm) : "Direct message";
-        return { workspaceId, workspaceName, kind: "dm", channelId: null, label, dm: { kind: dm.kind, id: dm.id } };
+        const participantKey = viewerId
+          ? conversationParticipantKey([{ kind: "user", id: viewerId }, { kind: dm.kind === "agent" ? "agent" : "user", id: dm.id }])
+          : "";
+        const matched = participantKey && directList ? indexDirectConversations(directList).get(participantKey) ?? null : null;
+        return {
+          workspaceId,
+          workspaceName,
+          kind: "dm",
+          channelId: null,
+          label,
+          dm: { kind: dm.kind, id: dm.id },
+          ...(matched?.conversationId ? { conversationId: matched.conversationId } : {}),
+          ...(participantKey ? { participantKey } : {}),
+        };
       }
       if (activeChannelId === GENERAL_CHANNEL_ID) {
         return { workspaceId, workspaceName, kind: "general", channelId: null, label: channelLabel(GENERAL_CHANNEL_SLUG) };
@@ -6603,7 +6658,18 @@ import "../../styles/kylon-image-viewer.css";
 
     const waitingChannelName = (workspaceId: string, conversation: WaitingConversation): string => {
       if (conversation.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
-      if (conversation.kind === "dm") return "Direct message";
+      if (conversation.kind === "dm" || conversation.kind === "group_dm") {
+        if (workspaceId === activeWorkspaceId && typeof workspaceConversations !== "undefined" && workspaceConversations) {
+          const conv = workspaceConversations.find(c =>
+            (c.kind === "dm" || c.kind === "group_dm") && (
+              (conversation.conversationId && c.conversationId === conversation.conversationId) ||
+              (conversation.participantKey && conversationParticipantKey(c.members) === conversation.participantKey)
+            ),
+          );
+          if (conv) return conversationTitle(conv, homeViewerId(), lookupConversationMemberName);
+        }
+        return conversation.kind === "group_dm" ? "Group direct message" : "Direct message";
+      }
       if (conversation.kind === "unknown") return "";
       const { channelId } = conversation;
       if (workspaceId === activeWorkspaceId) {
@@ -6616,15 +6682,34 @@ import "../../styles/kylon-image-viewer.css";
 
     const allWaitingAskItems = (): WaitingAskItem[] => {
       const items: WaitingAskItem[] = [];
+      const activeDirectIndex = typeof workspaceConversations !== "undefined" && workspaceConversations
+        ? indexDirectConversations(workspaceConversations)
+        : null;
       for (const workspace of workspaces) {
         for (const ask of waitingPanelAsks.get(workspace.id) ?? []) {
+          let conversation = ask.conversation;
+          if (
+            ask.workspaceId === activeWorkspaceId &&
+            activeDirectIndex &&
+            (conversation.kind === "dm" || conversation.kind === "group_dm") &&
+            !conversation.conversationId &&
+            conversation.participantKey
+          ) {
+            const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
+            if (matched) {
+              conversation = matched.kind === "group_dm"
+                ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
+                : { ...conversation, conversationId: matched.conversationId };
+            }
+          }
           const draft = choiceDrafts.get(choiceDraftKey(ask.workspaceId, ask.id));
           const error = waitingPanelErrors.get(ask.id);
           const pending = waitingPanelTickets.has(ask.id);
           const retryable = error !== undefined && waitingPanelLastSubmissions.has(ask.id);
           items.push({
             ...ask,
-            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            conversation,
+            channelLabel: waitingChannelName(ask.workspaceId, conversation),
             choices: {
               options: ask.choices.options,
               multi: ask.choices.multi,
@@ -6641,15 +6726,34 @@ import "../../styles/kylon-image-viewer.css";
 
     const allWaitingPlainAskItems = (): WaitingPlainAskItem[] => {
       const items: WaitingPlainAskItem[] = [];
+      const activeDirectIndex = typeof workspaceConversations !== "undefined" && workspaceConversations
+        ? indexDirectConversations(workspaceConversations)
+        : null;
       for (const workspace of workspaces) {
         for (const ask of waitingPanelPlainAsks.get(workspace.id) ?? []) {
+          let conversation = ask.conversation;
+          if (
+            ask.workspaceId === activeWorkspaceId &&
+            activeDirectIndex &&
+            (conversation.kind === "dm" || conversation.kind === "group_dm") &&
+            !conversation.conversationId &&
+            conversation.participantKey
+          ) {
+            const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
+            if (matched) {
+              conversation = matched.kind === "group_dm"
+                ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
+                : { ...conversation, conversationId: matched.conversationId };
+            }
+          }
           const ticket = waitingPlainTickets.get(ask.id);
           const error = waitingPlainErrors.get(ask.id);
           const draftText = waitingPlainDrafts.get(ask.id);
           const retryable = error !== undefined && waitingPlainLastSubmissions.has(ask.id);
           items.push({
             ...ask,
-            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            conversation,
+            channelLabel: waitingChannelName(ask.workspaceId, conversation),
             ...(draftText !== undefined ? { draftText } : {}),
             ...(ticket ? { pending: true as const, pendingMode: ticket.mode } : {}),
             ...(error ? { error } : {}),
@@ -7184,7 +7288,7 @@ import "../../styles/kylon-image-viewer.css";
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
-      const placeKey = `${place.workspaceId}:${place.kind}:${place.channelId ?? ""}:${place.dm?.id ?? ""}`;
+      const placeKey = `${place.workspaceId}:${place.kind}:${place.channelId ?? ""}:${place.conversationId ?? ""}:${place.participantKey ?? ""}:${place.dm?.id ?? ""}`;
       if (waitingSurvey.active && !waitingSurvey.sending && waitingScope === "channel" && waitingSurvey.placeKey !== placeKey) {
         waitingSurvey.active = false;
       }
@@ -7575,30 +7679,30 @@ import "../../styles/kylon-image-viewer.css";
             const plainNeeds = allAskNeeds.filter(item => !item.choices || item.choices.options.length === 0);
             const locations = new Map<string, SignalLocation>();
             const missingIds: string[] = [];
+            const needsRecipientLookup = (sig: Signal): boolean =>
+              sig.channelId === null &&
+              (sig.to !== null || sig.toAgent !== null) &&
+              sig.recipients === undefined &&
+              !sig.conversationId;
+            const toLiveLocation = (sig: Signal): SignalLocation => ({
+              id: sig.id,
+              channelId: sig.channelId,
+              to: sig.to,
+              toAgent: sig.toAgent,
+              threadRootId: sig.threadRootId,
+              from: sig.from,
+              fromKind: sig.fromKind,
+              ...(sig.conversationId !== undefined ? { conversationId: sig.conversationId } : {}),
+              ...(sig.recipients !== undefined ? { recipients: sig.recipients } : {}),
+            });
             for (const item of allAskNeeds) {
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
-              if (liveSignal) {
-                locations.set(item.id, {
-                  id: liveSignal.id,
-                  channelId: liveSignal.channelId,
-                  to: liveSignal.to,
-                  toAgent: liveSignal.toAgent,
-                  threadRootId: liveSignal.threadRootId,
-                  from: liveSignal.from,
-                  fromKind: liveSignal.fromKind,
-                });
+              if (liveSignal && !needsRecipientLookup(liveSignal)) {
+                locations.set(item.id, toLiveLocation(liveSignal));
                 if (liveSignal.channelId === null && liveSignal.threadRootId !== null) {
                   const liveRoot = signals.find(s => s.id === liveSignal.threadRootId);
-                  if (liveRoot) {
-                    locations.set(liveRoot.id, {
-                      id: liveRoot.id,
-                      channelId: liveRoot.channelId,
-                      to: liveRoot.to,
-                      toAgent: liveRoot.toAgent,
-                      threadRootId: liveRoot.threadRootId,
-                      from: liveRoot.from,
-                      fromKind: liveRoot.fromKind,
-                    });
+                  if (liveRoot && !needsRecipientLookup(liveRoot)) {
+                    locations.set(liveRoot.id, toLiveLocation(liveRoot));
                   } else {
                     missingIds.push(liveSignal.threadRootId);
                   }
@@ -7618,12 +7722,21 @@ import "../../styles/kylon-image-viewer.css";
                 locationReadFailed = true;
               }
             }
+            const directByParticipantKey = workspace.id === activeWorkspaceId &&
+              typeof workspaceConversations !== "undefined" &&
+              workspaceConversations
+              ? indexDirectConversations(workspaceConversations)
+              : undefined;
             const classified = new Map<string, WaitingConversation>();
             let anyUnknownLocation = locationReadFailed;
             for (const item of allAskNeeds) {
               const loc = locations.get(item.id) ?? null;
               const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
-              const conv = classifyAskConversation(loc, rootLoc);
+              const conv = classifyAskConversation(
+                loc,
+                rootLoc,
+                directByParticipantKey ? { directByParticipantKey } : undefined,
+              );
               if (conv.kind === "unknown") anyUnknownLocation = true;
               classified.set(item.id, conv);
             }
@@ -16615,6 +16728,7 @@ import "../../styles/kylon-image-viewer.css";
         renderHomeShell();
         renderChannelBlocked();
         renderChannelDirectoryDialog();
+        if (typeof syncWaitingPanel === "function") syncWaitingPanel();
       }
       return false;
     };
@@ -16707,6 +16821,7 @@ import "../../styles/kylon-image-viewer.css";
       renderHomeShell();
       renderChannelBlocked();
       renderFeed();
+      if (typeof syncWaitingPanel === "function") syncWaitingPanel();
       if (oneToOnePartner) {
         const keepWaitingColumn = typeof waitingSurface !== "undefined" && (waitingSurface?.isOpen() ?? false) && !waitingSurface!.isPhone();
         const anchor = one<HTMLElement>(`[data-rail-${oneToOnePartner.kind === "agent" ? "agent" : "person"}="${CSS.escape(oneToOnePartner.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");

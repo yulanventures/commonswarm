@@ -2899,6 +2899,8 @@ export interface Signal {
   conversationId?: string | null;
   /** Step 2b conversation kind stamped by conversation_history for strict DM exclusion. */
   conversationKind?: ConversationKind | null;
+  /** Full recipient roster when selected (e.g. `signalLocations` or Step 2b history). */
+  recipients?: Array<{ kind: "user" | "agent"; id: string }>;
 }
 
 /** Optional and additive: legacy rows become empty, and newer metadata fields are ignored. */
@@ -3921,9 +3923,24 @@ export const BROWSER_SIGNAL_COLUMNS =
  * written before the column existed reads back null, and null is not a
  * broadcast.
  */
+function parseSignalRecipients(value: unknown): Array<{ kind: "user" | "agent"; id: string }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: Array<{ kind: "user" | "agent"; id: string }> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    if ((rec.kind === "user" || rec.kind === "agent") && typeof rec.id === "string" && rec.id.trim()) {
+      out.push({ kind: rec.kind, id: rec.id.trim() });
+    }
+  }
+  return out;
+}
+
 export function browserSignalFromRow(row: Record<string, unknown>): Signal {
   const text = (value: unknown): string | null =>
     value === null || value === undefined ? null : String(value);
+  const conversationId = text(row.conversation_id);
+  const recipients = parseSignalRecipients(row.recipients);
   return {
     id: String(row.id),
     from: String(row.from ?? ""),
@@ -3940,9 +3957,10 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
     threadRootId: text(row.thread_root_id),
     inReplyTo: text(row.in_reply_to),
     broadcastToChannel: row.broadcast_to_channel === true,
-    ...(typeof row.conversation_id === "string" && row.conversation_id !== ""
-      ? { conversationId: row.conversation_id }
+    ...(conversationId !== null && conversationId !== ""
+      ? { conversationId }
       : {}),
+    ...(recipients !== undefined ? { recipients } : {}),
   };
 }
 
@@ -3978,12 +3996,14 @@ export interface SignalLocation {
   threadRootId: string | null;
   from: string;
   fromKind: string;
+  conversationId?: string | null;
+  recipients?: Array<{ kind: "user" | "agent"; id: string }>;
 }
 
 /**
  * Resolves the conversation placement columns for a small batch of signal ids in one workspace.
  * Used by the Waiting on you channel panel so asks older than the loaded feed page distinguish
- * named channels, #general, and direct messages without guessing on read failure.
+ * named channels, #general, 1:1 DMs, and group DMs without guessing on read failure.
  */
 export async function signalLocations(
   workspaceId: string,
@@ -4005,7 +4025,7 @@ export async function signalLocations(
           c
             .schema("swarm_read")
             .from("signals")
-            .select("id,channel_id,to,to_agent,thread_root_id,from,from_kind")
+            .select("id,channel_id,to,to_agent,thread_root_id,from,from_kind,recipients")
             .eq("workspace_id", workspaceId)
             .in("id", chunk)
             .abortSignal(signal),
@@ -4018,6 +4038,10 @@ export async function signalLocations(
   };
   const toLoc = (row: Record<string, unknown>): SignalLocation | null => {
     if (typeof row.id !== "string") return null;
+    const conversationId = typeof row.conversation_id === "string" && row.conversation_id.trim()
+      ? row.conversation_id.trim().toLowerCase()
+      : undefined;
+    const recipients = parseSignalRecipients(row.recipients);
     return {
       id: row.id,
       channelId: typeof row.channel_id === "string" ? row.channel_id : null,
@@ -4026,6 +4050,8 @@ export async function signalLocations(
       threadRootId: typeof row.thread_root_id === "string" ? row.thread_root_id : null,
       from: typeof row.from === "string" ? row.from : "",
       fromKind: typeof row.from_kind === "string" ? row.from_kind : "",
+      ...(conversationId !== undefined ? { conversationId } : {}),
+      ...(recipients !== undefined ? { recipients } : {}),
     };
   };
   for (const row of await readBatch(unique)) {
