@@ -15,12 +15,22 @@ struct TodoListView: View {
                 ContentUnavailableView("No to-dos yet", systemImage: "checkmark.circle")
             } else {
                 List(viewModel.todos) { todo in
-                    VStack(alignment: .leading) {
-                        Text(todo.title)
-                            .font(.headline)
-                        Text(todo.state.rawValue.capitalized)
-                            .font(.subheadline)
-                            .foregroundColor(todo.state == .open ? .blue : .gray)
+                    NavigationLink(destination: TodoDetailView(todo: todo)) {
+                        VStack(alignment: .leading) {
+                            Text(todo.title)
+                                .font(.headline)
+                                .lineLimit(2)
+                            HStack {
+                                Text(todo.state.rawValue.capitalized)
+                                    .font(.subheadline)
+                                    .foregroundColor(todo.state == .open ? .blue : .gray)
+                                if let due = todo.due_date {
+                                    Text("Due: \(due)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
                     }
                 }
             }
