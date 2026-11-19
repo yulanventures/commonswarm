@@ -18,15 +18,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-channel-description {
 }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description { min-block-size: 44px; cursor: pointer; }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description:hover { color: var(--k-shell-ink); text-decoration: underline; text-underline-offset: 3px; }
-live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-dialog-head {
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory], [data-group-leave-dialog]) .cm-dialog-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none;
 }
-live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-close {
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory], [data-group-leave-dialog]) .cm-close {
   display: inline-grid; place-items: center; flex: none; min-inline-size: 44px; min-block-size: 44px;
   margin: -8px -8px -8px 0; padding: 0; border: 0; border-radius: 6px;
   background: transparent; color: var(--k-shell-secondary); font: 400 24px/1 var(--k-shell-font); cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-close:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory], [data-group-leave-dialog]) .cm-close:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form textarea {
   inline-size: 100%; min-inline-size: 0; min-block-size: 88px; max-block-size: 35dvh; resize: vertical;
   padding: 10px 12px; border: 1px solid var(--k-shell-control); border-radius: var(--k-shell-radius);

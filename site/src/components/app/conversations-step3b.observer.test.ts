@@ -16,6 +16,7 @@ function installConversations3BFixture() {
   f.capture = params.get("capture") ?? "flow";
   f.step2b = !fallback;
   f.failNextPreviewJoin = params.get("fail_join") === "1";
+  f.failConvReadCount = Number(params.get("fail_conv_read") ?? "0");
   f.convCommands = [] as any[];
 
   const opsChannel = "66666666-6666-4666-8666-666666666666";
@@ -142,6 +143,10 @@ function installConversations3BFixture() {
       const body = await request.clone().json().catch(() => null);
       if (body?.resource === "conversations") {
         if (fallback) return Response.json({ error: "unsupported_resource", message: "Not deployed yet." }, { status: 400 });
+        if (f.failConvReadCount > 0) {
+          f.failConvReadCount -= 1;
+          return Response.json({ error: "service_unavailable", message: "Couldn't check channel membership." }, { status: 503 });
+        }
         return Response.json({ conversations: f.conversations });
       }
     }
@@ -219,6 +224,26 @@ async function observeConversations3B() {
       return;
     }
 
+    if (f.capture === "membership-retry") {
+      await wait("membership retry bar visible", () => visible(one("[data-channel-membership-retry-bar]")));
+      check(!visible(one("[data-composer]")), "failed membership read must never show composer");
+      const retryBtn = one<HTMLButtonElement>("[data-channel-membership-retry]");
+      check(retryBtn?.textContent === "Retry", "retry button label");
+      target44(retryBtn, "membership Retry button");
+      check(one("[data-channel-membership-error]")?.textContent === "Couldn't check channel membership.", "membership error text");
+      if (new URL(location.href).searchParams.get("recover") === "1") {
+        f.failConvReadCount = 0;
+        await click("[data-channel-membership-retry]:visible");
+        await wait("recovered to Join preview bar", () => visible(one("[data-channel-preview-bar]")) && !visible(one("[data-channel-membership-retry-bar]")));
+        check(!visible(one("[data-composer]")), "unjoined channel must still hide composer after recovery");
+      }
+      await document.fonts.ready;
+      check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
+      check(f.errors.length === 0, "app errors: " + f.errors.join(","));
+      document.documentElement.dataset.step3bObservation = JSON.stringify({ ok: true, capture: f.capture });
+      return;
+    }
+
     await wait("step 2b dms rendered", () => !!one("[data-home-dms]") && !!one(`[data-rail-conversation="${f.ids.dmGroupConv}"]`));
     check(!one(`[data-rail-channel="${f.ids.designChannel}"]`), "unjoined #design must stay out of rail before joining");
     check(!one(`[data-rail-channel="${f.ids.previewChannel}"]`), "unjoined #preview-only must stay out of rail before joining");
@@ -251,6 +276,23 @@ async function observeConversations3B() {
         check(!visible(one("[data-composer]")), "composer must remain hidden after failed join");
         check(one("[data-channel-preview-error]")?.textContent === "Network timeout.", "error alert must show refusal");
       }
+      await document.fonts.ready;
+      check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
+      document.documentElement.dataset.step3bObservation = JSON.stringify({ ok: true, capture: f.capture });
+      return;
+    }
+
+    if (f.capture === "group-leave") {
+      await openDrawerIfPhone();
+      await click(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`);
+      await wait("group dm menu open", () => visible(one(".cs-context-menu")));
+      await click('.cs-context-menu__item:has-text("Leave group")');
+      await wait("group leave confirm open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+      check(one("[data-group-leave-title]")?.textContent === "Leave Alex and Lead?", "confirm heading names group");
+      check(document.activeElement === one("[data-group-leave-cancel]"), "confirm opens with focus on Cancel");
+      target44(one<HTMLElement>("[data-group-leave-cancel]"), "Leave confirm Cancel");
+      target44(one<HTMLElement>("[data-group-leave-confirm]"), "Leave confirm Leave");
+      check(!f.convCommands.some((c: any) => c.kind === "conversation_leave"), "opening confirm must not send leave");
       await document.fonts.ready;
       check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
       document.documentElement.dataset.step3bObservation = JSON.stringify({ ok: true, capture: f.capture });
@@ -318,6 +360,28 @@ async function observeConversations3B() {
     const oneToOneLabels = [...document.querySelectorAll(".cs-context-menu__item")].map(el => el.textContent?.trim());
     check(!oneToOneLabels.includes("Leave group"), "1:1 DM must never offer Leave group");
 
+    // Group DM Leave requires confirmation (Cancel sends nothing; Leave sends conversation_leave and removes row):
+    await click(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`);
+    await wait("group dm menu reopen", () => visible(one(".cs-context-menu")));
+    await click('.cs-context-menu__item:has-text("Leave group")');
+    await wait("group leave confirm open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+    check(one("[data-group-leave-title]")?.textContent === "Leave Alex and Lead?", "leave confirm title");
+    check(document.activeElement === one("[data-group-leave-cancel]"), "leave confirm focuses Cancel");
+    check(!f.convCommands.some((c: any) => c.kind === "conversation_leave"), "Leave group menu click must not send leave");
+    await click("[data-group-leave-cancel]:visible");
+    await wait("group leave confirm cancelled", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === false);
+    check(!f.convCommands.some((c: any) => c.kind === "conversation_leave"), "Cancel must not send conversation_leave");
+    check(!!one(`[data-rail-conversation="${f.ids.dmGroupConv}"]`), "group row stays after Cancel");
+
+    await openDrawerIfPhone();
+    await click(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`);
+    await wait("group dm menu second open", () => visible(one(".cs-context-menu")));
+    await click('.cs-context-menu__item:has-text("Leave group")');
+    await wait("group leave confirm second open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+    await click("[data-group-leave-confirm]:visible");
+    await wait("group left after confirm", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === false && !one(`[data-rail-conversation="${f.ids.dmGroupConv}"]`));
+    check(f.convCommands.some((c: any) => c.kind === "conversation_leave" && c.conversation_id === f.ids.dmGroupConv), "confirming Leave must send conversation_leave");
+
     await document.fonts.ready;
     check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
     check(f.errors.length === 0, "app errors: " + f.errors.join(","));
@@ -373,6 +437,15 @@ test("Step 3B signed-in dashboard wires Step 2b DM rail, All channels Join, prev
       ])),
       { name: "390x844-light-preview-retry", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=preview-retry&fail_join=1`, screenshot: true },
       { name: "390x844-dark-preview-retry", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=dark&capture=preview-retry&fail_join=1`, screenshot: true },
+      // Delta captures: group Leave confirmation modal and failed membership read Retry bar:
+      { name: "360x740-light-group-leave", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&capture=group-leave`, screenshot: true },
+      { name: "390x844-dark-group-leave", width: 390, height: 844, query: `w=${ws}&c=general&theme=dark&capture=group-leave`, screenshot: true },
+      { name: "1024x1366-light-group-leave", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=light&capture=group-leave`, screenshot: true },
+      { name: "1024x1366-dark-group-leave", width: 1024, height: 1366, query: `w=${ws}&c=general&theme=dark&capture=group-leave`, screenshot: true },
+      { name: "390x844-light-membership-retry", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&fail_conv_read=99`, screenshot: true },
+      { name: "390x844-dark-membership-retry", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=dark&capture=membership-retry&fail_conv_read=99`, screenshot: true },
+      { name: "1024x1366-light-membership-retry", width: 1024, height: 1366, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&fail_conv_read=99`, screenshot: true },
+      { name: "membership-retry-recover-390", width: 390, height: 844, query: `w=${ws}&c=${previewCh}&theme=light&capture=membership-retry&fail_conv_read=99&recover=1` },
     ];
     for (const item of cases) {
       const context = await browser.newContext({ viewport: { width: item.width, height: item.height }, hasTouch: item.width < 1024 });

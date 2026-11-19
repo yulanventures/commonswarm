@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderChannelPreviewBar } from "./channel-preview-bar.ts";
+import { renderChannelMembershipRetryBar, renderChannelPreviewBar } from "./channel-preview-bar.ts";
 
 function previewRoot() {
   const focusCalls = [];
@@ -13,6 +13,7 @@ function previewRoot() {
         type: "",
         disabled: false,
         hidden: false,
+        isConnected: true,
         children: [],
         dataset: {},
         attrs: {},
@@ -80,4 +81,33 @@ test("public channel preview bar joins once while busy, keeps preview open with 
   await button.listeners.click();
   assert.equal(calls, 2);
   assert.equal(joined, 1);
+});
+
+test("membership retry bar runs once while busy and keeps Retry focused when read stays failed", async () => {
+  const { root, focusCalls } = previewRoot();
+  let calls = 0;
+  let release;
+  const { button, error } = renderChannelMembershipRetryBar(root, {
+    message: "Service unavailable.",
+    onRetry: () => {
+      calls += 1;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  });
+
+  assert.equal(button.textContent, "Retry");
+  assert.equal(error.attrs.role, "alert");
+  assert.equal(error.textContent, "Service unavailable.");
+
+  const first = button.listeners.click();
+  await button.listeners.click();
+  assert.equal(calls, 1);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, "Checking…");
+
+  release();
+  await first;
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Retry");
+  assert.equal(focusCalls.at(-1), button);
 });

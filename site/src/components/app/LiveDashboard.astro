@@ -1076,6 +1076,26 @@ import "../../styles/kylon-image-viewer.css";
   </dialog>
 
   <dialog
+    class="dashboard__channel-dialog"
+    id="dashboard-group-leave-dialog"
+    data-group-leave-dialog
+    aria-labelledby="dashboard-group-leave-title"
+  >
+    <header class="cm-dialog-head">
+      <h2 id="dashboard-group-leave-title" data-group-leave-title>Leave group?</h2>
+      <button class="cm-close" type="button" data-group-leave-close aria-label="Close">×</button>
+    </header>
+    <form class="dashboard__channel-form" data-group-leave-form>
+      <p data-group-leave-body></p>
+      <p class="dashboard__form-error" role="alert" data-group-leave-error hidden></p>
+      <div class="dashboard__channel-form-actions">
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-group-leave-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--danger" type="submit" data-group-leave-confirm>Leave</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog
     class="dashboard__connected-apps-dialog"
     data-connected-apps-dialog
     aria-labelledby="dashboard-connected-apps-title"
@@ -1422,6 +1442,7 @@ import "../../styles/kylon-image-viewer.css";
     workspaceFiles,
     workspaceChannels,
     channelUnread,
+    ConversationsUnsupportedError,
     listConversations,
     joinConversation,
     leaveConversation,
@@ -1572,8 +1593,9 @@ import "../../styles/kylon-image-viewer.css";
     signalInChannelView,
   } from "../../lib/channels";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
-  import { renderChannelPreviewBar } from "../../lib/channel-preview-bar";
+  import { renderChannelMembershipRetryBar, renderChannelPreviewBar } from "../../lib/channel-preview-bar";
   import {
+    GROUP_LEAVE_CONFIRM_BODY,
     canLeaveConversation,
     conversationTitle,
     sortDirectConversations,
@@ -1907,13 +1929,20 @@ import "../../styles/kylon-image-viewer.css";
     let channelUnreadRows: ChannelUnread[] | null = null;
     let channelUnreadGeneration = 0;
     /** Step 2b conversations read for this workspace (`POST /functions/v1/read`, resource="conversations").
-        Remains `null` until Step 2b answers so pre-Step-2b servers keep the legacy rail and directory. */
+        Distinguishes `"unsupported"` (pre-Step-2b server) from `"failed"` (transient read failure, which
+        shows Retry and never exposes the composer on a channel whose membership could not be verified). */
     let workspaceConversations: ConversationSummary[] | null = null;
+    let conversationsReadState: "idle" | "pending" | "ready" | "unsupported" | "failed" = "idle";
+    let conversationsReadError = "";
     let conversationsGeneration = 0;
     let conversationsReadAt = 0;
     let activeDmConversationId: string | null = null;
     let mountedPreviewKey = "";
     const channelJoinPending = new Set<string>();
+    let groupLeaveTarget: { conversationId: string; title: string; workspaceId: string } | null = null;
+    let groupLeavePending = false;
+    let groupLeaveSucceeded = false;
+    let groupLeaveReturn: { selector: string | null; element: HTMLElement | null; drawer: boolean } | null = null;
     /** Read positions (mark_channel_read). A server from before them answers 400: nothing more is sent this page. */
     let channelReadUnsupported = false;
     /** Marks on view by workspace, view and newest message: in flight or accepted, so neither is sent twice. A mark that
@@ -13432,11 +13461,19 @@ import "../../styles/kylon-image-viewer.css";
 
     const resetConversationsState = (): void => {
       workspaceConversations = null;
+      conversationsReadState = "idle";
+      conversationsReadError = "";
       conversationsGeneration += 1;
       conversationsReadAt = 0;
       activeDmConversationId = null;
       mountedPreviewKey = "";
       channelJoinPending.clear();
+      groupLeaveTarget = null;
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      groupLeaveReturn = null;
+      const leaveDialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (leaveDialog?.open) leaveDialog.close();
       one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
     };
     /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
@@ -13544,25 +13581,98 @@ import "../../styles/kylon-image-viewer.css";
         items.push(null, {
           label: "Leave group",
           danger: true,
-          run: () => {
-            if (!session) return;
-            void leaveConversation(session, uuid(), workspaceId, conversationId).then(res => {
-              if (!res.ok || workspaceId !== activeWorkspaceId) return;
-              if (workspaceConversations) {
-                workspaceConversations = workspaceConversations.filter(c => c.conversationId !== conversationId);
-              }
-              if (activeDmConversationId === conversationId) {
-                activeDmConversationId = null;
-                selectChannel(GENERAL_CHANNEL_ID);
-              } else {
-                renderHomeRail();
-              }
-              void refreshConversations(workspaceId, true);
-            }).catch(() => {});
-          },
+          run: () => { openGroupLeaveDialog(conversationId, title, button); },
         });
       }
       openContextMenu(event, button, items, `${title} options`);
+    };
+
+    const syncGroupLeaveDialogControls = (): void => {
+      const confirmBtn = one<HTMLButtonElement>("[data-group-leave-confirm]");
+      const cancelBtn = one<HTMLButtonElement>("[data-group-leave-cancel]");
+      const closeBtn = one<HTMLButtonElement>("[data-group-leave-close]");
+      for (const btn of [confirmBtn, cancelBtn, closeBtn]) {
+        if (!btn) continue;
+        btn.disabled = groupLeavePending;
+        if (groupLeavePending) btn.setAttribute("aria-busy", "true");
+        else btn.removeAttribute("aria-busy");
+      }
+      if (confirmBtn) confirmBtn.textContent = groupLeavePending ? "Leaving…" : "Leave";
+    };
+    const openGroupLeaveDialog = (conversationId: string, title: string, opener: HTMLElement | null = null): void => {
+      const dialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (!dialog || dialog.open || sampleMode || !session || !activeWorkspaceId) return;
+      groupLeaveReturn = channelFocusReturn(opener);
+      if (groupLeaveReturn.drawer) layout.closeNavigation(false);
+      groupLeaveTarget = { conversationId, title, workspaceId: activeWorkspaceId };
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      const heading = one<HTMLElement>("[data-group-leave-title]");
+      if (heading) heading.textContent = `Leave ${title}?`;
+      const body = one<HTMLElement>("[data-group-leave-body]");
+      if (body) body.textContent = GROUP_LEAVE_CONFIRM_BODY;
+      const error = one<HTMLElement>("[data-group-leave-error]");
+      if (error) { error.textContent = ""; error.hidden = true; }
+      syncGroupLeaveDialogControls();
+      dialog.showModal();
+      // Open on Cancel so a stray Enter never leaves the group.
+      one<HTMLButtonElement>("[data-group-leave-cancel]")?.focus({ preventScroll: true });
+    };
+    const closeGroupLeaveDialog = (): void => {
+      if (groupLeavePending) return;
+      const dialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
+      if (dialog?.open) dialog.close();
+    };
+    const groupLeaveDialogClosed = (): void => {
+      if (one<HTMLDialogElement>("[data-group-leave-dialog]")?.open) return;
+      const back = groupLeaveReturn;
+      const succeeded = groupLeaveSucceeded;
+      groupLeaveReturn = null;
+      groupLeaveTarget = null;
+      groupLeavePending = false;
+      groupLeaveSucceeded = false;
+      if (succeeded) {
+        focusConversationHeading();
+      } else if (back && !restoreChannelFocus(back)) {
+        focusConversationHeading();
+      }
+    };
+    const submitGroupLeave = async (): Promise<void> => {
+      const target = groupLeaveTarget;
+      if (!target || !session || sampleMode || groupLeavePending || target.workspaceId !== activeWorkspaceId) return;
+      groupLeavePending = true;
+      const errorEl = one<HTMLElement>("[data-group-leave-error]");
+      if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
+      syncGroupLeaveDialogControls();
+      let problem = "";
+      try {
+        const res = await leaveConversation(session, uuid(), target.workspaceId, target.conversationId);
+        if (!res.ok) problem = res.message;
+      } catch (error) {
+        problem = readableError(error);
+      }
+      groupLeavePending = false;
+      if (target.workspaceId !== activeWorkspaceId) return;
+      if (problem) {
+        syncGroupLeaveDialogControls();
+        if (errorEl) { errorEl.textContent = problem; errorEl.hidden = false; }
+        one<HTMLButtonElement>("[data-group-leave-cancel]")?.focus({ preventScroll: true });
+        return;
+      }
+      if (workspaceConversations) {
+        workspaceConversations = workspaceConversations.filter(c => c.conversationId !== target.conversationId);
+      }
+      if (activeDmConversationId === target.conversationId) {
+        activeDmConversationId = null;
+        signals = [];
+        selectChannel(GENERAL_CHANNEL_ID);
+      } else {
+        renderHomeRail();
+      }
+      groupLeaveSucceeded = true;
+      syncGroupLeaveDialogControls();
+      one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
+      void refreshConversations(target.workspaceId, true);
     };
 
     /** The Channels section of the rail for the workspace being read, or undefined where none is. */
@@ -13906,14 +14016,33 @@ import "../../styles/kylon-image-viewer.css";
       const inChannelFeed = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
         unknownChannelId === null && !(typeof activeDm !== "undefined" && activeDm) && activeDmConversationId === null;
       const archived = inChannelFeed && activeChannelArchived();
-      const unjoined = !archived && inChannelFeed ? activeUnjoinedPublicChannel() : null;
+      const needsMembershipCheck = !archived && inChannelFeed && !sampleMode && !!session &&
+        activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID;
+      const membershipFailed = needsMembershipCheck && workspaceConversations === null && conversationsReadState === "failed";
+      const membershipPending = needsMembershipCheck && workspaceConversations === null &&
+        (conversationsReadState === "idle" || conversationsReadState === "pending");
+      const unjoined = !archived && !membershipFailed && !membershipPending && inChannelFeed ? activeUnjoinedPublicChannel() : null;
       block.hidden = !archived;
       const unarchive = one<HTMLButtonElement>("[data-channel-unarchive]");
       if (unarchive) unarchive.hidden = !archived || !activeChannel() || !viewerMayManageChannel(activeChannel()!);
       if (previewHost) {
-        if (unjoined) {
+        if (membershipFailed) {
           previewHost.hidden = false;
-          const key = `${activeWorkspaceId}:${unjoined.conversationId}:${unjoined.slug ?? ""}`;
+          const key = `retry:${activeWorkspaceId}:${activeChannelId ?? ""}:${conversationsReadError}`;
+          if (mountedPreviewKey !== key) {
+            mountedPreviewKey = key;
+            const workspaceId = activeWorkspaceId;
+            renderChannelMembershipRetryBar(previewHost, {
+              message: conversationsReadError || "Couldn't check channel membership.",
+              onRetry: async () => {
+                if (workspaceId !== activeWorkspaceId) return;
+                await refreshConversations(workspaceId, true);
+              },
+            });
+          }
+        } else if (unjoined) {
+          previewHost.hidden = false;
+          const key = `join:${activeWorkspaceId}:${unjoined.conversationId}:${unjoined.slug ?? ""}`;
           if (mountedPreviewKey !== key) {
             mountedPreviewKey = key;
             const workspaceId = activeWorkspaceId;
@@ -13951,7 +14080,7 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       const composer = one<HTMLFormElement>("[data-composer]");
-      const blocked = archived || unjoined !== null;
+      const blocked = archived || membershipFailed || membershipPending || unjoined !== null;
       if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") {
         composer.hidden = blocked || unknownChannelId !== null;
       }
@@ -14536,8 +14665,8 @@ import "../../styles/kylon-image-viewer.css";
 
     /**
      * Step 2b conversations read (`POST /functions/v1/read`, resource="conversations").
-     * Gated cleanly on backend support: when an older server refuses or omits `conversations`,
-     * `workspaceConversations` stays `null` and the legacy rail, directory, and composer remain active.
+     * Distinguishes a pre-Step-2b server (`ConversationsUnsupportedError` -> `"unsupported"`, legacy fallback)
+     * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
      */
     const refreshConversations = async (workspaceId: string, force: boolean): Promise<void> => {
       if (sampleMode || !session || !workspaceId) return;
@@ -14545,14 +14674,32 @@ import "../../styles/kylon-image-viewer.css";
       if (!force && now - conversationsReadAt < 15_000) return;
       conversationsReadAt = now;
       const generation = ++conversationsGeneration;
+      if (workspaceConversations === null && conversationsReadState === "idle") {
+        conversationsReadState = "pending";
+        renderChannelBlocked();
+      }
       let rows: ConversationSummary[];
       try {
         rows = await listConversations(workspaceId, true);
-      } catch {
+      } catch (error) {
+        if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
+        if (error instanceof ConversationsUnsupportedError) {
+          conversationsReadState = "unsupported";
+          conversationsReadError = "";
+          renderChannelBlocked();
+          return;
+        }
+        if (workspaceConversations === null) {
+          conversationsReadState = "failed";
+          conversationsReadError = readableError(error) || "Couldn't check channel membership.";
+          renderChannelBlocked();
+        }
         return;
       }
       if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
       workspaceConversations = rows;
+      conversationsReadState = "ready";
+      conversationsReadError = "";
       renderHomeRail();
       renderChannelBlocked();
       renderChannelDirectoryDialog();
@@ -17255,6 +17402,11 @@ import "../../styles/kylon-image-viewer.css";
     one<HTMLButtonElement>("[data-channel-directory-close]")?.addEventListener("click", () => closeChannelDirectory());
     one<HTMLInputElement>("[data-channel-directory-search]")?.addEventListener("input", renderChannelDirectoryDialog);
     one<HTMLButtonElement>("[data-channel-directory-new]")?.addEventListener("click", event => openChannelDialog("create", null, event.currentTarget as HTMLElement));
+    one<HTMLDialogElement>("[data-group-leave-dialog]")?.addEventListener("cancel", event => { if (groupLeavePending) event.preventDefault(); });
+    one<HTMLDialogElement>("[data-group-leave-dialog]")?.addEventListener("close", groupLeaveDialogClosed);
+    one<HTMLButtonElement>("[data-group-leave-cancel]")?.addEventListener("click", closeGroupLeaveDialog);
+    one<HTMLButtonElement>("[data-group-leave-close]")?.addEventListener("click", closeGroupLeaveDialog);
+    one<HTMLFormElement>("[data-group-leave-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitGroupLeave(); });
     for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
       button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
     }

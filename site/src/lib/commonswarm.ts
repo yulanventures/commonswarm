@@ -4410,6 +4410,14 @@ async function postConversationRead(
   }
 }
 
+/** Raised when the backend does not expose Step 2b `resource: "conversations"` yet. */
+export class ConversationsUnsupportedError extends Error {
+  constructor(message = "Conversations read is not available on this server.") {
+    super(message);
+    this.name = "ConversationsUnsupportedError";
+  }
+}
+
 /** Step 2b `resource: "conversations"`: sidebar and directory list for the viewer. */
 export async function listConversations(
   workspaceId: string,
@@ -4419,7 +4427,12 @@ export async function listConversations(
     buildListConversationsRequest(workspaceId, includeArchived),
     "conversations",
   );
-  if (status !== 200 || !Array.isArray(body.conversations)) {
+  if (status === 400 || status === 404 || (status === 200 && !Array.isArray(body.conversations))) {
+    throw new ConversationsUnsupportedError(
+      typeof body.message === "string" ? body.message : `Conversations read unavailable (HTTP ${status}).`,
+    );
+  }
+  if (status !== 200) {
     throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load conversations (HTTP ${status}).`);
   }
   return parseConversationsListResponse(body);
