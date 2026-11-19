@@ -268,10 +268,10 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card__todo-done {
   background: var(--k-shell-ink);
   color: var(--k-shell-surface);
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card__todo-done:hover:not(:disabled) {
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card__todo-done:hover:not(:disabled):not([aria-disabled="true"]) {
   opacity: .88;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card__todo-done:disabled {
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card__todo-done:is(:disabled, [aria-disabled="true"]) {
   opacity: .55;
   cursor: wait;
 }

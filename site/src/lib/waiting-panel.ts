@@ -53,6 +53,7 @@ export interface WaitingAskItem {
 }
 
 export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "agent_removed";
+export type WaitingTodoPlacement = "channel" | "general" | "workspace";
 
 export interface WaitingTodoItem {
   id: string;
@@ -64,6 +65,9 @@ export interface WaitingTodoItem {
   reason: WaitingTodoReason;
   href: string;
   canMarkDone: boolean;
+  placement?: WaitingTodoPlacement;
+  channelId?: string | null;
+  channelLabel?: string;
   pending?: true;
   error?: string;
   retryable?: true;
@@ -139,8 +143,9 @@ export function filterWaitingItems(
   });
 }
 
-/** Filters waiting/assigned to-dos by scope. To-dos are workspace-level, so they appear in All channels,
- *  All workspaces, and the workspace-wide All messages view, never inside a specific channel or DM. */
+/** Filters waiting/assigned to-dos by scope. Channel-origin and #general-origin to-dos appear in
+ *  their authoritative channel's This channel queue; genuinely workspace-only to-dos stay in All
+ *  channels, All workspaces, and All messages so they never clutter an unrelated channel or DM. */
 export function filterWaitingTodos(
   todos: readonly WaitingTodoItem[],
   scope: WaitingScope,
@@ -149,7 +154,17 @@ export function filterWaitingTodos(
   if (scope === "all") return [...todos];
   if (scope === "workspace") return todos.filter(todo => todo.workspaceId === place.workspaceId);
   if (place.kind === "all") return todos.filter(todo => todo.workspaceId === place.workspaceId);
-  return [];
+  return todos.filter(todo => {
+    if (todo.workspaceId !== place.workspaceId) return false;
+    const placement = todo.placement ?? "workspace";
+    if (place.kind === "channel") {
+      return placement === "channel" && todo.channelId === place.channelId;
+    }
+    if (place.kind === "general") {
+      return placement === "general";
+    }
+    return false;
+  });
 }
 
 function todoReasonLabel(reason: WaitingTodoReason): string {
@@ -172,11 +187,20 @@ function formatTodoDue(dueOn: string | null): string | null {
   return month && day ? `Due ${month} ${day}` : `Due ${dueOn}`;
 }
 
+function todoCardLocationText(item: WaitingTodoItem, scope: WaitingScope): string | null {
+  if (scope === "channel") return null;
+  if (scope === "workspace") return item.channelLabel || null;
+  return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
+}
+
 function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
     item.workspaceName,
+    item.placement ?? "workspace",
+    item.channelId ?? "",
+    item.channelLabel ?? "",
     item.title,
     item.state,
     item.dueOn ?? "",
@@ -206,7 +230,8 @@ function buildTodoCard(
   meta.append(kind);
   const due = formatTodoDue(item.dueOn);
   if (due) meta.append(node(doc, "span", "cs-waiting-card__todo-due", due));
-  if (scope === "all") meta.append(node(doc, "span", "cs-waiting-card__place", item.workspaceName));
+  const location = todoCardLocationText(item, scope);
+  if (location) meta.append(node(doc, "span", "cs-waiting-card__place", location));
 
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
   card.append(meta, title);
@@ -229,8 +254,11 @@ function buildTodoCard(
       const done = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Mark done");
       done.type = "button";
       done.dataset.waitingTodoDone = item.id;
-      done.disabled = Boolean(item.pending);
-      done.addEventListener("click", () => handlers.onMarkTodoDone?.(item));
+      if (item.pending) done.setAttribute("aria-disabled", "true");
+      done.addEventListener("click", () => {
+        if (item.pending) return;
+        handlers.onMarkTodoDone?.(item);
+      });
       actions.append(done);
     }
   }
@@ -871,4 +899,57 @@ export function createWaitingSurface(
       expanded = false;
     },
   };
+}
+
+export interface WaitingFocusHint {
+  kind: "retry-todo" | "completed-todo" | "completed-ask";
+  todoId?: string;
+  prevIndex?: number;
+}
+
+/** Moves keyboard focus to a stable control inside the Waiting on you panel after an in-card
+ *  action fails or removes a card, so focus never falls back to document.body (preserving Escape). */
+export function focusWaitingPanelAfterAction(
+  container: HTMLElement,
+  hint: WaitingFocusHint,
+): HTMLElement | null {
+  const focusEl = (el: HTMLElement | null | undefined): HTMLElement | null => {
+    if (!el) return null;
+    el.focus({ preventScroll: true });
+    return el;
+  };
+  if (hint.kind === "retry-todo" && hint.todoId) {
+    const cards = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-todo]"));
+    const card = cards.find(el => el.dataset.waitingTodo === hint.todoId);
+    if (card) {
+      const target =
+        card.querySelector<HTMLElement>("[data-waiting-todo-retry]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-todo-done]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-todo-open]");
+      if (target) return focusEl(target);
+    }
+  }
+  const body = container.querySelector<HTMLElement>("[data-waiting-body]");
+  const remainingCards = body
+    ? Array.from(body.querySelectorAll<HTMLElement>("article")).filter(
+        el => el.dataset.waitingCard !== undefined || el.dataset.waitingTodo !== undefined,
+      )
+    : [];
+  if (remainingCards.length > 0) {
+    const idx = Math.min(Math.max(0, hint.prevIndex ?? 0), remainingCards.length - 1);
+    const nextCard = remainingCards[idx]!;
+    const control =
+      nextCard.querySelector<HTMLElement>("[data-waiting-todo-done]")
+      ?? nextCard.querySelector<HTMLElement>("[data-waiting-todo-retry]")
+      ?? nextCard.querySelector<HTMLElement>("[data-waiting-todo-open]")
+      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("button")).find(btn => !(btn as HTMLButtonElement).disabled)
+      ?? nextCard.querySelector<HTMLElement>("a")
+      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("input")).find(inp => !(inp as HTMLInputElement).disabled);
+    if (control) return focusEl(control);
+  }
+  const emptyAll = container.querySelector<HTMLElement>("[data-waiting-empty-all]");
+  if (emptyAll) return focusEl(emptyAll);
+  const scope = container.querySelector<HTMLSelectElement>("[data-waiting-scope]");
+  if (scope && !scope.disabled) return focusEl(scope);
+  return focusEl(container.querySelector<HTMLElement>("[data-waiting-close]"));
 }

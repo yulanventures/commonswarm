@@ -104,6 +104,18 @@ export interface DecisionAsk {
 }
 /** The viewer's open asks in one workspace, oldest first, at most 100 (`truncated` when more). */
 export interface DecisionQueue { workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; asks: DecisionAsk[] }
+/** Where a waiting/assigned to-do originated: a specific channel, #general, or workspace-only. */
+export type WaitingTodoPlacement = 'channel' | 'general' | 'workspace';
+export interface WaitingTodoEntry {
+  todo_id: Uuid; title: string; state: 'open' | 'doing'; due_on: LocalDate | null;
+  reason: 'assigned' | 'request' | 'after' | 'hold' | 'agent_removed';
+  agent_id: Uuid | null; state_at: IsoTime;
+  placement: WaitingTodoPlacement; channel_id: Uuid | null;
+}
+/** The viewer's open/doing assigned and waiting to-dos in one workspace (`truncated` when more pages remain). */
+export interface WaitingTodosQueue {
+  workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; todos: WaitingTodoEntry[];
+}
 
 export type ActivityEvent = 'created' | 'updated' | 'assigned' | 'requested' | 'accepted' | 'declined'
   | 'started' | 'done' | 'dropped' | 'reopened' | 'commented';
@@ -119,6 +131,7 @@ export type SteerAction = { kind: 'move'; after_todo_id: Uuid | null } | { kind:
 export interface HomeServer {
   overview(): Promise<HomeOverview>;                                   // rpc swarm_read.home_overview
   decisionQueue(workspaceId: Uuid): Promise<DecisionQueue | null>;    // rpc swarm_read.decision_queue; null for a non-member
+  waitingTodos(workspaceId: Uuid): Promise<WaitingTodosQueue | null>; // rpc swarm_read.waiting_todos_page; null if missing/non-member
   activity(workspaceId: Uuid, since: IsoTime, limit: number): Promise<ActivityItem[]>; // newest first
   listTodos(workspaceId: Uuid, q: { scope: 'open' | 'all'; assignee?: Party; offset: number; limit: number /* <= 50 */ }):
     Promise<{ todos: TodoSummary[]; next_offset: number | null }>;
