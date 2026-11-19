@@ -1453,6 +1453,7 @@ test("turn-off-key pins the opened key, reuses one command id per question, canc
       reloads.push({ wsId, id, receipt, action });
     },
     peopleDialogFocusTarget: () => opener,
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1580,6 +1581,7 @@ test("remove-person confirmation names the workspace, reuses one command ID, and
       reloads.push({ wsId, id, receipt, action });
     },
     peopleDialogFocusTarget: () => opener,
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1697,6 +1699,7 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
     reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => { reloads.push({ wsId, id, receipt, action }); },
     peopleDialogFocusTarget: () => null,
     uncertainAgentRemovals: new Set<string>(),
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1858,7 +1861,7 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
       keyRevokes.push({ commandId, wsId, tok });
     },
     roster: async () => ctx.serverRoster,
-    memberRoster: async () => ctx.serverMembers,
+    memberRoster: async () => ({ names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers }),
     serverRoster: makeLiveAgents(),
     serverMembers: [{ userId: viewerId, name: "Ana Rivera", role: "owner" }],
     reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
@@ -1983,11 +1986,11 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     };
     ctx.memberRoster = async () => {
       if (rosterMode === "fail") throw new Error("network down");
-      if (rosterMode === "unauthorized") return [];
-      return ctx.serverMembers;
+      if (rosterMode === "unauthorized") return { names: new Map(), members: [] };
+      return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
     };
-    ctx.revokeAgentPrincipal = async (_s: any, commandId: string, wsId: string, id: string) => {
-      removals.push({ commandId, wsId, id });
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
       if (committedCount === 0) {
         // Server commits the secondary-workspace membership removal ONCE, then reply is lost.
         committedCount += 1;
@@ -2016,6 +2019,7 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     assert.equal(dialog.open, true, `${label}: unauthorized empty read cannot settle removal`);
     assert.equal(removals.length, 2, `${label}: retried once with original command ID`);
     assert.equal(removals[0].commandId, removals[1].commandId, `${label}: kept original command ID across uncertain retry`);
+    assert.equal(removals[1].callerSession.user.id, viewerId, `${label}: retry passes pinned session`);
     assert.equal(committedCount, 1, `${label}: removal still happened only once`);
     alertText = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
     assert.match(alertText, /unknown/i, `${label}: preserves uncertain outcome after post-commit 409/403`);
@@ -2030,4 +2034,88 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     assert.equal(reloads.length, 1, `${label}: reloaded dialog with removal receipt`);
     assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
   }
+
+  // 7. Retry after uncertain removal aborts with 0 sends when account, workspace, live question, row, or authority changes during settledRemoval().
+  for (const kind of ["account-switch", "workspace-switch", "authority-lost", "row-removed", "dialog-replaced"] as const) {
+    ctx.session = { user: { id: viewerId } };
+    ctx.activeWorkspaceId = workspaceId;
+    ctx.agents = makeLiveAgents();
+    ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+    ctx.serverRoster = makeLiveAgents();
+    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+    let mayManageNow = true;
+    ctx.peopleDialogModel = () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: mayManageNow,
+      })),
+    });
+    removals.length = 0; reloads.length = 0;
+    let firstCall = true;
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
+      if (firstCall) { firstCall = false; throw new Error("lost"); }
+    };
+    ctx.roster = async () => { throw new Error("offline"); };
+    ctx.memberRoster = async () => { throw new Error("offline"); };
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", hostedId, opener);
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+    // Attempt 1 leaves questionId in uncertainAgentRemovals.
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, 1, `${kind}: initial uncertain send recorded`);
+    removals.length = 0;
+
+    // Attempt 2: mutate context mid-await inside settledRemoval(), then resolve with agent still present.
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    ctx.roster = async () => { await readGate; return ctx.serverRoster; };
+    ctx.memberRoster = async () => {
+      await readGate;
+      return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
+    };
+    const retryPromise = btn.events.get("click")?.();
+    if (kind === "account-switch") ctx.session = { user: { id: otherOwnerId } };
+    else if (kind === "workspace-switch") ctx.activeWorkspaceId = "99999999-9999-4999-8999-999999999999";
+    else if (kind === "authority-lost") mayManageNow = false;
+    else if (kind === "row-removed") ctx.agents = ctx.agents.filter((a: any) => a.principalId !== hostedId);
+    else if (kind === "dialog-replaced") actions.confirmPeopleDialogAction("turn-off-key", localId, opener);
+    releaseRead();
+    await retryPromise;
+    assert.equal(removals.length, 0, `${kind}: must send 0 removal commands after context changed during settledRemoval()`);
+  }
+
+  // 8. Late readAgentRemovalScope response cannot overwrite a later turn-off-key or hosted remove-agent dialog.
+  ctx.session = { user: { id: viewerId } };
+  ctx.activeWorkspaceId = workspaceId;
+  ctx.agents = makeLiveAgents();
+  ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+  ctx.peopleDialogModel = () => ({
+    sample: false, workspaceName, people: [], invites: [],
+    agents: ctx.agents.map((a: any) => ({
+      id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+      liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+      own: a.ownerUserId === viewerId, mayManage: true,
+    })),
+  });
+  let resolveLateScope!: (scope: "workspace" | "permanent" | null) => void;
+  ctx.readAgentRemovalScope = () => new Promise((resolve) => { resolveLateScope = resolve; });
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  assert.equal(dialog.dataset.confirmReady, "false");
+  // Before the scope read settles, open Turn off key (and later hosted remove-agent): both must stay intact when the stale scope resolves.
+  actions.confirmPeopleDialogAction("turn-off-key", localId, localOpener);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Turn off Sprout’s key?");
+  resolveLateScope("permanent");
+  await flush();
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Turn off Sprout’s key?", "stale local scope read must not overwrite Turn off key dialog");
+  let resolveLateScope2!: (scope: "workspace" | "permanent" | null) => void;
+  ctx.readAgentRemovalScope = () => new Promise((resolve) => { resolveLateScope2 = resolve; });
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Muse from ${workspaceName}?`);
+  resolveLateScope2("permanent");
+  await flush();
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Muse from ${workspaceName}?`, "stale local scope read must not overwrite hosted remove-agent dialog");
 });

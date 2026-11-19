@@ -8117,12 +8117,22 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (action === "remove-agent") {
         if (!agent) throw new Error("This agent is no longer in this workspace. Go back and check the list.");
+        const pinnedSession = session;
+        const questionGeneration = confirmScopeGeneration;
         const commandId = questionId ?? uuid();
+        const stillLiveRemoveQuestion = (): boolean => {
+          if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return false;
+          if (questionGeneration !== confirmScopeGeneration) return false;
+          const confirm = one<HTMLDialogElement>("[data-people-confirm]");
+          if (confirm && !confirm.open) return false;
+          if (!agents.some((entry) => entry.principalId === agent.principalId)) return false;
+          return peopleDialogCanAct(peopleDialogModel(), "remove-agent", id);
+        };
         const settledRemoval = async (): Promise<boolean> => {
           try {
             const [nextAgents, nextMembers] = await Promise.all([roster(workspaceId), memberRoster(workspaceId)]);
             if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return false;
-            return nextMembers.some((entry) => entry.userId === userId)
+            return nextMembers.members.some((entry) => entry.userId === userId)
               && !nextAgents.some((entry) => entry.principalId === agent.principalId);
           } catch { return false; }
         };
@@ -8132,10 +8142,17 @@ import "../../styles/kylon-image-viewer.css";
           return record.uncertain === true || typeof record.status !== "number" || record.status === 0 || record.status >= 500;
         };
         let confirmed = false;
-        if (questionId && uncertainAgentRemovals.has(questionId)) confirmed = await settledRemoval();
+        if (questionId && uncertainAgentRemovals.has(questionId)) {
+          confirmed = await settledRemoval();
+          if (!confirmed && !stillLiveRemoveQuestion()) {
+            throw new Error(workspaceId !== activeWorkspaceId || userId !== session?.user.id
+              ? "This space has changed. Go back and check the details."
+              : "This action is no longer available. Go back and check the details.");
+          }
+        }
         if (!confirmed) {
           try {
-            await revokeAgentPrincipal(session, commandId, workspaceId, agent.principalId);
+            await revokeAgentPrincipal(pinnedSession, commandId, workspaceId, agent.principalId);
             confirmed = true;
           } catch (error) {
             const wasUncertain = Boolean(questionId && uncertainAgentRemovals.has(questionId));
@@ -8192,6 +8209,7 @@ import "../../styles/kylon-image-viewer.css";
       await reloadPeopleDialog(workspaceId, id, receipt, action);
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
+      ++confirmScopeGeneration;
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
       const found = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
       const item = found && action === "cancel-invite" ? { ...found, detail: peopleInviteDisplayDetail(found as PeopleInvite, model.invites) } : found;

@@ -1,4 +1,4 @@
--- Read-only catalog verification for 20261119000001 (agent removal scope read).
+-- Read-only catalog verification for 20261119000002 (agent removal scope read).
 SELECT
   EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid = to_regprocedure('swarm_read.agent_removal_scope(uuid,uuid)') AND p.prosecdef AND p.provolatile = 's')
   AND has_function_privilege('authenticated', 'swarm_read.agent_removal_scope(uuid,uuid)', 'EXECUTE')

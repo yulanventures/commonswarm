@@ -1,4 +1,4 @@
--- 20261119000001: identify whether removing an agent from a workspace is workspace-only or permanent retirement.
+-- 20261119000002: identify whether removing an agent from a workspace is workspace-only or permanent retirement.
 --
 -- People & agents, Remove an agent (inventory item 47): revoke_agent_principal routes hosted_mcp agents and
 -- non-origin local workspaces through changeAgentWorkspace (workspace-only removal), while a local agent in its
@@ -69,5 +69,5 @@ ALTER FUNCTION swarm_read.agent_removal_scope(uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.agent_removal_scope(uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.agent_removal_scope(uuid, uuid) TO authenticated;
 
--- Rollback (verbatim in deploy/release-proofs/agent-removal-scope/20261119000001-rollback.sql):
+-- Rollback (verbatim in deploy/release-proofs/agent-removal-scope/20261119000002-rollback.sql):
 -- DROP FUNCTION IF EXISTS swarm_read.agent_removal_scope(uuid, uuid);

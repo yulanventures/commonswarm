@@ -1,5 +1,5 @@
 /**
- * Agent removal scope read (20261119000001): identifies whether removing an agent from a workspace
+ * Agent removal scope read (20261119000002): identifies whether removing an agent from a workspace
  * is workspace-only ('workspace') or permanent retirement ('permanent'), matching revoke_agent_principal.
  */
 import assert from "node:assert/strict";
