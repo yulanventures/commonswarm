@@ -672,3 +672,267 @@ test("4. DM & group-DM thread replies unblock, security fences, SQL privilege de
     assert.equal((err as Error).message, "ROLLBACK_DRILL_OK");
   });
 });
+
+test("5. HezSec C1-C3 witnesses: NULL-total DM thread gates, DM human-to-agent thread mentions, and live workspace seat requirement", { timeout: 90_000 }, async () => {
+  // === C1: NULL-total audience check on BOTH DM thread gates ===
+  // Group DM with two humans (ann, ben) and one agent (annBotA).
+  const grpC1 = String(((ok(await send(ann.jwt, {
+    kind: "conversation_open", members: [uRef(ben), aRef(annBotA)], new_group: true,
+  }), "open C1 group")).conversation as Row).conversation_id);
+  const c1OpenRoot = await posted(ann.jwt, { conversation_id: grpC1, body: "C1 open group root" });
+
+  // Plant (a) narrower legacy addressed root ann -> annBotA (to_user_id IS NULL, excluding human ben),
+  // (b) narrower legacy addressed reply under c1OpenRoot ann -> annBotA (also excluding human ben),
+  // and (c) full-member legacy addressed root ann -> [ben, annBotA] (allowed control).
+  const narrowHumanExcludedRoot = randomUUID();
+  const narrowHumanExcludedReply = randomUUID();
+  const fullAddressedRoot = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_kind, from_principal, to_user_id, to_agent_principal_id, kind, body, until, created_at)
+      VALUES
+        (${narrowHumanExcludedRoot}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, NULL, ${annBotA.id}::uuid,
+         'note', 'legacy narrow root excluding human ben', statement_timestamp() + interval '1 day', statement_timestamp()),
+        (${narrowHumanExcludedReply}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, NULL, ${annBotA.id}::uuid,
+         'note', 'legacy narrow reply excluding human ben', statement_timestamp() + interval '1 day', statement_timestamp()),
+        (${fullAddressedRoot}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, NULL, NULL,
+         'note', 'legacy addressed root visible to every live member', statement_timestamp() + interval '1 day', statement_timestamp())
+    `;
+    await tx`
+      UPDATE swarm.signals
+      SET thread_root_id = ${String(c1OpenRoot.id)}::uuid
+      WHERE id = ${narrowHumanExcludedReply}::uuid AND workspace_id = ${workspace}::uuid
+    `;
+    await tx`
+      INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, recipient_agent_principal_id, position)
+      VALUES
+        (${fullAddressedRoot}::uuid, ${workspace}::uuid, ${ben.id}::uuid, NULL, 0),
+        (${fullAddressedRoot}::uuid, ${workspace}::uuid, NULL, ${annBotA.id}::uuid, 1)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
+      VALUES
+        (${narrowHumanExcludedRoot}::uuid, ${workspace}::uuid, ${grpC1}::uuid, statement_timestamp(), 'addressed'),
+        (${narrowHumanExcludedReply}::uuid, ${workspace}::uuid, ${grpC1}::uuid, statement_timestamp(), 'addressed'),
+        (${fullAddressedRoot}::uuid, ${workspace}::uuid, ${grpC1}::uuid, statement_timestamp(), 'addressed')
+    `;
+  });
+
+  // Verify conversation_signal_visible_to is strictly total (returns FALSE, never NULL) for excluded human ben.
+  const [{ vis }] = await sql<{ vis: boolean | null }[]>`
+    SELECT swarm.conversation_signal_visible_to(
+      ${workspace}::uuid, ${narrowHumanExcludedRoot}::uuid, 'addressed',
+      'user', ${ann.id}::uuid, NULL::uuid, ${annBotA.id}::uuid, 'user', ${ben.id}::uuid
+    ) AS vis
+  `;
+  assert.strictEqual(vis, false, "conversation_signal_visible_to must return boolean false (never NULL) when to_user_id is NULL");
+
+  // Served denial on narrowHumanExcludedRoot AND narrowHumanExcludedReply must be indistinguishable from unknown UUID.
+  const unknownReply = await send(ann.jwt, note({
+    conversation_id: grpC1, thread_root_id: randomUUID(), body: "unknown root",
+  }));
+  const narrowRootReply = await send(ann.jwt, note({
+    conversation_id: grpC1, thread_root_id: narrowHumanExcludedRoot, body: "must not leak root",
+  }));
+  const narrowNestedReply = await send(ann.jwt, note({
+    conversation_id: grpC1, thread_root_id: narrowHumanExcludedReply, body: "must not leak reply oracle",
+  }));
+  assert.equal(unknownReply.status, 404);
+  assert.equal(narrowRootReply.status, unknownReply.status);
+  assert.deepEqual(narrowRootReply.body, unknownReply.body, "served narrow-root denial must match unknown root");
+  assert.equal(narrowNestedReply.status, unknownReply.status);
+  assert.deepEqual(narrowNestedReply.body, unknownReply.body, "hidden legacy reply must NOT reveal thread_root_is_a_reply");
+
+  // Direct deferred-validation refusal on DB commit with zero committed reply rows.
+  const directBadReplyId = randomUUID();
+  await assert.rejects(
+    async () => {
+      await sql.begin(async (tx) => {
+        await tx`
+          INSERT INTO swarm.signals (id, workspace_id, from_kind, from_principal, kind, body, thread_root_id, until, created_at)
+          VALUES (${directBadReplyId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, 'note',
+                  'direct deferred check', ${narrowHumanExcludedRoot}::uuid,
+                  statement_timestamp() + interval '1 hour', statement_timestamp())
+        `;
+        await tx`
+          INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, recipient_agent_principal_id, position)
+          VALUES
+            (${directBadReplyId}::uuid, ${workspace}::uuid, ${ben.id}::uuid, NULL, 0),
+            (${directBadReplyId}::uuid, ${workspace}::uuid, NULL, ${annBotA.id}::uuid, 1)
+        `;
+        await tx`
+          INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
+          VALUES (${directBadReplyId}::uuid, ${workspace}::uuid, ${grpC1}::uuid, statement_timestamp(), 'conversation')
+        `;
+      });
+    },
+    (err: unknown) => {
+      const e = err as { code?: string; constraint_name?: string };
+      return e?.code === "23514" && e?.constraint_name === "conversation_signals_route";
+    },
+    "deferred route trigger must reject reply to narrowHumanExcludedRoot",
+  );
+  const [{ committed }] = await sql<{ committed: number }[]>`
+    SELECT count(*)::int AS committed FROM swarm.signals WHERE id = ${directBadReplyId}::uuid
+  `;
+  assert.equal(committed, 0, "rejected deferred reply must leave zero committed rows");
+
+  // Allowed control: reply under fullAddressedRoot (every live member is in audience) succeeds 200.
+  const allowedCtrlReply = await posted(ben.jwt, {
+    conversation_id: grpC1, thread_root_id: fullAddressedRoot, body: "allowed reply on all-member legacy root",
+  });
+  assert.equal(allowedCtrlReply.thread_root_id, fullAddressedRoot);
+
+  // === C2: Keep implicit public thread mentions out of direct conversations (SWARM_CHAT_MENTIONS=1) ===
+  // 1:1 DM between human ann and live agent annBotA: agent posts root, human replies in thread -> 200,
+  // 0 signal_mentions rows, and direct recipient/delivery wakes annBotA.
+  const dmAnnBot = String(((ok(await send(ann.jwt, {
+    kind: "conversation_open", members: [aRef(annBotA)],
+  }), "open DM ann <-> annBotA")).conversation as Row).conversation_id);
+  const agentDmRoot = await posted(annBotA.token, { conversation_id: dmAnnBot, body: "agent DM root" });
+  const humanDmReply = await posted(ann.jwt, {
+    conversation_id: dmAnnBot, thread_root_id: String(agentDmRoot.id), body: "human DM thread reply",
+  });
+  assert.equal(humanDmReply.thread_root_id, agentDmRoot.id);
+  const [{ dmMentionCount }] = await sql<{ dmMentionCount: number }[]>`
+    SELECT count(*)::int AS "dmMentionCount"
+    FROM swarm.signal_mentions
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${String(humanDmReply.id)}::uuid
+  `;
+  assert.equal(dmMentionCount, 0, "direct-conversation thread reply must write zero signal_mentions rows");
+  const [{ dmDelivered }] = await sql<{ dmDelivered: number }[]>`
+    SELECT count(*)::int AS "dmDelivered"
+    FROM swarm.signal_deliveries
+    WHERE workspace_id = ${workspace}::uuid
+      AND signal_id = ${String(humanDmReply.id)}::uuid
+      AND recipient_agent_principal_id = ${annBotA.id}::uuid
+  `;
+  assert.equal(dmDelivered, 1, "human DM thread reply must still wake the agent via direct delivery");
+
+  // Channel-thread control: agent posts root in an open channel, human replies -> implicit source='thread' mention written.
+  const c2Ch = ok(await send(ann.jwt, { kind: "channel_create", slug: "c2-thread-ctrl" }), "create #c2-thread-ctrl");
+  const c2ChId = String((c2Ch.channel as Row).channel_id);
+  const agentChRoot = await posted(annBotA.token, { conversation_id: c2ChId, body: "agent channel root" });
+  const humanChReply = await posted(ann.jwt, {
+    conversation_id: c2ChId, thread_root_id: String(agentChRoot.id), body: "human channel thread reply",
+  });
+  const chMentions = await sql<{ principal_id: string; source: string }[]>`
+    SELECT mentioned_agent_principal_id::text AS principal_id, source
+    FROM swarm.signal_mentions
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${String(humanChReply.id)}::uuid
+  `;
+  assert.ok(
+    chMentions.some((m) => m.principal_id === annBotA.id && m.source === "thread"),
+    "ordinary channel thread reply must still emit implicit source=thread mention for the agent root author",
+  );
+
+  // === C3: Require an actual live workspace seat (agent_workspace_memberships row) on BOTH agent read paths ===
+  // Create an owned unseated registrar principal for ann (no agent_workspace_memberships row, matching
+  // agent_join_credentials_exclude_membership), and plant a DM row so only the seat gate separates it from a seated agent.
+  const unseatedReg = await createAgent(ann, "UnseatedRegistrar", workspace);
+  const unseatedDmId = randomUUID();
+  const unseatedMemberKey = createHash("sha256").update(`a:${unseatedReg.id},u:${ben.id}`).digest("hex");
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM swarm.agent_workspace_memberships WHERE principal_id = ${unseatedReg.id}::uuid`;
+    await tx`
+      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, member_key, created_by_kind, created_by_principal)
+      VALUES (${unseatedDmId}::uuid, ${workspace}::uuid, 'dm', ${unseatedMemberKey}, 'user', ${ben.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_user_id)
+      VALUES (${unseatedDmId}::uuid, ${workspace}::uuid, ${ben.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_agent_principal_id)
+      VALUES (${unseatedDmId}::uuid, ${workspace}::uuid, ${unseatedReg.id}::uuid)
+    `;
+  });
+
+  // Served oversight list & history for unseated registrar MUST match unknown agent subject (404 conversation_not_found).
+  const unknownOversightList = await readResource(ann.jwt, {
+    resource: "conversation_oversight", workspace_id: workspace, agent_principal_id: randomUUID(),
+  });
+  const unseatedOversightList = await readResource(ann.jwt, {
+    resource: "conversation_oversight", workspace_id: workspace, agent_principal_id: unseatedReg.id,
+  });
+  assert.equal(unknownOversightList.status, 404);
+  assert.equal(unseatedOversightList.status, unknownOversightList.status);
+  assert.deepEqual(unseatedOversightList.body, unknownOversightList.body, "unseated registrar oversight list must match unknown subject");
+
+  const unknownOversightHist = await readResource(ann.jwt, {
+    resource: "conversation_oversight_history", workspace_id: workspace,
+    conversation_id: unseatedDmId, agent_principal_id: randomUUID(),
+  });
+  const unseatedOversightHist = await readResource(ann.jwt, {
+    resource: "conversation_oversight_history", workspace_id: workspace,
+    conversation_id: unseatedDmId, agent_principal_id: unseatedReg.id,
+  });
+  assert.equal(unknownOversightHist.status, 404);
+  assert.equal(unseatedOversightHist.status, unknownOversightHist.status);
+  assert.deepEqual(unseatedOversightHist.body, unknownOversightHist.body, "unseated registrar oversight history must match unknown subject");
+
+  // Direct SQL check on swarm_read.conversations & conversation_history with unseated registrar claims -> NULL.
+  const unseatedSql = await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({ sub: ann.id, role: "authenticated", agent_principal_id: unseatedReg.id })},
+        true
+      )
+    `;
+    const [{ listRes }] = await tx<{ listRes: unknown }[]>`SELECT swarm_read.conversations(${workspace}::uuid, false) AS "listRes"`;
+    const [{ histRes }] = await tx<{ histRes: unknown }[]>`SELECT swarm_read.conversation_history(${workspace}::uuid, ${unseatedDmId}::uuid) AS "histRes"`;
+    return { listRes, histRes };
+  });
+  assert.strictEqual(unseatedSql.listRes, null, "unseated registrar must get NULL from swarm_read.conversations");
+  assert.strictEqual(unseatedSql.histRes, null, "unseated registrar must get NULL from swarm_read.conversation_history");
+
+  // Served agent read for unseated registrar is also refused (never 200).
+  const unseatedServedList = await readResource(unseatedReg.token, {
+    resource: "conversations", workspace_id: workspace,
+  });
+  assert.notEqual(unseatedServedList.status, 200, "unseated registrar served read must be refused");
+
+  // Revoked workspace seat is also refused identically to an unknown subject.
+  const revokedSeatBot = await createAgent(ann, "RevokedSeatBot", workspace);
+  const revokedSeatDm = String(((ok(await send(ben.jwt, {
+    kind: "conversation_open", members: [aRef(revokedSeatBot)],
+  }), "open DM with soon-revoked seat")).conversation as Row).conversation_id);
+  await sql`
+    UPDATE swarm.agent_workspace_memberships
+    SET revoked_at = statement_timestamp()
+    WHERE workspace_id = ${workspace}::uuid AND principal_id = ${revokedSeatBot.id}::uuid
+  `;
+  const revokedOversight = await readResource(ann.jwt, {
+    resource: "conversation_oversight", workspace_id: workspace, agent_principal_id: revokedSeatBot.id,
+  });
+  assert.equal(revokedOversight.status, 404);
+  assert.deepEqual(revokedOversight.body, unknownOversightList.body, "revoked seat oversight must match unknown subject");
+  const revokedSql = await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({ sub: ann.id, role: "authenticated", agent_principal_id: revokedSeatBot.id })},
+        true
+      )
+    `;
+    const [{ listRes }] = await tx<{ listRes: unknown }[]>`SELECT swarm_read.conversations(${workspace}::uuid, false) AS "listRes"`;
+    const [{ histRes }] = await tx<{ histRes: unknown }[]>`SELECT swarm_read.conversation_history(${workspace}::uuid, ${revokedSeatDm}::uuid) AS "histRes"`;
+    return { listRes, histRes };
+  });
+  assert.strictEqual(revokedSql.listRes, null, "revoked seat must get NULL from swarm_read.conversations");
+  assert.strictEqual(revokedSql.histRes, null, "revoked seat must get NULL from swarm_read.conversation_history");
+
+  // Seated agent control: annBotA (live unrevoked agent_workspace_memberships row) succeeds on BOTH member & oversight reads.
+  const seatedAgentList = ok(await readResource(annBotA.token, {
+    resource: "conversations", workspace_id: workspace,
+  }), "seated agent conversations list");
+  assert.ok(parseConversationsListResponse(seatedAgentList).some((c) => c.conversationId === dmAnnBot));
+  const seatedOversight = ok(await readResource(ann.jwt, {
+    resource: "conversation_oversight", workspace_id: workspace, agent_principal_id: annBotA.id,
+  }), "seated agent oversight list");
+  assert.ok(parseConversationsListResponse(seatedOversight).some((c) => c.conversationId === dmAnnBot));
+});

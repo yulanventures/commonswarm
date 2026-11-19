@@ -18306,7 +18306,12 @@ async function handleTransaction(
        * REFUSED by the validator (chatSignalShapeProblem), not silently
        * ignored here, so this line only ever chooses between an inherited
        * value and a top-level post's own channel. */
-      if (chatMentionsEnabled && threadResolution.threadRootId !== null && auth.credentialKind === "user") {
+      if (
+        chatMentionsEnabled &&
+        conversationPrefile === null &&
+        threadResolution.threadRootId !== null &&
+        auth.credentialKind === "user"
+      ) {
         /* A person's reply in a thread also reaches the agents already in it:
          * the root's author when that is an agent, and the agents the root
          * mentioned. Ones that are gone are skipped, not refused. */

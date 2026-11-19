@@ -51,14 +51,21 @@ BEGIN
     END IF;
     v_agent := (v_claims->>'agent_principal_id')::uuid;
     IF NOT EXISTS (
-      SELECT 1 FROM swarm.agent_principals AS p
+      SELECT 1
+      FROM swarm.agent_principals AS p
+      JOIN swarm.agent_workspace_memberships AS am
+        ON am.principal_id = p.principal_id
+       AND am.workspace_id = p_workspace_id
+       AND am.owner_user_id = p.owner_user_id
+       AND am.revoked_at IS NULL
       WHERE p.principal_id = v_agent
         AND p.owner_user_id = v_user
         AND p.revoked_at IS NULL
     ) THEN
       RETURN;
     END IF;
-    IF NOT swarm.actor_can_access_channel(p_workspace_id, NULL, 'agent', v_agent) THEN
+    IF NOT swarm.actor_can_access_channel(p_workspace_id, NULL, 'user', v_user)
+      OR NOT swarm.actor_can_access_channel(p_workspace_id, NULL, 'agent', v_agent) THEN
       RETURN;
     END IF;
     actor_kind := 'agent';
@@ -100,7 +107,13 @@ BEGIN
     RETURN;
   END IF;
   IF NOT EXISTS (
-    SELECT 1 FROM swarm.agent_principals AS p
+    SELECT 1
+    FROM swarm.agent_principals AS p
+    JOIN swarm.agent_workspace_memberships AS am
+      ON am.principal_id = p.principal_id
+     AND am.workspace_id = p_workspace_id
+     AND am.owner_user_id = p.owner_user_id
+     AND am.revoked_at IS NULL
     WHERE p.principal_id = p_agent_principal_id
       AND p.owner_user_id = v_user
       AND p.revoked_at IS NULL
@@ -114,7 +127,7 @@ BEGIN
 END;
 $$;
 
--- Per-message audience predicate for ONE exact actor (never falls back to agent owner).
+-- Per-message audience predicate for ONE exact actor (never falls back to agent owner; total boolean, never NULL).
 CREATE FUNCTION swarm.conversation_signal_visible_to(
   p_workspace_id uuid,
   p_signal_id uuid,
@@ -128,34 +141,37 @@ CREATE FUNCTION swarm.conversation_signal_visible_to(
 ) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = pg_catalog AS $$
-  SELECT CASE
-    WHEN p_audience = 'conversation' THEN true
-    WHEN p_audience = 'addressed' THEN
-      (p_from_kind = p_actor_kind AND p_from_principal = p_actor_id)
-      OR (
-        p_actor_kind = 'user' AND (
-          p_to_user_id = p_actor_id
-          OR EXISTS (
-            SELECT 1 FROM swarm.signal_recipients AS sr
-            WHERE sr.workspace_id = p_workspace_id
-              AND sr.signal_id = p_signal_id
-              AND sr.recipient_user_id = p_actor_id
+  SELECT COALESCE(
+    CASE
+      WHEN p_audience = 'conversation' THEN true
+      WHEN p_audience = 'addressed' AND p_actor_kind IS NOT NULL AND p_actor_id IS NOT NULL THEN
+        COALESCE(p_from_kind = p_actor_kind AND p_from_principal = p_actor_id, false)
+        OR (
+          p_actor_kind = 'user' AND (
+            COALESCE(p_to_user_id = p_actor_id, false)
+            OR EXISTS (
+              SELECT 1 FROM swarm.signal_recipients AS sr
+              WHERE sr.workspace_id = p_workspace_id
+                AND sr.signal_id = p_signal_id
+                AND sr.recipient_user_id = p_actor_id
+            )
           )
         )
-      )
-      OR (
-        p_actor_kind = 'agent' AND (
-          p_to_agent_principal_id = p_actor_id
-          OR EXISTS (
-            SELECT 1 FROM swarm.signal_recipients AS sr
-            WHERE sr.workspace_id = p_workspace_id
-              AND sr.signal_id = p_signal_id
-              AND sr.recipient_agent_principal_id = p_actor_id
+        OR (
+          p_actor_kind = 'agent' AND (
+            COALESCE(p_to_agent_principal_id = p_actor_id, false)
+            OR EXISTS (
+              SELECT 1 FROM swarm.signal_recipients AS sr
+              WHERE sr.workspace_id = p_workspace_id
+                AND sr.signal_id = p_signal_id
+                AND sr.recipient_agent_principal_id = p_actor_id
+            )
           )
         )
-      )
-    ELSE false
-  END
+      ELSE false
+    END,
+    false
+  )
 $$;
 
 -- ---------------------------------------------------------------------------------------------------
@@ -1012,12 +1028,12 @@ BEGIN
             WHERE lm.conversation_id = p_conversation
               AND lm.workspace_id = p_workspace
               AND lm.left_at IS NULL
-              AND NOT swarm.conversation_signal_visible_to(
+              AND swarm.conversation_signal_visible_to(
                 rcs.workspace_id, rcs.signal_id, rcs.audience,
                 root.from_kind, root.from_principal, root.to_user_id, root.to_agent_principal_id,
                 CASE WHEN lm.member_user_id IS NOT NULL THEN 'user' ELSE 'agent' END,
                 COALESCE(lm.member_user_id, lm.member_agent_principal_id)
-              )
+              ) IS NOT TRUE
           )
         )
       )
@@ -1149,12 +1165,12 @@ SET search_path = pg_catalog AS $$
           WHERE lm.conversation_id = p_conversation
             AND lm.workspace_id = p_workspace
             AND lm.left_at IS NULL
-            AND NOT swarm.conversation_signal_visible_to(
+            AND swarm.conversation_signal_visible_to(
               cs.workspace_id, cs.signal_id, cs.audience,
               s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
               CASE WHEN lm.member_user_id IS NOT NULL THEN 'user' ELSE 'agent' END,
               COALESCE(lm.member_user_id, lm.member_agent_principal_id)
-            )
+            ) IS NOT TRUE
         )
       )
     )
