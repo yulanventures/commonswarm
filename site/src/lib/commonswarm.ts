@@ -4428,6 +4428,56 @@ export async function removeFromConversation(
   );
 }
 
+/** Add live workspace people/agents to a private channel (`channel_member_add`). */
+export async function addChannelMembers(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  members: readonly ConversationMemberRef[],
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    {
+      kind: "channel_member_add",
+      channel_id: channelId,
+      members: members.map((m) => ({ kind: m.kind, id: m.id })),
+    },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") {
+    const id = channelId.toLowerCase();
+    return { ok: true, conversationId: id, channelId: id };
+  }
+  return parseConversationActionResponse(status, body, "CommonSwarm could not add those members.");
+}
+
+/** Remove a person or agent from a private channel (`channel_member_remove`). */
+export async function removeChannelMember(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  member: ConversationMemberRef,
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    {
+      kind: "channel_member_remove",
+      channel_id: channelId,
+      member: { kind: member.kind, id: member.id },
+    },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") {
+    const id = channelId.toLowerCase();
+    return { ok: true, conversationId: id, channelId: id };
+  }
+  return parseConversationActionResponse(status, body, "CommonSwarm could not remove that member.");
+}
+
 export async function markConversationRead(
   session: Session,
   commandId: string,

@@ -1099,6 +1099,20 @@ import "../../styles/kylon-image-viewer.css";
   </dialog>
 
   <dialog
+    class="cm-sheet-dialog"
+    id="dashboard-conversation-picker"
+    data-conversation-picker-dialog
+    aria-labelledby="dashboard-conversation-picker-title"
+  ></dialog>
+
+  <dialog
+    class="cm-sheet-dialog"
+    id="dashboard-conversation-members"
+    data-conversation-members-dialog
+    aria-labelledby="dashboard-conversation-members-title"
+  ></dialog>
+
+  <dialog
     class="dashboard__connected-apps-dialog"
     data-connected-apps-dialog
     aria-labelledby="dashboard-connected-apps-title"
@@ -2721,6 +2735,12 @@ import "../../styles/kylon-image-viewer.css";
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
         mayCreateChannel: viewerMayCreateChannel(),
         channelSettings: activeChannel() !== null && !activeDm,
+        conversationMembers: (() => {
+          const conv = typeof activeConversationSummary === "function" ? activeConversationSummary() : null;
+          if (!conv) return null;
+          const memberCount = conv.members.filter(m => !m.leftAt).length;
+          return { label: memberCount > 0 ? `Members (${memberCount})` : "Members" };
+        })(),
         place: activePlace(),
         filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
           const value = button.dataset.feedFilter;
@@ -2742,6 +2762,9 @@ import "../../styles/kylon-image-viewer.css";
       else if (action.kind === "new-channel") openChannelDialog("create");
       else if (action.kind === "all-channels") openChannelDirectory();
       else if (action.kind === "channel-settings") openChannelDialog("settings", activeChannelId);
+      else if (action.kind === "conversation-members") {
+        if (typeof openConversationMembersSheet === "function") void openConversationMembersSheet(null);
+      }
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
       else if (action.kind === "star" || action.kind === "involvement") {
         const place = activePlace();
@@ -6309,9 +6332,13 @@ import "../../styles/kylon-image-viewer.css";
         conversationMenu: (id: string, event: MouseEvent, button: HTMLElement) => {
           if (typeof openConversationRowMenu === "function") openConversationRowMenu(id, event, button);
         },
-        newDirectMessage: () => {
-          layout.closeNavigation(false);
-          if (activeWorkspaceId) void navigateHome({ view: "people", workspaceId: activeWorkspaceId }, "push");
+        newDirectMessage: (button: HTMLElement) => {
+          if (typeof openNewMessagePicker === "function") {
+            void openNewMessagePicker(button);
+          } else {
+            layout.closeNavigation(false);
+            if (activeWorkspaceId) void navigateHome({ view: "people", workspaceId: activeWorkspaceId }, "push");
+          }
         },
       } : {};
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
@@ -6501,6 +6528,12 @@ import "../../styles/kylon-image-viewer.css";
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null ? activeChannel() : null;
+      const headerConv = typeof activeConversationSummary === "function" && homeRoute.view === "chat" && unknownChannelId === null
+        ? activeConversationSummary()
+        : null;
+      const headerDmConv = typeof activeDmConversationId !== "undefined" && activeDmConversationId && workspaceConversations
+        ? workspaceConversations.find(c => c.conversationId === activeDmConversationId) ?? null
+        : null;
       const headerPlace = activePlace();
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
@@ -6509,10 +6542,17 @@ import "../../styles/kylon-image-viewer.css";
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
         channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
+        conversationMembers: headerConv ? {
+          count: headerConv.members.filter(m => !m.leftAt).length,
+          label: headerConv.kind === "dm" || headerConv.kind === "group_dm"
+            ? "Members"
+            : `${channelLabel(headerConv.slug ?? GENERAL_CHANNEL_SLUG)} members`,
+        } : undefined,
         place: headerPlace ? { slug: headerPlace.slug, starred: headerPlace.starred, involvement: headerPlace.involvement } : undefined,
         /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
            agent it is with. The workspace stays in the picker. */
         channelTitle: typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
+          : headerDmConv ? conversationTitle(headerDmConv, homeViewerId(), lookupConversationMemberName)
           : !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
       const composerLabel = one<HTMLElement>("[data-composer-label]");
@@ -6526,6 +6566,9 @@ import "../../styles/kylon-image-viewer.css";
       if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); if (typeof syncWaitingPanel === "function") syncWaitingPanel(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
+        openConversationMembers: (opener) => {
+          if (typeof openConversationMembersSheet === "function") void openConversationMembersSheet(opener);
+        },
         toggleStar: () => {
           const place = activePlace();
           if (place) void saveChannelPreference(place.viewId, { starred: !place.starred }, "[data-channel-star]");
@@ -13979,6 +14022,8 @@ import "../../styles/kylon-image-viewer.css";
       groupLeaveReturn = null;
       const leaveDialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
       if (leaveDialog?.open) leaveDialog.close();
+      conversationDialogsEpoch += 1;
+      conversationDialogsBridge?.closeAll();
       one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
     };
     /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
@@ -14035,6 +14080,7 @@ import "../../styles/kylon-image-viewer.css";
         if (workspaceId !== activeWorkspaceId) return;
         activeDmConversationId = conversationId;
         renderHomeRail();
+        renderHomeShell();
         return;
       }
       activeDm = null;
@@ -14193,6 +14239,120 @@ import "../../styles/kylon-image-viewer.css";
       syncGroupLeaveDialogControls();
       one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
       void refreshConversations(target.workspaceId, true);
+    };
+
+    type ConversationDialogsBridge = import("../../lib/conversation-dialogs").ConversationDialogsBridge;
+    let conversationDialogsBridge: ConversationDialogsBridge | null = null;
+    let conversationDialogsPromise: Promise<ConversationDialogsBridge> | null = null;
+    let conversationDialogsEpoch = 0;
+
+    const loadConversationDialogs = (): Promise<ConversationDialogsBridge> => {
+      if (conversationDialogsBridge) return Promise.resolve(conversationDialogsBridge);
+      conversationDialogsPromise ??= import("../../lib/conversation-dialogs").then((mod) => {
+        conversationDialogsBridge = mod.createConversationDialogsBridge();
+        return conversationDialogsBridge;
+      });
+      return conversationDialogsPromise;
+    };
+
+    /** Active Step 2b conversation for the open DM or channel, or null when pre-Step-2b / outside chat. */
+    const activeConversationSummary = (): ConversationSummary | null => {
+      if (sampleMode || !session || !workspaceConversations) return null;
+      if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals" || unknownChannelId !== null) return null;
+      if (activeDmConversationId) {
+        return workspaceConversations.find(c => c.conversationId === activeDmConversationId) ?? null;
+      }
+      if (typeof activeDm !== "undefined" && activeDm) return null;
+      return conversationForChannel(activeChannelId);
+    };
+
+    /** Open the lazy-loaded Step 3C New message / DM / Group DM picker dialog. */
+    const openNewMessagePicker = async (opener: HTMLElement | null = null): Promise<void> => {
+      const dialog = one<HTMLDialogElement>("[data-conversation-picker-dialog]");
+      if (!dialog || sampleMode || !session || !activeWorkspaceId) return;
+      if (workspaceConversations === null) {
+        layout.closeNavigation(false);
+        void navigateHome({ view: "people", workspaceId: activeWorkspaceId }, "push");
+        return;
+      }
+      const workspaceId = activeWorkspaceId;
+      const pinnedUserId = session.user.id;
+      const epoch = ++conversationDialogsEpoch;
+      const back = channelFocusReturn(opener);
+      if (back.drawer) layout.closeNavigation(false);
+      let bridge: ConversationDialogsBridge;
+      try {
+        bridge = await loadConversationDialogs();
+      } catch {
+        return;
+      }
+      if (epoch !== conversationDialogsEpoch || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+      bridge.openNewMessage({
+        dialog,
+        workspaceId,
+        pinnedUserId,
+        roster: { viewerUserId: pinnedUserId, members, people, agents },
+        lookupName: lookupConversationMemberName,
+        getSession: () => session,
+        isCurrent: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId,
+        uuid,
+        onOpened: (summary) => {
+          if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+          if (workspaceConversations && !workspaceConversations.some(c => c.conversationId === summary.conversationId)) {
+            workspaceConversations = [summary, ...workspaceConversations];
+          }
+          void openDirectConversation(summary.conversationId);
+          void refreshConversations(workspaceId, true);
+        },
+        restoreFocus: () => { if (!restoreChannelFocus(back)) focusConversationHeading(); },
+      });
+    };
+
+    /** Open the lazy-loaded Step 3C Channel / Conversation Members & Invite sheet. */
+    const openConversationMembersSheet = async (opener: HTMLElement | null = null): Promise<void> => {
+      const dialog = one<HTMLDialogElement>("[data-conversation-members-dialog]");
+      const conv = activeConversationSummary();
+      if (!dialog || !conv || sampleMode || !session || !activeWorkspaceId) return;
+      const workspaceId = activeWorkspaceId;
+      const pinnedUserId = session.user.id;
+      const convId = conv.conversationId;
+      const epoch = ++conversationDialogsEpoch;
+      const back = channelFocusReturn(opener);
+      if (back.drawer) layout.closeNavigation(false);
+      let bridge: ConversationDialogsBridge;
+      try {
+        bridge = await loadConversationDialogs();
+      } catch {
+        return;
+      }
+      if (epoch !== conversationDialogsEpoch || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+      const matchedChannel = conv.channelId ? channelById(channels, conv.channelId) : null;
+      bridge.openMembers({
+        dialog,
+        workspaceId,
+        pinnedUserId,
+        conv,
+        viewerCanManage: matchedChannel ? viewerMayManageChannel(matchedChannel) : false,
+        roster: { viewerUserId: pinnedUserId, members, people, agents },
+        lookupName: lookupConversationMemberName,
+        getSession: () => session,
+        isCurrent: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId,
+        uuid,
+        onChanged: (nextMembers) => {
+          if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+          if (workspaceConversations) {
+            workspaceConversations = workspaceConversations.map(c =>
+              c.conversationId === convId
+                ? { ...c, members: nextMembers.map(m => ({ kind: m.kind, id: m.id, name: m.name, leftAt: null })) }
+                : c,
+            );
+          }
+          renderHomeShell();
+          renderHomeRail();
+          void refreshConversations(workspaceId, true);
+        },
+        restoreFocus: () => { if (!restoreChannelFocus(back)) focusConversationHeading(); },
+      });
     };
 
     /** The Channels section of the rail for the workspace being read, or undefined where none is. */
@@ -14809,9 +14969,11 @@ import "../../styles/kylon-image-viewer.css";
       const selector = element?.dataset.railChannelMenu !== undefined
         ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
         : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
+        : element?.hasAttribute("data-conversation-members-open") ? "[data-conversation-members-open]"
         : element?.hasAttribute("data-channel-header-description") ? "[data-channel-header-description]"
         : element?.hasAttribute("data-channel-lead-pill") ? "[data-channel-lead-pill]"
         : element?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]"
+        : element?.hasAttribute("data-home-new-dm") ? "[data-home-new-dm]"
         : element?.hasAttribute("data-home-all-channels") ? "[data-home-all-channels]"
         : element?.id ? `#${CSS.escape(element.id)}` : null;
       return { selector, element, drawer: layout.navigationOpen() };
@@ -15227,6 +15389,7 @@ import "../../styles/kylon-image-viewer.css";
       conversationsReadError = "";
       if (render) {
         renderHomeRail();
+        renderHomeShell();
         renderChannelBlocked();
         renderChannelDirectoryDialog();
       }
