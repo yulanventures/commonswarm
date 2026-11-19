@@ -282,13 +282,21 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
         origin_channel_id: chPriv,
         assign: { to: { kind: "user", id: viewerId } },
       }));
-      const privOutsiderTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+      const privOutsiderCreateReqId = `req-${randomUUID()}`;
+      const privOutsiderCreateCmd: todos.TodoCommand = {
         kind: "todo_create",
         title: "Outsider private-channel task",
         origin_placement: "channel",
         origin_channel_id: chPriv,
         assign: { to: { kind: "user", id: memberOutsidePrivId } },
-      }));
+      };
+      const privOutsiderTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, privOutsiderCreateReqId, privOutsiderCreateCmd));
+
+      // C1: Every client-visible write outcome strips origin_placement and origin_channel_id (create, update, conflict, replay).
+      for (const written of [boilerTodo, renoTodo, generalTodo, workspaceTodo, privViewerTodo, privOutsiderTodo]) {
+        assert.equal("origin_channel_id" in written, false, "todo_create outcome must strip origin_channel_id");
+        assert.equal("origin_placement" in written, false, "todo_create outcome must strip origin_placement");
+      }
 
       // Immutability across updates: update boilerTodo title and move to 'doing'.
       const updatedBoiler = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
@@ -297,16 +305,48 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
         base_version: boilerTodo.version,
         title: "Boiler channel task (updated)",
       }));
-      assert.equal(updatedBoiler.origin_placement, "channel");
-      assert.equal(updatedBoiler.origin_channel_id, chBoiler);
+      assert.equal("origin_channel_id" in updatedBoiler, false, "todo_update outcome must strip origin_channel_id");
       const doingBoiler = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
         kind: "todo_set_state",
         todo_id: boilerTodo.todo_id,
         base_version: updatedBoiler.version,
         state: "doing",
       }));
-      assert.equal(doingBoiler.origin_placement, "channel");
-      assert.equal(doingBoiler.origin_channel_id, chBoiler);
+      assert.equal("origin_channel_id" in doingBoiler, false, "todo_set_state outcome must strip origin_channel_id");
+
+      // C1 witness: authorized to-do editor outside #private-vault gets redacted conflict and committed write responses.
+      const outsiderConflict = await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
+        kind: "todo_update",
+        todo_id: privOutsiderTodo.todo_id,
+        base_version: 99,
+        title: "Stale edit",
+      });
+      assert.equal(outsiderConflict.outcome.status, "conflict");
+      if (outsiderConflict.outcome.status === "conflict") {
+        assert.equal("origin_channel_id" in outsiderConflict.outcome.current, false, "conflict current must not leak private origin_channel_id");
+        assert.equal("origin_placement" in outsiderConflict.outcome.current, false, "conflict current must not leak private origin_placement");
+      }
+      const outsiderCommit = committedTodo(await store.write(tx, wsId, outsiderIdentity, `req-${randomUUID()}`, {
+        kind: "todo_update",
+        todo_id: privOutsiderTodo.todo_id,
+        base_version: privOutsiderTodo.version,
+        title: "Outsider private-channel task (edited)",
+      }));
+      assert.equal("origin_channel_id" in outsiderCommit, false, "outsider successful write must not leak private origin_channel_id");
+      assert.equal("origin_placement" in outsiderCommit, false, "outsider successful write must not leak private origin_placement");
+
+      // C1 witness: replay after the original caller loses channel access never leaks private origin_channel_id.
+      await tx`SAVEPOINT sp_replay_after_channel_removal`;
+      await tx`RESET ROLE`;
+      await tx`DELETE FROM swarm.channel_members WHERE channel_id = ${chPriv}::uuid AND user_id = ${viewerId}::uuid`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const replayedCreate = await store.write(tx, wsId, viewerIdentity, privOutsiderCreateReqId, privOutsiderCreateCmd);
+      assert.equal(replayedCreate.replayed, true);
+      const replayedVal = committedTodo(replayedCreate);
+      assert.equal("origin_channel_id" in replayedVal, false, "replayed create after channel removal must not leak origin_channel_id");
+      assert.equal("origin_placement" in replayedVal, false, "replayed create after channel removal must not leak origin_placement");
+      await tx`ROLLBACK TO SAVEPOINT sp_replay_after_channel_removal`;
+      await tx`SET LOCAL ROLE swarm_command`;
 
       // Verify todo_read for outsider does NOT leak origin_channel_id.
       const outsiderRead = await store.read(tx, wsId, outsiderIdentity, {
@@ -333,8 +373,67 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
       assert.equal(replayed.todos[boilerTodo.todo_id]!.origin_placement, "channel");
       assert.equal(replayed.todos[boilerTodo.todo_id]!.origin_channel_id, chBoiler);
       assert.equal(replayed.todos[boilerTodo.todo_id]!.title, "Boiler channel task (updated)");
+      assert.equal(replayed.todos[privOutsiderTodo.todo_id]!.origin_placement, "channel");
+      assert.equal(replayed.todos[privOutsiderTodo.todo_id]!.origin_channel_id, chPriv);
       assert.equal(replayed.todos[workspaceTodo.todo_id]!.origin_placement, "workspace");
       assert.equal(replayed.todos[workspaceTodo.todo_id]!.origin_channel_id, null);
+
+      // C2 witness: pre-migration TodoCreated event (no origin keys) + post-migration DB update replays cleanly from seq 0.
+      await tx`SAVEPOINT sp_legacy_migration_replay`;
+      const legacyWsId = randomUUID();
+      const legacyStreamId = randomUUID();
+      const legacyTodoId = randomUUID();
+      const legacyCreatedAt = "2026-11-18T12:00:00.000Z";
+      const legacyTodoPayload = {
+        workspace_id: legacyWsId, todo_id: legacyTodoId, version: 1, title: "Pre-migration task", notes: "", due_on: null,
+        state: "open", created_by: { user_id: viewerId, principal_id: null }, created_at: legacyCreatedAt,
+        assignee: null, assigned_by: null, assigned_at: null, offer: null, gate: { kind: "none" }, gate_set_by: null,
+        queue_rank: null, state_by: { user_id: viewerId, principal_id: null }, state_at: legacyCreatedAt, comment_count: 0,
+      };
+      const legacyCreatedEvent = {
+        type: "TodoCreated", workspace_id: legacyWsId, stream_id: legacyStreamId, seq: 0,
+        event_id: randomUUID(), command_id: "legacy-create-0", schema_version: 1,
+        actor_user: viewerId, actor_agent_principal: null, actor_run: null,
+        occurred_at_server: Date.parse(legacyCreatedAt),
+        payload: { todo: legacyTodoPayload },
+      };
+      await tx`RESET ROLE`;
+      await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${legacyWsId}::uuid, 'LegacyReplayWS', ${viewerId}::uuid)`;
+      await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${legacyWsId}::uuid, ${viewerId}::uuid, 'owner')`;
+      await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose) VALUES (${legacyWsId}::uuid, 'shared')`;
+      await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at) VALUES (${legacyWsId}::uuid, ${viewerId}::uuid, 'editor', ${randomUUID()}::uuid, now())`;
+      await tx`INSERT INTO swarm.household_todo_streams (workspace_id, stream_id, last_seq) VALUES (${legacyWsId}::uuid, ${legacyStreamId}::uuid, 0)`;
+      await tx`INSERT INTO swarm.household_todo_events (workspace_id, seq, event_id, occurred_at, event) VALUES (${legacyWsId}::uuid, 0, ${legacyCreatedEvent.event_id}::uuid, ${legacyCreatedAt}::timestamptz, ${tx.json(legacyCreatedEvent)}::jsonb)`;
+      // Projection row hydrated with migration DEFAULT 'workspace' / NULL.
+      await tx`
+        INSERT INTO swarm.household_todos (
+          workspace_id, todo_id, version, title, notes, state,
+          created_by_user, created_at, gate_kind, state_by_user, state_at, comment_count, last_seq
+        ) VALUES (
+          ${legacyWsId}::uuid, ${legacyTodoId}::uuid, 1, 'Pre-migration task', '', 'open',
+          ${viewerId}::uuid, ${legacyCreatedAt}::timestamptz, 'none', ${viewerId}::uuid, ${legacyCreatedAt}::timestamptz, 0, 0
+        )
+      `;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const migratedEdit = committedTodo(await store.write(tx, legacyWsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_update",
+        todo_id: legacyTodoId,
+        base_version: 1,
+        title: "Post-migration edited task",
+      }));
+      assert.equal(migratedEdit.title, "Post-migration edited task");
+      const legacyEvents = await tx<{ event: todos.TodoEvent }[]>`
+        SELECT event FROM swarm.household_todo_events WHERE workspace_id = ${legacyWsId}::uuid ORDER BY seq ASC
+      `;
+      const legacyReplayed = todos.reduceTodoEvents(
+        todos.emptyHouseholdTodoState(legacyWsId, legacyStreamId),
+        legacyEvents.map((r) => r.event),
+      );
+      assert.equal(legacyReplayed.todos[legacyTodoId]!.title, "Post-migration edited task");
+      assert.equal(legacyReplayed.todos[legacyTodoId]!.origin_placement, "workspace");
+      assert.equal(legacyReplayed.todos[legacyTodoId]!.origin_channel_id, null);
+      await tx`ROLLBACK TO SAVEPOINT sp_legacy_migration_replay`;
+      await tx`SET LOCAL ROLE swarm_command`;
 
       await tx`RELEASE SAVEPOINT sp_write_authz`;
       await tx`RESET ROLE`;

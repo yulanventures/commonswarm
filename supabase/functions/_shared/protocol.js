@@ -5635,7 +5635,12 @@ function reduceTodoEvents(initial, events) {
         };
         const allowed = /* @__PURE__ */ new Set(["version", ...fields[event2.type] ?? []]);
         const allKeys = /* @__PURE__ */ new Set([...Object.keys(current), ...Object.keys(todo)]);
-        if ([...allKeys].some((key2) => !allowed.has(key2) && !equal(current[key2], todo[key2]))) fail("unrelated field changed");
+        const originFieldEqual = (key2) => {
+          if (key2 === "origin_placement") return (current.origin_placement ?? "workspace") === (todo.origin_placement ?? "workspace");
+          if (key2 === "origin_channel_id") return (current.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
+          return equal(current[key2], todo[key2]);
+        };
+        if ([...allKeys].some((key2) => !allowed.has(key2) && !originFieldEqual(key2))) fail("unrelated field changed");
         if (event2.type === "TodoAssigned") {
           const validSetter = acceptedOffer ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event2.command_id && acceptedOffer.offer.decider_user_id === event2.actor_user && event2.actor_agent_principal === null && sameParty(todo.assignee, acceptedOffer.offer.to) && equal(todo.gate, acceptedOffer.offer.gate) && todo.gate_set_by === (todo.gate.kind === "none" ? null : acceptedOffer.offer.by.user_id) : todo.gate_set_by === (todo.gate.kind === "none" ? null : event2.actor_user) || equal(todo.gate, current.gate) && todo.gate_set_by === current.gate_set_by;
           if (todo.state !== "open" || todo.offer !== null || !equal(todo.assigned_by, author) || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || !validSetter) fail("invalid assignment");

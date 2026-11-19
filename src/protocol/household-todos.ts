@@ -541,7 +541,12 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
         };
         const allowed = new Set<keyof Todo>(['version', ...(fields[event.type] ?? [])]);
         const allKeys = new Set<string>([...Object.keys(current!), ...Object.keys(todo)]);
-        if ([...allKeys].some(key => !allowed.has(key as keyof Todo) && !equal(current![key as keyof Todo], todo[key as keyof Todo]))) fail('unrelated field changed');
+        const originFieldEqual = (key: string): boolean => {
+          if (key === 'origin_placement') return (current!.origin_placement ?? 'workspace') === (todo.origin_placement ?? 'workspace');
+          if (key === 'origin_channel_id') return (current!.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
+          return equal(current![key as keyof Todo], todo[key as keyof Todo]);
+        };
+        if ([...allKeys].some(key => !allowed.has(key as keyof Todo) && !originFieldEqual(key))) fail('unrelated field changed');
         if (event.type === 'TodoAssigned') {
           const validSetter = acceptedOffer
             ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event.command_id

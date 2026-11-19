@@ -68,6 +68,20 @@ async function digestOf(command: TodoCommand): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical(command)))), b => b.toString(16).padStart(2, '0')).join('');
 }
 
+function redactTodoFields(todo: Todo): Todo {
+  const { origin_placement: _originPlacement, origin_channel_id: _originChannelId, ...clean } = todo;
+  return clean;
+}
+function redactTodoOutcome(outcome: TodoOutcome): TodoOutcome {
+  if (outcome.status === 'committed' && 'todo_id' in outcome.value) {
+    return { status: 'committed', value: redactTodoFields(outcome.value) };
+  }
+  if (outcome.status === 'conflict') {
+    return { status: 'conflict', current: redactTodoFields(outcome.current) };
+  }
+  return outcome;
+}
+
 export function createHouseholdTodoStore({ core, access, notice }: { core: Core; access: HouseholdTodoAccess; notice: HouseholdTodoNoticePort }) {
   async function authorize(tx: Sql, workspaceId: string, identity: HouseholdIdentity, op: 'read' | 'create' | 'update') {
     const checked = await access(tx, workspaceId, identity);
@@ -131,7 +145,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     if (previous) {
       const replayed = previous.request_digest === digest;
       const stored = previous.outcome as { outcome: TodoOutcome; notices: HouseholdTodoNoticeReceipt[] };
-      const outcome = replayed ? stored.outcome : { status: 'refused' as const, reason: 'request_id_reused' as const };
+      const outcome = redactTodoOutcome(replayed ? stored.outcome : { status: 'refused' as const, reason: 'request_id_reused' as const });
       await audit(tx, workspaceId, identity, requestId, command, digest, outcome, replayed);
       return { outcome, events: [], notices: replayed ? stored.notices : [], replayed };
     }
@@ -180,10 +194,11 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       ON CONFLICT(workspace_id,principal_id) DO UPDATE SET accepts_from=EXCLUDED.accepts_from,set_by_user=EXCLUDED.set_by_user,set_at=EXCLUDED.set_at`;
     if (decision.events.length) await tx`UPDATE swarm.household_todo_streams SET last_seq=${next.last_seq} WHERE workspace_id=${workspaceId}::uuid`;
     if ((await authorize(tx, workspaceId, identity, op)).denied) throw new HouseholdTodoAccessChanged();
+    const publicOutcome = redactTodoOutcome(decision.outcome);
     if (decision.receipt) await tx`INSERT INTO swarm.household_todo_receipts(workspace_id,principal,command_id,request_digest,outcome,created_at)
-      VALUES (${workspaceId}::uuid,${principal}::uuid,${requestId},${digest},${json(tx, { outcome: decision.outcome, notices })},clock_timestamp())`;
-    await audit(tx, workspaceId, identity, requestId, command, digest, decision.outcome);
-    return { ...decision, notices };
+      VALUES (${workspaceId}::uuid,${principal}::uuid,${requestId},${digest},${json(tx, { outcome: publicOutcome, notices })},clock_timestamp())`;
+    await audit(tx, workspaceId, identity, requestId, command, digest, publicOutcome);
+    return { ...decision, outcome: publicOutcome, notices };
   }
   function view(todo: Todo, current: HouseholdTodoState, now: number) {
     const upNext = Object.values(current.todos).filter(t => t.state === 'open' && t.assignee?.kind === 'agent' && t.assignee.id === todo.assignee?.id && t.queue_rank !== null && core.evaluateGate(t.gate, current.todos, now))
