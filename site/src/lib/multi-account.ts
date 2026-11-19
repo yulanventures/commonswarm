@@ -2364,22 +2364,41 @@ export class AccountManager {
     }
   }
 
-  private readLoginCredential(record: AccountRecord): { fingerprint: string; accessToken: string } | null {
+  private readLocalSlotRaw(loginId: string): { ok: true; raw: string | null } | { ok: false } {
+    if (!this.env.localStorage) return { ok: false };
+    try {
+      return { ok: true, raw: this.env.localStorage.getItem(slotStorageKey(this.originHash, loginId)) };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  private readLoginCredential(
+    record: AccountRecord,
+  ):
+    | { status: "present"; fingerprint: string; accessToken: string }
+    | { status: "missing" }
+    | { status: "unreadable" } {
     if (this.sharedPersistenceAvailable) {
-      const parsed = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, record.loginId)));
-      if (!parsed || parsed.user.id !== record.userId) return null;
-      return { fingerprint: credentialFingerprint(parsed), accessToken: parsed.access_token };
+      const slotRead = this.readLocalSlotRaw(record.loginId);
+      if (!slotRead.ok) return { status: "unreadable" };
+      if (slotRead.raw === null) return { status: "missing" };
+      const parsed = parseSavedSession(slotRead.raw);
+      if (!parsed || parsed.user.id !== record.userId) return { status: "missing" };
+      return { status: "present", fingerprint: credentialFingerprint(parsed), accessToken: parsed.access_token };
     }
     const rt = this.runtimes.get(record.loginId);
-    if (!rt || rt.userId !== record.userId) return null;
+    if (!rt || rt.userId !== record.userId) return { status: "missing" };
     const fp = rt.peekCredentialFingerprint();
     const tok = rt.peekAccessToken();
-    return fp && tok ? { fingerprint: fp, accessToken: tok } : null;
+    return fp && tok ? { status: "present", fingerprint: fp, accessToken: tok } : { status: "missing" };
   }
 
   /**
    * C2: Retire an expired login ONLY after acquiring `registry -> lock:${slotKey}` and confirming
-   * the slot still holds the exact failed credential (never dropping a peer-rotated successor!).
+   * the slot is readable and still holds the exact failed credential (or is verified absent).
+   * An unreadable slot read aborts cleanup (fail closed, keeping durable ownership & slot intact
+   * while this tab stays locally fenced).
    */
   private async retireExpiredLogin(
     userId: string,
@@ -2409,13 +2428,20 @@ export class AccountManager {
           const hasExact = read.state.accounts.some((a) => a.userId === userId && a.loginId === loginId);
           if (!hasExact) return;
 
-          // Compare the current disk slot under `registry -> lock:${slotKey}` before removing ownership!
-          const diskSession = parseSavedSession(this.safeLocalGet(slotStorageKey(this.originHash, loginId)));
-          if (diskSession && diskSession.user.id === userId) {
-            if (failedCredential === null || credentialFingerprint(diskSession) !== failedCredential) {
-              // A peer refresh committed a newer credential under this loginId -> preserve ownership & slot!
-              preservedSuccessor = true;
-              return;
+          // Distinguish read failure from verified absence under `registry -> lock:${slotKey}`!
+          const slotRead = this.readLocalSlotRaw(loginId);
+          if (!slotRead.ok) {
+            // Fail closed: keep durable ownership and slot intact; initiating tab remains locally fenced.
+            return;
+          }
+          if (slotRead.raw !== null) {
+            const diskSession = parseSavedSession(slotRead.raw);
+            if (diskSession && diskSession.user.id === userId) {
+              if (failedCredential === null || credentialFingerprint(diskSession) !== failedCredential) {
+                // A peer refresh committed a newer credential under this loginId -> preserve ownership & slot!
+                preservedSuccessor = true;
+                return;
+              }
             }
           }
 
@@ -2542,7 +2568,11 @@ export class AccountManager {
 
         if (existing && !replaceExisting) {
           const currentCred = this.readLoginCredential(existing);
-          if (!currentCred) {
+          if (currentCred.status === "unreadable") {
+            // C2: Never treat an unreadable existing slot as missing/expired; leave record & slot intact.
+            return { kind: "refused", reason: "storage_unavailable" };
+          }
+          if (currentCred.status === "missing") {
             existingSlotMissing = true;
           } else {
             const tabExpiredFp = this.tabExpiredCredentials.get(existing.loginId);
@@ -2601,11 +2631,15 @@ export class AccountManager {
           let innerOutcome: LockedResult | null = null;
           try {
             await this.withLoginLocksInOrder(locksToHold, async () => {
-              // C2: Under `registry -> loginLocks`, confirm existing slot was NOT rotated to a newer
-              // peer credential while waiting for the lock!
+              // C2: Under `registry -> loginLocks`, confirm existing slot is readable and was NOT rotated
+              // to a newer peer credential while waiting for the lock!
               if (existing && !replaceExisting) {
                 const lockedExistingCred = this.readLoginCredential(existing);
-                if (lockedExistingCred) {
+                if (lockedExistingCred.status === "unreadable") {
+                  innerOutcome = { kind: "refused", reason: "storage_unavailable" };
+                  return;
+                }
+                if (lockedExistingCred.status === "present") {
                   if (existingSlotMissing || lockedExistingCred.fingerprint !== confirmedExpiredFingerprint) {
                     const known = verifiedExistingLiveness.get(`${existing.loginId}\0${lockedExistingCred.fingerprint}`);
                     if (known === "live") {
@@ -3077,11 +3111,26 @@ export async function postPinnedCommand(
   if (options.expectedDeployment && !sameDeployment(options.expectedDeployment, verifiedDeployment)) {
     throw new MultiAccountDeploymentMismatch();
   }
-  // C2: Validate EVERY embedded workspace field in options.extra and command against the pin BEFORE any send!
-  const embeddedWorkspaceIds = [
-    ...collectEmbeddedWorkspaceIds(options.extra),
-    ...collectEmbeddedWorkspaceIds(command),
-  ];
+
+  // C2: Build and serialize ONE immutable envelope synchronously BEFORE any await, then validate THAT
+  // exact serialized representation so mutating caller objects during identity verification cannot alter
+  // the bytes sent on any attempt!
+  const draftEnvelope: Record<string, unknown> = {
+    ...(options.extra ?? {}),
+    command_id: commandId,
+    client_version: options.clientVersion ?? "0.1.0",
+    command,
+  };
+  let wireBody: string;
+  let validatedEnvelope: Record<string, unknown>;
+  try {
+    wireBody = JSON.stringify(draftEnvelope);
+    validatedEnvelope = JSON.parse(wireBody) as Record<string, unknown>;
+  } catch {
+    throw new MultiAccountWorkspaceMismatch();
+  }
+
+  const embeddedWorkspaceIds = collectEmbeddedWorkspaceIds(validatedEnvelope);
   if (options.scope === "account") {
     if (embeddedWorkspaceIds.length > 0) {
       throw new MultiAccountWorkspaceMismatch();
@@ -3096,6 +3145,9 @@ export async function postPinnedCommand(
         throw new MultiAccountWorkspaceMismatch();
       }
     }
+    // Derive envelope workspace_id directly from the verified workspace pin and freeze final wire bytes.
+    validatedEnvelope.workspace_id = pinnedWorkspace;
+    wireBody = JSON.stringify(validatedEnvelope);
   }
 
   if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
@@ -3103,17 +3155,6 @@ export async function postPinnedCommand(
   if (!initial || !isPinnedScopeCurrent(ctx, options.scope) || initial.user.id !== ctx.userId) {
     throw new MultiAccountAuthRecoveryRequired();
   }
-  const envelope: Record<string, unknown> = {
-    ...(options.extra ?? {}),
-    command_id: commandId,
-    client_version: options.clientVersion ?? "0.1.0",
-    command,
-  };
-  if (options.scope !== "account") {
-    // Derive envelope workspace_id directly from the verified workspace pin.
-    envelope.workspace_id = options.scope.workspaceId.trim();
-  }
-  const wireBody = JSON.stringify(envelope);
   const fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   const endpoint = `${verifiedDeployment.url.replace(/\/+$/, "")}/functions/v1/command`;
   let credential = initial;

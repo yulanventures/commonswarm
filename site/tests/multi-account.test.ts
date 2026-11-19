@@ -574,13 +574,28 @@ test("C2: A->B->A switch, sign-out, and same-user re-sign-in invalidate pinned c
   );
   assert.equal(mock.state.commandRequests.length, requestsBeforeMismatch, "mismatched workspace payload/envelope sends 0 requests");
 
-  // Positive control: current pin on ws-alpha derives envelope workspace_id directly from the verified pin!
-  const okWsCmd = await postPinnedCommand(pinnedFor401, "cmd-ok-ws", { kind: "test" }, {
+  // Positive control: current pin on ws-alpha derives envelope workspace_id directly from the verified pin,
+  // AND mutating caller's command/extra objects while verifySession() is awaited CANNOT alter the sent bytes!
+  const mutableCommand: Record<string, unknown> = { kind: "test", workspace_id: "ws-alpha" };
+  const mutableExtra: Record<string, unknown> = { workspace_id: "ws-alpha" };
+  let releaseMutationVerify!: () => void;
+  mock.state.userGetGate = new Promise<void>((resolve) => { releaseMutationVerify = resolve; });
+  const okWsCmdPromise = postPinnedCommand(pinnedFor401, "cmd-ok-ws", mutableCommand, {
     scope: { workspaceId: "ws-alpha" },
+    extra: mutableExtra,
     fetcher: mock.fetcher,
   });
+  await new Promise((r) => setTimeout(r, 20));
+  // Mutate BOTH caller objects while identity verification is in flight!
+  mutableCommand.workspace_id = "ws-beta";
+  mutableExtra.workspace_id = "ws-beta";
+  releaseMutationVerify();
+  mock.state.userGetGate = null;
+  const okWsCmd = await okWsCmdPromise;
   assert.equal(okWsCmd.status, 200);
-  assert.equal(mock.state.commandRequests.at(-1)?.body.workspace_id, "ws-alpha", "envelope workspace_id derived from pin");
+  const sentBody = mock.state.commandRequests.at(-1)?.body;
+  assert.equal(sentBody?.workspace_id, "ws-alpha", "envelope workspace_id derived & frozen before await");
+  assert.equal((sentBody?.command as Record<string, unknown>)?.workspace_id, "ws-alpha", "command payload frozen before await");
   const requestsAfterOkWs = mock.state.commandRequests.length;
 
   // Workspace A -> B -> A invalidates pinned workspace context for sends and Realtime!
@@ -1693,5 +1708,75 @@ test("C1 slot-lock cancellation & C2 credential-generation fences (delayed expir
 
     mgr.destroy();
     mgr2.destroy();
+  }
+
+  // 4. C2: Unreadable slot during held expiry retirement AND during duplicate sign-in fails closed:
+  //        keeps durable ownership & slot intact while initiating tab stays locally fenced!
+  {
+    const ls = new MemoryStorage();
+    const locks = new TestWebLocks();
+    const hub = new TestBroadcastHub();
+    const mock = createMockGoTrue();
+
+    const tab1 = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    const tab2 = new AccountManager(DEPLOYMENT, {
+      localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: mock.fetcher,
+      webLocks: locks.lock, createBroadcastChannel: hub.create,
+    });
+    await Promise.all([tab1.initialize(), tab2.initialize()]);
+
+    const a = await tab1.signInWithPasswordStaging({ email: "first@example.test", password: "correct-horse-battery" });
+    assert.equal(a.kind, "promoted");
+    const loginId = a.account.loginId;
+    const slotKey = slotStorageKey(ORIGIN_HASH, loginId);
+    const rt1 = tab1.runtimeFor(a.account.userId)!;
+    await rt1.ready();
+    const expiredAccess = rt1.peekAccessToken()!;
+
+    // Hold registryLock across terminal expiry so queued retireExpiredLogin runs after slot read fails!
+    let releaseRegistry!: () => void;
+    const registryHold = locks.lock(registryLockName(ORIGIN_HASH), -1, async () => {
+      await new Promise<void>((resolve) => { releaseRegistry = resolve; });
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    mock.state.sessionsByAccess.delete(expiredAccess);
+    await assert.rejects(rt1.verifySession(), { name: "SessionExpired" });
+
+    // Peer commits successor T2, AND slot read now fails (unreadable storage)!
+    const peerSuccessor = mock.mintSession(makeUser(a.account.userId, "first@example.test", "First Owner"));
+    ls.rawSet(slotKey, JSON.stringify(peerSuccessor));
+    ls.failGetKeys.add(slotKey);
+
+    releaseRegistry();
+    await registryHold;
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Unreadable slot read MUST abort retirement: durable ownership & slot stay intact, tab1 stays locally fenced!
+    assert.equal(tab2.listAccounts().length, 1, "unreadable slot must NOT cause expiry cleanup to remove ownership");
+    assert.equal(tab2.listAccounts()[0]!.loginId, loginId);
+    assert.ok((ls.rawGet(slotKey) ?? "").includes(peerSuccessor.access_token), "slot remains untouched on read failure");
+    assert.equal(tab1.activeAccount(), null, "initiating tab stays locally fenced until slot is verifiable");
+    assert.equal(tab1.listAccounts().length, 0, "initiating tab stays locally fenced");
+
+    // Duplicate sign-in while existing slot is unreadable MUST also fail closed (NOT treat as missing/replace)!
+    const logoutsBeforeDup = mock.state.logouts.length;
+    const dupUnreadable = await tab2.signInWithPasswordStaging({
+      email: "first@example.test", password: "correct-horse-battery",
+    });
+    assert.equal(dupUnreadable.kind, "refused");
+    assert.equal(dupUnreadable.reason, "storage_unavailable");
+    assert.equal(tab2.listAccounts().length, 1);
+    assert.equal(tab2.listAccounts()[0]!.loginId, loginId, "original loginId preserved when slot read fails");
+    assert.ok((ls.rawGet(slotKey) ?? "").includes(peerSuccessor.access_token), "original slot untouched");
+    assert.equal(mock.state.logouts.length, logoutsBeforeDup + 1, "unused staging session locally revoked");
+    assert.equal(mock.state.logouts.at(-1)?.scope, "local");
+
+    ls.failGetKeys.clear();
+    tab1.destroy();
+    tab2.destroy();
   }
 });
