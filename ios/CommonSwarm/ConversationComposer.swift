@@ -3,6 +3,7 @@ import SwiftUI
 struct ConversationComposer: View {
     @ObservedObject var draft: Composer
     let destination: String
+    let allowsAttachments: Bool
     let send: () -> Void
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -12,16 +13,30 @@ struct ConversationComposer: View {
     private var solid: Bool { reduceTransparency || contrast == .increased }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 4) {
+            if !draft.attachments.isEmpty {
+                Text("Files are visible to everyone in this workspace.").font(.caption)
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(draft.attachments) { intent in
+                            Button { draft.attachments.removeAll { $0.id == intent.id } } label: {
+                                Label(intent.file.name, systemImage: "xmark.circle")
+                            }.accessibilityLabel("Remove " + intent.file.name)
+                        }
+                    }
+                }
+            }
             if #available(iOS 26, *), !solid {
                 GlassEffectContainer(spacing: 4) {
                     HStack(alignment: .bottom, spacing: 8) {
+                        if allowsAttachments { AttachmentPicker(draft: draft) }
                         entry.glassEffect(.regular, in: fieldShape)
                         sendButton.buttonStyle(.glassProminent).buttonBorderShape(.circle)
                     }
                 }
             } else {
                 HStack(alignment: .bottom, spacing: 8) {
+                    if allowsAttachments { AttachmentPicker(draft: draft) }
                     entry.background(fallbackFill, in: fieldShape)
                         .overlay { fieldShape.strokeBorder(.secondary, lineWidth: solid ? 1 : 0) }
                     sendButton.buttonStyle(.borderedProminent).buttonBorderShape(.circle)
@@ -51,7 +66,7 @@ struct ConversationComposer: View {
                 .frame(minWidth: 28, minHeight: 32)
         }
         .accessibilityLabel("Send message")
-        .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.text.utf16.count > 8_000)
+        .disabled(!draft.canSend)
     }
 
 }

@@ -70,7 +70,19 @@ enum Verify {
         guard let channel = directory.first(where: { if case .channel = $0.id { true } else { false } }) else {
             throw Failure.mismatch("named channel")
         }
-        try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"))
+        let upload = UploadIntent(file: try StagedFile(data: Data("Test file".utf8), name: "Notes.txt"))
+        guard let closed = directory.first(where: { $0.symbol == "lock" }) else { throw Failure.mismatch("private channel") }
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: closed.destination)
+            throw Failure.mismatch("private channel admitted an upload")
+        } catch AttachmentError.placement {}
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+            throw Failure.mismatch("fixture did not interrupt commitment")
+        } catch APIError.refused(503) {}
+        let ref = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+        try expect(ref.file_id == upload.file.id && ref.version_n == 1, "lost commit retries the original upload")
+        try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"), attachments: [ref])
         let workspaces = try await api.workspaces()
         guard let second = workspaces.first(where: { $0.id != ws.id }) else { throw Failure.mismatch("second workspace") }
         let draft = session.composer(workspace: ws.id, conversation: dm.id)

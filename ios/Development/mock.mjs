@@ -37,6 +37,8 @@ function recordEmailRequest(url, body) {
   if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
 }
 const receipts = new Map();
+const uploads = new Map();
+const fileReceipts = new Map();
 const refuseNextLookup = new Set();
 const sessions = new Set();
 const refreshTokens = new Set();
@@ -67,6 +69,18 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
+    if (req.method === "PUT" && url.pathname.startsWith("/storage/v1/object/upload/sign/swarm-files/")) {
+      const slot = uploads.get(url.searchParams.get("token"));
+      if (!slot || slot.path !== url.pathname || req.headers.authorization || req.headers.apikey || req.headers.cookie ||
+          req.headers["content-type"] !== slot.type) return reply(403, {});
+      if (slot.digest) return reply(409, {});
+      const hash = createHash("sha256");
+      let length = 0;
+      for await (const part of req) { length += part.length; hash.update(part); }
+      if (length !== slot.size) return reply(400, {});
+      slot.digest = hash.digest("hex");
+      return reply(200, {});
+    }
     if (upgrade && req.method === "GET" && url.pathname === "/fixture/upgrade-stage") {
       return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
     }
@@ -157,6 +171,24 @@ const server = createServer(async (req, res) => {
           body.command.file_id?.toLowerCase() === file && body.command.version_n === 2) {
         return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
       }
+      const cmd = body.command;
+      if (body.workspace_id?.toLowerCase() === workspace && ["file_version_create", "file_version_commit"].includes(cmd?.kind)) {
+        if (fileReceipts.has(body.command_id)) return reply(200, fileReceipts.get(body.command_id));
+        if (cmd.kind === "file_version_create") {
+          if (uploads.has(cmd.version_id)) return reply(409, {});
+          const path = "/storage/v1/object/upload/sign/swarm-files/" + workspace + "/" + cmd.file_id.toLowerCase() + "/1";
+          uploads.set(cmd.version_id, { id: cmd.file_id, path, type: cmd.content_type, size: cmd.declared_size_bytes });
+          const receipt = { status: "accepted", file_id: cmd.file_id, version_id: cmd.version_id, version_n: 1,
+            upload_path: path + "?token=" + cmd.version_id };
+          fileReceipts.set(body.command_id, receipt);
+          return reply(200, receipt);
+        }
+        const slot = uploads.get(cmd.version_id);
+        if (!slot || slot.id !== cmd.file_id || slot.digest !== cmd.sha256) return reply(409, {});
+        const receipt = { status: "accepted", file_id: slot.id, version_n: 1, size_bytes: slot.size };
+        fileReceipts.set(body.command_id, receipt);
+        return reply(verify ? 503 : 200, verify ? {} : receipt);
+      }
       if (!workspaces.some(row => row.workspace_id === body.workspace_id?.toLowerCase()) || body.command?.kind !== "post_signal") return reply(400, {});
       if (verify && body.command.body === "held during sign-out") {
         notifyPost();
@@ -164,10 +196,11 @@ const server = createServer(async (req, res) => {
       }
       if (body.command.channel && !channels.some(row => row.slug === body.command.channel && row.channel_id === body.command.expected_channel_id)) return reply(404, {});
       if (refuseNextLookup.delete(body.command_id)) return reply(403, {});
+      if (cmd.attachments?.some(ref => ![...uploads.values()].some(f => f.id === ref.file_id && f.digest && ref.version_n === 1))) return reply(400, {});
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body,
+        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments: cmd.attachments,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
         receipts.set(body.command_id, { command: body.command, signal: messages[0] });
         if (review && body.command.body === "Uncertain send") {
@@ -182,7 +215,10 @@ const server = createServer(async (req, res) => {
     const ws = workspaces.find(row => "eq." + row.workspace_id === url.searchParams.get("workspace_id")?.toLowerCase());
     if (!ws) return reply(403, {});
     switch (url.pathname) {
-      case "/rest/v1/channels": return reply(200, ws.workspace_id === workspace ? channels : []);
+      case "/rest/v1/channels": {
+        const filter = url.searchParams.get("channel_id");
+        return reply(200, ws.workspace_id === workspace ? channels.filter(c => !filter || "eq." + c.channel_id === filter.toLowerCase()) : []);
+      }
       case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }]);
       case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }]);
       case "/rest/v1/signals": {
