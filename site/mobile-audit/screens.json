@@ -3046,7 +3046,11 @@
     ],
     "requiresSeed": [
       "seed_delegated_invitation"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "\"action\":\"accept\""
+    }
   },
   {
     "id": "dialog.navigation-drawer",
