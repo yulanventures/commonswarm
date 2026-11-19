@@ -8050,7 +8050,24 @@ import "../../styles/kylon-image-viewer.css";
         signIn: async draft => {
           if (!session || session.user.id.toLowerCase() !== ownerUserId) return;
           const userEmail = session.user.email ?? "";
-          const ownerLoginId = renderedAuthLoginId || (isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "");
+          // C5: Require the exact rendered { userId, loginId } pair. Never fall back to
+          // ambient currentActiveLogin(), which may already have shifted to Account B!
+          const ownerRenderedUserId = renderedAuthUserId;
+          const ownerLoginId = renderedAuthLoginId;
+          if (isMultiAccountEnabled()) {
+            const exactPinValid =
+              Boolean(ownerRenderedUserId && ownerLoginId) &&
+              ownerRenderedUserId.toLowerCase() === ownerUserId &&
+              ownerRenderedUserId === session.user.id;
+            if (!exactPinValid) {
+              disposeSeatAdminDialog();
+              const refused = await signOutActiveAccount(null);
+              renderAccountSwitcher();
+              if (refused?.notice) pendingFallbackNotice = refused.notice;
+              if (!authReloadQueued) runBoot();
+              return;
+            }
+          }
           saveSeatAdminReauthIntent({
             userId: ownerUserId,
             workspaceId: ownerWorkspaceId,
@@ -8070,9 +8087,10 @@ import "../../styles/kylon-image-viewer.css";
           renderedAuthViewGen = -1;
           resetWorkspaceSessionState();
           if (isMultiAccountEnabled()) {
-            const signOutRes = await signOutActiveAccount(
-              ownerLoginId ? { userId: session.user.id, loginId: ownerLoginId } : null,
-            );
+            const signOutRes = await signOutActiveAccount({
+              userId: ownerRenderedUserId,
+              loginId: ownerLoginId,
+            });
             clearPerUserPrivateConvenienceKeys(ownerUserId);
             inactiveBadgePoller?.prune();
             session = null;
@@ -16760,26 +16778,43 @@ import "../../styles/kylon-image-viewer.css";
       button.addEventListener("click", async () => {
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
-        const signingOutUserId = renderedAuthUserId || session?.user.id || "";
-        const signingOutLoginId = renderedAuthLoginId;
-        if (signingOutUserId) inactiveBadgePoller?.forgetExpired(signingOutUserId);
-        pendingSeatAdminReauthNotice = false;
-        pendingForcedNotice = null;
-        passwordChangeNotice = null;
-        clearSeatAdminReauthIntent();
-        if (signingOutUserId) {
+        if (isMultiAccountEnabled()) {
+          // C5: Require the exact rendered { userId, loginId } pair and verify consistency with
+          // session; refuse missing or inconsistent pins without sending any revoke to ambient B!
+          const signingOutUserId = renderedAuthUserId;
+          const signingOutLoginId = renderedAuthLoginId;
+          const consistentPin =
+            Boolean(signingOutUserId && signingOutLoginId) &&
+            (!session || session.user.id === signingOutUserId);
+          if (!consistentPin) {
+            const refused = await signOutActiveAccount(null);
+            inactiveBadgePoller?.prune();
+            renderAccountSwitcher();
+            button.disabled = false;
+            if (refused?.nextActive) {
+              if (refused.notice) pendingFallbackNotice = refused.notice;
+              if (!authReloadQueued) runBoot();
+              return;
+            }
+            teardownActiveAccountView();
+            showAuthView("choices");
+            showPanel("signed-out");
+            if (refused?.notice) authError(refused.notice);
+            return;
+          }
+          inactiveBadgePoller?.forgetExpired(signingOutUserId);
+          pendingSeatAdminReauthNotice = false;
+          pendingForcedNotice = null;
+          passwordChangeNotice = null;
+          clearSeatAdminReauthIntent();
           clearCreateIntent(signingOutUserId);
           forgetAddAgent(addAgentStore(), signingOutUserId);
-          if (isMultiAccountEnabled()) clearPerUserPrivateConvenienceKeys(signingOutUserId);
-        }
-        teardownActiveAccountView();
-        if (isMultiAccountEnabled()) {
-          // C5: Pass exact displayed { userId, loginId } so a stale peer removal of A can NEVER revoke fallback B!
-          const result = await signOutActiveAccount(
-            signingOutUserId && signingOutLoginId
-              ? { userId: signingOutUserId, loginId: signingOutLoginId }
-              : null,
-          );
+          clearPerUserPrivateConvenienceKeys(signingOutUserId);
+          teardownActiveAccountView();
+          const result = await signOutActiveAccount({
+            userId: signingOutUserId,
+            loginId: signingOutLoginId,
+          });
           inactiveBadgePoller?.prune();
           session = null;
           renderAccountSwitcher();
@@ -16794,6 +16829,16 @@ import "../../styles/kylon-image-viewer.css";
           if (result?.notice) authError(result.notice);
           return;
         }
+        const signingOutUserId = renderedAuthUserId || session?.user.id || "";
+        pendingSeatAdminReauthNotice = false;
+        pendingForcedNotice = null;
+        passwordChangeNotice = null;
+        clearSeatAdminReauthIntent();
+        if (signingOutUserId) {
+          clearCreateIntent(signingOutUserId);
+          forgetAddAgent(addAgentStore(), signingOutUserId);
+        }
+        teardownActiveAccountView();
         await signOut();
         session = null;
         showAuthView("choices");
@@ -16880,7 +16925,20 @@ import "../../styles/kylon-image-viewer.css";
       });
     };
 
+    let activeAddAccountOtpAttemptId: string | null = null;
+    let activeAddAccountOtpEmail = "";
+    let addAccountClosingForPromotion = false;
+    let addAccountDialogEpoch = 0;
+    const retireAddAccountAttemptsSync = (): void => {
+      addAccountDialogEpoch += 1;
+      if (activeAddAccountOtpAttemptId) {
+        accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+        activeAddAccountOtpAttemptId = null;
+      }
+      accountManager()?.cancelAttempt();
+    };
     const dismissAllAccountDialogsAndSecrets = (): void => {
+      retireAddAccountAttemptsSync();
       closePasswordDialog();
       closeWorkspaceSkillsDialog();
       if (activeImageViewerDialog) {
@@ -17123,9 +17181,6 @@ import "../../styles/kylon-image-viewer.css";
       void inactiveBadgePoller?.pollOnce();
     };
 
-    let activeAddAccountOtpAttemptId: string | null = null;
-    let activeAddAccountOtpEmail = "";
-    let addAccountClosingForPromotion = false;
     const showAddAccountStep = (step: "entry" | "code"): void => {
       const entry = one<HTMLElement>("[data-add-account-entry]");
       const codeStep = one<HTMLFormElement>("[data-add-account-code-step]");
@@ -17152,6 +17207,7 @@ import "../../styles/kylon-image-viewer.css";
       const emailInput = one<HTMLInputElement>("#add-account-email");
       const status = one<HTMLElement>("[data-add-account-status]");
       if (!dialog) return;
+      addAccountDialogEpoch += 1;
       addAccountClosingForPromotion = false;
       resetAddAccountOtp();
       form?.reset();
@@ -17173,7 +17229,7 @@ import "../../styles/kylon-image-viewer.css";
       }
     });
 
-    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP step, password staging, cancel + focus return).
+    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP step, password staging, sync cancel + focus return).
     {
       const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
       const form = one<HTMLFormElement>("[data-add-account-form]");
@@ -17192,6 +17248,7 @@ import "../../styles/kylon-image-viewer.css";
 
       const sendAddAccountCode = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
         if (!status) return;
+        const openingEpoch = addAccountDialogEpoch;
         if (trigger) trigger.disabled = true;
         status.textContent = "";
         if (codeStatusEl) codeStatusEl.textContent = "";
@@ -17202,6 +17259,10 @@ import "../../styles/kylon-image-viewer.css";
             "add-account",
           );
           if (started && typeof started === "object" && started.attemptId) {
+            if (!dialog?.open || addAccountDialogEpoch !== openingEpoch) {
+              accountManager()?.cancelAttempt(started.attemptId);
+              return;
+            }
             activeAddAccountOtpAttemptId = started.attemptId;
             activeAddAccountOtpEmail = requestedEmail;
             if (codeEmailEl) codeEmailEl.textContent = requestedEmail;
@@ -17211,6 +17272,7 @@ import "../../styles/kylon-image-viewer.css";
             if (otpInput) { otpInput.value = ""; otpInput.focus(); }
           }
         } catch (error) {
+          if (!dialog?.open || addAccountDialogEpoch !== openingEpoch) return;
           if (activeAddAccountOtpEmail) {
             if (codeStatusEl) codeStatusEl.textContent = readableError(error);
           } else {
@@ -17222,23 +17284,33 @@ import "../../styles/kylon-image-viewer.css";
         }
       };
 
-      one<HTMLButtonElement>("[data-add-account-close]")?.addEventListener("click", () => dialog?.close());
+      // C3: Synchronously retire any in-flight OAuth/OTP attempt on close button, backdrop, and Escape
+      // BEFORE dialog.close() queues its async close event, preventing race-window redirects.
+      const closeAddAccountDialog = (): void => {
+        retireAddAccountAttemptsSync();
+        dialog?.close();
+      };
+      one<HTMLButtonElement>("[data-add-account-close]")?.addEventListener("click", () => closeAddAccountDialog());
+      dialog?.addEventListener("cancel", () => {
+        retireAddAccountAttemptsSync();
+      });
+      dialog?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") retireAddAccountAttemptsSync();
+      });
       dialog?.addEventListener("close", () => {
         const promoted = addAccountClosingForPromotion;
         addAccountClosingForPromotion = false;
-        if (activeAddAccountOtpAttemptId) {
-          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
-        }
+        retireAddAccountAttemptsSync();
         resetAddAccountOtp();
-        accountManager()?.cancelAttempt();
         form?.reset();
         if (status) status.textContent = "";
         if (!promoted && session) focusVisibleAccountTrigger();
       });
-      dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+      dialog?.addEventListener("click", (event) => { if (event.target === dialog) closeAddAccountDialog(); });
 
       for (const button of all<HTMLButtonElement>("[data-add-account-dialog] [data-signin-provider]")) {
         button.addEventListener("click", async () => {
+          const openingEpoch = addAccountDialogEpoch;
           button.disabled = true;
           if (status) status.textContent = "";
           try {
@@ -17246,9 +17318,12 @@ import "../../styles/kylon-image-viewer.css";
               button.dataset.signinProvider ?? "",
               new URL("/app", window.location.origin).href,
               "add-account",
+              { shouldNavigate: () => Boolean(dialog?.open && addAccountDialogEpoch === openingEpoch) },
             );
           } catch (error) {
-            if (status) status.textContent = readableError(error);
+            if (status && dialog?.open && addAccountDialogEpoch === openingEpoch) {
+              status.textContent = readableError(error);
+            }
             button.disabled = false;
           }
         });

@@ -51,6 +51,7 @@ import {
   type CallbackBootstrapResult,
   type HistoryLike,
   type LocationLike,
+  type MultiAccountEnv,
   type PinnedAccountContext,
   type PinnedOperationScope,
   type SignInPurpose,
@@ -199,8 +200,11 @@ function browserAttachmentContentType(name: string): string | null {
  * backend" state, and the UI says so rather than throwing on load.
  */
 export function deployment(): Deployment | null {
+  if (testDeploymentOverride) return testDeploymentOverride;
   const meta = (name: string): string | null =>
-    document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content?.trim() || null;
+    typeof document !== "undefined"
+      ? document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content?.trim() || null
+      : null;
 
   const buildEnv = (
     import.meta as ImportMeta & {
@@ -508,6 +512,8 @@ type ForcedTeardownDetail = {
 let sharedAccountManager: AccountManager | null = null;
 let sharedAccountManagerOrigin = "";
 let multiAccountBootPromise: Promise<{ cutoverClearedLegacy: boolean; callback: CallbackBootstrapResult }> | null = null;
+let testDeploymentOverride: Deployment | null = null;
+let testMultiAccountEnvOverride: Partial<MultiAccountEnv> | null = null;
 const ownershipListeners = new Set<(accounts: readonly AccountRecord[], active: { userId: string; loginId: string } | null) => void>();
 const forcedTeardownListeners = new Set<(detail: ForcedTeardownDetail) => void>();
 
@@ -524,12 +530,15 @@ export function accountManager(): AccountManager | null {
   sharedAccountManagerOrigin = originKey;
   multiAccountBootPromise = null;
   sharedAccountManager = new AccountManager(d, {
+    ...(testMultiAccountEnvOverride ?? {}),
     onOwnershipChange: (accounts, active) => {
+      testMultiAccountEnvOverride?.onOwnershipChange?.(accounts, active);
       for (const listener of [...ownershipListeners]) {
         try { listener(accounts, active); } catch { /* isolate listener errors */ }
       }
     },
     onForcedTeardown: (detail) => {
+      testMultiAccountEnvOverride?.onForcedTeardown?.(detail);
       for (const listener of [...forcedTeardownListeners]) {
         try { listener(detail); } catch { /* isolate listener errors */ }
       }
@@ -538,12 +547,24 @@ export function accountManager(): AccountManager | null {
   return sharedAccountManager;
 }
 
+/** Test-only override for deployment and AccountManager env (cleared by resetAccountManagerForTesting). */
+export function configureMultiAccountForTesting(options: {
+  deployment: Deployment;
+  env?: Partial<MultiAccountEnv>;
+}): void {
+  resetAccountManagerForTesting();
+  testDeploymentOverride = options.deployment;
+  testMultiAccountEnvOverride = options.env ?? null;
+}
+
 /** Test-only reset for the shared multi-account manager. */
 export function resetAccountManagerForTesting(): void {
   sharedAccountManager?.destroy();
   sharedAccountManager = null;
   sharedAccountManagerOrigin = "";
   multiAccountBootPromise = null;
+  testDeploymentOverride = null;
+  testMultiAccountEnvOverride = null;
   ownershipListeners.clear();
   forcedTeardownListeners.clear();
 }
@@ -615,13 +636,18 @@ export function onAuthChange(listener: (event: string, session: Session | null) 
   }
   const mgr = accountManager();
   if (!mgr) return () => undefined;
+  let unsubscribed = false;
   let lastKey: string | null = null;
+  let verifySeq = 0;
   const emitActive = () => {
+    if (unsubscribed) return;
     const active = mgr.activeAccount();
     const key = active ? `${active.userId}:${active.loginId}` : null;
+    const dispatchViewGen = mgr.currentViewGeneration();
     if (key === lastKey) return;
     const hadPrevious = lastKey !== null;
     lastKey = key;
+    const seq = ++verifySeq;
     if (!active) {
       listener("SIGNED_OUT", null);
       return;
@@ -636,24 +662,35 @@ export function onAuthChange(listener: (event: string, session: Session | null) 
     if (hadPrevious) {
       listener("SIGNED_OUT", null);
     }
+    const isStillCurrent = (): boolean => {
+      if (unsubscribed || seq !== verifySeq) return false;
+      if (mgr.currentViewGeneration() !== dispatchViewGen) return false;
+      const nowActive = mgr.activeAccount();
+      return Boolean(nowActive && `${nowActive.userId}:${nowActive.loginId}` === key);
+    };
     void rt.verifySession()
       .then((verified) => {
-        const nowActive = mgr.activeAccount();
-        if (!nowActive || `${nowActive.userId}:${nowActive.loginId}` !== key) return;
+        if (!isStillCurrent()) return;
         listener(verified ? "SIGNED_IN" : "SIGNED_OUT", verified);
       })
       .catch(() => {
-        const nowActive = mgr.activeAccount();
-        if (!nowActive || `${nowActive.userId}:${nowActive.loginId}` !== key) return;
+        if (!isStillCurrent()) return;
         listener("SIGNED_OUT", null);
       });
   };
   const offOwn = onAccountOwnershipChange(() => emitActive());
   const offTear = onAccountForcedTeardown(() => {
+    if (unsubscribed) return;
     lastKey = null;
+    verifySeq += 1;
     listener("SIGNED_OUT", null);
   });
-  return () => { offOwn(); offTear(); };
+  return () => {
+    unsubscribed = true;
+    verifySeq += 1;
+    offOwn();
+    offTear();
+  };
 }
 
 /** One client per page. Returns null when the build has no backend configured. */
@@ -958,11 +995,15 @@ export async function signInWithProvider(
   provider: string,
   redirectTo: string,
   purpose: SignInPurpose = "signed-out",
+  options: { shouldNavigate?: () => boolean } = {},
 ): Promise<void> {
   const entry = authProvider(provider);
   if (isMultiAccountEnabled()) {
     const mgr = accountManager();
     if (!mgr) throw new NoDeployment();
+    if (options.shouldNavigate?.() === false) {
+      throw new Error("Sign-in was cancelled.");
+    }
     const target = new URL(redirectTo, typeof window !== "undefined" ? window.location.origin : "https://commonswarm.com");
     const effectivePurpose: SignInPurpose =
       purpose === "signed-out" && mgr.listAccounts().length > 0 ? "add-account" : purpose;
@@ -975,8 +1016,10 @@ export async function signInWithProvider(
       origin: target.origin,
       ...(resume ? { resume } : {}),
     });
-    // C3: Recheck attempt liveness synchronously right before navigation so a retired/closed dialog never redirects.
-    if (!mgr.isAttemptActive(attemptId)) {
+    // C3: Recheck attempt liveness AND dialog lifetime synchronously right before navigation
+    // so a closed/escaped dialog never redirects even before its queued close event fires.
+    if (!mgr.isAttemptActive(attemptId) || options.shouldNavigate?.() === false) {
+      mgr.cancelAttempt(attemptId);
       throw new Error("Sign-in was cancelled.");
     }
     if (typeof window !== "undefined") {
@@ -1326,13 +1369,19 @@ export async function signOutActiveAccount(
 ): Promise<SignOutAccountResult | null> {
   const mgr = accountManager();
   if (!mgr) return null;
-  // C5: When caller specifies the exact displayed { userId, loginId }, pass it straight through
-  // without reselecting from activeAccount() (preventing accidental revocation of fallback B).
-  const target = expected && expected.userId && expected.loginId
-    ? expected
-    : mgr.activeAccount();
-  if (!target) return null;
-  return mgr.signOutAccount(target.userId, target.loginId);
+  // C5: Require the exact displayed { userId, loginId } pair. Never fall back to the ambient
+  // activeAccount(), which may already have shifted to fallback Account B after peer removal!
+  if (!expected || !expected.userId || !expected.loginId) {
+    return {
+      browserSignedOut: false,
+      localTabTornDown: false,
+      slotDeleted: false,
+      remoteRevocation: { status: "skipped" },
+      nextActive: mgr.activeAccount(),
+      notice: "Your displayed account changed before sign-out. No other account was signed out.",
+    };
+  }
+  return mgr.signOutAccount(expected.userId, expected.loginId);
 }
 
 export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | null> {
@@ -1341,9 +1390,9 @@ export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | nu
   return mgr.signOutAllAccounts();
 }
 
-export async function signOut(): Promise<void> {
+export async function signOut(expected?: { userId: string; loginId: string } | null): Promise<void> {
   if (isMultiAccountEnabled()) {
-    await signOutActiveAccount();
+    await signOutActiveAccount(expected ?? null);
     return;
   }
   deadSession = false;

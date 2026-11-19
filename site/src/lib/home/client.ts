@@ -279,20 +279,25 @@ export function createHomeServer(
       let pages = 1;
       const MAX_PAGES = 20;
       while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.asks[page.asks.length - 1]!;
         let next: DecisionQueue | null = null;
+        let pageFailed = false;
         try {
           const paged = await c.schema('swarm_read').rpc('decision_queue_page', {
             p_workspace_id: workspaceId,
             p_after_created_at: last.created_at,
             p_after_id: last.signal_id,
           });
-          if (paged.error) break;
-          next = parseDecisionQueue(paged.data, workspaceId);
+          if (paged.error) pageFailed = true;
+          else next = parseDecisionQueue(paged.data, workspaceId);
         } catch {
-          break;
+          pageFailed = true;
         }
-        if (!next) break;
+        // C2: Guard after every page OUTSIDE the partial-queue catch so a view change
+        // throws and drops prior-account rows instead of returning a stale partial queue.
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+        if (pageFailed || !next) break;
         let added = 0;
         for (const ask of next.asks) {
           if (seen.has(ask.signal_id)) continue;
@@ -308,6 +313,7 @@ export function createHomeServer(
         }
         if (added === 0) break;
       }
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       return {
         workspace_id: workspaceId,
         generated_at: page.generated_at,

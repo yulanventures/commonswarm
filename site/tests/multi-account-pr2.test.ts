@@ -27,6 +27,20 @@ import {
   type LockLike,
 } from "../src/lib/multi-account.ts";
 import { completePasswordChange } from "../src/lib/password-change-completion.ts";
+import {
+  AuthRecoveryRequired,
+  accountManager,
+  configureMultiAccountForTesting,
+  onAuthChange,
+  pinAccountContext,
+  postBrowserSignal,
+  prepareBrowserAttachments,
+  resetAccountManagerForTesting,
+  signInWithProvider,
+  signOutActiveAccount,
+  uploadBrowserAttachment,
+} from "../src/lib/commonswarm.ts";
+import { createHomeServer, HomeCommandRefused } from "../src/lib/home/client.ts";
 
 class MemoryStorage implements Storage {
   private map = new Map<string, string>();
@@ -1267,4 +1281,493 @@ test("PR 2 Designer CHANGES (1)-(4) + HezSec C3 signed-out copy: distinct code s
 
   // Designer #4: Name new identity on invitation review after identity change
   assert.ok(inviteOnramp.includes("data-review-identity-notice") && inviteOnramp.includes("You’re now joining as ${authEmail || \"this account\"}. Review this invitation again."));
+});
+
+test("PR 2 HezSec C1 real-caller witness: production uploadBrowserAttachment + postBrowserSignal drop stale PUT/commit/post across same-workspace A->B and A->B->A; unchanged control succeeds", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const sharedWs = "ws-shared-real-1";
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const live = new Map<string, typeof userA>();
+
+  let holdCreate = false;
+  let releaseCreate: (() => void) | null = null;
+  const commandsSent: Array<{ kind: string; actor: string }> = [];
+  let putCount = 0;
+
+  const mockFetch: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/functions/v1/command")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer)!;
+      const env = JSON.parse(String(init?.body ?? "{}")) as { command: { kind: string; file_id?: string; version_id?: string } };
+      commandsSent.push({ kind: env.command.kind, actor: who.id });
+      if (env.command.kind === "file_version_create" && holdCreate) {
+        await new Promise<void>((resolve) => { releaseCreate = resolve; });
+      }
+      if (env.command.kind === "file_version_create") {
+        return Response.json({
+          status: "accepted",
+          file_id: env.command.file_id ?? "f-real-1",
+          version_id: env.command.version_id ?? "v-real-1",
+          version_n: 1,
+          upload_path: "/storage/v1/object/upload/sign/attachments/f-real-1?token=up-1",
+        });
+      }
+      if (env.command.kind === "file_version_commit") {
+        return Response.json({
+          status: "accepted",
+          file_id: env.command.file_id ?? "f-real-1",
+          version_id: env.command.version_id ?? "v-real-1",
+          version_n: 1,
+        });
+      }
+      return Response.json({
+        status: "accepted",
+        signal: {
+          id: "sig-real-1",
+          workspace_id: sharedWs,
+          kind: "message",
+          from_kind: "user",
+          from_id: who.id,
+          body: "hello control",
+          created_at: "2026-11-19T00:00:00Z",
+        },
+      });
+    }
+    if (init?.method === "PUT" && u.pathname.startsWith("/storage/v1/")) {
+      putCount += 1;
+      return new Response(null, { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${init?.method ?? "GET"} ${u.href}`);
+  };
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = mockFetch;
+  setMultiAccountEnabledForTesting(true);
+  configureMultiAccountForTesting({
+    deployment,
+    env: {
+      localStorage: new MemoryStorage(),
+      sessionStorage: new MemoryStorage(),
+      fetcher: mockFetch,
+      webLocks: createLocks(),
+      createBroadcastChannel: noopChannel,
+    },
+  });
+  try {
+    const mgr = accountManager()!;
+    await mgr.initialize();
+    await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+    await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+    mgr.switchActiveAccount(userA.id);
+    mgr.setActiveWorkspace(sharedWs);
+    const sessionA = (await mgr.runtimeFor(userA.id)!.verifySession())!;
+
+    // Case 1: Held file_version_create across same-workspace A -> B -> 0 PUT, 0 commit, 0 post!
+    const [intent1] = prepareBrowserAttachments([new File(["hello A1"], "note.txt", { type: "text/plain" })]);
+    const pin1 = pinAccountContext({ userId: userA.id, workspaceId: sharedWs })!;
+    holdCreate = true;
+    const task1 = uploadBrowserAttachment(sessionA, sharedWs, intent1!, pin1);
+    await new Promise((r) => setTimeout(r, 15));
+    mgr.switchActiveAccount(userB.id);
+    mgr.setActiveWorkspace(sharedWs);
+    holdCreate = false;
+    (releaseCreate as (() => void) | null)?.();
+    releaseCreate = null;
+    await assert.rejects(() => task1, (err: unknown) => err instanceof AuthRecoveryRequired || err instanceof MultiAccountAuthRecoveryRequired);
+    assert.deepEqual(commandsSent.map((c) => c.kind), ["file_version_create"]);
+    assert.equal(putCount, 0, "production uploadBrowserAttachment must NOT PUT after same-workspace A->B");
+
+    // Case 2: Held file_version_create across same-workspace A -> B -> A -> 0 PUT, 0 commit, 0 post!
+    commandsSent.length = 0;
+    mgr.switchActiveAccount(userA.id);
+    mgr.setActiveWorkspace(sharedWs);
+    const [intent2] = prepareBrowserAttachments([new File(["hello A2"], "note2.txt", { type: "text/plain" })]);
+    const pin2 = pinAccountContext({ userId: userA.id, workspaceId: sharedWs })!;
+    holdCreate = true;
+    const task2 = uploadBrowserAttachment(sessionA, sharedWs, intent2!, pin2);
+    await new Promise((r) => setTimeout(r, 15));
+    mgr.switchActiveAccount(userB.id);
+    mgr.setActiveWorkspace(sharedWs);
+    mgr.switchActiveAccount(userA.id);
+    mgr.setActiveWorkspace(sharedWs);
+    holdCreate = false;
+    (releaseCreate as (() => void) | null)?.();
+    releaseCreate = null;
+    await assert.rejects(() => task2, (err: unknown) => err instanceof AuthRecoveryRequired || err instanceof MultiAccountAuthRecoveryRequired);
+    assert.deepEqual(commandsSent.map((c) => c.kind), ["file_version_create"]);
+    assert.equal(putCount, 0, "production uploadBrowserAttachment must NOT PUT after same-workspace A->B->A");
+
+    // Case 3: Unchanged-account control succeeds end-to-end through uploadBrowserAttachment + postBrowserSignal!
+    commandsSent.length = 0;
+    const [intent3] = prepareBrowserAttachments([new File(["hello ok"], "ok.txt", { type: "text/plain" })]);
+    const pin3 = pinAccountContext({ userId: userA.id, workspaceId: sharedWs })!;
+    const ref3 = await uploadBrowserAttachment(sessionA, sharedWs, intent3!, pin3);
+    await postBrowserSignal(sessionA, "cmd-post-ok", sharedWs, "hello control", [], undefined, [ref3], {}, pin3);
+    assert.deepEqual(commandsSent, [
+      { kind: "file_version_create", actor: userA.id },
+      { kind: "file_version_commit", actor: userA.id },
+      { kind: "post_signal", actor: userA.id },
+    ]);
+    assert.equal(putCount, 1);
+  } finally {
+    resetAccountManagerForTesting();
+    setMultiAccountEnabledForTesting(null);
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("PR 2 HezSec C2 real-caller witness: onAuthChange suppresses stale success/failure across A->B->A and after unsubscribe; decisionQueue pagination drops stale pages across switch", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const sharedWs = "ws-c2-paged-1";
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const live = new Map<string, typeof userA>();
+
+  let holdUserToken: string | null = null;
+  let holdUserFail = false;
+  let releaseHeldUser: (() => void) | null = null;
+  let holdPage2 = false;
+  let page2ReturnError = false;
+  let releasePage2: (() => void) | null = null;
+  let pageRpcCalls = 0;
+
+  const makeAskRow = (idx: number, actor: string) => ({
+    signal_id: `sig-${actor}-${idx}`,
+    from: { kind: "user", id: actor, name: actor },
+    body: `Ask ${idx} for ${actor}`,
+    created_at: `2026-11-19T00:${String(idx).padStart(2, "0")}:00Z`,
+    until: "2026-11-20T00:00:00Z",
+    reraised: null,
+  });
+
+  const mockFetch: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      if (holdUserToken && bearer === holdUserToken) {
+        holdUserToken = null;
+        const shouldFail = holdUserFail;
+        await new Promise<void>((resolve) => { releaseHeldUser = resolve; });
+        if (shouldFail) return Response.json({ message: "transient error" }, { status: 500 });
+      }
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/rest/v1/rpc/decision_queue")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer)!;
+      return Response.json({
+        workspace_id: sharedWs,
+        generated_at: "2026-11-19T01:00:00Z",
+        total: 3,
+        truncated: true,
+        asks: [makeAskRow(1, who.id)],
+      });
+    }
+    if (u.pathname.endsWith("/rest/v1/rpc/decision_queue_page")) {
+      pageRpcCalls += 1;
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer)!;
+      if (holdPage2) {
+        holdPage2 = false;
+        await new Promise<void>((resolve) => { releasePage2 = resolve; });
+      }
+      if (page2ReturnError) {
+        return Response.json({ code: "50000", message: "boom" }, { status: 500 });
+      }
+      return Response.json({
+        workspace_id: sharedWs,
+        generated_at: "2026-11-19T01:01:00Z",
+        total: 2,
+        truncated: false,
+        asks: [makeAskRow(2, who.id)],
+      });
+    }
+    throw new Error(`unexpected fetch: ${init?.method ?? "GET"} ${u.href}`);
+  };
+
+  setMultiAccountEnabledForTesting(true);
+  configureMultiAccountForTesting({
+    deployment,
+    env: {
+      localStorage: new MemoryStorage(),
+      sessionStorage: new MemoryStorage(),
+      fetcher: mockFetch,
+      webLocks: createLocks(),
+      createBroadcastChannel: noopChannel,
+    },
+  });
+  try {
+    const mgr = accountManager()!;
+    await mgr.initialize();
+    await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+    await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+    mgr.switchActiveAccount(userA.id);
+    const tokenA = mgr.runtimeFor(userA.id)!.peekAccessToken()!;
+
+    // Boundary 1a: onAuthChange held failure on A across A -> B -> A MUST NOT emit stale SIGNED_OUT after B->A!
+    const events: Array<{ event: string; userId: string | null }> = [];
+    const unsub = onAuthChange((event, s) => events.push({ event, userId: s?.user.id ?? null }));
+    holdUserToken = tokenA;
+    holdUserFail = true;
+    mgr.switchActiveAccount(userB.id);
+    mgr.switchActiveAccount(userA.id); // Triggers held verification #1 (gen N)
+    await new Promise((r) => setTimeout(r, 15));
+    const relGen1Fail = releaseHeldUser as (() => void) | null;
+    releaseHeldUser = null;
+    // Switch A -> B -> A again (gen N+2) while gen N verification is still held!
+    mgr.switchActiveAccount(userB.id);
+    mgr.switchActiveAccount(userA.id);
+    const eventsAfterSwitch2 = events.length;
+    // Now release the older held failure from gen N -> MUST be 100% suppressed, while gen N+2 resolves SIGNED_IN!
+    relGen1Fail?.();
+    await new Promise((r) => setTimeout(r, 30));
+    const emittedAfterRelease = events.slice(eventsAfterSwitch2);
+    assert.deepEqual(
+      emittedAfterRelease,
+      [{ event: "SIGNED_IN", userId: userA.id }],
+      "stale onAuthChange failure from earlier A->B->A gen must be suppressed; only current gen N+2 publishes",
+    );
+
+    // Boundary 1b: Held SUCCESS on A released AFTER A->B switch -> MUST NOT publish stale SIGNED_IN for A!
+    holdUserToken = tokenA;
+    holdUserFail = false;
+    mgr.switchActiveAccount(userB.id);
+    mgr.switchActiveAccount(userA.id);
+    await new Promise((r) => setTimeout(r, 15));
+    const relStaleSuccess = releaseHeldUser as (() => void) | null;
+    releaseHeldUser = null;
+    mgr.switchActiveAccount(userB.id);
+    const eventsAfterSwitchToB = events.length;
+    relStaleSuccess?.();
+    await new Promise((r) => setTimeout(r, 30));
+    const afterStaleSuccess = events.slice(eventsAfterSwitchToB);
+    assert.equal(
+      afterStaleSuccess.some((e) => e.userId === userA.id),
+      false,
+      "stale onAuthChange success for A after switching to B must never publish",
+    );
+
+    // Boundary 1c: Held verification released AFTER unsubscribe() -> 0 events published!
+    holdUserToken = tokenA;
+    holdUserFail = false;
+    mgr.switchActiveAccount(userA.id);
+    await new Promise((r) => setTimeout(r, 15));
+    const relAfterUnsub = releaseHeldUser as (() => void) | null;
+    releaseHeldUser = null;
+    unsub();
+    const countAtUnsub = events.length;
+    relAfterUnsub?.();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(events.length, countAtUnsub, "held onAuthChange verification released after unsubscribe must not publish");
+
+    // Boundary 2a: decisionQueue page 2 held across A -> B (success response) -> throws HomeCommandRefused, drops A rows!
+    mgr.switchActiveAccount(userA.id);
+    const sessionA = (await mgr.runtimeFor(userA.id)!.verifySession())!;
+    const home = createHomeServer(sessionA, {
+      client: () => mgr.runtimeFor(userA.id)!.client,
+      pinned: pinAccountContext({ userId: userA.id })!,
+    });
+    pageRpcCalls = 0;
+    holdPage2 = true;
+    page2ReturnError = false;
+    const dq1 = home.decisionQueue(sharedWs);
+    await new Promise((r) => setTimeout(r, 20));
+    mgr.switchActiveAccount(userB.id);
+    (releasePage2 as (() => void) | null)?.();
+    releasePage2 = null;
+    await assert.rejects(() => dq1, HomeCommandRefused);
+    assert.equal(pageRpcCalls, 1, "must not issue any page 3 after switch");
+
+    // Boundary 2b: decisionQueue page 2 held across A -> B -> A with page-2 RPC error -> STILL throws (never returns partial A page-1 rows)!
+    mgr.switchActiveAccount(userA.id);
+    const home2 = createHomeServer(sessionA, {
+      client: () => mgr.runtimeFor(userA.id)!.client,
+      pinned: pinAccountContext({ userId: userA.id })!,
+    });
+    holdPage2 = true;
+    page2ReturnError = true;
+    const dq2 = home2.decisionQueue(sharedWs);
+    await new Promise((r) => setTimeout(r, 20));
+    mgr.switchActiveAccount(userB.id);
+    mgr.switchActiveAccount(userA.id);
+    (releasePage2 as (() => void) | null)?.();
+    releasePage2 = null;
+    await assert.rejects(() => dq2, HomeCommandRefused);
+
+    // Boundary 2c: Unchanged-account control returns both pages cleanly!
+    mgr.switchActiveAccount(userA.id);
+    const home3 = createHomeServer(sessionA, {
+      client: () => mgr.runtimeFor(userA.id)!.client,
+      pinned: pinAccountContext({ userId: userA.id })!,
+    });
+    holdPage2 = false;
+    page2ReturnError = false;
+    const fullQueue = await home3.decisionQueue(sharedWs);
+    assert.ok(fullQueue);
+    assert.equal(fullQueue.asks.length, 2);
+    assert.equal(fullQueue.truncated, false);
+  } finally {
+    resetAccountManagerForTesting();
+    setMultiAccountEnabledForTesting(null);
+  }
+});
+
+test("PR 2 HezSec C3 & C5 real-caller witness: signInWithProvider aborts before navigation when dialog closes synchronously, and signOutActiveAccount refuses missing/stale pins with 0 revoke for B", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const live = new Map<string, typeof userA>();
+  const loggedOutTokens: string[] = [];
+
+  const mockFetch: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/auth/v1/logout")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      loggedOutTokens.push(bearer);
+      live.delete(bearer);
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  let holdDigest: (() => void) | null = null;
+  const gatedSubtle = {
+    digest: async (alg: AlgorithmIdentifier, data: BufferSource) => {
+      if (holdDigest) {
+        await new Promise<void>((r) => { holdDigest = r; });
+      }
+      return globalThis.crypto.subtle.digest(alg, data);
+    },
+  } as unknown as SubtleCrypto;
+
+  const sharedLs = new MemoryStorage();
+  const tabSs = new MemoryStorage();
+  const locks = createLocks();
+  let navigatedUrl: string | null = null;
+  const origWindow = (globalThis as Record<string, unknown>).window;
+  (globalThis as Record<string, unknown>).window = {
+    location: {
+      origin: "https://commonswarm.com",
+      assign: (href: string) => { navigatedUrl = href; },
+    },
+  };
+
+  setMultiAccountEnabledForTesting(true);
+  configureMultiAccountForTesting({
+    deployment,
+    env: {
+      localStorage: sharedLs,
+      sessionStorage: tabSs,
+      fetcher: mockFetch,
+      subtle: gatedSubtle,
+      webLocks: locks,
+      createBroadcastChannel: noopChannel,
+    },
+  });
+  try {
+    const mgr = accountManager()!;
+    await mgr.initialize();
+    const resA = await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+    const resB = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+    assert.equal(resA.kind, "promoted");
+    assert.equal(resB.kind, "promoted");
+    mgr.switchActiveAccount(userA.id);
+
+    // C3: Dialog closes synchronously (shouldNavigate flips false) BEFORE queued close event fires -> 0 navigation & 0 staging!
+    let dialogOpen = true;
+    holdDigest = () => undefined;
+    const navTask = signInWithProvider("google", "https://commonswarm.com/app", "add-account", {
+      shouldNavigate: () => dialogOpen,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    // Simulate Escape / close button flipping dialogOpen=false BEFORE dialog close event runs cancelAttempt!
+    dialogOpen = false;
+    const rel = holdDigest as (() => void) | null;
+    holdDigest = null;
+    rel?.();
+    await assert.rejects(() => navTask, /cancelled/i);
+    assert.equal(navigatedUrl, null, "must NEVER call window.location.assign after dialog closes");
+
+    // C5: Peer removes A without firing storage event; calling signOutActiveAccount with absent pair (null)
+    // OR departed A's exact pair MUST send 0 revokes for Account B and keep B signed in!
+    const peer = new AccountManager(deployment, {
+      localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher: mockFetch, webLocks: locks, createBroadcastChannel: noopChannel,
+    });
+    await peer.initialize();
+    await peer.signOutAccount(userA.id, resA.account.loginId);
+    peer.destroy();
+    loggedOutTokens.length = 0;
+
+    // 1. Absent displayed pair (null) -> MUST refuse without falling back to ambient B!
+    const refusedNull = await signOutActiveAccount(null);
+    assert.equal(refusedNull?.browserSignedOut, false);
+    assert.equal(refusedNull?.remoteRevocation.status, "skipped");
+    assert.equal(loggedOutTokens.length, 0, "absent displayed pair must send ZERO revokes");
+    assert.equal(mgr.listAccounts().some((a) => a.userId === userB.id), true, "B stays signed in");
+
+    // 2. Empty loginId pair -> MUST refuse without falling back to ambient B!
+    const refusedPartial = await signOutActiveAccount({ userId: userA.id, loginId: "" });
+    assert.equal(refusedPartial?.browserSignedOut, false);
+    assert.equal(refusedPartial?.remoteRevocation.status, "skipped");
+    assert.equal(loggedOutTokens.length, 0, "partial displayed pair must send ZERO revokes");
+
+    // 3. Exact departed A pair -> B stays untouched with 0 revokes!
+    await signOutActiveAccount({ userId: userA.id, loginId: resA.account.loginId });
+    assert.equal(loggedOutTokens.length, 0, "departed A exact pair must send ZERO revokes for B");
+    assert.equal(mgr.listAccounts().some((a) => a.userId === userB.id), true, "B stays signed in");
+  } finally {
+    resetAccountManagerForTesting();
+    setMultiAccountEnabledForTesting(null);
+    if (origWindow === undefined) delete (globalThis as Record<string, unknown>).window;
+    else (globalThis as Record<string, unknown>).window = origWindow;
+  }
 });
