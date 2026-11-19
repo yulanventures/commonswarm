@@ -4346,39 +4346,42 @@ async function admitHumanSession(tx: Sql, verified: VerifiedHuman): Promise<bool
   return admitted?.ok === true;
 }
 
+async function authenticateHumanUnchanged(
+  tx: Sql,
+  verified: VerifiedHuman,
+): Promise<AuthContext> {
+  const existing = await tx<{ user_id: string; display_name: string; email: string | null }[]>`
+    SELECT user_id, display_name, email
+    FROM swarm.users
+    WHERE user_id = ${verified.userId}::uuid
+  `;
+  const row = existing[0];
+  if (
+    !row ||
+    row.display_name !== verified.displayName ||
+    (verified.email !== null && row.email !== verified.email)
+  ) {
+    throw new LocalAuthDiscoveryChanged();
+  }
+  return {
+    credentialKind: "user",
+    ledgerCredentialKind: "user",
+    ledgerPrincipalId: row.user_id,
+    credentialId: null,
+    deviceId: null,
+    actor: { user: row.user_id, agent_principal: null, run: null },
+    agent: null,
+    agentFirstUse: false,
+    identityVerified: verified.identityVerified,
+    email: verified.email ?? row.email,
+    interactiveAuthAtSeconds: verified.interactiveAuthAtSeconds,
+  };
+}
+
 async function authenticateHuman(
   tx: Sql,
   verified: VerifiedHuman,
-  options?: { skipUpsertIfUnchanged?: boolean },
 ): Promise<AuthContext | null> {
-  if (options?.skipUpsertIfUnchanged) {
-    const existing = await tx<{ user_id: string; display_name: string; email: string | null }[]>`
-      SELECT user_id, display_name, email
-      FROM swarm.users
-      WHERE user_id = ${verified.userId}::uuid
-    `;
-    const row = existing[0];
-    if (
-      !row ||
-      row.display_name !== verified.displayName ||
-      (verified.email !== null && row.email !== verified.email)
-    ) {
-      throw new LocalAuthDiscoveryChanged();
-    }
-    return {
-      credentialKind: "user",
-      ledgerCredentialKind: "user",
-      ledgerPrincipalId: row.user_id,
-      credentialId: null,
-      deviceId: null,
-      actor: { user: row.user_id, agent_principal: null, run: null },
-      agent: null,
-      agentFirstUse: false,
-      identityVerified: verified.identityVerified,
-      email: verified.email ?? row.email,
-      interactiveAuthAtSeconds: verified.interactiveAuthAtSeconds,
-    };
-  }
   const rows = await tx<{ user_id: string; email: string | null }[]>`
     INSERT INTO swarm.users (user_id, display_name, email)
     VALUES (
@@ -16344,14 +16347,15 @@ async function handleTransaction(
     // swarm.streams (they emit no stream events). Keep workspaceMode='share'
     // (still fenced against workspace archive/removal FOR UPDATE) and omit the
     // workspace stream lock so concurrent sibling agents do not serialize.
-    const isNonStreamWorkspaceKind =
-      kind === CLAIM_AGENT_INBOX_KIND ||
-      kind === ACK_AGENT_DELIVERY_KIND ||
-      kind === TOUCH_PRESENCE_KIND ||
-      kind === SIGNALS_SEEN_KIND ||
-      kind === "claim_wake_lease" ||
-      kind === "renew_wake_lease" ||
-      kind === "release_wake_lease";
+    const isNonStreamWorkspaceKind = [
+      CLAIM_AGENT_INBOX_KIND,
+      ACK_AGENT_DELIVERY_KIND,
+      TOUCH_PRESENCE_KIND,
+      SIGNALS_SEEN_KIND,
+      "claim_wake_lease",
+      "renew_wake_lease",
+      "release_wake_lease",
+    ].includes(kind);
     const isOperationalWorkspaceKind =
       isNonStreamWorkspaceKind || kind === RENEW_AGENT_TOKEN_KIND;
     let humanSkipUpsertIfUnchanged = false;
@@ -16458,9 +16462,9 @@ async function handleTransaction(
       : agentTokenHash !== null
       ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
-      ? await authenticateHuman(tx, verifiedHuman, {
-        skipUpsertIfUnchanged: humanSkipUpsertIfUnchanged && localState.localPlan !== null,
-      })
+      ? humanSkipUpsertIfUnchanged && localState.localPlan !== null
+        ? await authenticateHumanUnchanged(tx, verifiedHuman)
+        : await authenticateHuman(tx, verifiedHuman)
       : null;
     if (!auth) {
       logCommandFailure(
