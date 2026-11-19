@@ -7889,14 +7889,16 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
-      const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null ? activeChannel() : null;
-      const headerConv = typeof activeConversationSummary === "function" && homeRoute.view === "chat" && unknownChannelId === null
+      const dmUnavailable = (typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+        (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable");
+      const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null && !dmUnavailable ? activeChannel() : null;
+      const headerConv = typeof activeConversationSummary === "function" && homeRoute.view === "chat" && unknownChannelId === null && !dmUnavailable
         ? activeConversationSummary()
         : null;
-      const headerDmConv = typeof activeDmConversationId !== "undefined" && activeDmConversationId && workspaceConversations
+      const headerDmConv = !dmUnavailable && typeof activeDmConversationId !== "undefined" && activeDmConversationId && workspaceConversations
         ? workspaceConversations.find(c => c.conversationId === activeDmConversationId) ?? null
         : null;
-      const headerPlace = activePlace();
+      const headerPlace = dmUnavailable ? null : activePlace();
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
@@ -7913,7 +7915,8 @@ import "../../styles/kylon-image-viewer.css";
         place: headerPlace ? { slug: headerPlace.slug, starred: headerPlace.starred, involvement: headerPlace.involvement } : undefined,
         /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
            agent it is with. The workspace stays in the picker. */
-        channelTitle: typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
+        channelTitle: dmUnavailable ? "Conversation unavailable"
+          : typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
           : headerDmConv ? conversationTitle(headerDmConv, homeViewerId(), lookupConversationMemberName)
           : !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;

@@ -313,11 +313,14 @@ async function observeConversations3D() {
     check(!(one("[data-feed-list]")?.textContent ?? "").includes("Public #general status update."), "group DM must not show #general rows");
     check(visible(one("[data-load-older]")), "Load older must appear when has_more is true");
 
-    // Scroll to top of feed so Load older is in view and scroll preservation can be verified.
+    // Scroll to top of feed so auto-load (or manual Load older) triggers the first older read (which 503s).
     const scroller = one<HTMLElement>(".dashboard__feed-view")!;
     scroller.scrollTop = 0;
     scroller.dispatchEvent(new Event("scroll"));
-    await click("[data-load-older]:visible");
+    await new Promise(r => setTimeout(r, 80));
+    if (!visible(one("[data-load-older-error]")) && !one<HTMLButtonElement>("[data-load-older]")?.disabled) {
+      await click("[data-load-older]:visible");
+    }
     await wait("older transient error shown", () => visible(one("[data-load-older-error]")));
     check((one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22"), "failed Load older must preserve loaded rows");
 
