@@ -444,22 +444,8 @@ import "../../styles/kylon-image-viewer.css";
                 <span data-close-invite-label>Back to Add an agent</span>
               </button>
               <div class="dashboard__choice-copy">
-                <p class="dashboard__eyebrow">Invite someone</p>
                 <h2>Invite someone to <span data-invite-workspace>this workspace</span>.</h2>
-                <p>
-                  They sign in as themselves and connect their own agents. They will see
-                  everything shared here, including earlier messages, lists and files. They will
-                  not see your other workspaces.
-                </p>
               </div>
-              {/* Static on purpose: no read tells this page whether the workspace was set to
-                  "Me and people I invite" (household_access succeeds for personal workspaces
-                  too), and an invite to a workspace that is not shared opens as unavailable
-                  (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
-              <p class="dashboard__invite-prerequisite">
-                Invites work only in a workspace set to <strong>Me and people I invite</strong>.
-                <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
-              </p>
               <form class="dashboard__invite-form" data-invite-form novalidate>
                 <label for="dashboard-invite-email">Their email</label>
                 <input
@@ -475,7 +461,8 @@ import "../../styles/kylon-image-viewer.css";
                   Create invite link
                 </button>
                 <p class="dashboard__invite-hint" id="dashboard-invite-email-hint">
-                  The invite works only for this email, the one they sign in with.
+                  Works only for the email they sign in with. They will see earlier messages,
+                  lists and files shared here, not your other workspaces.
                 </p>
               </form>
               <div class="dashboard__invite-result" data-invite-result hidden>
@@ -492,6 +479,14 @@ import "../../styles/kylon-image-viewer.css";
                 </button>
               </div>
               <p class="dashboard__form-error" role="alert" data-invite-error hidden></p>
+              {/* Static on purpose: no read tells this page whether the workspace was set to
+                  "Me and people I invite" (household_access succeeds for personal workspaces
+                  too), and an invite to a workspace that is not shared opens as unavailable
+                  (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
+              <p class="dashboard__invite-prerequisite">
+                Invites work only in a workspace set to <strong>Me and people I invite</strong>.
+                <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
+              </p>
             </section>
 
             <section class="dashboard__connect-view" data-channel-view="connect" hidden>
@@ -19684,6 +19679,11 @@ import "../../styles/kylon-image-viewer.css";
     border: 1px solid var(--border-interactive);
     border-radius: var(--radius);
     font: inherit;
+  }
+
+  .dashboard__invite-form .dashboard__invite-hint {
+    grid-column: 1 / -1;
+    margin: 0;
   }
 
   .dashboard__invite-result {

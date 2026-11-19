@@ -2149,6 +2149,9 @@
       },
       {
         "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-agent-owner-teammate]"
+      },
+      {
+        "waitFor": "[data-channel-view=\"invite\"]:not([hidden]) [data-invite-email]:focus"
       }
     ],
     "ready": "[data-channel-view=\"invite\"]:not([hidden]) [data-invite-form]",
@@ -2157,7 +2160,11 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "invite_member"
+    }
   },
   {
     "id": "app.entity-detail",
