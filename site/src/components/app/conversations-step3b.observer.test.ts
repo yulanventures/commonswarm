@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
@@ -47,14 +48,15 @@ async function runStep3BFixture(viewportWidth: number): Promise<Step3BSnapshot> 
   assert.ok(script, "Step 3B modules must bundle");
 
   const tokensCss = await readFile(join(siteRoot, "src/styles/tokens.css"), "utf8");
+  const kylonTokensCss = await readFile(join(siteRoot, "src/styles/kylon-tokens.css"), "utf8");
   const railCss = await readFile(join(siteRoot, "src/styles/home/rail.css"), "utf8");
   const cmCss = await readFile(join(siteRoot, "src/styles/kylon-channel-management.css"), "utf8");
 
   const html = `<!doctype html><html data-theme="light"><head><meta charset="utf-8" />
-    <style>${tokensCss}\n${railCss}\n${cmCss}
+    <style>*, *::before, *::after { box-sizing: border-box; }\n${tokensCss}\n${kylonTokensCss}\n${railCss}\n${cmCss}
       body { margin: 0; width: ${viewportWidth}px; }
       live-dashboard { display: block; width: ${viewportWidth}px; }
-      [data-channel-directory] { position: static; display: flex; flex-direction: column; margin: 0; max-width: 100%; box-sizing: border-box; }
+      [data-channel-directory] { position: static; display: flex; flex-direction: column; margin: 0; inline-size: 100%; max-inline-size: 100%; }
     </style></head>
     <body>
       <live-dashboard class="dashboard" data-kylon-shell>
@@ -65,6 +67,7 @@ async function runStep3BFixture(viewportWidth: number): Promise<Step3BSnapshot> 
       <script>${script}</script>
       <script>
         (async () => {
+          try {
           const railHost = document.querySelector("#rail-host");
           const dirHost = document.querySelector("#dir-host");
           const previewHost = document.querySelector("#preview-host");
@@ -140,6 +143,9 @@ async function runStep3BFixture(viewportWidth: number): Promise<Step3BSnapshot> 
             newDmMinHeight,
             overflowX,
           }));
+          } catch (err) {
+            document.documentElement.dataset.fixtureError = encodeURIComponent(String(err && err.stack ? err.stack : err));
+          }
         })();
       </script>
     </body></html>`;
@@ -152,9 +158,12 @@ async function runStep3BFixture(viewportWidth: number): Promise<Step3BSnapshot> 
       "--no-zygote",
       "--allow-file-access-from-files",
       `--window-size=${viewportWidth},844`,
+      "--virtual-time-budget=5000",
       "--dump-dom",
       `file://${fixture}`,
     ], { timeout: 15_000, maxBuffer: 10 * 1024 * 1024, killSignal: "SIGKILL" });
+    const fixtureError = stdout.match(/data-fixture-error="([^"]+)"/)?.[1];
+    assert.equal(fixtureError, undefined, fixtureError ? `Step 3B fixture threw: ${decodeURIComponent(fixtureError)}` : "");
     const encoded = stdout.match(/data-fixture="([^"]+)"/)?.[1];
     assert.ok(encoded, "headless Chrome must return the Step 3B snapshot");
     return JSON.parse(decodeURIComponent(encoded)) as Step3BSnapshot;
