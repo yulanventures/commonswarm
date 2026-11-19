@@ -1430,11 +1430,16 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
     await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${renewRun}::uuid, ${renewPrincipal}::uuid, ${renewDevice}::uuid)`;
     await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, kind, max_successors, successors_used, horizon_expires_at, bound_device_id, created_by)
       VALUES (${renewGrant}::uuid, ${workspace}::uuid, ${renewPrincipal}::uuid, ${renewRun}::uuid, 'standing', NULL, 0, NULL, ${renewDevice}::uuid, ${owner.id}::uuid)`;
-    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, first_used_at, lineage_id, renewal_grant_id)
+    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, task_id, epoch, scopes, token_hash, expires_at, lineage_id, renewal_grant_id)
       VALUES (${randomUUID()}::uuid, ${renewPrincipal}::uuid, ${renewRun}::uuid, ${renewTask}::uuid, 1,
         ${tx.json(["post_signal"])}::jsonb, ${createHash("sha256").update(predToken).digest()},
-        statement_timestamp() + interval '1 hour', statement_timestamp(), ${renewLineage}::uuid, ${renewGrant}::uuid)`;
+        statement_timestamp() + interval '1 hour', ${renewLineage}::uuid, ${renewGrant}::uuid)`;
   });
+  const usePred = await send(predToken, {
+    kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: "mark predecessor first_used_at",
+    to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+  });
+  assert.equal(usePred.status, 200, JSON.stringify(usePred.body));
   const firstRenew = await send(predToken, { kind: "renew_agent_token" });
   assert.equal(firstRenew.status, 200, JSON.stringify(firstRenew.body));
   assert.equal(firstRenew.body.status, "accepted", JSON.stringify(firstRenew.body));
