@@ -149,14 +149,20 @@ export async function setHouseholdDoc(env: SeedEnvironment, owner: SeedResult["o
     });
     return { status: response.status, body: await response.json().catch(() => ({})) as Record<string, any> };
   };
-  const read = await tool("object_read", { object_id: objectId }, false);
-  const before = read.body.content?.markdown, base = read.body.revision?.revision;
-  if (read.status !== 200 || read.body.status !== "ok" || typeof before !== "string" || !base) {
-    throw new Error(`doc read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
+  // Two conflict screens can run back to back on the same doc, so a save from here can meet a revision written a
+  // moment earlier. A conflict answer means the doc moved since it was read: read it again and save on top, a few times.
+  for (let attempt = 1; ; attempt++) {
+    const read = await tool("object_read", { object_id: objectId }, false);
+    const before = read.body.content?.markdown, base = read.body.revision?.revision;
+    if (read.status !== 200 || read.body.status !== "ok" || typeof before !== "string" || !base) {
+      throw new Error(`doc read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
+    }
+    if (before === markdown) return;
+    const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before, after: markdown }] } }, true);
+    if (saved.status === 200 && saved.body.status === "committed") return;
+    if (saved.status === 200 && saved.body.status === "conflict" && attempt < 4) { await new Promise((resolve) => setTimeout(resolve, 250 * attempt)); continue; }
+    throw new Error(`doc save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
   }
-  if (before === markdown) return;
-  const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before, after: markdown }] } }, true);
-  if (saved.status !== 200 || saved.body.status !== "committed") throw new Error(`doc save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
 }
 
 /**
