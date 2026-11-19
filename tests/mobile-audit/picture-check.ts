@@ -208,6 +208,25 @@ export async function runPictureChecks(
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
     check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
     await shot(page, "picture-loaded");
+    await page.evaluate(() => {
+      const log: string[] = [];
+      (window as any).__dlTrace = log;
+      const t0 = performance.now();
+      const mark = (msg: string) => { log.push(`+${Math.round(performance.now() - t0)}ms ${msg}`); if (log.length > 80) log.shift(); };
+      const desc = (el: Element | null) => el ? `${el.tagName}.${(el as HTMLElement).className}` : "null";
+      document.addEventListener("focusin", e => mark(`focusin ${desc(e.target as Element)}`), true);
+      document.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === "0") mark(`keydown:${e.key} active=${desc(document.activeElement)}`); }, true);
+      document.addEventListener("click", e => mark(`click ${desc(e.target as Element)}`), true);
+      const feed = document.querySelector("[data-feed-list]");
+      if (feed) new MutationObserver(() => mark("feed-mutated")).observe(feed, { childList: true });
+      const app = document.querySelector("live-dashboard");
+      if (app) new MutationObserver(ms => {
+        for (const m of ms) {
+          for (const n of m.addedNodes) if ((n as Element).matches?.("dialog[data-image-viewer]")) mark("viewer-added");
+          for (const n of m.removedNodes) if ((n as Element).matches?.("dialog[data-image-viewer]")) mark("viewer-removed");
+        }
+      }).observe(app, { childList: true });
+    });
     // 2. A press on the picture opens it in the viewer. Nothing navigates to the file and nothing downloads.
     const viewer = async (target: any, test: (v: Viewer | null) => boolean, timeout = 10_000): Promise<Viewer | null> => {
       const started = Date.now();
@@ -313,25 +332,25 @@ export async function runPictureChecks(
       page.off("request", watch);
       // Download is the viewer's own button, and it starts the picture's own signed file.
       const dlEvents: string[] = [];
+      const tBase = Date.now();
       const onDlReq = (request: any) => {
         const url = String(request.url());
         if (url.includes("/functions/v1/command") || url.includes("/storage/v1/")) {
-          dlEvents.push(`req:${request.resourceType()}:nav=${request.isNavigationRequest()}:${url.slice(0, 120)}:${(request.postData() ?? "").slice(0, 80)}`);
+          dlEvents.push(`+${Date.now() - tBase}ms req:${request.resourceType()}:nav=${request.isNavigationRequest()}:${url.slice(0, 100)}:${(request.postData() ?? "").slice(0, 60)}`);
         }
       };
       const onDlRes = (response: any) => {
         const url = String(response.url());
         if (url.includes("/functions/v1/command") || url.includes("/storage/v1/")) {
-          dlEvents.push(`res:${response.status()}:${url.slice(0, 120)}`);
+          dlEvents.push(`+${Date.now() - tBase}ms res:${response.status()}:${url.slice(0, 100)}`);
         }
       };
-      const onDlEvent = (dl: any) => dlEvents.push(`download:${dl.suggestedFilename?.() ?? ""}`);
+      const onDlEvent = (dl: any) => dlEvents.push(`+${Date.now() - tBase}ms download:${dl.suggestedFilename?.() ?? ""}`);
       page.on("request", onDlReq); page.on("response", onDlRes); page.on("download", onDlEvent);
       const tEnter = Date.now();
       await page.keyboard.press("Enter");
       const forDownload = await viewer(page, v => !!v && v.loaded);
       const forDownloadMs = Date.now() - tEnter;
-      const focusAfterEnter = await page.evaluate(FOCUS);
       const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
       const tClick = Date.now();
       if (forDownload) await page.locator("[data-viewer-download]").click();
@@ -340,44 +359,58 @@ export async function runPictureChecks(
       const navMs = Date.now() - tClick;
       const afterDiag = await page.evaluate(() => ({
         viewerOpen: !!document.querySelector("dialog[data-image-viewer][open]"),
-        active: document.activeElement?.tagName + "." + (document.activeElement as HTMLElement)?.className,
+        focus: document.activeElement?.tagName + "." + (document.activeElement as HTMLElement)?.className,
         status: document.querySelector("[data-composer-status]")?.textContent ?? null,
+        trace: ((window as any).__dlTrace ?? []).slice(-30),
       }));
       page.off("request", onDlReq); page.off("response", onDlRes); page.off("download", onDlEvent);
       check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
-        { path, fileId: after.fileId, forDownloadOpen: !!forDownload, forDownloadLoaded: forDownload?.loaded ?? null, forDownloadMs, focusAfterEnter, clickMs, navMs, afterDiag, dlEvents });
+        { path, fileId: after.fileId, forDownloadOpen: !!forDownload, forDownloadLoaded: forDownload?.loaded ?? null, forDownloadMs, clickMs, navMs, afterDiag, dlEvents });
       if (!options.click && again) {
         const trials: unknown[] = [];
         const cdp2 = await page.context().newCDPSession(page);
         const touch2 = (type: string, points: { x: number; y: number }[]) => cdp2.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
         const at2 = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 8; i++) {
           if (await page.evaluate(VIEWER)) { await page.keyboard.press("Escape"); await viewer(page, v => v === null, 5_000); }
-          await page.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
+          await page.evaluate(() => { (window as any).__dlTrace.length = 0; document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus(); });
           await page.keyboard.press("Enter");
-          const v1 = await viewer(page, v => !!v && v.loaded, 5_000);
+          const v1 = await viewer(page, v => !!v && v.loaded && v.state === "", 5_000);
           if (v1) {
+            await touch2("touchStart", [{ x: at2.x - 30, y: at2.y }, { x: at2.x + 30, y: at2.y }]);
+            for (let step = 1; step <= 5; step++) await touch2("touchMove", [{ x: at2.x - 30 - step * 14, y: at2.y }, { x: at2.x + 30 + step * 14, y: at2.y }]);
+            await touch2("touchEnd", []);
+            await page.waitForTimeout(250);
+            await touch2("touchStart", [at2]);
+            for (let step = 1; step <= 5; step++) await touch2("touchMove", [{ x: at2.x, y: at2.y + step * 50 }]);
+            await touch2("touchEnd", []);
+            await page.waitForTimeout(250);
+            await page.keyboard.press("0");
+            await page.waitForTimeout(350);
             await touch2("touchStart", [at2]);
             for (let step = 1; step <= 5; step++) await touch2("touchMove", [{ x: at2.x, y: at2.y + step * 50 }]);
             await touch2("touchEnd", []);
             await viewer(page, v => v === null, 5_000);
           }
-          const focusAfterSwipe = await page.evaluate(FOCUS);
           const ev: string[] = [];
-          const rq = (r: any) => { const u = String(r.url()); if (u.includes("/functions/v1/command") || u.includes("/storage/v1/")) ev.push(`req:${r.resourceType()}:nav=${r.isNavigationRequest()}:${u.slice(0, 90)}`); };
-          const rs = (r: any) => { const u = String(r.url()); if (u.includes("/functions/v1/command") || u.includes("/storage/v1/")) ev.push(`res:${r.status()}:${u.slice(0, 90)}`); };
+          const tb = Date.now();
+          const rq = (r: any) => { const u = String(r.url()); if (u.includes("/functions/v1/command") || u.includes("/storage/v1/")) ev.push(`+${Date.now() - tb}ms req:${r.resourceType()}:nav=${r.isNavigationRequest()}:${u.slice(0, 80)}`); };
+          const rs = (r: any) => { const u = String(r.url()); if (u.includes("/functions/v1/command") || u.includes("/storage/v1/")) ev.push(`+${Date.now() - tb}ms res:${r.status()}:${u.slice(0, 80)}`); };
           page.on("request", rq); page.on("response", rs);
           const t0 = Date.now();
           await page.keyboard.press("Enter");
           const v2 = await viewer(page, v => !!v && v.loaded, 5_000);
           const openMs = Date.now() - t0;
           const nav = page.waitForRequest(signedFile, { timeout: 8_000 }).then((r: any) => new URL(r.url()).pathname, () => null);
+          const tc = Date.now();
           if (v2) await page.locator("[data-viewer-download]").click();
           const p2 = await nav;
+          const navMs2 = Date.now() - tc;
           page.off("request", rq); page.off("response", rs);
-          trials.push({ i, v1: !!v1, focusAfterSwipe, v2: !!v2, openMs, path: p2, ev });
+          const trace = p2 ? undefined : await page.evaluate(() => (window as any).__dlTrace.slice());
+          trials.push({ i, v1: !!v1, v2: !!v2, openMs, navMs2, ok: !!p2, ev: p2 ? undefined : ev, trace });
         }
-        check("diag phone swipe-then-download trials", true, trials);
+        check("diag phone exact-pinch-swipe-download trials", true, trials);
       }
     }
     await page.close();
