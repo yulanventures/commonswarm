@@ -15,8 +15,31 @@ import {
   type WaitingConversation,
   type WaitingSignalPlacement,
 } from "./waiting-count";
+import {
+  focusWaitingSurvey,
+  renderWaitingSurvey,
+  surveyDraftKey,
+  surveyReadyEntries,
+  surveySubmissionFromDraft,
+  type SurveyDraft,
+  type WaitingSurveyFocusTarget,
+  type WaitingSurveyHandlers,
+  type WaitingSurveyVM,
+} from "./waiting-survey";
 
-export { classifyAskConversation, type WaitingConversation, type WaitingSignalPlacement };
+export {
+  classifyAskConversation,
+  focusWaitingSurvey,
+  surveyDraftKey,
+  surveyReadyEntries,
+  surveySubmissionFromDraft,
+  type SurveyDraft,
+  type WaitingConversation,
+  type WaitingSignalPlacement,
+  type WaitingSurveyFocusTarget,
+  type WaitingSurveyHandlers,
+  type WaitingSurveyVM,
+};
 
 export type WaitingScope = "channel" | "workspace" | "all";
 
@@ -95,6 +118,7 @@ export interface WaitingPanelVM {
   failed: boolean;
   truncated?: boolean;
   catchUpHref?: string;
+  survey?: WaitingSurveyVM | null;
   statusMessage: string;
   statusSeq: number;
 }
@@ -110,6 +134,8 @@ export interface WaitingPanelHandlers {
   onRetryTodo?: (item: WaitingTodoItem) => void;
   onOpenTodo?: (item: WaitingTodoItem) => void;
   onOpenCatchUp?: (href: string) => void;
+  onStartSurvey?: () => void;
+  surveyHandlers?: WaitingSurveyHandlers;
 }
 
 export const WAITING_PANEL_ID = "cs-waiting-panel";
@@ -429,6 +455,7 @@ export function renderWaitingPanel(
     header.append(headingGroup, closeBtn);
 
     const controls = node(doc, "div", "cs-waiting-panel__controls");
+    controls.dataset.waitingControls = "";
     const scope = node(doc, "select", "cs-waiting-panel__scope");
     scope.dataset.waitingScope = "";
     scope.setAttribute("aria-label", "Scope");
@@ -437,7 +464,11 @@ export function renderWaitingPanel(
       opt.value = value;
       scope.append(opt);
     }
-    controls.append(scope);
+    const reviewBtn = node(doc, "button", "cs-waiting-panel__review-btn");
+    reviewBtn.type = "button";
+    reviewBtn.dataset.waitingReviewStart = "";
+    reviewBtn.hidden = true;
+    controls.append(scope, reviewBtn);
 
     // Visible confirmation banner and polite live region: announces "Sent" and stays visible after the last answer.
     const status = node(doc, "p", "cs-waiting-panel__status");
@@ -477,6 +508,19 @@ export function renderWaitingPanel(
     };
   }
 
+  const controlsEl = root.querySelector<HTMLElement>("[data-waiting-controls]");
+  if (controlsEl) controlsEl.hidden = Boolean(vm.survey);
+
+  const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
+  if (reviewBtn) {
+    const showReview = !vm.survey && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
+    reviewBtn.hidden = !showReview;
+    if (showReview) {
+      reviewBtn.textContent = "Review questions";
+      reviewBtn.onclick = () => handlers.onStartSurvey?.();
+    }
+  }
+
   const statusEl = root.querySelector<HTMLElement>("[data-waiting-status]");
   if (statusEl) {
     const hasStatus = vm.statusMessage.trim() !== "";
@@ -489,6 +533,14 @@ export function renderWaitingPanel(
 
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
   if (!body) return;
+
+  if (vm.survey && handlers.surveyHandlers) {
+    delete body.dataset.waitingEmptyKey;
+    renderWaitingSurvey(body, vm.survey, handlers.surveyHandlers);
+    return;
+  }
+  delete body.dataset.waitingSurveySig;
+  delete body.dataset.waitingSurveyTypingSig;
 
   const buildCatchUpLink = (): HTMLAnchorElement | null => {
     if (!vm.catchUpHref) return null;

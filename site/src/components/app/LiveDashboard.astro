@@ -1415,7 +1415,7 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
-  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
+  import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -5904,6 +5904,13 @@ import "../../styles/kylon-image-viewer.css";
     type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
     const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
     const waitingTodoErrors = new Map<string, string>();
+    // Multi-question survey session state (PR 3): drafts survive Back, Next, Skip, and closing the panel/sheet.
+    const waitingSurveyDrafts = new Map<string, SurveyDraft>();
+    const waitingSurveySkipped = new Set<string>();
+    const waitingSurveyErrors = new Map<string, string>();
+    let waitingSurvey: { active: boolean; mode: "step" | "review"; index: number; itemIds: string[]; placeKey: string; sending: boolean } = {
+      active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false,
+    };
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -6172,6 +6179,88 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
+    const sendWaitingSurveyAll = async (entries: Array<{ item: WaitingAskItem; submission: ChoiceSubmission }>): Promise<void> => {
+      const activeSession = session;
+      const viewer = homeViewerId();
+      if (!activeSession || !viewer || waitingSurvey.sending || entries.length === 0) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      waitingSurvey.sending = true;
+      renderWaitingPanelView();
+      let sentCount = 0;
+      let failedCount = 0;
+      const succeededIds = new Set<string>();
+      for (const { item, submission } of entries) {
+        if (homeViewerId() !== viewer) break;
+        let result: Awaited<ReturnType<typeof answerChoice>>;
+        try {
+          result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission);
+        } catch {
+          result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
+        }
+        if (homeViewerId() !== viewer) break;
+        if (result.ok) {
+          sentCount += 1;
+          succeededIds.add(item.id);
+          const key = `${item.workspaceId}:${item.id}`;
+          waitingSurveyDrafts.delete(key);
+          waitingSurveySkipped.delete(item.id);
+          waitingSurveyErrors.delete(item.id);
+          choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
+          waitingPanelErrors.delete(item.id);
+          waitingPanelLastSubmissions.delete(item.id);
+          const list = waitingPanelAsks.get(item.workspaceId);
+          if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+          const prevCount = homeOverviewCounts.get(item.workspaceId);
+          if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+          if (item.workspaceId === activeWorkspaceId) {
+            const existingChoice = choiceRows.get(item.id);
+            if (existingChoice) {
+              choiceRows.set(item.id, {
+                ...existingChoice,
+                answer: {
+                  optionId: result.optionIds[0] ?? "other",
+                  optionIds: result.optionIds,
+                  otherText: result.otherText,
+                  byViewer: true,
+                  actorUserId: viewer,
+                  at: null,
+                },
+              });
+            }
+          }
+        } else {
+          failedCount += 1;
+          waitingSurveyErrors.set(item.id, result.message);
+        }
+      }
+      if (homeViewerId() !== viewer) return;
+      waitingSurvey.sending = false;
+      waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => !succeededIds.has(id));
+      if (sentCount > 0) {
+        if (homeRoute.view === "chat" && activeWorkspaceView === "signals") renderFeed();
+        renderHomeRail();
+        scheduleWaitingRefresh(400);
+      }
+      if (failedCount === 0) {
+        waitingSurvey.active = false;
+        showWaitingStatus(sentCount === 1 ? "Sent" : `Sent ${sentCount} answers`);
+      } else {
+        waitingSurvey.mode = "review";
+        if (sentCount > 0) showWaitingStatus(sentCount === 1 ? "Sent 1 answer" : `Sent ${sentCount} answers`);
+      }
+      renderWaitingPanelView();
+      const panelNow = one<HTMLElement>("[data-waiting-panel]");
+      if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()
+        && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (failedCount === 0) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "completed-ask", prevIndex: 0 });
+        } else {
+          waitingPanelMod.focusWaitingSurvey(panelNow, "failed-review");
+        }
+      }
+    };
+
     type WaitingPanelModule = typeof import("../../lib/waiting-panel");
     let waitingPanelMod: WaitingPanelModule | null = null;
     let waitingPanelModPromise: Promise<WaitingPanelModule> | null = null;
@@ -6298,6 +6387,26 @@ import "../../styles/kylon-image-viewer.css";
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
+      const placeKey = `${place.workspaceId}:${place.kind}:${place.channelId ?? ""}:${place.dm?.id ?? ""}`;
+      if (waitingSurvey.active && !waitingSurvey.sending && waitingScope === "channel" && waitingSurvey.placeKey !== placeKey) {
+        waitingSurvey.active = false;
+      }
+      const surveyItems = waitingSurvey.active
+        ? waitingSurvey.itemIds.map(id => visibleItems.find(item => item.id === id) ?? allItems.find(item => item.id === id)).filter((x): x is WaitingAskItem => Boolean(x))
+        : [];
+      if (waitingSurvey.active && surveyItems.length === 0 && !waitingSurvey.sending) {
+        waitingSurvey.active = false;
+      }
+      const surveyVM = waitingSurvey.active ? {
+        items: surveyItems,
+        scope: waitingScope,
+        mode: waitingSurvey.mode,
+        index: Math.max(0, Math.min(waitingSurvey.index, Math.max(0, surveyItems.length - 1))),
+        drafts: waitingSurveyDrafts,
+        skipped: waitingSurveySkipped,
+        errors: waitingSurveyErrors,
+        sending: waitingSurvey.sending,
+      } : null;
       waitingPanelMod.renderWaitingPanel(
         container,
         {
@@ -6315,12 +6424,14 @@ import "../../styles/kylon-image-viewer.css";
           failed: failed && !waitingInFlight,
           truncated,
           catchUpHref: routeHref({ view: "catchup" }),
+          survey: surveyVM,
           statusMessage: waitingStatusMessage,
           statusSeq: waitingStatusSeq,
         },
         {
           onScopeChange: (next) => {
             clearWaitingStatus();
+            waitingSurvey.active = false;
             waitingScope = next;
             renderWaitingPanelView();
             if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
@@ -6351,6 +6462,74 @@ import "../../styles/kylon-image-viewer.css";
             clearWaitingStatus();
             waitingSurface?.close(false);
             if (homeRoute.view !== "catchup") navigateHomeHref(href);
+          },
+          onStartSurvey: () => {
+            clearWaitingStatus();
+            waitingSurvey = {
+              active: true,
+              mode: "step",
+              index: 0,
+              itemIds: visibleItems.map(item => item.id),
+              placeKey,
+              sending: false,
+            };
+            renderWaitingPanelView();
+            waitingPanelMod?.focusWaitingSurvey(container, "step");
+          },
+          surveyHandlers: {
+            onExit: () => {
+              waitingSurvey.active = false;
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "exit");
+            },
+            onStep: (nextIndex) => {
+              waitingSurvey.mode = "step";
+              waitingSurvey.index = Math.max(0, Math.min(nextIndex, Math.max(0, surveyItems.length - 1)));
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "step");
+            },
+            onDraftChange: (item, draft, quiet) => {
+              const key = `${item.workspaceId}:${item.id}`;
+              const wasOtherOpen = waitingSurveyDrafts.get(key)?.otherOpen ?? false;
+              waitingSurveyDrafts.set(key, draft);
+              waitingSurveySkipped.delete(item.id);
+              waitingSurveyErrors.delete(item.id);
+              if (!quiet) {
+                renderWaitingPanelView();
+                if (!wasOtherOpen && draft.otherOpen) {
+                  waitingPanelMod?.focusWaitingSurvey(container, "other-input");
+                }
+              }
+            },
+            onSkip: (item) => {
+              const key = `${item.workspaceId}:${item.id}`;
+              waitingSurveyDrafts.delete(key);
+              waitingSurveyErrors.delete(item.id);
+              waitingSurveySkipped.add(item.id);
+              const wentToReview = waitingSurvey.index >= surveyItems.length - 1;
+              if (wentToReview) {
+                waitingSurvey.mode = "review";
+              } else {
+                waitingSurvey.index += 1;
+              }
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, wentToReview ? "review" : "step");
+            },
+            onReview: () => {
+              waitingSurvey.mode = "review";
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "review");
+            },
+            onEdit: (item) => {
+              const idx = surveyItems.findIndex(entry => entry.id === item.id);
+              if (idx >= 0) {
+                waitingSurvey.mode = "step";
+                waitingSurvey.index = idx;
+                renderWaitingPanelView();
+                waitingPanelMod?.focusWaitingSurvey(container, "step");
+              }
+            },
+            onSendAll: (entries) => void sendWaitingSurveyAll(entries),
           },
         },
       );
@@ -6427,6 +6606,10 @@ import "../../styles/kylon-image-viewer.css";
         waitingPanelLastSubmissions.clear();
         waitingTodoTickets.clear();
         waitingTodoErrors.clear();
+        waitingSurveyDrafts.clear();
+        waitingSurveySkipped.clear();
+        waitingSurveyErrors.clear();
+        waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
         waitingWorkspaceChannels.clear();
         waitingPanelOverviewFailed = false;
       }

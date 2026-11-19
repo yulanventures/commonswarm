@@ -48,12 +48,15 @@ function installWaitingFixture() {
   const todoCase = scenario.startsWith("todos-");
   const todo21Case = scenario.startsWith("todos-21-");
   const todoTruncatedCase = scenario.startsWith("todos-truncated-");
+  const surveyCase = scenario.startsWith("survey-");
+  const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101,
-    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase,
+    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
+    surveyFailOnceId: surveyCase ? surveyAsks[2]! : "",
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -72,6 +75,19 @@ function installWaitingFixture() {
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
+    if (surveyCase) {
+      const baseMs = Date.now() - 600_000;
+      const titles = ["Which boiler quote?", "Which paint finish?", "Which arrival window?"];
+      return surveyAsks
+        .map((id, i) => ({ id, title: titles[i]!, i }))
+        .filter(entry => !f.answeredIds.includes(entry.id))
+        .map(entry => ({
+          signal_id: entry.id,
+          from: { kind: "agent" as const, id: agent, name: "Scout" },
+          body: entry.title,
+          created_at: new Date(baseMs + entry.i * 1000).toISOString(), until, reraised: null,
+        }));
+    }
     const count = batch51 ? 51 : batch101 ? 101 : truncatedQueue ? 100 : 0;
     if (!count) return [];
     const baseMs = Date.now() - 3600_000;
@@ -98,7 +114,7 @@ function installWaitingFixture() {
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
-          const asks = id === ids[0] && multiBatch
+          const asks = id === ids[0] && (multiBatch || surveyCase)
             ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
             : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
@@ -116,7 +132,7 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/decision_queue") {
       const id = body?.p_workspace_id; f.log.push("queue:" + number(id));
-      if (id === ids[0] && multiBatch) {
+      if (id === ids[0] && (multiBatch || surveyCase)) {
         const asks = ws1Asks();
         const total = truncatedQueue ? 105 : asks.length;
         const page = asks.slice(0, 100);
@@ -173,7 +189,7 @@ function installWaitingFixture() {
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
-      if (body?.p_workspace_id === ids[0] && multiBatch) {
+      if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase)) {
         f.choiceBatchSizes.push(reqIds.length);
         return Response.json({ asks: reqIds.map(sigId => ({ signal_id: sigId, multi: false,
           options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
@@ -184,14 +200,14 @@ function installWaitingFixture() {
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
     }
-    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && multiBatch) {
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || surveyCase)) {
       const idFilter = url.searchParams.get("id") ?? "";
       const match = idFilter.match(/^in\.\(([^)]+)\)$/);
       if (match) {
         const reqIds = match[1]!.split(",").map(s => s.trim()).filter(Boolean);
         return Response.json(reqIds.map(sigId => ({
           id: sigId,
-          channel_id: (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
+          channel_id: surveyCase || (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
           to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
         })));
       }
@@ -238,11 +254,16 @@ function installWaitingFixture() {
       });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
+      if (f.surveyFailOnceId && body.command.signal_id === f.surveyFailOnceId) {
+        f.surveyFailOnceId = "";
+        f.log.push("answer-failed");
+        return Response.json({ status: "refused", error: "temporary_error", message: "Could not deliver answer." }, { status: 500 });
+      }
       // From here on the answered ask is no longer waiting.
       f.answers.push(body); f.answered = true;
       if (typeof body.command.signal_id === "string") f.answeredIds.push(body.command.signal_id);
       f.log.push("answer");
-      return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id } });
+      return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id, other_text: body.command.other_text ?? null } });
     }
     if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case)) {
       if (todo21Case) {
@@ -482,6 +503,75 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("survey-")) {
+      await wait(() => shown(control()) && count() === "3", "3 choice questions counted in #general");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const reviewStart = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-review-start]") ?? null;
+      await wait(() => shown(reviewStart()) && reviewStart()!.textContent === "Review questions", "Review questions button visible");
+      check(reviewStart()!.getBoundingClientRect().height >= 44, "Review questions button under 44px");
+      reviewStart()!.focus();
+      reviewStart()!.click();
+      // Q1: pick Approve, click Next.
+      await wait(() => shown(panel()?.querySelector('[data-survey-option="yes"]')), "Q1 shown in survey");
+      check(Boolean(panel()?.contains(document.activeElement)), "entering survey must keep focus inside panel");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+      await wait(() => panel()?.querySelector('[data-survey-option="yes"]')?.getAttribute("aria-pressed") === "true", "Q1 choice staged");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      // Q2: Skip.
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3", "stepped to Q2");
+      check(Boolean(panel()?.contains(document.activeElement)), "Next must keep focus inside panel");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]")!.click();
+      // Q3: Something else + custom text, then close and reopen panel to prove session drafts persist.
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "stepped to Q3");
+      panel()!.querySelector<HTMLButtonElement>("[data-survey-other-toggle]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")), "Other input opened on Q3");
+      const otherInput = panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!;
+      check(document.activeElement === otherInput, "toggling Something else open focuses its input");
+      otherInput.value = "After 2pm";
+      otherInput.dispatchEvent(new Event("input", { bubbles: true }));
+      // Close and reopen panel: survey drafts persist in this session.
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed mid-survey");
+      control()!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")) &&
+        panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!.value === "After 2pm",
+        "reopening panel preserved Q3 Other draft");
+      // Advance to Review answers: 2 ready, 1 skipped.
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-waiting-survey-send]")) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 2 answers",
+        "Review answers shows Send 2 answers");
+      // First Send: Q1 succeeds, Q3 fails once -> stays on review with Q3 editable, error alert, and focus inside panel.
+      const sendBtn = panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!;
+      sendBtn.focus();
+      sendBtn.click();
+      await wait(() => f.answers.length === 1 && f.answers[0].command.signal_id === f.surveyAsks[0] &&
+        shown(panel()?.querySelector(`[data-waiting-survey-item="${f.surveyAsks[2]}"] [role="alert"]`)) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 1 answer",
+        "partial send kept failed Q3 editable on review while Q1 left");
+      check(document.activeElement !== document.body && Boolean(panel()?.contains(document.activeElement)),
+        "partial survey failure must keep focus inside panel, got " + (document.activeElement?.tagName ?? "null"));
+      // Retry Q3: succeeds, exits survey, shows visible Sent banner, leaves skipped Q2 open (count 1), keeps focus inside panel.
+      const retrySend = panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!;
+      retrySend.focus();
+      retrySend.click();
+      await wait(() => f.answers.length === 2 && f.answers[1].command.signal_id === f.surveyAsks[2] &&
+        f.answers[1].command.other_text === "After 2pm" &&
+        shown(panel()?.querySelector("[data-waiting-status]")) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.surveyAsks[1]}"]`)) &&
+        count() === "1",
+        "retry sent Q3, showed Sent banner, and left skipped Q2 open");
+      check(document.activeElement !== document.body && Boolean(panel()?.contains(document.activeElement)),
+        "survey completion must keep focus inside panel, got " + (document.activeElement?.tagName ?? "null"));
+      if (!f.phone) {
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        await wait(() => Boolean(panel()?.hidden) && document.activeElement === control(),
+          "Escape closes desktop column after survey completion and returns focus to opener");
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -569,7 +659,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -604,5 +694,10 @@ test("Waiting on you: pages past 50 and 100 choice asks and keeps unpaged trunca
 
 test("Waiting on you: assigned to-dos paginate past 20, scope to channel-origin vs workspace-only, and keep keyboard focus on failure and completion", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["todos-desktop", "todos-phone", "todos-21-channels-desktop", "todos-truncated-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: multi-question survey keeps drafts across Back/Skip/close, sends only filled-in answers, keeps failed answers editable and skipped open", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["survey-desktop", "survey-phone"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
