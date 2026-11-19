@@ -9,6 +9,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-channel-stage {
 live-dashboard.dashboard[data-kylon-shell] .hm-channel-stage:not(:has(> .hm-frame__channel:not([hidden]))) {
   display: none;
 }
+/* Standalone pages (such as Add an agent) scroll inside .hm-frame__main: keep .hm-channel-stage block-level
+   so .hm-frame__channel (flex: none) stays full-width instead of expanding to max-content inside a row flex box. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] .hm-channel-stage {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-home-standalone] .hm-frame__channel {
+  inline-size: 100%;
+}
 
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting[aria-expanded="true"] {
   color: var(--k-shell-ink);
@@ -311,7 +321,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet::backdrop {
   background: #10151080;
 }
 
-@media (width <= 52rem) {
+@media (width <= 52rem), (height <= 32rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel {
     display: none;
   }
@@ -337,6 +347,22 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet::backdrop {
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card .hm-decision__input {
     font-size: 16px;
+  }
+}
+
+@media (height <= 32rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet[open] {
+    block-size: min(94dvh, 100dvh);
+    max-block-size: 94dvh;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__head {
+    padding: 6px 10px 4px 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__controls {
+    padding-block: 4px 6px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-panel__body {
+    padding: 8px 16px 12px;
   }
 }
 

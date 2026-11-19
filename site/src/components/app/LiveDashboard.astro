@@ -5978,7 +5978,7 @@ import "../../styles/kylon-image-viewer.css";
       const channelMode = isWaitingChannelView();
       const open = channelMode && (waitingSurface?.isOpen() ?? false);
       const controlsId = waitingSurface?.controlsId()
-        ?? (window.matchMedia("(max-width: 52rem)").matches ? "cs-waiting-sheet" : "cs-waiting-panel");
+        ?? (window.matchMedia("(max-width: 52rem), (max-height: 32rem)").matches ? "cs-waiting-sheet" : "cs-waiting-panel");
       WAITING_HOSTS.forEach(([selector, kind], index) => {
         const host = shown ? one<HTMLElement>(selector) : null;
         if (!host) { waitingLinks[index]?.remove(); return; }

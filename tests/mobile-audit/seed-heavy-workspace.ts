@@ -881,11 +881,13 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } catch (error) { note("seed_old_file", error); }
     }
     // A real PNG and the text quote on one message in the general channel: one picture beside one file card.
+    // Address the lead explicitly so it keeps the recipient link even with SWARM_CHAT_MENTIONS=1 (which uses mentions
+    // instead of re-addressing to_agent_principal_id on unaddressed posts).
     const pictureFileId = await seedFile("seed_file boiler-label.png", "boiler-label.png", "image/png", auditPng());
     if (pictureFileId && quoteFileId) {
       ok("seed_picture", await command(owner.token, {
         kind: "post_signal", signal_kind: "note", body: "Photo of the boiler label, with the service quote.",
-        to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null,
+        to_user_id: null, to_agent_principal_id: ids.agent ?? null, in_reply_to: null, about: null,
         attachments: [{ file_id: pictureFileId, version_n: 1 }, { file_id: quoteFileId, version_n: 1 }],
         channel: "household",
       }, workspace));
