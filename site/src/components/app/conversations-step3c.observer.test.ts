@@ -415,6 +415,10 @@ async function observeConversations3C() {
       await openDrawerIfPhone();
       await click(`[data-rail-conversation="${f.ids.dmAlexConv}"]:visible`);
       await wait("1:1 dm open", () => !!one(`[data-rail-conversation="${f.ids.dmAlexConv}"][aria-current="page"]`) && visible(one("[data-composer]")));
+      if (visible(one("[data-entity-panel-close]"))) {
+        await click("[data-entity-panel-close]:visible");
+        await wait("entity panel closed", () => !visible(one("[data-entity-panel]")));
+      }
       check(one<HTMLButtonElement>("[data-composer-attach]")?.disabled === true, "C1: attach button must be disabled in 1:1 DM");
       input.value = "DM with staged file";
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -510,10 +514,13 @@ async function observeConversations3C() {
       check(f.convCommands.length === 0, "C2: archived channel must dispatch 0 commands, got " + JSON.stringify(f.convCommands));
 
       // 5. Browser Back (popstate) to a different view in the same workspace retires open Members sheet immediately:
+      // Open the group DM (pushState, leaving #ops as the prior same-workspace entry) so Back stays inside /app.
       opsRow.archived_at = null;
+      await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
+      await wait("group dm open for back check", () => location.search.includes(`dm=${f.ids.dmGroupConv}`));
       await openMembersSheet();
       window.history.back();
-      await wait("sheet closed on browser Back", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+      await wait("sheet closed on browser Back", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false && location.search.includes(`c=${f.ids.opsChannel}`));
       check(f.convCommands.length === 0, "C2: browser Back must dispatch 0 commands");
 
       document.documentElement.dataset.step3cObservation = JSON.stringify({ ok: true, capture: f.capture, commands: f.convCommands.length });
@@ -716,7 +723,7 @@ test("Step 3C signed-in dashboard wires New message picker (#511 flows), Channel
   const server = createServer((request, response) => {
     const url = new URL(request.url!, "http://127.0.0.1");
     if (url.pathname === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
-    if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).first().click().then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
+    if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).first().click({ timeout: 8_000 }).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname === "/__key") { void activePage!.keyboard.press(url.searchParams.get("key")!).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname.startsWith("/fonts/") && url.pathname.endsWith(".woff2")) { void readFile(join(fonts, basename(url.pathname))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return; }
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
