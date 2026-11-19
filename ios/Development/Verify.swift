@@ -90,6 +90,21 @@ enum Verify {
                    "the retried upload appears once on the confirmed message")
         let workspaces = try await api.workspaces()
         guard let second = workspaces.first(where: { $0.id != ws.id }) else { throw Failure.mismatch("second workspace") }
+        guard let modern = try await api.conversationList(ws.id), let thread = modern.first(where: { $0.kind == .dm }) else {
+            throw Failure.mismatch("supported conversation read")
+        }
+        let legacy = try await api.conversationList(second.id)
+        try expect(legacy == nil, "explicitly unsupported read uses the legacy directory")
+        do {
+            _ = try await api.conversationList(UUID())
+            throw Failure.mismatch("permission failure selected the legacy directory")
+        } catch APIError.refused(403) {}
+        let canonical = thread.item(viewer: session.userID)
+        let canonicalPost = Post(id: UUID(), workspace: ws.id, destination: canonical.destination, body: "Canonical DM")
+        let canonicalID = try await api.post(canonicalPost)
+        let threadMessages = try await api.history(ws.id, canonical.destination)
+        try expect(threadMessages.map(\.id) == [canonicalID] && canonical.name == "Atlas" && thread.mention_count == 103,
+                   "canonical DM reads back the same conversation and mention count")
         let draft = session.composer(workspace: ws.id, conversation: dm.id)
         draft.text = "Unsent A"
         let inB = session.composer(workspace: second.id, conversation: dm.id)

@@ -21,7 +21,8 @@ const secondWorkspace = "00000000-0000-4000-8000-000000000005";
 const longChannel = "00000000-0000-4000-8000-000000000006";
 const verify = process.argv[2] === "--verify";
 const upgrade = process.argv[2] === "--upgrade";
-const review = verify || upgrade || process.argv[2] === "--review";
+const conversationsEnabled = verify || process.argv[2] === "--conversations";
+const review = conversationsEnabled || upgrade || process.argv[2] === "--review";
 const workspaces = [{ workspace_id: workspace, name: "Simulator workspace" }];
 const channels = [{ channel_id: channel, slug: "mobile", visibility: "open" }];
 if (review) {
@@ -53,7 +54,14 @@ const fileBytes = Buffer.from("Workspace notes");
 const signedPath = "/storage/v1/object/sign/swarm-files/" + workspace + "/" + file + "/2";
 const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_type: "text/plain", size_bytes: fileBytes.length };
 
-const address = (command) => command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general";
+const members = [{ kind: "user", id: me, name: "You" }, { kind: "agent", id: agent, name: "Atlas" }];
+const threadRows = [
+  { conversation_id: randomUUID(), kind: "general", slug: "general", joined: true },
+  { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true },
+  { conversation_id: randomUUID(), kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
+  { conversation_id: randomUUID(), kind: "dm", joined: true, members, mention_count: 103 }
+];
+const address = (command) => command.conversation_id?.toLowerCase() ?? (command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general");
 if (review) {
   for (let i = 130; i > 0; i--) {
     messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
@@ -162,6 +170,19 @@ const server = createServer(async (req, res) => {
     }
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
+    if (req.method === "POST" && url.pathname === "/functions/v1/read") {
+      const ws = body.workspace_id?.toLowerCase();
+      if (!conversationsEnabled || ws === secondWorkspace) return reply(400, { error: "invalid_resource" });
+      if (ws !== workspace) return reply(403, { error: "forbidden" });
+      if (body.resource === "conversations" && body.include_archived === false) return reply(200, { conversations: threadRows });
+      const row = threadRows.find(r => r.conversation_id === body.conversation_id?.toLowerCase());
+      if (body.resource !== "conversation_history" || !row) return reply(404, { error: "conversation_not_found" });
+      const targets = [row.conversation_id, row.kind === "general" ? "general" : row.channel_id];
+      const history = messages.filter(m => targets.includes(m.fixtureDestination) && m.workspace === ws &&
+        (!body.before_created_at || m.created_at < body.before_created_at ||
+          (m.created_at === body.before_created_at && m.id < body.before_id.toLowerCase())));
+      return reply(200, { conversation: row, messages: history.slice(0, body.limit).reverse() });
+    }
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
       if (typeof body.client_version !== "string" || body.client_version !== expectedClientVersion) {
         if (verify) console.error("Invalid client_version for", body.command?.kind);
