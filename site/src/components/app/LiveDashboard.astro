@@ -5060,8 +5060,20 @@ import "../../styles/kylon-image-viewer.css";
       ) return;
       focusedComposerWorkspaceId = activeWorkspaceId;
       if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
+      const onAccountControl = (): boolean => {
+        const active = document.activeElement;
+        return Boolean(
+          active &&
+          typeof (active as Element).closest === "function" &&
+          (active as Element).closest(
+            '[data-user-menu-root], [data-user-menu-trigger], button[aria-label="Open navigation"], .cs-kylon-workspace-menu, .hm-phone-bar .hm-menu',
+          ),
+        );
+      };
+      if (onAccountControl()) return;
       window.requestAnimationFrame(() => {
         if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
+        if (onAccountControl()) return;
         one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
       });
     };
@@ -16503,12 +16515,14 @@ import "../../styles/kylon-image-viewer.css";
         }
         if (pendingSwitchFocusReturn && bootVersion === bootGeneration) {
           const opener = lastAccountDialogOpener;
+          if (activeWorkspaceId) focusedComposerWorkspaceId = activeWorkspaceId;
           // Keep pendingSwitchFocusReturn true until this rAF runs (after focusHomeView's queued rAF
           // has already seen it and stood down), then return focus to Open navigation (phone) or
           // the account trigger (desktop).
           window.requestAnimationFrame(() => {
             if (bootVersion !== bootGeneration) return;
             pendingSwitchFocusReturn = false;
+            if (activeWorkspaceId) focusedComposerWorkspaceId = activeWorkspaceId;
             focusVisibleAccountTrigger(opener, "switch");
           });
         }

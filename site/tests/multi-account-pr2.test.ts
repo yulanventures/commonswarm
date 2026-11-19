@@ -2184,3 +2184,65 @@ test("PR 2 HezSec C7 post-response pre-settlement witness: peer sign-out AFTER t
   poller.stop();
   tabMgr.destroy();
 });
+
+test("PR 2 Designer desktop post-switch witness: real focusComposerOnEntry skips composer auto-focus when focus is on an account control (synchronously or before rAF fires), while normal entry still focuses composer", async () => {
+  const vm = await import("node:vm");
+  const ts = await import("typescript");
+  const liveDash = await readFile(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const start = liveDash.indexOf("    const focusComposerOnEntry = (): void => {");
+  assert.ok(start > 0, "focusComposerOnEntry must exist in LiveDashboard.astro");
+  const end = liveDash.indexOf("\n    /* THE CARET SURVIVES THE KEYBOARD.", start);
+  assert.ok(end > start, "focusComposerOnEntry boundary must exist");
+  const js = ts.transpileModule(liveDash.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+
+  const makeEl = (selector: string) => ({
+    closest: (sel: string) => (sel.includes(selector) ? {} : null),
+  });
+  let composerFocusCount = 0;
+  const rafQueue: Array<() => void> = [];
+  const ctx: Record<string, unknown> = {
+    activeWorkspaceId: "ws-1",
+    focusedComposerWorkspaceId: "",
+    pendingSwitchFocusReturn: false,
+    window: {
+      matchMedia: () => ({ matches: false }),
+      requestAnimationFrame: (cb: () => void) => { rafQueue.push(cb); return rafQueue.length; },
+    },
+    document: { activeElement: makeEl("[data-user-menu-trigger]") },
+    one: () => ({ focus: () => { composerFocusCount += 1; } }),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${js}\nthis.focusComposerOnEntry = focusComposerOnEntry;`, ctx);
+  const runFocusComposerOnEntry = ctx.focusComposerOnEntry as () => void;
+
+  // Case 1: Focus is already on desktop account trigger when delayed renderFeed calls focusComposerOnEntry -> 0 steals!
+  runFocusComposerOnEntry();
+  while (rafQueue.length) rafQueue.shift()!();
+  assert.equal(composerFocusCount, 0, "focusComposerOnEntry must NOT steal focus already on [data-user-menu-trigger]");
+
+  // Case 2: Focus lands on desktop account trigger AFTER focusComposerOnEntry queued its rAF -> 0 steals!
+  ctx.activeWorkspaceId = "ws-2";
+  ctx.focusedComposerWorkspaceId = "";
+  ctx.document = { activeElement: makeEl("body") };
+  runFocusComposerOnEntry();
+  assert.equal(rafQueue.length, 1, "normal call queues one rAF");
+  ctx.document = { activeElement: makeEl("[data-user-menu-trigger]") };
+  while (rafQueue.length) rafQueue.shift()!();
+  assert.equal(composerFocusCount, 0, "focusComposerOnEntry rAF must NOT steal focus that moved to [data-user-menu-trigger]");
+
+  // Case 3 (positive control): Normal workspace entry with focus on body focuses composer once!
+  ctx.activeWorkspaceId = "ws-3";
+  ctx.focusedComposerWorkspaceId = "";
+  ctx.document = { activeElement: makeEl("body") };
+  runFocusComposerOnEntry();
+  while (rafQueue.length) rafQueue.shift()!();
+  assert.equal(composerFocusCount, 1, "normal desktop workspace entry must still focus composer");
+
+  // Also verify boot() stamps focusedComposerWorkspaceId = activeWorkspaceId when completing an account switch!
+  assert.ok(
+    liveDash.includes("if (activeWorkspaceId) focusedComposerWorkspaceId = activeWorkspaceId;"),
+    "boot() switch focus return must mark focusedComposerWorkspaceId so delayed feed renders cannot steal focus",
+  );
+});
