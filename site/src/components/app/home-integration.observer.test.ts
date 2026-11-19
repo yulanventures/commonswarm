@@ -35,7 +35,7 @@ import { agentPresenceLine } from '../../lib/agent-presence';
 import { wakePathMark } from '../../lib/wake-path';
 import { identityDisplayLabel } from '../../lib/identity-label';
 import { isTaggable } from '../../lib/mention-address';
-import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from '../../lib/household-access';
+import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED } from '../../lib/household-access';
 import { workspaceLeadLine, buildSharedCard } from '../../lib/home-side-cards';
 import type { HomeOverview } from '../../lib/home/contract';
 import { splitChoicePrompt } from '../../lib/choices';
@@ -852,7 +852,7 @@ test('People Allow lands from settled access, continues after consent, and retir
     const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
-      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey,
+      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, APPROVAL_CHOICE_LABELS, READ_ACCESS_INCLUDED, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey,
       one: (selector: string) => selector.endsWith(':checked')
         ? (nodes.get(selector)?.checked ? nodes.get(selector) : null) : nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? [objects, files]

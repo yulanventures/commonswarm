@@ -41,6 +41,10 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval-c
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval-copy strong { font: 600 14px/1.5 var(--k-shell-font); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval-copy small { color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval-choices { gap: 4px 12px; min-inline-size: 0; }
+/* "Read access included." sits where the always-on box was, as plain text on its own line. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__approval-included {
+  flex: 1 0 100%; margin: 0; color: var(--k-shell-secondary); font: 400 13px/1.55 var(--k-shell-font);
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__approval-choices label,.hh-conflict label) {
   box-sizing: border-box; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%;
   display: inline-flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 4px;

@@ -1311,7 +1311,8 @@ import "../../styles/kylon-command-palette.css";
     type CommandPaletteItem,
   } from "../../lib/home-command-palette";
   import {
-    CONTENT_OPERATION_LABELS,
+    APPROVAL_CHOICE_LABELS,
+    READ_ACCESS_INCLUDED,
     CONTENT_OPERATIONS,
     accessRefusalMessage,
     withdrawRefusalMessage,
@@ -12568,32 +12569,39 @@ import "../../styles/kylon-command-palette.css";
         const legend = document.createElement("legend");
         legend.textContent = `What ${agentName} may do`;
         choices.append(legend);
+        /* Reading always comes with an approval: a sentence, not a ticked box nobody can change. */
+        const included = document.createElement("p");
+        included.className = "dashboard__approval-included";
+        included.textContent = READ_ACCESS_INCLUDED;
+        choices.append(included);
         for (const operation of CONTENT_OPERATIONS) {
+          if (operation === "read") continue;
           /* Readers can approve reading only: the server refuses more for a reader. */
-          if (!editor && operation !== "read") continue;
+          if (!editor) continue;
           const label = document.createElement("label");
           const input = document.createElement("input");
           input.type = "checkbox";
           input.value = operation;
           input.dataset.approvalOperation = "";
           input.checked = approval ? approval.operations.includes(operation) : true;
-          input.disabled = operation === "read";
-          label.append(input, document.createTextNode(` ${CONTENT_OPERATION_LABELS[operation]}`));
+          label.append(input, document.createTextNode(` ${APPROVAL_CHOICE_LABELS[operation]}`));
           choices.append(label);
         }
         const allow = document.createElement("button");
         allow.type = "button";
         allow.className = "dashboard__button dashboard__button--primary";
-        allow.textContent = approval ? "Save" : "Allow";
+        /* A reader can only pass on reading, so their button says exactly that. */
+        allow.textContent = approval ? "Save" : editor ? "Allow" : "Allow read access";
         const status = document.createElement("p");
         status.className = "dashboard__approval-status";
         status.setAttribute("role", "status");
         status.setAttribute("aria-live", "polite");
         status.textContent = householdReceipts.get(principalId) ?? (approval ? approvalDescription(approval) : "");
         allow.addEventListener("click", () => {
-          const operations = [...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
+          /* Reading is always sent; it no longer has a box to read it from. */
+          const operations = ["read", ...[...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
             .filter((input) => input.checked)
-            .map((input) => input.value);
+            .map((input) => input.value)];
           void approveAgent(connection, operations, allow, status);
         });
         /* Hosted consent uses the same controls; this note describes tool availability. */
