@@ -249,10 +249,12 @@ export async function runPictureChecks(
         await page.mouse.move(mid.x + 700, mid.y + 700, { steps: 6 }); await page.mouse.up();
       } else {
         const cdp = await page.context().newCDPSession(page);
-        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
-        await touch("touchStart", [mid]);
-        for (let step = 1; step <= 6; step++) await touch("touchMove", [{ x: mid.x, y: mid.y + step * 60 }]);
-        await touch("touchEnd", []);
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          await touch("touchStart", [mid]);
+          for (let step = 1; step <= 6; step++) await touch("touchMove", [{ x: mid.x, y: mid.y + step * 60 }]);
+          await touch("touchEnd", []);
+        } finally { await cdp.detach().catch(() => {}); }
       }
       await page.waitForTimeout(250);
       const panned = await page.evaluate(VIEWER);
@@ -273,28 +275,30 @@ export async function runPictureChecks(
       if (!options.click && again) {
         // A phone: two fingers pinch it open, and lifting them leaves the viewer open; then one finger from fitted size pulls it shut.
         const cdp = await page.context().newCDPSession(page);
-        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
-        const at = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
-        await touch("touchStart", [{ x: at.x - 30, y: at.y }, { x: at.x + 30, y: at.y }]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x - 30 - step * 14, y: at.y }, { x: at.x + 30 + step * 14, y: at.y }]);
-        await touch("touchEnd", []);
-        await page.waitForTimeout(250);
-        const pinched = await page.evaluate(VIEWER);
-        check("a pinch zooms the picture, and lifting the fingers leaves the viewer open", !!pinched && pinched.zoomed && pinched.image.w >= again.image.w * 1.5 && overStage(pinched), pinched);
-        // One finger pulled down on a ZOOMED picture pans it; it does not close the viewer.
-        await touch("touchStart", [at]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
-        await touch("touchEnd", []);
-        await page.waitForTimeout(250);
-        const held = await page.evaluate(VIEWER);
-        check("a swipe down on a zoomed picture does not close the viewer", !!held && held.zoomed, held);
-        await page.keyboard.press("0");
-        await page.waitForTimeout(350);
-        await touch("touchStart", [at]);
-        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
-        await touch("touchEnd", []);
-        const swiped = await viewer(page, v => v === null, 5_000);
-        check("a one-finger swipe down from fitted size closes the viewer, with focus back on the picture", swiped === null && await page.evaluate(FOCUS) === "picture", { open: swiped !== null, focus: await page.evaluate(FOCUS) });
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          const at = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
+          await touch("touchStart", [{ x: at.x - 30, y: at.y }, { x: at.x + 30, y: at.y }]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x - 30 - step * 14, y: at.y }, { x: at.x + 30 + step * 14, y: at.y }]);
+          await touch("touchEnd", []);
+          await page.waitForTimeout(250);
+          const pinched = await page.evaluate(VIEWER);
+          check("a pinch zooms the picture, and lifting the fingers leaves the viewer open", !!pinched && pinched.zoomed && pinched.image.w >= again.image.w * 1.5 && overStage(pinched), pinched);
+          // One finger pulled down on a ZOOMED picture pans it; it does not close the viewer.
+          await touch("touchStart", [at]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+          await touch("touchEnd", []);
+          await page.waitForTimeout(250);
+          const held = await page.evaluate(VIEWER);
+          check("a swipe down on a zoomed picture does not close the viewer", !!held && held.zoomed, held);
+          await page.keyboard.press("0");
+          await page.waitForTimeout(350);
+          await touch("touchStart", [at]);
+          for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+          await touch("touchEnd", []);
+          const swiped = await viewer(page, v => v === null, 5_000);
+          check("a one-finger swipe down from fitted size closes the viewer, with focus back on the picture", swiped === null && await page.evaluate(FOCUS) === "picture", { open: swiped !== null, focus: await page.evaluate(FOCUS) });
+        } finally { await cdp.detach().catch(() => {}); }
       } else if (again) {
         // A mouse: a double click zooms about the pointer and a second one fits again; Close returns focus to the picture.
         const at = { x: again.image.x + again.image.w / 2, y: again.image.y + again.image.h / 2 };
@@ -311,13 +315,27 @@ export async function runPictureChecks(
       }
       check("nothing navigated to the file while the viewer was used", !navigated, navigated);
       page.off("request", watch);
-      // Download is the viewer's own button, and it starts the picture's own signed file.
-      await page.keyboard.press("Enter");
-      const forDownload = await viewer(page, v => !!v && v.loaded);
-      const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
-      if (forDownload) await page.locator("[data-viewer-download]").click();
-      const path = await navigation;
-      check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`), { path, fileId: after.fileId });
+      // Download is the viewer's own button, and it starts the picture's own signed file. Activate the picture link
+      // directly so a background feed rebuild frame cannot send bare Enter to <body>.
+      await page.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+      const forDownload = await viewer(page, v => !!v && v.loaded && v.state === "");
+      let commandStatus: number | null = null;
+      const onCommandResponse = (response: any) => {
+        if (String(response.url()).includes("/functions/v1/command") && (response.request().postData() ?? "").includes("file_download_url")) {
+          commandStatus = response.status();
+        }
+      };
+      let path: string | null = null;
+      if (forDownload?.loaded && forDownload.state === "") {
+        page.on("response", onCommandResponse);
+        try {
+          const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
+          await page.locator("[data-viewer-download]").click();
+          path = await navigation;
+        } finally { page.off("response", onCommandResponse); }
+      }
+      check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`),
+        { path, fileId: after.fileId, ...(typeof path === "string" ? {} : { opened: !!forDownload, loaded: forDownload?.loaded ?? null, state: forDownload?.state ?? null, commandStatus, focus: await page.evaluate(FOCUS) }) });
     }
     await page.close();
 

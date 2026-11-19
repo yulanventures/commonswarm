@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FITTED, clampView, closeUpScale, fittedSize, maxScale, zoomAbout } from "./image-viewer.ts";
+import { FITTED, clampView, closeUpScale, fittedSize, maxScale, openImageViewer, zoomAbout } from "./image-viewer.ts";
 
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
@@ -36,4 +36,42 @@ test("the picture cannot be dragged off the stage, and the scale stays in range"
   // Fitted cannot move at all, and the scale cannot leave its range.
   assert.deepEqual(clampView({ scale: 0.4, x: 70, y: 70 }, fitted, stage, 8), FITTED);
   assert.equal(clampView({ scale: 40, x: 0, y: 0 }, fitted, stage, 8).scale, 8);
+});
+
+test("trailing keypress, keyup and repeat keydown from opening Enter/Space are blocked until a keydown starts inside the viewer", () => {
+  const makeNode = (tag) => {
+    const listeners = [];
+    const node = {
+      tagName: tag.toUpperCase(), className: "", dataset: {}, hidden: false, open: false, children: [],
+      style: { removeProperty() {}, setProperty() {} },
+      setAttribute() {}, toggleAttribute() {}, removeAttribute() {},
+      append(...kids) { this.children.push(...kids); this.firstElementChild = this.children[0]; },
+      querySelector() { return { setAttribute() {} }; },
+      addEventListener(type, fn, capture = false) { listeners.push({ type, fn, capture: Boolean(capture) }); },
+      removeEventListener() {},
+      dispatch(type, props = {}) {
+        const event = { type, defaultPrevented: false, stopped: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...props };
+        for (const l of listeners) if (l.type === type) l.fn(event);
+        return event;
+      },
+      showModal() { this.open = true; },
+      close() { this.open = false; this.dispatch("close"); },
+      remove() {},
+    };
+    return node;
+  };
+  const win = { matchMedia: () => ({ matches: true }), addEventListener() {}, removeEventListener() {} };
+  const doc = { defaultView: win, activeElement: null, createElement: makeNode, createElementNS: (_ns, tag) => makeNode(tag) };
+  const host = { ownerDocument: doc, append() {} };
+  const dialog = openImageViewer(host, { name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} }, () => {});
+  assert.equal(dialog.open, true);
+  // Trailing events from the keystroke that opened the dialog must be cancelled before they can click autofocused Close.
+  assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, true, "trailing Enter keypress is cancelled");
+  assert.equal(dialog.dispatch("keyup", { key: " " }).defaultPrevented, true, "trailing Space keyup is cancelled");
+  assert.equal(dialog.dispatch("keydown", { key: "Enter", repeat: true }).defaultPrevented, true, "initial repeat keydown is cancelled");
+  assert.equal(dialog.open, true, "viewer stays open");
+  // Once a fresh keydown starts inside the viewer, keypress and keyup proceed normally.
+  assert.equal(dialog.dispatch("keydown", { key: "Enter", repeat: false }).defaultPrevented, false);
+  assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, false, "keypress after keydown inside viewer is allowed");
+  assert.equal(dialog.dispatch("keyup", { key: " " }).defaultPrevented, false, "keyup after keydown inside viewer is allowed");
 });

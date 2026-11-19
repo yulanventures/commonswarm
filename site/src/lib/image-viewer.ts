@@ -241,8 +241,14 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
   }, { passive: false });
 
   // Keys stay in the viewer: nothing behind it answers them. Escape is the dialog's own.
+  // A key press that opened the viewer (Enter on a picture link, whose click runs on keydown before
+  // keypress) can deliver its trailing keypress/keyup to autofocused Close and shut the viewer at once.
+  // Ignore trailing keypress/keyup (and initial key repeat) until a keydown starts inside this dialog.
+  let keyInside = false;
   dialog.addEventListener("keydown", (event) => {
     event.stopPropagation();
+    if (!keyInside && event.repeat) { event.preventDefault(); return; }
+    keyInside = true;
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const pan = zoomed() ? ({ ArrowLeft: [80, 0], ArrowRight: [-80, 0], ArrowUp: [0, 80], ArrowDown: [0, -80] } as Record<string, [number, number]>)[event.key] : undefined;
     const next = event.key === "+" || event.key === "=" ? zoomAbout(view, view.scale * 1.5, { x: 0, y: 0 })
@@ -253,6 +259,12 @@ export function openImageViewer(host: HTMLElement, source: PictureSource, closed
     event.preventDefault();
     set(next, { ease: true, settle: true });
   });
+  dialog.addEventListener("keypress", (event) => {
+    if (!keyInside) { event.preventDefault(); event.stopPropagation(); }
+  }, true);
+  dialog.addEventListener("keyup", (event) => {
+    if (!keyInside) { event.preventDefault(); event.stopPropagation(); }
+  }, true);
 
   zoom.addEventListener("click", () => toggle({ x: 0, y: 0 }));
   download.addEventListener("click", () => source.download());
