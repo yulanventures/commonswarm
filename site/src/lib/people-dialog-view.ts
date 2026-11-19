@@ -316,6 +316,10 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const draft = oldEditor ? { id: oldEditor.dataset.modelEditor, value: oldEditor.querySelector<HTMLInputElement>("input")?.value } : null;
   const openActions = new Set(Array.from(root.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]"), menu => menu.dataset.memberMenu));
   if (appliedFocus) openActions.clear();
+  const prevContext = root.querySelector<HTMLElement>("[data-people-context]");
+  const prevScroll = prevContext ? { top: prevContext.scrollTop, tab: prevContext.dataset.peopleScrollTab, query: prevContext.dataset.peopleScrollQuery } : null;
+  const prevSide = root.querySelector<HTMLElement>("[data-people-side]");
+  const prevSideScroll = prevSide ? { top: prevSide.scrollTop, selected: prevSide.dataset.peopleScrollSelected } : null;
   root.replaceChildren(); detail.replaceChildren();
   const outer = root.closest<HTMLDialogElement>("[data-roster-dialog]");
   // One roster node: the shell projects it into desktop context and returns it to this page on phones.
@@ -832,6 +836,17 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         const remove = button(doc, "Remove person", (opener) => callbacks.confirm("remove-person", person.id, opener), "pd-danger-button"); remove.setAttribute("aria-label", `Remove person: ${person.name}`); remove.dataset.removeMember = person.id; remove.dataset.pdFocus = `remove-person-${person.id}`; danger.append(remove); detail.append(danger); }
     }
   }
+  // Background refreshes replace the DOM; keep scroll position on the same tab/query and same open profile.
+  const nextContext = pageRoot.querySelector<HTMLElement>("[data-people-context]");
+  if (nextContext) {
+    nextContext.dataset.peopleScrollTab = tab;
+    nextContext.dataset.peopleScrollQuery = state.query;
+    if (!appliedFocus && prevScroll && prevScroll.top > 0 && prevScroll.tab === tab && prevScroll.query === state.query) nextContext.scrollTop = prevScroll.top;
+  }
+  side.dataset.peopleSide = "";
+  const selectedKey = state.selected ? `${state.selected.type}:${state.selected.id}` : "";
+  side.dataset.peopleScrollSelected = selectedKey;
+  if (!appliedFocus && prevSideScroll && prevSideScroll.top > 0 && selectedKey && prevSideScroll.selected === selectedKey) side.scrollTop = prevSideScroll.top;
   if (draft?.id && state.selected?.type === "agent" && state.selected.id === draft.id) {
     const edit = detail.querySelector<HTMLButtonElement>("[data-edit-model]");
     edit?.click(); const input = detail.querySelector<HTMLInputElement>("[data-model-editor] input");
