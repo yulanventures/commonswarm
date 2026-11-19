@@ -20,3 +20,10 @@ Keep the same signing team and bundle identifier (`com.commonswarm.ios`). Instal
 The first update from a memory-only build requires one sign-in. For the phone witness, have the owner open a workspace after that sign-in. Install a newer signed build in place, open it, and confirm the workspace loads without asking for a code. Record the two build numbers and the outcome only.
 
 Run `ios/Development/verify-upgrade.sh <simulator-udid>` on an already booted, dedicated simulator with the fixture port free. The check signs in on build 2 and installs build 3 over it. It checks silent launch into authenticated content, a temporary service failure, refresh-token rotation, and explicit sign-out across a relaunch.
+
+
+## Google sign-in on a provisioned iPhone
+
+The optional Google build configuration enables the existing HTTPS PKCE flow and requests the `webcredentials:commonswarm.com` entitlement together. Use `Configuration/GoogleSignIn.xcconfig` only once the existing app identifier has an eligible provisioning profile and the server return has passed security review. For a physical Debug build, include the Google configuration in the local USB build configuration and retain its inherited Swift flags, USB flag and public deployment key. The ordinary USB build continues to support email.
+
+The association document at `https://commonswarm.com/.well-known/apple-app-site-association` must list the exact signed application identifier in `webcredentials.apps`. Verify the signed entitlement and association before an in-place phone test. The app expects only a code and the pending state at `https://commonswarm.com/ios/auth/callback`. Use the existing Google web client and its GoTrue HTTPS provider callback. The simulator fixture exercises the code exchange but cannot establish that the production domain belongs to this signed app.

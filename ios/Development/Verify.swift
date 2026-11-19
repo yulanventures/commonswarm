@@ -36,7 +36,14 @@ enum Verify {
         let (_, googleResponse) = try await browser.data(from: google.authorize(at: origin))
         guard let location = (googleResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
               let googleURL = URL(string: location) else { throw Failure.mismatch("Google HTTPS callback") }
-        _ = try google.code(from: googleURL)
+        let googleCode = try google.code(from: googleURL)
+        let foreignAttempt = try SignInAttempt(provider: .google)
+        try expect((try? foreignAttempt.code(from: googleURL)) == nil, "Google callback requires the pending state")
+        let googleTokens = try await google.exchange(code: googleCode, at: origin, publicKey: "local-fixture")
+        let googleLogin = HumanSession(userID: googleTokens.userID) { googleTokens.accessToken }
+        let googleAPI = ConversationAPI(origin: origin, publicKey: "local-fixture", session: googleLogin)
+        try expect(!(try await googleAPI.workspaces()).isEmpty, "Google PKCE exchange opens an authenticated workspace")
+        googleLogin.signOut()
         let customReturn = URL(string: location.replacingOccurrences(of: "https://commonswarm.com/ios/auth", with: "com.commonswarm.ios://auth"))!
         try expect((try? google.code(from: customReturn)) == nil, "Google refuses custom-scheme return")
 
