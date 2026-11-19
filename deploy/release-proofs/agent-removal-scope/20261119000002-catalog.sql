@@ -5,4 +5,5 @@ SELECT
   AND NOT has_function_privilege('anon', 'swarm_read.agent_removal_scope(uuid,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm_read.agent_removal_scope(uuid,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_command', 'swarm_read.agent_removal_scope(uuid,uuid)', 'EXECUTE')
-  AS catalog_ok;
+  AS catalog_ok
+\gset
