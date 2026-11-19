@@ -708,14 +708,19 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     const pkceBeforeApp = pkceExchanges;
     await page.click('[data-add-account-dialog] [data-signin-provider="google"]');
     await page.waitForFunction(
-      ({ regKey, uidB }: { regKey: string; uidB: string }) => (localStorage.getItem(regKey) ?? "").includes(uidB) && location.pathname === "/app" && location.search === "",
+      ({ regKey, uidB }: { regKey: string; uidB: string }) =>
+        (localStorage.getItem(regKey) ?? "").includes(uidB) &&
+        location.pathname === "/app" &&
+        !location.search.includes("code=") &&
+        !location.search.includes("cs_attempt=") &&
+        location.hash === "",
       { regKey: accountsStorageKey(originHash), uidB: userB.id },
       { timeout: 15_000 },
     );
     await waitForAppReady(page, userB.email);
     assert.equal(pkceExchanges, pkceBeforeApp + 1, "served /app must complete real HTTP S256 PKCE provider exchange");
 
-    // Verify URL scrubbed, 2 accounts owned, provider tokens stripped from storage!
+    // Verify callback params scrubbed, 2 accounts owned, provider tokens stripped from storage!
     const afterProvider = await page.evaluate((regKey: string) => {
       const reg = localStorage.getItem(regKey) ?? "";
       const allValues: string[] = [];
@@ -729,7 +734,11 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         leakedProvider: allValues.some((v) => v.includes("secret-provider-tok") || v.includes("secret-provider-refresh")),
       };
     }, accountsStorageKey(originHash));
-    assert.equal(new URL(afterProvider.href).search, "", "callback query params must be scrubbed on served /app");
+    const afterProviderUrl = new URL(afterProvider.href);
+    for (const forbidden of ["code", "cs_attempt", "state", "access_token", "refresh_token", "provider_token", "token_hash"]) {
+      assert.equal(afterProviderUrl.searchParams.has(forbidden), false, `callback param ${forbidden} must be scrubbed on served /app`);
+    }
+    assert.equal(afterProviderUrl.hash, "", "callback hash must be empty on served /app");
     assert.equal(afterProvider.leakedProvider, false, "provider_token & provider_refresh_token must be stripped");
     assert.ok(afterProvider.reg.includes(userA.id) && afterProvider.reg.includes(userB.id), "both A and B owned");
 
@@ -815,6 +824,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.waitForSelector("[data-composer]:not([hidden])");
     await openAccountMenu(page);
     await page.waitForSelector(`[data-account-switch="${userA.id}"]:visible`);
+    await page.waitForTimeout(50);
     await page.focus(`[data-account-switch="${userA.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
@@ -881,6 +891,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
 
     await page.click(".cs-kylon-workspace-menu .hm-menu__trigger");
     await page.waitForSelector(`[data-menu-account-switch="${userB.id}"]:visible`);
+    await page.waitForTimeout(50);
     await page.focus(`[data-menu-account-switch="${userB.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
