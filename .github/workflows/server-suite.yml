@@ -72,8 +72,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The full mobile-audit matrix (no screens named) runs as six parallel shards; a focused capture stays one job.
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3}]' || inputs.suite == 'mobile-audit' && inputs.audit_screens == '' && inputs.audit_sizes == '' && '[{"suite":"mobile-audit","shard":1,"of":6},{"suite":"mobile-audit","shard":2,"of":6},{"suite":"mobile-audit","shard":3,"of":6},{"suite":"mobile-audit","shard":4,"of":6},{"suite":"mobile-audit","shard":5,"of":6},{"suite":"mobile-audit","shard":6,"of":6}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
+        # The full mobile-audit matrix (no screens named) runs as eight parallel shards (about 30 minutes; one job took over 150);
+        # a focused capture stays one job.
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3}]' || inputs.suite == 'mobile-audit' && inputs.audit_screens == '' && inputs.audit_sizes == '' && '[{"suite":"mobile-audit","shard":1,"of":8},{"suite":"mobile-audit","shard":2,"of":8},{"suite":"mobile-audit","shard":3,"of":8},{"suite":"mobile-audit","shard":4,"of":8},{"suite":"mobile-audit","shard":5,"of":8},{"suite":"mobile-audit","shard":6,"of":8},{"suite":"mobile-audit","shard":7,"of":8},{"suite":"mobile-audit","shard":8,"of":8}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1,"of":3},{"suite":"server","shard":2,"of":3},{"suite":"server","shard":3,"of":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 120 || 30 }}
     steps:
@@ -599,7 +600,7 @@ jobs:
           fi
           # The full matrix runs as shards of one job; the suite result above already covers all of them (any failed shard fails it).
           if [ "$SUITE" = mobile-audit ] && [ -z "${AUDIT_SCREENS}${AUDIT_SIZES}" ]; then
-            description="dispatch run ${GITHUB_RUN_ID}: ${state}, full matrix in 6 shards"
+            description="dispatch run ${GITHUB_RUN_ID}: ${state}, full matrix in 8 shards"
           fi
           gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
             -f state="$state" -f context="$context" \

@@ -19,7 +19,7 @@ test("every manifest screen is captured by exactly one shard, and the shards are
     { screens?: { id: string }[] } | { id: string }[];
   const ids = (Array.isArray(manifest) ? manifest : manifest.screens ?? []).map(screen => screen.id);
   assert.ok(ids.length > 20, "the manifest has screens");
-  for (const count of [2, 4, 6]) {
+  for (const count of [2, 4, 6, 8]) {
     const shards = Array.from({ length: count }, (_, index) => ids.filter(id => inShard(ids, id, { index, count })));
     assert.deepEqual(shards.flat().sort(), [...ids].sort(), `${count} shards cover every screen once`);
     const sizes = shards.map(list => list.length);
