@@ -10,3 +10,5 @@ git -C "$dest" fetch --quiet --depth=1 https://github.com/supabase/auth.git "$up
 git -C "$dest" checkout --quiet --detach "$upstream"
 git -C "$dest" apply "$here/integration.patch"
 cp "$here"/ios_usb{,_test}.go "$dest/internal/api/"
+cp "$here"/ios_google_usb{,_test}.go "$dest/internal/api/"
+cp "$here/ios_google_usb_attempts.sql" "$dest/migrations/20261119040000_ios_google_usb_attempts.up.sql"
