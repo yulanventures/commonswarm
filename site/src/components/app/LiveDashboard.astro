@@ -1451,6 +1451,7 @@ import "../../styles/kylon-image-viewer.css";
     channelUnread,
     ConversationsUnsupportedError,
     listConversations,
+    OversightAuthRefusedError,
     OversightRequestRetiredError,
     readOversightConversationsRaw,
     readOversightConversationHistory,
@@ -5638,6 +5639,14 @@ import "../../styles/kylon-image-viewer.css";
         );
       } catch (error) {
         if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isHistoryLive()) teardownAgentOversight();
+          return;
+        }
         result = { ok: false, code: "other", message: readableError(error) || "Could not load messages." };
       }
       if (!isHistoryLive() || !oversightMod || !oversightState) return;
@@ -5718,6 +5727,14 @@ import "../../styles/kylon-image-viewer.css";
         outcome = oversightMod.parseOversightListOutcome(raw.status, raw.body);
       } catch (error) {
         if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isOversightPinLive(pin)) teardownAgentOversight();
+          return;
+        }
         outcome = { status: "failed", message: readableError(error) || "Could not load agent conversations." };
       }
       if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;

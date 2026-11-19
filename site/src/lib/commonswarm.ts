@@ -4474,6 +4474,14 @@ export class OversightRequestRetiredError extends Error {
   }
 }
 
+/** Raised when the read service rejects oversight with an explicit sign-in refusal (403 human_sign_in_required). */
+export class OversightAuthRefusedError extends Error {
+  constructor(message = "Sign in as a person to read agent conversations.") {
+    super(message);
+    this.name = "OversightAuthRefusedError";
+  }
+}
+
 async function postConversationRead(
   payload: Record<string, unknown>,
   label: string,
@@ -4574,11 +4582,17 @@ export async function readOversightConversationsRaw(
   agentPrincipalId: string,
   guard?: OversightDispatchGuard,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  return postConversationRead(
+  const res = await postConversationRead(
     buildOversightListRequest(workspaceId, agentPrincipalId),
     "agent conversations",
     guard,
   );
+  if (res.status === 403 && res.body.error === "human_sign_in_required") {
+    throw new OversightAuthRefusedError(
+      typeof res.body.message === "string" ? res.body.message : undefined,
+    );
+  }
+  return res;
 }
 
 /** Step 2b `resource: "conversation_oversight_history"`: read-only history bound to one owned agent. */
@@ -4594,6 +4608,11 @@ export async function readOversightConversationHistory(
     "agent conversation history",
     guard,
   );
+  if (status === 403 && body.error === "human_sign_in_required") {
+    throw new OversightAuthRefusedError(
+      typeof body.message === "string" ? body.message : undefined,
+    );
+  }
   return parseOversightHistoryResponse(status, body, browserSignalFromRow);
 }
 

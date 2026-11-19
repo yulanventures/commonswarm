@@ -26,6 +26,7 @@ function installOversightFixture() {
   f.heldHistoryA = false;
   f.releaseHistoryA = null as null | (() => void);
   f.historyACount = 0;
+  f.olderCalls = 0;
 
   const replacementOwner = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const peerAlex = "dddd4444-4444-4444-8444-444444444444";
@@ -303,10 +304,29 @@ function installOversightFixture() {
         const pid = String(body.agent_principal_id ?? "").toLowerCase();
         if (cid === oversightDmAlex && pid === ownedLead) {
           if (body.before_id === "55555555-5555-4555-8555-555555555501") {
+            f.olderCalls += 1;
             if (f.oversightMode === "deny_older") {
               return Response.json(
                 { error: "conversation_not_found", message: "This conversation isn't available in this workspace." },
                 { status: 404 },
+              );
+            }
+            if (f.oversightMode === "auth_refusal_older") {
+              if (f.olderCalls === 1) {
+                return Response.json(
+                  { error: "service_unavailable", message: "Temporary read error." },
+                  { status: 503 },
+                );
+              }
+              return Response.json(
+                { error: "unauthorized", message: "Sign in again." },
+                { status: 401 },
+              );
+            }
+            if (f.oversightMode === "human_signin_older") {
+              return Response.json(
+                { error: "human_sign_in_required", message: "Sign in as a person to read agent conversations." },
+                { status: 403 },
               );
             }
             return Response.json({
@@ -507,6 +527,35 @@ async function observeOversight() {
       check(!one(".cs-oversight__detail-meta"), "denied older page must clear member summary");
       check(!!one(`[data-oversight-conv="${f.ids.oversightGroup}"]`), "other allowed conversations remain in list");
       document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "deny_older" });
+      return;
+    }
+
+    // Condition 1c witness: transient 503 on older page keeps retryable transcript, then 401 sign-in refusal retires entire oversight panel and DOM.
+    if (f.oversightMode === "auth_refusal_older") {
+      await wait("initial transcript ready", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      await click("[data-oversight-load-older]");
+      await wait("transient 503 shows retryable error", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("Temporary read error."));
+      const transientText = one("[data-oversight-panel]")?.textContent ?? "";
+      check(transientText.includes("All three checks passed."), "transient 503 must keep existing transcript");
+      check(!!one("[data-oversight-load-older]"), "transient 503 must keep retryable Load older button");
+      check(!!one(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`), "transient 503 must keep conversation list");
+      // Second Load older receives 401 -> retires entire oversight scope and clears DOM:
+      await click("[data-oversight-load-older]");
+      await wait("401 retired oversight panel", () => !one("[data-oversight-panel]"));
+      const leftover = all<HTMLElement>("[data-oversight-slot]").some(el => (el.textContent ?? "").trim().length > 0);
+      check(!leftover, "401 refusal must clear all oversight DOM text (transcript, list, and cursor)");
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "auth_refusal_older" });
+      return;
+    }
+
+    // Condition 1d witness: 403 human_sign_in_required on older page retires entire oversight panel and clears DOM.
+    if (f.oversightMode === "human_signin_older") {
+      await wait("initial transcript ready", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      await click("[data-oversight-load-older]");
+      await wait("403 human_sign_in_required retired oversight panel", () => !one("[data-oversight-panel]"));
+      const leftover = all<HTMLElement>("[data-oversight-slot]").some(el => (el.textContent ?? "").trim().length > 0);
+      check(!leftover, "403 human_sign_in_required refusal must clear all oversight DOM text (transcript, list, and cursor)");
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "human_signin_older" });
       return;
     }
 
@@ -727,6 +776,8 @@ test("Step 3D-3 signed-in read-only agent oversight UI enforces isolation, curso
       { name: "unsupported-pre2b-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=unsupported` },
       { name: "slow-switch-isolation-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=slow_switch` },
       { name: "denied-older-page-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=deny_older` },
+      { name: "auth-refusal-and-transient-older-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=auth_refusal_older` },
+      { name: "human-signin-refusal-older-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=human_signin_older` },
       { name: "held-success-after-aba-denial-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=aba_held_then_deny` },
       { name: "nav-retire-before-await-reenter-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=nav_retire_reenter` },
       { name: "held-session-list-guard-1024", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&oversight_mode=held_session_list` },
