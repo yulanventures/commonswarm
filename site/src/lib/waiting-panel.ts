@@ -52,6 +52,23 @@ export interface WaitingAskItem {
   };
 }
 
+export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "agent_removed";
+
+export interface WaitingTodoItem {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  title: string;
+  state: "open" | "doing";
+  dueOn: string | null;
+  reason: WaitingTodoReason;
+  href: string;
+  canMarkDone: boolean;
+  pending?: true;
+  error?: string;
+  retryable?: true;
+}
+
 export interface WaitingScopeCount {
   min: number;
   complete: boolean;
@@ -67,6 +84,7 @@ export interface WaitingPanelVM {
   scope: WaitingScope;
   place: WaitingPlace;
   items: WaitingAskItem[];
+  todos?: WaitingTodoItem[];
   counts: WaitingPanelCounts;
   loading: boolean;
   complete: boolean;
@@ -84,6 +102,9 @@ export interface WaitingPanelHandlers {
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
+  onMarkTodoDone?: (item: WaitingTodoItem) => void;
+  onRetryTodo?: (item: WaitingTodoItem) => void;
+  onOpenTodo?: (item: WaitingTodoItem) => void;
   onOpenCatchUp?: (href: string) => void;
 }
 
@@ -116,6 +137,115 @@ export function filterWaitingItems(
     }
     return false;
   });
+}
+
+/** Filters waiting/assigned to-dos by scope. To-dos are workspace-level, so they appear in All channels,
+ *  All workspaces, and the workspace-wide All messages view, never inside a specific channel or DM. */
+export function filterWaitingTodos(
+  todos: readonly WaitingTodoItem[],
+  scope: WaitingScope,
+  place: WaitingPlace,
+): WaitingTodoItem[] {
+  if (scope === "all") return [...todos];
+  if (scope === "workspace") return todos.filter(todo => todo.workspaceId === place.workspaceId);
+  if (place.kind === "all") return todos.filter(todo => todo.workspaceId === place.workspaceId);
+  return [];
+}
+
+function todoReasonLabel(reason: WaitingTodoReason): string {
+  switch (reason) {
+    case "request": return "To-do · Waiting for your answer";
+    case "hold": return "To-do · On hold";
+    case "after": return "To-do · Waiting";
+    case "agent_removed": return "To-do · Agent removed";
+    default: return "To-do · Assigned to you";
+  }
+}
+
+function formatTodoDue(dueOn: string | null): string | null {
+  if (!dueOn) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(dueOn);
+  if (!match) return `Due ${dueOn}`;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const month = months[Number(match[2]) - 1];
+  const day = Number(match[3]);
+  return month && day ? `Due ${month} ${day}` : `Due ${dueOn}`;
+}
+
+function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
+  return JSON.stringify([
+    item.id,
+    item.workspaceId,
+    item.workspaceName,
+    item.title,
+    item.state,
+    item.dueOn ?? "",
+    item.reason,
+    item.href,
+    item.canMarkDone,
+    scope,
+    item.pending ?? false,
+    item.error ?? "",
+    item.retryable ?? false,
+  ]);
+}
+
+function buildTodoCard(
+  doc: Document,
+  item: WaitingTodoItem,
+  scope: WaitingScope,
+  handlers: WaitingPanelHandlers,
+): HTMLElement {
+  const card = node(doc, "article", "cs-waiting-card cs-waiting-card--todo");
+  card.dataset.waitingTodo = item.id;
+  card.dataset.waitingWorkspace = item.workspaceId;
+  card.dataset.waitingCardSig = todoCardSignature(item, scope);
+
+  const meta = node(doc, "div", "cs-waiting-card__todo-meta");
+  const kind = node(doc, "span", "cs-waiting-card__todo-kind", todoReasonLabel(item.reason));
+  meta.append(kind);
+  const due = formatTodoDue(item.dueOn);
+  if (due) meta.append(node(doc, "span", "cs-waiting-card__todo-due", due));
+  if (scope === "all") meta.append(node(doc, "span", "cs-waiting-card__place", item.workspaceName));
+
+  const title = node(doc, "p", "cs-waiting-card__question", item.title);
+  card.append(meta, title);
+
+  if (item.error) {
+    const err = node(doc, "p", "cs-waiting-card__error", item.error);
+    err.setAttribute("role", "alert");
+    card.append(err);
+  }
+
+  const actions = node(doc, "div", "cs-waiting-card__actions");
+  if (item.canMarkDone) {
+    if (item.error && item.retryable && !item.pending) {
+      const retry = node(doc, "button", "cs-waiting-card__todo-done", "Retry");
+      retry.type = "button";
+      retry.dataset.waitingTodoRetry = item.id;
+      retry.addEventListener("click", () => (handlers.onRetryTodo ?? handlers.onMarkTodoDone)?.(item));
+      actions.append(retry);
+    } else {
+      const done = node(doc, "button", "cs-waiting-card__todo-done", item.pending ? "Saving…" : "Mark done");
+      done.type = "button";
+      done.dataset.waitingTodoDone = item.id;
+      done.disabled = Boolean(item.pending);
+      done.addEventListener("click", () => handlers.onMarkTodoDone?.(item));
+      actions.append(done);
+    }
+  }
+  const open = node(doc, "a", "cs-waiting-panel__action", "Open");
+  open.href = item.href;
+  open.dataset.waitingTodoOpen = item.id;
+  open.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (!handlers.onOpenTodo) return;
+    event.preventDefault();
+    handlers.onOpenTodo(item);
+  });
+  actions.append(open);
+  card.append(actions);
+  return card;
 }
 
 function isAgent(who: PersonVM | AgentVM): who is AgentVM {
@@ -346,7 +476,8 @@ export function renderWaitingPanel(
     return link;
   };
 
-  if (vm.items.length === 0) {
+  const todos = vm.todos ?? [];
+  if (vm.items.length === 0 && todos.length === 0) {
     const emptyState = vm.failed ? "failed" : vm.truncated ? "truncated" : vm.loading || !vm.complete ? "loading" : "empty";
     const wsNum = formatScopeCount(vm.counts.workspace);
     const allNum = formatScopeCount(vm.counts.all);
@@ -455,24 +586,33 @@ export function renderWaitingPanel(
   const existing = new Map<string, HTMLElement>();
   for (const child of Array.from(list.children)) {
     const el = child as HTMLElement;
-    const id = el.dataset.waitingCard;
-    if (id) existing.set(id, el);
+    if (el.dataset.waitingCard) existing.set(`ask:${el.dataset.waitingCard}`, el);
+    else if (el.dataset.waitingTodo) existing.set(`todo:${el.dataset.waitingTodo}`, el);
   }
 
-  const keepIds = new Set(vm.items.map(item => item.id));
+  const keepKeys = new Set<string>([
+    ...vm.items.map(item => `ask:${item.id}`),
+    ...todos.map(todo => `todo:${todo.id}`),
+  ]);
   const rawActive = doc.activeElement;
   const activeEl = rawActive && typeof (rawActive as HTMLElement).closest === "function" ? (rawActive as HTMLElement) : null;
-  const activeCardId = activeEl?.closest<HTMLElement>("[data-waiting-card]")?.dataset.waitingCard ?? null;
-  const activeControlId = activeCardId && activeEl?.id ? activeEl.id : null;
+  const activeCardEl = activeEl?.closest<HTMLElement>("[data-waiting-card], [data-waiting-todo]") ?? null;
+  const activeKey = activeCardEl?.dataset.waitingCard
+    ? `ask:${activeCardEl.dataset.waitingCard}`
+    : activeCardEl?.dataset.waitingTodo
+      ? `todo:${activeCardEl.dataset.waitingTodo}`
+      : null;
+  const activeControlId = activeKey && activeEl?.id ? activeEl.id : null;
 
-  for (const [id, el] of existing) {
-    if (!keepIds.has(id)) el.remove();
+  for (const [key, el] of existing) {
+    if (!keepKeys.has(key)) el.remove();
   }
 
   let cursor: ChildNode | null = list.firstChild;
   for (const item of vm.items) {
+    const key = `ask:${item.id}`;
     const sig = cardSignature(item, vm.scope);
-    let card = existing.get(item.id);
+    let card = existing.get(key);
     if (card && card.dataset.waitingCardSig === sig) {
       const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
       if (timeEl && timeEl.textContent !== item.when) timeEl.textContent = item.when;
@@ -485,10 +625,28 @@ export function renderWaitingPanel(
         list.insertBefore(built, cursor);
       }
       card = built;
-      if (activeCardId === item.id && activeControlId) {
+      if (activeKey === key && activeControlId) {
         const restored = doc.getElementById(activeControlId);
         if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
       }
+    }
+    if (card !== cursor) list.insertBefore(card, cursor);
+    else cursor = cursor.nextSibling;
+  }
+
+  for (const todo of todos) {
+    const key = `todo:${todo.id}`;
+    const sig = todoCardSignature(todo, vm.scope);
+    let card = existing.get(key);
+    if (!card || card.dataset.waitingCardSig !== sig) {
+      const built = buildTodoCard(doc, todo, vm.scope, handlers);
+      if (card) {
+        if (cursor === card) cursor = built;
+        card.replaceWith(built);
+      } else {
+        list.insertBefore(built, cursor);
+      }
+      card = built;
     }
     if (card !== cursor) list.insertBefore(card, cursor);
     else cursor = cursor.nextSibling;

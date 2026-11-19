@@ -41,9 +41,12 @@ function installWaitingFixture() {
   const multiBatch = batch51 || batch101 || truncatedQueue;
   const ask51 = askIdAt(51);
   const ask101 = askIdAt(101);
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch,
+  const todoId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const todoCase = scenario.startsWith("todos-");
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101, todoId, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
+    todoDone: false, todoFailOnce: todoCase, todoWrites: [] as any[],
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
@@ -77,11 +80,14 @@ function installWaitingFixture() {
           const asks = id === ids[0] && multiBatch
             ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
             : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
+          const assigned = id === ids[0] && todoCase && !f.todoDone
+            ? [{ todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22" }]
+            : [];
           return {
             workspace_id: id, name: "Workspace " + number(id), role: "owner", last_seen_at: recent, new_messages: 0, content: null,
             // No agents on the roster: an agent of the viewer's that needs fixing would be counted too.
             people: [{ user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true, agents: [] }],
-            needs_you: { asks, assigned: [], waiting: [] },
+            needs_you: { asks, assigned, waiting: [] },
           };
         }) });
     }
@@ -138,6 +144,44 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[8] && url.searchParams.get("id")?.includes(ask)) {
       return Response.json([{ id: ask, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent" }]);
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_read") {
+      f.log.push("todo_read");
+      return Response.json({
+        status: "ok",
+        todo: {
+          workspace_id: ids[0], todo_id: todoId, version: 3, title: "Confirm boiler visit time", notes: "",
+          state: f.todoDone ? "done" : "open", due_on: "2026-11-22",
+          created_by: { user_id: owner, principal_id: null }, created_at: recent,
+          assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
+          offer: null, gate: { kind: "none" }, gate_clear: true, queue_position: null,
+          state_by: { user_id: owner, principal_id: null }, state_at: recent, comment_count: 0,
+        },
+        comments: [],
+        next_comment_offset: null,
+      });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_set_state") {
+      f.todoWrites.push(body.command.arguments);
+      f.log.push("todo_set_state");
+      if (f.todoFailOnce) {
+        f.todoFailOnce = false;
+        return Response.json({ status: "refused", reason: "not_permitted" });
+      }
+      f.todoDone = true;
+      return Response.json({
+        status: "committed",
+        value: {
+          workspace_id: ids[0], todo_id: todoId, version: 4, title: "Confirm boiler visit time", notes: "",
+          state: "done", due_on: "2026-11-22",
+          created_by: { user_id: owner, principal_id: null }, created_at: recent,
+          assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
+          offer: null, gate: { kind: "none" }, gate_clear: true, queue_position: null,
+          state_by: { user_id: owner, principal_id: null }, state_at: recent, comment_count: 0,
+        },
+        notices: [],
+        replayed: false,
+      });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
       // From here on the answered ask is no longer waiting.
@@ -294,6 +338,33 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("todos-")) {
+      await wait(() => shown(control()) && count() === "1", "assigned to-do is counted in the top bar");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const showWs = () => panel()?.querySelector<HTMLButtonElement>('[data-waiting-switch-scope="workspace"]') ?? null;
+      await wait(() => shown(showWs()) && showWs()!.textContent === "Show all channels (1)",
+        "This channel stays channel-specific and offers Show all channels (1) for the workspace to-do");
+      showWs()!.click();
+      const todoCard = () => panel()?.querySelector<HTMLElement>(`[data-waiting-todo="${f.todoId}"]`) ?? null;
+      const doneBtn = () => todoCard()?.querySelector<HTMLButtonElement>(`[data-waiting-todo-done="${f.todoId}"]`) ?? null;
+      const openLink = () => todoCard()?.querySelector<HTMLAnchorElement>(`[data-waiting-todo-open="${f.todoId}"]`) ?? null;
+      await wait(() => shown(todoCard()) && shown(doneBtn()) && shown(openLink()), "assigned to-do renders with Mark done and Open");
+      check(doneBtn()!.getBoundingClientRect().height >= 44 && openLink()!.getBoundingClientRect().height >= 44, "to-do action targets under 44px");
+      // First attempt fails (refused): card stays visible with role="alert" and Retry.
+      doneBtn()!.click();
+      const retryBtn = () => todoCard()?.querySelector<HTMLButtonElement>(`[data-waiting-todo-retry="${f.todoId}"]`) ?? null;
+      await wait(() => shown(retryBtn()) && shown(todoCard()?.querySelector('[role="alert"]')), "failed Mark done keeps to-do card visible with Retry");
+      // Retry commits state=done, removes card, shows visible Done banner, and drops top-bar count to 0.
+      retryBtn()!.click();
+      await wait(() => !todoCard() && shown(panel()?.querySelector("[data-waiting-status]")) &&
+        panel()?.querySelector("[data-waiting-status]")?.textContent === "Done" && count() === "0",
+        "Retry completes to-do, displays Done banner, and updates count to 0");
+      check(f.todoWrites.length === 2 && f.todoWrites[1].state === "done" && f.todoWrites[1].base_version === 3,
+        "unexpected todo_set_state calls: " + JSON.stringify(f.todoWrites));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -379,7 +450,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     for (const scenario of scenarios) {
       // A phone (390 x 844) draws the control in the shell's top bar; a desktop (1280 x 800) in the workspace header.
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
-      const channelParam = (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue")) ? "&c=general" : "";
+      const channelParam = (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-")) ? "&c=general" : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa" + channelParam + "&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-waiting-observation="([^"]*)"/)?.[1];
@@ -407,5 +478,10 @@ test("Waiting on you: an uncounted workspace makes the count a minimum, never ze
 
 test("Waiting on you: pages past 50 and 100 choice asks and keeps unpaged truncated queues incomplete", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["batch-51-desktop", "batch-101-desktop", "truncated-queue-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: assigned to-dos appear in All channels/All workspaces with Mark done, Retry, Open and Done banner", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["todos-desktop", "todos-phone"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

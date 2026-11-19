@@ -1317,7 +1317,7 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
-  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
+  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -5690,9 +5690,9 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       }
     };
-    const showWaitingSent = (): void => {
+    const showWaitingStatus = (message: string): void => {
       window.clearTimeout(waitingStatusTimer);
-      waitingStatusMessage = "Sent";
+      waitingStatusMessage = message;
       waitingStatusSeq += 1;
       waitingStatusTimer = window.setTimeout(() => {
         waitingStatusTimer = undefined;
@@ -5700,7 +5700,9 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       }, 5_000);
     };
+    const showWaitingSent = (): void => showWaitingStatus("Sent");
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
     const waitingPanelTruncatedWorkspaces = new Set<string>();
@@ -5709,6 +5711,9 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+    type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
+    const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
+    const waitingTodoErrors = new Map<string, string>();
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -5774,6 +5779,141 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       return items;
+    };
+
+    const allWaitingTodoItems = (): WaitingTodoItem[] => {
+      const items: WaitingTodoItem[] = [];
+      for (const workspace of workspaces) {
+        for (const todo of waitingPanelTodos.get(workspace.id) ?? []) {
+          const error = waitingTodoErrors.get(todo.id);
+          const pending = waitingTodoTickets.has(todo.id);
+          items.push({
+            ...todo,
+            ...(pending ? { pending: true as const } : {}),
+            ...(error ? { error, retryable: true as const } : {}),
+          });
+        }
+      }
+      return items;
+    };
+
+    const extractWaitingTodos = (
+      row: { needs_you: { assigned: ReadonlyArray<{ todo_id: string; title: string; state: string; due_on: string | null }>; waiting: ReadonlyArray<{ todo_id: string; title: string; state: string; due_on: string | null; reason: "request" | "after" | "hold" | "agent_removed" }> } },
+      workspace: Workspace,
+    ): WaitingTodoItem[] => {
+      const byId = new Map<string, WaitingTodoItem>();
+      const order: string[] = [];
+      for (const todo of row.needs_you.assigned) {
+        if (todo.state === "done" || todo.state === "dropped") continue;
+        byId.set(todo.todo_id, {
+          id: todo.todo_id,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          title: todo.title,
+          state: todo.state === "doing" ? "doing" : "open",
+          dueOn: todo.due_on ?? null,
+          reason: "assigned",
+          href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
+          canMarkDone: true,
+        });
+        order.push(todo.todo_id);
+      }
+      for (const todo of row.needs_you.waiting) {
+        if (todo.state === "done" || todo.state === "dropped") continue;
+        const existing = byId.get(todo.todo_id);
+        const item: WaitingTodoItem = {
+          id: todo.todo_id,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          title: todo.title,
+          state: todo.state === "doing" ? "doing" : "open",
+          dueOn: todo.due_on ?? null,
+          reason: todo.reason,
+          href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
+          canMarkDone: false,
+        };
+        if (!existing) {
+          byId.set(todo.todo_id, item);
+          order.push(todo.todo_id);
+        } else if (todo.reason === "request") {
+          // Mirrors home-map.ts pushNeed: a pending request replaces the assignment card so each to-do counts once.
+          byId.set(todo.todo_id, item);
+        }
+      }
+      return order.map(id => byId.get(id)!).filter(Boolean);
+    };
+
+    const markWaitingTodoDone = async (item: WaitingTodoItem): Promise<void> => {
+      const server = homeServer();
+      const viewer = homeViewerId();
+      if (!server || !viewer || waitingTodoTickets.has(item.id)) return;
+      const ticket: WaitingTodoTicket = { viewer, workspaceId: item.workspaceId, todoId: item.id };
+      waitingTodoTickets.set(item.id, ticket);
+      waitingTodoErrors.delete(item.id);
+      renderWaitingPanelView();
+      let ok = false;
+      let errorMessage = TODO_SAVE_FAILED;
+      try {
+        let baseVersion: number | null = null;
+        if (item.workspaceId === activeWorkspaceId) {
+          const cached = homeTodoRead?.todo.todo_id === item.id
+            ? homeTodoRead.todo
+            : homeTodoRows.find(row => row.todo_id === item.id);
+          if (cached) baseVersion = cached.version;
+        }
+        if (baseVersion === null) {
+          const read = await server.readTodo(item.workspaceId, item.id);
+          if (read.todo.state === "done" || read.todo.state === "dropped") {
+            ok = true;
+          } else {
+            baseVersion = read.todo.version;
+          }
+        }
+        if (!ok && baseVersion !== null) {
+          let result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: baseVersion, state: "done" }, uuid());
+          if (result.status === "conflict") {
+            const current = result.current;
+            if (current.state === "done" || current.state === "dropped") {
+              ok = true;
+            } else {
+              result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: current.version, state: "done" }, uuid());
+            }
+          }
+          if (!ok) {
+            if (result.status === "committed") {
+              ok = true;
+            } else if (result.status === "refused") {
+              errorMessage = homeRefusalCopy(result.reason);
+            }
+          }
+        }
+      } catch (error) {
+        errorMessage = error instanceof CommandOutcomeUnknown
+          ? TODO_RESULT_UNKNOWN
+          : error instanceof HomeCommandRefused
+            ? homeRefusalCopy(error.reason)
+            : TODO_SAVE_FAILED;
+      }
+      if (waitingTodoTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingTodoTickets.delete(item.id);
+      if (ok) {
+        waitingTodoErrors.delete(item.id);
+        const list = waitingPanelTodos.get(item.workspaceId);
+        if (list) waitingPanelTodos.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingStatus("Done");
+        renderWaitingPanelView();
+        renderHomeRail();
+        if (item.workspaceId === activeWorkspaceId) {
+          homeTodoRows = homeTodoRows.map(row => row.todo_id === item.id ? { ...row, state: "done" } : row);
+          if (homeRoute.view === "todos" || homeRoute.view === "todo") renderHomeObjectPane();
+        }
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingTodoErrors.set(item.id, errorMessage);
+      renderWaitingPanelView();
     };
 
     type WaitingPanelModule = typeof import("../../lib/waiting-panel");
@@ -5874,6 +6014,7 @@ import "../../styles/kylon-image-viewer.css";
       if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
       const place = currentWaitingPlace();
       const allItems = allWaitingAskItems();
+      const allTodos = allWaitingTodoItems();
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
       const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
@@ -5883,7 +6024,10 @@ import "../../styles/kylon-image-viewer.css";
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const channelTodos = waitingPanelMod.filterWaitingTodos(allTodos, "channel", place);
+      const workspaceTodos = waitingPanelMod.filterWaitingTodos(allTodos, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const visibleTodos = waitingScope === "channel" ? channelTodos : waitingScope === "workspace" ? workspaceTodos : allTodos;
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
@@ -5893,10 +6037,11 @@ import "../../styles/kylon-image-viewer.css";
           scope: waitingScope,
           place,
           items: visibleItems,
+          todos: visibleTodos,
           counts: {
-            channel: { min: channelItems.length, complete: wsLoaded },
-            workspace: { min: workspaceItems.length, complete: wsLoaded },
-            all: { min: allItems.length, complete: allLoaded },
+            channel: { min: channelItems.length + channelTodos.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length + workspaceTodos.length, complete: wsLoaded },
+            all: { min: allItems.length + allTodos.length, complete: allLoaded },
           },
           loading: waitingInFlight && !complete && !truncated,
           complete,
@@ -5927,6 +6072,13 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDraftChoice: (item, draft) => {
             choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onMarkTodoDone: (item) => void markWaitingTodoDone(item),
+          onRetryTodo: (item) => void markWaitingTodoDone(item),
+          onOpenTodo: (item) => {
+            clearWaitingStatus();
+            if (waitingSurface?.isPhone()) waitingSurface.close(false);
+            navigateHomeHref(item.href);
           },
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
@@ -5999,12 +6151,15 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingPanelViewer !== viewer) {
         waitingPanelViewer = viewer;
         waitingPanelAsks.clear();
+        waitingPanelTodos.clear();
         waitingPanelLoadedWorkspaces.clear();
         waitingPanelFailedWorkspaces.clear();
         waitingPanelTruncatedWorkspaces.clear();
         waitingPanelTickets.clear();
         waitingPanelErrors.clear();
         waitingPanelLastSubmissions.clear();
+        waitingTodoTickets.clear();
+        waitingTodoErrors.clear();
         waitingWorkspaceChannels.clear();
         waitingPanelOverviewFailed = false;
       }
@@ -6028,11 +6183,13 @@ import "../../styles/kylon-image-viewer.css";
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
           } else if (row.needs_you.asks.length > 0) {
             counted.set(workspace.id, null);
+            waitingPanelTodos.set(workspace.id, extractWaitingTodos(row, workspace));
             toRead.push(workspace);
           } else {
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
+            waitingPanelTodos.set(workspace.id, extractWaitingTodos(row, workspace));
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
