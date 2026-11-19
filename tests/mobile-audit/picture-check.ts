@@ -548,7 +548,13 @@ export async function runPictureChecks(
     await browse.locator("[data-composer-send]").click();
     let pair: ReturnType<typeof PAIR> = null;
     for (const started = Date.now(); Date.now() - started < 30_000 && !pair?.loaded;) { pair = await browse.evaluate(PAIR); if (!pair?.loaded) await browse.waitForTimeout(200); }
-    check("a message posted with two pictures shows both", !!pair?.loaded && pair.names.join("|") === "first-view.png|second-view.png", pair);
+    const pairDiag = pair?.loaded ? null : await browse.evaluate(() => ({
+      status: document.querySelector("[data-composer-status]")?.textContent?.trim() ?? null,
+      staged: document.querySelectorAll("[data-staged-attachment]").length,
+      input: document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? null,
+      imageLists: [...document.querySelectorAll<HTMLElement>(".hm-extras__images")].map(el => el.dataset.streamImages),
+    }));
+    check("a message posted with two pictures shows both", !!pair?.loaded && pair.names.join("|") === "first-view.png|second-view.png", pair?.loaded ? pair : { pair, pairDiag });
     if (pair?.loaded) {
       const named = (v: Viewer | null, name: string) => !!v && v.name === name && v.loaded && v.state === "" && fitted(v);
       const can = (v: Viewer | null, key: "previous" | "next") => v?.steps?.find(step => step.key === key);
