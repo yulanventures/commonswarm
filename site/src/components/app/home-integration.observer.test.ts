@@ -2200,11 +2200,14 @@ test('Grokbot command palette and agent routines summary surface teammates, lead
 
 /* Workspace picker gear (Dogfood #3): the real open, render and roster-sync functions. Navigation is held so each
    step can be observed; it moves the active workspace and clears the roster at once, as openWorkspace does. */
-async function workspaceSettingsFixture() {
+async function workspaceSettingsFixture(extra: {
+  myOrganizations?: () => Promise<readonly { id: string; name: string; role: string }[]>;
+  workspaces?: { id: string; name: string; orgId?: string }[];
+} = {}) {
   const code = await dashboardFunctions(['openWorkspaceDetailsDialog', 'closeWorkspaceDetailsDialog', 'focusWorkspaceSettingsReturn',
-    'workspaceSettingsFactsKey', 'syncWorkspaceSettingsRoster', 'renderWorkspaceSettingsPanel']);
+    'workspaceSettingsFactsKey', 'syncWorkspaceSettingsRoster', 'workspaceMoveDestinations', 'renderWorkspaceSettingsPanel']);
   const calls: string[] = [];
-  const renders: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number }[] = [];
+  const renders: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number; moreOpen?: boolean; moveDestinations?: readonly { id: string; name: string }[] }[] = [];
   const dialog = { open: false, showModal() { this.open = true; calls.push('showModal'); }, close() { this.open = false; } };
   const root = {};
   const focusable = (name: string, shown: boolean) => ({ name, dataset: name.startsWith('gear:') ? { workspacePickerSettings: name.slice(5) } : {},
@@ -2217,17 +2220,19 @@ async function workspaceSettingsFixture() {
     one: (selector: string) => selector === '[data-workspace-details-popover]' ? dialog : selector === '[data-workspace-details-content]' ? root : null,
     all: (selector: string) => lists[selector] ?? [],
     layout: { closeNavigation: (restore: boolean) => calls.push(`closeNavigation:${restore}`) },
-    renderWorkspaceSettings: (_root: unknown, options: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number }) => {
+    renderWorkspaceSettings: (_root: unknown, options: { workspaceId: string; name: string; canRename: boolean; canClose: boolean; memberCount: number; agentCount: number; moreOpen?: boolean; moveDestinations?: readonly { id: string; name: string }[] }) => {
       renders.push({ workspaceId: options.workspaceId, name: options.name, canRename: options.canRename, canClose: options.canClose,
-        memberCount: options.memberCount, agentCount: options.agentCount });
+        memberCount: options.memberCount, agentCount: options.agentCount, moreOpen: options.moreOpen,
+        moveDestinations: Array.from(options.moveDestinations ?? [], dest => ({ id: dest.id, name: dest.name })) });
     },
     refreshChannelPolicy: async () => false,
-    myOrganizations: async () => [],
+    myOrganizations: extra.myOrganizations ?? (async () => []),
   });
+  const initialWorkspaces = JSON.stringify(extra.workspaces ?? [{ id: 'A', name: 'Alpha' }, { id: 'B', name: 'Beta' }, { id: 'C', name: 'Gamma' }]);
   runInContext(`
     let session={user:{id:'me'}}, sampleMode=false, activeWorkspaceId='A', homeNavigation=0, moveOrganizations=[];
     let workspaceSettingsIntent=0, workspaceSettingsReturn=null, workspaceSettingsFacts='';
-    let workspaces=[{id:'A',name:'Alpha'},{id:'B',name:'Beta'},{id:'C',name:'Gamma'}];
+    let workspaces=${initialWorkspaces};
     let members=[{userId:'me',role:'owner'}], agents=[{principalId:'a1'}];
     const rosters={A:[{userId:'me',role:'owner'}], B:[{userId:'me',role:'member'},{userId:'other',role:'owner'}], C:[{userId:'me',role:'admin'}]};
     const navigations=[];
@@ -2248,7 +2253,7 @@ test('a picker gear for another workspace closes the drawer, waits for that work
   assert.equal(f.dialog.open, false, 'nothing opens while the workspace is loading');
   await f.finish(0); await opening;
   assert.equal(f.dialog.open, true);
-  assert.deepEqual(f.renders.at(-1), { workspaceId: 'B', name: 'Beta', canRename: false, canClose: false, memberCount: 2, agentCount: 0 },
+  assert.deepEqual(f.renders.at(-1), { workspaceId: 'B', name: 'Beta', canRename: false, canClose: false, memberCount: 2, agentCount: 0, moreOpen: false, moveDestinations: [] },
     "Beta's own member role, never Alpha's owner role");
   assert.equal(f.run('workspaceSettingsReturn'), 'B');
 
@@ -2267,7 +2272,7 @@ test('the active workspace opens at once, and the header door keeps its old path
   assert.equal(f.dialog.open, true, 'no await before showModal');
   assert.deepEqual(f.calls, ['showModal'], 'no navigation and no drawer change from the header menu');
   assert.equal(f.run('navigations.length'), 0);
-  assert.deepEqual(f.renders.at(-1), { workspaceId: 'A', name: 'Alpha', canRename: true, canClose: true, memberCount: 1, agentCount: 1 });
+  assert.deepEqual(f.renders.at(-1), { workspaceId: 'A', name: 'Alpha', canRename: true, canClose: true, memberCount: 1, agentCount: 1, moreOpen: false, moveDestinations: [] });
   assert.equal(f.run('workspaceSettingsReturn'), null, 'focus return is left to the dialog');
 });
 
@@ -2311,4 +2316,29 @@ test('closing returns focus to the picker, and the app closing the dialog itself
   await g.finish(0); await again;
   g.run('closeWorkspaceDetailsDialog()');
   assert.equal(g.run('workspaceSettingsReturn'), null, 'a navigation or a finished command keeps its own focus');
+});
+
+test('organization load skips a no-op redraw and preserves More when destinations arrive', async () => {
+  const same = await workspaceSettingsFixture({
+    workspaces: [{ id: 'A', name: 'Alpha', orgId: 'org-1' }],
+    myOrganizations: async () => [{ id: 'org-1', name: 'Home', role: 'owner' }],
+  });
+  await same.run<Promise<void>>('openWorkspaceDetailsDialog()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(same.renders.length, 1, 'no second redraw when move destinations stay empty');
+  assert.equal(same.renders[0]?.moreOpen, false, 'fresh open starts with More closed');
+
+  const movable = await workspaceSettingsFixture({
+    workspaces: [{ id: 'A', name: 'Alpha', orgId: 'org-1' }],
+    myOrganizations: async () => [
+      { id: 'org-1', name: 'Home', role: 'owner' },
+      { id: 'org-2', name: 'Yulan', role: 'admin' },
+    ],
+  });
+  await movable.run<Promise<void>>('openWorkspaceDetailsDialog()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(movable.renders.length, 2, 'new eligible move destinations redraw the open panel');
+  assert.equal(movable.renders[0]?.moreOpen, false);
+  assert.equal(movable.renders[1]?.moreOpen, undefined, 'redraw omits moreOpen so an open More stays open');
+  assert.deepEqual(movable.renders[1]?.moveDestinations, [{ id: 'org-2', name: 'Yulan' }]);
 });

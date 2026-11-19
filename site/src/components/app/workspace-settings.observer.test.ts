@@ -16,6 +16,10 @@ interface SettingsSnapshot {
   partialDisabled: boolean;
   exactDisabled: boolean;
   closeCalls: number;
+  moreStartedOpen: boolean;
+  moreAfterSameWorkspaceRedraw: boolean;
+  moreAfterReset: boolean;
+  moreAfterSwitch: boolean;
 }
 
 async function renderSettingsFixture(): Promise<SettingsSnapshot> {
@@ -37,7 +41,7 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
     <script>
       let closeCalls = 0;
       const root = document.querySelector("#host");
-      const controls = WorkspaceSettings.renderWorkspaceSettings(root, {
+      const base = {
         name: "Science Swarm",
         workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         memberCount: 3,
@@ -45,7 +49,10 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
         canClose: true,
         onCopy: async () => {},
         onClose: async () => { closeCalls += 1; },
-      });
+      };
+      const controls = WorkspaceSettings.renderWorkspaceSettings(root, base);
+      const more = () => root.querySelector("[data-workspace-more]");
+      const moreStartedOpen = more().open;
       const initialDisabled = controls.closeButton.disabled;
       controls.confirmInput.value = "Science";
       controls.confirmInput.dispatchEvent(new Event("input"));
@@ -55,11 +62,27 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
       const exactDisabled = controls.closeButton.disabled;
       root.querySelector("form").requestSubmit();
       setTimeout(() => {
+        more().querySelector("summary").click();
+        WorkspaceSettings.renderWorkspaceSettings(root, { ...base, memberCount: 4 });
+        const moreAfterSameWorkspaceRedraw = more().open;
+        WorkspaceSettings.renderWorkspaceSettings(root, { ...base, moreOpen: false });
+        const moreAfterReset = more().open;
+        more().querySelector("summary").click();
+        WorkspaceSettings.renderWorkspaceSettings(root, {
+          ...base,
+          workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          name: "Ops Swarm",
+        });
+        const moreAfterSwitch = more().open;
         const snapshot = {
           initialDisabled,
           partialDisabled,
           exactDisabled,
           closeCalls,
+          moreStartedOpen,
+          moreAfterSameWorkspaceRedraw,
+          moreAfterReset,
+          moreAfterSwitch,
         };
         document.documentElement.dataset.fixture = encodeURIComponent(JSON.stringify(snapshot));
       }, 0);
@@ -82,10 +105,14 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
   }
 }
 
-test("the real settings renderer gates close on the exact workspace name", async () => {
+test("the real settings renderer gates close on the exact workspace name and keeps More open across same-workspace redraws", async () => {
   const snapshot = await renderSettingsFixture();
   assert.equal(snapshot.initialDisabled, true);
   assert.equal(snapshot.partialDisabled, true);
   assert.equal(snapshot.exactDisabled, false);
   assert.equal(snapshot.closeCalls, 1);
+  assert.equal(snapshot.moreStartedOpen, false);
+  assert.equal(snapshot.moreAfterSameWorkspaceRedraw, true);
+  assert.equal(snapshot.moreAfterReset, false);
+  assert.equal(snapshot.moreAfterSwitch, false);
 });
