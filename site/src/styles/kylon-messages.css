@@ -353,6 +353,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   outline: 2px solid var(--k-shell-focus);
   outline-offset: -2px;
 }
+/* "Couldn't open picture · Retry": the viewer itself could not be fetched. The picture is still there under the
+   note, so the note stands on a wash of the surface colour and reads on any picture. */
+.hm-frame .hm-extras__image-failed[data-picture-open-failed] {
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--k-shell-surface) 88%, transparent);
+  color: var(--k-shell-ink);
+}
 /* The plain attachment card (a message whose author is no longer known here) has no frame: the note takes the
    picture's place in the card. */
 .hm-frame .dashboard__attachment-card > .hm-extras__image-failed {

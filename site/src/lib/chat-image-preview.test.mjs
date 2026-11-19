@@ -84,4 +84,8 @@ test("chat attachment rendering cannot fetch blobs or opt into CORS", () => {
   const end = dashboard.indexOf("\n    };", dashboard.indexOf("const renderMessageAttachments =", start));
   assert.ok(start >= 0 && end > start, "the renderer must be present for this probe");
   assert.equal(forbiddenPreviewTransport(dashboard.slice(start, end)), false);
+  // The viewer shows the same signed file, so the same rule holds for all of it.
+  const viewer = readFileSync(new URL("./image-viewer.ts", import.meta.url), "utf8");
+  assert.ok(viewer.includes("image.src = await source.link()"), "the viewer must be present for this probe");
+  assert.equal(forbiddenPreviewTransport(viewer), false);
 });

@@ -68,6 +68,46 @@ const FAILED_NOTE = () => {
     centre: { x: b.left + b.width / 2, y: b.top + b.height / 2 },
   };
 };
+/** The open picture viewer: its picture and stage, its three controls, and where focus is. Null when none is open. */
+const VIEWER = () => {
+  const dialog = document.querySelector<HTMLDialogElement>("dialog[data-image-viewer]");
+  if (!dialog || !dialog.open) return null;
+  const image = dialog.querySelector("img")!, stage = dialog.querySelector("[data-viewer-stage]")!;
+  const box = (node: Element) => { const r = node.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; };
+  const active = document.activeElement as HTMLElement | null;
+  return {
+    state: dialog.dataset.state ?? null,
+    loaded: image.complete && image.naturalWidth > 0,
+    painted: getComputedStyle(image).visibility === "visible",
+    natural: { w: image.naturalWidth, h: image.naturalHeight },
+    image: box(image), stage: box(stage),
+    zoomed: dialog.hasAttribute("data-zoomed"),
+    pressed: dialog.querySelector("[data-viewer-zoom]")?.getAttribute("aria-pressed") ?? null,
+    note: dialog.querySelector<HTMLElement>(".cs-viewer__note")?.checkVisibility() ? dialog.querySelector(".cs-viewer__note")!.textContent : null,
+    controls: ["zoom", "download", "close"].map(key => {
+      const button = dialog.querySelector(`[data-viewer-${key}]`);
+      const r = button?.getBoundingClientRect();
+      return !button || !r ? { key, ok: false } : {
+        key, w: r.width, h: r.height,
+        ok: r.width >= 44 && r.height >= 44 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight
+          && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest("button") === button,
+      };
+    }),
+    focus: !active ? "body" : active.dataset.viewerClose !== undefined ? "close" : active === dialog ? "viewer" : dialog.contains(active) ? "inside" : "outside",
+  };
+};
+type Viewer = NonNullable<ReturnType<typeof VIEWER>>;
+/** The whole picture is inside the stage, centred, at no more than its own size. */
+const fitted = (v: Viewer): boolean => !v.zoomed && v.image.w <= v.natural.w + 0.5
+  && v.image.x >= v.stage.x - 0.5 && v.image.y >= v.stage.y - 0.5 && v.image.x + v.image.w <= v.stage.x + v.stage.w + 0.5 && v.image.y + v.image.h <= v.stage.y + v.stage.h + 0.5
+  && Math.abs(v.image.x + v.image.w / 2 - v.stage.x - v.stage.w / 2) <= 1 && Math.abs(v.image.y + v.image.h / 2 - v.stage.y - v.stage.h / 2) <= 1;
+/** On each axis a picture larger than the stage shows no gap, and a smaller one is centred. */
+const overStage = (v: Viewer): boolean => ([["x", "w"], ["y", "h"]] as const).every(([at, size]) =>
+  v.image[size] > v.stage[size] + 0.5
+    ? v.image[at] <= v.stage[at] + 0.5 && v.image[at] + v.image[size] >= v.stage[at] + v.stage[size] - 0.5
+    : Math.abs(v.image[at] + v.image[size] / 2 - v.stage[at] - v.stage[size] / 2) <= 1);
+const VIEWER_CHUNK = (url: URL) => /\/image-viewer[^/]*\.(?:js|ts)(?:$|\?)/u.test(url.pathname + url.search);
+
 /** Where keyboard focus is, relative to the seeded picture: on its link, on its Retry, on the page body, or elsewhere. */
 const FOCUS = () => {
   const link = document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image");
@@ -168,15 +208,165 @@ export async function runPictureChecks(
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
     check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
     await shot(page, "picture-loaded");
-    // 2. A native click on the picture opens its own signed file.
-    if (options.click && after?.frame) {
-      const navigation = page.waitForRequest((request: any) => request.isNavigationRequest() && /\/storage\/v1\/object\/sign\//u.test(request.url()), { timeout: 15_000 })
-        .then((request: any) => new URL(request.url()).pathname, () => null);
-      await page.mouse.click(after.frame.x + after.frame.w / 2, after.frame.y + after.frame.h / 2);
+    // 2. A press on the picture opens it in the viewer. Nothing navigates to the file and nothing downloads.
+    const viewer = async (target: any, test: (v: Viewer | null) => boolean, timeout = 10_000): Promise<Viewer | null> => {
+      const started = Date.now();
+      let last: Viewer | null = null;
+      while (Date.now() - started < timeout) {
+        last = await target.evaluate(VIEWER);
+        if (test(last)) return last;
+        await target.waitForTimeout(100);
+      }
+      return last;
+    };
+    const signedFile = (request: any) => request.isNavigationRequest() && /\/storage\/v1\/object\/sign\//u.test(request.url());
+    if (after?.frame) {
+      let navigated = false;
+      const watch = (request: any) => { if (signedFile(request)) navigated = true; };
+      page.on("request", watch);
+      const press = async (x: number, y: number) => { if (options.click) await page.mouse.click(x, y); else await page.touchscreen.tap(x, y); };
+      const cx = after.frame.x + after.frame.w / 2, cy = after.frame.y + after.frame.h / 2;
+      await press(cx, cy);
+      const opened = await viewer(page, v => !!v && v.loaded && v.state === "");
+      check("a press on the picture opens it in the viewer, whole and fitted", !!opened && opened.painted && fitted(opened)
+        && opened.natural.w === AUDIT_PNG_SIZE.width && opened.natural.h === AUDIT_PNG_SIZE.height, opened);
+      check("Zoom, Download and Close are 44px, on screen and reachable", !!opened && opened.controls.every(c => c.ok), opened?.controls ?? null);
+      check("the viewer opens with focus on Close", opened?.focus === "close", opened?.focus ?? null);
+      await shot(page, "viewer-fitted");
+      // A press on the picture itself does nothing: the viewer stays open and fitted.
+      const mid = opened ? { x: opened.stage.x + opened.stage.w / 2, y: opened.stage.y + opened.stage.h / 2 } : { x: cx, y: cy };
+      await press(mid.x, mid.y);
+      await page.waitForTimeout(450);
+      const pressed = await page.evaluate(VIEWER);
+      check("a press on the picture never closes the viewer or starts a download", !!pressed && fitted(pressed) && !navigated, { pressed, navigated });
+      // Zoom, then a long drag: the picture moves and cannot leave the stage. Letting go leaves the viewer open.
+      await page.locator("[data-viewer-zoom]").click();
+      await page.waitForTimeout(350);
+      const close = await page.evaluate(VIEWER);
+      check("Zoom shows the picture close up", !!close && !!opened && close.zoomed && close.pressed === "true" && close.image.w >= opened.image.w * 1.9 && overStage(close), close);
+      if (options.click) {
+        await page.mouse.move(mid.x, mid.y); await page.mouse.down();
+        await page.mouse.move(mid.x + 700, mid.y + 700, { steps: 6 }); await page.mouse.up();
+      } else {
+        const cdp = await page.context().newCDPSession(page);
+        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+        await touch("touchStart", [mid]);
+        for (let step = 1; step <= 6; step++) await touch("touchMove", [{ x: mid.x, y: mid.y + step * 60 }]);
+        await touch("touchEnd", []);
+      }
+      await page.waitForTimeout(250);
+      const panned = await page.evaluate(VIEWER);
+      check("a drag on the zoomed picture stops at its edge and leaves the viewer open", !!panned && !!close && panned.zoomed && overStage(panned)
+        && Math.abs(panned.image.w - close.image.w) <= 1, { close: close?.image, panned: panned?.image, stage: panned?.stage });
+      await shot(page, "viewer-zoomed");
+      // Keyboard: 0 fits again; Escape closes and focus returns to the picture; Enter on it opens the viewer again; Close returns focus too.
+      await page.keyboard.press("0");
+      await page.waitForTimeout(350);
+      const refit = await page.evaluate(VIEWER);
+      check("0 fits the picture again", !!refit && fitted(refit) && refit.pressed === "false", refit);
+      await page.keyboard.press("Escape");
+      const shut = await viewer(page, v => v === null);
+      check("Escape closes the viewer and focus returns to the picture", shut === null && await page.evaluate(FOCUS) === "picture", { open: shut !== null, focus: await page.evaluate(FOCUS) });
+      await page.keyboard.press("Enter");
+      const again = await viewer(page, v => !!v && v.loaded && v.state === "");
+      check("Enter on the picture opens the viewer, fitted", !!again && fitted(again), again);
+      if (!options.click && again) {
+        // A phone: two fingers pinch it open, and lifting them leaves the viewer open; then one finger from fitted size pulls it shut.
+        const cdp = await page.context().newCDPSession(page);
+        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+        const at = { x: again.stage.x + again.stage.w / 2, y: again.stage.y + again.stage.h / 2 };
+        await touch("touchStart", [{ x: at.x - 30, y: at.y }, { x: at.x + 30, y: at.y }]);
+        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x - 30 - step * 14, y: at.y }, { x: at.x + 30 + step * 14, y: at.y }]);
+        await touch("touchEnd", []);
+        await page.waitForTimeout(250);
+        const pinched = await page.evaluate(VIEWER);
+        check("a pinch zooms the picture, and lifting the fingers leaves the viewer open", !!pinched && pinched.zoomed && pinched.image.w >= again.image.w * 1.5 && overStage(pinched), pinched);
+        // One finger pulled down on a ZOOMED picture pans it; it does not close the viewer.
+        await touch("touchStart", [at]);
+        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+        await touch("touchEnd", []);
+        await page.waitForTimeout(250);
+        const held = await page.evaluate(VIEWER);
+        check("a swipe down on a zoomed picture does not close the viewer", !!held && held.zoomed, held);
+        await page.keyboard.press("0");
+        await page.waitForTimeout(350);
+        await touch("touchStart", [at]);
+        for (let step = 1; step <= 5; step++) await touch("touchMove", [{ x: at.x, y: at.y + step * 50 }]);
+        await touch("touchEnd", []);
+        const swiped = await viewer(page, v => v === null, 5_000);
+        check("a one-finger swipe down from fitted size closes the viewer, with focus back on the picture", swiped === null && await page.evaluate(FOCUS) === "picture", { open: swiped !== null, focus: await page.evaluate(FOCUS) });
+      } else if (again) {
+        // A mouse: a double click zooms about the pointer and a second one fits again; Close returns focus to the picture.
+        const at = { x: again.image.x + again.image.w / 2, y: again.image.y + again.image.h / 2 };
+        await page.mouse.dblclick(at.x, at.y);
+        await page.waitForTimeout(350);
+        const doubled = await page.evaluate(VIEWER);
+        await page.mouse.dblclick(at.x, at.y);
+        await page.waitForTimeout(350);
+        const undone = await page.evaluate(VIEWER);
+        check("a double click zooms in, and another fits again", !!doubled && doubled.zoomed && !!undone && fitted(undone), { doubled: doubled?.image, undone: undone?.image });
+        await page.locator("[data-viewer-close]").click();
+        const closed = await viewer(page, v => v === null);
+        check("Close closes the viewer and focus returns to the picture", closed === null && await page.evaluate(FOCUS) === "picture", { open: closed !== null, focus: await page.evaluate(FOCUS) });
+      }
+      check("nothing navigated to the file while the viewer was used", !navigated, navigated);
+      page.off("request", watch);
+      // Download is the viewer's own button, and it starts the picture's own signed file.
+      await page.keyboard.press("Enter");
+      const forDownload = await viewer(page, v => !!v && v.loaded);
+      const navigation = page.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
+      if (forDownload) await page.locator("[data-viewer-download]").click();
       const path = await navigation;
-      check("clicking the picture opens its own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`), { path, fileId: after.fileId });
+      check("Download in the viewer starts the picture's own signed file", typeof path === "string" && !!after.fileId && path.includes(`/${after.fileId}/`), { path, fileId: after.fileId });
     }
     await page.close();
+
+    // 2a. The viewer's code cannot be fetched (a dropped connection, or a tab left open across a release). Nothing downloads and
+    // nothing navigates: the reader stays at the picture, which says so and offers Retry. With the code back, Retry opens the viewer.
+    let chunkDown = true, chunkAsked = 0, strayed = false;
+    const stale = await open(async (p: any) => {
+      await p.route(VIEWER_CHUNK, async (route: any) => {
+        chunkAsked++;
+        if (chunkDown) await route.fulfill({ status: 404, body: "not found" }); else await route.continue();
+      });
+    });
+    stale.on("request", (request: any) => { if (signedFile(request)) strayed = true; });
+    stale.on("download", () => { strayed = true; });
+    const OPEN_FAILED = () => {
+      const link = document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image");
+      const note = link?.parentElement?.querySelector<HTMLElement>("[data-picture-open-failed]");
+      const button = note?.querySelector("button");
+      const frame = link?.querySelector(".hm-extras__image-frame")?.getBoundingClientRect();
+      if (!link || !note || !button || !frame) return null;
+      const n = note.getBoundingClientRect(), b = button.getBoundingClientRect();
+      return {
+        text: note.textContent, role: note.getAttribute("role"), button: { w: b.width, h: b.height },
+        overFrame: Math.max(Math.abs(n.left - frame.left), Math.abs(n.top - frame.top), Math.abs(n.width - frame.width), Math.abs(n.height - frame.height)) <= 1,
+        reached: document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) === button,
+        focus: document.activeElement === link ? "picture" : document.activeElement === button ? "retry" : document.activeElement === document.body ? "body" : "elsewhere",
+        url: location.pathname + location.search,
+      };
+    };
+    const loadedStale = await until(stale, p => p.loaded);
+    const staleAt = await stale.evaluate(() => location.pathname + location.search);
+    await stale.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
+    await stale.keyboard.press("Enter");
+    let refused: Awaited<ReturnType<typeof OPEN_FAILED>> = null;
+    for (const started = Date.now(); Date.now() - started < 10_000 && !refused;) { refused = await stale.evaluate(OPEN_FAILED); if (!refused) await stale.waitForTimeout(100); }
+    await stale.waitForTimeout(500);
+    check("when the viewer cannot be fetched, nothing downloads or navigates and no viewer opens", !!loadedStale?.loaded && chunkAsked >= 1 && !strayed && !!refused && refused.url === staleAt
+      && await stale.evaluate(VIEWER) === null, { loaded: loadedStale?.loaded, chunkAsked, strayed, refused, staleAt });
+    check("the picture says it could not be opened and offers Retry, with focus still on the picture", !!refused && /^Couldn't open picture\s*Retry$/u.test(refused.text ?? "") && refused.role === "alert"
+      && refused.overFrame && refused.reached && refused.button.w >= 44 && refused.button.h >= 44 && refused.focus === "picture", refused);
+    await shot(stale, "viewer-unavailable");
+    chunkDown = false;
+    await stale.keyboard.press("Tab");
+    const onRetryOpen = (await stale.evaluate(OPEN_FAILED))?.focus ?? null;
+    await stale.keyboard.press("Enter");
+    const recovered2 = await viewer(stale, v => !!v && v.loaded && v.state === "");
+    check("Tab reaches that Retry, and with the viewer's code back it opens the viewer", onRetryOpen === "retry" && !!recovered2 && fitted(recovered2) && await stale.evaluate(OPEN_FAILED) === null && !strayed,
+      { onRetryOpen, recovered: recovered2, strayed });
+    await stale.close();
 
     // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
     let imageReads = 0, sawFailure = false, paintedUnloaded = false;
@@ -212,6 +402,15 @@ export async function runPictureChecks(
     check("a failed picture says so and offers Retry over its frame", !!note && /^Couldn't load image\s*Retry$/u.test(note.text ?? "") && note.overFrame && !note.inLink && note.reached, note);
     check("Retry is a 44px target", !!note && note.button.w >= 44 && note.button.h >= 44, note?.button ?? null);
     await shot(failing, "picture-unavailable");
+    // The viewer on a picture that cannot load: it says so, offers Retry, and keeps Download and Close.
+    await failing.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
+    await failing.keyboard.press("Enter");
+    const broken = await viewer(failing, v => !!v && v.state === "failed");
+    check("the viewer says a picture could not load and offers Retry, with nothing painted", !!broken && !broken.painted && /^Couldn't load image\s*Retry$/u.test(broken.note ?? "") && broken.controls.every(c => c.ok), broken);
+    await shot(failing, "viewer-failed");
+    await failing.keyboard.press("Escape");
+    const brokenShut = await viewer(failing, v => v === null);
+    check("Escape closes that viewer too, with focus back on the picture", brokenShut === null && await failing.evaluate(FOCUS) === "picture", await failing.evaluate(FOCUS));
     // Retry from the keyboard while storage still fails: focus goes to the picture, never the page, and stays there
     // when the failure comes back. Tab from the picture then reaches Retry again.
     const readsBefore = failedReads;
