@@ -251,7 +251,7 @@ BEGIN
     c.generation,
     COALESCE(ch.archived_at, c.archived_at) AS archived_at,
     CASE WHEN c.kind = 'general' THEN 'general' ELSE ch.slug END AS slug,
-    ch.description,
+    ch.purpose AS description,
     ch.lead_mode,
     ch.lead_agent_principal_id
   INTO v_conv

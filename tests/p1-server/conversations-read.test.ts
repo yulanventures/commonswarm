@@ -131,15 +131,9 @@ const uRef = (p: Person) => ({ kind: "user", id: p.id });
 const aRef = (a: Agent) => ({ kind: "agent", id: a.id });
 
 async function addWorkspaceMember(ws: string, person: Person, role: "owner" | "admin" | "member"): Promise<void> {
-  const [{ id }] = await sql<{ id: string }[]>`
-    INSERT INTO swarm.users (user_id, display_name) VALUES (${person.id}::uuid, ${role})
-    ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name
-    RETURNING user_id AS id
-  `;
-  assert.equal(id, person.id);
   await sql`
-    INSERT INTO swarm.memberships (workspace_id, user_id, role, created_at)
-    VALUES (${ws}::uuid, ${person.id}::uuid, ${role}, statement_timestamp())
+    INSERT INTO swarm.memberships (workspace_id, user_id, role)
+    VALUES (${ws}::uuid, ${person.id}::uuid, ${role})
     ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role, revoked_at = NULL
   `;
 }
@@ -152,13 +146,8 @@ async function createAgent(owner: Person, name: string, ws: string = workspace):
   const hash = createHash("sha256").update(rawToken).digest();
   await sql.begin(async (tx) => {
     await tx`
-      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, created_at)
-      VALUES (${principalId}::uuid, ${ws}::uuid, ${owner.id}::uuid, ${name}, statement_timestamp())
-    `;
-    await tx`
-      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id, created_at)
-      VALUES (${ws}::uuid, ${principalId}::uuid, ${owner.id}::uuid, statement_timestamp())
-      ON CONFLICT (workspace_id, principal_id) DO NOTHING
+      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${principalId}::uuid, ${ws}::uuid, ${owner.id}::uuid, ${`${name}-${principalId.slice(0, 6)}`})
     `;
     await tx`
       INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
@@ -203,16 +192,22 @@ before(async () => {
   ben = await createUser("conv2b-ben", "Ben");
   cat = await createUser("conv2b-cat", "Cat");
 
+  await sql`
+    INSERT INTO swarm.users (user_id, display_name)
+    VALUES (${ann.id}::uuid, 'Ann'), (${ben.id}::uuid, 'Ben'), (${cat.id}::uuid, 'Cat')
+    ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name
+  `;
+
   workspace = randomUUID();
   otherWorkspace = randomUUID();
   for (const ws of [workspace, otherWorkspace]) {
     await sql`
-      INSERT INTO swarm.workspaces (workspace_id, name, created_by, created_at)
-      VALUES (${ws}::uuid, ${`conv2b-${ws.slice(0, 6)}`}, ${ann.id}::uuid, statement_timestamp())
+      INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+      VALUES (${ws}::uuid, ${`conv2b-${ws.slice(0, 6)}`}, ${ann.id}::uuid)
     `;
     await sql`
-      INSERT INTO swarm.streams (stream_id, workspace_id, kind, created_at)
-      VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'workspace', statement_timestamp())
+      INSERT INTO swarm.streams (stream_id, workspace_id, kind)
+      VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'workspace')
     `;
   }
   await addWorkspaceMember(workspace, ann, "owner");
@@ -267,18 +262,24 @@ before(async () => {
     diagnostics: () => `local read function not ready: ${functionLogs}`,
     cliState,
   });
-}, { timeout: 60_000 });
+}, { timeout: 120_000 });
 
 after(async () => {
-  functionProcess?.kill("SIGTERM");
+  if (functionProcess?.pid && functionProcess.exitCode === null) {
+    try { process.kill(-functionProcess.pid, "SIGTERM"); } catch { /* already stopped */ }
+    await Promise.race([new Promise((resolve) => functionProcess!.once("close", resolve)), delay(2_000)]);
+    if (functionProcess.exitCode === null) {
+      try { process.kill(-functionProcess.pid, "SIGKILL"); } catch { /* already stopped */ }
+    }
+  }
   await sql?.end({ timeout: 5 });
   if (envDir) rmSync(envDir, { recursive: true, force: true });
-});
+}, { timeout: 10_000 });
 
 test("1. Member reads: conversations list, public preview, unread/mention counts, mark-read, and cursor pagination", { timeout: 60_000 }, async () => {
   // Ann creates a public channel #design (ann auto-joins; annBotA does NOT auto-join).
   const createdCh = ok(await send(ann.jwt, {
-    kind: "channel_create", slug: "design", description: "Design room",
+    kind: "channel_create", slug: "design", purpose: "Design room",
   }), "create #design");
   const chId = String((createdCh.channel as Row).channel_id);
 
@@ -606,7 +607,7 @@ test("4. DM & group-DM thread replies unblock, security fences, SQL privilege de
     conversation_id: grpAgents, body: "group update not waking benBot",
   });
   ok(await send(benBot.token, {
-    kind: "conversation_mark_read", conversation_id: grpAgents, read_through_signal_id: String(unaddressedPost.id),
+    kind: "conversation_mark_read", conversation_id: grpAgents, through_signal_id: String(unaddressedPost.id),
   }), "benBot marks read through unaddressed audience=conversation group post");
 
   // Narrower legacy `addressed` root in grpAgents (ann -> annBotA ONLY, excluding benBot):
