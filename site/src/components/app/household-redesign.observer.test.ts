@@ -2192,4 +2192,101 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   assert.equal(removals[0].commandId, removals[2].commandId);
   assert.equal(reloads.length, 1);
   assert.equal(reloads[0].receipt, "Sprout permanently removed. Its history stays as “Sprout (removed)”.");
+
+  // 10. Real roster() and memberRoster() transport witness (HezSec C2):
+  //     actual PostgREST 403 responses preserve HTTP status + code through BOTH live helpers and stop retry (0 sends)
+  //     while cached UI still shows admin; transient 503 failure control still allows retrying the same command ID.
+  const makeQuery = (reply: () => Promise<any>) => {
+    const chain: any = {
+      select: () => chain, eq: () => chain, is: () => chain, order: () => chain, range: () => reply(), limit: () => reply(),
+      then: (resolve: any, reject: any) => reply().then(resolve, reject),
+    };
+    return chain;
+  };
+  let agentPostgrestReply: () => Promise<any> = async () => ({ data: [], error: null, status: 200 });
+  let memberPostgrestReply: () => Promise<any> = async () => ({ data: [], error: null, status: 200 });
+  const realReaders = execute(
+    `${section(script, "const roster = async", "// Names and roles are already membership-gated")}; ({ roster, memberRoster });`,
+    {
+      client: () => ({
+        schema: () => ({
+          from: (table: string) => {
+            if (table === "agent_principals") return makeQuery(() => agentPostgrestReply());
+            if (table === "member_profiles") return makeQuery(() => memberPostgrestReply());
+            return makeQuery(async () => ({ data: [], error: null, status: 200 }));
+          },
+        }),
+      }),
+      NoDeployment: class extends Error {},
+      rosterAgentsFromRows: (rows: any[]) => rows.map((r) => ({
+        principalId: r.principal_id, name: r.name, model: r.model ?? null,
+        transport: r.transport, turnOnly: Boolean(r.turn_only), ownerUserId: r.owner_user_id,
+      })),
+      browserAgentPresenceRows: () => new Map(),
+    },
+  );
+  ctx.roster = realReaders.roster;
+  ctx.memberRoster = realReaders.memberRoster;
+  for (const [label, agentReply, memberReply, expectedSends] of [
+    [
+      "real memberRoster 403 stops retry",
+      async () => ({ data: null, error: { message: "upstream unavailable", code: "57014" }, status: 503 }),
+      async () => ({ data: null, error: { message: "permission denied for view member_profiles", code: "42501" }, status: 403 }),
+      0,
+    ],
+    [
+      "real roster 403 stops retry",
+      async () => ({ data: null, error: { message: "permission denied for view agent_principals", code: "42501" }, status: 403 }),
+      async () => ({ data: [{ user_id: viewerId, display_name: "Ana Rivera", role: "admin" }], error: null, status: 200 }),
+      0,
+    ],
+    [
+      "real 503 transient failure control still retries same command ID",
+      async () => ({ data: null, error: { message: "service unavailable", code: "57014" }, status: 503 }),
+      async () => ({ data: null, error: { message: "service unavailable", code: "57014" }, status: 503 }),
+      1,
+    ],
+  ] as const) {
+    ctx.session = { user: { id: viewerId } };
+    ctx.activeWorkspaceId = workspaceId;
+    ctx.agents = makeLiveAgents();
+    ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+    ctx.peopleDialogModel = () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: true,
+      })),
+    });
+    ctx.readAgentRemovalScope = async () => "workspace";
+    removals.length = 0; reloads.length = 0;
+    let firstAttempt = true;
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
+      if (firstAttempt) { firstAttempt = false; throw new Error("lost"); }
+    };
+    // Initial attempt fails while PostgREST is down (503) so questionId stays uncertain.
+    agentPostgrestReply = async () => ({ data: null, error: { message: "down", code: "57014" }, status: 503 });
+    memberPostgrestReply = async () => ({ data: null, error: { message: "down", code: "57014" }, status: 503 });
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", foreignLocalId, opener);
+    await flush();
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, 1, `${label}: initial send recorded`);
+    const firstCommandId = removals[0].commandId;
+    removals.length = 0;
+
+    // Retry goes through the REAL roster() and memberRoster() helpers with PostgREST 403 / 503 replies.
+    agentPostgrestReply = agentReply;
+    memberPostgrestReply = memberReply;
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, expectedSends, `${label}: expected ${expectedSends} retry send(s)`);
+    if (expectedSends === 1) {
+      assert.equal(removals[0].commandId, firstCommandId, `${label}: transient control reuses original command ID`);
+    } else {
+      assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /no longer available/i);
+    }
+  }
 });

@@ -3033,7 +3033,7 @@ import "../../styles/kylon-image-viewer.css";
       const pageSize = 200;
       const result: Agent[] = [];
       for (let offset = 0; ; offset += pageSize) {
-        const { data, error } = await api
+        const { data, error, status } = await api
           .schema("swarm_read")
           .from("agent_principals")
           .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at")
@@ -3042,7 +3042,7 @@ import "../../styles/kylon-image-viewer.css";
           .order("name", { ascending: true })
           .order("principal_id", { ascending: true })
           .range(offset, offset + pageSize - 1);
-        if (error) throw new Error(error.message);
+        if (error) throw Object.assign(new Error(error.message), { status, code: error.code });
         const page = data ?? [];
         const joinedTimes = new Map(page.map(row => [String(row.principal_id), typeof row.created_at === "string" ? row.created_at : null]));
         result.push(...rosterAgentsFromRows(page).map(agent => ({ ...agent, joinedAt: joinedTimes.get(agent.principalId) ?? null })));
@@ -3106,13 +3106,13 @@ import "../../styles/kylon-image-viewer.css";
     ): Promise<{ names: Map<string, string>; members: Member[] }> => {
       const api = client();
       if (!api) throw new NoDeployment();
-      const { data, error } = await api
+      const { data, error, status } = await api
         .schema("swarm_read")
         .from("member_profiles")
         .select("user_id,display_name,role")
         .eq("workspace_id", workspaceId)
         .limit(1_000);
-      if (error) throw new Error(error.message);
+      if (error) throw Object.assign(new Error(error.message), { status, code: error.code });
       const members = (data ?? []).map((row) => ({
         userId: String(row.user_id ?? ""),
         name: String(row.display_name ?? ""),
@@ -8140,7 +8140,7 @@ import "../../styles/kylon-image-viewer.css";
         const isFreshRefusalError = (error: unknown): boolean => {
           if (typeof error !== "object" || error === null) return false;
           const record = error as { status?: unknown; code?: unknown };
-          return record.status === 403 || record.code === "forbidden";
+          return record.status === 403 || record.code === "forbidden" || record.code === "42501";
         };
         const checkRemovalRead = async (): Promise<"absent" | "refused" | "unknown"> => {
           const [rosterRes, memberRes] = await Promise.allSettled([roster(workspaceId), memberRoster(workspaceId)]);
