@@ -36,22 +36,11 @@ struct ConversationComposer: View {
     }
 
     private var entry: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let failure = draft.failure, !draft.sending {
-                Text(failure == .unconfirmed ? "Delivery unconfirmed" : "Couldn’t send message")
-                Button("Retry", action: send)
-            }
-            let label = "Message " + destination
-            ZStack(alignment: .leading) {
-                if draft.text.isEmpty {
-                    Text(label).foregroundStyle(.primary.opacity(0.78))
-                        .accessibilityHidden(true).allowsHitTesting(false)
-                }
-                TextField(label, text: $draft.text, prompt: Text(""), axis: .vertical)
-                    .lineLimit(1...5).textFieldStyle(.plain)
-                    .accessibilityLabel(Text(label))
-            }
-        }
+        let label = "Message " + destination
+        return TextField(label, text: $draft.text,
+                         prompt: Text(label).foregroundStyle(.primary.opacity(0.78)), axis: .vertical)
+            .lineLimit(1...5).textFieldStyle(.plain)
+            .accessibilityLabel(Text(label))
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16).padding(.vertical, 8).frame(minHeight: 44)
     }
@@ -62,8 +51,7 @@ struct ConversationComposer: View {
                 .frame(minWidth: 28, minHeight: 32)
         }
         .accessibilityLabel("Send message")
-        .disabled(draft.sending || draft.submission != nil ||
-                  draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.text.utf16.count > 8_000)
+        .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.text.utf16.count > 8_000)
     }
 
 }

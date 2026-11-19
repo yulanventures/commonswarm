@@ -144,13 +144,19 @@ struct ConversationAPI {
         return Array(result.reversed())
     }
 
-    func post(_ post: Post) async throws {
-        struct Receipt: Decodable { let status: String }
+    @discardableResult
+    func post(_ post: Post) async throws -> UUID {
+        struct Receipt: Decodable {
+            struct Signal: Decodable { let id: UUID }
+            let status: String
+            let signal: Signal
+        }
         var request = request("functions/v1/command")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(post)
         let receipt: Receipt = try await send(request)
-        guard receipt.status == "accepted" else { throw SignInError.refused }
+        guard receipt.status == "accepted" else { throw APIError.invalidResponse }
+        return receipt.signal.id
     }
 }

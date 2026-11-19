@@ -4,37 +4,57 @@ import Foundation
 @MainActor
 final class Composer: ObservableObject {
     @Published var text = ""
-    @Published private(set) var sending = false
-    enum Failure { case refused, unconfirmed }
-    @Published private(set) var failure: Failure?
-    private(set) var submission: Post?
+    enum Delivery { case sending, retrying, unconfirmed, refused, accepted(UUID) }
+
+    struct Outgoing: Identifiable {
+        let post: Post
+        let createdAt = Date()
+        var delivery: Delivery = .sending
+        var id: UUID { post.command_id }
+    }
+    @Published private(set) var outgoing: [Outgoing] = []
 
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
-        guard !sending else { return nil }
-        if submission == nil {
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 8_000 else { return nil }
-            submission = Post(id: UUID(), workspace: workspace, destination: destination, body: text)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 8_000 else { return nil }
+        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: text)
+        outgoing.append(Outgoing(post: post))
+        text = ""
+        return post
+    }
+
+    func retry(_ id: UUID) -> Post? {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }), case .unconfirmed = outgoing[i].delivery else { return nil }
+        outgoing[i].delivery = .retrying
+        return outgoing[i].post
+    }
+
+    func editRefused(_ id: UUID) {
+        guard text.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }),
+              case .refused = outgoing[i].delivery else { return }
+        text = outgoing.remove(at: i).post.body ?? ""
+    }
+
+    func accepted(_ id: UUID, signalID: UUID) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        outgoing[i].delivery = .accepted(signalID)
+    }
+
+    func reconcile(_ messages: [Message]) {
+        let ids = Set(messages.map(\.id))
+        outgoing.removeAll { row in
+            if case .accepted(let id) = row.delivery { return ids.contains(id) }
+            return false
         }
-        sending = true
-        return submission
     }
 
-    func accepted() {
-        if text == submission?.body { text = "" }
-        submission = nil
-        sending = false
-        failure = nil
-    }
-
-    func failed(with error: Error) {
-        sending = false
-        // A refusal on a retry can precede receipt lookup. It cannot settle an earlier attempt.
-        if failure != .unconfirmed, case APIError.refused(let status) = error,
+    func failed(_ id: UUID, with error: Error) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        // A refusal before receipt lookup cannot settle a previous uncertain attempt.
+        if case .sending = outgoing[i].delivery, case APIError.refused(let status) = error,
            (400..<500).contains(status), status != 408 {
-            submission = nil
-            failure = .refused
+            outgoing[i].delivery = .refused
         } else {
-            failure = .unconfirmed
+            outgoing[i].delivery = .unconfirmed
         }
     }
 }
