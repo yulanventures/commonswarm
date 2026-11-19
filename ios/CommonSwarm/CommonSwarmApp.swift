@@ -110,13 +110,7 @@ private struct WorkspacesView: View {
     }
 }
 
-struct RetryView: View {
-    let text: String
-    let action: () async -> Void
-    var body: some View {
-        VStack { Text(text); Button("Retry") { Task { await action() } } }
-    }
-}
+// RetryView moved to CommonUI.swift
 
 private struct DirectoryView: View {
     let api: ConversationAPI
