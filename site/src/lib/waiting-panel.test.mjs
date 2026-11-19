@@ -11,6 +11,7 @@ import {
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
+import { plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
 
 class FakeNode {
   tagName;
@@ -847,4 +848,132 @@ test("filterWaitingTodos separates channel-origin, #general, and workspace-only 
   assert.equal(host.querySelector("[data-waiting-status]").textContent, "Done");
   focusWaitingPanelAfterAction(host, { kind: "completed-todo", prevIndex: 0 });
   assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-scope]"));
+});
+
+test("Check F historical plain-text asks: inline answer, one-tap Clear as stale, DOM preservation while typing, and keyboard focus recovery on failure and completion", () => {
+  assert.ok(STALE_ASK_CLOSE_BODY.length > 0 && !STALE_ASK_CLOSE_BODY.includes("\u2014"));
+  assert.deepEqual(plainAskReplyCommand("sig-old-1", STALE_ASK_CLOSE_BODY), {
+    kind: "post_signal",
+    signal_kind: "note",
+    body: STALE_ASK_CLOSE_BODY,
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: "sig-old-1",
+    about: null,
+  });
+
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+
+  const submitted = [];
+  const retried = [];
+  const drafted = [];
+  const place = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "general", channelId: null, label: "#general" };
+  const handlers = {
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onSubmitPlainAsk: (item, bodyText, mode) => submitted.push({ id: item.id, bodyText, mode }),
+    onRetryPlainAsk: (item) => retried.push(item.id),
+    onDraftPlainAsk: (item, text) => drafted.push({ id: item.id, text }),
+  };
+
+  const plain1 = {
+    id: "plain-1",
+    workspaceId: "ws-1",
+    workspaceName: "Rivera Household",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: agent,
+    fromKind: "agent",
+    fromId: "a1",
+    what: "Should we renew the lawn service for spring?",
+    when: "2d ago",
+    createdAt: "2026-11-17T12:00:00Z",
+    until: "2026-11-24T12:00:00Z",
+  };
+  const plain2 = {
+    ...plain1,
+    id: "plain-2",
+    what: "Did the electrician call back?",
+  };
+
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    plainAsks: [plain1, plain2],
+    counts: { channel: { min: 2, complete: true }, workspace: { min: 2, complete: true }, all: { min: 2, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, handlers);
+
+  const card1 = host.querySelector('[data-waiting-plain-ask="plain-1"]');
+  assert.ok(card1);
+  const input1 = card1.querySelector('[data-waiting-plain-input="plain-1"]');
+  const send1 = card1.querySelector('[data-waiting-plain-send="plain-1"]');
+  const stale1 = card1.querySelector('[data-waiting-plain-stale="plain-1"]');
+  assert.equal(send1.disabled, true, "Send stays disabled while answer input is empty");
+
+  // Typing updates draft, enables Send, and survives an unchanged background refresh without replacing the DOM node.
+  input1.focus();
+  input1.value = "Yes, book them for April";
+  input1.dispatchEvent({ type: "input" });
+  assert.equal(send1.disabled, false);
+  assert.deepEqual(drafted, [{ id: "plain-1", text: "Yes, book them for April" }]);
+
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    plainAsks: [{ ...plain1, when: "2d ago", draftText: "Yes, book them for April" }, plain2],
+    counts: { channel: { min: 2, complete: true }, workspace: { min: 2, complete: true }, all: { min: 2, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, handlers);
+  assert.strictEqual(host.querySelector('[data-waiting-plain-ask="plain-1"]'), card1, "typing must keep exact DOM node");
+  assert.strictEqual(doc.activeElement, input1);
+
+  // Submitting the form sends the typed inline answer.
+  card1.querySelector("form").dispatchEvent({ type: "submit" });
+  assert.deepEqual(submitted, [{ id: "plain-1", bodyText: "Yes, book them for April", mode: "answer" }]);
+
+  // One tap on Clear as stale sends the fixed stale-close body.
+  stale1.click();
+  assert.equal(submitted.length, 2);
+  assert.deepEqual(submitted[1], { id: "plain-1", bodyText: STALE_ASK_CLOSE_BODY, mode: "stale" });
+
+  // Failed delivery renders role="alert" + Retry and focusWaitingPanelAfterAction focuses Retry on that card.
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    plainAsks: [{ ...plain1, draftText: "Yes, book them for April", error: "Could not deliver answer.", retryable: true }, plain2],
+    counts: { channel: { min: 2, complete: true }, workspace: { min: 2, complete: true }, all: { min: 2, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, handlers);
+  const retryBtn = host.querySelector('[data-waiting-plain-retry="plain-1"]');
+  assert.ok(retryBtn);
+  const failedCard = host.querySelector('[data-waiting-plain-ask="plain-1"]');
+  assert.equal(failedCard.querySelector(".cs-waiting-card__error").textContent, "Could not deliver answer.");
+  focusWaitingPanelAfterAction(host, { kind: "retry-plain", signalId: "plain-1" });
+  assert.strictEqual(doc.activeElement, retryBtn);
+  retryBtn.click();
+  assert.deepEqual(retried, ["plain-1"]);
+
+  // Completing plain-1 removes it, displays Cleared banner, and moves focus to plain-2 (never document.body).
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place,
+    items: [],
+    plainAsks: [plain2],
+    counts: { channel: { min: 1, complete: true }, workspace: { min: 1, complete: true }, all: { min: 1, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "Cleared", statusSeq: 1,
+  }, handlers);
+  assert.equal(host.querySelector('[data-waiting-plain-ask="plain-1"]'), null);
+  assert.equal(host.querySelector("[data-waiting-status]").textContent, "Cleared");
+  focusWaitingPanelAfterAction(host, { kind: "completed-plain", prevIndex: 0 });
+  assert.strictEqual(doc.activeElement, host.querySelector('[data-waiting-plain-stale="plain-2"]'));
 });

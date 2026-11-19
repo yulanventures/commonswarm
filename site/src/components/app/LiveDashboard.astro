@@ -1415,7 +1415,7 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
-  import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
+  import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1592,6 +1592,7 @@ import "../../styles/kylon-image-viewer.css";
     removeReaction,
     type ReactionResult,
     answerChoice,
+    answerPlainAsk,
     type ChannelUnread,
     createChannel,
     updateChannel,
@@ -5892,6 +5893,7 @@ import "../../styles/kylon-image-viewer.css";
     };
     const showWaitingSent = (): void => showWaitingStatus("Sent");
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelPlainAsks = new Map<string, WaitingPlainAskItem[]>();
     const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
@@ -5901,6 +5903,11 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+    type WaitingPlainTicket = { viewer: string; workspaceId: string; signalId: string; mode: "answer" | "stale" };
+    const waitingPlainTickets = new Map<string, WaitingPlainTicket>();
+    const waitingPlainDrafts = new Map<string, string>();
+    const waitingPlainErrors = new Map<string, string>();
+    const waitingPlainLastSubmissions = new Map<string, { bodyText: string; mode: "answer" | "stale"; commandId: string }>();
     type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
     const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
     const waitingTodoErrors = new Map<string, string>();
@@ -5972,6 +5979,27 @@ import "../../styles/kylon-image-viewer.css";
               ...(draft ? { draft } : {}),
               ...(retryable ? { retryable: true as const } : {}),
             },
+          });
+        }
+      }
+      return items;
+    };
+
+    const allWaitingPlainAskItems = (): WaitingPlainAskItem[] => {
+      const items: WaitingPlainAskItem[] = [];
+      for (const workspace of workspaces) {
+        for (const ask of waitingPanelPlainAsks.get(workspace.id) ?? []) {
+          const ticket = waitingPlainTickets.get(ask.id);
+          const error = waitingPlainErrors.get(ask.id);
+          const draftText = waitingPlainDrafts.get(ask.id);
+          const retryable = error !== undefined && waitingPlainLastSubmissions.has(ask.id);
+          items.push({
+            ...ask,
+            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            ...(draftText !== undefined ? { draftText } : {}),
+            ...(ticket ? { pending: true as const, pendingMode: ticket.mode } : {}),
+            ...(error ? { error } : {}),
+            ...(retryable ? { retryable: true as const } : {}),
           });
         }
       }
@@ -6084,7 +6112,7 @@ import "../../styles/kylon-image-viewer.css";
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
-        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingTodo === item.id)
         : -1;
       const ticket: WaitingTodoTicket = { viewer, workspaceId: item.workspaceId, todoId: item.id };
@@ -6309,7 +6337,7 @@ import "../../styles/kylon-image-viewer.css";
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
-        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingCard === item.id)
         : -1;
       const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
@@ -6365,11 +6393,82 @@ import "../../styles/kylon-image-viewer.css";
       renderWaitingPanelView();
     };
 
+    const sendWaitingPlainAsk = async (
+      item: WaitingPlainAskItem,
+      bodyText: string,
+      mode: "answer" | "stale",
+    ): Promise<void> => {
+      const activeSession = session;
+      const viewer = homeViewerId();
+      if (!activeSession || sampleMode || !viewer || activeSession.user.id !== viewer || waitingPlainTickets.has(item.id)) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      const prevCardIndex = panelBefore
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
+            .findIndex(el => el.dataset.waitingPlainAsk === item.id)
+        : -1;
+      const prev = waitingPlainLastSubmissions.get(item.id);
+      const commandId = prev && prev.bodyText === bodyText && prev.mode === mode ? prev.commandId : uuid();
+      const ticket: WaitingPlainTicket = { viewer, workspaceId: item.workspaceId, signalId: item.id, mode };
+      waitingPlainTickets.set(item.id, ticket);
+      waitingPlainErrors.delete(item.id);
+      waitingPlainLastSubmissions.set(item.id, { bodyText, mode, commandId });
+      renderWaitingPanelView();
+      let result: Awaited<ReturnType<typeof answerPlainAsk>>;
+      try {
+        result = await answerPlainAsk(activeSession, commandId, item.workspaceId, item.id, bodyText);
+      } catch (error) {
+        result = { ok: false, status: 0, error: null, message: readableError(error) };
+      }
+      if (waitingPlainTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingPlainTickets.delete(item.id);
+      const canRestoreFocus = (): HTMLElement | null => {
+        if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (!panelNow) return null;
+        if (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement)) {
+          return panelNow;
+        }
+        return null;
+      };
+      if (result.ok) {
+        waitingPlainErrors.delete(item.id);
+        waitingPlainDrafts.delete(item.id);
+        waitingPlainLastSubmissions.delete(item.id);
+        const remaining = (waitingPanelPlainAsks.get(item.workspaceId) ?? []).filter(ask => ask.id !== item.id);
+        waitingPanelPlainAsks.set(item.workspaceId, remaining);
+        const currentCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof currentCount === "number" && currentCount > 0) {
+          homeOverviewCounts.set(item.workspaceId, currentCount - 1);
+          syncWaitingButtons();
+        }
+        showWaitingStatus(mode === "stale" ? "Cleared" : "Sent");
+        renderWaitingPanelView();
+        const afterPanel = canRestoreFocus();
+        if (afterPanel) {
+          waitingPanelMod!.focusWaitingPanelAfterAction(afterPanel, {
+            kind: "completed-plain",
+            prevIndex: Math.max(0, prevCardIndex),
+          });
+        }
+        renderHomeRail();
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingPlainErrors.set(item.id, result.message);
+      renderWaitingPanelView();
+      const afterPanel = canRestoreFocus();
+      if (afterPanel) {
+        waitingPanelMod!.focusWaitingPanelAfterAction(afterPanel, { kind: "retry-plain", signalId: item.id });
+      }
+    };
+
     const renderWaitingPanelView = (): void => {
       const container = one<HTMLElement>("[data-waiting-panel]");
       if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
       const place = currentWaitingPlace();
       const allItems = allWaitingAskItems();
+      const allPlainAsks = allWaitingPlainAskItems();
       const allTodos = allWaitingTodoItems();
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
@@ -6380,9 +6479,12 @@ import "../../styles/kylon-image-viewer.css";
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const channelPlainAsks = waitingPanelMod.filterWaitingItems(allPlainAsks, "channel", place);
+      const workspacePlainAsks = waitingPanelMod.filterWaitingItems(allPlainAsks, "workspace", place);
       const channelTodos = waitingPanelMod.filterWaitingTodos(allTodos, "channel", place);
       const workspaceTodos = waitingPanelMod.filterWaitingTodos(allTodos, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const visiblePlainAsks = waitingScope === "channel" ? channelPlainAsks : waitingScope === "workspace" ? workspacePlainAsks : allPlainAsks;
       const visibleTodos = waitingScope === "channel" ? channelTodos : waitingScope === "workspace" ? workspaceTodos : allTodos;
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
@@ -6413,11 +6515,12 @@ import "../../styles/kylon-image-viewer.css";
           scope: waitingScope,
           place,
           items: visibleItems,
+          plainAsks: visiblePlainAsks,
           todos: visibleTodos,
           counts: {
-            channel: { min: channelItems.length + channelTodos.length, complete: wsLoaded },
-            workspace: { min: workspaceItems.length + workspaceTodos.length, complete: wsLoaded },
-            all: { min: allItems.length + allTodos.length, complete: allLoaded },
+            channel: { min: channelItems.length + channelPlainAsks.length + channelTodos.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length + workspacePlainAsks.length + workspaceTodos.length, complete: wsLoaded },
+            all: { min: allItems.length + allPlainAsks.length + allTodos.length, complete: allLoaded },
           },
           loading: waitingInFlight && !complete && !truncated,
           complete,
@@ -6450,6 +6553,14 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDraftChoice: (item, draft) => {
             choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onSubmitPlainAsk: (item, bodyText, mode) => void sendWaitingPlainAsk(item, bodyText, mode),
+          onRetryPlainAsk: (item) => {
+            const last = waitingPlainLastSubmissions.get(item.id);
+            if (last) void sendWaitingPlainAsk(item, last.bodyText, last.mode);
+          },
+          onDraftPlainAsk: (item, text) => {
+            waitingPlainDrafts.set(item.id, text);
           },
           onMarkTodoDone: (item) => void markWaitingTodoDone(item),
           onRetryTodo: (item) => void markWaitingTodoDone(item),
@@ -6597,6 +6708,7 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingPanelViewer !== viewer) {
         waitingPanelViewer = viewer;
         waitingPanelAsks.clear();
+        waitingPanelPlainAsks.clear();
         waitingPanelTodos.clear();
         waitingPanelLoadedWorkspaces.clear();
         waitingPanelFailedWorkspaces.clear();
@@ -6604,6 +6716,10 @@ import "../../styles/kylon-image-viewer.css";
         waitingPanelTickets.clear();
         waitingPanelErrors.clear();
         waitingPanelLastSubmissions.clear();
+        waitingPlainTickets.clear();
+        waitingPlainDrafts.clear();
+        waitingPlainErrors.clear();
+        waitingPlainLastSubmissions.clear();
         waitingTodoTickets.clear();
         waitingTodoErrors.clear();
         waitingSurveyDrafts.clear();
@@ -6638,6 +6754,7 @@ import "../../styles/kylon-image-viewer.css";
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
+            waitingPanelPlainAsks.set(workspace.id, []);
             waitingPanelTodos.set(workspace.id, []);
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
@@ -6679,10 +6796,12 @@ import "../../styles/kylon-image-viewer.css";
             const detail = detailOf(workspace, queue, choicesMap);
 
             const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
-            const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
+            const allAskNeeds = detail.needsYou.filter(item => item.kind === "ask");
+            const choiceNeeds = allAskNeeds.filter(item => item.choices && item.choices.options.length > 0);
+            const plainNeeds = allAskNeeds.filter(item => !item.choices || item.choices.options.length === 0);
             const locations = new Map<string, SignalLocation>();
             const missingIds: string[] = [];
-            for (const item of choiceNeeds) {
+            for (const item of allAskNeeds) {
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
               if (liveSignal) {
                 locations.set(item.id, {
@@ -6725,7 +6844,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             const classified = new Map<string, WaitingConversation>();
             let anyUnknownLocation = locationReadFailed;
-            for (const item of choiceNeeds) {
+            for (const item of allAskNeeds) {
               const loc = locations.get(item.id) ?? null;
               const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
               const conv = classifyAskConversation(loc, rootLoc);
@@ -6778,6 +6897,26 @@ import "../../styles/kylon-image-viewer.css";
                 choices: { options: item.choices.options, multi: item.choices.multi },
               }];
             });
+            const panelPlainItems: WaitingPlainAskItem[] = plainNeeds.flatMap(item => {
+              const raw = askById.get(item.id);
+              if (!raw) return [];
+              const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
+              const question = raw.body.trim() || item.what;
+              return [{
+                id: item.id,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                conversation,
+                channelLabel: waitingChannelName(workspace.id, conversation),
+                from: item.from,
+                fromKind: raw.from.kind,
+                fromId: raw.from.id,
+                what: question,
+                when: item.when,
+                createdAt: raw.created_at,
+                until: raw.until,
+              }];
+            });
             let panelTodos: WaitingTodoItem[] = [];
             let todosTruncated = false;
             if (!hasTodos) {
@@ -6792,6 +6931,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             if (!live()) return;
             waitingPanelAsks.set(workspace.id, panelItems);
+            waitingPanelPlainAsks.set(workspace.id, panelPlainItems);
             if (!todosReadFailed) waitingPanelTodos.set(workspace.id, panelTodos);
             const queueTruncated = queue.truncated || queue.asks.length < queue.total;
             const anyTruncated = queueTruncated || todosTruncated;

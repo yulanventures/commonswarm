@@ -507,6 +507,77 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-survey__nav > .cs-waiting
   margin-inline-start: auto;
 }
 
+/* Historical plain-text ask card (Check F): answer inline or clear as stale without leaving chat. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__form {
+  display: grid;
+  gap: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__input {
+  inline-size: 100%;
+  min-block-size: 44px;
+  padding: 9px 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font: 400 13px/1.4 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__input:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__stale,
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send {
+  min-block-size: 44px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font: 600 13px/1 var(--k-shell-font);
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__stale {
+  border: 1px solid var(--k-shell-control);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__stale:hover {
+  background: var(--k-shell-hover);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send {
+  margin-inline-start: auto;
+  border: 1px solid var(--k-shell-accent);
+  background: var(--k-shell-accent);
+  color: var(--k-shell-on-accent, #ffffff);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send:hover:not(:disabled) {
+  background: var(--k-shell-accent-hover, var(--k-shell-accent));
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send:disabled,
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send[aria-disabled="true"],
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__stale[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__stale:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__send:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+
+/* Keep the floating corner invitation card clear of the desktop Waiting on you right column. */
+@media (min-width: 52.001rem) and (min-height: 32.001rem) {
+  body:has(live-dashboard.dashboard[data-kylon-shell] .hm-channel-stage > .cs-waiting-panel:not([hidden]))
+    human-invitation-inbox[data-kylon-invite][data-placement="corner"] {
+    inset-inline-end: calc(clamp(300px, 34vw, 380px) + var(--s-4, 1rem));
+    max-inline-size: calc(100vw - clamp(300px, 34vw, 380px) - var(--s-8, 2rem));
+  }
+}
+
 /* Native phone sheet: same panel node promoted into a modal dialog. */
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet {
   padding: 0;
@@ -542,7 +613,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting-sheet::backdrop {
     inline-size: 100%;
     border-inline-start: 0;
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card .hm-decision__input {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-card .hm-decision__input,
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting-plain__input {
     font-size: 16px;
   }
 }

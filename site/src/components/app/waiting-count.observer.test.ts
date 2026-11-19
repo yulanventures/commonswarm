@@ -50,13 +50,18 @@ function installWaitingFixture() {
   const todoTruncatedCase = scenario.startsWith("todos-truncated-");
   const surveyCase = scenario.startsWith("survey-");
   const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
+  const plainCleanupCase = scenario.startsWith("historical-cleanup-");
+  const plainAsks = [askIdAt(11), askIdAt(12)];
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101,
-    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase,
+    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase ? surveyAsks[2]! : "",
+    plainFailOnceId: plainCleanupCase ? plainAsks[1]! : "",
+    plainFailedCommandId: "",
+    plainReplies: [] as any[],
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -75,6 +80,19 @@ function installWaitingFixture() {
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
+    if (plainCleanupCase) {
+      const baseMs = Date.now() - 600_000;
+      const titles = ["Legacy open question without options?", "Stale historical question to clear?"];
+      return plainAsks
+        .map((id, i) => ({ id, title: titles[i]!, i }))
+        .filter(entry => !f.answeredIds.includes(entry.id))
+        .map(entry => ({
+          signal_id: entry.id,
+          from: { kind: "agent" as const, id: agent, name: "Scout" },
+          body: entry.title,
+          created_at: new Date(baseMs + entry.i * 1000).toISOString(), until, reraised: null,
+        }));
+    }
     if (surveyCase) {
       const baseMs = Date.now() - 600_000;
       const titles = ["Which boiler quote?", "Which paint finish?", "Which arrival window?"];
@@ -114,8 +132,8 @@ function installWaitingFixture() {
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
-          const asks = id === ids[0] && (multiBatch || surveyCase)
-            ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
+          const asks = id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)
+            ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: a.from.kind, id: a.from.id }, created_at: a.created_at, until }))
             : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
             ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
@@ -132,7 +150,7 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/decision_queue") {
       const id = body?.p_workspace_id; f.log.push("queue:" + number(id));
-      if (id === ids[0] && (multiBatch || surveyCase)) {
+      if (id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
         const asks = ws1Asks();
         const total = truncatedQueue ? 105 : asks.length;
         const page = asks.slice(0, 100);
@@ -189,6 +207,9 @@ function installWaitingFixture() {
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
+      if (body?.p_workspace_id === ids[0] && plainCleanupCase) {
+        return Response.json({ asks: [] });
+      }
       if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase)) {
         f.choiceBatchSizes.push(reqIds.length);
         return Response.json({ asks: reqIds.map(sigId => ({ signal_id: sigId, multi: false,
@@ -200,14 +221,14 @@ function installWaitingFixture() {
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
     }
-    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || surveyCase)) {
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
       const idFilter = url.searchParams.get("id") ?? "";
       const match = idFilter.match(/^in\.\(([^)]+)\)$/);
       if (match) {
         const reqIds = match[1]!.split(",").map(s => s.trim()).filter(Boolean);
         return Response.json(reqIds.map(sigId => ({
           id: sigId,
-          channel_id: surveyCase || (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
+          channel_id: surveyCase || plainCleanupCase || (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
           to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
         })));
       }
@@ -251,6 +272,24 @@ function installWaitingFixture() {
         },
         notices: [],
         replayed: false,
+      });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "post_signal" && typeof body?.command?.in_reply_to === "string") {
+      const replyTarget = body.command.in_reply_to;
+      if (f.plainFailOnceId && replyTarget === f.plainFailOnceId) {
+        f.plainFailOnceId = "";
+        f.plainFailedCommandId = String(body.command_id ?? "");
+        f.log.push("plain-failed");
+        return Response.json({ status: "refused", error: "temporary_error", message: "Could not deliver reply." }, { status: 500 });
+      }
+      f.plainReplies.push(body);
+      f.answeredIds.push(replyTarget);
+      f.log.push("plain-reply");
+      return Response.json({
+        status: "accepted",
+        ok: true,
+        event_ids: [],
+        signal: { id: "88888888-8888-4888-8888-00000000000" + f.plainReplies.length, body: body.command.body, in_reply_to: replyTarget },
       });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
@@ -572,6 +611,64 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("historical-cleanup-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted");
+      // Mount a synthetic corner invitation card to verify desktop clearance next to the open Waiting on you column.
+      const inviteCard = document.createElement("human-invitation-inbox");
+      inviteCard.setAttribute("data-kylon-invite", "");
+      inviteCard.setAttribute("data-placement", "corner");
+      inviteCard.style.position = "fixed";
+      inviteCard.style.insetBlockEnd = "144px";
+      inviteCard.style.inlineSize = "320px";
+      inviteCard.style.blockSize = "140px";
+      inviteCard.style.display = "block";
+      document.body.append(inviteCard);
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      const card2 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[1]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()) && shown(card2()), "Waiting on you rendered both historical plain-text ask cards");
+      const panelBox = panel()!.getBoundingClientRect();
+      const inviteBox = inviteCard.getBoundingClientRect();
+      check(inviteBox.right <= panelBox.left + 1 && inviteBox.left >= 0,
+        `corner invitation overlapped Waiting on you column or left edge: invite=${JSON.stringify(inviteBox)}, panel=${JSON.stringify(panelBox)}`);
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      const stale1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-stale]")!;
+      check(send1.disabled === true, "Send button should start disabled before typing");
+      check(send1.getBoundingClientRect().height >= 44 && stale1.getBoundingClientRect().height >= 44 && input1.getBoundingClientRect().height >= 44,
+        "plain-ask controls under 44px hit target");
+      input1.focus();
+      input1.value = "Go with Option B next Tuesday.";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      check(send1.disabled === false, "Send button should enable after typing");
+      send1.click();
+      await wait(() => f.plainReplies.length === 1 && !card1() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent",
+        "plain-ask inline answer sent post_signal reply and removed card");
+      check(f.plainReplies[0].command.in_reply_to === f.plainAsks[0] && f.plainReplies[0].command.body === "Go with Option B next Tuesday.",
+        "unexpected plain-ask reply payload: " + JSON.stringify(f.plainReplies[0]));
+      check(panel()!.contains(document.activeElement), "focus fell outside panel after answering plain-text ask");
+      // Second card: Clear as stale hits simulated failure -> Retry button receives focus -> Retry clears it cleanly.
+      const stale2 = card2()!.querySelector<HTMLButtonElement>("[data-waiting-plain-stale]")!;
+      stale2.focus();
+      stale2.click();
+      await wait(() => shown(card2()?.querySelector('[role="alert"]')) && shown(card2()?.querySelector("[data-waiting-plain-retry]")),
+        "failed Clear as stale kept card with role=alert and Retry button");
+      check(document.activeElement === card2()!.querySelector("[data-waiting-plain-retry]"),
+        "focus did not move to Retry button after failed Clear as stale");
+      card2()!.querySelector<HTMLButtonElement>("[data-waiting-plain-retry]")!.click();
+      await wait(() => f.plainReplies.length === 2 && !card2() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Cleared" && count() === "0",
+        "Retry cleared stale historical ask and updated count to 0");
+      check(f.plainReplies[1].command.in_reply_to === f.plainAsks[1] &&
+        f.plainReplies[1].command.body === "Closed as stale. Re-ask with choices if still needed." &&
+        f.plainFailedCommandId !== "" &&
+        f.plainReplies[1].command_id === f.plainFailedCommandId,
+        "unexpected stale close payload or command_id reuse mismatch: " + JSON.stringify({ failed: f.plainFailedCommandId, retry: f.plainReplies[1] }));
+      check(panel()!.contains(document.activeElement), "focus fell outside panel after clearing last plain-text ask");
+      inviteCard.remove();
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -659,7 +756,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("historical-cleanup-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -699,5 +796,9 @@ test("Waiting on you: assigned to-dos paginate past 20, scope to channel-origin 
 
 test("Waiting on you: multi-question survey keeps drafts across Back/Skip/close, sends only filled-in answers, keeps failed answers editable and skipped open", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["survey-desktop", "survey-phone"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+test("Waiting on you: Check F historical plain-text asks answer inline or clear as stale with Retry focus and desktop corner invite clearance", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["historical-cleanup-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

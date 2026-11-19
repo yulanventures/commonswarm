@@ -178,3 +178,5 @@ export function answerNeedsV2(command: Record<string, unknown>): boolean {
 /** The neutral line when a server without v2 refuses a multi-select or Other answer as invalid input. */
 export const CHOICE_ANSWER_UNSUPPORTED = "This kind of answer can't be sent here yet. Pick one of the options instead.";
 export const CHOICE_ANSWER_FAILED = "That answer couldn't be sent. Try again.";
+/** Default reply text when closing a historical plain-text ask as stale. */
+export const STALE_ASK_CLOSE_BODY = "Closed as stale. Re-ask with choices if still needed.";
