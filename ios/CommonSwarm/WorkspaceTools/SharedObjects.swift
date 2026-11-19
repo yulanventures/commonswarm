@@ -175,6 +175,10 @@ enum SharedListPatchOp: Encodable, Equatable, Sendable {
     }
 }
 
+enum SharedObjectsError: Error, Equatable, Sendable {
+    case refused(reason: String)
+}
+
 enum SharedSaveOutcome: Equatable, Sendable {
     case committed(revision: SharedRevisionRef)
     case conflict(current: SharedRevisionRef, draftID: String)
@@ -414,6 +418,15 @@ final class SharedObjectsListStore: ObservableObject {
             let listed = try await api.listObjects(workspaceID: workspaceID)
             guard !Task.isCancelled else { return }
             objects = listed
+        } catch SharedObjectsError.refused(let reason) {
+            if !Task.isCancelled {
+                objects = []
+                if reason == "content_consent_required" {
+                    accessStatus = .needsConfirmation(reason: reason)
+                } else {
+                    accessStatus = .refused(reason: reason)
+                }
+            }
         } catch {
             if !Task.isCancelled {
                 loadFailed = true
@@ -425,11 +438,14 @@ final class SharedObjectsListStore: ObservableObject {
 
 @MainActor
 final class SharedObjectDetailStore: ObservableObject {
+    @Published private(set) var access: SharedAccess?
+    @Published private(set) var accessStatus: SharedAccessStatus?
     @Published private(set) var detail: SharedObjectDetail?
     @Published private(set) var isLoading = false
     @Published private(set) var loadFailed = false
     @Published private(set) var isSaving = false
     @Published private(set) var saveBanner: String?
+    @Published private(set) var postSaveRefreshMessage: String?
     @Published private(set) var conflictMessage: String?
     @Published private(set) var saveError: String?
     @Published private(set) var pendingEdit: SharedPendingListEdit?
@@ -438,7 +454,6 @@ final class SharedObjectDetailStore: ObservableObject {
     let workspaceID: UUID
     let objectID: String
     let expectedKind: SharedObjectKind
-    let access: SharedAccess?
     private var bannerTask: Task<Void, Never>?
 
     init(workspaceID: UUID, objectID: String, expectedKind: SharedObjectKind, access: SharedAccess?) {
@@ -446,28 +461,100 @@ final class SharedObjectDetailStore: ObservableObject {
         self.objectID = objectID
         self.expectedKind = expectedKind
         self.access = access
+        self.accessStatus = access.map { .granted($0) }
+    }
+
+    var needsRefreshAfterSave: Bool {
+        postSaveRefreshMessage != nil
     }
 
     var canEditList: Bool {
-        expectedKind == .list && (access?.canUpdate ?? false) && !isSaving && conflictMessage == nil
+        expectedKind == .list
+            && (access?.canUpdate ?? false)
+            && !isSaving
+            && conflictMessage == nil
+            && pendingEdit == nil
+            && !needsRefreshAfterSave
+    }
+
+    private var postSaveRefreshCopy: String {
+        expectedKind == .doc
+            ? "Saved. Couldn’t refresh the doc."
+            : "Saved. Couldn’t refresh the list."
+    }
+
+    private func applyAccessEnded(_ status: SharedAccessStatus) {
+        bannerTask?.cancel()
+        detail = nil
+        access = nil
+        accessStatus = status
+        pendingEdit = nil
+        conflictMessage = nil
+        saveError = nil
+        postSaveRefreshMessage = nil
+        saveBanner = nil
+        loadFailed = false
     }
 
     func load(api: SharedObjectsAPI) async {
         isLoading = true
-        loadFailed = false
+        if postSaveRefreshMessage == nil {
+            loadFailed = false
+        }
         do {
+            let status = try await api.access(workspaceID: workspaceID)
+            guard !Task.isCancelled else {
+                isLoading = false
+                return
+            }
+            switch status {
+            case .refused(let reason):
+                applyAccessEnded(.refused(reason: reason))
+                isLoading = false
+                return
+            case .needsConfirmation(let reason):
+                applyAccessEnded(.needsConfirmation(reason: reason))
+                isLoading = false
+                return
+            case .granted(let freshAccess):
+                guard freshAccess.canRead else {
+                    applyAccessEnded(.refused(reason: "workspace_access_refused"))
+                    isLoading = false
+                    return
+                }
+                access = freshAccess
+                accessStatus = .granted(freshAccess)
+                if !freshAccess.canUpdate {
+                    pendingEdit = nil
+                }
+            }
+
             let loaded = try await api.readObject(workspaceID: workspaceID, objectID: objectID, expectedKind: expectedKind)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                isLoading = false
+                return
+            }
             detail = loaded
             conflictMessage = nil
             saveError = nil
             pendingEdit = nil
-        } catch {
+            postSaveRefreshMessage = nil
+            loadFailed = false
+        } catch SharedObjectsError.refused(let reason) {
             if !Task.isCancelled {
+                handleReadRefusal(reason)
+            }
+        } catch {
+            if !Task.isCancelled, postSaveRefreshMessage == nil {
                 loadFailed = true
             }
         }
         isLoading = false
+    }
+
+    func retryPostSaveRefresh(api: SharedObjectsAPI) async {
+        guard needsRefreshAfterSave, !isLoading, !isSaving else { return }
+        await load(api: api)
     }
 
     func toggleItem(_ item: SharedListItem, api: SharedObjectsAPI) async {
@@ -519,6 +606,26 @@ final class SharedObjectDetailStore: ObservableObject {
         await applyListPatch(pendingEdit, api: api)
     }
 
+    private func handleReadRefusal(_ reason: String) {
+        switch reason {
+        case "content_consent_required":
+            applyAccessEnded(.needsConfirmation(reason: reason))
+        case "workspace_access_refused", "connection_access_refused":
+            applyAccessEnded(.refused(reason: reason))
+        case "object_not_found":
+            bannerTask?.cancel()
+            detail = nil
+            pendingEdit = nil
+            postSaveRefreshMessage = nil
+            saveBanner = nil
+            loadFailed = true
+        default:
+            if postSaveRefreshMessage == nil {
+                loadFailed = true
+            }
+        }
+    }
+
     private func applyListPatch(_ edit: SharedPendingListEdit, api: SharedObjectsAPI) async {
         isSaving = true
         saveError = nil
@@ -540,17 +647,65 @@ final class SharedObjectDetailStore: ObservableObject {
             if edit.pendingNewItemText != nil {
                 newItemText = ""
             }
-            // Reload server-confirmed revision (matching web audit U7)
-            if let fresh = try? await api.readObject(workspaceID: workspaceID, objectID: objectID, expectedKind: expectedKind) {
-                detail = fresh
-            }
-            showSavedBanner("Saved")
+            await refreshAfterCommittedSave(api: api)
         case .conflict:
+            pendingEdit = nil
             conflictMessage = "Someone saved another revision. Reload to see the current list before trying again."
-        case .refused(_, let message):
-            saveError = message
+        case .refused(let reason, let message):
+            switch reason {
+            case "workspace_access_refused", "connection_access_refused":
+                applyAccessEnded(.refused(reason: reason))
+            case "content_consent_required":
+                applyAccessEnded(.needsConfirmation(reason: reason))
+            case "content_read_only":
+                let reader = SharedAccess(role: .reader, operations: ["read"])
+                access = reader
+                accessStatus = .granted(reader)
+                pendingEdit = nil
+                saveError = message
+            default:
+                saveError = message
+            }
         case .unconfirmed(let message):
             saveError = message
+        }
+    }
+
+    private func refreshAfterCommittedSave(api: SharedObjectsAPI) async {
+        do {
+            let status = try await api.access(workspaceID: workspaceID)
+            switch status {
+            case .refused(let reason):
+                applyAccessEnded(.refused(reason: reason))
+                return
+            case .needsConfirmation(let reason):
+                applyAccessEnded(.needsConfirmation(reason: reason))
+                return
+            case .granted(let freshAccess):
+                guard freshAccess.canRead else {
+                    applyAccessEnded(.refused(reason: "workspace_access_refused"))
+                    return
+                }
+                access = freshAccess
+                accessStatus = .granted(freshAccess)
+            }
+            let fresh = try await api.readObject(workspaceID: workspaceID, objectID: objectID, expectedKind: expectedKind)
+            detail = fresh
+            postSaveRefreshMessage = nil
+            loadFailed = false
+            showSavedBanner("Saved")
+        } catch SharedObjectsError.refused(let reason) {
+            if reason == "content_consent_required" || reason == "workspace_access_refused" || reason == "connection_access_refused" {
+                handleReadRefusal(reason)
+            } else {
+                bannerTask?.cancel()
+                saveBanner = nil
+                postSaveRefreshMessage = postSaveRefreshCopy
+            }
+        } catch {
+            bannerTask?.cancel()
+            saveBanner = nil
+            postSaveRefreshMessage = postSaveRefreshCopy
         }
     }
 

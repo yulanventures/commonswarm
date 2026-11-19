@@ -16,9 +16,12 @@ const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
 
 let accessMode = "editor"; // editor | reader | consent | refused
 let failNextUpdate = false;
+let failNextReadStatus = null; // e.g. 503
+let refuseNextReadReason = null; // e.g. "workspace_access_refused"
 let conflictNextUpdate = false;
 let forceObjectListPageSize = null;
 const receivedUpdates = [];
+let readCount = 0;
 
 function makeObjects() {
   return new Map([
@@ -138,6 +141,14 @@ const server = createServer(async (req, res) => {
       failNextUpdate = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-next-read") {
+      failNextReadStatus = Number(url.searchParams.get("status") || 503);
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/refuse-next-read") {
+      refuseNextReadReason = url.searchParams.get("reason") || "workspace_access_refused";
+      return reply(200, { ok: true });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/conflict-next-update") {
       conflictNextUpdate = true;
       return reply(200, { ok: true });
@@ -149,6 +160,9 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/fixture/updates") {
       return reply(200, receivedUpdates);
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/read-count") {
+      return reply(200, { count: readCount });
     }
 
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
@@ -255,6 +269,23 @@ const server = createServer(async (req, res) => {
           return reply(200, { status: "ok", kind: "object_list", objects: slice, next_offset: nextOffset });
         }
         if (cmd.tool === "object_read") {
+          readCount += 1;
+          if (failNextReadStatus !== null) {
+            const code = failNextReadStatus;
+            failNextReadStatus = null;
+            return reply(code, { error: "unavailable" });
+          }
+          if (refuseNextReadReason !== null) {
+            const reason = refuseNextReadReason;
+            refuseNextReadReason = null;
+            return reply(200, { status: "refused", reason });
+          }
+          if (accessMode === "refused") {
+            return reply(200, { status: "refused", reason: "workspace_access_refused" });
+          }
+          if (accessMode === "consent") {
+            return reply(200, { status: "refused", reason: "content_consent_required" });
+          }
           const obj = objects.get(String(args.object_id || ""));
           if (!obj) return reply(200, { status: "refused", reason: "object_not_found" });
           return reply(200, {

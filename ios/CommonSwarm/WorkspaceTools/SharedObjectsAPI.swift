@@ -68,8 +68,9 @@ struct SharedObjectsAPI: Sendable {
     }
 
     private struct ObjectListReplyWire: Decodable {
-        let status: String
+        let status: String?
         let reason: String?
+        let error: String?
         let objects: [ObjectListEntryWire]?
         let next_offset: Int?
     }
@@ -89,20 +90,22 @@ struct SharedObjectsAPI: Sendable {
     }
 
     private struct ObjectReadReplyWire: Decodable {
-        let status: String
+        let status: String?
         let reason: String?
+        let error: String?
         let live: Bool?
         let revision: RevisionMetaWire?
         let content: ContentWire?
     }
 
     private struct ObjectUpdateReplyWire: Decodable {
-        let status: String
+        let status: String?
         let object_id: String?
         let revision: SharedRevisionRef?
         let current: SharedRevisionRef?
         let draft_id: String?
         let reason: String?
+        let error: String?
     }
 
     private struct MemberProfileWire: Decodable {
@@ -174,38 +177,45 @@ struct SharedObjectsAPI: Sendable {
                     )
                 )
             )
-            guard status == 200,
-                  let reply = try? JSONDecoder().decode(ObjectListReplyWire.self, from: data),
-                  reply.status == "ok",
-                  let rows = reply.objects else {
-                throw APIError.refused(status)
-            }
-            for row in rows {
-                guard row.kind.isListOrDoc else { continue }
-                guard row.revision.isBound(workspaceID: workspaceID, objectID: row.object_id) else {
-                    throw APIError.invalidResponse
+            if (status == 200 || status == 403),
+               let reply = try? JSONDecoder().decode(ObjectListReplyWire.self, from: data) {
+                if reply.status == "refused" {
+                    throw SharedObjectsError.refused(reason: reply.reason ?? "workspace_access_refused")
                 }
-                if seen.insert(row.object_id).inserted {
-                    collected.append(
-                        SharedObjectSummary(
-                            objectID: row.object_id,
-                            kind: row.kind,
-                            title: row.title,
-                            revision: row.revision
-                        )
-                    )
+                if status == 403, let err = reply.error, !err.isEmpty {
+                    throw SharedObjectsError.refused(reason: err)
+                }
+                if status == 200, reply.status == "ok", let rows = reply.objects {
+                    for row in rows {
+                        guard row.kind.isListOrDoc else { continue }
+                        guard row.revision.isBound(workspaceID: workspaceID, objectID: row.object_id) else {
+                            throw APIError.invalidResponse
+                        }
+                        if seen.insert(row.object_id).inserted {
+                            collected.append(
+                                SharedObjectSummary(
+                                    objectID: row.object_id,
+                                    kind: row.kind,
+                                    title: row.title,
+                                    revision: row.revision
+                                )
+                            )
+                        }
+                    }
+                    guard collected.count <= SharedObjectsRules.objectLimit else {
+                        throw APIError.invalidResponse
+                    }
+                    guard let nextOffset = reply.next_offset else {
+                        break
+                    }
+                    guard nextOffset > offset && nextOffset < SharedObjectsRules.objectLimit else {
+                        throw APIError.invalidResponse
+                    }
+                    offset = nextOffset
+                    continue
                 }
             }
-            guard collected.count <= SharedObjectsRules.objectLimit else {
-                throw APIError.invalidResponse
-            }
-            guard let nextOffset = reply.next_offset else {
-                break
-            }
-            guard nextOffset > offset && nextOffset < SharedObjectsRules.objectLimit else {
-                throw APIError.invalidResponse
-            }
-            offset = nextOffset
+            throw APIError.refused(status)
         }
         return collected
     }
@@ -223,8 +233,17 @@ struct SharedObjectsAPI: Sendable {
                 arguments: ObjectReadArgs(seat: Self.householdLocalSeat, object_id: objectID)
             )
         )
+        guard status == 200 || status == 403,
+              let reply = try? JSONDecoder().decode(ObjectReadReplyWire.self, from: data) else {
+            throw APIError.refused(status)
+        }
+        if reply.status == "refused" {
+            throw SharedObjectsError.refused(reason: reply.reason ?? "workspace_access_refused")
+        }
+        if status == 403, let err = reply.error, !err.isEmpty {
+            throw SharedObjectsError.refused(reason: err)
+        }
         guard status == 200,
-              let reply = try? JSONDecoder().decode(ObjectReadReplyWire.self, from: data),
               reply.status == "ok",
               let meta = reply.revision,
               let rawContent = reply.content else {
@@ -313,7 +332,7 @@ struct SharedObjectsAPI: Sendable {
                     )
                 )
             )
-            guard status == 200 || status == 409,
+            guard status == 200 || status == 403 || status == 409,
                   let reply = try? JSONDecoder().decode(ObjectUpdateReplyWire.self, from: data) else {
                 return .unconfirmed(message: Self.unconfirmedMessage)
             }
@@ -333,6 +352,9 @@ struct SharedObjectsAPI: Sendable {
             if reply.status == "refused" {
                 let reason = reply.reason ?? "refused"
                 return .refused(reason: reason, message: SharedObjectsRules.refusalMessage(reason))
+            }
+            if status == 403, let err = reply.error, !err.isEmpty {
+                return .refused(reason: err, message: SharedObjectsRules.refusalMessage(err))
             }
             return .unconfirmed(message: Self.unconfirmedMessage)
         } catch {

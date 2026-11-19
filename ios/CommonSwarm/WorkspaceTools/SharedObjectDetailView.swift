@@ -63,6 +63,12 @@ struct SharedObjectDetailView: View {
             : Color(red: 0.72, green: 0.08, blue: 0.08)
     }
 
+    private var mutedForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.72, green: 0.72, blue: 0.76)
+            : Color(red: 0.34, green: 0.34, blue: 0.37)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let banner = store.saveBanner {
@@ -100,7 +106,35 @@ struct SharedObjectDetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.isLoading && store.detail == nil {
+        if case .refused = store.accessStatus {
+            ContentUnavailableView(
+                "Access unavailable",
+                systemImage: "lock.slash",
+                description: Text("You don’t have read access to shared lists and docs in this workspace.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if case .needsConfirmation = store.accessStatus {
+            VStack(spacing: 14) {
+                ContentUnavailableView(
+                    "Confirm content access",
+                    systemImage: "lock.doc",
+                    description: Text("Choose reader or editor access for this workspace before opening shared lists and docs.")
+                )
+                Button {
+                    Task { await store.load(api: objectsAPI) }
+                } label: {
+                    Text("Retry")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(secondaryForeground)
+                        .padding(.horizontal, 20)
+                        .frame(minWidth: 88, minHeight: 44)
+                        .background(secondaryBackground, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if store.isLoading && store.detail == nil {
             ProgressView("Loading \(summary.kind.label.lowercased())…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.loadFailed && store.detail == nil {
@@ -113,7 +147,16 @@ struct SharedObjectDetailView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     headerCard(detail: detail)
 
-                    if let conflictMessage = store.conflictMessage {
+                    if let refreshMessage = store.postSaveRefreshMessage {
+                        noticeCard(
+                            title: refreshMessage,
+                            message: "Retry to load the latest revision before making another edit.",
+                            primaryTitle: "Retry",
+                            onPrimary: { Task { await store.retryPostSaveRefresh(api: objectsAPI) } },
+                            secondaryTitle: nil,
+                            onSecondary: nil
+                        )
+                    } else if let conflictMessage = store.conflictMessage {
                         noticeCard(
                             title: "Someone saved another revision",
                             message: conflictMessage,
@@ -166,7 +209,7 @@ struct SharedObjectDetailView: View {
 
             HStack(spacing: 8) {
                 SharedObjectKindBadge(kind: detail.kind)
-                if !(access?.canUpdate ?? false) {
+                if !(store.access?.canUpdate ?? false) {
                     Text("Reader access")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(secondaryForeground)
@@ -179,12 +222,12 @@ struct SharedObjectDetailView: View {
             HStack(spacing: 6) {
                 Image(systemName: detail.authorIsAgent ? "cpu" : "person.crop.circle")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(mutedForeground)
                     .accessibilityHidden(true)
                 let savedAt = detail.formattedSavedAt
                 Text(savedAt.isEmpty ? "Saved by \(detail.authorLabel)" : "Saved by \(detail.authorLabel) · \(savedAt)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(mutedForeground)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -247,7 +290,7 @@ struct SharedObjectDetailView: View {
             if items.isEmpty {
                 Text("No items in this list yet.")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(mutedForeground)
                     .padding(.vertical, 8)
             } else {
                 VStack(spacing: 8) {
@@ -260,12 +303,12 @@ struct SharedObjectDetailView: View {
                                     HStack(alignment: .center, spacing: 10) {
                                         Image(systemName: item.checked ? "checkmark.square.fill" : "square")
                                             .font(.title3)
-                                            .foregroundStyle(item.checked ? primaryBackground : .secondary)
+                                            .foregroundStyle(item.checked ? primaryBackground : mutedForeground)
                                             .accessibilityHidden(true)
                                         Text(item.text)
                                             .font(.body)
                                             .strikethrough(item.checked)
-                                            .foregroundStyle(item.checked ? .secondary : .primary)
+                                            .foregroundStyle(item.checked ? mutedForeground : Color.primary)
                                             .multilineTextAlignment(.leading)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Spacer(minLength: 4)
@@ -297,12 +340,12 @@ struct SharedObjectDetailView: View {
                                 HStack(alignment: .center, spacing: 10) {
                                     Image(systemName: item.checked ? "checkmark.square.fill" : "square")
                                         .font(.title3)
-                                        .foregroundStyle(item.checked ? primaryBackground : .secondary)
+                                        .foregroundStyle(item.checked ? primaryBackground : mutedForeground)
                                         .accessibilityHidden(true)
                                     Text(item.text)
                                         .font(.body)
                                         .strikethrough(item.checked)
-                                        .foregroundStyle(item.checked ? .secondary : .primary)
+                                        .foregroundStyle(item.checked ? mutedForeground : Color.primary)
                                         .fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
                                 }
@@ -318,7 +361,7 @@ struct SharedObjectDetailView: View {
                 }
             }
 
-            if access?.canUpdate ?? false {
+            if store.access?.canUpdate ?? false {
                 HStack(spacing: 8) {
                     TextField("Add an item…", text: $store.newItemText)
                         .textFieldStyle(.plain)
@@ -365,7 +408,7 @@ struct SharedObjectDetailView: View {
             if blocks.isEmpty {
                 Text("This document is empty.")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(mutedForeground)
             } else {
                 ForEach(blocks) { block in
                     switch block {
@@ -379,7 +422,7 @@ struct SharedObjectDetailView: View {
                         HStack(alignment: .top, spacing: 8) {
                             Text("•")
                                 .font(.body.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(mutedForeground)
                                 .accessibilityHidden(true)
                             Text(text)
                                 .font(.body)
@@ -390,7 +433,7 @@ struct SharedObjectDetailView: View {
                         HStack(alignment: .top, spacing: 8) {
                             Text(number)
                                 .font(.body.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(mutedForeground)
                             Text(text)
                                 .font(.body)
                                 .foregroundStyle(.primary)
