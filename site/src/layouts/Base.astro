@@ -158,18 +158,21 @@ const origin = (Astro.site ?? new URL(FALLBACK_ORIGIN)).origin;
 const canonical = new URL(path, origin).href;
 const ogImageUrl = new URL(ogImage, origin).href;
 const isHome = path === "/";
-const isAppShell = path === "/app" || path === "/invite";
+const isApp = path === "/app";
+const isAppShell = isApp || path === "/invite";
 const fontPreloads = isHome || publicLook
   ? ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/dm-sans-latin.woff2"]
-  : isAppShell
-    ? ["/fonts/inter-latin.woff2", "/fonts/jetbrains-mono-latin.woff2"]
-    : path === "/download"
-      ? [
-          "/fonts/bricolage-grotesque-latin.woff2",
-          "/fonts/instrument-sans-latin.woff2",
-          "/fonts/jetbrains-mono-latin.woff2",
-        ]
-      : ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/instrument-sans-latin.woff2"];
+  : isApp
+    ? ["/fonts/inter-latin.woff2"]
+    : isAppShell
+      ? ["/fonts/inter-latin.woff2", "/fonts/jetbrains-mono-latin.woff2"]
+      : path === "/download"
+        ? [
+            "/fonts/bricolage-grotesque-latin.woff2",
+            "/fonts/instrument-sans-latin.woff2",
+            "/fonts/jetbrains-mono-latin.woff2",
+          ]
+        : ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/instrument-sans-latin.woff2"];
 
 // Generator and social alt tags share the homepage copy. Regenerate public/og.png
 // with scripts/og-card.mjs after edits; its source fingerprint catches stale pixels.
@@ -180,6 +183,7 @@ const ogImageAlt = LANDING_SOCIAL_COPY.alt;
 <html
   lang="en"
   data-home={isHome ? "" : undefined}
+  data-app={isApp ? "" : undefined}
   data-marketing={!isAppShell ? "" : undefined}
   data-public-look={publicLook ? "" : undefined}
 >
