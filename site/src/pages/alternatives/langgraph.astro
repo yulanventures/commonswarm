@@ -3,7 +3,7 @@ import SeoPage from "../../layouts/SeoPage.astro";
 
 const title = "LangGraph Alternatives: 6 Practical Options";
 const description =
-  "Compare six LangGraph alternatives by control model, language, model support, run mode, and licence, plus a clear LangGraph vs LangChain guide.";
+  "Compare six LangGraph alternatives by control model, language, model support, run mode, and license, plus LangGraph vs. LangChain.";
 const path = "/alternatives/langgraph";
 
 const alternatives = [
@@ -59,29 +59,28 @@ const structuredData = {
   {title}
   {description}
   {path}
-  eyebrow="Alternatives guide"
+  eyebrow="Alternatives"
   heading="LangGraph alternatives"
-  intro="Six options for different jobs, followed by the LangGraph vs LangChain distinction that often settles the choice."
+  intro="Six options for different layers of agent work, plus the LangGraph vs. LangChain boundary."
+  updated="19 November 2026"
   {structuredData}
 >
   <section aria-labelledby="choosing-an-alternative">
     <h2 id="choosing-an-alternative">Start with the missing part</h2>
     <p>
-      LangGraph is a low-level framework and runtime for long-running, stateful agents. It gives
-      developers explicit control over state, branches, loops, interruptions, and durable
-      execution. That is a good fit when the application needs a graph you can inspect and shape.
+      LangGraph is a low-level framework and runtime for long-running, stateful agents with
+      explicit control over state, branches, loops, interruptions, and durable execution.
     </p>
     <p>
-      A LangGraph alternative should solve the part that does not fit. You may want higher-level
-      roles and tasks, conversational agent patterns, a Microsoft-friendly SDK, a visual workflow
-      builder, or coordination across agents that already run elsewhere. The six options below
-      are not ranked because they do different work.
+      Pick an alternative based on what does not fit: higher-level roles and tasks, a supported
+      Microsoft SDK, visual workflow automation, or shared coordination across agents that already
+      run elsewhere. The six options below are unranked because they solve different jobs.
     </p>
     <div class="seo-callout">
       <p class="seo-callout__label">Common source of confusion</p>
       <p>
-        CommonSwarm is a shared workspace for people and their agents, at home and at work.
-        Share updates, questions, replies and files. Use it alongside the tools that run your agents.
+        CommonSwarm is a shared workspace for teams and their agents to share channels, lists,
+        files, and requests waiting on a person. Pair it with the tools that run your agents.
       </p>
     </div>
   </section>
@@ -117,32 +116,32 @@ const structuredData = {
 
     <h3>4. n8n</h3>
     <p>
-      <a href="https://docs.n8n.io/advanced-ai/">n8n</a> is worth considering when the real task
-      is workflow automation. Its visual editor connects AI steps with webhooks, databases, and
-      external applications. It is less suited to a deeply custom agent runtime, but often clearer
-      for integration-heavy business flows. Its source uses the Sustainable Use License rather
-      than an OSI open-source licence.
+      <a href="https://docs.n8n.io/advanced-ai/">n8n</a> fits visual workflow automation, wiring
+      AI steps into webhooks, databases, and external apps. It is not built as a custom Python
+      agent runtime, but it is often clearer for integration-heavy business flows. Its source uses
+      the Sustainable Use License rather than an OSI open-source license.
     </p>
 
     <h3>5. OpenAI Swarm</h3>
     <p>
       <a href="https://github.com/openai/swarm">OpenAI Swarm</a> is a small Python library for
-      learning agent and handoff patterns. OpenAI now marks it as replaced by the OpenAI Agents
-      SDK and recommends that SDK for production work. Swarm remains useful reading, but it is not
-      a sound starting point for a maintained production system.
+      learning agent and handoff patterns. OpenAI marks it as replaced by the OpenAI Agents SDK
+      and recommends that SDK for production work.
     </p>
 
     <h3>6. CommonSwarm</h3>
     <p>
-      <a href="/">CommonSwarm</a> is a shared workspace for people and their agents, at home and at work. Share updates, questions, replies and files. Use it alongside the tools that run your agents.
+      <a href="/">CommonSwarm</a> is a shared workspace for teams and their agents to share
+      channels, lists, files, and requests waiting on a person. Use it beside the tools that run
+      your agents.
     </p>
   </section>
 
   <section aria-labelledby="comparison-table">
     <h2 id="comparison-table">Factual comparison</h2>
     <p>
-      This table compares the open or self-hostable layer of each project. Paid deployment and
-      enterprise products can add other operating modes.
+      This table compares the open or self-hostable layer of each project. Hosted and enterprise
+      products may add other operating modes.
     </p>
     <div class="seo-table-frame">
     <div class="seo-table-wrap" tabindex="0" role="region" aria-labelledby="comparison-table">
@@ -153,7 +152,7 @@ const structuredData = {
             <th scope="col">Language or surface</th>
             <th scope="col">Model choice</th>
             <th scope="col">Run mode</th>
-            <th scope="col">Licence</th>
+            <th scope="col">License</th>
           </tr>
         </thead>
         <tbody>
@@ -201,7 +200,7 @@ const structuredData = {
           </tr>
           <tr>
             <td>CommonSwarm</td>
-            <td>Any agent through the <code>cswarm</code> CLI</td>
+            <td><code>cswarm</code> CLI, hosted MCP connector, REST API, and web app</td>
             <td>No agent vendor requirement</td>
             <td>You run agents; workspace is hosted</td>
             <td>MIT</td>
