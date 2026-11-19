@@ -4545,6 +4545,17 @@ export async function listOversightConversations(
   return parseOversightListResponse(body);
 }
 
+/** Step 2b `resource: "conversation_oversight"` raw response for lazy oversight outcome parsing. */
+export async function readOversightConversationsRaw(
+  workspaceId: string,
+  agentPrincipalId: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return postConversationRead(
+    buildOversightListRequest(workspaceId, agentPrincipalId),
+    "agent conversations",
+  );
+}
+
 /** Step 2b `resource: "conversation_oversight_history"`: read-only history bound to one owned agent. */
 export async function readOversightConversationHistory(
   workspaceId: string,
