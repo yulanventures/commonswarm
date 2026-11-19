@@ -31,6 +31,18 @@ struct Message: Decodable, Identifiable {
     let from_kind: String
     let body: String
     let created_at: String
+    let attachments: [MessageAttachment]?
+}
+
+struct MessageAttachment: Decodable, Hashable, Identifiable {
+    let file_id: UUID
+    let version_n: Int
+    let name: String
+    let content_type: String
+    let size_bytes: Int
+
+    var id: String { file_id.uuidString + "@" + String(version_n) }
+    var isRasterImage: Bool { ["image/png", "image/jpeg", "image/gif", "image/webp"].contains(content_type) }
 }
 
 struct Post: Encodable {
@@ -114,7 +126,7 @@ struct ConversationAPI {
     }
 
     func history(_ workspace: UUID, _ destination: Conversation.Destination, before: Message? = nil) async throws -> [Message] {
-        var query = ["select": "id,from,from_kind,body,created_at", "workspace_id": "eq." + workspace.uuidString,
+        var query = ["select": "id,from,from_kind,body,created_at,attachments", "workspace_id": "eq." + workspace.uuidString,
                      "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {
@@ -142,6 +154,46 @@ struct ConversationAPI {
         query["and"] = "(" + predicates.joined(separator: ",") + ")"
         let result: [Message] = try await rows("signals", query)
         return Array(result.reversed())
+    }
+
+    func download(_ attachment: MessageAttachment, workspace: UUID) async throws -> Data {
+        struct Command: Encodable {
+            let kind = "file_download_url"
+            let file_id: UUID
+            let version_n: Int
+        }
+        struct Envelope: Encodable {
+            let command_id = UUID()
+            let workspace_id: UUID
+            let stream = ["kind": "workspace"]
+            let command: Command
+        }
+        struct Grant: Decodable {
+            let status: String
+            let file_id: UUID
+            let version_n, size_bytes: Int
+            let download_path: String
+        }
+        guard attachment.version_n > 0, (1...25 * 1024 * 1024).contains(attachment.size_bytes) else {
+            throw APIError.invalidResponse
+        }
+        var req = request("functions/v1/command")
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Envelope(workspace_id: workspace,
+            command: Command(file_id: attachment.file_id, version_n: attachment.version_n)))
+        let grant: Grant = try await send(req)
+        let expected = "/storage/v1/object/sign/swarm-files/" + workspace.uuidString.lowercased() + "/"
+            + attachment.file_id.uuidString.lowercased() + "/" + String(attachment.version_n)
+        guard grant.status == "accepted", grant.file_id == attachment.file_id,
+              grant.version_n == attachment.version_n, grant.size_bytes == attachment.size_bytes,
+              let path = URLComponents(string: grant.download_path),
+              path.scheme == nil, path.host == nil, path.fragment == nil,
+              path.percentEncodedPath == expected, path.queryItems?.contains(where: { $0.name == "token" && $0.value?.isEmpty == false }) == true,
+              let url = URL(string: grant.download_path, relativeTo: origin)?.absoluteURL else {
+            throw APIError.invalidResponse
+        }
+        return try await session.downloadStorage(url, size: grant.size_bytes)
     }
 
     @discardableResult

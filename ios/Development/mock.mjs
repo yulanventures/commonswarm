@@ -43,12 +43,18 @@ let notifyPost;
 const postReceived = new Promise(resolve => { notifyPost = resolve; });
 let authenticatedRequests = 0;
 const messages = [];
+const file = "00000000-0000-4000-8000-000000000009";
+const fileBytes = Buffer.from("Workspace notes");
+const signedPath = "/storage/v1/object/sign/swarm-files/" + workspace + "/" + file + "/2";
+const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_type: "text/plain", size_bytes: fileBytes.length };
+
 const address = (command) => command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general";
 if (review) {
   for (let i = 130; i > 0; i--) {
     messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
       created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString().replace("Z", "+00:00"), fixtureDestination: "general", workspace });
   }
+  messages[0].attachments = [fixtureFile];
 }
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
@@ -94,6 +100,11 @@ const server = createServer(async (req, res) => {
       }
       body = JSON.parse(data);
     }
+    if (req.method === "GET" && url.pathname === signedPath && url.searchParams.get("token") === "fixture") {
+      if (req.headers.apikey || req.headers.authorization) return reply(403, {});
+      res.writeHead(200, { "Content-Type": "text/plain", "Content-Length": fileBytes.length });
+      return res.end(fileBytes);
+    }
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
     const issueSession = () => {
       const session = randomBytes(32).toString("hex");
@@ -135,6 +146,10 @@ const server = createServer(async (req, res) => {
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
+      if (body.command?.kind === "file_download_url" && body.workspace_id?.toLowerCase() === workspace &&
+          body.command.file_id?.toLowerCase() === file && body.command.version_n === 2) {
+        return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
+      }
       if (!workspaces.some(row => row.workspace_id === body.workspace_id?.toLowerCase()) || body.command?.kind !== "post_signal") return reply(400, {});
       if (verify && body.command.body === "held during sign-out") {
         notifyPost();
