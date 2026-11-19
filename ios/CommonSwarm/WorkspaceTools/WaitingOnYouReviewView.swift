@@ -373,10 +373,11 @@ struct WaitingQuestionReviewView: View {
     }
 
     private func sendButtonTitle(answeredCount: Int, failedCount: Int) -> String {
-        if isSending { return "Sending…" }
-        if failedCount > 0 { return failedCount == 1 ? "Retry 1 failed" : "Retry \(failedCount) failed" }
-        if answeredCount == 1 { return "Send 1 answer" }
-        return "Send \(answeredCount) answers"
+        WaitingReviewRules.sendButtonTitle(
+            answeredCount: answeredCount,
+            failedCount: failedCount,
+            isSending: isSending
+        )
     }
 
     @ViewBuilder

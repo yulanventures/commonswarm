@@ -53,7 +53,8 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
                     viewerID: api.session.userID,
                     directory: directory,
                     channelID: channelID
-                )
+                ),
+                session: api.session
             )
         )
     }

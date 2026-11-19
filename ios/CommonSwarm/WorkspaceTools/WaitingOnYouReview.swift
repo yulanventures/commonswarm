@@ -8,6 +8,91 @@ struct WaitingReviewBatchResult: Equatable, Sendable {
     var allSucceeded: Bool { failedIDs.isEmpty }
 }
 
+enum WaitingReviewRules {
+    /// Names the whole outgoing batch when new answers are included alongside retries;
+    /// keeps Retry wording only when every outgoing answer is a retry.
+    static func sendButtonTitle(answeredCount: Int, failedCount: Int, isSending: Bool) -> String {
+        if isSending { return "Sending…" }
+        if failedCount > 0 && failedCount == answeredCount {
+            return failedCount == 1 ? "Retry 1 failed" : "Retry \(failedCount) failed"
+        }
+        if answeredCount == 1 { return "Send 1 answer" }
+        return "Send \(answeredCount) answers"
+    }
+}
+
+struct WaitingDraftKey: Hashable, Sendable {
+    let viewerID: UUID
+    let workspaceID: UUID
+    let signalID: UUID
+}
+
+@MainActor
+final class WaitingSessionDraftMemory {
+    static let shared = WaitingSessionDraftMemory()
+
+    private final class Bucket {
+        weak var session: HumanSession?
+        let viewerID: UUID
+        var drafts: [WaitingDraftKey: WaitingChoiceDraft] = [:]
+        var failures: [WaitingDraftKey: WaitingCardFailure] = [:]
+
+        init(session: HumanSession) {
+            self.session = session
+            self.viewerID = session.userID
+        }
+    }
+
+    private var buckets: [ObjectIdentifier: Bucket] = [:]
+
+    private func prune() {
+        buckets = buckets.filter { _, bucket in
+            guard let session = bucket.session else { return false }
+            return session.isActive
+        }
+    }
+
+    private func bucket(for session: HumanSession) -> Bucket? {
+        prune()
+        guard session.isActive else { return nil }
+        let id = ObjectIdentifier(session)
+        if let existing = buckets[id], existing.session === session, existing.viewerID == session.userID {
+            return existing
+        }
+        let created = Bucket(session: session)
+        buckets[id] = created
+        return created
+    }
+
+    func setDraft(_ draft: WaitingChoiceDraft?, workspaceID: UUID, signalID: UUID, session: HumanSession?) {
+        guard let session, let bucket = bucket(for: session) else { return }
+        let key = WaitingDraftKey(viewerID: session.userID, workspaceID: workspaceID, signalID: signalID)
+        if let draft, (!draft.selected.isEmpty || !draft.otherText.isEmpty) {
+            bucket.drafts[key] = draft
+        } else {
+            bucket.drafts[key] = nil
+        }
+    }
+
+    func draft(workspaceID: UUID, signalID: UUID, session: HumanSession?) -> WaitingChoiceDraft? {
+        guard let session, let bucket = bucket(for: session) else { return nil }
+        let key = WaitingDraftKey(viewerID: session.userID, workspaceID: workspaceID, signalID: signalID)
+        return bucket.drafts[key]
+    }
+
+    func setFailure(_ failure: WaitingCardFailure?, workspaceID: UUID, signalID: UUID, session: HumanSession?) {
+        guard let session, let bucket = bucket(for: session) else { return }
+        let key = WaitingDraftKey(viewerID: session.userID, workspaceID: workspaceID, signalID: signalID)
+        bucket.failures[key] = failure
+    }
+
+    func failure(workspaceID: UUID, signalID: UUID, session: HumanSession?) -> WaitingCardFailure? {
+        guard let session, let bucket = bucket(for: session) else { return nil }
+        let key = WaitingDraftKey(viewerID: session.userID, workspaceID: workspaceID, signalID: signalID)
+        return bucket.failures[key]
+    }
+}
+
 extension WaitingOnYouStore {
     /// Builds the submission currently staged in session drafts for a review-mode question, or nil if unanswered/skipped.
     func reviewSubmission(for item: WaitingAskItem) -> WaitingChoiceSubmission? {
@@ -42,7 +127,7 @@ extension WaitingOnYouStore {
             current.selected = [optionID]
             current.otherText = ""
         }
-        draftsBySignal[item.id] = current
+        persistDraft(current, workspaceID: item.workspaceID, signalID: item.id)
         clearFailureIfChanged(for: item.id)
     }
 
@@ -53,13 +138,13 @@ extension WaitingOnYouStore {
         if !item.multi && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             current.selected = []
         }
-        draftsBySignal[item.id] = current
+        persistDraft(current, workspaceID: item.workspaceID, signalID: item.id)
         clearFailureIfChanged(for: item.id)
     }
 
     /// Explicitly skips a question in Review mode by clearing any staged draft so it will not be sent.
     func skipReviewQuestion(_ item: WaitingAskItem) {
-        draftsBySignal[item.id] = nil
+        persistDraft(nil, workspaceID: item.workspaceID, signalID: item.id)
         clearFailureIfChanged(for: item.id)
     }
 

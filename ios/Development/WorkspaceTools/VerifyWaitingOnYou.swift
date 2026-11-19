@@ -240,7 +240,12 @@ struct VerifyWaitingOnYou {
         expect(await MainActor.run { bare404Store.scopeFailed && !bare404Store.scopeComplete }, "Bare 404 without PGRST202/42883 must not silently fall back or claim empty")
         try await postFixture(origin.appending(path: "fixture/show-waiting-todos-rpc"))
 
-        // 8. Verify survey-style Review questions batch send (sends ONLY answered, skips skipped, reuses command_id on retry)
+        // 8. Verify survey-style Review questions:
+        //    - sends ONLY answered, skips skipped
+        //    - button says "Retry 1 failed" when only the 1 failed answer is outgoing,
+        //      and switches to "Send 2 answers" once a previously skipped question is also answered
+        //    - leaving conversation to another channel and returning preserves staged choice, typed Other answer, and retry command_id
+        //    - a fresh HumanSession sees zero drafts or retry IDs
         await MainActor.run { store.scope = .all }
         let reviewCandidates = await MainActor.run { store.visibleItems }
         expect(reviewCandidates.count == 2, "Expected 2 remaining asks across all workspaces for review batch, got \(reviewCandidates.count)")
@@ -256,13 +261,47 @@ struct VerifyWaitingOnYou {
         let q1Labels = await MainActor.run { store.reviewAnswerLabels(for: q1) }
         expect(q1Labels == [q1.orderedOptions[0].label], "Expected Q1 summary label")
 
-        // Fail once during review batch -> Q1 fails with stable command_id, Q2 is skipped (never sent)
+        // Fail Q1 once during review batch -> Q1 fails with stable command_id, Q2 is skipped (never sent)
         try await postFixture(origin.appending(path: "fixture/fail-next"))
         let firstBatch = await store.submitReviewBatch(items: reviewCandidates, api: waitingAPI)
         expect(firstBatch.sentIDs.isEmpty && firstBatch.failedIDs == [q1.id] && firstBatch.skippedIDs == [q2.id], "First review batch should record Q1 failed and Q2 skipped")
-        let retryBatch = await store.submitReviewBatch(items: reviewCandidates, api: waitingAPI)
-        expect(retryBatch.allSucceeded && retryBatch.sentIDs == [q1.id] && retryBatch.skippedIDs == [q2.id], "Retry review batch should send Q1 and still skip Q2")
-        expect(await MainActor.run { store.visibleItems.map(\.id) == [q2.id] }, "Only skipped Q2 should remain unanswered")
+        let failedCommandID = await MainActor.run { store.failuresBySignal[q1.id]?.commandID }
+        expect(failedCommandID != nil, "Expected stored retry command_id for failed Q1")
+
+        // Every outgoing answer is a retry -> "Retry 1 failed"
+        expect(WaitingReviewRules.sendButtonTitle(answeredCount: 1, failedCount: 1, isSending: false) == "Retry 1 failed", "Expected Retry 1 failed when all outgoing are retries")
+
+        // User goes Back and fills in a typed Other answer on previously skipped Q2 -> button must name whole batch ("Send 2 answers")
+        await MainActor.run {
+            store.updateReviewOtherText("Hold until Friday morning", for: q2)
+        }
+        expect(WaitingReviewRules.sendButtonTitle(answeredCount: 2, failedCount: 1, isSending: false) == "Send 2 answers", "Button must name whole batch when sending retry + newly answered skipped question")
+
+        // Simulate leaving conversation for another channel (#mobile) and returning with a brand-new WaitingOnYouStore in the same signed-in session
+        let otherChannelStore = await MainActor.run { WaitingOnYouStore(place: mobilePlace, session: session) }
+        await otherChannelStore.load(api: waitingAPI)
+        let returnedStore = await MainActor.run { WaitingOnYouStore(place: generalPlace, session: session) }
+        await returnedStore.load(api: waitingAPI)
+        await MainActor.run { returnedStore.scope = .all }
+        let restoredQ1Draft = await MainActor.run { returnedStore.draft(for: q1.id) }
+        let restoredQ2Draft = await MainActor.run { returnedStore.draft(for: q2.id) }
+        let restoredQ1RetryID = await MainActor.run { returnedStore.failuresBySignal[q1.id]?.commandID }
+        expect(restoredQ1Draft.selected == [q1.orderedOptions[0].id], "Leaving and returning must preserve staged choice on Q1")
+        expect(restoredQ2Draft.otherText == "Hold until Friday morning", "Leaving and returning must preserve typed Other answer on Q2")
+        expect(restoredQ1RetryID == failedCommandID, "Leaving and returning must preserve outstanding retry command_id on Q1")
+
+        // Verify a separate HumanSession (fresh login / different account) sees zero drafts or retry IDs
+        let freshSession = await MainActor.run { HumanSession(userID: tokens.userID) { tokens.accessToken } }
+        let freshConvAPI = ConversationAPI(origin: origin, publicKey: publicKey, session: freshSession)
+        let freshStore = await MainActor.run { WaitingOnYouStore(place: generalPlace, session: freshSession) }
+        await freshStore.load(api: WaitingOnYouAPI(api: freshConvAPI))
+        expect(await MainActor.run { freshStore.draft(for: q1.id).selected.isEmpty && freshStore.draft(for: q2.id).otherText.isEmpty && freshStore.failuresBySignal[q1.id] == nil }, "Fresh signed-in session must be isolated from previous session drafts and retry IDs")
+
+        // Send the 2-answer batch from returnedStore: Q1 reuses its original command_id, Q2 sends typed Other
+        let returnedCandidates = await MainActor.run { returnedStore.visibleItems }
+        let retryBatch = await returnedStore.submitReviewBatch(items: returnedCandidates, api: waitingAPI)
+        expect(retryBatch.allSucceeded && retryBatch.sentIDs == [q1.id, q2.id] && retryBatch.skippedIDs.isEmpty, "Batch should send both retried Q1 and newly answered Q2")
+        expect(await MainActor.run { returnedStore.visibleItems.isEmpty }, "All reviewed questions should now be cleared")
 
         // 9. Inspect ask wire commands recorded by fixture
         struct RecordedCommand: Decodable {
@@ -278,12 +317,12 @@ struct VerifyWaitingOnYou {
         }
         let (cmdData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/commands"))
         let recorded = try JSONDecoder().decode([RecordedCommand].self, from: cmdData)
-        expect(recorded.count == 5, "Expected 5 ask commands (2 initial + 1 v2 + 1 failed review + 1 retried review), got \(recorded.count)")
+        expect(recorded.count == 6, "Expected 6 ask commands (2 initial + 1 v2 + 1 failed Q1 + 1 retried Q1 + 1 Q2 Other), got \(recorded.count)")
         expect(recorded[0].command_id == recorded[1].command_id, "Retry must reuse original command_id")
         expect(recorded[0].command.option_id == "ship" && recorded[0].command.option_ids == nil && recorded[0].command.other_text == nil, "Single choice must use v1 exact shape")
         expect(recorded[2].command.option_id == nil && recorded[2].command.option_ids == ["todos"] && recorded[2].command.other_text == "Also check VoiceOver focus", "Multi+Other must use v2 shape")
-        expect(recorded[3].command_id == recorded[4].command_id, "Review batch retry must reuse original command_id")
-        expect(recorded.allSatisfy { $0.command.signal_id != q2.id.uuidString.lowercased() }, "Skipped Q2 must NEVER be sent")
+        expect(recorded[3].command_id == recorded[4].command_id, "Review batch retry after leaving/returning must reuse original command_id")
+        expect(recorded[5].command.signal_id == q2.id.uuidString.lowercased() && recorded[5].command.other_text == "Hold until Friday morning", "Q2 typed Other answer must send v2 other_text")
 
         // 10. Placement rule unit checks
         expect(WaitingChoiceRules.classifyConversation(nil) == .unknown, "nil placement must be .unknown")
