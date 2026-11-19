@@ -33,7 +33,7 @@ const grant = (n: number, over: Record<string, unknown> = {}) => ({ grantId: `g$
 async function page(options: { role?: string; enabled?: boolean } = {}) {
   const calls: string[] = []; const ends: Array<{ commandId: string; grantId: string }> = []; const events: string[] = [];
   let token = 0;
-  const receipt = { textContent: "" };
+  const receipt = { textContent: "" }; const draws = { count: 0 };
   const io: { all: null | (() => Promise<unknown>); end: null | (() => Promise<any>); confirm: boolean | "hold"; held: null | (() => void) } = { all: null, end: null, confirm: true, held: null };
   const context = createContext({
     peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, URLSearchParams, uuid: () => `cmd-${++token}`, CustomEvent: class { constructor(public type: string) {} },
@@ -54,7 +54,10 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
       // "hold": the question stays open; the test presses End access later through io.held.
       return { dialog: { remove() { calls.push("question removed"); } }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
     },
-    disposeSeatAdminDialog: () => {}, renderDialogRoster: () => {}, document: {}, app: { append() {} },
+    disposeSeatAdminDialog: () => {}, document: {}, app: { append() {} },
+    // The real draw runs the role check first. So does this one, and it counts itself: a load that drew before
+    // recording the new role would re-enter here without end.
+    renderDialogRoster: () => { draws.count += 1; if (draws.count > 200) throw new Error("the draw re-entered the load without end"); runInContext("syncPeopleAdminAccessRole()", context); },
     one: (selector: string) => (selector === "[data-roster-dialog]" ? { get open() { return runInContext("dialogOpen", context); }, close() { runInContext("dialogOpen = false", context); }, querySelectorAll: () => [] }
       : selector === "[data-people-receipt]" ? receipt : null),
     all: () => [], parkPeopleHosts: () => {}, erasePeopleDialogInvite: () => {},
@@ -73,7 +76,7 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
   runInContext(await dashboardFunctions(NAMES), context);
   const run = <T>(code: string): T => runInContext(code, context) as T;
   const setRefresh = (refresh: () => Promise<void>) => { context.refreshSeatAdminState = refresh; };
-  return { run, calls, ends, events, io, receipt, setRefresh };
+  return { run, calls, ends, events, io, receipt, setRefresh, draws };
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -318,6 +321,8 @@ test("a demotion drops the owner's rows at once, through a held and then failed 
   p.run("members = [{ userId: 'u1', role: 'admin' }]; syncPeopleAdminAccessRole()");
   const during = plain(p.run<any>("currentPeopleAdminAccess()"));
   assert.deepEqual(during, { read: "pending", all: false, grants: [] }, "at that draw none of the owner's rows is left, not even as pending");
+  assert.ok(p.draws.count >= 1 && p.draws.count < 10, `the role change draws the dialog (it drew ${p.draws.count} times) and each draw's own role check starts nothing new`);
+  assert.equal(p.run("peopleAdminReadAsOwner"), false, "the new role was recorded before that draw");
   assert.ok(p.calls.includes("question removed"), "the open question is taken down");
   p.io.held!(); await settle();
   assert.equal(p.ends.length, 0, "and confirming it sends nothing");

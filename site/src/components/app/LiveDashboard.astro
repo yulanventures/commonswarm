@@ -7872,13 +7872,16 @@ import "../../styles/kylon-command-palette.css";
       // The role changed since the list on screen was read: that list belongs to the other role. It is dropped now, with
       // any Remove question opened from it, whoever asked for this read; it is not kept as pending, and it cannot come
       // back as the "last rows" of a read that fails.
-      if (before && peopleAdminReadAsOwner !== null && peopleAdminReadAsOwner !== asOwner) {
+      const roleChanged = !!before && peopleAdminReadAsOwner !== null && peopleAdminReadAsOwner !== asOwner;
+      // Recorded before anything is drawn: every draw checks the role, and a draw that still saw the old one would
+      // start this read again from inside itself.
+      peopleAdminReadAsOwner = asOwner;
+      if (roleChanged) {
         before = undefined;
         retirePeopleAdminEndQuestion();
         peopleAdminAccess = { key, access: { read: "pending", all: false, grants: [] } };
         if (peopleDialogOpen()) renderDialogRoster();
       }
-      peopleAdminReadAsOwner = asOwner;
       // A read is starting: what is on screen is no longer a current list. The rows stay to look at, as pending, and
       // nothing may act on them (no Remove, and an open question will not send) until this read succeeds.
       if (before) { peopleAdminAccess = { key, access: { ...before, read: "pending" } }; if (peopleDialogOpen()) renderDialogRoster(); }
