@@ -23,7 +23,7 @@ import {
   removeChannelMember,
   removeFromConversation,
 } from "./commonswarm.js";
-import type { ConversationMemberRef, ConversationSummary } from "./conversations.js";
+import type { ConversationKind, ConversationMemberRef, ConversationSummary } from "./conversations.js";
 import {
   createConversationPickerController,
   type ConversationCandidate,
@@ -53,11 +53,14 @@ export interface ChannelManageContext {
 
 export interface OpenMembersSnapshot {
   conversationId: string;
+  kind: ConversationKind;
+  route: ChannelMembersPermissions["route"];
   channelId: string | null;
   archivedAt: string | null;
   joined: boolean;
   canAdd: boolean;
   canRemove: boolean;
+  promotedPrivateManager: boolean;
 }
 
 export function buildConversationCandidates(roster: DialogWorkspaceRoster): ConversationCandidate[] {
@@ -130,7 +133,8 @@ export interface ConversationDialogsBridge {
     getSession: () => Session | null;
     isHostAlive: () => boolean;
     uuid: () => string;
-    onFreshConversations: (rows: ConversationSummary[]) => void;
+    beginConversationsRead: () => number;
+    commitConversationsRead: (generation: number, rows: ConversationSummary[]) => boolean;
     onOpenedSnapshot: (snapshot: OpenMembersSnapshot) => void;
     onClosed: () => void;
     onChanged: (nextMembers: ConversationMemberEntry[]) => void;
@@ -142,6 +146,7 @@ export interface ConversationDialogsBridge {
     manageContext: ChannelManageContext;
     isPromotedPrivateManager?: boolean;
   }) => ChannelMembersPermissions;
+  checkPromotedPrivateManager: (workspaceId: string, channelId: string, userId: string) => Promise<boolean>;
   closeMembers: (restoreFocus?: boolean) => void;
   closeAll: () => void;
 }
@@ -169,6 +174,7 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
 
   return {
     computePermissions,
+    checkPromotedPrivateManager: isPromotedPrivateChannelManager,
     openNewMessage(args) {
       const lifetime = createOperationLifetime(args.isHostAlive);
       if (!lifetime.isAlive()) return;
@@ -254,6 +260,8 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
       });
       const convId = conv.conversationId;
       const channelId = conv.channelId;
+      const initialKind = conv.kind;
+      const initialRoute = permissions.route;
       const candidates = buildConversationCandidates(args.roster);
       const viewerIdLower = args.pinnedUserId.toLowerCase();
       const liveMembers = conv.members.filter((m) => !m.leftAt);
@@ -270,11 +278,18 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
         ? "Members"
         : `${channelLabel(conv.slug ?? GENERAL_CHANNEL_SLUG)} members`;
 
-      // Fresh authoritative pre-dispatch gate (C2): checks live access, joined, archive, and role.
+      // Fresh authoritative pre-dispatch gate (C2): checks active route, live access, joined,
+      // archive, unchanged visibility/kind/command route, and role using the shared list generation.
       const revalidateForMutation = async (
         action: "add" | "remove",
       ): Promise<{ ok: true; freshConv: ConversationSummary; perms: ChannelMembersPermissions } | { ok: false; message: string }> => {
         if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
+        const activeNow = args.resolveActiveConversation();
+        if (!activeNow || activeNow.conversationId !== convId || activeNow.kind !== initialKind) {
+          membersCtrl?.close(false);
+          return { ok: false, message: "This channel changed. Reopen Members to continue." };
+        }
+        const readGen = args.beginConversationsRead();
         let freshRows: ConversationSummary[];
         try {
           freshRows = await listConversations(args.workspaceId, true);
@@ -282,15 +297,25 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
           return { ok: false, message: "Couldn't verify channel access. Try again." };
         }
         if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
-        args.onFreshConversations(freshRows);
+        if (!args.commitConversationsRead(readGen, freshRows)) {
+          membersCtrl?.close(false);
+          return { ok: false, message: "Channel state updated. Reopen Members to continue." };
+        }
+        const activeAfter = args.resolveActiveConversation();
+        if (!activeAfter || activeAfter.conversationId !== convId) {
+          membersCtrl?.close(false);
+          return { ok: false, message: "This channel isn't available anymore." };
+        }
         const freshConv = freshRows.find((c) => c.conversationId === convId) ?? null;
-        if (!freshConv || !freshConv.joined || freshConv.archivedAt !== null) {
+        if (!freshConv || !freshConv.joined || freshConv.archivedAt !== null || freshConv.kind !== initialKind) {
           membersCtrl?.close(false);
           return {
             ok: false,
             message: freshConv?.archivedAt
               ? "That channel is archived, so its members can't be changed."
-              : "This channel isn't available anymore.",
+              : freshConv && freshConv.kind !== initialKind
+                ? "Channel visibility changed. Reopen Members to confirm."
+                : "This channel isn't available anymore.",
           };
         }
         const freshManageCtx = args.resolveManageContext(freshConv.channelId);
@@ -318,7 +343,7 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
           manageContext: freshManageCtx,
           isPromotedPrivateManager: freshPromoted,
         });
-        const allowed = action === "add" ? freshPerms.canAdd : freshPerms.canRemove;
+        const allowed = freshPerms.route === initialRoute && (action === "add" ? freshPerms.canAdd : freshPerms.canRemove);
         if (!allowed) {
           membersCtrl?.close(false);
           return { ok: false, message: "You can no longer change members in this channel." };
@@ -329,11 +354,14 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
       membersCtrl ??= createChannelMembersDialogController(args.dialog);
       args.onOpenedSnapshot({
         conversationId: convId,
+        kind: initialKind,
+        route: initialRoute,
         channelId,
         archivedAt: conv.archivedAt,
         joined: conv.joined,
         canAdd: permissions.canAdd,
         canRemove: permissions.canRemove,
+        promotedPrivateManager: promotedManager,
       });
       membersCtrl.open({
         title: sheetTitle,

@@ -471,4 +471,12 @@ test("disambiguateMemberLabels distinguishes same-kind duplicate names with stab
   // Different kind ("agent") does not collide with "user".
   assert.equal(labels.get("agent:cccc3333-3333-4333-8333-333333333333"), "Alex");
   assert.equal(labels.get("user:dddd4444-4444-4444-8444-444444444444"), "Sam");
+
+  // Colliding 6-char prefixes extend until every same-name entry is distinct.
+  const deep = disambiguateMemberLabels([
+    { kind: "user", id: "aaaaaa11-1111-4111-8111-111111111111", name: "Jordan Lee" },
+    { kind: "user", id: "aaaaaa22-2222-4222-8222-222222222222", name: "Jordan Lee" },
+  ]);
+  assert.equal(deep.get("user:aaaaaa11-1111-4111-8111-111111111111"), "Jordan Lee · aaaaaa11");
+  assert.equal(deep.get("user:aaaaaa22-2222-4222-8222-222222222222"), "Jordan Lee · aaaaaa22");
 });

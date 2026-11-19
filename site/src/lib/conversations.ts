@@ -216,24 +216,41 @@ export function trueDmSendRefusal(state: {
 
 /**
  * Append a stable non-secret short ID suffix whenever two or more same-kind people or agents
- * share the same display name, so picker rows and remove confirmations stay distinguishable.
+ * share the same display name, extending the prefix length if 6-character prefixes collide so
+ * picker rows and remove confirmations stay strictly distinguishable.
  */
 export function disambiguateMemberLabels<T extends { kind: "user" | "agent"; id: string; name: string }>(
   entries: readonly T[],
 ): Map<string, string> {
-  const counts = new Map<string, number>();
+  const buckets = new Map<string, T[]>();
   for (const entry of entries) {
     const bucket = `${entry.kind}:${entry.name.trim().toLowerCase()}`;
-    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    const list = buckets.get(bucket);
+    if (list) list.push(entry);
+    else buckets.set(bucket, [entry]);
   }
   const labels = new Map<string, string>();
-  for (const entry of entries) {
-    const key = `${entry.kind}:${entry.id.toLowerCase()}`;
-    const cleanName = entry.name.trim();
-    const bucket = `${entry.kind}:${cleanName.toLowerCase()}`;
-    const duplicate = (counts.get(bucket) ?? 0) > 1;
-    const shortId = entry.id.toLowerCase().slice(0, 6);
-    labels.set(key, duplicate && shortId ? `${cleanName} · ${shortId}` : cleanName);
+  for (const group of buckets.values()) {
+    const distinctIds = [...new Set(group.map((e) => e.id.toLowerCase()))];
+    if (distinctIds.length <= 1) {
+      for (const entry of group) {
+        labels.set(`${entry.kind}:${entry.id.toLowerCase()}`, entry.name.trim());
+      }
+      continue;
+    }
+    const maxLen = Math.max(...distinctIds.map((id) => id.length));
+    let prefixLen = 6;
+    while (prefixLen < maxLen) {
+      const prefixes = new Set(distinctIds.map((id) => id.slice(0, prefixLen)));
+      if (prefixes.size === distinctIds.length) break;
+      prefixLen = Math.min(maxLen, prefixLen + 2);
+    }
+    for (const entry of group) {
+      const cleanName = entry.name.trim();
+      const id = entry.id.toLowerCase();
+      const shortId = id.slice(0, prefixLen);
+      labels.set(`${entry.kind}:${id}`, shortId ? `${cleanName} · ${shortId}` : cleanName);
+    }
   }
   return labels;
 }

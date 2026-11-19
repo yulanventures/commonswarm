@@ -24,7 +24,9 @@ function installConversations3CFixture() {
   f.holdFirstInvite401 = false;
   f.invite401Count = 0;
   f.releaseInvite401 = null as null | (() => void);
-  f.holdNextWorkspaceSwitch = false;
+  f.holdNextConvPoll = false;
+  f.releaseConvPoll = null as null | (() => void);
+  f.convReadCount = 0;
 
   const opsChannel = "66666666-6666-4666-8666-666666666666";
   const secretChannel = "77777777-7777-4777-8777-777777777777";
@@ -184,6 +186,13 @@ function installConversations3CFixture() {
       const body = await request.clone().json().catch(() => null);
       if (body?.resource === "conversations") {
         if (body.workspace_id === secondWorkspace) return Response.json({ conversations: [] });
+        f.convReadCount += 1;
+        if (f.holdNextConvPoll) {
+          f.holdNextConvPoll = false;
+          const staleSnapshot = JSON.parse(JSON.stringify(f.conversations));
+          await new Promise<void>((resolve) => { f.releaseConvPoll = resolve; });
+          return Response.json({ conversations: staleSnapshot });
+        }
         return Response.json({ conversations: f.conversations });
       }
     }
@@ -298,7 +307,7 @@ function installConversations3CFixture() {
           return Response.json({ status: "accepted", channel: { channel_id: command.channel_id } });
         }
       }
-      if (command?.kind === "signals_seen") return Response.json({ status: "accepted" });
+      if (command?.kind === "signals_seen" || command?.kind === "channel_preference_set") return Response.json({ status: "accepted" });
     }
     return previous(input, init);
   };
@@ -442,14 +451,26 @@ async function observeConversations3C() {
       return;
     }
 
-    // C2 security witness: archive pre-dispatch fence, same-workspace channel switch invalidation, private access loss, promoted private manager.
+    // C2 security witness: promoted manager unchanged refresh, held older poll vs newer omission,
+    // public-to-private conversion with same owner, archive fence, and browser Back retirement.
     if (f.capture === "c2-revalidation") {
-      // 1. Promoted private-channel manager (role=member, is_manager=true in swarm_read.channel_members) sees Add & Remove on #secrets.
+      // 1. Promoted private-channel manager (role=member, Step 2b row omits is_manager; swarm_read.channel_members has is_manager=true).
       await openMembersSheet();
       check(visible(one("[data-conversation-members-add-toggle]")), "C2: promoted private-channel manager must see Add toggle");
       check(!!one(`[data-conversation-member-remove="user:${f.ids.peerAlex}"]`), "C2: promoted private-channel manager must see Remove button");
 
-      // 2. Private access loss: server omits #secrets on fresh pre-dispatch read -> closes stale sheet without sending channel_member_add!
+      // 1b. Unchanged refresh control: trigger forced channel unread/conversations refresh -> promoted manager's sheet MUST stay open!
+      const readsBefore = f.convReadCount;
+      one<HTMLButtonElement>("[data-channel-star]")?.click();
+      await wait("unchanged conversations refresh landed", () => f.convReadCount > readsBefore);
+      await new Promise(r => setTimeout(r, 80));
+      check(one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === true, "C2: unchanged refresh must keep promoted manager sheet open");
+
+      // 2. Held older allowed poll across newer access-loss omission:
+      // Start an older background refresh that captures #secrets while still allowed, then omit #secrets before preflight.
+      f.holdNextConvPoll = true;
+      one<HTMLButtonElement>("[data-channel-star]")?.click();
+      await wait("older poll held", () => typeof f.releaseConvPoll === "function");
       f.conversations = f.conversations.filter((c: any) => c.conversation_id !== f.ids.secretConv);
       await click("[data-conversation-members-add-toggle]:visible");
       await wait("secrets add panel", () => visible(one("[data-conversation-members-add-panel]")));
@@ -457,8 +478,14 @@ async function observeConversations3C() {
       await click("[data-conversation-members-add-submit]:visible");
       await wait("stale secrets sheet closed", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
       check(f.convCommands.length === 0, "C2: private access loss must dispatch 0 commands, got " + JSON.stringify(f.convCommands));
+      check(!one(`[data-rail-channel="${f.ids.secretChannel}"]`), "C2: #secrets must be removed from rail after omission");
+      // Release the older allowed poll -> shared conversationsGeneration MUST drop it so #secrets stays retired!
+      f.releaseConvPoll!();
+      await new Promise(r => setTimeout(r, 120));
+      check(!one(`[data-rail-channel="${f.ids.secretChannel}"]`), "C2: older held poll must NOT restore revoked #secrets to rail");
 
-      // 3. Archive fence on #ops: open Members sheet while live -> server archives #ops -> Add refuses before dispatch & closes sheet.
+      // 3. Held public-to-private conversion with the SAME owner (identical canAdd/canRemove booleans, changed kind/route):
+      f.viewerRole = "owner";
       await click(`[data-rail-channel="${f.ids.opsChannel}"]:visible`);
       await wait("#ops open", () => location.search.includes(`c=${f.ids.opsChannel}`));
       await openMembersSheet();
@@ -466,16 +493,28 @@ async function observeConversations3C() {
       await wait("ops add panel", () => visible(one("[data-conversation-members-add-panel]")));
       await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
       const opsRow = f.conversations.find((c: any) => c.conversation_id === f.ids.opsConv);
+      opsRow.kind = "private_channel";
+      await click("[data-conversation-members-add-submit]:visible");
+      await wait("converted ops sheet closed", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+      check(f.convCommands.length === 0, "C2: public-to-private conversion must dispatch 0 commands, got " + JSON.stringify(f.convCommands));
+
+      // 4. Archive fence on #ops:
+      opsRow.kind = "public_channel";
+      await openMembersSheet();
+      await click("[data-conversation-members-add-toggle]:visible");
+      await wait("ops add panel 2", () => visible(one("[data-conversation-members-add-panel]")));
+      await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
       opsRow.archived_at = "2026-11-19T18:00:00Z";
       await click("[data-conversation-members-add-submit]:visible");
       await wait("archived ops sheet closed", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
       check(f.convCommands.length === 0, "C2: archived channel must dispatch 0 commands, got " + JSON.stringify(f.convCommands));
 
-      // 4. Same-workspace channel switch closes open Members sheet immediately.
+      // 5. Browser Back (popstate) to a different view in the same workspace retires open Members sheet immediately:
       opsRow.archived_at = null;
       await openMembersSheet();
-      one<HTMLAnchorElement>('[data-rail-channel="general"]')?.click();
-      await wait("sheet closed on channel switch", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+      window.history.back();
+      await wait("sheet closed on browser Back", () => one<HTMLDialogElement>("[data-conversation-members-dialog]")?.open === false);
+      check(f.convCommands.length === 0, "C2: browser Back must dispatch 0 commands");
 
       document.documentElement.dataset.step3cObservation = JSON.stringify({ ok: true, capture: f.capture, commands: f.convCommands.length });
       return;
