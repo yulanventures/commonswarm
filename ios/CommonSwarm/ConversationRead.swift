@@ -92,3 +92,23 @@ extension ConversationAPI {
         return result.messages
     }
 }
+
+extension ConversationAPI {
+    func conversationCommand<C: Encodable, R: Decodable>(_ command: C, workspace: UUID, id: UUID) async throws -> R {
+        var req = request("functions/v1/command")
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(WorkspaceCommand(command_id: id, workspace_id: workspace, command: command))
+        return try await send(req)
+    }
+
+    func join(workspace: UUID, conversation: UUID, commandID: UUID) async throws {
+        struct Join: Encodable {
+            let kind = "conversation_join"
+            let conversation_id: UUID
+        }
+        struct Receipt: Decodable { let status: String; let conversation_id: UUID }
+        let receipt: Receipt = try await conversationCommand(Join(conversation_id: conversation), workspace: workspace, id: commandID)
+        guard receipt.status == "accepted", receipt.conversation_id == conversation else { throw APIError.invalidResponse }
+    }
+}

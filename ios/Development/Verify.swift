@@ -110,6 +110,11 @@ enum Verify {
             _ = try await api.conversationList(probe)
             throw Failure.mismatch("known-supported workspace downgraded on refresh")
         } catch APIError.invalidResponse {}
+        guard let preview = modern.first(where: { !$0.joined && $0.kind == .publicChannel }) else { throw Failure.mismatch("preview") }
+        _ = try await api.history(ws.id, preview.item(viewer: session.userID).destination)
+        try await api.join(workspace: ws.id, conversation: preview.id, commandID: UUID())
+        let updated = try await api.conversationList(ws.id)
+        try expect(updated?.first(where: { $0.id == preview.id })?.joined == true, "Join changes membership for the previewed channel")
         let canonical = thread.item(viewer: session.userID)
         let canonicalPost = Post(id: UUID(), workspace: ws.id, destination: canonical.destination, body: "Canonical DM")
         let canonicalID = try await api.post(canonicalPost)

@@ -201,6 +201,12 @@ const server = createServer(async (req, res) => {
         return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
       }
       const cmd = body.command;
+      if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
+        const target = threadRows.find(r => r.conversation_id === cmd.conversation_id.toLowerCase() && r.kind === "public_channel");
+        if (!target) return reply(404, {});
+        target.joined = true;
+        return reply(200, { status: "accepted", conversation_id: target.conversation_id });
+      }
       if (body.workspace_id?.toLowerCase() === workspace && ["file_version_create", "file_version_commit"].includes(cmd?.kind)) {
         if (fileReceipts.has(body.command_id)) return reply(200, fileReceipts.get(body.command_id));
         if (cmd.kind === "file_version_create") {
