@@ -12237,6 +12237,10 @@ import "../../styles/kylon-image-viewer.css";
         const removedAgentsRead = removedAgentNames(selected.id);
         const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
         const claimsRead = homeWorkingOn(selected.id);
+        /* Run the initial conversations/membership read in parallel with the channel list so
+           the composer vs. preview/retry bar is settled before the first feed paint (no 72px
+           layout shift when opening a named channel). refreshConversations never throws. */
+        const conversationsRead = refreshConversations(selected.id, true);
         const [
           [rosterSettled, memberRosterSettled, invitesSettled, accessStatusesSettled],
           nextPending,
@@ -12264,6 +12268,7 @@ import "../../styles/kylon-image-viewer.css";
             (value) => ({ value, failed: false }),
             () => ({ value: [] as WorkspaceChannel[], failed: true }),
           ),
+          conversationsRead,
         ]);
         const nextRemovedAgents = await removedAgentsRead;
         const nextRemovedOwners = await removedOwnersRead;
@@ -12297,7 +12302,7 @@ import "../../styles/kylon-image-viewer.css";
           channelsLoaded = true;
           channelListReadAt = Date.now();
         }
-        void refreshChannelUnread(selected.id, true);
+        void refreshChannelUnread(selected.id, true, false);
         /* The URL is read ONCE per workspace open, after the channels are known: a ?c= that
            names no channel here must show an honest empty state, and the only way to tell
            that from a channel that is merely empty is to have the list. Then it is WRITTEN,
@@ -14733,9 +14738,9 @@ import "../../styles/kylon-image-viewer.css";
      * is unknown for every row: no dot, and nothing claims "read".
      */
     let channelUnreadReadAt = 0;
-    const refreshChannelUnread = async (workspaceId: string, force: boolean): Promise<void> => {
+    const refreshChannelUnread = async (workspaceId: string, force: boolean, includeConversations = true): Promise<void> => {
       if (sampleMode || !session || !workspaceId) return;
-      void refreshConversations(workspaceId, force);
+      if (includeConversations) void refreshConversations(workspaceId, force);
       const now = Date.now();
       if (!force && now - channelUnreadReadAt < 15_000) return;
       channelUnreadReadAt = now;
