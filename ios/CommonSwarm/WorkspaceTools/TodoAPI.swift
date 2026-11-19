@@ -26,4 +26,13 @@ struct TodoAPI {
         request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
         return try await send(request)
     }
+
+    func members(workspace: UUID) async throws -> [UUID: String] {
+        struct Member: Decodable { let user_id: UUID; let display_name: String }
+        let query = ["select": "user_id,display_name", "workspace_id": "eq." + workspace.uuidString]
+        var request = request("rest/v1/member_profiles", query)
+        request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        let members: [Member] = try await send(request)
+        return Dictionary(uniqueKeysWithValues: members.map { ($0.user_id, $0.display_name) })
+    }
 }
