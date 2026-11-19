@@ -3408,6 +3408,75 @@
     }
   },
   {
+    "id": "app.people.admins.member",
+    "kind": "view",
+    "path": "/app?w={adminsWorkspace}&v=people",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access=\"own\"] [data-end-admin=\"{adminsGrant}\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-admin-access=\"own\"] [data-end-admin=\"{adminsGrant}\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_admin_grants",
+      "seed_delegated_invitation"
+    ],
+    "frame": [
+      "[data-people-context] #pd-admin-access-title",
+      "[data-people-context] [data-admin-access=\"own\"] [data-end-admin=\"{adminsGrant}\"]"
+    ],
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
+    "id": "app.people.admins-error",
+    "kind": "view",
+    "path": "/app?w={adminsWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access-state=\"error\"] [data-tab-retry=\"admin-access\"]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-admin-access-state=\"error\"] [data-tab-retry=\"admin-access\"]",
+    "states": [
+      "error"
+    ],
+    "requiresSeed": [
+      "seed_admin_grants"
+    ],
+    "frame": [
+      "[data-people-context] #pd-admin-access-title",
+      "[data-people-context] [data-admin-access-state=\"error\"] [data-tab-retry=\"admin-access\"]"
+    ],
+    "fault": {
+      "request": "**/rest/v1/rpc/workspace_seat_admin_grants*",
+      "recover": {
+        "click": "[data-people-context] [data-tab-retry=\"admin-access\"]",
+        "expect": "[data-people-context] [data-admin-access=\"all\"] [data-end-admin=\"{adminsGrant}\"]"
+      }
+    },
+    "never": {
+      "request": "/functions/v1/command",
+      "body": "end_seat_admin"
+    }
+  },
+  {
     "id": "app.people.agents-error",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
