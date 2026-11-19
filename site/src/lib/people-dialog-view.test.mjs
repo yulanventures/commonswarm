@@ -70,7 +70,7 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   assert.deepEqual(removed.stays, ["Its history stays as “Muse (removed)”.", "Its owner can connect a new agent with the same name."]);
   assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
-  assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei" }).stays[0], "History stays. Their other spaces are unaffected.");
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei", workspaceName: "Herb garden" }).stays[0], "Workspace history stays. They keep their other memberships.");
   assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
   assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this key?");
 });
@@ -225,4 +225,20 @@ test("turn-off-key confirmation puts both consequences together first and follow
   assert.deepEqual(copy.stays, [
     "Its identity and history stay here. Its owner can get a new key to bring it back.",
   ]);
+});
+
+test("remove-person confirmation names the workspace, groups both consequences, and follows with one quiet note", () => {
+  const longName = "Rivera household & studio — shared with everyone, including the agents";
+  const copy = peopleConfirmationCopy("remove-person", { name: "Sam Rivera", workspaceName: longName });
+  assert.equal(copy.title, `Remove Sam Rivera from ${longName}?`);
+  assert.equal(copy.button, "Remove Sam Rivera");
+  assert.deepEqual(copy.stops, [
+    "Sam Rivera will lose membership of this workspace.",
+    "This removal cannot be undone; they would need a new invitation to join again.",
+  ]);
+  assert.deepEqual(copy.stays, [
+    "Workspace history stays. They keep their other memberships.",
+  ]);
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Sam Rivera" }).title, "Remove Sam Rivera?");
+  assert.equal(peopleConfirmationCopy("remove-person", { name: "Sam Rivera", workspaceName: "   " }).title, "Remove Sam Rivera?");
 });

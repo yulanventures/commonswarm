@@ -170,9 +170,10 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
       stops: [`${name} will no longer be able to use Lists & docs here.`],
       stays: ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."] };
   }
-  return { title: `Remove ${name}?`, button: `Remove ${name}`,
-    stops: [`${name} will lose membership of this space.`, "This removal cannot be undone; they would need a new invitation to join again."],
-    stays: ["History stays. Their other spaces are unaffected."] };
+  const workspace = item.workspaceName?.trim();
+  return { title: workspace ? `Remove ${name} from ${workspace}?` : `Remove ${name}?`, button: `Remove ${name}`,
+    stops: [`${name} will lose membership of this workspace.`, "This removal cannot be undone; they would need a new invitation to join again."],
+    stays: ["Workspace history stays. They keep their other memberships."] };
 }
 
 const ROLE_LABELS: Record<PeopleDialogRole, string> = { owner: "Owner", admin: "Admin", member: "Member" };
@@ -896,7 +897,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   dialog.replaceChildren(); dialog.setAttribute("role", "alertdialog"); dialog.setAttribute("aria-labelledby", "pd-confirm-title"); dialog.setAttribute("aria-describedby", "pd-confirm-description");
   const symbol = node(doc, "span", "pd-confirm-icon", action === "withdraw" ? "▤" : "⚠"); symbol.setAttribute("aria-hidden", "true");
   const title = node(doc, "h2", "", copy.title); title.id = "pd-confirm-title";
-  if (action === "turn-off-key") {
+  if (action === "turn-off-key" || action === "remove-person") {
     const description = node(doc, "div", "pd-confirm-body"); description.id = "pd-confirm-description";
     const facts = node(doc, "ul", "pd-confirm-facts");
     for (const text of copy.stops) {

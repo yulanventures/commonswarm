@@ -8127,7 +8127,11 @@ import "../../styles/kylon-image-viewer.css";
         if (one<HTMLElement>("[data-mention-picker]")?.hidden === false) renderMentionPicker();
         if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; } }
       if (action === "remove-person") {
-        await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`;
+        const member = members.find((entry) => entry.userId === id);
+        if (!member) throw new Error("This person is no longer in this workspace. Go back and check the list.");
+        await removeWorkspaceMember(session, questionId ?? uuid(), workspaceId, member.userId);
+        const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
+        receipt = `${member.name} removed from ${workspaceName || "this workspace"}. They keep their other memberships.`;
       }
       if (action === "cancel-invite") {
         // The row decides the command: its own id, in the workspace it was read from. The server decides the rest.
