@@ -50,7 +50,11 @@ struct DirectoryView: View {
         let mentions = row.notify_level == "muted" ? 0 : row.mention_count ?? 0
         return NavigationLink(value: ThreadRoute(id: row.id)) {
             HStack {
-                Label(item.name, systemImage: item.symbol)
+                if row.kind == .general || row.kind == .publicChannel {
+                    Text(item.name)
+                } else {
+                    Label(item.name, systemImage: item.symbol)
+                }
                 Spacer()
                 if mentions > 0 {
                     Text(mentions > 99 ? "99+" : String(mentions))
