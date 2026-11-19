@@ -126,6 +126,11 @@ export interface SignalQuery {
    */
   after?: SignalCursor;
   /**
+   * Independent strict keyset lower bound for the open_system_alerts
+   * reconciliation feed (inbox reads only).
+   */
+  alertAfter?: SignalCursor;
+  /**
    * Oldest-first order. Follow catch-up uses this so a backlog larger than
    * --limit is drained page by page instead of truncated to the newest page.
    * One-shot inbox/feed keep the default (newest first).
@@ -164,6 +169,8 @@ export interface AgentSignalPage {
   wake?: WakeHint;
   /** Open system alerts routed to this lead seat, cursor-independent for late-commit reconciliation. */
   openSystemAlerts?: SignalRecord[];
+  /** True when more open_system_alerts pages follow after the last row in openSystemAlerts. */
+  openSystemAlertsHasMore?: boolean;
 }
 
 /** Bounded CLI wait window for inbox --wait / ask --wait (seconds). */
@@ -1372,6 +1379,12 @@ async function agentSignalPage(
               after_id: query.after?.id ?? null,
             }
             : {}),
+          ...(includeOptional && query.alertAfter !== undefined
+            ? {
+              alert_after_created_at: query.alertAfter.created_at,
+              alert_after_id: query.alertAfter.id,
+            }
+            : {}),
           limit: query.limit,
           include_stale: query.includeStale ?? false,
           /* Each row's mentions, as stored. Without it the edge names this agent in to_agent on an
@@ -1454,6 +1467,8 @@ async function agentSignalPage(
   const openSystemAlerts = Array.isArray(rawOpenAlerts)
     ? parseSignalRows(rawOpenAlerts, parseOptions).signals
     : undefined;
+  const openSystemAlertsHasMore =
+    (body as Record<string, unknown>).open_system_alerts_has_more === true;
   return {
     signals: sortSignals(
       rowsAfterCursor(parsedRows.signals, query.after),
@@ -1469,6 +1484,7 @@ async function agentSignalPage(
     pendingDeliveryCount,
     ...(wake === undefined ? {} : { wake }),
     ...(openSystemAlerts === undefined ? {} : { openSystemAlerts }),
+    ...(openSystemAlertsHasMore ? { openSystemAlertsHasMore: true } : {}),
   };
 }
 
@@ -1999,6 +2015,7 @@ function normalizedSignalQuery(query: SignalQuery): SignalQuery {
     throw new Error("in_reply_to must be a signal UUID");
   }
   const after = checkedAfter(query.after);
+  const alertAfter = checkedAfter(query.alertAfter);
   return {
     ...query,
     workspaceId: query.workspaceId.toLowerCase(),
@@ -2008,6 +2025,7 @@ function normalizedSignalQuery(query: SignalQuery): SignalQuery {
     limit: checkedLimit(query.limit),
     since: checkedSince(query.since),
     ...(after === undefined ? {} : { after }),
+    ...(alertAfter === undefined ? {} : { alertAfter }),
     ascending: query.ascending === true || after !== undefined,
     includeStale: query.includeStale ?? false,
   };

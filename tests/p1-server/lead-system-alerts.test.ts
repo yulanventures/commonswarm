@@ -518,32 +518,106 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
     "rerouted alert must appear after backup lead's cursor advanced during lock wait",
   );
 
-  // MVCC commit-order skew witness: even when the listener's signal cursor is 60s PAST routed_at,
-  // a single served read?resource=signals returns open_system_alerts and runArrivalWatch emits it once!
+  // Full-page pagination + behind-cursor reconciliation witness:
+  // Keep one full page (limit = 2) of older open routes routed to wsLead (general + openCh),
+  // deliver a newer route ahead of cursor on the ordinary cursor path (proving SQL applies the
+  // signal cursor BEFORE LIMIT), and deliver a late-committing behind-cursor route on page 2 via
+  // independent alertAfter reconciliation, with zero duplicate notices across 3 full poll cycles!
+  const existingOpenForWsLead = await sql<{ alert_id: string; routed_at: Date }[]>`
+    SELECT alert_id, COALESCE(routed_at, opened_at) AS routed_at
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid
+      AND resolved_at IS NULL
+      AND routed_lead_principal_id = ${wsLead.principal}::uuid
+    ORDER BY date_trunc('milliseconds', COALESCE(routed_at, opened_at)) ASC, alert_id ASC
+  `;
+  assert.equal(existingOpenForWsLead.length, 2, "expected exactly 2 older open alerts (general + openCh) routed to wsLead");
+  const older1Id = existingOpenForWsLead[0]!.alert_id;
+  const older2Id = existingOpenForWsLead[1]!.alert_id;
+  const tBaseMs = existingOpenForWsLead[1]!.routed_at.getTime();
+
+  const lateSeat = await agentOf(owner.id, "quiet-late-reconcile");
+  const newerSeat = await agentOf(owner.id, "quiet-newer-cursor");
+  const [{ id: lateBehindId }] = await sql<{ id: string }[]>`
+    SELECT swarm.record_system_alert(
+      ${workspace}::uuid, 'agent_quiet', ${lateSeat.principal}::uuid, NULL::uuid,
+      1, statement_timestamp() - interval '15 minutes', interval '30 minutes'
+    ) AS id
+  `;
+  const [{ id: newerAheadId }] = await sql<{ id: string }[]>`
+    SELECT swarm.record_system_alert(
+      ${workspace}::uuid, 'agent_quiet', ${newerSeat.principal}::uuid, NULL::uuid,
+      1, statement_timestamp() - interval '15 minutes', interval '30 minutes'
+    ) AS id
+  `;
+  const lateBehindTs = new Date(tBaseMs + 5_000).toISOString();
+  const signalCursorTs = new Date(tBaseMs + 10_000).toISOString();
+  const newerAheadTs = new Date(tBaseMs + 20_000).toISOString();
+  await sql`
+    UPDATE swarm.system_alerts
+    SET opened_at = ${lateBehindTs}::timestamptz, routed_at = ${lateBehindTs}::timestamptz
+    WHERE alert_id = ${lateBehindId}::uuid
+  `;
+  await sql`
+    UPDATE swarm.system_alerts
+    SET opened_at = ${newerAheadTs}::timestamptz, routed_at = ${newerAheadTs}::timestamptz
+    WHERE alert_id = ${newerAheadId}::uuid
+  `;
+
+  // Direct served check at limit = 2: ordinary cursor path MUST return newerAhead even though
+  // 2 older open alerts fill page 1, AND open_system_alerts MUST advertise hasMore = true!
+  const watchTarget = { profileId: "reroute-watch-test", url: local.API_URL, anonKey: local.ANON_KEY };
+  const initialCursor = { created_at: signalCursorTs, id: "00000000-0000-4000-8000-000000000000" };
+  const probePage = await readAgentSignalPage(
+    watchTarget,
+    { kind: "agent", token: wsLead.token },
+    { workspaceId: workspace, inbox: true, ascending: true, after: initialCursor, limit: 2, includeStale: false },
+  );
+  assert.ok(
+    probePage.signals.some((s) => s.id === newerAheadId),
+    "ordinary cursor path must apply cursor in SQL before LIMIT so newer route beyond full page of older open routes is delivered",
+  );
+  assert.ok(
+    !probePage.signals.some((s) => s.id === older1Id || s.id === older2Id || s.id === lateBehindId),
+    "ordinary cursor path must exclude older and behind-cursor routes",
+  );
+  assert.deepEqual(
+    (probePage.openSystemAlerts ?? []).map((s) => s.id),
+    [older1Id, older2Id],
+    "page 1 of open_system_alerts holds the full page of 2 older open routes",
+  );
+  assert.equal(probePage.openSystemAlertsHasMore, true, "open_system_alerts must signal additional bounded pages");
+
+  // Full runArrivalWatch proof with pageLimit = 2 across 3 idle poll cycles while all 4 stay open.
   const watchCtrl = new AbortController();
   const watchEmitted: SignalRecord[] = [];
-  let watchCycles = 0;
-  let futureCursor: { created_at: string; id: string } | null = {
-    created_at: new Date(afterReroute!.routed_at.getTime() + 60_000).toISOString(),
-    id: randomUUID(),
-  };
-  const watchTarget = { profileId: "reroute-watch-test", url: local.API_URL, anonKey: local.ANON_KEY };
+  const observedReads: Array<{
+    alertAfterId: string | null;
+    signalIds: string[];
+    openAlertIds: string[];
+    hasMore: boolean;
+  }> = [];
+  let idleCycles = 0;
+  let savedCursor: { created_at: string; id: string } | null = initialCursor;
   await runArrivalWatch({
     workspaceId: workspace,
     principalId: wsLead.principal,
     signal: watchCtrl.signal,
     pollMs: 1,
-    sleep: async () => {
-      watchCycles += 1;
-      if (watchCycles >= 2) watchCtrl.abort();
+    pageLimit: 2,
+    sleep: async (ms) => {
+      if (ms > 0) {
+        idleCycles += 1;
+        if (idleCycles >= 3) watchCtrl.abort();
+      }
     },
     store: {
       location: "memory://reroute-watch-test",
-      read: async () => futureCursor,
-      write: async (next) => { futureCursor = next; },
+      read: async () => savedCursor,
+      write: async (next) => { savedCursor = next; },
     },
-    readPage: async ({ after, baseline, limit }) =>
-      await readAgentSignalPage(
+    readPage: async ({ after, alertAfter, baseline, limit }) => {
+      const page = await readAgentSignalPage(
         watchTarget,
         { kind: "agent", token: wsLead.token },
         {
@@ -551,14 +625,44 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
           inbox: true,
           limit,
           includeStale: false,
-          ...(baseline ? {} : { ascending: true as const, ...(after === null ? {} : { after }) }),
+          ...(baseline
+            ? {}
+            : {
+              ascending: true as const,
+              ...(after === null ? {} : { after }),
+              ...(alertAfter === null ? {} : { alertAfter }),
+            }),
         },
         { signal: watchCtrl.signal },
-      ),
+      );
+      observedReads.push({
+        alertAfterId: alertAfter?.id ?? null,
+        signalIds: page.signals.map((s) => s.id),
+        openAlertIds: (page.openSystemAlerts ?? []).map((s) => s.id),
+        hasMore: page.openSystemAlertsHasMore === true,
+      });
+      return page;
+    },
     emit: async (row) => { watchEmitted.push(row); },
   });
-  const matchingEmits = watchEmitted.filter((r) => r.id === beforeReroute!.alert_id);
-  assert.equal(matchingEmits.length, 1, "open_system_alerts reconciliation must deliver the routed alert once even when cursor is past routed_at");
+
+  assert.ok(
+    observedReads.some((r) => r.signalIds.includes(newerAheadId)),
+    "newer route must be delivered via ordinary cursor signals path",
+  );
+  assert.ok(
+    !observedReads.some((r) => r.signalIds.includes(lateBehindId)),
+    "behind-cursor route must never appear on ordinary cursor signals path",
+  );
+  assert.ok(
+    observedReads.some((r) => r.alertAfterId === older2Id && r.openAlertIds.includes(lateBehindId)),
+    "behind-cursor route beyond full page of older routes must be delivered via page 2 independent alertAfter reconciliation",
+  );
+  for (const expectedId of [older1Id, older2Id, lateBehindId, newerAheadId]) {
+    const count = watchEmitted.filter((r) => r.id === expectedId).length;
+    assert.equal(count, 1, `alert ${expectedId} must emit exactly once across 3 full poll cycles (got ${count})`);
+  }
+  assert.equal(savedCursor?.id, newerAheadId, "signal cursor must advance to newerAhead and never rewind on reconciliation");
 });
 
 test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404, identical audit_log visibility, and zero lock wait under contention for non-member admin", { timeout: 90_000 }, async () => {

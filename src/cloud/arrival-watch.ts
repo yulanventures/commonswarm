@@ -197,6 +197,8 @@ export interface ArrivalCursorStore {
 export interface ArrivalWatchPageRequest {
   /** Null only after an empty first-run baseline. */
   after: SignalCursor | null;
+  /** Independent bounded progression cursor for open_system_alerts reconciliation. */
+  alertAfter: SignalCursor | null;
   /** First run reads the newest row only and emits none of the existing backlog. */
   baseline: boolean;
   limit: number;
@@ -926,8 +928,11 @@ export async function runArrivalWatch(options: {
   reconcileMs?: number;
   stdoutConsumer?: StdoutConsumerAdapter;
   stdoutCheckIntervalMs?: number;
+  /** Optional bounded page limit override (defaults to SIGNAL_FOLLOW_PAGE_LIMIT). */
+  pageLimit?: number;
 }): Promise<ArrivalWatchStop> {
   const pollMs = options.pollMs ?? ARRIVAL_WATCH_POLL_MS;
+  const pageLimit = options.pageLimit ?? SIGNAL_FOLLOW_PAGE_LIMIT;
   const random = options.random ?? Math.random;
   const now = options.now ?? Date.now;
   const reconcileMs = options.reconcileMs ?? LISTENER_RECONCILE_POLL_MS;
@@ -946,7 +951,12 @@ export async function runArrivalWatch(options: {
   let ready = false;
   // Tracks (alert_id -> routed_at/created_at) already emitted so open-route reconciliation delivers
   // alerts whose route committed behind the signal cursor without duplicating emitted routes.
+  // Reconciles across independent bounded pages (alertAfter) and prunes only after a complete sweep.
   const seenAlertRoutes = new Map<string, string>();
+  const sweepSeenAlertIds = new Set<string>();
+  let alertAfter: SignalCursor | null = null;
+  let alertSweepPages = 0;
+  const MAX_ALERT_SWEEP_PAGES = 50;
   const cancelled = () => options.signal?.aborted === true;
 
   const inspectStdout = async (): Promise<void> => {
@@ -1077,8 +1087,9 @@ export async function runArrivalWatch(options: {
     try {
       const page = await options.readPage({
         after: cursor ?? null,
+        alertAfter: baseline ? null : alertAfter,
         baseline,
-        limit: baseline ? 1 : SIGNAL_FOLLOW_PAGE_LIMIT,
+        limit: baseline ? 1 : pageLimit,
       });
       assertCursorPage(page);
       applyWakeHint(page);
@@ -1088,6 +1099,9 @@ export async function runArrivalWatch(options: {
           signalReachesAgent(row, options.principalId) ||
           (row.to === null && row.to_agent === null)
         )
+      ) || (page.openSystemAlerts ?? []).some((row) =>
+        row.workspace_id !== options.workspaceId ||
+        !signalReachesAgent(row, options.principalId)
       )) {
         throw new Error(
           "arrival read returned a message directed to another workspace or agent",
@@ -1118,32 +1132,54 @@ export async function runArrivalWatch(options: {
       }
 
       const emittedSignals: SignalRecord[] = [];
+      if (alertAfter === null) {
+        sweepSeenAlertIds.clear();
+        alertSweepPages = 0;
+      }
       for (const row of page.signals) {
         if (cancelled()) break;
         if (row.system_alert) {
           seenAlertRoutes.set(row.system_alert.alert_id, row.created_at);
+          sweepSeenAlertIds.add(row.system_alert.alert_id);
         }
         await options.emit(row);
         emittedSignals.push(row);
         cursor = cursorOf(row);
         await options.store.write(cursor);
       }
-      if (!cancelled() && page.openSystemAlerts !== undefined) {
-        const stillOpen = new Set<string>();
-        for (const alertRow of page.openSystemAlerts) {
+      if (!cancelled()) {
+        const openAlerts = page.openSystemAlerts ?? [];
+        for (const alertRow of openAlerts) {
           if (cancelled()) break;
           const alertId = alertRow.system_alert?.alert_id ?? alertRow.id;
-          stillOpen.add(alertId);
+          sweepSeenAlertIds.add(alertId);
           if (seenAlertRoutes.get(alertId) === alertRow.created_at) continue;
           seenAlertRoutes.set(alertId, alertRow.created_at);
           await options.emit(alertRow);
           emittedSignals.push(alertRow);
         }
-        for (const tracked of seenAlertRoutes.keys()) {
-          if (!stillOpen.has(tracked)) seenAlertRoutes.delete(tracked);
+        const lastOpenAlert = openAlerts.length > 0 ? openAlerts[openAlerts.length - 1]! : null;
+        const nextAlertCursor = lastOpenAlert ? cursorOf(lastOpenAlert) : null;
+        const advancedAlertCursor = nextAlertCursor !== null && (
+          alertAfter === null ||
+          nextAlertCursor.created_at !== alertAfter.created_at ||
+          nextAlertCursor.id !== alertAfter.id
+        );
+        if (
+          page.openSystemAlertsHasMore === true &&
+          advancedAlertCursor &&
+          alertSweepPages + 1 < MAX_ALERT_SWEEP_PAGES
+        ) {
+          alertAfter = nextAlertCursor;
+          alertSweepPages += 1;
+        } else {
+          for (const tracked of seenAlertRoutes.keys()) {
+            if (!sweepSeenAlertIds.has(tracked)) seenAlertRoutes.delete(tracked);
+          }
+          sweepSeenAlertIds.clear();
+          alertAfter = null;
+          alertSweepPages = 0;
         }
-      } else if (page.openSystemAlerts === undefined) {
-        seenAlertRoutes.clear();
       }
       if (emittedSignals.length > 0) {
         await options.afterEmitBatch?.(emittedSignals);
@@ -1158,8 +1194,8 @@ export async function runArrivalWatch(options: {
         if (options.onReady !== undefined && !cancelled()) continue;
       }
 
-      const fullPage = page.rawCount >= SIGNAL_FOLLOW_PAGE_LIMIT;
-      if (fullPage) {
+      const fullPage = page.rawCount >= pageLimit;
+      if (fullPage || alertAfter !== null) {
         await wait(0);
         continue;
       }

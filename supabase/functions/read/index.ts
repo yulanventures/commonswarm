@@ -128,6 +128,9 @@ interface SignalReadRequest {
   after_created_at?: string | null;
   after_id?: string | null;
   cursor_mode: boolean;
+  /** Independent bounded progression cursor for open_system_alerts reconciliation (inbox only). */
+  alert_after_created_at?: string | null;
+  alert_after_id?: string | null;
   limit: number;
   include_stale: boolean;
   /**
@@ -591,6 +594,10 @@ function parseBody(
   // is not a valid request shape (exactKeys also rejects a single extra key).
   if (hasAfterCreatedAt !== hasAfterId) return null;
   const cursorMode = hasAfterCreatedAt && hasAfterId;
+  const hasAlertAfterCreatedAt = Object.hasOwn(body, "alert_after_created_at");
+  const hasAlertAfterId = Object.hasOwn(body, "alert_after_id");
+  if (hasAlertAfterCreatedAt !== hasAlertAfterId) return null;
+  const alertCursorMode = hasAlertAfterCreatedAt && hasAlertAfterId;
   const hasIncludeMentions = Object.hasOwn(body, "include_mentions");
   const hasIncludeReactions = Object.hasOwn(body, "include_reactions");
   const hasSignalId = Object.hasOwn(body, "signal_id");
@@ -605,6 +612,7 @@ function parseBody(
       ...(modernShape ? ["in_reply_to"] : []),
       ...channelKeys,
       ...(cursorMode ? ["after_created_at", "after_id"] : []),
+      ...(alertCursorMode ? ["alert_after_created_at", "alert_after_id"] : []),
       "limit",
       "include_stale",
       ...(hasIncludeMentions ? ["include_mentions"] : []),
@@ -632,6 +640,13 @@ function parseBody(
         Number.isFinite(Date.parse(body.after_created_at)) &&
         typeof body.after_id === "string" &&
         UUID_RE.test(body.after_id))
+    )) ||
+    (alertCursorMode && !(
+      (body.alert_after_created_at === null && body.alert_after_id === null) ||
+      (typeof body.alert_after_created_at === "string" &&
+        Number.isFinite(Date.parse(body.alert_after_created_at)) &&
+        typeof body.alert_after_id === "string" &&
+        UUID_RE.test(body.alert_after_id))
     )) ||
     !Number.isSafeInteger(body.limit) ||
     (body.limit as number) < 1 ||
@@ -676,6 +691,16 @@ function parseBody(
           : null,
         after_id: typeof body.after_id === "string"
           ? body.after_id.toLowerCase()
+          : null,
+      }
+      : {}),
+    ...(alertCursorMode
+      ? {
+        alert_after_created_at: typeof body.alert_after_created_at === "string"
+          ? body.alert_after_created_at
+          : null,
+        alert_after_id: typeof body.alert_after_id === "string"
+          ? body.alert_after_id.toLowerCase()
           : null,
       }
       : {}),
@@ -1662,9 +1687,13 @@ async function handle(
     /* Open system alerts routed to this lead seat reach its inbox as notes addressed to it,
      * through swarm_read.system_alerts under this agent's claims (so stale leads or lost channel
      * access immediately return zero rows). Never includes resolution_note or message bodies.
-     * Returned both cursor-merged into signals AND as open_system_alerts (when non-empty) so
-     * monotonic-cursor watchers reconcile late-committing reroutes in the same single HTTP read. */
-    const openSystemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
+     *
+     * Query 1 applies the ordinary signal cursor IN SQL BEFORE LIMIT so a full page of older
+     * open alerts can never starve newer alerts ahead of the cursor.
+     * Query 2 provides an independent, cursor-paginated open_system_alerts reconciliation feed
+     * (ordered ascending by routed_at/opened_at, alert_id with LIMIT + 1) so monotonic-cursor
+     * watchers sweep all open routes in bounded pages and catch behind-cursor late commits. */
+    const systemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
       SELECT
         a.alert_id AS id, a.workspace_id, a.affected_principal_id AS "from", 'agent' AS from_kind,
         NULL::uuid AS "to", ('system_alert:' || a.kind) AS about, 'note' AS kind,
@@ -1713,20 +1742,94 @@ async function handle(
         AND (${channelId}::uuid IS NULL OR a.channel_id = ${channelId}::uuid)
         AND (${unfiledOnly} = false OR a.channel_id IS NULL)
         AND (${body.since}::timestamptz IS NULL OR COALESCE(a.routed_at, a.opened_at) >= ${body.since}::timestamptz)
+        AND (
+          ${useAfterCursor} = false
+          OR date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) >
+            date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+          OR (
+            date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) =
+              date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+            AND a.alert_id > ${afterId}::uuid
+          )
+        )
       ORDER BY
         CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END ASC,
         CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) END DESC,
         CASE WHEN ${orderAsc} THEN a.alert_id END ASC,
         CASE WHEN ${orderDesc} THEN a.alert_id END DESC
-      LIMIT ${Math.max(body.limit, 50)}
+      LIMIT ${body.limit}
     `;
-    const afterMs = useAfterCursor && afterCreatedAt ? new Date(afterCreatedAt).getTime() : null;
-    const systemAlertRows = !useAfterCursor || afterMs === null
-      ? openSystemAlertRows.slice(0, body.limit)
-      : openSystemAlertRows.filter((row) => {
-          const rowMs = new Date(row.created_at as string | Date).getTime();
-          return rowMs > afterMs || (rowMs === afterMs && String(row.id) > String(afterId));
-        }).slice(0, body.limit);
+    const alertAfterCreatedAt = body.alert_after_created_at ?? null;
+    const alertAfterId = body.alert_after_id ?? null;
+    const useAlertAfterCursor = alertAfterCreatedAt !== null && alertAfterId !== null;
+    const rawOpenSystemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
+      SELECT
+        a.alert_id AS id, a.workspace_id, a.affected_principal_id AS "from", 'agent' AS from_kind,
+        NULL::uuid AS "to", ('system_alert:' || a.kind) AS about, 'note' AS kind,
+        CASE
+          WHEN a.kind = 'agent_quiet' THEN
+            format(
+              'System alert (%s, id %s): %s has stopped listening (%s waiting since %s). Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.waiting_count,
+              to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              a.fix_hint
+            )
+          ELSE
+            format(
+              'System alert (%s, id %s): %s lost access. Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.fix_hint
+            )
+        END AS body,
+        COALESCE(a.routed_at, a.opened_at) + interval '7 days' AS until,
+        COALESCE(a.routed_at, a.opened_at) AS created_at,
+        ${agent.principal_id}::uuid AS to_agent, NULL::uuid AS in_reply_to, NULL::text AS reply_status,
+        0 AS chain_hop, '[]'::jsonb AS attachments, a.channel_id, NULL::uuid AS thread_root_id,
+        false AS broadcast_to_channel,
+        jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', ${agent.principal_id}::uuid, 'position', 0)) AS recipients,
+        'private' AS audience,
+        ${body.include_mentions ? tx`'[]'::jsonb AS mentions,` : tx``}
+        ${body.include_reactions ? tx`'[]'::jsonb AS reactions,` : tx``}
+        jsonb_build_object(
+          'alert_id', a.alert_id,
+          'kind', a.kind,
+          'affected_principal_id', a.affected_principal_id
+        ) AS system_alert,
+        'unknown' AS sender_owner_relation
+      FROM swarm_read.system_alerts AS a
+      WHERE a.workspace_id = ${body.workspace_id}::uuid
+        AND a.resolved_at IS NULL
+        AND a.routed_lead_principal_id = ${agent.principal_id}::uuid
+        AND (${body.about}::text IS NULL OR ('system_alert:' || a.kind) = ${body.about}::text)
+        AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
+        AND ${inReplyTo}::uuid IS NULL
+        AND (${channelId}::uuid IS NULL OR a.channel_id = ${channelId}::uuid)
+        AND (${unfiledOnly} = false OR a.channel_id IS NULL)
+        AND (${body.since}::timestamptz IS NULL OR COALESCE(a.routed_at, a.opened_at) >= ${body.since}::timestamptz)
+        AND (
+          ${useAlertAfterCursor} = false
+          OR date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) >
+            date_trunc('milliseconds', ${alertAfterCreatedAt}::timestamptz)
+          OR (
+            date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) =
+              date_trunc('milliseconds', ${alertAfterCreatedAt}::timestamptz)
+            AND a.alert_id > ${alertAfterId}::uuid
+          )
+        )
+      ORDER BY
+        date_trunc('milliseconds', COALESCE(a.routed_at, a.opened_at)) ASC,
+        a.alert_id ASC
+      LIMIT ${body.limit + 1}
+    `;
+    const hasMoreOpenSystemAlerts = rawOpenSystemAlertRows.length > body.limit;
+    const openSystemAlertRows = hasMoreOpenSystemAlerts
+      ? rawOpenSystemAlertRows.slice(0, body.limit)
+      : rawOpenSystemAlertRows;
     const withReactions = reactionRows.length === 0 ? rows : mergeSignalPages(rows, reactionRows, orderAsc, body.limit);
     const mergedSignals = systemAlertRows.length === 0
       ? withReactions
@@ -1734,6 +1837,7 @@ async function handle(
     return json(200, {
       signals: mergedSignals,
       ...(openSystemAlertRows.length > 0 ? { open_system_alerts: openSystemAlertRows } : {}),
+      ...(hasMoreOpenSystemAlerts ? { open_system_alerts_has_more: true } : {}),
       capabilities: body.inbox
         ? HOME_INBOX_SIGNAL_CAPABILITIES
         : SIGNAL_CAPABILITIES,

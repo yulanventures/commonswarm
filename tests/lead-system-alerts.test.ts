@@ -179,63 +179,90 @@ test("system_alert inbox marker skips delivery ack, observation, auto-eyes react
   assert.ok(toolNames.includes("alert_resolve"), "STDIO_MCP_TOOLS includes alert_resolve");
 });
 
-test("runArrivalWatch open-route reconciliation delivers an open routed alert even when cursor is past routed_at, without duplicates", async () => {
+test("runArrivalWatch reconciles multi-page openSystemAlerts independently of signal cursor without duplicates", async () => {
   const controller = new AbortController();
   const emitted: SignalRecord[] = [];
+  const OLDER_1 = "55555555-5555-4555-8555-555555555501";
+  const OLDER_2 = "55555555-5555-4555-8555-555555555502";
+  const LATE_BEHIND = "55555555-5555-4555-8555-555555555503";
+  const NEWER_AHEAD = "55555555-5555-4555-8555-555555555504";
   let savedCursor: { created_at: string; id: string } | null = {
     created_at: "2026-11-19T16:10:00.000Z",
     id: NORMAL_SIG,
   };
-  let cycles = 0;
-  const skewedAlert = systemAlertToSignalRecord(
-    {
-      alert_id: ALERT,
-      workspace_id: WS,
-      channel_id: null,
-      kind: "agent_quiet",
-      affected_principal_id: AFFECTED,
-      affected_seat_name: "quiet-seat",
-      fix_hint: "Restart its listener.",
-      waiting_count: 2,
-      oldest_waiting_at: "2026-11-19T15:30:00.000Z",
-      routed_lead_principal_id: LEAD,
-      routed_at: "2026-11-19T16:05:00.000Z", // BEFORE savedCursor (16:10:00Z)!
-      opened_at: "2026-11-19T15:45:00.000Z",
-      escalated_at: null,
-    },
-    LEAD,
-  );
+  let idleCycles = 0;
+  const makeAlert = (id: string, routedAt: string) =>
+    systemAlertToSignalRecord(
+      {
+        alert_id: id,
+        workspace_id: WS,
+        channel_id: null,
+        kind: "agent_quiet",
+        affected_principal_id: AFFECTED,
+        affected_seat_name: "quiet-seat",
+        fix_hint: "Restart its listener.",
+        waiting_count: 2,
+        oldest_waiting_at: "2026-11-19T15:30:00.000Z",
+        routed_lead_principal_id: LEAD,
+        routed_at: routedAt,
+        opened_at: "2026-11-19T15:45:00.000Z",
+        escalated_at: null,
+      },
+      LEAD,
+    );
+  const older1 = makeAlert(OLDER_1, "2026-11-19T16:01:00.000Z");
+  const older2 = makeAlert(OLDER_2, "2026-11-19T16:02:00.000Z");
+  const lateBehind = makeAlert(LATE_BEHIND, "2026-11-19T16:05:00.000Z"); // behind cursor AND on page 2
+  const newerAhead = makeAlert(NEWER_AHEAD, "2026-11-19T16:15:00.000Z"); // ahead of cursor
+  const allOpen = [older1, older2, lateBehind, newerAhead];
+  const seenAlertAfters: Array<string | null> = [];
+
   await runArrivalWatch({
     workspaceId: WS,
     principalId: LEAD,
     signal: controller.signal,
     pollMs: 1,
-    sleep: async () => {
-      cycles += 1;
-      if (cycles >= 2) controller.abort();
+    pageLimit: 2,
+    sleep: async (ms) => {
+      if (ms > 0) {
+        idleCycles += 1;
+        if (idleCycles >= 3) controller.abort();
+      }
     },
     store: {
       location: "memory://lead-system-alerts-test",
       read: async () => savedCursor,
       write: async (next) => { savedCursor = next; },
     },
-    readPage: async () => ({
-      signals: [],
-      openSystemAlerts: [skewedAlert],
-      rawCount: 0,
-      malformedRows: 0,
-      pendingDeliveryCount: 0,
-      nextCursor: null,
-      capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
-      legacyCursorFallback: false,
-    }),
+    readPage: async ({ after, alertAfter, limit }) => {
+      seenAlertAfters.push(alertAfter?.id ?? null);
+      const afterMs = after ? Date.parse(after.created_at) : -Infinity;
+      const signals = allOpen
+        .filter((r) => Date.parse(r.created_at) > afterMs || (Date.parse(r.created_at) === afterMs && r.id > (after?.id ?? "")))
+        .slice(0, limit);
+      const alertAfterMs = alertAfter ? Date.parse(alertAfter.created_at) : -Infinity;
+      const openSlice = allOpen.filter(
+        (r) => Date.parse(r.created_at) > alertAfterMs || (Date.parse(r.created_at) === alertAfterMs && r.id > (alertAfter?.id ?? "")),
+      );
+      return {
+        signals,
+        openSystemAlerts: openSlice.slice(0, limit),
+        ...(openSlice.length > limit ? { openSystemAlertsHasMore: true } : {}),
+        rawCount: signals.length,
+        malformedRows: 0,
+        pendingDeliveryCount: 0,
+        nextCursor: signals.length > 0 ? { created_at: signals[signals.length - 1]!.created_at, id: signals[signals.length - 1]!.id } : null,
+        capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
+        legacyCursorFallback: false,
+      };
+    },
     emit: async (row) => { emitted.push(row); },
   });
-  assert.equal(emitted.length, 1, "open routed alert behind signal cursor must emit once and not duplicate on next cycle");
-  assert.equal(emitted[0]!.id, ALERT);
-  assert.deepEqual(emitted[0]!.system_alert, {
-    alert_id: ALERT,
-    kind: "agent_quiet",
-    affected_principal_id: AFFECTED,
-  });
+  assert.ok(seenAlertAfters.includes(OLDER_2), "reconciliation must advance alertAfter past the full page of older routes");
+  assert.deepEqual(
+    emitted.map((r) => r.id).sort(),
+    [OLDER_1, OLDER_2, LATE_BEHIND, NEWER_AHEAD].sort(),
+    "each open route (older page 1, newer ordinary cursor, behind-cursor page 2) must emit exactly once across 3 cycles",
+  );
+  assert.equal(savedCursor?.id, NEWER_AHEAD, "signal cursor advances on ordinary path and never rewinds on reconciliation");
 });

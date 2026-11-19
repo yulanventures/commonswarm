@@ -5867,7 +5867,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         });
         await Promise.race([attendedCanaryAccepted, attendedCanaryTask]);
       },
-      readPage: async ({ after, baseline, limit }) => {
+      readPage: async ({ after, alertAfter, baseline, limit }) => {
         const token = selected.session
           ? await selected.session.bearer()
           : selected.bearer;
@@ -5884,6 +5884,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
               : {
                 ascending: true as const,
                 ...(after === null ? {} : { after }),
+                ...(alertAfter === null ? {} : { alertAfter }),
               }),
           },
           { signal: controller.signal, fetcher: httpClient.fetch },
