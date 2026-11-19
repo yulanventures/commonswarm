@@ -33,6 +33,7 @@ let olderPageInterrupted = false;
 const codes = new Map();
 let emailCodePending = false;
 const emailWire = {};
+const conversationWire = new Map();
 // Record the actual Swift request, with stable key order for the CI fixture.
 function recordEmailRequest(url, body) {
   if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
@@ -61,11 +62,11 @@ const teammate = { kind: "user", id: "00000000-0000-4000-8000-000000000088", nam
 const twins = ["012345ab-0000-4000-8000-000000000001", "012345cd-0000-4000-8000-000000000002"]
   .map(id => ({ kind: "agent", id, name: "Riley" }));
 const threadRows = [
-  { conversation_id: randomUUID(), kind: "general", slug: "general", joined: true },
-  { conversation_id: randomUUID(), kind: "public_channel", channel_id: channel, slug: "mobile", joined: true, members: [members[0]] },
-  { conversation_id: randomUUID(), kind: "private_channel", channel_id: longChannel, slug: "design", joined: true, members: [members[0]] },
-  { conversation_id: randomUUID(), kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
-  { conversation_id: randomUUID(), kind: "dm", joined: true, members, mention_count: 103 }
+  { conversation_id: "00000000-0000-4000-8000-000000000020", kind: "general", slug: "general", joined: true },
+  { conversation_id: "00000000-0000-4000-8000-000000000021", kind: "public_channel", channel_id: channel, slug: "mobile", joined: true, members: [members[0]] },
+  { conversation_id: "00000000-0000-4000-8000-000000000022", kind: "private_channel", channel_id: longChannel, slug: "design", joined: true, members: [members[0]] },
+  { conversation_id: "00000000-0000-4000-8000-000000000023", kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
+  { conversation_id: "00000000-0000-4000-8000-000000000024", kind: "dm", joined: true, members, mention_count: 103 }
 ];
 const address = (command) => command.conversation_id?.toLowerCase() ?? (command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general");
 if (review) {
@@ -235,6 +236,9 @@ const server = createServer(async (req, res) => {
       }
       const cmd = body.command;
       if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
+      if (verify && ["conversation_join", "conversation_open", "conversation_invite", "conversation_remove"].includes(cmd?.kind)) {
+        conversationWire.set(cmd.kind, cmd);
+      }
       if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
         const candidates = [...members, teammate, ...twins];
         const refs = [members[0], ...cmd.members.map(m => candidates.find(c => c.id === m.id.toLowerCase() && c.kind === m.kind))];
@@ -355,6 +359,10 @@ server.listen(verify ? 0 : 8765, "127.0.0.1", () => {
   child.once("exit", (status) => {
     if (status === 0 && process.argv[4]) {
       writeFileSync(join(dirname(process.argv[4]), "email-code.json"), JSON.stringify(emailWire, null, 2) + "\n");
+      const sortedKeys = (_, value) => value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value;
+      writeFileSync(join(dirname(process.argv[4]), "conversation-commands.json"),
+        JSON.stringify([...conversationWire.values()], sortedKeys, 2) + "\n");
     }
     process.exitCode = status ?? 1;
     server.close();
