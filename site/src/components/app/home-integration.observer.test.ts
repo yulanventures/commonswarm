@@ -2459,6 +2459,61 @@ test('keepFeedFocus restores rebuilt controls in the microtask and defers only m
   assert.equal(doc.activeElement, showMore2, 'deferred control regains focus once added on the next frame');
 });
 
+test('openChatPicture aborts if another dialog opens while the viewer module loads, then opens normally once it closes', async () => {
+  const code = await dashboardFunctions(['openChatPicture']);
+  let openDialog: object | null = null;
+  let currentFeed = 'chat:w1:c1';
+  let openedCount = 0;
+  let resolveLoader: ((mod: { openImageViewer: (...args: unknown[]) => void }) => void) | null = null;
+  const openImageViewer = () => { openedCount++; };
+  const context = createContext({
+    app: {},
+    document: { querySelector: (sel: string) => sel === 'dialog[open]' ? openDialog : null },
+    feedIdentity: () => currentFeed,
+    loadImageViewer: () => new Promise((resolve) => { resolveLoader = resolve; }),
+    chatPictureOpening: false,
+    attachmentPreviewUrls: { get: () => null, remember() {}, forget() {} },
+    freshAttachmentDownload: async () => ({ url: 'https://storage.test/pic' }),
+    setComposerStatus() {},
+    readableError: String,
+    one: () => null,
+    checkForNewBuild: async () => {},
+    CSS: { escape: (s: string) => s },
+  });
+  runInContext(code, context);
+  const openPic = runInContext('openChatPicture', context) as (a: { file_id: string; version_n: number; name: string }, t: unknown) => void;
+  const trigger = { isConnected: true, closest: () => ({ dataset: { signalId: 'sig-1' } }), parentElement: { querySelector: () => null } };
+
+  // Start opening picture while the viewer module response is held.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  assert.equal(runInContext('chatPictureOpening', context), true);
+  // Open People while the viewer module is still in flight.
+  openDialog = { id: 'dashboard-roster-dialog' };
+  // Release the viewer module response: viewer must NOT open over People, and opening lock must clear.
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 0, 'viewer does not open over an already-open dialog');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after aborting');
+
+  // Close People and press the picture again: viewer opens normally.
+  openDialog = null;
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer opens normally once the other dialog has closed');
+
+  // Navigating to another channel while the viewer module is loading also aborts cleanly.
+  openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);
+  currentFeed = 'chat:w1:c2';
+  resolveLoader!({ openImageViewer });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(openedCount, 1, 'viewer does not open after navigating away');
+  assert.equal(runInContext('chatPictureOpening', context), false, 'opening lock clears after navigation abort');
+});
+
 test('pending-access indicator on the People door is pinned out of flow and restored on shell rebuild', async () => {
   const code = await dashboardFunctions(['syncRosterOpenButtons']);
   const attrs = new Map<string, string>();

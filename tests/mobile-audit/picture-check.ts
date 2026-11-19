@@ -380,7 +380,7 @@ export async function runPictureChecks(
         url: location.pathname + location.search,
       };
     };
-    const loadedStale = await until(stale, p => p.loaded);
+    const loadedStale = await until(stale, p => p.loaded && p.state === null);
     const staleAt = await stale.evaluate(() => location.pathname + location.search);
     await stale.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
     await stale.keyboard.press("Enter");
@@ -400,6 +400,44 @@ export async function runPictureChecks(
     check("Tab reaches that Retry, and with the viewer's code back it opens the viewer", onRetryOpen === "retry" && !!recovered2 && fitted(recovered2) && await stale.evaluate(OPEN_FAILED) === null && !strayed,
       { onRetryOpen, recovered: recovered2, strayed });
     await stale.close();
+
+    // 2a-dialog. If another dialog opens while the viewer's module is still loading, that dialog stays the only open
+    // dialog and keeps focus; once it closes, a fresh press on the picture opens the viewer normally.
+    let releaseViewerChunk: () => void = () => {};
+    let viewerChunkRequested = false;
+    let viewerChunkHeld = new Promise<void>(done => { releaseViewerChunk = done; });
+    const contested = await open(async (p: any) => {
+      await p.route(VIEWER_CHUNK, async (route: any) => {
+        viewerChunkRequested = true;
+        await viewerChunkHeld;
+        await route.continue();
+      });
+    });
+    await until(contested, p => p.loaded && p.state === null);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    for (const started = Date.now(); Date.now() - started < 10_000 && !viewerChunkRequested;) await contested.waitForTimeout(50);
+    if (options.click) await contested.locator("[data-roster-open]:visible").first().click();
+    else await contested.keyboard.press("ControlOrMeta+k");
+    await contested.waitForSelector("dialog[open]:not([data-image-viewer])", { state: "visible", timeout: 10_000 });
+    releaseViewerChunk();
+    await contested.waitForTimeout(350);
+    const duringOther = await contested.evaluate(() => {
+      const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
+      const other = openDialogs.find(d => !d.hasAttribute("data-image-viewer")) ?? null;
+      return {
+        openCount: openDialogs.length,
+        viewerOpen: openDialogs.some(d => d.hasAttribute("data-image-viewer")),
+        focusInsideOther: !!other && other.contains(document.activeElement),
+      };
+    });
+    await contested.keyboard.press("Escape");
+    for (const started = Date.now(); Date.now() - started < 5_000 && await contested.evaluate(() => !!document.querySelector("dialog[open]"));) await contested.waitForTimeout(50);
+    await contested.locator(".dashboard__message .hm-extras__image").first().press("Enter");
+    const afterOther = await viewer(contested, v => !!v && v.loaded && v.state === "");
+    check("a late viewer module never opens over another dialog, and opens normally once it closes",
+      viewerChunkRequested && duringOther.openCount === 1 && !duringOther.viewerOpen && duringOther.focusInsideOther && !!afterOther && fitted(afterOther),
+      { viewerChunkRequested, duringOther, afterOther: !!afterOther });
+    await contested.close();
 
     // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
     let imageReads = 0, sawFailure = false, paintedUnloaded = false;
