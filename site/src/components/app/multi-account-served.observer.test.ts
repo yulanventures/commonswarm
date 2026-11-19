@@ -485,6 +485,13 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       }
       if (url.pathname === "/rest/v1/rpc/home_overview" && method === "POST") {
         const viewer = actor ?? userA;
+        const asks = viewer.id === userA.id
+          ? [
+              { signal_id: "10000000-0000-4000-8000-000000000001", from: { kind: "user", id: userB.id, name: "Alex" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "10000000-0000-4000-8000-000000000002", from: { kind: "user", id: userB.id, name: "Alex" }, created_at: "2026-11-19T00:01:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "10000000-0000-4000-8000-000000000003", from: { kind: "user", id: userB.id, name: "Alex" }, created_at: "2026-11-19T00:02:00Z", until: "2026-11-20T00:00:00Z" },
+            ]
+          : [];
         sendJson(res, 200, {
           viewer_user_id: viewer.id,
           generated_at: "2026-11-19T00:00:00Z",
@@ -496,7 +503,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
             new_messages: 0,
             content: null,
             people: [{ user_id: viewer.id, display_name: "Alex", role: "owner", is_viewer: true, agents: [] }],
-            needs_you: { asks: [], assigned: [], waiting: [] },
+            needs_you: { asks, assigned: [], waiting: [] },
           }],
         });
         return;
@@ -680,11 +687,17 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterProvider.leakedProvider, false, "provider_token & provider_refresh_token must be stripped");
     assert.ok(afterProvider.reg.includes(userA.id) && afterProvider.reg.includes(userB.id), "both A and B owned");
 
-    // Verify Designer #3 cues: Current label, full emails readable, active sub-label on sign-out items!
+    // Verify Designer #3 cues: Current label, "3 waiting" for inactive Account A, full emails readable, active sub-label on sign-out items!
     await page.click("[data-user-menu-trigger]");
     await page.waitForSelector("[data-account-switcher]:visible");
+    await page.waitForFunction(
+      () => (document.querySelector<HTMLElement>("[data-user-menu]")?.innerText ?? "").includes("3 waiting"),
+      null,
+      { timeout: 10_000 },
+    );
     const menuText = await page.locator("[data-user-menu]").innerText();
     assert.ok(menuText.includes("Current"), "active account must show visible Current label");
+    assert.ok(menuText.includes("3 waiting"), "inactive account with 3 open asks must show 3 waiting");
     assert.ok(menuText.includes(userA.email) && menuText.includes(userB.email), "both full emails readable");
     assert.ok(menuText.includes("Sign out on this device"), "multi-account sign-out label shown");
 

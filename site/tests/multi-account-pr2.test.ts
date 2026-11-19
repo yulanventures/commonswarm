@@ -41,6 +41,7 @@ import {
   uploadBrowserAttachment,
 } from "../src/lib/commonswarm.ts";
 import { createHomeServer, HomeCommandRefused } from "../src/lib/home/client.ts";
+import { overviewNeedsYouTotal } from "../src/lib/home-map.ts";
 
 class MemoryStorage implements Storage {
   private map = new Map<string, string>();
@@ -1270,7 +1271,7 @@ test("PR 2 Designer CHANGES (1)-(4) + HezSec C3 signed-out copy: distinct code s
 
   // Designer #2: Dialog centering, field insets, focus rings, and focus return on Escape/Cancel
   assert.ok(dialogCss.includes("[data-add-account-dialog]") && dialogCss.includes("[data-signout-all-dialog]"));
-  assert.ok(liveDash.includes("focusVisibleAccountTrigger()"));
+  assert.ok(liveDash.includes("focusVisibleAccountTrigger("));
 
   // Designer #3: Visible "Current", "N waiting", "Sign in again", wrapping full email, active identifier on trigger & single-account sign-out actions, 5-account cap guidance, switch live announcement
   assert.equal(liveDash.includes("viewerInitials("), false, "account switcher must call the existing initials() helper, not undefined viewerInitials()");
@@ -1876,4 +1877,38 @@ test("PR 2 HezSec C7 held-poll witnesses: peer sign-out and sign-out-all during 
   assert.ok(liveDash.includes('triggerEl.removeAttribute("title")') && liveDash.includes('triggerEl?.removeAttribute("title")'));
   assert.ok(liveDash.includes("signedOutOtpIntentGen") && liveDash.includes("addAccountOtpIntentGen"));
   assert.ok(inviteOnramp.includes("inviteOtpIntentGen"));
+
+  // Designer cf04d684/68160bac fixes: overviewNeedsYouTotal counts raw HomeOverview asks/assigned/waiting
+  // (e.g., 3 open questions -> 3 waiting) and focusVisibleAccountTrigger prefers visible phone More trigger & post-switch focus return.
+  assert.equal(
+    overviewNeedsYouTotal({
+      viewer_user_id: "u-office",
+      generated_at: "2026-11-19T00:00:00Z",
+      workspaces: [
+        {
+          workspace_id: "ws-office",
+          name: "Office",
+          role: "member",
+          last_seen_at: "2026-11-19T00:00:00Z",
+          new_messages: 0,
+          content: null,
+          people: [],
+          needs_you: {
+            asks: [
+              { signal_id: "a1", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "a2", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "a3", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+            ],
+            assigned: [],
+            waiting: [],
+          },
+        },
+      ],
+    }),
+    3,
+    "overviewNeedsYouTotal must count 3 open questions from raw HomeOverview payload",
+  );
+  assert.equal(overviewNeedsYouTotal(null), null);
+  assert.ok(liveDash.includes("return overviewNeedsYouTotal(overview);") && liveDash.includes("pendingSwitchFocusReturn"));
+  assert.ok(liveDash.includes("openSignOutAllDialog(\"phone\")") && liveDash.includes("focusVisibleAccountTrigger(opener)"));
 });

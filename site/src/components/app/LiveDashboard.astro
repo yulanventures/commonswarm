@@ -1404,7 +1404,7 @@ import "../../styles/kylon-image-viewer.css";
   import { createListsChrome } from "../../lib/lists-chrome";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails, catchUpReadOrder,
-    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, overviewNeedsYouTotal, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, directMessages, renameAgent } from "../../lib/commonswarm";
   import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
@@ -2957,16 +2957,16 @@ import "../../styles/kylon-image-viewer.css";
     };
     const accountMenuAction = (action: AccountMenuAction): void => {
       if (typeof action === "object") {
-        if (action.kind === "switch-account") { void switchToAccount(action.userId); return; }
-        if (action.kind === "reauth-account") { openAddAccountDialog(action.email, "Your session expired. Sign in again."); return; }
+        if (action.kind === "switch-account") { void switchToAccount(action.userId, "phone"); return; }
+        if (action.kind === "reauth-account") { openAddAccountDialog(action.email, "Your session expired. Sign in again.", "phone"); return; }
         void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push");
       }
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
       else if (action === "sign-out-others") one<HTMLButtonElement>("[data-signout-others-open]")?.click();
-      else if (action === "sign-out-all") one<HTMLButtonElement>("[data-signout-all-open]")?.click();
-      else if (action === "add-account") openAddAccountDialog();
+      else if (action === "sign-out-all") openSignOutAllDialog("phone");
+      else if (action === "add-account") openAddAccountDialog("", "", "phone");
       else if (action === "password") one<HTMLButtonElement>("[data-password-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
@@ -5047,6 +5047,9 @@ import "../../styles/kylon-image-viewer.css";
       syncComposerControls();
     };
 
+    let pendingSwitchFocusReturn = false;
+    let lastAccountDialogOpener: "phone" | "desktop" | null = null;
+
     const focusComposerOnEntry = (): void => {
       if (
         !activeWorkspaceId ||
@@ -5054,7 +5057,9 @@ import "../../styles/kylon-image-viewer.css";
         window.matchMedia("(max-width: 52rem)").matches
       ) return;
       focusedComposerWorkspaceId = activeWorkspaceId;
+      if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
       window.requestAnimationFrame(() => {
+        if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
         one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
       });
     };
@@ -7071,6 +7076,7 @@ import "../../styles/kylon-image-viewer.css";
       // home-map.ts has no label for this route yet; the page names itself.
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
+        if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
         if (one<HTMLDialogElement>("[data-roster-dialog]")?.open) return;
         // Allow's settled access render owns focus, including while consent is being completed.
         if (homeRoute.view === "lists" && listsAllowLanding) return;
@@ -16477,6 +16483,17 @@ import "../../styles/kylon-image-viewer.css";
            than an error: the address bar is a convenience, never an authorization. */
         activeWorkspaceId = "";
         await navigateHome(resolveHomeRoute(reauthSearchForBoot(session.user.id), workspaces), "replace");
+        if (isMultiAccountEnabled() && version === requestVersion) {
+          void inactiveBadgePoller?.pollOnce();
+        }
+        if (pendingSwitchFocusReturn && version === requestVersion) {
+          const opener = lastAccountDialogOpener;
+          pendingSwitchFocusReturn = false;
+          window.requestAnimationFrame(() => {
+            if (version !== requestVersion) return;
+            focusVisibleAccountTrigger(opener);
+          });
+        }
         if (pendingFallbackNotice && version === requestVersion) {
           const notice = pendingFallbackNotice;
           pendingFallbackNotice = null;
@@ -16925,12 +16942,7 @@ import "../../styles/kylon-image-viewer.css";
         mgr,
         async (rt) => {
           const overview = await homeOverview(rt);
-          if (!overview || !Array.isArray(overview.workspaces)) return null;
-          let total = 0;
-          for (const entry of overview.workspaces) {
-            total += homeNeedsYouCount(entry);
-          }
-          return total;
+          return overviewNeedsYouTotal(overview);
         },
         {
           intervalMs: 45_000,
@@ -16939,6 +16951,7 @@ import "../../styles/kylon-image-viewer.css";
         },
       );
       inactiveBadgePoller.start();
+      void inactiveBadgePoller.pollOnce();
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) void inactiveBadgePoller?.pollOnce();
       });
@@ -16990,18 +17003,33 @@ import "../../styles/kylon-image-viewer.css";
       session = null;
     };
 
-    const focusVisibleAccountTrigger = (): void => {
+    const isTriggerVisible = (el: HTMLElement | null): el is HTMLElement => {
+      if (!el || !el.isConnected || el.closest("[hidden], [inert]")) return false;
+      if (el.getClientRects().length === 0) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== "none" && style.visibility !== "hidden";
+    };
+
+    const focusVisibleAccountTrigger = (preferred?: "phone" | "desktop" | null): void => {
+      const phoneBar = document.querySelector<HTMLElement>(".hm-phone-bar");
+      const phoneVisible = Boolean(phoneBar && isTriggerVisible(phoneBar));
+      const phoneTrigger = phoneVisible
+        ? document.querySelector<HTMLButtonElement>(".hm-phone-bar .hm-menu__trigger")
+        : null;
       const desktopTrigger = one<HTMLButtonElement>("[data-user-menu-trigger]");
-      if (desktopTrigger && desktopTrigger.getClientRects().length > 0 && !desktopTrigger.closest("[hidden], [inert]")) {
-        desktopTrigger.focus({ preventScroll: true });
-        return;
-      }
-      const phoneTrigger = document.querySelector<HTMLButtonElement>(".hm-phone-bar .hm-menu__trigger");
-      if (phoneTrigger && phoneTrigger.getClientRects().length > 0 && !phoneTrigger.closest("[hidden], [inert]")) {
+      if (preferred === "phone" && isTriggerVisible(phoneTrigger)) {
         phoneTrigger.focus({ preventScroll: true });
         return;
       }
-      desktopTrigger?.focus({ preventScroll: true });
+      if (phoneVisible && isTriggerVisible(phoneTrigger)) {
+        phoneTrigger.focus({ preventScroll: true });
+        return;
+      }
+      if (isTriggerVisible(desktopTrigger)) {
+        desktopTrigger.focus({ preventScroll: true });
+        return;
+      }
+      (phoneTrigger ?? desktopTrigger)?.focus({ preventScroll: true });
     };
 
     const announceAccountChange = (message: string): void => {
@@ -17159,10 +17187,10 @@ import "../../styles/kylon-image-viewer.css";
           if (menu) menu.hidden = true;
           one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
           if (isExpired) {
-            openAddAccountDialog(acct.secondary || acct.label, "Your session expired. Sign in again.");
+            openAddAccountDialog(acct.secondary || acct.label, "Your session expired. Sign in again.", "desktop");
             return;
           }
-          if (!isCurrent) void switchToAccount(acct.userId);
+          if (!isCurrent) void switchToAccount(acct.userId, "desktop");
         });
         list.append(btn);
       }
@@ -17177,7 +17205,7 @@ import "../../styles/kylon-image-viewer.css";
           const menu = one<HTMLElement>("[data-user-menu]");
           if (menu) menu.hidden = true;
           one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
-          openAddAccountDialog();
+          openAddAccountDialog("", "", "desktop");
         });
         list.append(addBtn);
       } else {
@@ -17189,13 +17217,15 @@ import "../../styles/kylon-image-viewer.css";
       container.replaceChildren(list);
     };
 
-    const switchToAccount = async (targetUserId: string): Promise<void> => {
+    const switchToAccount = async (targetUserId: string, opener: "phone" | "desktop" = "desktop"): Promise<void> => {
       const mgr = accountManager();
       if (!mgr || sampleMode) return;
       const targetRecord = mgr.listAccounts().find((acct) => acct.userId === targetUserId) ?? null;
       pendingSeatAdminReauthNotice = false;
       pendingForcedNotice = null;
       passwordChangeNotice = null;
+      lastAccountDialogOpener = opener;
+      pendingSwitchFocusReturn = true;
       teardownActiveAccountView();
       mgr.switchActiveAccount(targetUserId);
       renderAccountSwitcher();
@@ -17229,13 +17259,14 @@ import "../../styles/kylon-image-viewer.css";
       if (verifyBtn) verifyBtn.disabled = false;
       showAddAccountStep("entry");
     };
-    const openAddAccountDialog = (prefillEmail = "", initialStatus = ""): void => {
+    const openAddAccountDialog = (prefillEmail = "", initialStatus = "", opener: "phone" | "desktop" = "desktop"): void => {
       if (!isMultiAccountEnabled() || sampleMode) return;
       const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
       const form = one<HTMLFormElement>("[data-add-account-form]");
       const emailInput = one<HTMLInputElement>("#add-account-email");
       const status = one<HTMLElement>("[data-add-account-status]");
       if (!dialog) return;
+      lastAccountDialogOpener = opener;
       addAccountDialogEpoch += 1;
       addAccountClosingForPromotion = false;
       resetAddAccountOtp();
@@ -17334,7 +17365,7 @@ import "../../styles/kylon-image-viewer.css";
         resetAddAccountOtp();
         form?.reset();
         if (status) status.textContent = "";
-        if (!promoted && session) focusVisibleAccountTrigger();
+        if (!promoted && session) focusVisibleAccountTrigger(lastAccountDialogOpener);
       });
       dialog?.addEventListener("click", (event) => { if (event.target === dialog) closeAddAccountDialog(); });
 
@@ -17469,33 +17500,41 @@ import "../../styles/kylon-image-viewer.css";
     }
 
     // Wire "Sign out all accounts on this device" confirmation dialog (C5).
-    {
+    const openSignOutAllDialog = (opener: "phone" | "desktop" = "desktop"): void => {
       const dialog = one<HTMLDialogElement>("[data-signout-all-dialog]");
       const titleEl = one<HTMLElement>("[data-signout-all-title]");
       const targetEl = one<HTMLElement>("[data-signout-all-target]");
       const confirm = one<HTMLButtonElement>("[data-signout-all-confirm]");
       const cancel = one<HTMLButtonElement>("[data-signout-all-cancel]");
       const status = one<HTMLElement>("[data-signout-all-status]");
+      const mgr = accountManager();
+      if (!dialog || !confirm || !cancel || !status || !mgr || sampleMode) return;
+      const count = mgr.listAccounts().length;
+      if (count < 2) return;
+      lastAccountDialogOpener = opener;
+      const menu = one<HTMLElement>("[data-user-menu]");
+      if (menu) menu.hidden = true;
+      one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+      if (titleEl) titleEl.textContent = `Sign out all ${count} accounts on this device?`;
+      if (targetEl) targetEl.textContent = `all ${count} accounts signed in to this browser on this device.`;
+      status.textContent = "";
+      confirm.hidden = false;
+      confirm.disabled = false;
+      cancel.textContent = "Cancel";
+      dialog.showModal();
+      cancel.focus();
+    };
+    {
+      const dialog = one<HTMLDialogElement>("[data-signout-all-dialog]");
+      const confirm = one<HTMLButtonElement>("[data-signout-all-confirm]");
+      const cancel = one<HTMLButtonElement>("[data-signout-all-cancel]");
+      const status = one<HTMLElement>("[data-signout-all-status]");
       one<HTMLButtonElement>("[data-signout-all-open]")?.addEventListener("click", () => {
-        const mgr = accountManager();
-        if (!dialog || !confirm || !cancel || !status || !mgr || sampleMode) return;
-        const count = mgr.listAccounts().length;
-        if (count < 2) return;
-        const menu = one<HTMLElement>("[data-user-menu]");
-        if (menu) menu.hidden = true;
-        one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
-        if (titleEl) titleEl.textContent = `Sign out all ${count} accounts on this device?`;
-        if (targetEl) targetEl.textContent = `all ${count} accounts signed in to this browser on this device.`;
-        status.textContent = "";
-        confirm.hidden = false;
-        confirm.disabled = false;
-        cancel.textContent = "Cancel";
-        dialog.showModal();
-        cancel.focus();
+        openSignOutAllDialog("desktop");
       });
       cancel?.addEventListener("click", () => dialog?.close());
       dialog?.addEventListener("close", () => {
-        if (session) focusVisibleAccountTrigger();
+        if (session) focusVisibleAccountTrigger(lastAccountDialogOpener);
       });
       dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
       confirm?.addEventListener("click", async () => {
