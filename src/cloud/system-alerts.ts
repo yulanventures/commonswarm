@@ -3,6 +3,7 @@
  * or owner escalated inbox) and build resolve_system_alert wire commands.
  */
 import type { CloudTarget } from "./config.js";
+import type { SignalRecord } from "./command-client.js";
 
 export interface SystemAlertRecord {
   alert_id: string;
@@ -60,16 +61,55 @@ export function resolveSystemAlertCommand(
   };
 }
 
+export function systemAlertToSignalRecord(
+  alert: SystemAlertRecord,
+  leadPrincipalId: string,
+): SignalRecord {
+  const routedAt = alert.routed_at ?? alert.opened_at;
+  const until = new Date(Date.parse(routedAt) + 7 * 24 * 3600_000).toISOString();
+  const body = alert.kind === "agent_quiet"
+    ? `System alert (${alert.kind}, id ${alert.alert_id}): ${alert.affected_seat_name} has stopped listening (${alert.waiting_count ?? 0} waiting since ${alert.oldest_waiting_at ?? alert.opened_at}). Fix: ${alert.fix_hint}`
+    : `System alert (${alert.kind}, id ${alert.alert_id}): ${alert.affected_seat_name} lost access. Fix: ${alert.fix_hint}`;
+  return {
+    id: alert.alert_id,
+    workspace_id: alert.workspace_id,
+    from: alert.affected_principal_id,
+    from_kind: "agent",
+    to: null,
+    to_agent: leadPrincipalId,
+    in_reply_to: null,
+    about: `system_alert:${alert.kind}`,
+    kind: "note",
+    body,
+    until,
+    created_at: routedAt,
+    channel_id: alert.channel_id,
+    recipients: [{ kind: "agent", id: leadPrincipalId, position: 0 }],
+    audience: "private",
+    system_alert: {
+      alert_id: alert.alert_id,
+      kind: alert.kind,
+      affected_principal_id: alert.affected_principal_id,
+    },
+  };
+}
+
 export async function readSystemAlerts(
   target: CloudTarget,
   token: string,
   workspaceId: string,
-  options: { includeResolved?: boolean; escalatedOnly?: boolean; fetcher?: typeof fetch } = {},
+  options: {
+    includeResolved?: boolean;
+    escalatedOnly?: boolean;
+    fetcher?: typeof fetch;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<SystemAlertsReadResult> {
   const fetcher = options.fetcher ?? fetch;
   const endpoint = `${target.url.replace(/\/+$/, "")}/functions/v1/read`;
   const response = await fetcher(endpoint, {
     method: "POST",
+    ...(options.signal ? { signal: options.signal } : {}),
     headers: {
       authorization: `Bearer ${token}`,
       apikey: target.anonKey,

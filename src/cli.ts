@@ -143,6 +143,7 @@ import {
 import {
   readSystemAlerts,
   resolveSystemAlertCommand,
+  systemAlertToSignalRecord,
 } from "./cloud/system-alerts.js";
 import {
   getMemoryAsAgent,
@@ -5888,6 +5889,18 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
           },
           { signal: controller.signal, fetcher: httpClient.fetch },
         );
+      },
+      readOpenAlerts: async () => {
+        const token = selected.session
+          ? await selected.session.bearer()
+          : selected.bearer;
+        const result = await readSystemAlerts(cloud, token, selected.selectedWorkspace, {
+          fetcher: httpClient.fetch,
+          signal: controller.signal,
+        });
+        return result.alerts
+          .filter((a) => a.routed_lead_principal_id === principalId && (a.resolved_at ?? null) === null)
+          .map((a) => systemAlertToSignalRecord(a, principalId));
       },
       emit: async (signal) => {
         const notification = arrivalNotification(

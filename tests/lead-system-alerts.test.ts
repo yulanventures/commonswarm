@@ -15,11 +15,11 @@ import {
   SYSTEM_ALERT_KINDS,
 } from "../supabase/functions/command/system-alerts.js";
 import { HUMAN_ONLY_COMMANDS } from "../src/protocol/workspace-commands.js";
-import { resolveSystemAlertCommand } from "../src/cloud/system-alerts.js";
+import { resolveSystemAlertCommand, systemAlertToSignalRecord } from "../src/cloud/system-alerts.js";
 import { deliveryAckIds } from "../src/cloud/agent-check.js";
 import { seenAckTargets } from "../src/cloud/agent-signal-receipts.js";
 import { surfacedDeliveryIds } from "../src/cloud/delivery-observation.js";
-import { arrivalNotification } from "../src/cloud/arrival-watch.js";
+import { arrivalNotification, runArrivalWatch } from "../src/cloud/arrival-watch.js";
 import { STDIO_MCP_TOOLS } from "../src/mcp/tools.js";
 import type { SignalRecord } from "../src/cloud/command-client.js";
 
@@ -104,8 +104,12 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*sync_quiet_agent_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*escalate_due_system_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*system_alert_lock_scope[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
-  // Canonical scope lock order (NO channel-access inversion), multi-scope pre-lock, read-only resolve precheck & bare {"v": 1} wake frames.
+  // Canonical scope lock order (NO channel-access inversion, NO parent-locking FKs), multi-scope
+  // (workspace_id, conversation_id) pre-lock, read-only resolve precheck & bare {"v": 1} wake frames.
   assert.doesNotMatch(migration, /'channel-access:'/);
+  assert.doesNotMatch(migration, /CREATE TABLE swarm\.system_alerts[\s\S]*?REFERENCES\s+swarm\./);
+  assert.match(migration, /CREATE TRIGGER system_alerts_validate_refs/);
+  assert.match(migration, /ORDER BY c\.workspace_id ASC, c\.conversation_id ASC\s+FOR SHARE/);
   assert.match(migration, /'conversation-frames:'/);
   assert.match(migration, /CREATE FUNCTION swarm\.system_alert_lock_scopes\(/);
   assert.match(migration, /CREATE FUNCTION swarm\.system_alert_actor_can_resolve\(/);
@@ -173,4 +177,65 @@ test("system_alert inbox marker skips delivery ack, observation, auto-eyes react
   const toolNames = STDIO_MCP_TOOLS.map((t) => t.name);
   assert.ok(toolNames.includes("alerts"), "STDIO_MCP_TOOLS includes alerts");
   assert.ok(toolNames.includes("alert_resolve"), "STDIO_MCP_TOOLS includes alert_resolve");
+});
+
+test("runArrivalWatch open-route reconciliation delivers an open routed alert even when cursor is past routed_at, without duplicates", async () => {
+  const controller = new AbortController();
+  const emitted: SignalRecord[] = [];
+  let savedCursor: { created_at: string; id: string } | null = {
+    created_at: "2026-11-19T16:10:00.000Z",
+    id: NORMAL_SIG,
+  };
+  let cycles = 0;
+  const skewedAlert = systemAlertToSignalRecord(
+    {
+      alert_id: ALERT,
+      workspace_id: WS,
+      channel_id: null,
+      kind: "agent_quiet",
+      affected_principal_id: AFFECTED,
+      affected_seat_name: "quiet-seat",
+      fix_hint: "Restart its listener.",
+      waiting_count: 2,
+      oldest_waiting_at: "2026-11-19T15:30:00.000Z",
+      routed_lead_principal_id: LEAD,
+      routed_at: "2026-11-19T16:05:00.000Z", // BEFORE savedCursor (16:10:00Z)!
+      opened_at: "2026-11-19T15:45:00.000Z",
+      escalated_at: null,
+    },
+    LEAD,
+  );
+  await runArrivalWatch({
+    workspaceId: WS,
+    principalId: LEAD,
+    signal: controller.signal,
+    pollMs: 1,
+    sleep: async () => {
+      cycles += 1;
+      if (cycles >= 2) controller.abort();
+    },
+    store: {
+      location: "memory://lead-system-alerts-test",
+      read: async () => savedCursor,
+      write: async (next) => { savedCursor = next; },
+    },
+    readPage: async () => ({
+      signals: [],
+      rawCount: 0,
+      malformedRows: 0,
+      pendingDeliveryCount: 0,
+      nextCursor: null,
+      capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
+      legacyCursorFallback: false,
+    }),
+    readOpenAlerts: async () => [skewedAlert],
+    emit: async (row) => { emitted.push(row); },
+  });
+  assert.equal(emitted.length, 1, "open routed alert behind signal cursor must emit once and not duplicate on next cycle");
+  assert.equal(emitted[0]!.id, ALERT);
+  assert.deepEqual(emitted[0]!.system_alert, {
+    alert_id: ALERT,
+    kind: "agent_quiet",
+    affected_principal_id: AFFECTED,
+  });
 });

@@ -13,11 +13,16 @@
 --      listener liveness (at routing/wake time) and distinct-from-affected checks. Read, inbox,
 --      resolve and wake recheck live actor authority from verified claims; an agent claim never
 --      exercises human owner authority, and stale/demoted leads are refused.
---   3. Wake emission, alert writes, resolution and escalation acquire the canonical scope lock
---      order (conversations FOR SHARE -> channel-access shared -> conversation-frames shared ->
---      system_alerts FOR UPDATE) so concurrent membership removals and public-to-private
---      conversions serialize cleanly without late wakes or stale resolves, and resolve/escalation
---      serialize on the same alert row. Wake frames carry bare {"v": 1}.
+--   3. Wake emission, alert writes, resolution and escalation follow ONE global deadlock-free
+--      lock order matching all served channel/workspace/retirement writers:
+--        Level 1: swarm.conversations FOR SHARE in (workspace_id ASC, conversation_id ASC)
+--        Level 2: conversation-frames advisory lock shared in (workspace_id ASC, channel_id ASC)
+--        Level 3: system_alert key lock -> system_alerts FOR UPDATE in canonical natural key order
+--                 (workspace_id ASC, COALESCE(channel_id, nil) ASC, kind ASC, affected_principal_id ASC)
+--      swarm.system_alerts validates workspace/principal/channel references via a read-only MVCC
+--      trigger (no parent-locking FOREIGN KEY constraints) so alert writes never acquire FOR KEY
+--      SHARE locks on swarm.workspaces, swarm.agent_principals or swarm.channels after holding
+--      conversation locks. Wake frames carry bare {"v": 1}.
 --   4. Direct table writes are denied to all client and edge roles. Internal producers are pinned:
 --      record_system_alert / record_hosted_seat_refused_alerts / resolve_system_alert execute as
 --      swarm_admin via swarm_command; sync_quiet_agent_alerts / escalate_due_system_alerts execute
@@ -30,9 +35,14 @@
 -- Rollback: deploy/release-proofs/lead-system-alerts/20261119000001-rollback.sql.
 SET search_path = swarm, pg_catalog, public;
 
+-- No parent-locking FOREIGN KEY constraints here: PostgreSQL FK checks take FOR KEY SHARE locks
+-- on swarm.workspaces, swarm.agent_principals and swarm.channels at INSERT/UPDATE time (AFTER
+-- conversation locks), which would invert served member-removal writers that lock workspaces and
+-- principals FOR UPDATE before conversations. Reference integrity is enforced by the read-only
+-- MVCC trigger system_alerts_validate_refs below (zero parent row locks).
 CREATE TABLE swarm.system_alerts (
   alert_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id uuid NOT NULL REFERENCES swarm.workspaces (workspace_id),
+  workspace_id uuid NOT NULL,
   channel_id uuid,
   kind text NOT NULL CHECK (
     kind IN (
@@ -43,11 +53,11 @@ CREATE TABLE swarm.system_alerts (
       'hosted_family_retired'
     )
   ),
-  affected_principal_id uuid NOT NULL REFERENCES swarm.agent_principals (principal_id),
+  affected_principal_id uuid NOT NULL,
   fix_hint text NOT NULL CHECK (char_length(fix_hint) BETWEEN 1 AND 300),
   waiting_count integer CHECK (waiting_count IS NULL OR waiting_count > 0),
   oldest_waiting_at timestamptz,
-  routed_lead_principal_id uuid REFERENCES swarm.agent_principals (principal_id),
+  routed_lead_principal_id uuid,
   routed_at timestamptz,
   opened_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   escalate_after timestamptz NOT NULL,
@@ -64,8 +74,6 @@ CREATE TABLE swarm.system_alerts (
     )
   ),
   updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
-  FOREIGN KEY (channel_id, workspace_id)
-    REFERENCES swarm.channels (channel_id, workspace_id),
   CHECK (routed_lead_principal_id IS NULL OR routed_lead_principal_id <> affected_principal_id),
   CHECK (routed_at IS NULL OR routed_at >= opened_at),
   CHECK ((kind = 'agent_quiet') = (waiting_count IS NOT NULL AND oldest_waiting_at IS NOT NULL)),
@@ -78,6 +86,49 @@ CREATE TABLE swarm.system_alerts (
     AND (resolved_at IS NULL) = (resolution_note IS NULL)
   )
 );
+
+-- Read-only MVCC reference validator (zero parent row locks).
+CREATE FUNCTION swarm.system_alert_validate_refs()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM swarm.workspaces AS w WHERE w.workspace_id = NEW.workspace_id
+  ) THEN
+    RAISE EXCEPTION 'system_alerts: unknown workspace_id %', NEW.workspace_id
+      USING ERRCODE = '23503';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM swarm.agent_principals AS p WHERE p.principal_id = NEW.affected_principal_id
+  ) THEN
+    RAISE EXCEPTION 'system_alerts: unknown affected_principal_id %', NEW.affected_principal_id
+      USING ERRCODE = '23503';
+  END IF;
+  IF NEW.routed_lead_principal_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM swarm.agent_principals AS p WHERE p.principal_id = NEW.routed_lead_principal_id
+  ) THEN
+    RAISE EXCEPTION 'system_alerts: unknown routed_lead_principal_id %', NEW.routed_lead_principal_id
+      USING ERRCODE = '23503';
+  END IF;
+  IF NEW.channel_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM swarm.channels AS c
+    WHERE c.workspace_id = NEW.workspace_id AND c.channel_id = NEW.channel_id
+  ) THEN
+    RAISE EXCEPTION 'system_alerts: unknown channel_id % in workspace %', NEW.channel_id, NEW.workspace_id
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER system_alerts_validate_refs
+  BEFORE INSERT OR UPDATE OF workspace_id, channel_id, affected_principal_id, routed_lead_principal_id
+  ON swarm.system_alerts
+  FOR EACH ROW
+  EXECUTE FUNCTION swarm.system_alert_validate_refs();
 
 -- Open-alert dedupe includes scope (channel_id vs workspace-general NULL), so a hidden private
 -- alert never suppresses an otherwise visible alert in another scope.
@@ -170,9 +221,10 @@ END;
 $$;
 
 -- Multi-scope canonical pre-lock for batch timers and multi-workspace producers.
--- Acquires ALL Level 1 conversation locks in conversation_id ASC order (matching
--- swarm.conversation_lock_workspace) and then ALL Level 2 conversation-frames locks in
--- (workspace_id, channel_id) ASC order BEFORE any swarm.system_alerts row lock is taken.
+-- Acquires ALL Level 1 conversation locks in (workspace_id ASC, conversation_id ASC) order
+-- (matching BOTH swarm.conversation_lock_workspace AND multi-workspace principal retirement in
+-- 20261118000005:1035), then ALL Level 2 conversation-frames locks in (workspace_id ASC,
+-- channel_id ASC) order BEFORE any Level 3 swarm.system_alerts lock is taken.
 CREATE FUNCTION swarm.system_alert_lock_scopes(p_workspaces uuid[], p_channels uuid[])
 RETURNS void
 LANGUAGE plpgsql
@@ -200,7 +252,7 @@ BEGIN
      END
     WHERE s.ws_id IS NOT NULL
   )
-  ORDER BY c.conversation_id ASC
+  ORDER BY c.workspace_id ASC, c.conversation_id ASC
   FOR SHARE;
 
   FOR v_rec IN
@@ -586,6 +638,10 @@ BEGIN
     AND a.resolved_at IS NULL
   FOR UPDATE;
 
+  -- Stamp post-lock wall clock so a route or alert waiting behind locks does not receive a stale
+  -- pre-wait statement_timestamp().
+  v_opened := clock_timestamp();
+
   IF v_existing_id IS NOT NULL THEN
     v_lead := swarm.system_alert_pick_lead(p_workspace_id, p_channel_id, p_affected_principal_id);
     UPDATE swarm.system_alerts AS a
@@ -595,10 +651,10 @@ BEGIN
         routed_lead_principal_id = next_route.next_lead,
         routed_at = CASE
           WHEN next_route.next_lead IS DISTINCT FROM a.routed_lead_principal_id THEN
-            CASE WHEN next_route.next_lead IS NOT NULL THEN v_opened ELSE NULL END
+            CASE WHEN next_route.next_lead IS NOT NULL THEN GREATEST(a.opened_at, v_opened) ELSE NULL END
           ELSE a.routed_at
         END,
-        updated_at = v_opened
+        updated_at = GREATEST(a.opened_at, v_opened)
     FROM (
       SELECT
         CASE
@@ -780,9 +836,11 @@ END;
 $$;
 
 -- Escalate unresolved open alerts whose threshold has elapsed.
--- Pre-locks ALL affected scopes in canonical order (Level 1 conversations ASC -> Level 2
--- conversation-frames ASC) BEFORE acquiring ANY Level 3 system_alerts row locks (alert_id ASC),
--- preventing any multi-scope lock inversion with workspace removal or channel updates.
+-- Pre-locks ALL affected scopes in canonical order (Level 1 (workspace_id, conversation_id) ASC ->
+-- Level 2 (workspace_id, channel_id) ASC), then locks and updates each due alert in the universal
+-- Level 3 natural-key order (workspace_id ASC, COALESCE(channel_id, nil) ASC, kind ASC,
+-- affected_principal_id ASC) taking the same per-alert advisory key lock as record_system_alert
+-- and record_hosted_seat_refused_alerts.
 CREATE FUNCTION swarm.escalate_due_system_alerts()
 RETURNS integer
 LANGUAGE plpgsql
@@ -794,16 +852,21 @@ DECLARE
   v_alert_ids uuid[];
   v_ws_ids uuid[];
   v_ch_ids uuid[];
+  v_kinds text[];
+  v_principals uuid[];
   v_idx integer;
+  v_scope_key text;
   v_count integer := 0;
   v_updated integer;
   v_now timestamptz := statement_timestamp();
 BEGIN
   SELECT
-    array_agg(a.alert_id ORDER BY a.alert_id),
-    array_agg(a.workspace_id ORDER BY a.alert_id),
-    array_agg(a.channel_id ORDER BY a.alert_id)
-  INTO v_alert_ids, v_ws_ids, v_ch_ids
+    array_agg(a.alert_id ORDER BY a.workspace_id ASC, COALESCE(a.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, a.kind ASC, a.affected_principal_id ASC, a.alert_id ASC),
+    array_agg(a.workspace_id ORDER BY a.workspace_id ASC, COALESCE(a.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, a.kind ASC, a.affected_principal_id ASC, a.alert_id ASC),
+    array_agg(a.channel_id ORDER BY a.workspace_id ASC, COALESCE(a.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, a.kind ASC, a.affected_principal_id ASC, a.alert_id ASC),
+    array_agg(a.kind ORDER BY a.workspace_id ASC, COALESCE(a.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, a.kind ASC, a.affected_principal_id ASC, a.alert_id ASC),
+    array_agg(a.affected_principal_id ORDER BY a.workspace_id ASC, COALESCE(a.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, a.kind ASC, a.affected_principal_id ASC, a.alert_id ASC)
+  INTO v_alert_ids, v_ws_ids, v_ch_ids, v_kinds, v_principals
   FROM swarm.system_alerts AS a
   WHERE a.resolved_at IS NULL
     AND a.escalated_at IS NULL
@@ -816,9 +879,16 @@ BEGIN
   PERFORM swarm.system_alert_lock_scopes(v_ws_ids, v_ch_ids);
 
   FOR v_idx IN 1..pg_catalog.array_length(v_alert_ids, 1) LOOP
+    v_scope_key := COALESCE(v_ch_ids[v_idx]::text, '00000000-0000-0000-0000-000000000000');
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+      pg_catalog.hashtextextended(
+        'system_alert:' || v_ws_ids[v_idx]::text || ':' || v_kinds[v_idx] || ':' || v_principals[v_idx]::text || ':' || v_scope_key,
+        0
+      )
+    );
     UPDATE swarm.system_alerts AS a
-    SET escalated_at = v_now,
-        updated_at = v_now
+    SET escalated_at = GREATEST(a.opened_at, clock_timestamp()),
+        updated_at = GREATEST(a.opened_at, clock_timestamp())
     WHERE a.alert_id = v_alert_ids[v_idx]
       AND a.resolved_at IS NULL
       AND a.escalated_at IS NULL
@@ -833,9 +903,10 @@ $$;
 -- Server-only quiet-agent sync (swarm_admin only). Derives canonical scope from conversation
 -- placement (swarm.conversation_signals / swarm.conversations) so replies with inherited private
 -- placement never bucket under workspace-general, excludes DMs, group DMs, addressed messages,
--- addressed roots and chain/legacy-thread history, then partitions by (workspace, principal, scope).
--- Pre-locks ALL scopes for BOTH quiet alerts AND due escalations in canonical global order
--- BEFORE acquiring ANY Level 3 system_alerts row lock.
+-- addressed roots and chain/legacy-thread history, then merges quiet sync items AND due
+-- escalations into ONE single unified pass ordered by the universal Level 3 natural key
+-- (workspace_id ASC, COALESCE(channel_id, nil) ASC, kind ASC, affected_principal_id ASC) AFTER
+-- pre-locking ALL Level 1/Level 2 scopes in (workspace_id ASC, conversation_id ASC) order.
 CREATE FUNCTION swarm.sync_quiet_agent_alerts(
   p_escalation_interval interval DEFAULT interval '30 minutes'
 )
@@ -847,17 +918,18 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
   v_now timestamptz := statement_timestamp();
-  v_q_ws uuid[];
-  v_q_principal uuid[];
-  v_q_ch uuid[];
-  v_q_count integer[];
-  v_q_oldest timestamptz[];
-  v_due_ids uuid[];
-  v_due_ws uuid[];
-  v_due_ch uuid[];
-  v_all_ws uuid[];
-  v_all_ch uuid[];
+  v_ws uuid[];
+  v_ch uuid[];
+  v_kind text[];
+  v_principal uuid[];
+  v_has_quiet boolean[];
+  v_waiting_count integer[];
+  v_oldest timestamptz[];
+  v_due_alert_id uuid[];
   v_idx integer;
+  v_scope_key text;
+  v_opened_id uuid;
+  v_target_due_id uuid;
   v_synced integer := 0;
   v_escalated integer := 0;
   v_updated integer;
@@ -979,11 +1051,12 @@ BEGIN
             )
         )
       )
-  ), grouped AS (
+  ), quiet_items AS (
     SELECT
       e.workspace_id,
-      e.principal_id,
       e.effective_channel_id AS channel_id,
+      'agent_quiet'::text AS kind,
+      e.principal_id AS affected_principal_id,
       count(*)::integer AS waiting_count,
       min(e.enqueued_at) AS oldest_waiting_at
     FROM eligible_evidence AS e
@@ -996,64 +1069,101 @@ BEGIN
            AND ch.archived_at IS NULL
        )
     GROUP BY e.workspace_id, e.principal_id, e.effective_channel_id
+  ), due_items AS (
+    SELECT
+      a.workspace_id,
+      a.channel_id,
+      a.kind,
+      a.affected_principal_id,
+      a.alert_id
+    FROM swarm.system_alerts AS a
+    WHERE a.resolved_at IS NULL
+      AND a.escalated_at IS NULL
+      AND a.escalate_after <= v_now
+  ), unified AS (
+    SELECT
+      COALESCE(q.workspace_id, d.workspace_id) AS workspace_id,
+      COALESCE(q.channel_id, d.channel_id) AS channel_id,
+      COALESCE(q.kind, d.kind) AS kind,
+      COALESCE(q.affected_principal_id, d.affected_principal_id) AS affected_principal_id,
+      (q.workspace_id IS NOT NULL) AS has_quiet,
+      q.waiting_count,
+      q.oldest_waiting_at,
+      d.alert_id AS due_alert_id
+    FROM quiet_items AS q
+    FULL OUTER JOIN due_items AS d
+      ON d.workspace_id = q.workspace_id
+     AND d.channel_id IS NOT DISTINCT FROM q.channel_id
+     AND d.kind = q.kind
+     AND d.affected_principal_id = q.affected_principal_id
   )
   SELECT
-    array_agg(g.workspace_id ORDER BY g.workspace_id, g.channel_id NULLS FIRST, g.principal_id),
-    array_agg(g.principal_id ORDER BY g.workspace_id, g.channel_id NULLS FIRST, g.principal_id),
-    array_agg(g.channel_id ORDER BY g.workspace_id, g.channel_id NULLS FIRST, g.principal_id),
-    array_agg(g.waiting_count ORDER BY g.workspace_id, g.channel_id NULLS FIRST, g.principal_id),
-    array_agg(g.oldest_waiting_at ORDER BY g.workspace_id, g.channel_id NULLS FIRST, g.principal_id)
-  INTO v_q_ws, v_q_principal, v_q_ch, v_q_count, v_q_oldest
-  FROM grouped AS g;
+    array_agg(u.workspace_id ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.channel_id ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.kind ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.affected_principal_id ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.has_quiet ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.waiting_count ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.oldest_waiting_at ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST),
+    array_agg(u.due_alert_id ORDER BY u.workspace_id ASC, COALESCE(u.channel_id, '00000000-0000-0000-0000-000000000000'::uuid) ASC, u.kind ASC, u.affected_principal_id ASC, u.due_alert_id NULLS FIRST)
+  INTO v_ws, v_ch, v_kind, v_principal, v_has_quiet, v_waiting_count, v_oldest, v_due_alert_id
+  FROM unified AS u;
 
-  SELECT
-    array_agg(a.alert_id ORDER BY a.alert_id),
-    array_agg(a.workspace_id ORDER BY a.alert_id),
-    array_agg(a.channel_id ORDER BY a.alert_id)
-  INTO v_due_ids, v_due_ws, v_due_ch
-  FROM swarm.system_alerts AS a
-  WHERE a.resolved_at IS NULL
-    AND a.escalated_at IS NULL
-    AND a.escalate_after <= v_now;
+  IF v_ws IS NULL OR pg_catalog.array_length(v_ws, 1) IS NULL THEN
+    RETURN jsonb_build_object('synced', 0, 'escalated', 0);
+  END IF;
 
-  v_all_ws := COALESCE(v_q_ws, ARRAY[]::uuid[]) || COALESCE(v_due_ws, ARRAY[]::uuid[]);
-  v_all_ch := COALESCE(v_q_ch, ARRAY[]::uuid[]) || COALESCE(v_due_ch, ARRAY[]::uuid[]);
+  -- Lock ALL Level 1 conversations in (workspace_id ASC, conversation_id ASC) and Level 2
+  -- conversation-frames in (workspace_id ASC, channel_id ASC) BEFORE touching any alert row.
+  PERFORM swarm.system_alert_lock_scopes(v_ws, v_ch);
 
-  -- Lock ALL Level 1 conversations (ORDER BY conversation_id ASC) and Level 2 conversation-frames
-  -- (ORDER BY workspace_id, channel_id ASC) BEFORE touching any swarm.system_alerts row.
-  PERFORM swarm.system_alert_lock_scopes(v_all_ws, v_all_ch);
-
-  IF v_q_ws IS NOT NULL AND pg_catalog.array_length(v_q_ws, 1) IS NOT NULL THEN
-    FOR v_idx IN 1..pg_catalog.array_length(v_q_ws, 1) LOOP
-      IF swarm.record_system_alert(
-        v_q_ws[v_idx],
+  -- Execute BOTH quiet sync and due escalations in ONE single pass sorted by the universal
+  -- Level 3 natural key (workspace_id, COALESCE(channel_id, nil), kind, affected_principal_id).
+  FOR v_idx IN 1..pg_catalog.array_length(v_ws, 1) LOOP
+    v_opened_id := NULL;
+    IF v_has_quiet[v_idx] THEN
+      v_opened_id := swarm.record_system_alert(
+        v_ws[v_idx],
         'agent_quiet',
-        v_q_principal[v_idx],
-        v_q_ch[v_idx],
-        v_q_count[v_idx],
-        v_q_oldest[v_idx],
+        v_principal[v_idx],
+        v_ch[v_idx],
+        v_waiting_count[v_idx],
+        v_oldest[v_idx],
         p_escalation_interval
-      ) IS NOT NULL THEN
+      );
+      IF v_opened_id IS NOT NULL THEN
         v_synced := v_synced + 1;
       END IF;
-    END LOOP;
-  END IF;
+    END IF;
 
-  -- Escalate pre-collected due alerts (and any newly opened 0-second alerts in the already-locked
-  -- scopes) in strict alert_id ASC order without acquiring any new Level 1/Level 2 locks.
-  IF v_due_ids IS NOT NULL AND pg_catalog.array_length(v_due_ids, 1) IS NOT NULL THEN
-    FOR v_idx IN 1..pg_catalog.array_length(v_due_ids, 1) LOOP
+    v_target_due_id := COALESCE(
+      v_due_alert_id[v_idx],
+      CASE
+        WHEN v_opened_id IS NOT NULL
+         AND COALESCE(p_escalation_interval, interval '30 minutes') <= interval '0 seconds'
+        THEN v_opened_id
+        ELSE NULL
+      END
+    );
+    IF v_target_due_id IS NOT NULL THEN
+      v_scope_key := COALESCE(v_ch[v_idx]::text, '00000000-0000-0000-0000-000000000000');
+      PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+          'system_alert:' || v_ws[v_idx]::text || ':' || v_kind[v_idx] || ':' || v_principal[v_idx]::text || ':' || v_scope_key,
+          0
+        )
+      );
       UPDATE swarm.system_alerts AS a
-      SET escalated_at = v_now,
-          updated_at = v_now
-      WHERE a.alert_id = v_due_ids[v_idx]
+      SET escalated_at = GREATEST(a.opened_at, clock_timestamp()),
+          updated_at = GREATEST(a.opened_at, clock_timestamp())
+      WHERE a.alert_id = v_target_due_id
         AND a.resolved_at IS NULL
         AND a.escalated_at IS NULL
-        AND a.escalate_after <= v_now;
+        AND a.escalate_after <= GREATEST(v_now, clock_timestamp());
       GET DIAGNOSTICS v_updated = ROW_COUNT;
       v_escalated := v_escalated + v_updated;
-    END LOOP;
-  END IF;
+    END IF;
+  END LOOP;
 
   RETURN jsonb_build_object(
     'synced', v_synced,
@@ -1192,6 +1302,7 @@ BEGIN
   END IF;
 
   v_was_escalated := (v_row.escalated_at IS NOT NULL);
+  v_now := GREATEST(v_row.opened_at, clock_timestamp());
 
   UPDATE swarm.system_alerts
   SET resolved_at = v_now,
@@ -1294,6 +1405,7 @@ BEGIN
 END;
 $$;
 
+ALTER FUNCTION swarm.system_alert_validate_refs() OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_fix_hint(text) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_lock_scope(uuid, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.system_alert_lock_scopes(uuid[], uuid[]) OWNER TO swarm_admin;
@@ -1312,6 +1424,7 @@ ALTER FUNCTION swarm.sync_quiet_agent_alerts(interval) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.resolve_system_alert(uuid, uuid, text, uuid, uuid, text) OWNER TO swarm_admin;
 
 REVOKE ALL ON FUNCTION
+  swarm.system_alert_validate_refs(),
   swarm.system_alert_fix_hint(text),
   swarm.system_alert_lock_scope(uuid, uuid),
   swarm.system_alert_lock_scopes(uuid[], uuid[]),

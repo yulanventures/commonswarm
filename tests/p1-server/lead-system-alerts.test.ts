@@ -15,8 +15,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { readSystemAlerts, resolveSystemAlertCommand } from "../../src/cloud/system-alerts.js";
-import { ThinCommandClient } from "../../src/cloud/command-client.js";
+import { readSystemAlerts, resolveSystemAlertCommand, systemAlertToSignalRecord } from "../../src/cloud/system-alerts.js";
+import { ThinCommandClient, type SignalRecord } from "../../src/cloud/command-client.js";
+import { runArrivalWatch } from "../../src/cloud/arrival-watch.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 type Person = { id: string; jwt: string };
@@ -468,27 +469,97 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   `;
   assert.equal(afterNoReroute!.routed_at.getTime(), beforeReroute!.routed_at.getTime(), "routed_at must not bump when routed lead is unchanged");
 
-  // Record wsLead's cursor AFTER opened_at, then make leadOpen stale so the alert reroutes to wsLead.
-  await delay(50);
-  const wsLeadCursorAt = new Date().toISOString();
-  await delay(50);
+  // Held reroute witness (cursor advances WHILE reroute is waiting on lock):
+  // Make leadOpen stale, hold openCh's conversation lock, eagerly start sync_quiet_agent_alerts(),
+  // wait until it blocks in pg_stat_activity, advance wsLead's cursor DURING the lock wait, then
+  // release the lock. Post-lock clock_timestamp() ensures routed_at > cursorDuringWait, AND
+  // runArrivalWatch open-route reconciliation delivers the open alert even if cursor > routed_at!
   await setPresence(leadOpen, { watcherAgoSec: 600, lastCommandAgoSec: 900 });
-  await sql`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')`;
+  let rerouteHolderPid = 0;
+  let rerouteHoldReady!: () => void;
+  const rerouteHeld = new Promise<void>((r) => { rerouteHoldReady = r; });
+  let releaseRerouteHold!: () => void;
+  const rerouteReleaseGate = new Promise<void>((r) => { releaseRerouteHold = r; });
+  const rerouteHoldTx = sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    rerouteHolderPid = pid;
+    await tx`SELECT 1 FROM swarm.conversations WHERE conversation_id = ${openCh.id}::uuid FOR UPDATE`;
+    rerouteHoldReady();
+    await rerouteReleaseGate;
+  });
+  await rerouteHeld;
+
+  const heldReroute = sql`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes')`.execute();
+  await waitForBlockedBy(rerouteHolderPid, "sync_quiet_agent_alerts", "held reroute waiting on channel scope lock");
+  await delay(80);
+  // Simulate another message committing and advancing wsLead's cursor WHILE the reroute waits!
+  const wsLeadCursorDuringWait = new Date().toISOString();
+  await delay(80);
+  releaseRerouteHold();
+  await Promise.all([rerouteHoldTx, heldReroute]);
+
   const [afterReroute] = await sql<{ routed_lead_principal_id: string; routed_at: Date }[]>`
     SELECT routed_lead_principal_id, routed_at FROM swarm.system_alerts WHERE alert_id = ${beforeReroute!.alert_id}::uuid
   `;
   assert.equal(afterReroute!.routed_lead_principal_id, wsLead.principal);
-  assert.ok(afterReroute!.routed_at.getTime() > new Date(wsLeadCursorAt).getTime(), "routed_at must advance on reroute");
+  assert.ok(
+    afterReroute!.routed_at.getTime() > new Date(wsLeadCursorDuringWait).getTime(),
+    "routed_at must use post-lock clock_timestamp() so a cursor advancing during lock wait stays behind it",
+  );
   const wsLeadAfterCursor = await readResource(wsLead.token, {
     resource: "signals", workspace_id: workspace, inbox: true, about: null, kind: null, since: null,
-    after_created_at: wsLeadCursorAt, after_id: "00000000-0000-4000-8000-000000000000",
+    after_created_at: wsLeadCursorDuringWait, after_id: "00000000-0000-4000-8000-000000000000",
     limit: 20, include_stale: false,
   });
   assert.equal(wsLeadAfterCursor.status, 200, JSON.stringify(wsLeadAfterCursor.body));
   assert.ok(
     (wsLeadAfterCursor.body.signals as Row[]).some((s) => s.id === beforeReroute!.alert_id),
-    "rerouted alert must appear after backup lead's existing inbox cursor",
+    "rerouted alert must appear after backup lead's cursor advanced during lock wait",
   );
+
+  // MVCC commit-order skew witness: even when the listener's signal cursor is 60s PAST routed_at,
+  // runArrivalWatch open-route reconciliation (backed by real readSystemAlerts) still emits it once!
+  const watchCtrl = new AbortController();
+  const watchEmitted: SignalRecord[] = [];
+  let watchCycles = 0;
+  let futureCursor: { created_at: string; id: string } | null = {
+    created_at: new Date(afterReroute!.routed_at.getTime() + 60_000).toISOString(),
+    id: randomUUID(),
+  };
+  const watchTarget = { profileId: "reroute-watch-test", url: local.API_URL, anonKey: local.ANON_KEY };
+  await runArrivalWatch({
+    workspaceId: workspace,
+    principalId: wsLead.principal,
+    signal: watchCtrl.signal,
+    pollMs: 1,
+    sleep: async () => {
+      watchCycles += 1;
+      if (watchCycles >= 2) watchCtrl.abort();
+    },
+    store: {
+      location: "memory://reroute-watch-test",
+      read: async () => futureCursor,
+      write: async (next) => { futureCursor = next; },
+    },
+    readPage: async () => ({
+      signals: [],
+      rawCount: 0,
+      malformedRows: 0,
+      pendingDeliveryCount: 0,
+      nextCursor: null,
+      capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
+      legacyCursorFallback: false,
+    }),
+    readOpenAlerts: async () => {
+      const res = await readSystemAlerts(watchTarget, wsLead.token, workspace);
+      return res.alerts
+        .filter((a) => a.routed_lead_principal_id === wsLead.principal && (a.resolved_at ?? null) === null)
+        .map((a) => systemAlertToSignalRecord(a, wsLead.principal));
+    },
+    emit: async (row) => { watchEmitted.push(row); },
+  });
+  const matchingEmits = watchEmitted.filter((r) => r.id === beforeReroute!.alert_id);
+  assert.equal(matchingEmits.length, 1, "open-route reconciliation must deliver the routed alert once even when cursor is past routed_at");
 });
 
 test("Condition 2: hidden private alert and unknown UUID produce identical HTTP 404, identical audit_log visibility, and zero lock wait under contention for non-member admin", { timeout: 90_000 }, async () => {
@@ -721,13 +792,15 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
     await wsLeadSock.close();
   }
 
-  // 3. Multi-scope workspace-removal race: workspace removal triggers swarm.conversation_lock_workspace
-  //    (locking ALL conversations in conversation_id ASC order) while sync_quiet_agent_alerts touches
-  //    multiple channels + #general + due escalation in one pass. Verify real lock wait + ZERO deadlock!
+  // 3. Served workspace-removal race (exact agent-auth.ts:647 order: workspaces FOR UPDATE +
+  //    agent_principals FOR UPDATE -> agent_workspace_memberships update triggering
+  //    swarm.conversation_lock_workspace) racing BOTH sync_quiet_agent_alerts AND a brand-new
+  //    record_system_alert insert in that workspace. Proves zero FK parent-lock inversion!
   const msCh1 = await createChannel(owner, "multi-scope-1");
   const msCh2 = await createChannel(owner, "multi-scope-2");
   const msLead = await agentOf(owner.id, "ms-lead");
   const msQuiet = await agentOf(owner.id, "ms-quiet");
+  const fkInsertSeat = await agentOf(owner.id, "fk-insert-seat");
   await setPresence(msLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
   await setPresence(msQuiet, { watcherAgoSec: 600, lastCommandAgoSec: 900 });
   assert.equal((await send(owner.jwt, {
@@ -748,8 +821,14 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
   const removalTx = sql.begin(async (tx) => {
     const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
     msHolderPid = pid;
-    // Revoking workspace seat triggers agent_workspace_memberships_apply_conversations ->
-    // swarm.conversation_lock_workspace(workspace) in conversation_id ASC order!
+    // Exact served member/agent removal lock order (agent-auth.ts:647): workspaces FOR UPDATE +
+    // agent_principals FOR UPDATE BEFORE conversation_lock_workspace!
+    await tx`SELECT 1 FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid FOR UPDATE`;
+    await tx`
+      SELECT 1 FROM swarm.agent_principals
+      WHERE principal_id IN (${msLead.principal}::uuid, ${fkInsertSeat.principal}::uuid, ${wsLead.principal}::uuid)
+      ORDER BY principal_id FOR UPDATE
+    `;
     await tx`
       UPDATE swarm.agent_workspace_memberships
       SET revoked_at = statement_timestamp()
@@ -764,10 +843,17 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
   const multiScopeTimer = sql<{ res: Row }[]>`
     SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes') AS res
   `.execute();
-  await waitForBlockedBy(msHolderPid, "sync_quiet_agent_alerts", "multi-scope timer racing workspace removal");
+  const concurrentFkInsert = sql<{ id: string }[]>`
+    SELECT swarm.record_system_alert(
+      ${workspace}::uuid, 'local_renewal_superseded', ${fkInsertSeat.principal}::uuid, ${msCh1.id}::uuid
+    ) AS id
+  `.execute();
+  await waitForBlockedBy(msHolderPid, "sync_quiet_agent_alerts", "multi-scope timer racing served workspace removal");
+  await waitForBlockedBy(msHolderPid, "record_system_alert", "new alert insert racing served workspace/principal locks");
   msAllowCommit();
-  const [, [timerResult]] = await Promise.all([removalTx, multiScopeTimer]);
-  assert.ok(Number(timerResult!.res.synced) >= 3, "multi-scope timer must complete without deadlock after workspace removal");
+  const [, [timerResult], [fkInserted]] = await Promise.all([removalTx, multiScopeTimer, concurrentFkInsert]);
+  assert.ok(Number(timerResult!.res.synced) >= 3, "multi-scope timer must complete without deadlock after served workspace removal");
+  assert.ok(fkInserted?.id, "new alert insert must complete without FK parent-lock deadlock");
   const msAlerts = await sql<Row[]>`
     SELECT channel_id, routed_lead_principal_id
     FROM swarm.system_alerts
@@ -778,7 +864,120 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
     assert.notEqual(row.routed_lead_principal_id, msLead.principal, "removed workspace lead must NOT receive multi-scope route");
   }
 
-  // 4. Resolve racing escalation against the same row lock: verify real lock wait in pg_stat_activity!
+  // 4. Multi-workspace principal retirement (20261118000005:1035, locking workspaces in workspace_id
+  //    ASC then conversations in conversation_id ASC) racing multi-workspace sync_quiet_agent_alerts!
+  const retiringLead = await agentOf(owner.id, "multi-ws-retire");
+  const otherQuiet = await agentOf(owner.id, "other-ws-quiet", otherWorkspace);
+  await sql`
+    INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${retiringLead.principal}::uuid, ${otherWorkspace}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)
+    ON CONFLICT DO NOTHING
+  `;
+  await setPresence(retiringLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(otherQuiet, { watcherAgoSec: 600, lastCommandAgoSec: 900, ws: otherWorkspace });
+  const otherCh = await createChannel(owner, "other-ws-ch", {}, otherWorkspace);
+  await enqueueWaitingDelivery({ ws: otherWorkspace, senderUserId: owner.id, recipientAgent: otherQuiet, channelId: otherCh.id, ageMinutes: 25 });
+  await enqueueWaitingDelivery({ ws: otherWorkspace, senderUserId: owner.id, recipientAgent: otherQuiet, channelId: null, ageMinutes: 20 });
+
+  let retirePid = 0;
+  let retireLocked!: () => void;
+  const retireLockedReady = new Promise<void>((r) => { retireLocked = r; });
+  let releaseRetire!: () => void;
+  const retireReleaseGate = new Promise<void>((r) => { releaseRetire = r; });
+  const retireTx = sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    retirePid = pid;
+    // Triggers agent_principals_apply_conversations across BOTH workspace and otherWorkspace!
+    await tx`
+      UPDATE swarm.agent_principals
+      SET revoked_at = statement_timestamp()
+      WHERE principal_id = ${retiringLead.principal}::uuid
+    `;
+    retireLocked();
+    await retireReleaseGate;
+  });
+  await retireLockedReady;
+  const multiWsTimer = sql<{ res: Row }[]>`
+    SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes') AS res
+  `.execute();
+  await waitForBlockedBy(retirePid, "sync_quiet_agent_alerts", "multi-workspace timer racing principal retirement");
+  releaseRetire();
+  const [, [multiWsResult]] = await Promise.all([retireTx, multiWsTimer]);
+  assert.ok(Number(multiWsResult!.res.synced) >= 2, "multi-workspace timer must serialize with principal retirement without deadlock");
+
+  // 5. Opposite alert_id vs natural-key order witness: two due hosted_seat_refused alerts with
+  //    alert_ids strictly reversed relative to (workspace_id, affected_principal_id) order, racing
+  //    record_hosted_seat_refused_alerts against escalate_due_system_alerts!
+  const rawHost1 = await agentOf(owner.id, "host-order-a");
+  const rawHost2 = await agentOf(owner.id, "host-order-b");
+  const [hostFirst, hostSecond] = rawHost1.principal < rawHost2.principal ? [rawHost1, rawHost2] : [rawHost2, rawHost1];
+  const orderGrantId = randomUUID();
+  const orderProviderId = `pg_ord_${randomBytes(12).toString("hex")}`;
+  const orderDigest = createHash("sha256").update("order-manifest-v1").digest();
+  const alertIdHigh = "ffffffff-ffff-4fff-8fff-fffffffffff1";
+  const alertIdLow = "00000001-0000-4000-8000-000000000001";
+  await sql.begin(async (tx) => {
+    await tx`UPDATE swarm.agent_principals SET transport = 'hosted_mcp', turn_only = true
+      WHERE principal_id IN (${hostFirst.principal}::uuid, ${hostSecond.principal}::uuid)`;
+    await tx`INSERT INTO swarm.hosted_mcp_grants (
+        grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
+        selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at
+      ) VALUES (
+        ${orderGrantId}::uuid, ${orderProviderId}, ${owner.id}::uuid, ${workspace}::uuid, 'client-ord',
+        'https://mcp.commonswarm.com/mcp', ARRAY[${workspace}::uuid], ${orderDigest},
+        'ref-ord', 'active', statement_timestamp(), statement_timestamp()
+      )`;
+    await tx`INSERT INTO swarm.hosted_mcp_grant_workspaces (
+        grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at
+      ) VALUES (${orderGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${orderDigest}, ${randomUUID()}::uuid, statement_timestamp())`;
+    for (const s of [hostFirst, hostSecond]) {
+      await tx`INSERT INTO swarm.hosted_mcp_grant_agents (grant_id, principal_id, owner_user_id)
+        VALUES (${orderGrantId}::uuid, ${s.principal}::uuid, ${owner.id}::uuid)`;
+      await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+        VALUES (${randomUUID()}::uuid, ${orderGrantId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${s.principal}::uuid, ${s.name}, statement_timestamp())`;
+    }
+    // Insert due open alerts with alert_id order REVERSED vs (workspace_id, affected_principal_id)!
+    await tx`INSERT INTO swarm.system_alerts (
+        alert_id, workspace_id, channel_id, kind, affected_principal_id, fix_hint,
+        routed_lead_principal_id, routed_at, opened_at, escalate_after, escalated_at, updated_at
+      ) VALUES
+        (${alertIdHigh}::uuid, ${workspace}::uuid, NULL, 'hosted_seat_refused', ${hostFirst.principal}::uuid,
+         'Reconnect hosted MCP.', ${wsLead.principal}::uuid, statement_timestamp() - interval '1 hour',
+         statement_timestamp() - interval '1 hour', statement_timestamp() - interval '30 minutes', NULL, statement_timestamp()),
+        (${alertIdLow}::uuid, ${workspace}::uuid, NULL, 'hosted_seat_refused', ${hostSecond.principal}::uuid,
+         'Reconnect hosted MCP.', ${wsLead.principal}::uuid, statement_timestamp() - interval '1 hour',
+         statement_timestamp() - interval '1 hour', statement_timestamp() - interval '30 minutes', NULL, statement_timestamp())`;
+  });
+
+  let orderPid = 0;
+  let orderLocked!: () => void;
+  const orderLockedReady = new Promise<void>((r) => { orderLocked = r; });
+  let releaseOrder!: () => void;
+  const orderReleaseGate = new Promise<void>((r) => { releaseOrder = r; });
+  const firstKey = `system_alert:${workspace}:hosted_seat_refused:${hostFirst.principal}:00000000-0000-0000-0000-000000000000`;
+  const orderHoldTx = sql.begin(async (tx) => {
+    const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+    orderPid = pid;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${firstKey}, 0))`;
+    orderLocked();
+    await orderReleaseGate;
+  });
+  await orderLockedReady;
+
+  const hostedBatchRace = sql<{ n: number }[]>`
+    SELECT swarm.record_hosted_seat_refused_alerts(${orderProviderId}, ${owner.id}::uuid) AS n
+  `.execute();
+  const escalateOrderRace = sql<{ n: number }[]>`
+    SELECT swarm.escalate_due_system_alerts() AS n
+  `.execute();
+  await waitForBlockedBy(orderPid, "record_hosted_seat_refused_alerts", "hosted batch blocked on canonical first key");
+  await waitForBlockedBy(orderPid, "escalate_due_system_alerts", "escalation timer blocked on same canonical first key");
+  releaseOrder();
+  const [, [hostedBatchRes], [escalateOrderRes]] = await Promise.all([orderHoldTx, hostedBatchRace, escalateOrderRace]);
+  assert.equal(hostedBatchRes!.n, 2, "hosted batch must complete without deadlock against reversed alert_ids");
+  assert.ok(escalateOrderRes!.n >= 2, "escalation timer must complete without deadlock against reversed alert_ids");
+
+  // 6. Resolve racing escalation against the same row lock: verify real lock wait in pg_stat_activity!
   const raceSeat = await agentOf(owner.id, "race-seat-c4");
   const raceAlertId = (await sql<{ id: string }[]>`
     SELECT swarm.record_system_alert(

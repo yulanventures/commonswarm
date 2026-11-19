@@ -35,6 +35,8 @@ DROP FUNCTION IF EXISTS swarm.system_alert_lock_scopes(uuid[], uuid[]);
 DROP FUNCTION IF EXISTS swarm.system_alert_lock_scope(uuid, uuid);
 DROP FUNCTION IF EXISTS swarm.system_alert_fix_hint(text);
 
+DROP TRIGGER IF EXISTS system_alerts_validate_refs ON swarm.system_alerts;
+DROP FUNCTION IF EXISTS swarm.system_alert_validate_refs();
 DROP TABLE IF EXISTS swarm.system_alerts;
 
 RESET search_path;
