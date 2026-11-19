@@ -590,10 +590,10 @@ async function main(): Promise<void> {
 
   const envDir = mkdtempSync(join(tmpdir(), "cswarm-mobile-audit-"));
   const envFile = join(envDir, "functions.env");
-  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\nSWARM_SEAT_ADMIN=1\n");
+  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\nSWARM_SEAT_ADMIN=1\nSWARM_CHAT_MENTIONS=1\n");
   let functionLogs = "";
   const functions = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
-    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1", SWARM_SEAT_ADMIN: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1", SWARM_SEAT_ADMIN: "1", SWARM_CHAT_MENTIONS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   const cliState = observeFunctionCli(functions);
   const capture = (chunk: Buffer) => { functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000); };
   functions.stdout?.on("data", capture); functions.stderr?.on("data", capture);
@@ -1153,6 +1153,7 @@ async function main(): Promise<void> {
       }
       // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
+      const browseScreen = screens().find(s => s.id === "app.chat.group") ?? general;
       // The picture and palette checks are once per run: in a sharded full run, shard 1 does them.
       for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PICTURE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
@@ -1167,7 +1168,15 @@ async function main(): Promise<void> {
           const shot = `shots/app.chat.general--${label}--${size}--${theme}.png`;
           await page.screenshot({ path: join(OUT, shot) });
           hoverShots.push(shot);
-        }, { click: desktop });
+        }, {
+          click: desktop,
+          openBrowse: async (setup) => {
+            const page = await signedIn.newPage();
+            await setup(page);
+            await openScreen(page, browseScreen!);
+            return page;
+          },
+        });
         pictures.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }

@@ -2482,7 +2482,9 @@ test('openChatPicture aborts if another dialog opens while the viewer module loa
   });
   runInContext(code, context);
   const openPic = runInContext('openChatPicture', context) as (a: { file_id: string; version_n: number; name: string }, t: unknown) => void;
-  const trigger = { isConnected: true, closest: () => ({ dataset: { signalId: 'sig-1' } }), parentElement: { querySelector: () => null } };
+  const trigger = { isConnected: true, title: 'boiler.png', dataset: { streamImage: 'f1', streamImageVersion: '1' },
+    closest: (sel: string) => sel === '[data-signal-id]' ? { dataset: { signalId: 'sig-1' } } : { querySelectorAll: () => [trigger] },
+    parentElement: { querySelector: () => null } };
 
   // Start opening picture while the viewer module response is held.
   openPic({ file_id: 'f1', version_n: 1, name: 'boiler.png' }, trigger);

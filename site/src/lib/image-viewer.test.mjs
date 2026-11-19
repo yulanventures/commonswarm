@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FITTED, clampView, closeUpScale, fittedSize, maxScale, openImageViewer, zoomAbout } from "./image-viewer.ts";
+import { FITTED, clampView, closeUpScale, fittedSize, maxScale, openImageViewer, slideTarget, zoomAbout } from "./image-viewer.ts";
 
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
@@ -42,7 +42,7 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   const makeNode = (tag) => {
     const listeners = [];
     const node = {
-      tagName: tag.toUpperCase(), className: "", dataset: {}, hidden: false, open: false, children: [],
+      tagName: tag.toUpperCase(), className: "", classList: { add() {} }, dataset: {}, hidden: false, open: false, children: [],
       style: { removeProperty() {}, setProperty() {} },
       setAttribute() {}, toggleAttribute() {}, removeAttribute() {},
       append(...kids) { this.children.push(...kids); this.firstElementChild = this.children[0]; },
@@ -63,7 +63,7 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   const win = { matchMedia: () => ({ matches: true }), addEventListener() {}, removeEventListener() {} };
   const doc = { defaultView: win, activeElement: null, createElement: makeNode, createElementNS: (_ns, tag) => makeNode(tag) };
   const host = { ownerDocument: doc, append() {} };
-  const dialog = openImageViewer(host, { name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} }, () => {});
+  const dialog = openImageViewer(host, [{ name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} }], 0, () => {});
   assert.equal(dialog.open, true);
   // Trailing events from the keystroke that opened the dialog must be cancelled before they can click autofocused Close.
   assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, true, "trailing Enter keypress is cancelled");
@@ -74,4 +74,88 @@ test("trailing keypress, keyup and repeat keydown from opening Enter/Space are b
   assert.equal(dialog.dispatch("keydown", { key: "Enter", repeat: false }).defaultPrevented, false);
   assert.equal(dialog.dispatch("keypress", { key: "Enter" }).defaultPrevented, false, "keypress after keydown inside viewer is allowed");
   assert.equal(dialog.dispatch("keyup", { key: " " }).defaultPrevented, false, "keyup after keydown inside viewer is allowed");
+});
+
+test("a sideways slide goes to the neighbour that way, and nowhere when it is short or there is none", () => {
+  // Sliding left brings the next picture in; sliding right, the previous.
+  assert.equal(slideTarget(1, 3, -120), 2);
+  assert.equal(slideTarget(1, 3, 120), 0);
+  // Short slides stay.
+  assert.equal(slideTarget(1, 3, -63), 1);
+  assert.equal(slideTarget(1, 3, 63), 1);
+  // No neighbour that way: the first has no previous, the last no next, and a single picture has neither.
+  assert.equal(slideTarget(0, 3, 200), 0);
+  assert.equal(slideTarget(2, 3, -200), 2);
+  assert.equal(slideTarget(0, 1, -200), 0);
+  assert.equal(slideTarget(0, 1, 200), 0);
+});
+
+test("multi-picture header separates truncating filename from reserved position while keeping one atomic live announcement", () => {
+  const makeNode = (tag) => {
+    const attrs = new Map();
+    const listeners = [];
+    const node = {
+      tagName: tag.toUpperCase(), className: "", classList: { add() {} }, dataset: {}, hidden: false, open: false, children: [],
+      _text: "",
+      get textContent() { return this.children.length ? this.children.map(c => c.textContent).join("") : this._text; },
+      set textContent(v) { this._text = String(v); this.children = []; },
+      style: { removeProperty() {}, setProperty() {} },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.get(k) ?? null; },
+      toggleAttribute() {}, removeAttribute(k) { attrs.delete(k); },
+      append(...kids) { this.children.push(...kids); this.firstElementChild = this.children[0]; },
+      querySelector() { return { setAttribute() {} }; },
+      addEventListener(type, fn, capture = false) { listeners.push({ type, fn, capture: Boolean(capture) }); },
+      removeEventListener() {},
+      dispatch(type, props = {}) {
+        const event = { type, defaultPrevented: false, stopped: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...props };
+        for (const l of listeners) if (l.type === type) l.fn(event);
+        return event;
+      },
+      showModal() { this.open = true; },
+      close() { this.open = false; this.dispatch("close"); },
+      remove() {},
+    };
+    return node;
+  };
+  const win = { matchMedia: () => ({ matches: true }), addEventListener() {}, removeEventListener() {} };
+  const doc = { defaultView: win, activeElement: null, createElement: makeNode, createElementNS: (_ns, tag) => makeNode(tag) };
+  const host = { ownerDocument: doc, append() {} };
+  const first = "Boiler inspection - east utility room - before repairs.png";
+  const second = "Boiler inspection - east utility room - after repairs.png";
+  const dialog = openImageViewer(host, [
+    { name: first, link: () => new Promise(() => {}), forget() {}, download() {} },
+    { name: second, link: () => new Promise(() => {}), forget() {}, download() {} },
+  ], 0, () => {});
+  const bar = dialog.children[0];
+  const name = bar.children[0];
+  assert.equal(name.className, "cs-viewer__name");
+  assert.equal(name.getAttribute("aria-live"), "polite");
+  assert.equal(name.getAttribute("aria-atomic"), "true");
+  assert.deepEqual(name.children.map(c => c.className), ["cs-viewer__title", "cs-viewer__sep", "cs-viewer__position"]);
+  assert.equal(name.children[0].textContent, first);
+  assert.equal(name.children[2].textContent, "1 of 2");
+  assert.equal(name.textContent, `${first}, 1 of 2`);
+  assert.equal(dialog.getAttribute("aria-label"), `${first}, 1 of 2`);
+
+  // Step to the second picture via ArrowRight.
+  const prevButtonCtor = globalThis.HTMLButtonElement;
+  if (!prevButtonCtor) globalThis.HTMLButtonElement = class {};
+  try {
+    dialog.dispatch("keydown", { key: "ArrowRight", repeat: false });
+  } finally {
+    if (!prevButtonCtor) delete globalThis.HTMLButtonElement;
+  }
+  assert.equal(name.children[0].textContent, second);
+  assert.equal(name.children[2].textContent, "2 of 2");
+  assert.equal(name.textContent, `${second}, 2 of 2`);
+  assert.equal(dialog.getAttribute("aria-label"), `${second}, 2 of 2`);
+
+  // A single picture omits the position element altogether.
+  const single = openImageViewer(host, [
+    { name: "boiler-label.png", link: () => new Promise(() => {}), forget() {}, download() {} },
+  ], 0, () => {});
+  const singleName = single.children[0].children[0];
+  assert.deepEqual(singleName.children.map(c => c.className), ["cs-viewer__title"]);
+  assert.equal(singleName.textContent, "boiler-label.png");
 });
