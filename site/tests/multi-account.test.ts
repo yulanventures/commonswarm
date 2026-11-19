@@ -858,14 +858,18 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
 
     // Case A (C3): FAILED Step 1 durable ownership write during logout ->
     // (1) DO NOT delete slot, DO NOT claim browserSignedOut, and DO NOT resurrect the torn-down account in this tab!
-    // (2) An in-flight refresh hitting fencedResponse(400 session_not_found) after failed Step 1 MUST NOT delete slotKey from disk!
-    let releaseQueuedLock!: () => void;
-    const queuedLockHold = locks.lock(expectedLoginLock, -1, async () => {
-      await new Promise<void>((resolve) => { releaseQueuedLock = resolve; });
-    });
-    await new Promise((r) => setTimeout(r, 15));
-    const queuedRefreshPromise = rt1.client.auth.refreshSession();
-    await new Promise((r) => setTimeout(r, 15));
+    // (2) Hold a refresh ALREADY IN FLIGHT across the failed Step 1 write so post-fetch fence returns
+    //     fencedResponse(400 session_not_found) and GoTrueClient ACTUALLY invokes storageAdapter.removeItem(slotKey1),
+    //     proving the disposed/unowned removeItem guard keeps slotKey1 intact on disk!
+    const slot1ParsedBeforeA = JSON.parse(ls.rawGet(slotKey1)!) as { refresh_token: string };
+    const savedRefreshBeforeA = mock.state.sessionsByRefresh.get(slot1ParsedBeforeA.refresh_token)!;
+    let releaseInFlightRefresh!: () => void;
+    mock.state.refreshGate = new Promise<void>((resolve) => { releaseInFlightRefresh = resolve; });
+    const refreshesBeforeA = mock.state.refreshCount;
+    const inFlightRefreshPromise = rt1.client.auth.refreshSession();
+    // Wait until refreshSession() has passed getItem(slotKey1) and is genuinely in flight inside mock.fetcher.
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(mock.state.refreshCount, refreshesBeforeA + 1, "refresh must already be in flight before Step 1 logout");
 
     ls.failSetKeys.add(accountsStorageKey(ORIGIN_HASH));
     const failedLogout = await tab1.signOutAccount(p1.account.userId, p1.account.loginId);
@@ -880,13 +884,15 @@ test("C3: SDK BroadcastChannel disabled pre-init (0 credential broadcasts), dura
     assert.ok(ls.rawGet(slotKey1), "slot remains on disk because Step 1 failed");
     assert.match(failedLogout.notice ?? "", /could not be confirmed/i);
 
-    // Release the queued lock so the in-flight refresh enters buildAuthFetch -> receives fencedResponse(400 session_not_found)
-    // -> SDK calls storageAdapter.removeItem(slotKey1), which MUST clear memory only and leave localStorage intact!
-    releaseQueuedLock();
-    await queuedLockHold;
-    const queuedRefreshRes = await queuedRefreshPromise;
-    assert.ok(queuedRefreshRes.error, "fenced refresh must fail with error");
+    // Release the already-in-flight refresh -> buildAuthFetch post-response fence returns 400 session_not_found
+    // -> GoTrueClient invokes storageAdapter.removeItem(slotKey1), which MUST clear memory only & leave localStorage intact!
+    releaseInFlightRefresh();
+    mock.state.refreshGate = null;
+    const inFlightRefreshRes = await inFlightRefreshPromise;
+    assert.ok(inFlightRefreshRes.error, "fenced in-flight refresh must fail with error");
     assert.ok(ls.rawGet(slotKey1), "SDK removeItem after fenced 400 MUST NOT delete slotKey from localStorage when Step 1 failed");
+    // Restore mock server's refresh token entry so Case B tests genuine 200-refresh rejection by durable ownership.
+    mock.state.sessionsByRefresh.set(slot1ParsedBeforeA.refresh_token, savedRefreshBeforeA);
     ls.failSetKeys.clear();
 
     // Case B (C3): SUCCEEDED Step 1 durable ownership write + FAILED Step 2 slot deletion ->
