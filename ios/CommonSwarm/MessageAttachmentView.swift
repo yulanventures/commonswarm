@@ -64,6 +64,8 @@ struct MessageAttachmentView: View {
                         .contentShape(Rectangle())
                 } else {
                     Label(safeName, systemImage: "doc")
+                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
             }
             .accessibilityLabel(safeName)
