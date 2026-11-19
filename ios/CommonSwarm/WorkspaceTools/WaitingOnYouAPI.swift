@@ -33,6 +33,15 @@ struct WaitingOnYouAPI: Sendable {
 
     private struct PostgRESTErrorWire: Decodable {
         let code: String?
+        let error: String?
+        let reason: String?
+
+        var isToolsMissing: Bool {
+            let codes = [code, error, reason].compactMap { $0 }
+            return codes.contains {
+                $0 == "PGRST202" || $0 == "42883" || $0 == "unknown_tool" || $0 == "unknown_household_tool"
+            }
+        }
     }
 
     private struct WaitingTodoEntryWire: Decodable {
@@ -386,12 +395,9 @@ struct WaitingOnYouAPI: Sendable {
 
         func fetchPage<Args: Encodable>(_ args: Args) async throws -> WaitingTodosQueueWire? {
             let (data, status) = try await rpcRaw("waiting_todos_page", body: args)
-            if status == 404 {
-                throw ToolsUnavailableError()
-            }
             if status != 200 {
                 if let err = try? JSONDecoder().decode(PostgRESTErrorWire.self, from: data),
-                   err.code == "PGRST202" || err.code == "42883" {
+                   err.isToolsMissing {
                     throw ToolsUnavailableError()
                 }
                 throw APIError.refused(status)

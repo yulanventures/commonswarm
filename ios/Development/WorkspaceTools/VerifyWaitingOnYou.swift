@@ -210,7 +210,7 @@ struct VerifyWaitingOnYou {
         let remainingWorkspace = await MainActor.run { store.counts.workspace.min }
         expect(remainingWorkspace == 2, "Expected 2 remaining items (1 ask + 1 request todo) in workspace, got \(remainingWorkspace)")
 
-        // 7. Verify home_overview fallback when waiting_todos_page returns 404 (PGRST202)
+        // 7. Verify home_overview fallback when waiting_todos_page returns PGRST202 (and marks incomplete when at 20-row cap)
         try await postFixture(origin.appending(path: "fixture/hide-waiting-todos-rpc"))
         let fallbackStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
         await fallbackStore.load(api: waitingAPI)
@@ -219,6 +219,25 @@ struct VerifyWaitingOnYou {
         let fallbackRequest = fallbackTodos.first { $0.id == mobileTodos[0].id }
         expect(fallbackRequest?.reason == .request && fallbackRequest?.canMarkDone == false, "Fallback must let request replace assigned for duplicate todo_id")
         expect(await MainActor.run { fallbackStore.visibleTodos.isEmpty }, "Fallback workspace-only todos must not clutter #general")
+        expect(await MainActor.run { fallbackStore.scopeComplete && !fallbackStore.scopeFailed }, "Uncapped home_overview fallback should complete cleanly")
+
+        // At 20-row home_overview cap -> must mark incomplete (N+), never claiming a complete count
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/cap-home-overview?on=1")!)
+        let cappedStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        await cappedStore.load(api: waitingAPI)
+        expect(await MainActor.run { !cappedStore.scopeComplete && !cappedStore.counts.workspace.complete && cappedStore.counts.workspace.badgeText.hasSuffix("+") }, "Capped home_overview fallback must stay incomplete with + badge")
+
+        // Non-missing failure (503 or bare 404 without PGRST202/42883) -> must NOT fall back and must mark failed/incomplete
+        try await postFixture(origin.appending(path: "fixture/show-waiting-todos-rpc"))
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/fail-waiting-todos-rpc?status=503")!)
+        let failedTodosStore = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        await failedTodosStore.load(api: waitingAPI)
+        expect(await MainActor.run { failedTodosStore.scopeFailed && !failedTodosStore.scopeComplete }, "503 on waiting_todos_page must mark scopeFailed and !scopeComplete, never treated as empty")
+
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/fail-waiting-todos-rpc?status=404")!)
+        let bare404Store = await MainActor.run { WaitingOnYouStore(place: generalPlace) }
+        await bare404Store.load(api: waitingAPI)
+        expect(await MainActor.run { bare404Store.scopeFailed && !bare404Store.scopeComplete }, "Bare 404 without PGRST202/42883 must not silently fall back or claim empty")
         try await postFixture(origin.appending(path: "fixture/show-waiting-todos-rpc"))
 
         // 8. Verify survey-style Review questions batch send (sends ONLY answered, skips skipped, reuses command_id on retry)
