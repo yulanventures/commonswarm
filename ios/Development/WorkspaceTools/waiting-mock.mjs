@@ -253,6 +253,82 @@ const server = createServer(async (req, res) => {
           },
         ]);
       }
+      case "/functions/v1/read": {
+        if (req.method !== "POST") return reply(405, {});
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        const body = raw ? JSON.parse(raw) : {};
+        const reqWs = workspaces.find((w) => w.workspace_id === body.workspace_id) ?? ws;
+        const convGeneral = {
+          conversation_id: "40000000-0000-4000-8000-000000000001",
+          kind: "general",
+          channel_id: null,
+          slug: null,
+          description: null,
+          archived_at: null,
+          joined: true,
+          members: [
+            { kind: "user", id: me, name: "You", left_at: null },
+            { kind: "user", id: maya, name: "Maya Chen", left_at: null },
+            { kind: "agent", id: atlas, name: "Atlas", left_at: null },
+          ],
+          last_message_at: "2026-11-19T14:00:00.000Z",
+          notify_level: "all",
+          mention_count: 0,
+          unread_count: 0,
+        };
+        const convMobile = {
+          conversation_id: "40000000-0000-4000-8000-000000000002",
+          kind: "public_channel",
+          channel_id: chMobile,
+          slug: "mobile",
+          description: "Mobile client engineering",
+          archived_at: null,
+          joined: true,
+          members: convGeneral.members,
+          last_message_at: "2026-11-19T14:30:00.000Z",
+          notify_level: "all",
+          mention_count: 0,
+          unread_count: 0,
+        };
+        const convDmAtlas = {
+          conversation_id: "40000000-0000-4000-8000-000000000003",
+          kind: "dm",
+          channel_id: null,
+          slug: null,
+          description: null,
+          archived_at: null,
+          joined: true,
+          members: [
+            { kind: "user", id: me, name: "You", left_at: null },
+            { kind: "agent", id: atlas, name: "Atlas", left_at: null },
+          ],
+          last_message_at: "2026-11-19T14:45:00.000Z",
+          notify_level: "all",
+          mention_count: 0,
+          unread_count: 0,
+        };
+        const allConvs = reqWs.workspace_id === wsMain ? [convGeneral, convMobile, convDmAtlas] : [convGeneral];
+        if (body.resource === "conversations") {
+          return reply(200, { conversations: allConvs });
+        }
+        if (body.resource === "conversation_history") {
+          const found = allConvs.find((c) => c.conversation_id === body.conversation_id) ?? convGeneral;
+          return reply(200, {
+            conversation: found,
+            messages: [
+              {
+                id: sigGeneralChoice,
+                from: atlas,
+                from_kind: "agent",
+                body: "The TestFlight build passed smoke checks.\n\nShould we publish build 14 to internal testers now?",
+                created_at: "2026-11-19T14:00:00.000Z",
+              },
+            ],
+          });
+        }
+        return reply(400, { error: "invalid_request" });
+      }
       default:
         return reply(404, {});
     }

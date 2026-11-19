@@ -5,9 +5,19 @@ extension View {
     func waitingOnYouToolbar(
         api: ConversationAPI,
         workspace: Workspace,
-        conversation: Conversation
+        conversation: Conversation,
+        directory: [Conversation] = [],
+        channelID: UUID? = nil
     ) -> some View {
-        modifier(WaitingOnYouToolbarModifier(api: api, workspace: workspace, conversation: conversation))
+        modifier(
+            WaitingOnYouToolbarModifier(
+                api: api,
+                workspace: workspace,
+                conversation: conversation,
+                directory: directory,
+                channelID: channelID
+            )
+        )
     }
 }
 
@@ -18,11 +28,27 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
     @StateObject private var store: WaitingOnYouStore
     @State private var isPresented = false
 
-    init(api: ConversationAPI, workspace: Workspace, conversation: Conversation) {
+    init(
+        api: ConversationAPI,
+        workspace: Workspace,
+        conversation: Conversation,
+        directory: [Conversation],
+        channelID: UUID?
+    ) {
         self.api = api
         self.workspace = workspace
         self.conversation = conversation
-        _store = StateObject(wrappedValue: WaitingOnYouStore(place: WaitingPlace(workspace: workspace, conversation: conversation)))
+        _store = StateObject(
+            wrappedValue: WaitingOnYouStore(
+                place: WaitingPlace(
+                    workspace: workspace,
+                    conversation: conversation,
+                    viewerID: api.session.userID,
+                    directory: directory,
+                    channelID: channelID
+                )
+            )
+        )
     }
 
     func body(content: Content) -> some View {

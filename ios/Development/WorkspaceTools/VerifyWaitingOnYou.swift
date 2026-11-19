@@ -104,13 +104,32 @@ struct VerifyWaitingOnYou {
         expect(recorded[0].command.option_id == "ship" && recorded[0].command.option_ids == nil && recorded[0].command.other_text == nil, "Single choice must use v1 exact shape")
         expect(recorded[2].command.option_id == nil && recorded[2].command.option_ids == ["todos"] && recorded[2].command.other_text == "Also check VoiceOver focus", "Multi+Other must use v2 shape")
 
-        // 6. Placement rule unit checks (missing root -> unknown, never #general)
+        // 6. Placement rule unit checks (missing root -> unknown, never #general; thread destinations)
         let unknown = WaitingChoiceRules.classifyConversation(nil)
         expect(unknown == .unknown, "nil placement must be .unknown")
         let replyNoRoot = WaitingSignalPlacement(id: UUID(), channel_id: nil, to: nil, to_agent: nil, thread_root_id: UUID(), from: UUID(), from_kind: "agent")
         expect(WaitingChoiceRules.classifyConversation(replyNoRoot, root: nil) == .unknown, "thread reply without root must be .unknown")
         expect(WaitingChoiceRules.cleanOtherText("hello\u{0007}") == nil, "Control chars must be rejected")
 
-        print("PASS: VerifyWaitingOnYou (scopes, complete counts, DM vs #general, recommended order, v1/v2 answer_choice, stable retry, Sent banner)")
+        let threadChannelID = UUID()
+        let threadGeneral = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .general), name: "#general", symbol: "number"))
+        expect(threadGeneral.conversation == .general, "Thread general must map to .general")
+        let threadChannel = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .publicChannel), name: "#mobile", symbol: "number"), channelID: threadChannelID)
+        expect(threadChannel.conversation == .channel(threadChannelID), "Thread channel must map to .channel(channelID)")
+        let atlasID = UUID()
+        let threadDM = WaitingPlace(
+            workspace: mainWS,
+            conversation: Conversation(destination: .thread(UUID(), .dm), name: "Atlas", symbol: "cpu"),
+            viewerID: session.userID,
+            directory: [
+                Conversation(destination: .person(session.userID), name: "You", symbol: "person"),
+                Conversation(destination: .agent(atlasID), name: "Atlas", symbol: "cpu"),
+            ]
+        )
+        expect(threadDM.conversation == .dm(.agent, atlasID), "Thread DM must map to .dm(.agent, atlasID)")
+        let threadGroup = WaitingPlace(workspace: mainWS, conversation: Conversation(destination: .thread(UUID(), .group), name: "Team", symbol: "person.2"))
+        expect(threadGroup.conversation == .unknown, "Thread group DM must map to .unknown")
+
+        print("PASS: VerifyWaitingOnYou (scopes, complete counts, DM vs #general, thread places, recommended order, v1/v2 answer_choice, stable retry, Sent banner)")
     }
 }

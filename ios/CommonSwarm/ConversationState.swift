@@ -3,10 +3,28 @@ import Foundation
 
 @MainActor
 final class Composer: ObservableObject {
+    enum Access { case checking, joined, preview, unavailable }
+    @Published private(set) var access: Access
+    private var lastRead = 0
+    init(access: Access = .joined) { self.access = access }
+
+    @discardableResult
+    func apply(_ newAccess: Access, read: Int) -> Bool {
+        guard read >= lastRead else { return false }
+        lastRead = read
+        if newAccess == .preview || newAccess == .unavailable {
+            text = ""
+            attachments = []
+            outgoing = []
+        }
+        access = newAccess
+        return true
+    }
+
     @Published var text = ""
     @Published var attachments: [UploadIntent] = []
     var canSend: Bool {
-        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
+        access == .joined && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
     }
 
     func stage(_ file: StagedFile) throws {
@@ -25,6 +43,14 @@ final class Composer: ObservableObject {
     }
     @Published private(set) var outgoing: [Outgoing] = []
 
+    func canDispatch(_ commandID: UUID) -> Bool {
+        guard access == .joined, let row = outgoing.first(where: { $0.id == commandID }) else { return false }
+        switch row.delivery {
+        case .sending, .retrying: return true
+        default: return false
+        }
+    }
+
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
         guard canSend else { return nil }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text
@@ -36,7 +62,7 @@ final class Composer: ObservableObject {
     }
 
     func retry(_ id: UUID) -> Post? {
-        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return nil }
+        guard access == .joined, let i = outgoing.firstIndex(where: { $0.id == id }) else { return nil }
         switch outgoing[i].delivery {
         case .unconfirmed, .uploadFailed: break
         default: return nil
@@ -137,7 +163,14 @@ final class MessageHistory: ObservableObject {
             }
             return true
         } catch {
-            if id == requestID && !Task.isCancelled && api.session.isActive { retry = request }
+            if id == requestID && !Task.isCancelled && api.session.isActive {
+                if case .thread(let threadID, _) = destination,
+                   api.session.composer(workspace: workspace, conversation: .thread(threadID)).access == .unavailable {
+                    messages = nil
+                    hasOlder = false
+                    retry = nil
+                } else { retry = request }
+            }
             return false
         }
     }

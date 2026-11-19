@@ -45,7 +45,13 @@ struct WaitingPlace: Hashable, Sendable {
     let conversation: WaitingConversation
     let label: String
 
-    init(workspace: Workspace, conversation: Conversation) {
+    init(
+        workspace: Workspace,
+        conversation: Conversation,
+        viewerID: UUID? = nil,
+        directory: [Conversation] = [],
+        channelID: UUID? = nil
+    ) {
         self.workspaceID = workspace.id
         self.workspaceName = workspace.name
         self.label = conversation.name
@@ -58,6 +64,35 @@ struct WaitingPlace: Hashable, Sendable {
             self.conversation = .dm(.person, id)
         case .agent(let id):
             self.conversation = .dm(.agent, id)
+        case .thread(_, let kind):
+            switch kind {
+            case .general:
+                self.conversation = .general
+            case .publicChannel, .privateChannel:
+                if let channelID {
+                    self.conversation = .channel(channelID)
+                } else {
+                    self.conversation = .unknown
+                }
+            case .dm:
+                let other = directory.first {
+                    switch $0.destination {
+                    case .person(let id): return id != viewerID
+                    case .agent: return true
+                    default: return false
+                    }
+                }
+                switch other?.destination {
+                case .person(let id):
+                    self.conversation = .dm(.person, id)
+                case .agent(let id):
+                    self.conversation = .dm(.agent, id)
+                default:
+                    self.conversation = .unknown
+                }
+            case .group:
+                self.conversation = .unknown
+            }
         }
     }
 

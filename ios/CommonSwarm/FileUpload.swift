@@ -98,7 +98,7 @@ private final class UploadProgress: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
-private struct FileEnvelope<Command: Encodable>: Encodable {
+struct WorkspaceCommand<Command: Encodable>: Encodable {
     let client_version = ConversationAPI.clientVersion
     let command_id, workspace_id: UUID
     let stream = ["kind": "workspace"]
@@ -109,6 +109,11 @@ extension ConversationAPI {
     @MainActor
     func upload(_ intent: UploadIntent, workspace: UUID, destination: Conversation.Destination) async throws -> FileReference {
         if let ref = intent.committed { return ref }
+        if case let .thread(id, kind) = destination {
+            guard kind.workspaceFiles, let rows = try await conversationList(workspace),
+                  rows.contains(where: { $0.id == id && $0.kind == kind && $0.joined && $0.archived_at == nil })
+            else { throw AttachmentError.placement }
+        }
         if case let .channel(channel, _) = destination {
             struct Placement: Decodable { let visibility: String }
             let placement: [Placement] = try await rows("channels", ["select":"visibility","workspace_id":"eq." + workspace.uuidString,
@@ -165,7 +170,7 @@ extension ConversationAPI {
         var req = request("functions/v1/command")
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(FileEnvelope(command_id: id, workspace_id: workspace, command: command))
+        req.httpBody = try JSONEncoder().encode(WorkspaceCommand(command_id: id, workspace_id: workspace, command: command))
         return try await send(req)
     }
 }
