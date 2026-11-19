@@ -41,6 +41,21 @@ import {
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
 import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
+import {
+  buildInviteConversationCommand,
+  buildJoinConversationCommand,
+  buildLeaveConversationCommand,
+  buildMarkConversationReadCommand,
+  buildOpenConversationCommand,
+  buildRemoveConversationCommand,
+  buildSetConversationNotifyCommand,
+  parseConversationActionResponse,
+  parseConversationOpenResponse,
+  type ConversationActionResult,
+  type ConversationMemberRef,
+  type ConversationNotifyLevel,
+  type ConversationOpenResult,
+} from "./conversations.js";
 import type { ReactionActor, ReactionGroup } from "./reactions";
 import {
   MESSAGE_STATUS_BATCH,
@@ -4220,6 +4235,133 @@ export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
   } catch {
     return []; // An optional status read cannot hide messages already loaded.
   }
+}
+
+/** Open or find a 1:1 DM or group DM (Step 2a `conversation_open`). */
+export async function openConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  members: readonly ConversationMemberRef[],
+  newGroup = false,
+): Promise<ConversationOpenResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    buildOpenConversationCommand(members, newGroup),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  return parseConversationOpenResponse(status, body);
+}
+
+async function conversationAction(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  command: Record<string, unknown>,
+  fallbackMessage: string,
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    command,
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  return parseConversationActionResponse(status, body, fallbackMessage);
+}
+
+export async function joinConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildJoinConversationCommand(conversationId),
+    "CommonSwarm could not join that channel.",
+  );
+}
+
+export async function leaveConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildLeaveConversationCommand(conversationId),
+    "CommonSwarm could not leave that conversation.",
+  );
+}
+
+export async function inviteToConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  members: readonly ConversationMemberRef[],
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildInviteConversationCommand(conversationId, members),
+    "CommonSwarm could not add those members.",
+  );
+}
+
+export async function removeFromConversation(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  member: ConversationMemberRef,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildRemoveConversationCommand(conversationId, member),
+    "CommonSwarm could not remove that member.",
+  );
+}
+
+export async function markConversationRead(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  throughSignalId: string | null = null,
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildMarkConversationReadCommand(conversationId, throughSignalId),
+    "CommonSwarm could not mark that conversation read.",
+  );
+}
+
+export async function setConversationNotify(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  conversationId: string,
+  change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean; starRank?: number | null },
+): Promise<ConversationActionResult> {
+  return conversationAction(
+    session,
+    commandId,
+    workspaceId,
+    buildSetConversationNotifyCommand(conversationId, change),
+    "CommonSwarm could not save those notification settings.",
+  );
 }
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */

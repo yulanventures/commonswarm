@@ -1,7 +1,7 @@
 export const HOME_WORKSPACE_VIEWS = ["chat", "todos", "lists", "files", "wiki", "add-agent"] as const;
 export type HomeWorkspaceView = typeof HOME_WORKSPACE_VIEWS[number];
 export type HomeRoute = { view: "catchup" | "new" }
-  | { view: HomeWorkspaceView; workspaceId: string | null; channelId?: string; messageId?: string }
+  | { view: HomeWorkspaceView; workspaceId: string | null; channelId?: string; dmId?: string; messageId?: string }
   | { view: "todo"; workspaceId: string | null; todoId: string }
   | { view: "agent"; workspaceId: string | null; agentId: string }
   /** People & agents as a page (the canvas Members artboard), not a dialog. */
@@ -17,9 +17,10 @@ export function parseRoute(search: string): HomeRoute {
   if (view === "catchup" || view === "new") return { view };
   if (view === "people") return { view, workspaceId };
   const selected = HOME_WORKSPACE_VIEWS.find(value => value === view) ?? "chat";
+  const channelId = params.get("c"), dmId = params.get("dm"), messageId = params.get("m");
   return { view: selected, workspaceId, ...(selected === "chat" ? {
-    ...(params.get("c") ? { channelId: params.get("c")! } : {}),
-    ...(params.get("m") ? { messageId: params.get("m")! } : {}),
+    ...(dmId && !channelId ? { dmId } : channelId ? { channelId } : {}),
+    ...(messageId ? { messageId } : {}),
   } : {}) };
 }
 
@@ -33,6 +34,7 @@ export function routeHref(route: HomeRoute): string {
     else if (route.view !== "chat") params.set("v", route.view);
     else {
       if (route.channelId) params.set("c", route.channelId);
+      else if (route.dmId) params.set("dm", route.dmId);
       if (route.messageId) params.set("m", route.messageId);
     }
   }
