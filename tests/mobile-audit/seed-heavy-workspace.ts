@@ -842,6 +842,14 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       "text/plain",
       "Boiler service quote — $240 including filter check and expansion vessel inspection.\nValid until 2026-11-30.\n",
     );
+    // The quote is made old (dialog.cleanup.files.filtered): the Clean up "Older than 90 days" filter then shows one file.
+    if (quoteFileId) {
+      try {
+        const moved = await sql`UPDATE swarm.file_versions SET created_at = created_at - interval '200 days', committed_at = committed_at - interval '200 days'
+          WHERE file_id = ${quoteFileId}::uuid AND workspace_id = ${workspace}::uuid AND state = 'live'`;
+        if (moved.count === 1) steps.push("seed_old_file"); else note("seed_old_file", `moved ${moved.count} versions`);
+      } catch (error) { note("seed_old_file", error); }
+    }
     // A real PNG and the text quote on one message in the general channel: one picture beside one file card.
     const pictureFileId = await seedFile("seed_file boiler-label.png", "boiler-label.png", "image/png", auditPng());
     if (pictureFileId && quoteFileId) {
