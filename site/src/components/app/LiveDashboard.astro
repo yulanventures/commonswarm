@@ -5955,6 +5955,14 @@ import "../../styles/kylon-image-viewer.css";
       pill.append(body);
       copy.insertBefore(pill, copy.querySelector("[data-channel-header-description]"));
     };
+    const syncRosterOpenButtons = (pendingTotal = currentPendingAccessRows().length): void => {
+      for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
+        button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
+        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
+        button.toggleAttribute("data-pending-access", pendingTotal > 0);
+        button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
+      }
+    };
     const renderHomeShell = (): void => {
       const slot = one<HTMLElement>("[data-home-workspace-shell]");
       const bottom = one<HTMLElement>("[data-home-phone-nav]");
@@ -6025,8 +6033,9 @@ import "../../styles/kylon-image-viewer.css";
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncChannelLeadPill();
-      // The header was rebuilt: the Waiting on you control goes back into it.
+      // The header was rebuilt: restore the Waiting on you control and pending-access state on the People door.
       syncWaitingButtons();
+      syncRosterOpenButtons();
       syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
@@ -6384,12 +6393,7 @@ import "../../styles/kylon-image-viewer.css";
      */
     const renderHeaderRoster = (pendingTotal = currentPendingAccessRows().length): void => {
       renderHomeShell();
-      for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
-        button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
-        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
-        button.toggleAttribute("data-pending-access", pendingTotal > 0);
-        button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
-      }
+      syncRosterOpenButtons(pendingTotal);
     };
 
     /*

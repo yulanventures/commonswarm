@@ -173,9 +173,12 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-group
 }
 
 live-dashboard.dashboard[data-kylon-shell] .hm-frame:not([data-channel-details-active]) .hm-details-heading { display: none; }
-/* Someone is waiting for access. The warning colour, so it does not read as a stray full stop. */
+/* Someone is waiting for access. Pinned to the corner like .hm-live-dot so pending status never widens the button or wraps the title. */
+live-dashboard.dashboard[data-kylon-shell] [data-roster-open] { position: relative; }
 live-dashboard.dashboard[data-kylon-shell] [data-roster-open][data-pending-access]::after {
-  content: ""; flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--warning); margin-inline-start: 6px;
+  content: ""; position: absolute; inset-block-start: 4px; inset-inline-end: 4px;
+  inline-size: 8px; block-size: 8px; box-sizing: border-box; border: 1px solid transparent; border-radius: 50%;
+  background: var(--warning); box-shadow: 0 0 0 2px var(--k-shell-surface); pointer-events: none;
 }
 /* Live: the Live chip's own colour, pinned to the corner of the control it sits on. */
 live-dashboard.dashboard[data-kylon-shell] .hm-live-dot {
