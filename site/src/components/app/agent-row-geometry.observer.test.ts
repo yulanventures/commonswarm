@@ -52,11 +52,12 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const local = { ...agent, id: 'local', name: 'Local Agent', model: null, app: 'Codex', hosted: false, liveKey: false, key: null,
           status: { kind: 'active', label: 'Active', sentence: '', attention: false, fix: null }, updateAvailable: false };
         const longWorkspace = 'Rivera household & studio — shared with everyone, including the agents';
+        const sameCodeDetail = 'Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours';
         const invites = [
           { kind: 'person', id: 'inv-person', workspaceId: 'ws-1', name: 'pending.invitee.with.a.long.address@example.test', detail: 'You invited · 2 days ago · ends in 5 days', mayCancel: true },
           { kind: 'key', id: 'inv-key', workspaceId: 'ws-1', name: 'Sprout', detail: 'Sam’s agent · made 3 days ago · ends in 4 days', mayCancel: true },
-          { kind: 'code', id: 'inv-code-1', workspaceId: 'ws-1', name: 'Connect code', detail: 'You made it · 10 minutes ago · 0 of 3 places used · ends in 1 day', mayCancel: true },
-          { kind: 'code', id: 'inv-code-2', workspaceId: 'ws-1', name: 'Connect code', detail: 'Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours', mayCancel: true },
+          { kind: 'code', id: '11111111-1111-4111-8111-111111111111', workspaceId: 'ws-1', name: 'Connect code', detail: sameCodeDetail, mayCancel: true },
+          { kind: 'code', id: '22222222-2222-4222-8222-222222222222', workspaceId: 'ws-1', name: 'Connect code', detail: sameCodeDetail, mayCancel: true },
         ];
         const model = { workspaceName: longWorkspace, people: [{ id: 'person', name: 'Mei Langridge', role: 'owner', own: true, mayRemove: false }, { id: 'sam', name: 'Sam Rivera', role: 'member', own: false, mayRemove: true }], agents: [agent, local], invites, sample: false, pendingFailed: false };
         const state = { selected: null, query: '' };
@@ -108,7 +109,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
           confirm: (action,id,opener) => {
             const target = action === 'remove-person' ? model.people.find(item => item.id === id) : action === 'cancel-invite' ? model.invites.find(item => item.id === id) : model.agents.find(item => item.id === id);
-            PeopleView.showPeopleConfirmation(pageConfirm,action,{ ...target, workspaceName: model.workspaceName },opener,
+            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) } : { ...target, workspaceName: model.workspaceName };
+            PeopleView.showPeopleConfirmation(pageConfirm,action,item,opener,
               async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.');
           } };
         const number = value => Number.parseFloat(value) || 0;
@@ -196,7 +198,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           pRow.returned=!pageConfirm.open && document.activeElement===personOpener;
           document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
           pageState.selected=null; pageState.tab='invites'; pageCallbacks.render();
-          for (const [kind, pendingId] of [['cancel-person','inv-person'], ['cancel-key','inv-key'], ['cancel-code','inv-code-2']]) {
+          for (const [kind, pendingId] of [['cancel-person','inv-person'], ['cancel-key','inv-key'], ['cancel-code-a','11111111-1111-4111-8111-111111111111'], ['cancel-code-b','22222222-2222-4222-8222-222222222222']]) {
             const invOpener=pageRoot.querySelector('button[data-pending-id="'+pendingId+'"]'); invOpener.focus(); invOpener.click();
             pageConfirm.getBoundingClientRect();
             const invDeadline=performance.now()+2000;
@@ -208,6 +210,8 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
             const iDescribed=pageConfirm.querySelector('#'+pageConfirm.getAttribute('aria-describedby'));
             const iRow={dark,id:pendingId,kind,width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
               pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
+              openerLabel:invOpener.getAttribute('aria-label'),
+              rowDetail:invOpener.closest('li')?.querySelector('.pd-muted')?.textContent ?? null,
               contextText:pageConfirm.querySelector('.pd-confirm-context')?.textContent ?? null,
               stopCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.stop').length,
               keepCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.keep').length,
@@ -271,9 +275,13 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           assert.equal(row.contextText, null, facts);
           assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
           assert.equal(row.describedByHasBoth, true, facts);
-        } else if (row.kind === 'cancel-code') {
+        } else if (row.kind === 'cancel-code-a' || row.kind === 'cancel-code-b') {
+          const expectedTag = row.kind === 'cancel-code-a' ? 'code 11111111' : 'code 22222222';
+          const expectedDetail = `${expectedTag} · Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours`;
           assert.equal(row.title, 'Cancel this connect code for Rivera household & studio — shared with everyone, including the agents?', facts);
-          assert.equal(row.contextText, 'Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours', facts);
+          assert.equal(row.rowDetail, expectedDetail, facts);
+          assert.equal(row.openerLabel, `Cancel connect code: ${expectedDetail}`, facts);
+          assert.equal(row.contextText, expectedDetail, facts);
           assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
           assert.equal(row.noteText, 'Agents that already joined with it stay. You can make a new code later.', facts);
           assert.equal(row.describedByHasBoth, true, facts);

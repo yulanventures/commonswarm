@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { peopleInvites, cancelPeopleInvite, peopleInviteCancelLabel, peopleInviteConfirmCopy } from "./people-invites.ts";
+import { peopleInvites, cancelPeopleInvite, peopleInviteCancelLabel, peopleInviteConfirmCopy, peopleInviteDisplayDetail } from "./people-invites.ts";
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
 const at = (days) => new Date(NOW + days * 86_400_000).toISOString();
@@ -89,4 +89,31 @@ test("confirmation names recipient email or agent, identifies connect code by wo
   assert.equal(peopleInviteConfirmCopy({ kind: "code", name: "Connect code", workspaceName: "   ", detail: "   " }).context, undefined);
   assert.equal(peopleInviteCancelLabel({ kind: "code", name: "Connect code", detail }), `Cancel connect code: ${detail}`);
   assert.equal(peopleInviteCancelLabel({ kind: "code", name: "Connect code" }), "Cancel this connect code");
+});
+
+test("connect codes with matching creator, times, capacity and use count get distinct non-secret ids on the row, Cancel label and confirmation", () => {
+  const idA = "11111111-1111-4111-8111-111111111111";
+  const idB = "22222222-2222-4222-8222-222222222222";
+  const shared = { kind: "join", principalId: null, principalName: null, ownerUserId: "sam", issuerDisplay: "Sam Rivera", issuedAt: at(0), expiresAt: at(1), seatsUsed: 1, seatCap: 3 };
+  const rows = peopleInvites(input({ userId: "ana", elevated: true }, { invites: [], access: [], pending: [{ ...shared, joinCredentialId: idA }, { ...shared, joinCredentialId: idB }] }));
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].detail, "code 11111111 · Sam made it · <2026-11-18> · 1 of 3 places used · ends <2026-11-19>");
+  assert.equal(rows[1].detail, "code 22222222 · Sam made it · <2026-11-18> · 1 of 3 places used · ends <2026-11-19>");
+  assert.notEqual(rows[0].detail, rows[1].detail);
+  assert.notEqual(peopleInviteCancelLabel(rows[0]), peopleInviteCancelLabel(rows[1]));
+  assert.equal(peopleInviteCancelLabel(rows[0]), `Cancel connect code: ${rows[0].detail}`);
+  assert.equal(peopleInviteCancelLabel(rows[1]), `Cancel connect code: ${rows[1].detail}`);
+  const copyA = peopleInviteConfirmCopy({ ...rows[0], workspaceName: "Herb garden" });
+  const copyB = peopleInviteConfirmCopy({ ...rows[1], workspaceName: "Herb garden" });
+  assert.equal(copyA.context, rows[0].detail);
+  assert.equal(copyB.context, rows[1].detail);
+  assert.notEqual(copyA.context, copyB.context);
+  // Idempotent when applied again on already-disambiguated rows.
+  assert.equal(peopleInviteDisplayDetail(rows[0], rows), rows[0].detail);
+
+  // Prefix expands if two colliding credential ids share their first 8 characters.
+  const twin1 = { kind: "code", id: "aaaaaaaa-1111-4111-8111-111111111111", detail: "Sam made it · today" };
+  const twin2 = { kind: "code", id: "aaaaaaaa-2222-4111-8111-111111111111", detail: "Sam made it · today" };
+  assert.equal(peopleInviteDisplayDetail(twin1, [twin1, twin2]), "code aaaaaaaa-111 · Sam made it · today");
+  assert.equal(peopleInviteDisplayDetail(twin2, [twin1, twin2]), "code aaaaaaaa-222 · Sam made it · today");
 });

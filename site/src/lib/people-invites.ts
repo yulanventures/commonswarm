@@ -81,7 +81,31 @@ export function peopleInvites(input: PeopleInvitesInput): PeopleInvite[] {
         entry.expiresAt ? `ends ${relative(entry.expiresAt)}` : null),
       mayCancel: mine(entry.ownerUserId) });
   }
-  return rows;
+  return rows.map((row) => row.kind === "code" ? { ...row, detail: peopleInviteDisplayDetail(row, rows) } : row);
+}
+
+/**
+ * When two connect codes in a workspace share identical displayed details (same creator, rounded times
+ * and seat count), prepend a stable non-secret prefix of the credential record id ("code 11111111") so
+ * the row, accessible Cancel button and confirmation stay distinguishable without ever showing the code value.
+ */
+function uniqueCodePrefix(id: string, siblings: readonly string[]): string {
+  const clean = id.trim();
+  for (let len = 8; len <= clean.length; len += 4) {
+    const prefix = clean.slice(0, len);
+    if (siblings.every((other) => other === clean || !other.startsWith(prefix))) return prefix;
+  }
+  return clean;
+}
+export function peopleInviteDisplayDetail(
+  invite: Pick<PeopleInvite, "kind" | "id" | "detail">,
+  all: readonly Pick<PeopleInvite, "kind" | "id" | "detail">[],
+): string {
+  if (invite.kind !== "code") return invite.detail;
+  const matching = all.filter((other) => other.kind === "code" && other.detail === invite.detail);
+  if (matching.length < 2 || matching.every((other) => other.id === invite.id)) return invite.detail;
+  const tag = `code ${uniqueCodePrefix(invite.id, matching.map((other) => other.id))}`;
+  return invite.detail ? `${tag} · ${invite.detail}` : tag;
 }
 
 /** The three ways an invite ends. Each takes the id its row carries: an invitation, a key, a connect code.

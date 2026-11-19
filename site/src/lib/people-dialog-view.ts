@@ -7,7 +7,8 @@ import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
 import { buildPeoplePage } from "./people-page";
-import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
+import { peopleInviteCancelLabel, peopleInviteConfirmCopy, peopleInviteDisplayDetail, type PeopleInvite } from "./people-invites";
+export { peopleInviteDisplayDetail };
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
 import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
@@ -707,13 +708,14 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const count = node(doc, "span", "", String(invites.length)); count.dataset.dialogAccessCount = ""; invitedTitle.append(count);
   const inviteList = node(doc, "ul", "pd-invite-list"); inviteList.dataset.dialogAccessList = "";
   for (const invite of invites) {
+    const detailText = peopleInviteDisplayDetail(invite, model.invites);
     const row = node(doc, "li", "pd-invite"); row.dataset.inviteKind = invite.kind;
     const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "person" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
     if (invite.kind === "person") symbol.append(inviteIcon(doc));
     const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "key" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
-    copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
+    copy.append(name, node(doc, "span", "pd-muted", detailText)); row.append(symbol, copy);
     if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
-      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel(invite)); row.append(cancel); }
+      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel({ ...invite, detail: detailText })); row.append(cancel); }
     inviteList.append(row);
   }
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;

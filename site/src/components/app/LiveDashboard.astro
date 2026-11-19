@@ -1573,7 +1573,7 @@ import "../../styles/kylon-image-viewer.css";
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
-  import { cancelPeopleInvite, peopleInvites, peopleInviteReceipt } from "../../lib/people-invites";
+  import { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInvites, peopleInviteReceipt, type PeopleInvite } from "../../lib/people-invites";
   import {
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
@@ -8150,7 +8150,8 @@ import "../../styles/kylon-image-viewer.css";
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
-      const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const found = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const item = found && action === "cancel-invite" ? { ...found, detail: peopleInviteDisplayDetail(found as PeopleInvite, model.invites) } : found;
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
       const workspaceId = activeWorkspaceId, userId = session?.user.id;
       let pinnedKey: { tokenId: string; grantId: string | null } | undefined;

@@ -1644,7 +1644,7 @@ test("remove-person confirmation names the workspace, reuses one command ID, and
 
 test("cancel-invite confirmation identifies each invite kind, keeps Go back focused, cancels with zero sends, and reuses one command ID", async () => {
   const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
-  const { cancelPeopleInvite, peopleInviteReceipt } = await import("../../lib/people-invites.ts");
+  const { cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt } = await import("../../lib/people-invites.ts");
   const { doc } = approvalDom();
   const focused: any[] = [];
   const makeDialog = () => {
@@ -1687,7 +1687,7 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
     members: [], agents: [], accessStatuses: [],
     activeInvites: [...invites],
     peopleDialogModel: () => ({ sample: false, workspaceName, people: [], agents: [], invites: ctx.activeInvites }),
-    peopleDialogCanAct, showPeopleConfirmation, cancelPeopleInvite, peopleInviteReceipt,
+    peopleDialogCanAct, showPeopleConfirmation, cancelPeopleInvite, peopleInviteDisplayDetail, peopleInviteReceipt,
     one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
     uuid: () => `cmd-${++ids}`,
     readableError: (error: Error) => error.message,
@@ -1754,4 +1754,32 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
   assert.equal(sent[0].commandId, sent[1].commandId, "retry reuses one command ID");
   assert.deepEqual(sent[0], { kind: "code", commandId: sent[0].commandId, wsId: workspaceId, id: "code-1" });
   assert.equal(reloads[0].receipt, "Connect code canceled.");
+
+  // Two connect codes with identical creator, displayed times, capacity and use count stay distinguishable and each sends only its own ID.
+  const idA = "11111111-1111-4111-8111-111111111111";
+  const idB = "22222222-2222-4222-8222-222222222222";
+  const sameDetail = "Sam made it · 2 hours ago · 1 of 3 places used · ends in 22 hours";
+  ctx.activeInvites = [
+    { kind: "code", id: idA, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+    { kind: "code", id: idB, workspaceId, name: "Connect code", detail: sameDetail, mayCancel: true },
+  ];
+  sent.length = 0;
+  const openerA: any = doc.createElement("button");
+  const openerB: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("cancel-invite", idA, openerA);
+  const ctxA = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxA, `code 11111111 · ${sameDetail}`);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "code");
+  assert.equal(sent[0].id, idA);
+
+  actions.confirmPeopleDialogAction("cancel-invite", idB, openerB);
+  const ctxB = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-context")?.textContent;
+  assert.equal(ctxB, `code 22222222 · ${sameDetail}`);
+  assert.notEqual(ctxA, ctxB);
+  await dialog.querySelectorAll("button")[1].events.get("click")?.();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].kind, "code");
+  assert.equal(sent[1].id, idB);
 });
