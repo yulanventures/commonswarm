@@ -621,13 +621,15 @@ final class WaitingOnYouStore: ObservableObject {
         showStatusBanner("Done")
     }
 
-    private func submit(
+    @discardableResult
+    func submitChoice(
         _ submission: WaitingChoiceSubmission,
         for item: WaitingAskItem,
         api: WaitingOnYouAPI,
-        commandID: UUID
-    ) async {
-        guard !pendingBySignal.contains(item.id) else { return }
+        commandID: UUID,
+        announceBanner: Bool = true
+    ) async -> Bool {
+        guard !pendingBySignal.contains(item.id) else { return false }
         pendingBySignal.insert(item.id)
         failuresBySignal[item.id] = nil
 
@@ -645,7 +647,10 @@ final class WaitingOnYouStore: ObservableObject {
             items.removeAll { $0.id == item.id }
             draftsBySignal[item.id] = nil
             failuresBySignal[item.id] = nil
-            showStatusBanner("Sent")
+            if announceBanner {
+                showStatusBanner("Sent")
+            }
+            return true
         case .failed(let message, let retryable):
             failuresBySignal[item.id] = WaitingCardFailure(
                 commandID: commandID,
@@ -653,10 +658,24 @@ final class WaitingOnYouStore: ObservableObject {
                 message: message,
                 retryable: retryable
             )
+            return false
         }
     }
 
-    private func showStatusBanner(_ text: String) {
+    private func submit(
+        _ submission: WaitingChoiceSubmission,
+        for item: WaitingAskItem,
+        api: WaitingOnYouAPI,
+        commandID: UUID
+    ) async {
+        await submitChoice(submission, for: item, api: api, commandID: commandID, announceBanner: true)
+    }
+
+    func clearFailure(for signalID: UUID) {
+        failuresBySignal[signalID] = nil
+    }
+
+    func showStatusBanner(_ text: String) {
         sentBanner = text
         bannerTask?.cancel()
         bannerTask = Task { [weak self] in

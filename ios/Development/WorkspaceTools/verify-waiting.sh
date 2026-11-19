@@ -5,7 +5,7 @@ scratch=$(mktemp -d)
 trap 'rm -f "$scratch/verify-waiting"; rmdir "$scratch"' EXIT
 xcrun swiftc -swift-version 6 -parse-as-library \
   ios/CommonSwarm/{PKCE,Conversations,ConversationRead,ConversationState,FileUpload}.swift \
-  ios/CommonSwarm/WorkspaceTools/{WaitingOnYou,WaitingOnYouAPI}.swift \
+  ios/CommonSwarm/WorkspaceTools/{WaitingOnYou,WaitingOnYouAPI,WaitingOnYouReview}.swift \
   ios/Development/WorkspaceTools/VerifyWaitingOnYou.swift \
   -o "$scratch/verify-waiting" \
   -module-cache-path "${TMPDIR:-/tmp}/commonswarm-ios-module-cache"

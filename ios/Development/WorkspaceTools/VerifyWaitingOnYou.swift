@@ -195,7 +195,31 @@ struct VerifyWaitingOnYou {
         expect(await MainActor.run { fallbackStore.visibleTodos.isEmpty }, "Fallback workspace-only todos must not clutter #general")
         try await postFixture(origin.appending(path: "fixture/show-waiting-todos-rpc"))
 
-        // 8. Inspect ask wire commands recorded by fixture
+        // 8. Verify survey-style Review questions batch send (sends ONLY answered, skips skipped, reuses command_id on retry)
+        await MainActor.run { store.scope = .all }
+        let reviewCandidates = await MainActor.run { store.visibleItems }
+        expect(reviewCandidates.count == 2, "Expected 2 remaining asks across all workspaces for review batch, got \(reviewCandidates.count)")
+        let q1 = reviewCandidates[0]
+        let q2 = reviewCandidates[1]
+        await MainActor.run {
+            store.selectReviewOption(q1.orderedOptions[0].id, for: q1)
+            store.selectReviewOption(q2.orderedOptions[0].id, for: q2)
+            store.skipReviewQuestion(q2)
+        }
+        expect(await MainActor.run { store.reviewSubmission(for: q1) != nil }, "Q1 must stay staged in session draft")
+        expect(await MainActor.run { store.reviewSubmission(for: q2) == nil }, "Skipped Q2 must have nil submission")
+        let q1Labels = await MainActor.run { store.reviewAnswerLabels(for: q1) }
+        expect(q1Labels == [q1.orderedOptions[0].label], "Expected Q1 summary label")
+
+        // Fail once during review batch -> Q1 fails with stable command_id, Q2 is skipped (never sent)
+        try await postFixture(origin.appending(path: "fixture/fail-next"))
+        let firstBatch = await store.submitReviewBatch(items: reviewCandidates, api: waitingAPI)
+        expect(firstBatch.sentIDs.isEmpty && firstBatch.failedIDs == [q1.id] && firstBatch.skippedIDs == [q2.id], "First review batch should record Q1 failed and Q2 skipped")
+        let retryBatch = await store.submitReviewBatch(items: reviewCandidates, api: waitingAPI)
+        expect(retryBatch.allSucceeded && retryBatch.sentIDs == [q1.id] && retryBatch.skippedIDs == [q2.id], "Retry review batch should send Q1 and still skip Q2")
+        expect(await MainActor.run { store.visibleItems.map(\.id) == [q2.id] }, "Only skipped Q2 should remain unanswered")
+
+        // 9. Inspect ask wire commands recorded by fixture
         struct RecordedCommand: Decodable {
             struct Body: Decodable {
                 let kind: String
@@ -209,17 +233,19 @@ struct VerifyWaitingOnYou {
         }
         let (cmdData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/commands"))
         let recorded = try JSONDecoder().decode([RecordedCommand].self, from: cmdData)
-        expect(recorded.count == 3, "Expected 3 ask commands (1 failed + 1 retry + 1 v2), got \(recorded.count)")
+        expect(recorded.count == 5, "Expected 5 ask commands (2 initial + 1 v2 + 1 failed review + 1 retried review), got \(recorded.count)")
         expect(recorded[0].command_id == recorded[1].command_id, "Retry must reuse original command_id")
         expect(recorded[0].command.option_id == "ship" && recorded[0].command.option_ids == nil && recorded[0].command.other_text == nil, "Single choice must use v1 exact shape")
         expect(recorded[2].command.option_id == nil && recorded[2].command.option_ids == ["todos"] && recorded[2].command.other_text == "Also check VoiceOver focus", "Multi+Other must use v2 shape")
+        expect(recorded[3].command_id == recorded[4].command_id, "Review batch retry must reuse original command_id")
+        expect(recorded.allSatisfy { $0.command.signal_id != q2.id.uuidString.lowercased() }, "Skipped Q2 must NEVER be sent")
 
-        // 9. Placement rule unit checks
+        // 10. Placement rule unit checks
         expect(WaitingChoiceRules.classifyConversation(nil) == .unknown, "nil placement must be .unknown")
         let replyNoRoot = WaitingSignalPlacement(id: UUID(), channel_id: nil, to: nil, to_agent: nil, thread_root_id: UUID(), from: UUID(), from_kind: "agent")
         expect(WaitingChoiceRules.classifyConversation(replyNoRoot, root: nil) == .unknown, "thread reply without root must be .unknown")
         expect(WaitingChoiceRules.cleanOtherText("hello\u{0007}") == nil, "Control chars must be rejected")
 
-        print("PASS: VerifyWaitingOnYou (directory read, distinct groups, missing-location retry, asks + paginated todos, home_overview fallback, Mark done retry+conflict, todo detail, v1/v2 answer_choice)")
+        print("PASS: VerifyWaitingOnYou (directory read, distinct groups, missing-location retry, asks + paginated todos, home_overview fallback, Mark done retry+conflict, todo detail, survey Review batch send+skip+retry)")
     }
 }
