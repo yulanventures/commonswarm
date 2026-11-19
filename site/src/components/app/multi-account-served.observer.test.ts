@@ -1130,7 +1130,14 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       ],
     );
 
-    // ── FLOW 4 (C5): Peer removes A from localStorage without storage event -> real [data-signout] spares B! ──
+    // ── FLOW 4 (C5): Peer removes A from localStorage without storage event while A's menu is open -> real [data-signout] spares B! ──
+    await page.waitForTimeout(150);
+    await openAccountMenu(page);
+    await page.waitForFunction(
+      (emailA: string) => (document.querySelector<HTMLElement>("[data-signout-sub]")?.textContent ?? "").trim() === emailA,
+      userA.email,
+      { timeout: 10_000 },
+    );
     revokedTokens.length = 0;
     const tokenB = [...liveTokens.entries()].find(([, u]) => u.id === userB.id)?.[0] ?? "";
     assert.ok(tokenB, "B must have a live token before peer removal");
@@ -1147,7 +1154,8 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       if (removed) localStorage.removeItem(`commonswarm:auth:v1:${hash}:login:${removed.loginId}`);
     }, { regKey: accountsStorageKey(originHash), hash: originHash, removedUserId: userA.id });
 
-    await clickAccountMenuItem(page, "[data-user-menu] [data-signout]");
+    // Click the already-open Sign out button for Account A directly (never reopening the menu if fallback to B already occurred).
+    await page.click("[data-user-menu] [data-signout]");
     await page.waitForTimeout(150);
     assert.equal(revokedTokens.includes(tokenB), false, "real [data-signout] after peer removal of A must NEVER revoke B");
     assert.equal(liveTokens.has(tokenB), true, "Account B token must remain live");
