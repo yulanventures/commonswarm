@@ -211,15 +211,23 @@ before(async () => {
   functionProcess.stderr?.on("data", observe);
   const bootDeadline = Date.now() + 60_000;
   while (!startupSeen) {
-    if (cliState.exit !== null) {
-      throw new Error(`supabase functions serve exited early: ${cliState.exit}\n${functionLogs}`);
+    if (functionProcess.exitCode !== null) {
+      throw new Error(`supabase functions serve exited early: ${functionProcess.exitCode}\n${functionLogs}`);
     }
     if (Date.now() > bootDeadline) {
       throw new Error(`supabase functions serve timed out\n${functionLogs}`);
     }
     await delay(100);
   }
-  await awaitFunctionRunning(local.API_URL, "command", cliState);
+  await awaitFunctionRunning({
+    url: `${local.API_URL}/functions/v1/command`,
+    fetcher: fetch,
+    timeoutMs: 30_000,
+    sleep: (ms) => delay(ms),
+    now: () => Date.now(),
+    diagnostics: () => `local command function was not ready\n${functionLogs.slice(-2000)}`,
+    cliState,
+  });
 
   owner = await createUser("lock-owner");
   workspace = randomUUID();
