@@ -267,8 +267,21 @@ private struct HistoryView: View {
                             Text(row.post.body ?? "").textSelection(.enabled)
                             ForEach(row.files) { FileUploadProgress(intent: $0) }
                             if case .uploadFailed = row.delivery {
-                                Button("Retry upload") { deliver(draft.retry(row.id)) }
-                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                                Button {
+                                    deliver(draft.retry(row.id))
+                                } label: {
+                                    Text("Retry upload")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                Button {
+                                    draft.editRefused(row.id)
+                                } label: {
+                                    Text("Edit message")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
                             } else if case .unconfirmed = row.delivery {
                                 Button("Retry") { deliver(draft.retry(row.id)) }
                             } else if case .refused = row.delivery {
