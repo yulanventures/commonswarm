@@ -2362,3 +2362,34 @@ test('keepFeedFocus identity ignores transient picture preview state across feed
   assert.equal(idOf(link('file-a')), idOf(link('file-a', 'waiting')), 'a loaded picture matches its rebuilt waiting copy');
   assert.notEqual(idOf(link('file-a')), idOf(link('file-b')), 'different pictures keep distinct identities');
 });
+
+test('pending-access indicator on the People door is pinned out of flow and restored on shell rebuild', async () => {
+  const code = await dashboardFunctions(['syncRosterOpenButtons']);
+  const attrs = new Map<string, string>();
+  const button = {
+    title: '',
+    setAttribute(name: string, value: string) { attrs.set(name, value); },
+    toggleAttribute(name: string, force?: boolean) { if (force) attrs.set(name, ''); else attrs.delete(name); },
+  };
+  let pending = 2;
+  const context = createContext({
+    all: (selector: string) => selector === '[data-roster-open]' ? [button] : [],
+    currentPendingAccessRows: () => Array.from({ length: pending }),
+  });
+  runInContext(code, context);
+  runInContext('syncRosterOpenButtons()', context);
+  assert.equal(attrs.has('data-pending-access'), true, 'pending state is set when pending rows exist');
+  assert.equal(attrs.get('aria-label'), 'People & agents · 2 pending access');
+  assert.equal(button.title, '2 pending access');
+  pending = 0;
+  runInContext('syncRosterOpenButtons()', context);
+  assert.equal(attrs.has('data-pending-access'), false, 'pending state clears when no pending rows exist');
+  assert.equal(attrs.get('aria-label'), 'People & agents');
+  assert.equal(button.title, 'People & agents');
+
+  const css = await readFile(new URL('../../styles/kylon-channel.css', import.meta.url), 'utf8');
+  assert.match(css, /\[data-roster-open\]\s*\{[^}]*position:\s*relative/, 'People door establishes a positioning context');
+  const dotRule = css.match(/\[data-roster-open\]\[data-pending-access\]::after\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(dotRule, /position:\s*absolute/, 'pending-access dot is pinned out of flow so it cannot widen the header button');
+  assert.doesNotMatch(dotRule, /margin-inline-start/, 'pending-access dot adds no in-flow horizontal margin');
+});
