@@ -1,10 +1,13 @@
 // Simulator fixture. All state is synthetic and disappears when the process exits.
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
+const { client_version: expectedClientVersion } = JSON.parse(
+  readFileSync(new URL("./post-agent.json", import.meta.url), "utf8"),
+);
 let origin;
 const callbacks = new Map([
   ["github", "com.commonswarm.ios://auth/callback"],
@@ -146,6 +149,10 @@ const server = createServer(async (req, res) => {
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
+      if (typeof body.client_version !== "string" || body.client_version !== expectedClientVersion) {
+        if (verify) console.error("Invalid client_version for", body.command?.kind);
+        return reply(400, { error: "invalid_request" });
+      }
       if (body.command?.kind === "file_download_url" && body.workspace_id?.toLowerCase() === workspace &&
           body.command.file_id?.toLowerCase() === file && body.command.version_n === 2) {
         return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });

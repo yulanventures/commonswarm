@@ -48,7 +48,7 @@ struct MessageAttachment: Decodable, Hashable, Identifiable {
 struct Post: Encodable {
     let command_id: UUID
     let workspace_id: UUID
-    let client_version = "0.1.0"
+    let client_version = ConversationAPI.clientVersion
     let stream = ["kind": "workspace"]
     let command: [String: String?]
 
@@ -75,6 +75,7 @@ struct Post: Encodable {
 enum APIError: Error { case refused(Int), invalidResponse }
 
 struct ConversationAPI {
+    static let clientVersion = "0.1.0"
     static let pageSize = 50
     let origin: URL
     let publicKey: String
@@ -164,6 +165,7 @@ struct ConversationAPI {
         }
         struct Envelope: Encodable {
             let command_id = UUID()
+            let client_version = ConversationAPI.clientVersion
             let workspace_id: UUID
             let stream = ["kind": "workspace"]
             let command: Command
