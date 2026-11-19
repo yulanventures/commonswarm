@@ -1,6 +1,6 @@
-import type { Session } from '@supabase/supabase-js';
+import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../../src/protocol/household-tool-registry.ts';
-import { client, isMultiAccountEnabled, pinAccountContext, postCommand } from '../commonswarm.ts';
+import { client, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from '../commonswarm.ts';
 import type {
   ActivityItem,
   AgentQueue,
@@ -233,14 +233,28 @@ function checkedCommandBody(status: number, body: Record<string, unknown>): Reco
   return body;
 }
 
-export function createHomeServer(session: Session, deps: Partial<HomeServerDeps> = {}): HomeServer {
+export function createHomeServer(
+  session: Session,
+  deps: Partial<HomeServerDeps> = {},
+  pinnedOverride?: PinnedAccountContext | null,
+): HomeServer {
   const resolved = { ...defaultDeps(), ...deps };
+  const resolvePinnedClient = (): { c: SupabaseClient; pinned: PinnedAccountContext | null } => {
+    if (isMultiAccountEnabled()) {
+      const pinned = pinnedOverride ?? pinAccountContext({ userId: session.user.id });
+      if (!pinned || !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+      return { c: pinned.runtime.client, pinned };
+    }
+    const c = resolved.client();
+    if (!c) throw new Error('home_no_deployment');
+    return { c, pinned: null };
+  };
 
   return {
     async overview(): Promise<HomeOverview> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('home_overview');
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_overview_failed');
       if (!record(data) || typeof data.viewer_user_id !== 'string' || typeof data.generated_at !== 'string' || !Array.isArray(data.workspaces)) throw new Error('home_overview_malformed');
@@ -248,9 +262,9 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
     },
 
     async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_decision_queue_failed');
       const first = parseDecisionQueue(data, workspaceId);

@@ -345,8 +345,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
     };
 
-    const unusable = (message?: string): void => {
-      if (resumeId) forgetInvite(resumeId, localStorage);
+    const unusable = (message?: string, keepInvite = false): void => {
+      if (resumeId && !keepInvite) forgetInvite(resumeId, localStorage);
       const node = one<HTMLElement>("[data-unusable-message]");
       if (node && message) node.textContent = message;
       show("unusable");
@@ -970,15 +970,29 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         prepared = null;
         authUser = user;
         authEmail = session?.user.email ?? null;
-        // Rev 4 §3: If fallback or account switch changes the displayed identity on /invite,
-        // require fresh explicit user confirmation under the new identity (never auto-accept).
-        if (isMultiAccountEnabled() && payload && session) {
+        // Rev 4 §3 & C3: Retire old preview, consent, and prepared command immediately WITHOUT forgetting
+        // the stored invitation while a verified successor or fresh sign-in can still review & confirm it.
+        if (isMultiAccountEnabled() && payload && resumeId) {
           resetReview();
-          void accept(false);
+          if (session) {
+            void accept(false);
+          } else if (accountManager()?.activeAccount()) {
+            show("loading");
+          } else {
+            show("auth");
+          }
           return;
         }
         payload = null;
         unusable('Sign in as the invited person and reopen the invitation.');
+        return;
+      }
+      if (isMultiAccountEnabled() && payload && resumeId && session && authUser === null) {
+        ++authGeneration;
+        authUser = user;
+        authEmail = session.user.email ?? null;
+        resetReview();
+        void accept(false);
         return;
       }
       authUser = user;
@@ -994,11 +1008,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       resetReview();
       if (!payload || !resumeId) {
         if (host.dataset.state !== "unusable") {
-          unusable("Sign in as the invited person and reopen the invitation.");
+          unusable("Sign in as the invited person and reopen the invitation.", true);
         }
         return;
       }
-      if (!accountManager()?.activeAccount()) {
+      if (accountManager()?.activeAccount()) {
+        show("loading");
+      } else {
         show("auth");
       }
     });

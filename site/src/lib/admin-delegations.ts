@@ -1,5 +1,5 @@
 import type { Session } from "@supabase/supabase-js";
-import { CommandOutcomeUnknown, deployment, isMultiAccountEnabled, pinAccountContext, postCommand } from "./commonswarm";
+import { CommandOutcomeUnknown, deployment, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from "./commonswarm";
 import { adminClientAction, assertAdminPageOwner } from "./admin-delegations-view";
 import {
   ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage,
@@ -13,9 +13,15 @@ export class AdminRecoveryReadError extends Error {
 }
 
 export async function loadAdminRecovery(
-  session: Session, resource: AdminReadRequest["resource"], workspaceId: string | null = null, before: string | null = null,
+  session: Session,
+  resource: AdminReadRequest["resource"],
+  workspaceId: string | null = null,
+  before: string | null = null,
+  pinnedOverride?: PinnedAccountContext | null,
 ): Promise<AdminRecoveryPage> {
-  const pinned = isMultiAccountEnabled() ? pinAccountContext({ userId: session.user.id }) : null;
+  const pinned = isMultiAccountEnabled()
+    ? (pinnedOverride ?? pinAccountContext({ userId: session.user.id }))
+    : null;
   if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent())) {
     throw new AdminRecoveryReadError(401);
   }
@@ -42,12 +48,12 @@ export async function loadAdminRecovery(
   const missing = new Set([...page.workers, ...page.coverage].map(row => row.grant_id));
   for (const grant of parents) if (grant.owner_user_id === session.user.id) missing.delete(grant.grant_id);
   // Dependency pages omit owners and parents. Resolve them through verified grant pages,
-  // independently of the grant page currently visible in the dialog.
+  // independently of the grant page currently visible in the dialog, carrying ONE single pin (C2).
   let cursor: string | null = null;
   const seen = new Set<string>();
   while ((resource === "admin_workers" || resource === "admin_coverage") && missing.size > 0) {
     if (pinned && !pinned.isCurrent()) throw new AdminRecoveryReadError(401);
-    const grants = await loadAdminRecovery(session, "admin_grants", null, cursor);
+    const grants = await loadAdminRecovery(session, "admin_grants", null, cursor, pinned);
     parents.push(...grants.grants);
     for (const grant of grants.grants) missing.delete(grant.grant_id);
     cursor = grants.next_before;

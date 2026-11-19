@@ -1514,6 +1514,7 @@ import "../../styles/kylon-image-viewer.css";
     signInWithProvider,
     accountManager,
     bootstrapMultiAccountAuth,
+    currentActiveLogin,
     InactiveAccountBadgePoller,
     isMultiAccountEnabled,
     MAX_SIGNED_IN_ACCOUNTS,
@@ -1529,6 +1530,7 @@ import "../../styles/kylon-image-viewer.css";
     signOutOtherDevices,
     verifyEmailOtpSignIn,
     type AccountRecord,
+    type PinnedAccountContext,
     setPassword,
     sendPasswordCode,
     PasswordCodeRequired,
@@ -2226,6 +2228,10 @@ import "../../styles/kylon-image-viewer.css";
     let pendingWorkspaceId = "";
     let pendingWorkspaceCreate = false;
     let renderedAuthUserId = "";
+    let renderedAuthLoginId = "";
+    let renderedAuthViewGen = -1;
+    let pendingFallbackNotice: string | null = null;
+    let activeImageViewerDialog: HTMLDialogElement | null = null;
     let authReloadQueued = false;
     let authRecoveryActive = false;
     let bootInFlight: Promise<void> | null = null;
@@ -3231,8 +3237,9 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
-    const roster = async (workspaceId: string): Promise<Agent[]> => {
-      const api = client();
+    const roster = async (workspaceId: string, pinned?: PinnedAccountContext | null): Promise<Agent[]> => {
+      if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+      const api = pinned ? pinned.runtime.client : client();
       if (!api) throw new NoDeployment();
       const pageSize = 200;
       const result: Agent[] = [];
@@ -3307,8 +3314,10 @@ import "../../styles/kylon-image-viewer.css";
 
     const memberRoster = async (
       workspaceId: string,
+      pinned?: PinnedAccountContext | null,
     ): Promise<{ names: Map<string, string>; members: Member[] }> => {
-      const api = client();
+      if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+      const api = pinned ? pinned.runtime.client : client();
       if (!api) throw new NoDeployment();
       const { data, error } = await api
         .schema("swarm_read")
@@ -5408,8 +5417,8 @@ import "../../styles/kylon-image-viewer.css";
     const homeTodoContext = (): HomeTodoContext => ({ workspaceId: activeWorkspaceId, people: currentHomePeople(), viewerId: homeViewerId(),
       editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails, tagDelivers: true });
     const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
-    const homeServer = (): HomeServer | null => {
-      if (!sampleMode) return session ? createHomeServer(session) : null;
+    const homeServer = (pinned?: PinnedAccountContext | null): HomeServer | null => {
+      if (!sampleMode) return session ? createHomeServer(session, {}, pinned) : null;
       // Fixture data uses this sample workspace's identities. This adapter is never used by a signed-in workspace.
       const replacements = new Map<string, string>([[IDS.workspaces.home, activeWorkspaceId], [IDS.users.tom, homeViewerId() ?? "sample-owner"]]);
       const own = agents.filter(agent => agent.ownerUserId === homeViewerId());
@@ -6851,7 +6860,15 @@ import "../../styles/kylon-image-viewer.css";
       catchUpChoiceTickets.clear();
       catchUpChoiceErrors.clear();
       const viewer = homeViewerId();
-      const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
+      // C2: Carry ONE account pin across the entire Home Catch-up overview + workspace fan-out!
+      const catchUpPin = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session
+        ? pinAccountContext({ userId: session.user.id })
+        : null;
+      const live = () =>
+        generation === catchUpGeneration &&
+        homeRoute.view === "catchup" &&
+        homeViewerId() === viewer &&
+        (!catchUpPin || catchUpPin.isCurrent());
       catchUpExpanded = false;
       catchUpData = initialCatchUpData(workspaces);
       for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, null);
@@ -6859,8 +6876,9 @@ import "../../styles/kylon-image-viewer.css";
       if (sampleMode) {
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "open" })); renderHomeCatchUp(); return;
       }
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !catchUpPin) return;
       let overview;
-      try { overview = await homeOverview(); }
+      try { overview = await homeOverview(catchUpPin?.runtime); }
       catch {
         if (!live()) return;
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "failed" }));
@@ -6873,6 +6891,7 @@ import "../../styles/kylon-image-viewer.css";
         renderHomeCatchUp();
       }
       await fillCatchUpDetails(catchUpReadOrder(catchUpData, overview), async workspace => {
+        if (!live()) throw new AuthRecoveryRequired();
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
         // A workspace the overview left out has had none of its questions read. It stays "could not be checked": the
         // compatibility reads below know nothing of what waits there and would otherwise call it checked.
@@ -6881,19 +6900,27 @@ import "../../styles/kylon-image-viewer.css";
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
           // Waiting on you: the decision queue lists every open ask, oldest first, with its body. If it can't be read, the
           // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
-          const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
-          const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
+          const queue = await Promise.resolve().then(() => homeServer(catchUpPin)?.decisionQueue(workspace.id) ?? null).catch(() => null);
+          if (!live()) throw new AuthRecoveryRequired();
+          const latest = await feed(workspace.id, 50, catchUpPin).catch(() => [] as Signal[]);
+          if (!live()) throw new AuthRecoveryRequired();
           // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
           const askIds = (queue?.asks ?? []).map(ask => ask.signal_id);
-          const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
+          const choices = askIds.length ? await askChoices(workspace.id, askIds, catchUpPin).catch(() => null) : null;
+          if (!live()) throw new AuthRecoveryRequired();
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
             new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
-          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, signalPage),
-          homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
+          memberRoster(workspace.id, catchUpPin),
+          roster(workspace.id, catchUpPin),
+          agentAccessStatuses(workspace.id, undefined, catchUpPin),
+          feed(workspace.id, signalPage, catchUpPin),
+          homeWorkingOn(workspace.id, catchUpPin),
+          workspaceFiles(workspace.id, catchUpPin).then(value => homeFileCount(value), () => null),
         ]);
+        if (!live()) throw new AuthRecoveryRequired();
         // Page length is not an answer check: the read hides the viewer's own directed replies.
         return { people: mapHomePeople({ workspaceId: workspace.id, viewerId: viewer, members: nextMembers.members, agents: nextAgents,
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
@@ -7277,12 +7304,18 @@ import "../../styles/kylon-image-viewer.css";
           state.notice = "Choose a future end date."; update(); date.focus(); return;
         }
         const desired = parsed === null ? null : new Date(parsed).toISOString();
+        const expiryPin = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
+          ? pinAccountContext({ userId: ownerSession.user.id })
+          : null;
+        if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!expiryPin || !expiryPin.isCurrent())) {
+          return;
+        }
         state.busy = true; state.notice = "Saving end date…"; update();
         // Even an unknown command outcome is reconciled by reading; never remint or send again here.
         let writeError: unknown = null;
-        try { await setConnectionExpiry(ownerSession, options.workspaceId, options.kind, options.grantId, desired); }
+        try { await setConnectionExpiry(ownerSession, options.workspaceId, options.kind, options.grantId, desired, undefined, expiryPin); }
         catch (error) { writeError = error; }
-        if (!options.isCurrent()) {
+        if (!options.isCurrent() || (expiryPin && !expiryPin.isCurrent())) {
           state.busy = false; state.needsCheck = true;
           state.notice = "Check the saved end date before saving again.";
           if (session?.user.id === ownerSession.user.id) refreshConnectionDateViews();
@@ -7957,6 +7990,7 @@ import "../../styles/kylon-image-viewer.css";
         signIn: async draft => {
           if (!session || session.user.id.toLowerCase() !== ownerUserId) return;
           const userEmail = session.user.email ?? "";
+          const ownerLoginId = renderedAuthLoginId || (isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "");
           saveSeatAdminReauthIntent({
             userId: ownerUserId,
             workspaceId: ownerWorkspaceId,
@@ -7972,14 +8006,19 @@ import "../../styles/kylon-image-viewer.css";
           requestVersion += 1;
           householdDashboard?.clear();
           renderedAuthUserId = "";
+          renderedAuthLoginId = "";
+          renderedAuthViewGen = -1;
           resetWorkspaceSessionState();
           if (isMultiAccountEnabled()) {
-            const signOutRes = await signOutActiveAccount();
+            const signOutRes = await signOutActiveAccount(
+              ownerLoginId ? { userId: session.user.id, loginId: ownerLoginId } : null,
+            );
             clearPerUserPrivateConvenienceKeys(ownerUserId);
             inactiveBadgePoller?.prune();
             session = null;
             renderAccountSwitcher();
             if (signOutRes?.nextActive) {
+              if (signOutRes.notice) pendingFallbackNotice = signOutRes.notice;
               if (!authReloadQueued) runBoot();
               openAddAccountDialog(userEmail, "Sign in again to confirm agent admin access.");
               return;
@@ -10539,15 +10578,31 @@ import "../../styles/kylon-image-viewer.css";
     const freshAttachmentDownload = async (
       fileId: string,
       version: number,
+      pinnedOverride?: PinnedAccountContext | null,
+      workspaceOverride?: string,
     ) => {
-      if (!session || !activeWorkspaceId) throw new SessionExpired();
-      return fileDownloadUrl(
-        session,
+      const dlSession = session;
+      const dlWorkspaceId = workspaceOverride ?? activeWorkspaceId;
+      if (!dlSession || !dlWorkspaceId) throw new SessionExpired();
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const dlPin = multi
+        ? (pinnedOverride ?? pinAccountContext({ userId: dlSession.user.id, workspaceId: dlWorkspaceId }))
+        : null;
+      if (multi && (!dlPin || !dlPin.isCurrent(dlWorkspaceId))) {
+        throw new AuthRecoveryRequired();
+      }
+      const signed = await fileDownloadUrl(
+        dlSession,
         uuid(),
-        activeWorkspaceId,
+        dlWorkspaceId,
         fileId,
         version,
+        dlPin,
       );
+      if (dlPin && !dlPin.isCurrent(dlWorkspaceId)) {
+        throw new AuthRecoveryRequired();
+      }
+      return signed;
     };
 
     /**
@@ -10591,18 +10646,28 @@ import "../../styles/kylon-image-viewer.css";
         fetched = true;
         show("loading");
         const signedAt = Date.now();
+        const previewWorkspaceId = activeWorkspaceId;
+        const previewPin =
+          typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session && previewWorkspaceId
+            ? pinAccountContext({ userId: session.user.id, workspaceId: previewWorkspaceId })
+            : null;
         try {
+          if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!previewPin || !previewPin.isCurrent(previewWorkspaceId))) {
+            return;
+          }
           const signed = await freshAttachmentDownload(
             attachment.file_id,
             attachment.version_n,
+            previewPin,
+            previewWorkspaceId,
           );
-          if (!image.isConnected) return;
+          if (!image.isConnected || (previewPin && !previewPin.isCurrent(previewWorkspaceId))) return;
           attachmentPreviewUrls.remember(
             attachment.file_id, attachment.version_n, signed, signedAt,
           );
           image.src = signed.url;
         } catch {
-          if (image.isConnected) unavailable();
+          if (image.isConnected && (!previewPin || previewPin.isCurrent(previewWorkspaceId))) unavailable();
         } finally {
           signing = false;
         }
@@ -10667,6 +10732,13 @@ import "../../styles/kylon-image-viewer.css";
     const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
       if (chatPictureOpening || document.querySelector("dialog[open]")) return;
       const openedFeed = feedIdentity();
+      const viewerWorkspaceId = typeof activeWorkspaceId === "string" ? activeWorkspaceId : "";
+      const viewerPin =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof session !== "undefined" && session && viewerWorkspaceId
+          ? pinAccountContext({ userId: session.user.id, workspaceId: viewerWorkspaceId })
+          : null;
+      const viewerStillCurrent = (): boolean =>
+        feedIdentity() === openedFeed && (!viewerPin || viewerPin.isCurrent(viewerWorkspaceId));
       const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
       const slot = trigger.parentElement;
       slot?.querySelector("[data-picture-open-failed]")?.remove();
@@ -10679,29 +10751,40 @@ import "../../styles/kylon-image-viewer.css";
         : { fileId: link.dataset.streamImage ?? "", version: Number(link.dataset.streamImageVersion), name: link.title });
       chatPictureOpening = true;
       void loadImageViewer().then(({ openImageViewer }) => {
-        // Another dialog (e.g. People) or a navigation may have arrived while the viewer module was loading.
-        if (document.querySelector("dialog[open]") || feedIdentity() !== openedFeed) return;
-        openImageViewer(app, files.map(({ fileId, version, name }) => ({
+        // Another dialog (e.g. People) or a navigation/account switch may have arrived while the viewer module was loading.
+        if (document.querySelector("dialog[open]") || !viewerStillCurrent()) return;
+        const viewerDialog = openImageViewer(app, files.map(({ fileId, version, name }) => ({
           name,
           link: async () => {
+            if (!viewerStillCurrent()) throw new AuthRecoveryRequired();
             const cached = attachmentPreviewUrls.get(fileId, version, Date.now());
             if (cached) return cached;
             const signedAt = Date.now();
-            const signed = await freshAttachmentDownload(fileId, version);
+            const signed = await freshAttachmentDownload(fileId, version, viewerPin, viewerWorkspaceId);
+            if (!viewerStillCurrent()) throw new AuthRecoveryRequired();
             attachmentPreviewUrls.remember(fileId, version, signed, signedAt);
             return signed.url;
           },
           forget: () => attachmentPreviewUrls.forget(fileId, version),
           download: () => {
-            void freshAttachmentDownload(fileId, version).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error"));
+            if (!viewerStillCurrent()) return;
+            void freshAttachmentDownload(fileId, version, viewerPin, viewerWorkspaceId).then(
+              signed => { if (viewerStillCurrent()) window.location.assign(signed.url); },
+              error => { if (viewerStillCurrent()) setComposerStatus(readableError(error), "error"); },
+            );
           },
         })), Math.max(0, at), (shown) => {
+          if (typeof activeImageViewerDialog !== "undefined" && activeImageViewerDialog === viewerDialog) {
+            activeImageViewerDialog = null;
+          }
+          if (!viewerStillCurrent()) return;
           // Focus goes back to the picture last shown: its own link, or the same picture in its new row after a redraw.
           const link = at < 0 ? trigger : links[shown] ?? trigger;
           const back = link.isConnected ? link
             : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(files[shown]?.fileId ?? attachment.file_id)}"]`);
           back?.focus({ preventScroll: true });
         });
+        if (typeof activeImageViewerDialog !== "undefined") activeImageViewerDialog = viewerDialog;
       }, () => {
         if (!slot || !trigger.isConnected || feedIdentity() !== openedFeed) return;
         const note = document.createElement("span");
@@ -10747,16 +10830,30 @@ import "../../styles/kylon-image-viewer.css";
         download.className = "dashboard__attachment-download";
         download.textContent = "Download";
         download.addEventListener("click", async () => {
+          const dlWorkspaceId = activeWorkspaceId;
+          const dlPin =
+            typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session && dlWorkspaceId
+              ? pinAccountContext({ userId: session.user.id, workspaceId: dlWorkspaceId })
+              : null;
+          if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!dlPin || !dlPin.isCurrent(dlWorkspaceId))) {
+            return;
+          }
           download.disabled = true;
           const oldLabel = download.textContent;
           download.textContent = "Getting link…";
           try {
-            window.location.assign((await freshAttachmentDownload(
+            const signed = await freshAttachmentDownload(
               attachment.file_id,
               attachment.version_n,
-            )).url);
+              dlPin,
+              dlWorkspaceId,
+            );
+            if (dlPin && !dlPin.isCurrent(dlWorkspaceId)) return;
+            window.location.assign(signed.url);
           } catch (error) {
-            setComposerStatus(readableError(error), "error");
+            if (!dlPin || dlPin.isCurrent(dlWorkspaceId)) {
+              setComposerStatus(readableError(error), "error");
+            }
           } finally {
             download.disabled = false;
             download.textContent = oldLabel;
@@ -16240,6 +16337,8 @@ import "../../styles/kylon-image-viewer.css";
         if (version !== requestVersion) return;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
+        renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
+        renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
         if (isMultiAccountEnabled()) renderAccountSwitcher();
         if (!session) {
           resetWorkspaceSessionState();
@@ -16297,6 +16396,11 @@ import "../../styles/kylon-image-viewer.css";
            than an error: the address bar is a convenience, never an authorization. */
         activeWorkspaceId = "";
         await navigateHome(resolveHomeRoute(reauthSearchForBoot(session.user.id), workspaces), "replace");
+        if (pendingFallbackNotice && version === requestVersion) {
+          const notice = pendingFallbackNotice;
+          pendingFallbackNotice = null;
+          setComposerStatus(notice, "error");
+        }
         if (refusedAddAccountMessage && isMultiAccountEnabled() && version === requestVersion) {
           openAddAccountDialog("", refusedAddAccountMessage);
         }
@@ -16530,7 +16634,8 @@ import "../../styles/kylon-image-viewer.css";
       button.addEventListener("click", async () => {
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
-        const signingOutUserId = session?.user.id ?? "";
+        const signingOutUserId = renderedAuthUserId || session?.user.id || "";
+        const signingOutLoginId = renderedAuthLoginId;
         pendingSeatAdminReauthNotice = false;
         pendingForcedNotice = null;
         passwordChangeNotice = null;
@@ -16540,18 +16645,20 @@ import "../../styles/kylon-image-viewer.css";
           forgetAddAgent(addAgentStore(), signingOutUserId);
           if (isMultiAccountEnabled()) clearPerUserPrivateConvenienceKeys(signingOutUserId);
         }
-        requestVersion += 1;
-        householdDashboard?.clear();
-        homeOverviewCounts.clear();
-        renderedAuthUserId = "";
-        resetWorkspaceSessionState();
+        teardownActiveAccountView();
         if (isMultiAccountEnabled()) {
-          const result = await signOutActiveAccount();
+          // C5: Pass exact displayed { userId, loginId } so a stale peer removal of A can NEVER revoke fallback B!
+          const result = await signOutActiveAccount(
+            signingOutUserId && signingOutLoginId
+              ? { userId: signingOutUserId, loginId: signingOutLoginId }
+              : null,
+          );
           inactiveBadgePoller?.prune();
           session = null;
           renderAccountSwitcher();
           button.disabled = false;
           if (result?.nextActive) {
+            if (result.notice) pendingFallbackNotice = result.notice;
             if (!authReloadQueued) runBoot();
             return;
           }
@@ -16648,15 +16755,15 @@ import "../../styles/kylon-image-viewer.css";
 
     const dismissAllAccountDialogsAndSecrets = (): void => {
       closePasswordDialog();
-      for (const selector of [
-        "[data-signout-others-dialog]",
-        "[data-signout-all-dialog]",
-        "[data-add-account-dialog]",
-        "[data-account-agents-dialog]",
-        "[data-connected-apps-dialog]",
-      ]) {
-        const dlg = one<HTMLDialogElement>(selector);
-        if (dlg?.open) dlg.close();
+      closeWorkspaceSkillsDialog();
+      if (activeImageViewerDialog) {
+        try { activeImageViewerDialog.close(); } catch { /* ignore */ }
+        activeImageViewerDialog.remove();
+        activeImageViewerDialog = null;
+      }
+      attachmentPreviewUrls.clear();
+      for (const dlg of all<HTMLDialogElement>("dialog[open]")) {
+        try { dlg.close(); } catch { /* ignore */ }
       }
       for (const connectEl of all<HTMLElement & { clearPrompt?: () => void; retirePending?: () => void }>("agent-connect")) {
         connectEl.clearPrompt?.();
@@ -16671,6 +16778,8 @@ import "../../styles/kylon-image-viewer.css";
       householdDashboard?.clear();
       homeOverviewCounts.clear();
       renderedAuthUserId = "";
+      renderedAuthLoginId = "";
+      renderedAuthViewGen = -1;
       resetWorkspaceSessionState();
       session = null;
     };
@@ -18235,6 +18344,18 @@ import "../../styles/kylon-image-viewer.css";
          See `composerSendToken` where it is declared for what went wrong when the screen's
          generation was asked that question instead. */
       const sendToken = ++composerSendToken;
+      // C1: Capture initiating session & login/workspace/viewGen pin SYNCHRONOUSLY at Send!
+      const sendSession = session;
+      const sendMulti = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const sendPinned = sendMulti && sendSession
+        ? pinAccountContext({ userId: sendSession.user.id, workspaceId })
+        : null;
+      if (sendMulti && (!sendPinned || !sendPinned.isCurrent(workspaceId))) {
+        composerSendToken += 1;
+        setComposerSending(false);
+        setComposerStatus("Your active account or workspace changed. Confirm again before sending.", "error");
+        return;
+      }
       setComposerSending(true);
       visualMentions.set(pendingId, rowMentions);
       /* The pending row draws its mentions at once, from what this send is about to store. */
@@ -18273,15 +18394,21 @@ import "../../styles/kylon-image-viewer.css";
           attachmentRefs.push(...await uploadAttachmentsFor({
             channelId: placementChannelId,
             files: attachmentSnapshot,
-            readVisibility: channelId => channelVisibilityNow(workspaceId, channelId),
+            readVisibility: channelId => channelVisibilityNow(workspaceId, channelId, sendPinned),
             upload: (attachment, index) => {
+              if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
+                throw new AuthRecoveryRequired();
+              }
               setComposerStatus(
                 `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
                 "posting",
               );
-              return uploadBrowserAttachment(session!, workspaceId, attachment.intent);
+              return uploadBrowserAttachment(sendSession!, workspaceId, attachment.intent, sendPinned);
             },
           }));
+          if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
+            throw new AuthRecoveryRequired();
+          }
         }
         setComposerStatus("Posting message…", "posting");
         if (sampleMode) await sampleSendWindow();
@@ -18303,7 +18430,7 @@ import "../../styles/kylon-image-viewer.css";
               broadcastToChannel,
             }
           : await postBrowserSignal(
-              session!,
+              sendSession!,
               commandId,
               workspaceId,
               rawBody,
@@ -18311,6 +18438,7 @@ import "../../styles/kylon-image-viewer.css";
               signalKind,
               attachmentRefs,
               placement,
+              sendPinned,
             );
         /* THE SEND'S OWN STORAGE IS FINISHED FIRST, before the guard below, because it is not
            about the screen. The guard exists so a send that outlived its workspace cannot
@@ -19332,14 +19460,26 @@ import "../../styles/kylon-image-viewer.css";
 
     const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
-      const identityChanged = signedOut || nextUserId !== renderedAuthUserId;
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const nextLoginId = multi && nextSession && typeof currentActiveLogin === "function"
+        ? (currentActiveLogin()?.loginId ?? "")
+        : "";
+      const nextViewGen = multi && nextSession && typeof accountManager === "function"
+        ? (accountManager()?.currentViewGeneration() ?? -1)
+        : -1;
+      const identityChanged =
+        signedOut ||
+        nextUserId !== renderedAuthUserId ||
+        (multi && (nextLoginId !== renderedAuthLoginId || nextViewGen !== renderedAuthViewGen));
       if (!identityChanged && !recovered) return;
       if (identityChanged) {
-        if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()) {
+        if (multi) {
           dismissAllAccountDialogsAndSecrets();
           householdDashboard?.clear();
           homeOverviewCounts.clear();
           session = null;
+          renderedAuthLoginId = nextLoginId;
+          renderedAuthViewGen = nextViewGen;
         }
         resetWorkspaceSessionState();
         renderedAuthUserId = nextUserId;

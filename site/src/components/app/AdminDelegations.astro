@@ -74,10 +74,12 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     isMultiAccountEnabled,
     onAccountForcedTeardown,
     onAuthChange,
+    pinAccountContext,
     uuid,
     CommandOutcomeUnknown,
     myOrganizations,
     myWorkspaces,
+    type PinnedAccountContext,
   } from "../../lib/commonswarm";
   import { loadAdminRecovery, revokeAdminGrant, changeAdminClientApproval, readAdminIssuanceGate, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView, type AdminClientView, type AdminWorkerView, type AdminCoverageView } from "../../lib/admin-delegations";
   import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList, seatAdminGrantLive } from "../../lib/seat-admin";
@@ -89,7 +91,16 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     const policy: AdminSitePolicy = JSON.parse(root.dataset.adminPolicy!);
     const dialog = one<HTMLDialogElement>("dialog");
     let session: Session | null = null, workspaceId: string | null = document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") ?? null;
+    let activePin: PinnedAccountContext | null = null;
     let scope: "account" | "workspace" = "account", generation = 0;
+    const currentPinFor = (own: Session | null): PinnedAccountContext | null => {
+      if (!own || !isMultiAccountEnabled()) return null;
+      return activePin && activePin.userId === own.user.id && activePin.isCurrent()
+        ? activePin
+        : pinAccountContext({ userId: own.user.id });
+    };
+    const pinStillCurrent = (own: Session, pin: PinnedAccountContext | null): boolean =>
+      session?.user.id === own.user.id && (!isMultiAccountEnabled() || Boolean(pin && pin.isCurrent()));
     // The opening view answers "who has admin access now". History and client approvals are their own views.
     type Pane = "access" | "history" | "clients";
     let pane: Pane = "access";
@@ -324,14 +335,17 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     const indicator = async (): Promise<void> => {
       if (!session) return;
       const ownSession = session, at = generation, ticket = ++indicatorGeneration;
+      const pin = currentPinFor(ownSession);
+      if (isMultiAccountEnabled() && (!pin || !pin.isCurrent())) return;
       const button = one<HTMLButtonElement>("[data-admin-indicator]");
       try {
-        const account = await loadAdminRecovery(ownSession, "admin_grants");
-        const workspace = workspaceId ? await loadAdminRecovery(ownSession, "admin_grants", workspaceId).catch(error => {
+        const account = await loadAdminRecovery(ownSession, "admin_grants", null, null, pin);
+        if (generation !== at || ticket !== indicatorGeneration || !pinStillCurrent(ownSession, pin)) return;
+        const workspace = workspaceId ? await loadAdminRecovery(ownSession, "admin_grants", workspaceId, null, pin).catch(error => {
           if (error instanceof AdminRecoveryReadError && error.status === 403) return null;
           throw error;
         }) : null;
-        if (generation !== at || ticket !== indicatorGeneration) return;
+        if (generation !== at || ticket !== indicatorGeneration || !pinStillCurrent(ownSession, pin)) return;
         const full = account.active.full_account_count;
         const count = account.active.grant_count, workspaceCount = workspace?.active.grant_count ?? 0;
         indicatorView = count > 0 || workspaceCount === 0 ? "account" : "workspace";
@@ -369,16 +383,18 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     const load = async (more?: Collection): Promise<void> => {
       if (!session || busy) return;
       const ownSession = session, at = ++generation, selected = scope === "workspace" ? workspaceId : null;
+      const pin = currentPinFor(ownSession);
+      if (isMultiAccountEnabled() && (!pin || !pin.isCurrent())) return;
       busy = true; dialog.dataset.adminState = "loading"; render(); status("Loading admin access and recorded actions…"); void gate();
       try {
         const [grantPage, actionPage, clientPage, workerPage, coveragePage] = await Promise.all([
-          more && more !== "grants" ? null : loadAdminRecovery(ownSession, "admin_grants", selected, more ? grantsBefore : null),
-          more && more !== "actions" ? null : loadAdminRecovery(ownSession, "admin_history", selected, more ? actionsBefore : null),
-          scope !== "account" || more && more !== "clients" ? null : loadAdminRecovery(ownSession, "admin_clients", null, more ? clientsBefore : null),
-          more && more !== "workers" ? null : loadAdminRecovery(ownSession, "admin_workers", selected, more ? workersBefore : null),
-          more && more !== "coverage" ? null : loadAdminRecovery(ownSession, "admin_coverage", selected, more ? coverageBefore : null),
+          more && more !== "grants" ? null : loadAdminRecovery(ownSession, "admin_grants", selected, more ? grantsBefore : null, pin),
+          more && more !== "actions" ? null : loadAdminRecovery(ownSession, "admin_history", selected, more ? actionsBefore : null, pin),
+          scope !== "account" || more && more !== "clients" ? null : loadAdminRecovery(ownSession, "admin_clients", null, more ? clientsBefore : null, pin),
+          more && more !== "workers" ? null : loadAdminRecovery(ownSession, "admin_workers", selected, more ? workersBefore : null, pin),
+          more && more !== "coverage" ? null : loadAdminRecovery(ownSession, "admin_coverage", selected, more ? coverageBefore : null, pin),
         ]);
-        if (generation !== at) return;
+        if (generation !== at || !pinStillCurrent(ownSession, pin)) return;
         if (grantPage) { grants = more ? [...grants, ...grantPage.grants] : grantPage.grants; grantsBefore = grantPage.next_before; }
         if (actionPage) { actions = more ? [...actions, ...actionPage.actions] : actionPage.actions; actionsBefore = actionPage.next_before; }
         if (clientPage) { clients = more ? [...clients, ...clientPage.clients] : clientPage.clients; clientsBefore = clientPage.next_before; }
@@ -506,6 +522,9 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     };
     const open = (view: "account" | "workspace" = "account", wanted?: Pane): void => {
       if (!session) return;
+      const ownSession = session;
+      const pin = currentPinFor(ownSession);
+      if (isMultiAccountEnabled() && (!pin || !pin.isCurrent())) return;
       scope = view === "workspace" && workspaceId ? "workspace" : "account";
       clear();
       // A fresh opening starts on who has access now; changing scope keeps the view the person is reading.
@@ -513,10 +532,10 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       if (wanted) showPane(wanted); else if (!dialog.open) showPane("access");
       if (!dialog.open) dialog.showModal();
       scopeLine();
-      const ownerId = session.user.id, ticket = ++namesTicket;
+      const ticket = ++namesTicket;
       // Names for the scope line and for each grant's reach; ids are shown until they arrive, and if they never do.
-      void myWorkspaces().then(rows => {
-        if (ticket !== namesTicket || session?.user.id !== ownerId) return;
+      void myWorkspaces(pin).then(rows => {
+        if (ticket !== namesTicket || !pinStillCurrent(ownSession, pin)) return;
         workspaceNames = new Map(rows.filter(row => row.id && row.name?.trim()).map(row => [row.id.toLowerCase(), row.name.trim()]));
         scopeLine(); if (!busy) render();
       }).catch(() => {});
@@ -546,15 +565,28 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     window.addEventListener("commonswarm:workspace-selected", event => {
       const detail = (event as CustomEvent<{ workspaceId: string | null; sample?: boolean }>).detail;
       workspaceId = detail.sample ? null : detail.workspaceId;
-      clear(); if (dialog.open) open(scope); else scopeLine(); void indicator();
+      clear();
+      if (isMultiAccountEnabled() && (!activePin || !activePin.isCurrent())) {
+        if (dialog.open) dialog.close();
+        return;
+      }
+      if (dialog.open) open(scope); else scopeLine();
+      void indicator();
     });
     // A link to ?admin=history opens History for the whole account, once, as soon as the person's session is known.
     let wantsHistory = false;
     try { wantsHistory = new URLSearchParams(window.location.search).get("admin") === "history"; } catch { /* ignore */ }
     const openFromLink = (): void => { if (wantsHistory && session) { wantsHistory = false; open("account", "history"); } };
     const applyAuthChange = (next: Session | null): void => {
-      const changed = session?.user.id !== next?.user.id || session?.access_token !== next?.access_token;
-      session = next; root.hidden = !session;
+      const nextPin = next && isMultiAccountEnabled() ? pinAccountContext({ userId: next.user.id }) : null;
+      const changed =
+        session?.user.id !== next?.user.id ||
+        session?.access_token !== next?.access_token ||
+        activePin?.loginId !== nextPin?.loginId ||
+        activePin?.viewGeneration !== nextPin?.viewGeneration;
+      session = next;
+      activePin = nextPin;
+      root.hidden = !session;
       if (changed) { clear(); forgetNames(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
       if (session) window.setTimeout(() => { void indicator(); openFromLink(); }, 0);
     };
@@ -565,7 +597,9 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       if (isMultiAccountEnabled()) await bootstrapMultiAccountAuth();
       const next = await currentSession();
       if (generation !== initialGeneration) return;
-      session = next; root.hidden = !next;
+      session = next;
+      activePin = next && isMultiAccountEnabled() ? pinAccountContext({ userId: next.user.id }) : null;
+      root.hidden = !next;
       if (next) {
         void indicator();
         openFromLink();

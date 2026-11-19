@@ -1106,6 +1106,90 @@ export class AccountSessionRuntime {
   }
 }
 
+export const CREDENTIAL_URL_PARAMS = [
+  "access_token",
+  "refresh_token",
+  "provider_token",
+  "provider_refresh_token",
+  "id_token",
+] as const;
+
+export const ALL_AUTH_URL_PARAMS = [
+  ...CREDENTIAL_URL_PARAMS,
+  "token",
+  "expires_in",
+  "expires_at",
+  "token_type",
+  "code",
+  "state",
+  "cs_attempt",
+  "token_hash",
+  "type",
+  "error",
+  "error_code",
+  "error_description",
+] as const;
+
+export interface ScrubbedCallbackSnapshot {
+  pathname: string;
+  rawSearch: string;
+  rawHash: string;
+  hasAnyAuthParam: boolean;
+  scrubbed: boolean;
+}
+
+/**
+ * C6: Capture and scrub ALL credential-bearing and auth callback params from BOTH query and fragment
+ * synchronously BEFORE awaiting AccountManager.initialize() or any app work!
+ */
+export function scrubCallbackUrlImmediate(location: LocationLike, history: HistoryLike): ScrubbedCallbackSnapshot {
+  const rawSearch = location.search;
+  const rawHash = location.hash;
+  const search = new URLSearchParams(rawSearch.replace(/^\?/, ""));
+  const hash = new URLSearchParams(rawHash.replace(/^#/, ""));
+
+  const hasBearerFragment = CREDENTIAL_URL_PARAMS.some((k) => hash.has(k));
+  const hasBearerQuery = CREDENTIAL_URL_PARAMS.some((k) => search.has(k));
+  const hasTokenHash = search.has("token_hash") || hash.has("token_hash");
+  const callbackType = (search.get("type") ?? hash.get("type") ?? "").toLowerCase();
+  const code = search.get("code");
+  const attemptId = search.get("cs_attempt");
+  const errorCode = search.get("error_code") ?? hash.get("error_code") ?? search.get("error") ?? hash.get("error");
+
+  const hasAnyAuthParam =
+    hasBearerFragment ||
+    hasBearerQuery ||
+    hasTokenHash ||
+    Boolean(code) ||
+    Boolean(attemptId) ||
+    Boolean(errorCode) ||
+    Boolean(callbackType && ["recovery", "email_change", "magiclink", "email", "signup", "invite"].includes(callbackType));
+
+  if (!hasAnyAuthParam) {
+    return { pathname: location.pathname, rawSearch, rawHash, hasAnyAuthParam: false, scrubbed: true };
+  }
+
+  const cleanSearch = new URLSearchParams(search);
+  for (const key of ALL_AUTH_URL_PARAMS) {
+    cleanSearch.delete(key);
+  }
+  const qs = cleanSearch.toString();
+  const cleanUrl = `${location.pathname}${qs ? `?${qs}` : ""}`;
+  let scrubbed = false;
+  try {
+    history.replaceState(null, "", cleanUrl);
+    const afterSearch = new URLSearchParams(location.search.replace(/^\?/, ""));
+    const afterHash = new URLSearchParams(location.hash.replace(/^#/, ""));
+    scrubbed =
+      !ALL_AUTH_URL_PARAMS.some((k) => afterSearch.has(k) || afterHash.has(k)) &&
+      !location.hash;
+  } catch {
+    scrubbed = false;
+  }
+
+  return { pathname: location.pathname, rawSearch, rawHash, hasAnyAuthParam: true, scrubbed };
+}
+
 export type PinnedOperationScope =
   | "account"
   | { workspaceId: string }
@@ -1139,9 +1223,14 @@ export class AccountManager {
   private memoryOwnership: DurableOwnershipTable = { version: 1, allSignOutGen: 1, accounts: [] };
   private readonly tabFencedLoginIds = new Set<string>();
   private readonly tabExpiredCredentials = new Map<string, string>();
+  private readonly knownAttemptIds = new Set<string>();
+  private readonly retiredAttemptIds = new Set<string>();
+  private readonly inFlightStartAttemptIds = new Set<string>();
+  private attemptCancelGen = 0;
   private tabActive: { userId: string; loginId: string } | null = null;
   private activeWorkspaceId: string | null = null;
   private viewGeneration = 0;
+  private reconciling = false;
   private destroyed = false;
 
   constructor(deployment: MultiAccountDeployment, envOverrides: Partial<MultiAccountEnv> = {}) {
@@ -1199,8 +1288,8 @@ export class AccountManager {
 
   /**
    * Startup initialization + fresh-sign-in cutover (C4).
-   * Never imports or copies `sb-<projectRef>-auth-token`; clears it once under
-   * `registry -> lock:${legacyKey}` and initializes durable ownership cleanly.
+   * Never imports or copies `sb-<projectRef>-auth-token`; verifies legacy storage read + deletion
+   * under `registry -> lock:${legacyKey}` BEFORE committing durable ownership cutover.
    */
   async initialize(): Promise<{ accounts: readonly AccountRecord[]; active: { userId: string; loginId: string } | null; cutoverClearedLegacy: boolean }> {
     let cutoverClearedLegacy = false;
@@ -1213,15 +1302,21 @@ export class AccountManager {
               const recheck = this.readDurableOwnership();
               if (recheck.ok) return false;
               if (!recheck.ok && recheck.reason !== "missing") return false;
-              const hadLegacy = this.safeLocalGet(this.legacyKey) !== null;
-              this.safeLocalRemove(this.legacyKey);
+              const legacyRead = this.readLocalStrict(this.legacyKey);
+              if (!legacyRead.ok) {
+                throw new DurableOwnershipWriteError("Could not read legacy sign-in state during cutover.");
+              }
+              const hadLegacy = legacyRead.value !== null;
+              if (hadLegacy && !this.removeLocalStrict(this.legacyKey)) {
+                throw new DurableOwnershipWriteError("Could not clear legacy sign-in state during cutover.");
+              }
               this.writeDurableOwnership({ version: 1, allSignOutGen: 1, accounts: [] });
               this.sweepOrphanSlots([]);
               return hadLegacy;
             });
           });
         } catch {
-          // Fail closed cleanly on storage write failure during cutover.
+          // C4: Fail closed cleanly — never commit cutover when legacy read or deletion failed.
           cutoverClearedLegacy = false;
         }
       }
@@ -1257,11 +1352,15 @@ export class AccountManager {
     return read.ok ? read.state.accounts.filter((a) => !this.tabFencedLoginIds.has(a.loginId)) : [];
   }
 
-  /** Current tab's pinned active account, falling back to shared default -> first owned account. */
+  /** Current tab's pinned active account, reconciling first if the pinned login vanished from disk (C5). */
   activeAccount(): { userId: string; loginId: string } | null {
     const accounts = this.listAccounts();
     if (accounts.length === 0) {
-      this.tabActive = null;
+      if (this.tabActive && !this.reconciling) {
+        this.reconcile();
+      } else {
+        this.tabActive = null;
+      }
       return null;
     }
     if (this.tabActive) {
@@ -1269,6 +1368,13 @@ export class AccountManager {
         (a) => a.userId === this.tabActive!.userId && a.loginId === this.tabActive!.loginId,
       );
       if (stillOwned) return { userId: stillOwned.userId, loginId: stillOwned.loginId };
+      // C5: Never silently replace departed tabActive with a fallback before reconcile() fires
+      // onForcedTeardown for the departed login!
+      if (!this.reconciling) {
+        this.reconcile();
+        return this.tabActive ? { userId: this.tabActive.userId, loginId: this.tabActive.loginId } : null;
+      }
+      return null;
     }
     const storedTab = this.readTabAccount();
     if (storedTab) {
@@ -1307,6 +1413,8 @@ export class AccountManager {
     if (changed) {
       this.activeWorkspaceId = null;
       this.viewGeneration += 1;
+      // C3: Switching accounts retires any in-flight Add-account OAuth PKCE generation.
+      this.retireInFlightAttempts();
     }
     this.setTabActiveInternal(target.userId, target.loginId, true);
     this.ensureRuntime(target);
@@ -1385,7 +1493,16 @@ export class AccountManager {
    * Disposes any unowned runtime immediately and triggers forced teardown if the tab's active login ended.
    */
   reconcile(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.reconciling) return;
+    this.reconciling = true;
+    try {
+      this.reconcileInner();
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private reconcileInner(): void {
     const read = this.sharedPersistenceAvailable
       ? this.readDurableOwnership()
       : ({ ok: true, state: this.memoryOwnership } as const);
@@ -1397,6 +1514,7 @@ export class AccountManager {
       this.tabActive = null;
       if (hadActive) {
         this.viewGeneration += 1;
+        this.retireInFlightAttempts();
         this.clearTabAccount();
         this.env.onForcedTeardown?.({
           reason: read.reason === "missing" ? "all-signed-out" : "storage-unavailable",
@@ -1428,6 +1546,7 @@ export class AccountManager {
       this.tabActive = null;
       this.clearTabAccount();
       this.viewGeneration += 1;
+      this.retireInFlightAttempts();
       this.env.onForcedTeardown?.({
         reason: visibleAccounts.length === 0 ? "all-signed-out" : "signed-out",
         userId: departed.userId,
@@ -1464,17 +1583,37 @@ export class AccountManager {
     if (allowlistedResume && !/^[A-Za-z0-9._-]{1,128}$/.test(allowlistedResume)) {
       throw new Error("Invalid invitation resume token.");
     }
-    // Pin initiation generation synchronously BEFORE the first await.
+    // Pin initiation generation, active login, and pre-created attempt intent synchronously BEFORE the first await (C3).
     const allSignOutGenAtStart = this.readRequiredAllSignOutGen();
     if (allSignOutGenAtStart === null) {
       throw new DurableOwnershipWriteError("Sign-in storage is unavailable.");
     }
-    const createdAt = this.env.now();
-    const { codeVerifier, codeChallenge } = await generatePkcePair(this.env);
-    if (this.destroyed || this.readRequiredAllSignOutGen() !== allSignOutGenAtStart) {
-      throw new Error("Sign-in was cancelled because you signed out.");
-    }
     const attemptId = this.env.randomUUID();
+    const cancelGenAtStart = this.attemptCancelGen;
+    const activeKeyAtStart = this.tabActive ? `${this.tabActive.userId}:${this.tabActive.loginId}` : null;
+    this.knownAttemptIds.add(attemptId);
+    this.inFlightStartAttemptIds.add(attemptId);
+    const createdAt = this.env.now();
+    let codeVerifier: string;
+    let codeChallenge: string;
+    try {
+      const pair = await generatePkcePair(this.env);
+      codeVerifier = pair.codeVerifier;
+      codeChallenge = pair.codeChallenge;
+    } finally {
+      this.inFlightStartAttemptIds.delete(attemptId);
+    }
+    const activeKeyNow = this.tabActive ? `${this.tabActive.userId}:${this.tabActive.loginId}` : null;
+    if (
+      this.destroyed ||
+      this.retiredAttemptIds.has(attemptId) ||
+      this.attemptCancelGen !== cancelGenAtStart ||
+      activeKeyNow !== activeKeyAtStart ||
+      this.readRequiredAllSignOutGen() !== allSignOutGenAtStart
+    ) {
+      this.retiredAttemptIds.add(attemptId);
+      throw new Error("Sign-in was cancelled.");
+    }
     const attempt: SignInAttempt = {
       attemptId,
       originHash: this.originHash,
@@ -1764,47 +1903,42 @@ export class AccountManager {
     }
   }
 
-  /** Cancel an in-progress attempt (or all in-tab attempts if omitted) and erase its verifier from sessionStorage. */
+  /** True only while `attemptId` is still live (not retired in memory and still stored). */
+  isAttemptActive(attemptId: string): boolean {
+    if (this.destroyed || !attemptId || this.retiredAttemptIds.has(attemptId)) return false;
+    return this.readAttempt(attemptId) !== null;
+  }
+
+  /** Cancel an in-progress attempt (or all in-tab attempts if omitted) and retire it in memory first (C3). */
   cancelAttempt(attemptId?: string): void {
-    if (attemptId) this.clearAttempt(attemptId);
-    else this.clearAllInTabAttempts();
+    this.attemptCancelGen += 1;
+    if (attemptId) {
+      this.retiredAttemptIds.add(attemptId);
+      this.clearAttempt(attemptId);
+    } else {
+      this.retireInFlightAttempts();
+      this.clearAllInTabAttempts();
+    }
   }
 
   /**
-   * Dedicated startup callback bootstrap (C1).
-   * Runs BEFORE app init or analytics: captures callback params, immediately scrubs ALL credential-bearing
-   * and auth params from BOTH query and fragment (refusing the exchange if scrubbing fails), refuses bearer
-   * fragments / bearer query fields / token_hash / recovery / email_change, keeps the one-use attempt live
-   * (minus its secret verifier) through promotion, exchanges S256 PKCE code directly with GoTrue in memory,
-   * verifies identity, strips provider tokens, and promotes under the strict lock order.
+   * Dedicated startup callback bootstrap (C1 & C6).
+   * Accepts an optional pre-scrubbed snapshot captured synchronously before initialize() (C6),
+   * or scrubs immediately if called directly. Refuses bearer fragments / bearer query fields /
+   * token_hash / recovery / email_change, keeps the one-use attempt live (minus its secret verifier)
+   * through promotion, exchanges S256 PKCE code directly with GoTrue in memory, verifies identity,
+   * strips provider tokens, and promotes under the strict lock order.
    */
-  async consumeAuthCallbackBootstrap(location: LocationLike, history: HistoryLike): Promise<CallbackBootstrapResult> {
-    const search = new URLSearchParams(location.search.replace(/^\?/, ""));
-    const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+  async consumeAuthCallbackBootstrap(
+    location: LocationLike,
+    history: HistoryLike,
+    preScrubbed?: ScrubbedCallbackSnapshot,
+  ): Promise<CallbackBootstrapResult> {
+    const snap = preScrubbed ?? scrubCallbackUrlImmediate(location, history);
+    if (!snap.hasAnyAuthParam) return { kind: "none" };
 
-    const CREDENTIAL_URL_PARAMS = [
-      "access_token",
-      "refresh_token",
-      "provider_token",
-      "provider_refresh_token",
-      "id_token",
-    ] as const;
-    const ALL_AUTH_URL_PARAMS = [
-      ...CREDENTIAL_URL_PARAMS,
-      "token",
-      "expires_in",
-      "expires_at",
-      "token_type",
-      "code",
-      "state",
-      "cs_attempt",
-      "token_hash",
-      "type",
-      "error",
-      "error_code",
-      "error_description",
-    ] as const;
-
+    const search = new URLSearchParams(snap.rawSearch.replace(/^\?/, ""));
+    const hash = new URLSearchParams(snap.rawHash.replace(/^#/, ""));
     const hasBearerFragment = CREDENTIAL_URL_PARAMS.some((k) => hash.has(k));
     const hasBearerQuery = CREDENTIAL_URL_PARAMS.some((k) => search.has(k));
     const hasTokenHash = search.has("token_hash") || hash.has("token_hash");
@@ -1813,38 +1947,8 @@ export class AccountManager {
     const attemptId = search.get("cs_attempt");
     const errorCode = search.get("error_code") ?? hash.get("error_code") ?? search.get("error") ?? hash.get("error");
 
-    const hasAnyAuthParam =
-      hasBearerFragment ||
-      hasBearerQuery ||
-      hasTokenHash ||
-      Boolean(code) ||
-      Boolean(attemptId) ||
-      Boolean(errorCode) ||
-      Boolean(callbackType && ["recovery", "email_change", "magiclink", "email", "signup", "invite"].includes(callbackType));
-
-    if (!hasAnyAuthParam) return { kind: "none" };
-
-    // Scrub ALL credential-bearing and auth params from BOTH query and fragment immediately before any network/app work.
-    const cleanSearch = new URLSearchParams(search);
-    for (const key of ALL_AUTH_URL_PARAMS) {
-      cleanSearch.delete(key);
-    }
-    const qs = cleanSearch.toString();
-    const cleanUrl = `${location.pathname}${qs ? `?${qs}` : ""}`;
-    let scrubbed = false;
-    try {
-      history.replaceState(null, "", cleanUrl);
-      const afterSearch = new URLSearchParams(location.search.replace(/^\?/, ""));
-      const afterHash = new URLSearchParams(location.hash.replace(/^#/, ""));
-      scrubbed =
-        !ALL_AUTH_URL_PARAMS.some((k) => afterSearch.has(k) || afterHash.has(k)) &&
-        !location.hash;
-    } catch {
-      scrubbed = false;
-    }
-
-    if (!scrubbed) {
-      if (attemptId) this.clearAttempt(attemptId);
+    if (!snap.scrubbed) {
+      if (attemptId) this.cancelAttempt(attemptId);
       return {
         kind: "refused",
         reason: "url_scrub_failed",
@@ -1852,7 +1956,7 @@ export class AccountManager {
       };
     }
 
-    const currentRoute = normalizeReturnRoute(location.pathname);
+    const currentRoute = normalizeReturnRoute(snap.pathname);
 
     // Refuse bearer fragments (#access_token=...) and bearer query fields (?access_token=...) outright.
     if (hasBearerFragment) {
@@ -2206,6 +2310,7 @@ export class AccountManager {
     const capturedSessions: Array<{ userId: string; loginId: string; accessToken: string | null }> = [];
     let fencedLoginIds: string[] = [];
     let step1Succeeded = false;
+    let legacyCleanupFailed = false;
     let nextGen = this.currentAllSignOutGen() + 1;
 
     try {
@@ -2248,9 +2353,11 @@ export class AccountManager {
           // Step 1: Write & verify durable ownership clear + allSignOutGen bump FIRST.
           this.writeDurableOwnership({ version: 1, allSignOutGen: nextGen, accounts: [] });
           step1Succeeded = true;
-          // Step 2a (still holding registry -> lock:${legacyKey}): remove any stray legacyKey & active pointer
-          // BEFORE releasing the lock so a next-generation promotion's active pointer is never clobbered.
-          this.safeLocalRemove(this.legacyKey);
+          // Step 2a (still holding registry -> lock:${legacyKey}): verify stray legacyKey removal (C4).
+          const legacyRead = this.readLocalStrict(this.legacyKey);
+          if (!legacyRead.ok || (legacyRead.value !== null && !this.removeLocalStrict(this.legacyKey))) {
+            legacyCleanupFailed = true;
+          }
           this.safeLocalRemove(activeAccountStorageKey(this.originHash));
         });
       });
@@ -2325,13 +2432,15 @@ export class AccountManager {
     );
     const anyUnconfirmed = remoteRevocations.some((r) => r.result.status === "unconfirmed");
     return {
-      browserSignedOut: true,
+      browserSignedOut: !legacyCleanupFailed,
       localTabTornDown: true,
       slotsDeleted,
       remoteRevocations,
-      notice: anyUnconfirmed
-        ? "Signed out of all accounts on this device. Some sessions could not be confirmed on the server."
-        : undefined,
+      notice: legacyCleanupFailed
+        ? "Signed out of this browser's accounts, but an older saved sign-in entry could not be cleared. Try again."
+        : anyUnconfirmed
+          ? "Signed out of all accounts on this device. Some sessions could not be confirmed on the server."
+          : undefined,
     };
   }
 
@@ -2968,7 +3077,16 @@ export class AccountManager {
     }
   }
 
+  private retireInFlightAttempts(includeKnown = false): void {
+    this.attemptCancelGen += 1;
+    for (const id of this.inFlightStartAttemptIds) this.retiredAttemptIds.add(id);
+    if (includeKnown) {
+      for (const id of this.knownAttemptIds) this.retiredAttemptIds.add(id);
+    }
+  }
+
   private readAttempt(attemptId: string): SignInAttempt | null {
+    if (!attemptId || this.retiredAttemptIds.has(attemptId)) return null;
     if (!this.env.sessionStorage) return null;
     try {
       const raw = this.env.sessionStorage.getItem(attemptStorageKey(this.originHash, attemptId));
@@ -2982,24 +3100,32 @@ export class AccountManager {
 
   private writeAttempt(attempt: SignInAttempt): void {
     if (!this.env.sessionStorage) throw new Error("Session storage is unavailable.");
+    this.knownAttemptIds.add(attempt.attemptId);
     this.env.sessionStorage.setItem(attemptStorageKey(this.originHash, attempt.attemptId), JSON.stringify(attempt));
   }
 
   private clearAttempt(attemptId: string): void {
-    try { this.env.sessionStorage?.removeItem(attemptStorageKey(this.originHash, attemptId)); } catch { /* ignore */ }
+    this.retiredAttemptIds.add(attemptId);
+    try { this.env.sessionStorage?.removeItem(attemptStorageKey(this.originHash, attemptId)); } catch { /* in-memory retirement holds */ }
   }
 
   private clearAllInTabAttempts(): void {
+    this.retireInFlightAttempts(true);
     if (!this.env.sessionStorage) return;
     const prefix = attemptStoragePrefix(this.originHash);
     try {
       const keys: string[] = [];
       for (let i = 0; i < this.env.sessionStorage.length; i += 1) {
         const key = this.env.sessionStorage.key(i);
-        if (key && key.startsWith(prefix)) keys.push(key);
+        if (key && key.startsWith(prefix)) {
+          keys.push(key);
+          this.retiredAttemptIds.add(key.slice(prefix.length));
+        }
       }
-      for (const key of keys) this.env.sessionStorage.removeItem(key);
-    } catch { /* ignore */ }
+      for (const key of keys) {
+        try { this.env.sessionStorage.removeItem(key); } catch { /* in-memory retirement holds */ }
+      }
+    } catch { /* in-memory retirement holds */ }
   }
 
   private readTabAccount(): { userId: string; loginId: string } | null {
@@ -3028,6 +3154,25 @@ export class AccountManager {
 
   private clearTabAccount(): void {
     try { this.env.sessionStorage?.removeItem(tabAccountStorageKey(this.originHash)); } catch { /* ignore */ }
+  }
+
+  private readLocalStrict(key: string): { ok: true; value: string | null } | { ok: false } {
+    if (!this.env.localStorage) return { ok: false };
+    try {
+      return { ok: true, value: this.env.localStorage.getItem(key) };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  private removeLocalStrict(key: string): boolean {
+    if (!this.env.localStorage) return false;
+    try {
+      this.env.localStorage.removeItem(key);
+      return this.env.localStorage.getItem(key) === null;
+    } catch {
+      return false;
+    }
   }
 
   private safeLocalGet(key: string): string | null {
@@ -3246,6 +3391,9 @@ export async function postPinnedCommand(
       body: wireBody,
     });
     const text = await response.text();
+    // C2: Recheck initiating pin AFTER response arrives (even on HTTP 200) so a held
+    // signed-download URL or command result can never reach a switched/signed-out view!
+    if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
     let body: Record<string, unknown> = {};
     try { body = text ? (JSON.parse(text) as Record<string, unknown>) : {}; } catch { body = { error: "unreadable_response" }; }
 

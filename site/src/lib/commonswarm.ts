@@ -46,6 +46,7 @@ import {
   attachPinnedRealtime,
   isMultiAccountEnabled,
   postPinnedCommand,
+  scrubCallbackUrlImmediate,
   type AccountRecord,
   type CallbackBootstrapResult,
   type HistoryLike,
@@ -560,8 +561,9 @@ export function onAccountForcedTeardown(listener: (detail: ForcedTeardownDetail)
 }
 
 /**
- * Startup multi-account bootstrap (C1 & C4): runs initialize() (fresh-sign-in cutover) and
- * consumeAuthCallbackBootstrap() (immediate URL scrub + direct PKCE exchange) once before app reads.
+ * Startup multi-account bootstrap (C1, C4, C6): scrubs ALL callback credentials from the address bar
+ * SYNCHRONOUSLY BEFORE awaiting initialize() (fresh-sign-in cutover), then runs consumeAuthCallbackBootstrap()
+ * with the pre-scrubbed snapshot once before app reads.
  */
 export async function bootstrapMultiAccountAuth(
   location: LocationLike | undefined = typeof window !== "undefined" ? window.location : undefined,
@@ -570,10 +572,12 @@ export async function bootstrapMultiAccountAuth(
   const mgr = accountManager();
   if (!mgr) return null;
   if (!multiAccountBootPromise) {
+    // C6: Scrub callback query & fragment SYNCHRONOUSLY BEFORE awaiting registry/legacy locks!
+    const preScrubbed = location && history ? scrubCallbackUrlImmediate(location, history) : undefined;
     const pending = (async () => {
       const init = await mgr.initialize();
       const callback: CallbackBootstrapResult = location && history
-        ? await mgr.consumeAuthCallbackBootstrap(location, history)
+        ? await mgr.consumeAuthCallbackBootstrap(location, history, preScrubbed)
         : { kind: "none" };
       return { cutoverClearedLegacy: init.cutoverClearedLegacy, callback };
     })();
@@ -585,6 +589,10 @@ export async function bootstrapMultiAccountAuth(
     });
   }
   return multiAccountBootPromise;
+}
+
+export function currentActiveLogin(): { userId: string; loginId: string } | null {
+  return accountManager()?.activeAccount() ?? null;
 }
 
 export function setActiveWorkspaceScope(workspaceId: string | null): void {
@@ -612,6 +620,7 @@ export function onAuthChange(listener: (event: string, session: Session | null) 
     const active = mgr.activeAccount();
     const key = active ? `${active.userId}:${active.loginId}` : null;
     if (key === lastKey) return;
+    const hadPrevious = lastKey !== null;
     lastKey = key;
     if (!active) {
       listener("SIGNED_OUT", null);
@@ -621,6 +630,11 @@ export function onAuthChange(listener: (event: string, session: Session | null) 
     if (!rt) {
       listener("SIGNED_OUT", null);
       return;
+    }
+    // C2: Invalidate dependent views SYNCHRONOUSLY before awaiting B's verification so Account A
+    // can never start fresh reads or react to workspace-reset while B is still verifying!
+    if (hadPrevious) {
+      listener("SIGNED_OUT", null);
     }
     void rt.verifySession()
       .then((verified) => {
@@ -780,7 +794,6 @@ export async function subscribeAgentActivity(
   if (isMultiAccountEnabled()) {
     const mgr = accountManager();
     if (!mgr) throw new NoDeployment();
-    mgr.setActiveWorkspace(workspaceId);
     const ctx = pinned ?? mgr.pinContext({ workspaceId });
     if (!ctx) throw new SessionExpired();
     let sub: AgentActivitySubscription | null = null;
@@ -882,7 +895,6 @@ export async function subscribeWorkspaceSignals(
   if (isMultiAccountEnabled()) {
     const mgr = accountManager();
     if (!mgr) throw new NoDeployment();
-    mgr.setActiveWorkspace(workspaceId);
     const ctx = pinned ?? mgr.pinContext({ workspaceId });
     if (!ctx) throw new SessionExpired();
     let sub: WorkspaceSignalsSubscription | null = null;
@@ -956,13 +968,17 @@ export async function signInWithProvider(
       purpose === "signed-out" && mgr.listAccounts().length > 0 ? "add-account" : purpose;
     const normalizedPath = target.pathname.replace(/\/+$/, "") || "/";
     const resume = normalizedPath === "/invite" ? (target.searchParams.get("resume") ?? undefined) : undefined;
-    const { authorizeUrl } = await mgr.startOAuthAttempt({
+    const { attemptId, authorizeUrl } = await mgr.startOAuthAttempt({
       provider: entry.id,
       purpose: effectivePurpose,
       returnRoute: target.pathname,
       origin: target.origin,
       ...(resume ? { resume } : {}),
     });
+    // C3: Recheck attempt liveness synchronously right before navigation so a retired/closed dialog never redirects.
+    if (!mgr.isAttemptActive(attemptId)) {
+      throw new Error("Sign-in was cancelled.");
+    }
     if (typeof window !== "undefined") {
       window.location.assign(authorizeUrl);
     }
@@ -1305,12 +1321,18 @@ export async function sendPasswordCode(
   await passwordRequest(session, "reauthenticate", { method: "GET" }, "The code could not be sent. Try again.", options);
 }
 
-export async function signOutActiveAccount(): Promise<SignOutAccountResult | null> {
+export async function signOutActiveAccount(
+  expected?: { userId: string; loginId: string } | null,
+): Promise<SignOutAccountResult | null> {
   const mgr = accountManager();
   if (!mgr) return null;
-  const active = mgr.activeAccount();
-  if (!active) return null;
-  return mgr.signOutAccount(active.userId, active.loginId);
+  // C5: When caller specifies the exact displayed { userId, loginId }, pass it straight through
+  // without reselecting from activeAccount() (preventing accidental revocation of fallback B).
+  const target = expected && expected.userId && expected.loginId
+    ? expected
+    : mgr.activeAccount();
+  if (!target) return null;
+  return mgr.signOutAccount(target.userId, target.loginId);
 }
 
 export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | null> {
@@ -1958,13 +1980,14 @@ export async function setConnectionExpiry(
   grantId: string,
   connectionExpiresAt: string | null,
   commandId = uuid(),
+  pinned?: PinnedAccountContext | null,
 ): Promise<void> {
   const result = await postCommand(session, commandId, {
     kind: "set_connection_expiry", connection_kind: connectionKind,
     grant_id: grantId, connection_expires_at: connectionExpiresAt,
   }, { workspace_id: workspaceId, stream: { kind: "workspace" } },
   "The end date result is unknown. Check the connection before saving again.",
-  undefined,
+  pinned,
   { accountWideWorkspace: true });
   if (result.status === 400) {
     if (result.body.error === "invalid_connection_expiry") {
@@ -1989,10 +2012,13 @@ export async function setConnectionExpiry(
 export async function agentAccessStatuses(
   workspaceId: string,
   tokenId?: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<AgentAccessStatus[]> {
-  const d = deployment();
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
-  const session = await currentSession();
+  const session = pinned ? await pinned.runtime.verifySession() : await currentSession();
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
   if (!session) throw new SessionExpired();
   const deadline = requestDeadline();
   try {
@@ -2294,8 +2320,12 @@ export interface WorkspaceFile {
 }
 
 /** Lists every unpurged workspace file through the membership-gated read view. */
-export async function workspaceFiles(workspaceId: string): Promise<WorkspaceFile[]> {
-  const c = client();
+export async function workspaceFiles(
+  workspaceId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<WorkspaceFile[]> {
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const { data, error } = await readWithDeadline(
     "workspace files",
@@ -2430,7 +2460,14 @@ export async function uploadBrowserAttachment(
   session: Session,
   workspaceId: string,
   intent: BrowserAttachmentUploadIntent,
+  pinned?: PinnedAccountContext | null,
 ): Promise<BrowserSignalAttachmentRef> {
+  const assertPinned = (): void => {
+    if (pinned && !pinned.isCurrent(workspaceId)) {
+      throw new AuthRecoveryRequired();
+    }
+  };
+  assertPinned();
   if (intent.committed) return intent.committed;
   if (!intent.created) {
     const created = await postCommand(
@@ -2446,7 +2483,9 @@ export async function uploadBrowserAttachment(
       },
       { workspace_id: workspaceId, stream: { kind: "workspace" } },
       `CommonSwarm lost the upload-slot result for ${intent.name}. Retry this message to check the same request.`,
+      pinned,
     );
+    assertPinned();
     if (created.status !== 200 || created.body.status !== "accepted") {
       throw browserFileRefusal(created.status, created.body, `CommonSwarm did not start ${intent.name}.`);
     }
@@ -2464,7 +2503,8 @@ export async function uploadBrowserAttachment(
     };
   }
 
-  const d = deployment();
+  assertPinned();
+  const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
   if (!intent.uploaded) {
     let putResponse: Response;
@@ -2484,6 +2524,9 @@ export async function uploadBrowserAttachment(
      * whether the object is present; branch on its stable code, not PUT copy. */
   }
 
+  assertPinned();
+  const sha256 = await browserSha256(intent.file);
+  assertPinned();
   const committed = await postCommand(
     session,
     intent.commitCommandId,
@@ -2491,11 +2534,13 @@ export async function uploadBrowserAttachment(
       kind: "file_version_commit",
       file_id: intent.created.fileId,
       version_id: intent.created.versionId,
-      sha256: await browserSha256(intent.file),
+      sha256,
     },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     `CommonSwarm lost the commit result for ${intent.name}. Retry this message to check the same request.`,
+    pinned,
   );
+  assertPinned();
   if (committed.status !== 200 || committed.body.status !== "accepted") {
     throw browserFileRefusal(committed.status, committed.body, `CommonSwarm did not commit ${intent.name}.`);
   }
@@ -2513,7 +2558,9 @@ export async function fileDownloadUrl(
   workspaceId: string,
   fileId: string,
   version: number | null = null,
+  pinned?: PinnedAccountContext | null,
 ): Promise<FileDownload> {
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   const requestedAt = Date.now();
   const { status, body } = await postCommand(
     session,
@@ -2524,7 +2571,10 @@ export async function fileDownloadUrl(
       ...(version === null ? {} : { version_n: version }),
     },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    pinned,
   );
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   if (status !== 200 || body.status !== "accepted") {
     throw new Error(
       `File download was refused: ${String(body.error ?? status)}.`,
@@ -2536,7 +2586,7 @@ export async function fileDownloadUrl(
       "CommonSwarm accepted the download without returning a usable storage path.",
     );
   }
-  const d = deployment();
+  const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
   return {
     // S1 returns a path relative to the deployment the browser already trusts.
@@ -3528,14 +3578,18 @@ export async function postBrowserSignal(
   signalKind: BrowserSignalKind = browserSignalKind(recipients),
   attachments: readonly BrowserSignalAttachmentRef[] = [],
   placement: BrowserSignalPlacement = {},
+  pinned?: PinnedAccountContext | null,
 ): Promise<Signal> {
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   const { status, body } = await postCommand(
     session,
     commandId,
     browserSignalCommand(bodyText, recipients, signalKind, attachments, placement),
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the signal result. Refresh the feed before posting it again.",
+    pinned,
   );
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   if (status !== 200 || body.status !== "accepted") {
     throw new Error(
       status === 403
@@ -3666,8 +3720,13 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
   };
 }
 
-export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
-  const c = client();
+export async function feed(
+  workspaceId: string,
+  limit = 50,
+  pinned?: PinnedAccountContext | null,
+): Promise<Signal[]> {
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const { data, error } = await readWithDeadline(
     "workspace activity",
@@ -3829,12 +3888,18 @@ export async function workspaceChannels(
  * list may be stale. Returns the raw value, or `null` when the viewer can read no such channel. Throws
  * when the read fails; the caller treats that as not open.
  */
-export async function channelVisibilityNow(workspaceId: string, channelId: string): Promise<unknown> {
-  const c = client();
+export async function channelVisibilityNow(
+  workspaceId: string,
+  channelId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<unknown> {
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const { data, error } = await readWithDeadline("the channel", signal => c
     .schema("swarm_read").from("channels").select("channel_id,visibility")
     .eq("workspace_id", workspaceId).eq("channel_id", channelId).limit(1).abortSignal(signal));
+  if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   if (error) throw new Error(error.message);
   const row = (data ?? [])[0] as { visibility?: unknown } | undefined;
   return row ? row.visibility ?? null : null;
@@ -4345,13 +4410,14 @@ export async function mintAgentReconnectCode(
   commandId: string,
   workspaceId: string,
   principalId: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<AgentReconnectCode> {
   const { status, body } = await postCommand(session, commandId, {
     kind: "mint_agent_join_credential",
     seat_cap: 1,
     ttl_hours: 1,
     principal_id: principalId,
-  }, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, undefined, { accountWideWorkspace: true });
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, pinned, { accountWideWorkspace: true });
   if (status === 200 && body.status === "accepted" && typeof body.join_credential === "string") {
     return {
       joinCode: body.join_credential,
@@ -4411,16 +4477,19 @@ export interface MyWorkspace {
   /** Who may create channels. `null` is a policy this build does not know. */
   channelCreationPolicy: ChannelCreationPolicy | null;
 }
-export async function myWorkspaces(): Promise<MyWorkspace[]> {
-  const c = client();
+export async function myWorkspaces(pinned?: PinnedAccountContext | null): Promise<MyWorkspace[]> {
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const c = pinned ? pinned.runtime.client : client();
   if (!c) throw new NoDeployment();
   const workspaces: MyWorkspace[] = [];
   const pageSize = 50;
   for (let offset = 0; ; offset += pageSize) {
+    if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
     const { data, error } = await readWithDeadline("your workspaces", signal => c
       .schema("swarm_read").from("workspaces").select("*")
       .is("archived_at", null).order("name", { ascending: true }).order("workspace_id", { ascending: true })
       .range(offset, offset + pageSize - 1).abortSignal(signal));
+    if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
     if (error) throw new Error(error.message);
     const page = data ?? [];
     workspaces.push(...page.map(row => ({ id: String(row.workspace_id ?? ""),
@@ -4676,18 +4745,25 @@ export function removeReaction(session: Session, commandId: string, workspaceId:
 /** Interactive replies: the stored choices (and any answer) for asks the signed-in person can read,
  * paged in batches of ASK_CHOICES_BATCH (50). `null` when any batch is unavailable or malformed;
  * asks without choices simply aren't in the result. */
-export async function askChoices(workspaceId: string, signalIds: readonly string[]): Promise<AskChoiceState[] | null> {
-  const api = client();
+export async function askChoices(
+  workspaceId: string,
+  signalIds: readonly string[],
+  pinned?: PinnedAccountContext | null,
+): Promise<AskChoiceState[] | null> {
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const api = pinned ? pinned.runtime.client : client();
   if (!api) throw new NoDeployment();
   if (signalIds.length === 0) return [];
   const out: AskChoiceState[] = [];
   for (let offset = 0; offset < signalIds.length; offset += ASK_CHOICES_BATCH) {
+    if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
     const chunk = signalIds.slice(offset, offset + ASK_CHOICES_BATCH);
     const result = await readWithDeadline("Ask choices", signal =>
       api.schema("swarm_read").rpc("ask_choices", {
         p_workspace_id: workspaceId,
         p_signal_ids: chunk,
       }).abortSignal(signal));
+    if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
     if (result.error) return null;
     const parsed = parseAskChoices(result.data);
     if (!parsed) return null;
@@ -4749,8 +4825,12 @@ export async function homeOverviewAsks(workspaceId: string, ids: readonly string
 }
 
 /** Dedicated work read: an agent's active claim must not depend on the latest chat page. */
-export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
-  const api = client();
+export async function homeWorkingOn(
+  workspaceId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<Signal[]> {
+  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+  const api = pinned ? pinned.runtime.client : client();
   if (!api) throw new NoDeployment();
   try {
     const rows: Signal[] = [];
