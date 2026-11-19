@@ -4419,7 +4419,7 @@ export async function listConversations(
     buildListConversationsRequest(workspaceId, includeArchived),
     "conversations",
   );
-  if (status !== 200) {
+  if (status !== 200 || !Array.isArray(body.conversations)) {
     throw new Error(typeof body.message === "string" ? body.message : `CommonSwarm could not load conversations (HTTP ${status}).`);
   }
   return parseConversationsListResponse(body);

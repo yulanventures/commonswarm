@@ -777,6 +777,8 @@ import "../../styles/kylon-image-viewer.css";
               <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-go-general>{GO_TO_GENERAL_LABEL}</button>
               <p class="dashboard__form-error" role="alert" data-channel-unarchive-error hidden></p>
             </div>
+            {/* An unjoined public channel's history stays readable; this Join bar replaces the composer until confirmed. */}
+            <div data-channel-preview hidden></div>
             <form class="dashboard__composer" data-composer hidden>
               {/* THE REPLY BAR. Hidden until a reply is in progress, so the composer at rest is
                   the bar the mobile budget was measured against. It names the message being
@@ -1258,7 +1260,7 @@ import "../../styles/kylon-image-viewer.css";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
   import { completePasswordChange, type CurrentCheck } from "../../lib/password-change-completion";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
-  import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailOrderList } from "../../lib/home-rail";
+  import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailDirectMessageRowVM, type RailDirectMessagesVM, type RailOrderList } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
@@ -1420,6 +1422,11 @@ import "../../styles/kylon-image-viewer.css";
     workspaceFiles,
     workspaceChannels,
     channelUnread,
+    listConversations,
+    joinConversation,
+    leaveConversation,
+    markConversationRead,
+    setConversationNotify,
     messageStatus,
     askChoices,
     signalMentions,
@@ -1565,6 +1572,15 @@ import "../../styles/kylon-image-viewer.css";
     signalInChannelView,
   } from "../../lib/channels";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
+  import { renderChannelPreviewBar } from "../../lib/channel-preview-bar";
+  import {
+    canLeaveConversation,
+    conversationTitle,
+    sortDirectConversations,
+    type ConversationMemberRef,
+    type ConversationNotifyLevel,
+    type ConversationSummary,
+  } from "../../lib/conversations";
   import { CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
     type ChannelLead } from "../../lib/channel-lead";
   import {
@@ -1890,6 +1906,14 @@ import "../../styles/kylon-image-viewer.css";
     /** The per-channel unread read for this workspace (C1b). `null` is unknown, never "read". */
     let channelUnreadRows: ChannelUnread[] | null = null;
     let channelUnreadGeneration = 0;
+    /** Step 2b conversations read for this workspace (`POST /functions/v1/read`, resource="conversations").
+        Remains `null` until Step 2b answers so pre-Step-2b servers keep the legacy rail and directory. */
+    let workspaceConversations: ConversationSummary[] | null = null;
+    let conversationsGeneration = 0;
+    let conversationsReadAt = 0;
+    let activeDmConversationId: string | null = null;
+    let mountedPreviewKey = "";
+    const channelJoinPending = new Set<string>();
     /** Read positions (mark_channel_read). A server from before them answers 400: nothing more is sent this page. */
     let channelReadUnsupported = false;
     /** Marks on view by workspace, view and newest message: in flight or accepted, so neither is sent twice. A mark that
@@ -5723,10 +5747,12 @@ import "../../styles/kylon-image-viewer.css";
       /* The Channels section belongs to the selected workspace; guarded for fixtures that render
          the rail without channel state. */
       const channelSection = typeof railChannelSection === "function" ? railChannelSection() : undefined;
+      const dmSection = typeof railDirectMessagesSection === "function" ? railDirectMessagesSection() : undefined;
       const vm = { ...mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts),
         ...(typeof activeDm !== "undefined" && activeDm ? { currentDmId: activeDm.id } : {}),
         ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}),
-        ...(channelSection ? { channels: channelSection } : {}) };
+        ...(channelSection ? { channels: channelSection } : {}),
+        ...(dmSection ? { directMessages: dmSection } : {}) };
       const archivedOpen = typeof railArchivedOpen === "boolean" && railArchivedOpen;
       const key = homeStructureKey(vm) + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}|more:${railExpanded}|archived:${archivedOpen}`;
       if (key === homeRailKey && slot.childElementCount) {
@@ -5795,12 +5821,26 @@ import "../../styles/kylon-image-viewer.css";
         toggleChannels: (expanded: boolean) => { railExpanded = expanded; writeRailExpanded(activeWorkspaceId, expanded); },
         toggleArchived: (open: boolean) => { railArchivedOpen = open; },
       } : {};
+      const dmCallbacks = dmSection ? {
+        selectConversation: (id: string) => {
+          layout.closeNavigation(false);
+          if (typeof openDirectConversation === "function") void openDirectConversation(id);
+        },
+        conversationMenu: (id: string, event: MouseEvent, button: HTMLElement) => {
+          if (typeof openConversationRowMenu === "function") openConversationRowMenu(id, event, button);
+        },
+        newDirectMessage: () => {
+          layout.closeNavigation(false);
+          if (activeWorkspaceId) void navigateHome({ view: "people", workspaceId: activeWorkspaceId }, "push");
+        },
+      } : {};
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: openRailPerson,
         openAgent: openRailAgent,
         contextMenu: railContextMenu,
         ...channelCallbacks,
+        ...dmCallbacks,
       }, { channelsExpanded: railExpanded, archivedOpen })]));
       homeRailKey = key;
     };
@@ -11308,6 +11348,7 @@ import "../../styles/kylon-image-viewer.css";
       channelListFailed = false;
       channelsLoaded = false;
       channelUnreadRows = null;
+      if (typeof resetConversationsState === "function") resetConversationsState();
       activeChannelId = null;
       unknownChannelId = null;
       postedSinceReset.clear();
@@ -12119,6 +12160,7 @@ import "../../styles/kylon-image-viewer.css";
       channelsLoaded = false;
       channelUnreadRows = null;
       channelUnreadGeneration += 1;
+      if (typeof resetConversationsState === "function") resetConversationsState();
       railArchivedOpen = false;
       railExpanded = readRailExpanded(selected.id);
       activeChannelId = null;
@@ -13388,24 +13430,174 @@ import "../../styles/kylon-image-viewer.css";
       } catch { /* storage unavailable: the rail stays as the reader left it this session */ }
     };
 
+    const resetConversationsState = (): void => {
+      workspaceConversations = null;
+      conversationsGeneration += 1;
+      conversationsReadAt = 0;
+      activeDmConversationId = null;
+      mountedPreviewKey = "";
+      channelJoinPending.clear();
+      one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
+    };
+    /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
+    const conversationForChannel = (channelId: string | null): ConversationSummary | null => {
+      if (!workspaceConversations || channelId === null) return null;
+      if (channelId === GENERAL_CHANNEL_ID) return workspaceConversations.find(c => c.kind === "general") ?? null;
+      return workspaceConversations.find(c => c.channelId === channelId) ?? null;
+    };
+    /** Active unjoined public channel (Step 2b `joined: false`), or null when joined / archived / pre-Step-2b. */
+    const activeUnjoinedPublicChannel = (): ConversationSummary | null => {
+      if (sampleMode || !session || !activeChannelId || activeChannelId === GENERAL_CHANNEL_ID) return null;
+      const conv = conversationForChannel(activeChannelId);
+      return conv && conv.kind === "public_channel" && !conv.joined && conv.archivedAt === null ? conv : null;
+    };
+    const markConversationJoinedLocally = (conversationId: string): void => {
+      if (!workspaceConversations) return;
+      workspaceConversations = workspaceConversations.map(c =>
+        c.conversationId === conversationId ? { ...c, joined: true } : c,
+      );
+    };
+    const lookupConversationMemberName = (member: ConversationMemberRef): string | null => {
+      if (member.kind === "agent") return agents.find(a => a.principalId === member.id)?.name ?? null;
+      return people.get(member.id) ?? members.find(m => m.userId === member.id)?.displayName ?? null;
+    };
+    /** Step 2b Direct messages rail section; undefined until `resource: "conversations"` answers. */
+    const railDirectMessagesSection = (): RailDirectMessagesVM | undefined => {
+      if (sampleMode || !activeWorkspaceId || workspaceConversations === null ||
+        homeRoute.view === "catchup" || homeRoute.view === "new") return undefined;
+      const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null;
+      const viewerId = homeViewerId();
+      const rows: RailDirectMessageRowVM[] = sortDirectConversations(workspaceConversations).map(conv => ({
+        id: conv.conversationId,
+        kind: conv.kind === "group_dm" ? "group_dm" : "dm",
+        title: conversationTitle(conv, viewerId, lookupConversationMemberName),
+        href: routeHref({ view: "chat", workspaceId: activeWorkspaceId, dmId: conv.conversationId }),
+        current: reading && activeDmConversationId === conv.conversationId,
+        unreadCount: conv.unreadCount,
+        mentionCount: conv.mentionCount,
+        muted: conv.notifyLevel === "muted",
+        memberCount: conv.members.filter(m => !m.leftAt).length,
+      }));
+      return { rows };
+    };
+    /** Open a Step 2b DM or group DM row from the rail. */
+    const openDirectConversation = async (conversationId: string): Promise<void> => {
+      const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
+      if (!conv || !activeWorkspaceId) return;
+      const viewerId = homeViewerId();
+      const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
+      if (conv.kind === "dm" && others.length === 1) {
+        const other = others[0]!;
+        await openDirectMessage({ kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef);
+        activeDmConversationId = conversationId;
+        renderHomeRail();
+        return;
+      }
+      activeDmConversationId = conversationId;
+      activeChannelId = null;
+      unknownChannelId = null;
+      if (homeRoute.view !== "chat") await navigateHome({ view: "chat", workspaceId: activeWorkspaceId, dmId: conversationId }, "push");
+      else window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId: activeWorkspaceId, dmId: conversationId }));
+      const recipients: ComposerRecipient[] = others.map(m => ({ kind: m.kind === "agent" ? "agent" : "person", id: m.id }));
+      if (recipients.length) syncComposerAddress(recipients);
+      renderHomeRail();
+      renderHomeShell();
+      renderChannelBlocked();
+    };
+    /** Row ⋯ menu for a Step 2b DM / group DM: Mark as read, Star, Notifications, and Leave (group DMs only). */
+    const openConversationRowMenu = (conversationId: string, event: MouseEvent, button: HTMLElement): void => {
+      const conv = workspaceConversations?.find(c => c.conversationId === conversationId);
+      const workspaceId = activeWorkspaceId;
+      if (!conv || !session || !workspaceId || sampleMode) return;
+      const title = conversationTitle(conv, homeViewerId(), lookupConversationMemberName);
+      const runNotify = (change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean }): void => {
+        if (!session) return;
+        void setConversationNotify(session, uuid(), workspaceId, conversationId, change).then(res => {
+          if (res.ok && workspaceId === activeWorkspaceId) void refreshConversations(workspaceId, true);
+        }).catch(() => {});
+      };
+      const items: (ContextMenuItem | null)[] = [];
+      if ((conv.unreadCount ?? 0) > 0 || (conv.mentionCount ?? 0) > 0) {
+        items.push({
+          label: MARK_AS_READ_LABEL,
+          run: () => {
+            if (!session) return;
+            void markConversationRead(session, uuid(), workspaceId, conversationId, conv.lastMessageId).then(res => {
+              if (!res.ok || workspaceId !== activeWorkspaceId) return;
+              if (workspaceConversations) {
+                workspaceConversations = workspaceConversations.map(c =>
+                  c.conversationId === conversationId ? { ...c, unreadCount: 0, mentionCount: 0 } : c,
+                );
+                renderHomeRail();
+              }
+              void refreshConversations(workspaceId, true);
+            }).catch(() => {});
+          },
+        });
+      }
+      items.push({ label: conv.starred ? "Remove star" : "Star", run: () => runNotify({ starred: !conv.starred }) });
+      items.push(null);
+      for (const [level, label] of [["everything", "All messages"], ["mentions", "Mentions only"], ["muted", "Mute"]] as const) {
+        items.push({ label, checked: conv.notifyLevel === level, run: () => runNotify({ notifyLevel: level }) });
+      }
+      if (canLeaveConversation(conv.kind)) {
+        items.push(null, {
+          label: "Leave group",
+          danger: true,
+          run: () => {
+            if (!session) return;
+            void leaveConversation(session, uuid(), workspaceId, conversationId).then(res => {
+              if (!res.ok || workspaceId !== activeWorkspaceId) return;
+              if (workspaceConversations) {
+                workspaceConversations = workspaceConversations.filter(c => c.conversationId !== conversationId);
+              }
+              if (activeDmConversationId === conversationId) {
+                activeDmConversationId = null;
+                selectChannel(GENERAL_CHANNEL_ID);
+              } else {
+                renderHomeRail();
+              }
+              void refreshConversations(workspaceId, true);
+            }).catch(() => {});
+          },
+        });
+      }
+      openContextMenu(event, button, items, `${title} options`);
+    };
+
     /** The Channels section of the rail for the workspace being read, or undefined where none is. */
     const railChannelSection = (): RailChannelsVM | undefined => {
       if (!activeWorkspaceId || homeRoute.view === "catchup" || homeRoute.view === "new") return undefined;
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
       const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null &&
-        !(typeof activeDm !== "undefined" && activeDm);
-      const muted = (id: string): boolean => channelPreferenceFor(channelUnreadRows, id)?.involvement === "muted";
+        !(typeof activeDm !== "undefined" && activeDm) && activeDmConversationId === null;
+      const muted = (id: string): boolean => {
+        const conv = conversationForChannel(id);
+        return conv ? conv.notifyLevel === "muted" : channelPreferenceFor(channelUnreadRows, id)?.involvement === "muted";
+      };
+      const unreadFor = (id: string): boolean | null => {
+        const conv = conversationForChannel(id);
+        if (conv && conv.unreadCount !== null) return conv.unreadCount > 0;
+        return channelUnreadFor(channelUnreadRows, id);
+      };
       const row = (channel: WorkspaceChannel) => ({ id: channel.channelId, slug: channel.slug, href: href(channel.channelId),
         current: reading && activeChannelId === channel.channelId,
-        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
+        unread: unreadFor(channel.channelId),
+        mentionCount: conversationForChannel(channel.channelId)?.mentionCount ?? 0,
+        manageable: viewerMayManageChannel(channel),
         muted: muted(channel.channelId) });
       const movable = (rows: RailChannelRowVM[], list: RailOrderList): RailChannelRowVM[] =>
         !sampleMode && rows.length > 1 ? rows.map(entry => ({ ...entry, reorder: list })) : rows;
       const sharedOrder = viewerWorkspaceRole() === "owner" || viewerWorkspaceRole() === "admin";
       const general = { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
         current: reading && activeChannelId === GENERAL_CHANNEL_ID,
-        unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
-      const live = liveChannels(channels);
+        unread: unreadFor(GENERAL_CHANNEL_ID),
+        mentionCount: conversationForChannel(GENERAL_CHANNEL_ID)?.mentionCount ?? 0,
+        manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
+      const allLive = liveChannels(channels);
+      const live = workspaceConversations
+        ? allLive.filter(channel => conversationForChannel(channel.channelId)?.joined !== false)
+        : allLive;
       /* A starred place is listed once, under Starred, in the viewer's own order. A star on a channel that
          has since been archived or left shows nothing. */
       const starredIds = starredViewIds(channelUnreadRows);
@@ -13708,16 +13900,62 @@ import "../../styles/kylon-image-viewer.css";
      */
     const renderChannelBlocked = (): void => {
       const block = one<HTMLElement>("[data-channel-archived]");
+      const previewHost = one<HTMLElement>("[data-channel-preview]");
       if (!block) return;
       const feedShown = app.dataset.channelView === "feed" || app.dataset.channelView === "feed-empty";
-      const archived = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        unknownChannelId === null && activeChannelArchived();
+      const inChannelFeed = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        unknownChannelId === null && !(typeof activeDm !== "undefined" && activeDm) && activeDmConversationId === null;
+      const archived = inChannelFeed && activeChannelArchived();
+      const unjoined = !archived && inChannelFeed ? activeUnjoinedPublicChannel() : null;
       block.hidden = !archived;
       const unarchive = one<HTMLButtonElement>("[data-channel-unarchive]");
       if (unarchive) unarchive.hidden = !archived || !activeChannel() || !viewerMayManageChannel(activeChannel()!);
+      if (previewHost) {
+        if (unjoined) {
+          previewHost.hidden = false;
+          const key = `${activeWorkspaceId}:${unjoined.conversationId}:${unjoined.slug ?? ""}`;
+          if (mountedPreviewKey !== key) {
+            mountedPreviewKey = key;
+            const workspaceId = activeWorkspaceId;
+            const convId = unjoined.conversationId;
+            const slug = unjoined.slug ?? activeChannel()?.slug ?? "channel";
+            renderChannelPreviewBar(previewHost, {
+              slug,
+              onJoin: async () => {
+                if (!session || !workspaceId) return { ok: false, message: "Sign in to join this channel." };
+                try {
+                  const res = await joinConversation(session, uuid(), workspaceId, convId);
+                  return res.ok ? { ok: true } : { ok: false, message: res.message };
+                } catch (error) {
+                  return { ok: false, message: readableError(error) };
+                }
+              },
+              onJoined: () => {
+                if (workspaceId !== activeWorkspaceId) return;
+                markConversationJoinedLocally(convId);
+                mountedPreviewKey = "";
+                renderChannelBlocked();
+                renderHomeRail();
+                renderChannelDirectoryDialog();
+                one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+                void refreshConversations(workspaceId, true);
+              },
+            });
+          }
+        } else {
+          previewHost.hidden = true;
+          if (mountedPreviewKey) {
+            mountedPreviewKey = "";
+            previewHost.replaceChildren();
+          }
+        }
+      }
       const composer = one<HTMLFormElement>("[data-composer]");
-      if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") composer.hidden = archived || unknownChannelId !== null;
-      if (composer && archived) {
+      const blocked = archived || unjoined !== null;
+      if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") {
+        composer.hidden = blocked || unknownChannelId !== null;
+      }
+      if (composer && blocked) {
         composer.hidden = true;
         closeMentionPicker();
       }
@@ -13798,9 +14036,10 @@ import "../../styles/kylon-image-viewer.css";
       if (channelId !== null && next === null) return;
       rememberPaletteVisit(next === null ? "channel:__all__" : next === GENERAL_CHANNEL_ID ? "channel:general" : `channel:${channelById(channels, next)?.slug ?? ""}`);
       /* A channel row leaves a Direct Message: the feed and the composer go back to the channel. */
-      const leavingDm = !!activeDm;
+      const leavingDm = !!activeDm || activeDmConversationId !== null;
       if (leavingDm) {
         activeDm = null;
+        activeDmConversationId = null;
         syncComposerAddress([]);
         closeEntityPanel(false);
       }
@@ -13869,6 +14108,7 @@ import "../../styles/kylon-image-viewer.css";
       syncChannelUrl();
       renderChannelRail();
       renderHomeShell();
+      renderChannelBlocked();
       closeChannelDialog();
       /* returnToChannel, reached through here, is what loads the new page: it sees an
          empty signal list and fetches one under the channel now in state. */
@@ -14080,24 +14320,58 @@ import "../../styles/kylon-image-viewer.css";
       channelDirectoryRestore = restore;
       dialog.close();
     };
+    const submitChannelJoin = async (channelId: string): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
+      const conv = conversationForChannel(channelId);
+      if (!session || !workspaceId || !conv || channelJoinPending.has(channelId)) return;
+      channelJoinPending.add(channelId);
+      channelDirectoryErrors.delete(channelId);
+      renderChannelDirectoryDialog();
+      let errorMessage = "";
+      try {
+        const res = await joinConversation(session, uuid(), workspaceId, conv.conversationId);
+        if (!res.ok) errorMessage = res.message;
+      } catch (error) {
+        errorMessage = readableError(error);
+      }
+      channelJoinPending.delete(channelId);
+      if (workspaceId !== activeWorkspaceId) return;
+      if (errorMessage) {
+        channelDirectoryErrors.set(channelId, errorMessage);
+        renderChannelDirectoryDialog();
+        return;
+      }
+      markConversationJoinedLocally(conv.conversationId);
+      renderChannelDirectoryDialog();
+      renderHomeRail();
+      renderChannelBlocked();
+      void refreshConversations(workspaceId, true);
+    };
     const renderChannelDirectoryDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-directory]");
       const list = one<HTMLElement>("[data-channel-directory-list]");
       if (!dialog?.open || !list) return;
       const query = one<HTMLInputElement>("[data-channel-directory-search]")?.value ?? "";
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
-      const row = (channel: WorkspaceChannel): DirectoryChannel => ({ id: channel.channelId, slug: channel.slug,
-        description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
-        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
+      const row = (channel: WorkspaceChannel): DirectoryChannel => {
+        const conv = conversationForChannel(channel.channelId);
+        return { id: channel.channelId, slug: channel.slug,
+          description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
+          unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
+          ...(conv ? { joined: conv.joined } : {}) };
+      };
       const rows: DirectoryChannel[] = [{ id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, description: null,
-        href: href(GENERAL_CHANNEL_ID), archived: false, unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false },
+        href: href(GENERAL_CHANNEL_ID), archived: false, unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false,
+        ...(workspaceConversations ? { joined: true } : {}) },
         ...liveChannels(channels).map(row), ...archivedChannels(channels).map(row)];
-      const key = JSON.stringify([query, rows, channelsLoaded, channelListFailed, [...channelUnarchivePending], [...channelDirectoryErrors]]);
+      const pending = new Set([...channelUnarchivePending, ...channelJoinPending]);
+      const key = JSON.stringify([query, rows, channelsLoaded, channelListFailed, [...pending], [...channelDirectoryErrors]]);
       if (key === channelDirectoryKey) return;
       channelDirectoryKey = key;
-      const count = renderChannelDirectory(list, rows, query, channelUnarchivePending, channelDirectoryErrors, {
+      const count = renderChannelDirectory(list, rows, query, pending, channelDirectoryErrors, {
         open: id => { closeChannelDirectory(false); layout.closeNavigation(false); selectChannel(id); focusConversationHeading(); },
         unarchive: (id, button) => { void submitChannelUnarchive(id, "directory", button); },
+        join: id => { void submitChannelJoin(id); },
       });
       const status = one<HTMLElement>("[data-channel-directory-status]");
       if (status) status.textContent = !channelsLoaded ? "Loading channels…" : channelListFailed ? CHANNELS_LOAD_FAILED : count === 0 ? "No channels found" : "";
@@ -14258,6 +14532,30 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     /**
+     * Step 2b conversations read (`POST /functions/v1/read`, resource="conversations").
+     * Gated cleanly on backend support: when an older server refuses or omits `conversations`,
+     * `workspaceConversations` stays `null` and the legacy rail, directory, and composer remain active.
+     */
+    const refreshConversations = async (workspaceId: string, force: boolean): Promise<void> => {
+      if (sampleMode || !session || !workspaceId) return;
+      const now = Date.now();
+      if (!force && now - conversationsReadAt < 15_000) return;
+      conversationsReadAt = now;
+      const generation = ++conversationsGeneration;
+      let rows: ConversationSummary[];
+      try {
+        rows = await listConversations(workspaceId, true);
+      } catch {
+        return;
+      }
+      if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
+      workspaceConversations = rows;
+      renderHomeRail();
+      renderChannelBlocked();
+      renderChannelDirectoryDialog();
+    };
+
+    /**
      * The viewer's unread state per channel (C1b), re-read at workspace open, after a seen receipt
      * lands, after a channel change, and at most every 15 seconds on the live tick. A failed read
      * is unknown for every row: no dot, and nothing claims "read".
@@ -14265,6 +14563,7 @@ import "../../styles/kylon-image-viewer.css";
     let channelUnreadReadAt = 0;
     const refreshChannelUnread = async (workspaceId: string, force: boolean): Promise<void> => {
       if (sampleMode || !session || !workspaceId) return;
+      void refreshConversations(workspaceId, force);
       const now = Date.now();
       if (!force && now - channelUnreadReadAt < 15_000) return;
       channelUnreadReadAt = now;

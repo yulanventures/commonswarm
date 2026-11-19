@@ -49,6 +49,7 @@
   min-block-size: 0;
   max-block-size: 60%;
 }
+.hm-rail__nav:has(.hm-rail__dms) { max-block-size: none; }
 
 /* Channels share the rail's one scroll region: no list here scrolls on its own. */
 .hm-rail__channels { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
