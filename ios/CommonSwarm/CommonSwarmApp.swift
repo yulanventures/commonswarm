@@ -218,6 +218,7 @@ struct HistoryView: View {
     let directory: [Conversation]
     @ObservedObject var draft: Composer
     var previewBar: AnyView? = nil
+    var recipientDetails: [String] = []
     @StateObject private var history = MessageHistory()
     @ViewState private var readingAnchor: HistoryAnchor?
     @ViewState private var restoreAnchor: HistoryAnchor?
@@ -319,13 +320,20 @@ struct HistoryView: View {
                     .padding(.trailing, 12).padding(.bottom, 4)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if draft.access == .joined && !recipientDetails.isEmpty {
+                    Text(recipientDetails.joined(separator: "\n")).font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal).padding(.vertical, 4).background(.bar)
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if draft.access == .preview, let previewBar { previewBar }
                 else if draft.access == .joined {
                     ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
                 }
             }
-        }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle(draft.access == .unavailable ? "Conversation unavailable" : item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
     }
 
