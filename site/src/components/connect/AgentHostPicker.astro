@@ -261,11 +261,13 @@ const notesOf = (host: AgentHost): string[] => [
     <div data-ahp-rename-slot></div>
     <div class="hm-ahp__actions">
       <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done>Done</button>
-      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
       <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another</button>
       <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-rename hidden>Rename</button>
     </div>
-    <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
+    <div class="hm-ahp__optional-access" data-ahp-approve-wrap hidden>
+      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
+      <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
+    </div>
   </section>
 
   <p class="hm-ahp__footer">
@@ -401,6 +403,8 @@ const notesOf = (host: AgentHost): string[] => [
       if (name) name.value = "";
       this.#error("");
       this.#show("form");
+      const approveWrap = this.querySelector<HTMLElement>("[data-ahp-approve-wrap]");
+      if (approveWrap) approveWrap.hidden = true;
       const approveStatus = this.querySelector<HTMLElement>("[data-ahp-approve-status]");
       if (approveStatus) approveStatus.textContent = "";
       const fold = this.querySelector<HTMLDetailsElement>("[data-ahp-yours-fold]");
@@ -462,9 +466,12 @@ const notesOf = (host: AgentHost): string[] => [
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
       const rename = this.querySelector<HTMLButtonElement>("[data-ahp-rename]");
       if (rename) rename.hidden = !this.renameAgent;
+      const showApprove = joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
+      const approveWrap = this.querySelector<HTMLElement>("[data-ahp-approve-wrap]");
+      if (approveWrap) approveWrap.hidden = !showApprove;
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
       if (approve) {
-        approve.hidden = !joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
+        approve.hidden = !showApprove;
         approve.disabled = false;
         approve.textContent = "Allow Lists & docs";
       }

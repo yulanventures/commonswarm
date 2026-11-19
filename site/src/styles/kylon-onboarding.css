@@ -356,6 +356,23 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined
   overflow-wrap: anywhere;
 }
 
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined .hm-ahp__button--done {
+  padding-inline: 18px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined .hm-ahp__button--done:not(:focus-visible),
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined .hm-ahp__button--text:not(:focus-visible) {
+  box-shadow: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined .hm-ahp__button--text {
+  padding-inline: 8px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__joined .hm-ahp__button--quiet:not(:focus-visible) {
+  box-shadow: inset 0 0 0 1px var(--k-shell-control);
+}
+
 live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__yours .workspace-agent-picker__notice,
 live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__yours .pd-agent-app {
   color: var(--k-shell-secondary);
