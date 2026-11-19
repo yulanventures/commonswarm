@@ -154,7 +154,7 @@ struct MemberChoice: Identifiable {
 
     static func disambiguators(_ choices: [MemberChoice]) -> [MemberRef: String] {
         let groups = Dictionary(grouping: choices) { choice in
-            choice.id.kind.rawValue + ":" + choice.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            choice.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
         var result: [MemberRef: String] = [:]
         for group in groups.values {
@@ -164,7 +164,8 @@ struct MemberChoice: Identifiable {
             var length = 6
             while length < 32 && Set(strings.map { $0.prefix(length) }).count < ids.count { length += 1 }
             for id in ids {
-                result[id] = String(id.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(length))
+                let tag = id.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(length)
+                result[id] = (id.kind == .agent ? "Agent · " : "Person · ") + tag
             }
         }
         return result

@@ -26,42 +26,42 @@ struct NewMessagePicker: View {
                     }
                 }.frame(minHeight: 44).padding(.horizontal)
                 List {
-                if let error { Text(error).foregroundStyle(.secondary) }
-                if let choices {
-                    ForEach(choices.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }) { choice in
-                        let picked = selected.contains(choice.id)
-                        Button {
-                            if picked { selected.removeAll { $0 == choice.id } } else { selected.append(choice.id) }
-                            commandID = UUID()
-                            restart = false
-                            error = nil
-                        } label: {
-                            HStack {
-                                Label {
-                                    VStack(alignment: .leading) {
-                                        Text(choice.name)
-                                        if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
-                                    }
-                                } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
-                                Spacer()
-                                if picked { Image(systemName: "checkmark") }
-                            }.frame(minHeight: 44).contentShape(Rectangle())
-                        }.accessibilityAddTraits(picked ? .isSelected : [])
-                         .disabled(busy || (!picked && Set(selected + [choice.id, MemberRef(kind: .user, id: api.session.userID)]).count > 9))
-                    }
-                } else if error == nil { ProgressView() }
-                else { Button("Retry") { Task { await load() } } }
-            }
-            if !selected.isEmpty {
-                Button { Task { await open() } } label: {
-                    Text(restart ? "Start new group" : "Open")
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                    if let error { Text(error).foregroundStyle(.secondary) }
+                    if let choices {
+                        ForEach(choices.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }) { choice in
+                            let picked = selected.contains(choice.id)
+                            Button {
+                                if picked { selected.removeAll { $0 == choice.id } } else { selected.append(choice.id) }
+                                commandID = UUID()
+                                restart = false
+                                error = nil
+                            } label: {
+                                HStack {
+                                    Label {
+                                        VStack(alignment: .leading) {
+                                            Text(choice.name)
+                                            if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
+                                        }
+                                    } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
+                                    Spacer()
+                                    if picked { Image(systemName: "checkmark") }
+                                }.frame(minHeight: 44).contentShape(Rectangle())
+                            }.accessibilityAddTraits(picked ? .isSelected : [])
+                             .disabled(busy || (!picked && Set(selected + [choice.id, MemberRef(kind: .user, id: api.session.userID)]).count > 9))
+                        }
+                    } else if error == nil { ProgressView() }
+                    else { Button("Retry") { Task { await load() } } }
                 }
-                .buttonStyle(.borderedProminent).disabled(busy)
-                .padding(.horizontal).padding(.vertical, 6)
-                .background(.bar)
+                if !selected.isEmpty {
+                    Button { Task { await open() } } label: {
+                        Text(restart ? "Start new group" : "Open")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent).disabled(busy)
+                    .padding(.horizontal).padding(.vertical, 6)
+                    .background(.bar)
+                }
             }
-        }
             .navigationTitle("New message").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) } }
         }
