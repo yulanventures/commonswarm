@@ -15,7 +15,7 @@ const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 type Geometry = { width: number; hostileElements: number; hostileText: boolean; modelValues: (string | null)[];
   confirmRole: string | null; safeConfirmFocus: boolean; outerStillOpen: boolean; moreClosedInitially: boolean; technicalClosed: boolean;
   turnOffKey: { title: string | null; stopCount: number; keepCount: number; noteCount: number; noteText: string | null; describedByHasBoth: boolean;
-    safeFocus: boolean; closedOnEscape: boolean; returnedToOpener: boolean; commits: number } };
+    safeFocus: boolean; closedOnEscape: boolean; commits: number } };
 
 // CI only: build the production DOM builder rather than recreating obsolete row markup.
 test("A2 rows, details and confirms have usable geometry and preserve plain text", { timeout: 60_000 }, async () => {
@@ -75,11 +75,10 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           noteText: confirm.querySelector('.pd-confirm-note')?.textContent ?? null,
           describedByHasBoth: !!(described && described.querySelector('.pd-confirm-facts') && described.querySelector('.pd-confirm-note')),
           safeFocus: document.activeElement?.textContent === 'Go back',
-          closedOnEscape: false, returnedToOpener: false, commits: 0,
+          closedOnEscape: false, commits: 0,
         };
         confirm.requestClose();
         turnOffKey.closedOnEscape = !confirm.open;
-        turnOffKey.returnedToOpener = document.activeElement === revokeOpener;
         turnOffKey.commits = modalCommits.length;
         const opener = detail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
@@ -145,21 +144,24 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           for (const id of ['local','agent']) {
             pageState.selected={type:'agent',id}; pageCallbacks.render();
             pageDetail.querySelector('[data-people-agent-more] > summary').click();
-            const opener=pageDetail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
-            pageConfirm.getBoundingClientRect();
-            const deadline=performance.now()+2000;
-            while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check(getComputedStyle(pageConfirm.querySelector('.pd-confirm-actions button')).font)) {
-              if (performance.now()>=deadline) throw Error('Page confirmation readiness: '+JSON.stringify({width:innerWidth,height:innerHeight,phone:matchMedia('(max-width:52rem)').matches,open:pageConfirm.open,modal:pageConfirm.matches(':modal'),active:document.activeElement?.outerHTML,fonts:document.fonts.status,font:pageConfirm.querySelector('button')?getComputedStyle(pageConfirm.querySelector('button')).font:null}));
-              await new Promise(resolve=>setTimeout(resolve,20));
+            const triggers = id === 'agent' ? [['remove', '[data-remove-agent]'], ['turn-off-key', '[data-revoke-grant]']] : [['remove', '[data-remove-agent]']];
+            for (const [kind, selector] of triggers) {
+              const opener=pageDetail.querySelector(selector); opener.focus(); opener.click();
+              pageConfirm.getBoundingClientRect();
+              const deadline=performance.now()+2000;
+              while (!pageConfirm.open || !pageConfirm.matches(':modal') || document.activeElement!==pageConfirm.querySelector('.pd-confirm-actions button') || document.fonts.status!=='loaded' || !document.fonts.check(getComputedStyle(pageConfirm.querySelector('.pd-confirm-actions button')).font)) {
+                if (performance.now()>=deadline) throw Error('Page confirmation readiness: '+JSON.stringify({width:innerWidth,height:innerHeight,phone:matchMedia('(max-width:52rem)').matches,open:pageConfirm.open,modal:pageConfirm.matches(':modal'),active:document.activeElement?.outerHTML,fonts:document.fonts.status,font:pageConfirm.querySelector('button')?getComputedStyle(pageConfirm.querySelector('button')).font:null}));
+                await new Promise(resolve=>setTimeout(resolve,20));
+              }
+              const buttons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], cancel=buttons[0];
+              const row={dark,id,kind,width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
+                pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
+                actions:buttons.map(naturalAction),initial:modalPaint(cancel),cancelled:false,returned:false};
+              pageRows.push(row); document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+              pageConfirm.addEventListener('cancel',event=>{row.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
+              row.returned=!pageConfirm.open && document.activeElement===opener;
+              document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
             }
-            const buttons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], cancel=buttons[0];
-            const row={dark,id,width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
-              pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
-              actions:buttons.map(naturalAction),initial:modalPaint(cancel),cancelled:false,returned:false};
-            pageRows.push(row); document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
-            pageConfirm.addEventListener('cancel',event=>{row.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
-            row.returned=!pageConfirm.open && document.activeElement===opener;
-            document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
           }
         }
         document.documentElement.dataset.pageModal=btoa(unescape(encodeURIComponent(JSON.stringify({rows:pageRows,commits}))));
@@ -186,7 +188,6 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       assert.equal(geometry.turnOffKey.describedByHasBoth, true);
       assert.equal(geometry.turnOffKey.safeFocus, true);
       assert.equal(geometry.turnOffKey.closedOnEscape, true);
-      assert.equal(geometry.turnOffKey.returnedToOpener, true);
       assert.equal(geometry.turnOffKey.commits, 0);
 
       const pageEncoded = stdout.match(/data-page-modal="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
@@ -196,12 +197,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
 
       for (const row of page.rows) {
         const facts = `${width}px page modal: ${JSON.stringify(row)}`;
-
-        assert.equal(row.title, `Remove ${row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent'}?`, facts);
+        const name = row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent';
+        assert.equal(row.title, row.kind === 'turn-off-key' ? `Turn off ${name}’s key?` : `Remove ${name}?`, facts);
         assert.ok(row.cancelled && row.returned, `native close request must cancel and return to the actual opener: ${facts}`);
-
-
-
       }
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
