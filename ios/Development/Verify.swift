@@ -63,6 +63,9 @@ enum Verify {
         let messages = try await api.history(ws.id, dm.destination)
         try expect(messages.filter { $0.body == post.command["body"] ?? nil }.count == 1, "one DM after retry")
         let general = try await api.history(ws.id, .general)
+        guard let pinned = general.flatMap({ $0.attachments ?? [] }).first else { throw Failure.mismatch("thread file") }
+        let bytes = try await api.download(pinned, workspace: ws.id)
+        try expect(String(decoding: bytes, as: UTF8.self) == "Workspace notes", "pinned attachment uses session only to grant access")
         try expect(!general.contains { $0.body == post.command["body"] ?? nil }, "DM excluded from general")
         guard let channel = directory.first(where: { if case .channel = $0.id { true } else { false } }) else {
             throw Failure.mismatch("named channel")

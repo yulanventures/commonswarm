@@ -246,6 +246,9 @@ private struct HistoryView: View {
                                 }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
+                                ForEach(message.attachments ?? []) { attachment in
+                                    MessageAttachmentView(api: api, workspace: workspace.id, attachment: attachment)
+                                }
                             }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }

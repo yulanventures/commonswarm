@@ -206,6 +206,32 @@ final class HumanSession {
         return response
     }
 
+    // The signed URL authorizes only this file. Share sign-out cancellation with the app transport.
+    func downloadStorage(_ url: URL, size: Int) async throws -> Data {
+        guard isActive else { throw CancellationError() }
+        var request = URLRequest(url: url)
+        request.httpShouldHandleCookies = false
+        let data = try await Self.readStorage(request, size: size, transport: transport)
+        guard isActive else { throw CancellationError() }
+        return data
+    }
+
+    private nonisolated static func readStorage(_ request: URLRequest, size: Int, transport: URLSession) async throws -> Data {
+        let (bytes, response) = try await transport.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              response.expectedContentLength < 0 || response.expectedContentLength == size else { throw APIError.invalidResponse }
+        var result = Data()
+        result.reserveCapacity(size)
+        for try await byte in bytes {
+            guard result.count < size else { throw APIError.invalidResponse }
+            result.append(byte)
+        }
+        try Task.checkCancellation()
+        guard result.count == size else { throw APIError.invalidResponse }
+        return result
+    }
+
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
         let key = DraftKey(workspace: workspace, conversation: conversation)
         if let draft = drafts[key] { return draft }
