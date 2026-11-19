@@ -383,6 +383,7 @@ dialog.dashboard__roster-dialog .pd-detail-identity .pd-orb { inline-size: 52px;
 .dashboard__roster-dialog .pd-confirm-facts li.keep::before { background: var(--home-ink-muted); }
 .dashboard__roster-dialog .pd-confirm-context,
 .dashboard__roster-dialog .pd-confirm-note { color: var(--home-ink-muted); }
+.dashboard__roster-dialog .pd-confirm-error { color: var(--home-ink); }
 .dashboard__roster-dialog .pd-alternative { border: 1px solid var(--home-card-border); border-radius: 14px; background: var(--home-soft); }
 .dashboard__roster-dialog .pd-alternative p { color: var(--home-ink-muted); }
 .dashboard__roster-dialog .pd-confirm-actions .dashboard__button {
@@ -408,6 +409,7 @@ dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-facts li::before 
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-facts li.keep::before { background: var(--home-ink-muted); }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-context,
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-note { color: var(--home-ink-muted); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-error { color: var(--home-ink); }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-alternative { border: 1px solid var(--home-card-border); border-radius: 14px; background: var(--home-soft); }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-alternative p { color: var(--home-ink-muted); }
 dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-error { color: var(--home-danger); }

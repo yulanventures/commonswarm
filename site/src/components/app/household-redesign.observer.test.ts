@@ -1899,6 +1899,8 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   await flush();
   assert.equal(dialog.dataset.confirmReady, "true");
   assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back,Retry");
+  const scopeError = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-error");
+  assert.ok(scopeError && scopeError.getAttribute("role") === "alert", "failed-read explanation uses normal-ink pd-confirm-error with role=alert");
   assert.equal(focused.at(-1)?.textContent, "Go back");
   assert.equal(removals.length, 0);
 

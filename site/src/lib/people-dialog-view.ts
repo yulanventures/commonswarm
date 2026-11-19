@@ -936,7 +936,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
     }
     for (const text of copy.stays) description.append(node(doc, "p", "pd-confirm-note", text));
     if ("error" in copy && copy.error) {
-      const scopeError = node(doc, "p", "pd-error", copy.error);
+      const scopeError = node(doc, "p", "pd-confirm-error", copy.error);
       scopeError.setAttribute("role", "alert");
       description.append(scopeError);
     }
