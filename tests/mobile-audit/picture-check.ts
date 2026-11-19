@@ -152,7 +152,7 @@ type Picture = NonNullable<ReturnType<typeof PICTURE>>;
 export async function runPictureChecks(
   open: (setup: (page: any) => Promise<void>) => Promise<any>,
   shot: (page: any, label: string) => Promise<void>,
-  options: { click: boolean },
+  options: { click: boolean; openBrowse?: (setup: (page: any) => Promise<void>) => Promise<any> },
 ): Promise<{ checks: PictureCheck[]; error: string | null }> {
   const checks: PictureCheck[] = [];
   const check = (name: string, ok: boolean, detail: unknown) => { checks.push({ name, ok, detail }); };
@@ -531,9 +531,9 @@ export async function runPictureChecks(
     await shot(failing, "picture-staged");
     await failing.close();
 
-    // 4. Several pictures on one message. The seed has none, so the check posts one with two through the composer (after
-    // every capture has been taken), then steps between them in the viewer.
-    const browse = await open(async () => {});
+    // 4. Several pictures on one message. Post in an isolated channel (openBrowse) so #household's single-picture
+    // checks stay untouched across profiles, and reuse the two-picture message once posted.
+    const browse = await (options.openBrowse ?? open)(async () => {});
     const PAIR = () => {
       const lists = [...document.querySelectorAll<HTMLElement>('.dashboard__message .hm-extras__images[data-stream-images="2"]')];
       const links = [...(lists[lists.length - 1]?.querySelectorAll<HTMLElement>(".hm-extras__image") ?? [])];
@@ -542,10 +542,13 @@ export async function runPictureChecks(
       return { names: links.map(link => link.title), focus: links.indexOf(document.activeElement as HTMLElement),
         loaded: links.every(link => { const image = link.querySelector("img"); return !!image && image.complete && image.naturalWidth > 0 && !link.dataset.previewState; }) };
     };
-    await browse.setInputFiles("[data-composer-file-input]", ["first-view.png", "second-view.png"].map(name => ({ name, mimeType: "image/png", buffer: Buffer.from(auditPng()) })));
-    await browse.waitForSelector('[data-staged-attachment="second-view.png"]', { state: "visible", timeout: 10_000 });
-    await browse.fill("[data-composer-input]", "Two views of the boiler label.");
-    await browse.locator("[data-composer-send]").click();
+    const existingPair = await browse.evaluate(PAIR);
+    if (!existingPair) {
+      await browse.setInputFiles("[data-composer-file-input]", ["first-view.png", "second-view.png"].map(name => ({ name, mimeType: "image/png", buffer: Buffer.from(auditPng()) })));
+      await browse.waitForSelector('[data-staged-attachment="second-view.png"]', { state: "visible", timeout: 10_000 });
+      await browse.fill("[data-composer-input]", "Two views of the boiler label.");
+      await browse.locator("[data-composer-send]").click();
+    }
     let pair: ReturnType<typeof PAIR> = null;
     for (const started = Date.now(); Date.now() - started < 30_000 && !pair?.loaded;) { pair = await browse.evaluate(PAIR); if (!pair?.loaded) await browse.waitForTimeout(200); }
     const pairDiag = pair?.loaded ? null : await browse.evaluate(() => ({

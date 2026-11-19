@@ -1143,6 +1143,7 @@ async function main(): Promise<void> {
       }
       // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
+      const browseScreen = screens().find(s => s.id === "app.chat.group") ?? general;
       // The picture and palette checks are once per run: in a sharded full run, shard 1 does them.
       for (const [viewport, theme, desktop] of ownsRunChecks(SHARD) ? PICTURE_PROFILES : []) {
         const size = `${viewport.width}x${viewport.height}`;
@@ -1157,7 +1158,15 @@ async function main(): Promise<void> {
           const shot = `shots/app.chat.general--${label}--${size}--${theme}.png`;
           await page.screenshot({ path: join(OUT, shot) });
           hoverShots.push(shot);
-        }, { click: desktop });
+        }, {
+          click: desktop,
+          openBrowse: async (setup) => {
+            const page = await signedIn.newPage();
+            await setup(page);
+            await openScreen(page, browseScreen!);
+            return page;
+          },
+        });
         pictures.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
