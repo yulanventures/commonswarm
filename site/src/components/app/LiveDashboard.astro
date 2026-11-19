@@ -10093,6 +10093,9 @@ import "../../styles/kylon-command-palette.css";
           : "dashboard__message";
         row.tabIndex = -1;
         row.dataset.signalId = signal.id;
+        /* Whose message it is, for the reader finding their own question and the answers to it: an agent's row is
+           plain, another person's has a quiet leading edge, the viewer's own a stronger one (kylon-messages.css). */
+        row.dataset.author = signal.fromKind === "agent" ? "agent" : signal.from === viewerId ? "you" : "person";
         /* Working-on posts are status, not conversation: a compact activity line. */
         if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
         markThreadReplyRoot(row);
@@ -10270,6 +10273,11 @@ import "../../styles/kylon-command-palette.css";
           const authorLabel = authorLine.querySelector<HTMLElement>(".hm-author__name");
           const headerAuthorName = homeAuthor && "nestedLabel" in homeAuthor && homeAuthor.yours && homeAuthor.nestedLabel ? homeAuthor.nestedLabel : authorName;
           if (authorEntity && authorLabel) authorLabel.replaceChildren(entityControl(headerAuthorName, authorEntity, "dashboard__message-entity dashboard__message-author"));
+          // The viewer's own message says so beside the name, in words, so the stronger edge is not the only sign.
+          if (authorLabel && row.dataset.author === "you") {
+            const self = document.createElement("span"); self.className = "hm-author__self"; self.textContent = "You";
+            authorLabel.after(self);
+          }
           const authorWhen = authorLine.querySelector<HTMLElement>(".hm-author__when");
           if (authorWhen) authorWhen.title = timeHover;
           body.append(authorLine);
