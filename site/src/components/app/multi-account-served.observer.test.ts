@@ -31,6 +31,7 @@ import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { test as unitTest } from "node:test";
 import { browserTest as test, launchPlaywrightChromium } from "../../../tests/chrome.js";
 import { accountsStorageKey, deploymentOriginHash } from "../../lib/multi-account.js";
+import { parseConversationsListOutcome } from "../../lib/conversations.js";
 import { memberInviteUrl } from "../../lib/member-invite.js";
 import { HOUSEHOLD_JOIN_CONSENT_VERSION } from "../../../../src/protocol/household-invitations.js";
 
@@ -205,6 +206,24 @@ unitTest("served witness fixture compiles real LiveDashboard and InviteOnramp wi
     assert.ok(inv.markup.includes('data-signin-provider="google"'), "/invite renders Google provider button");
     assert.ok(app.js.includes("MULTI_ACCOUNT_ENABLED = !0") || app.js.includes("MULTI_ACCOUNT_ENABLED = true"));
     assert.ok(inv.js.includes("MULTI_ACCOUNT_ENABLED = !0") || inv.js.includes("MULTI_ACCOUNT_ENABLED = true"));
+    const parsedConv = parseConversationsListOutcome(200, {
+      conversations: [{
+        conversation_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        kind: "public_channel",
+        channel_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        slug: "ops",
+        description: "Operations channel",
+        archived_at: null,
+        joined: true,
+        generation: 1,
+        members: [],
+        notify_level: "everything",
+        starred: false,
+      }],
+    });
+    assert.equal(parsedConv.status, "ready");
+    assert.equal(parsedConv.conversations.length, 1);
+    assert.equal(parsedConv.conversations[0]?.joined, true);
   } finally {
     srv.closeAllConnections();
     await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -483,6 +502,13 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         }]);
         return;
       }
+      if (url.pathname === "/rest/v1/channel_members" && method === "GET") {
+        sendJson(res, 200, [
+          { workspace_id: sharedWs, channel_id: opsChannelId, kind: "user", id: userA.id, is_manager: true },
+          { workspace_id: sharedWs, channel_id: opsChannelId, kind: "user", id: userB.id, is_manager: false },
+        ]);
+        return;
+      }
       if (url.pathname === "/rest/v1/rpc/home_overview" && method === "POST") {
         const viewer = actor ?? userA;
         const asks = viewer.id === userA.id
@@ -528,6 +554,27 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         }
         if (body.resource === "pending_access") {
           sendJson(res, 200, { pending: [], agents: [] });
+          return;
+        }
+        if (body.resource === "conversations") {
+          sendJson(res, 200, {
+            conversations: [{
+              conversation_id: opsChannelId,
+              kind: "public_channel",
+              channel_id: opsChannelId,
+              slug: "ops",
+              description: "Operations channel",
+              archived_at: null,
+              joined: true,
+              generation: 1,
+              members: [
+                { kind: "user", id: userA.id, joined_at: "2026-11-19T00:00:00Z", left_at: null },
+                { kind: "user", id: userB.id, joined_at: "2026-11-19T00:00:00Z", left_at: null },
+              ],
+              notify_level: "everything",
+              starred: false,
+            }],
+          });
           return;
         }
         sendJson(res, 200, { grants: [], invitations: [] });
