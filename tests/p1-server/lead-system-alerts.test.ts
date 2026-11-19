@@ -410,13 +410,14 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   await enqueueWaitingDelivery({ senderUserId: member.id, recipientAgent: quietSeat, channelId: null, ageMinutes: 50, directToAgent: true, body: "SECRET_DM_BODY" });
 
   const [synced] = await sql<{ res: Row }[]>`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes') AS res`;
-  assert.equal(Number(synced!.res.synced), 4, "exactly 4 scoped alerts; DM and addressed thread excluded");
+  assert.ok(Number(synced!.res.synced) >= 4, `expected at least 4 synced alerts, got ${synced!.res.synced}`);
 
   const rawRows = await sql<Row[]>`
     SELECT alert_id, channel_id, waiting_count, routed_lead_principal_id
     FROM swarm.system_alerts
     WHERE workspace_id = ${workspace}::uuid AND affected_principal_id = ${quietSeat.principal}::uuid
   `;
+  assert.equal(rawRows.length, 4, "exactly 4 scoped alerts for quietSeat; DM and addressed thread excluded");
   const byScope = new Map(rawRows.map((r) => [r.channel_id ?? "general", r]));
   assert.equal(byScope.get("general")!.waiting_count, 2, "inherited #priv-a reply must NOT inflate #general");
   assert.equal(byScope.get(openCh.id)!.waiting_count, 1, "addressed root & reply must NOT inflate #open-ch");
@@ -1017,8 +1018,7 @@ test("Condition 4: real-socket bare wake control, served conversion lock-order r
   const orderGrantId = randomUUID();
   const orderProviderId = `pg_ord_${randomBytes(12).toString("hex")}`;
   const orderDigest = createHash("sha256").update("order-manifest-v1").digest();
-  const alertIdHigh = "ffffffff-ffff-4fff-8fff-fffffffffff1";
-  const alertIdLow = "00000001-0000-4000-8000-000000000001";
+  const [alertIdLow, alertIdHigh] = [randomUUID(), randomUUID()].sort() as [string, string];
   await sql.begin(async (tx) => {
     await tx`UPDATE swarm.agent_principals SET transport = 'hosted_mcp', turn_only = true
       WHERE principal_id IN (${hostFirst.principal}::uuid, ${hostSecond.principal}::uuid)`;
@@ -1422,7 +1422,7 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   const renewGrant = randomUUID();
   const renewTask = randomUUID();
   const renewLineage = randomUUID();
-  const predToken = `swm_agt_${randomBytes(24).toString("base64url")}`;
+  const predToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
   await sql.begin(async (tx) => {
     await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${renewDevice}::uuid, ${owner.id}::uuid, 'renew-lock-test')`;
     await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
@@ -1491,7 +1491,16 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
       method: "POST",
       signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${revokedAct.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ workspace_id: workspace, state: "working", summary: "revoked heartbeat" }),
+      body: JSON.stringify({
+        version: 1,
+        workspace_id: workspace,
+        stream_id: randomUUID(),
+        sequence: 1,
+        phase: "prompting",
+        signal_id: null,
+        tool_title: null,
+        elapsed_ms: 0,
+      }),
     }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) as Row })),
   ]);
   const elapsedMs = Date.now() - t0;

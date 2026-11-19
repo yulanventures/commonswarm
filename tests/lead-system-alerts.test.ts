@@ -443,7 +443,7 @@ test("best-effort access_lost alert writes run post-tx with 250ms lock_timeout a
   const insertAuditBody = commandEdge.slice(insertAuditStart, insertAuditStart + 2000);
   assert.doesNotMatch(insertAuditBody, /swarm\.record_system_alert/, "insertAudit must defer renewal-superseded alert post-transaction");
   assert.match(insertAuditBody, /pendingRenewalSupersededHooks\.get\(tx\)/);
-  assert.match(commandEdge, /setBestEffortAlertTransaction\(/);
+  assert.match(commandEdge, /withBestEffortAlertTransaction/);
   assert.match(commandEdge, /recordBestEffortSystemAlert\(/);
 
   // activity/index.ts and mcp/index.ts must bound best-effort alert lock wait to 250ms.

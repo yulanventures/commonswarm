@@ -1969,13 +1969,14 @@ async function setTransaction(tx: Sql): Promise<void> {
   `;
 }
 
-async function setBestEffortAlertTransaction(tx: Sql): Promise<void> {
-  await tx`
-    SELECT
-      set_config('role', 'swarm_command', true),
-      set_config('search_path', 'swarm, pg_catalog', true),
-      set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)
-  `;
+async function withBestEffortAlertTransaction<T>(
+  run: (tx: Sql) => Promise<T>,
+): Promise<T> {
+  return await db.begin("isolation level read committed", async (tx) => {
+    await setTransaction(tx);
+    await tx`SELECT set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)`;
+    return await run(tx);
+  }) as unknown as T;
 }
 
 const pendingRenewalSupersededHooks = new WeakMap<
@@ -19908,19 +19909,16 @@ async function handleTransaction(
   if (slow !== null) console.log(slow);
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
-    await reportRevokedLocalCredential(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
-      await db.begin("isolation level read committed", async (tx) => {
-        await setBestEffortAlertTransaction(tx);
-        return await run(tx);
-      }) as unknown as T, agentTokenHash);
+    await reportRevokedLocalCredential(withBestEffortAlertTransaction, agentTokenHash);
   }
   if (renewalSupersededAlert !== null) {
     const alertTarget = renewalSupersededAlert as { workspaceId: string; principalId: string };
-    await recordBestEffortSystemAlert(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
-      await db.begin("isolation level read committed", async (tx) => {
-        await setBestEffortAlertTransaction(tx);
-        return await run(tx);
-      }) as unknown as T, alertTarget.workspaceId, "local_renewal_superseded", alertTarget.principalId);
+    await recordBestEffortSystemAlert(
+      withBestEffortAlertTransaction,
+      alertTarget.workspaceId,
+      "local_renewal_superseded",
+      alertTarget.principalId,
+    );
   }
   return recoverSavedPending && response.status===204
     ? await handleTransaction(body,verifiedHuman,agentTokenHash,joinCredentialHash,sessionProofParse,acquireProofParse,hostedSeatCapability)

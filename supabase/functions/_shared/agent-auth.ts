@@ -222,7 +222,6 @@ export async function reportRevokedLocalCredential(
     const key = Array.from(tokenHash.subarray(0, 8), b => b.toString(16).padStart(2, "0")).join("");
     if (tokenHash.length !== 32 || !accessLostProbes.allow(`local_credential_revoked:${key}`, now)) return;
     const [row] = await withTx(async (tx) => {
-      await tx`SELECT set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)`;
       const found = await tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
         SELECT t.principal_id::text AS principal_id, p.owner_user_id::text AS owner_user_id,
           (t.revoked_at IS NOT NULL OR p.revoked_at IS NOT NULL OR d.revoked_at IS NOT NULL
