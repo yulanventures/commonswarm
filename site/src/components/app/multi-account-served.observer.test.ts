@@ -475,7 +475,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
           workspace_id: sharedWs,
           slug: "ops",
           purpose: "Operations channel",
-          visibility: "public",
+          visibility: "open",
           created_by_principal: userA.id,
           created_by_kind: "user",
           created_at: "2026-11-19T00:00:00Z",
@@ -763,7 +763,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterEscape.attemptKeys.length, 0, "Escape must retire staging attempt cleanly");
 
     // ── FLOW 3 (C1): Real LiveDashboard.astro composer Send handler across same-workspace A->B & A->B->A ──
-    // Case 3a0: Hold named-channel visibility read across same-workspace A -> B -> 0 file_version_create, 0 PUT, 0 commit, 0 post!
+    // Case 3a0: Hold named-channel #ops ("open") visibility read across same-workspace A -> B -> 0 file_version_create, 0 PUT, 0 commit, 0 post!
     await page.click("[data-user-menu-trigger]");
     await page.click(`[data-account-switch="${userA.id}"]`);
     await page.waitForSelector('[data-panel="channel"]:not([hidden])');
@@ -778,6 +778,11 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       mimeType: "text/plain",
       buffer: Buffer.from("account A visibility-held file"),
     });
+    await page.waitForFunction(
+      () => (document.querySelector<HTMLElement>("[data-composer-attachments]")?.textContent ?? "").includes("secret-vis-a.txt"),
+      null,
+      { timeout: 10_000 },
+    );
     await page.fill("[data-composer-input]", "held visibility A->B message");
     await page.click("[data-composer-send]");
     await channelVisibilityHeldPromise;
@@ -792,6 +797,37 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       "held named-channel visibility read across A->B must send ZERO file_version_create/commit/post commands",
     );
     assert.equal(putCount, 0, "held named-channel visibility read across A->B must issue 0 PUTs");
+
+    // Case 3a1: Unchanged #ops ("open") control reaches upload & post after that exact same visibility response!
+    await page.click("[data-user-menu-trigger]");
+    await page.click(`[data-account-switch="${userA.id}"]`);
+    await page.waitForSelector('[data-panel="channel"]:not([hidden])');
+    await page.goto(`${origin}/app?w=${sharedWs}&c=${opsChannelId}`);
+    await page.waitForSelector("[data-composer]:not([hidden])");
+    commandsSent.length = 0;
+    putCount = 0;
+    await page.setInputFiles("[data-composer-file-input]", {
+      name: "ops-ok-a.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("account A ops control file"),
+    });
+    await page.waitForFunction(
+      () => (document.querySelector<HTMLElement>("[data-composer-attachments]")?.textContent ?? "").includes("ops-ok-a.txt"),
+      null,
+      { timeout: 10_000 },
+    );
+    await page.fill("[data-composer-input]", "ops control message");
+    await page.click("[data-composer-send]");
+    await page.waitForFunction(() => (document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "") === "");
+    assert.equal(putCount, 1, "unchanged #ops control must upload attachment after open visibility check");
+    assert.deepEqual(
+      commandsSent.filter((c) => ["file_version_create", "file_version_commit", "post_signal"].includes(c.kind)),
+      [
+        { kind: "file_version_create", actor: userA.id },
+        { kind: "file_version_commit", actor: userA.id },
+        { kind: "post_signal", actor: userA.id },
+      ],
+    );
 
     // Switch back to Account A and navigate to the workspace chat composer.
     await page.click("[data-user-menu-trigger]");

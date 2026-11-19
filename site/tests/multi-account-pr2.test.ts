@@ -1912,3 +1912,122 @@ test("PR 2 HezSec C7 held-poll witnesses: peer sign-out and sign-out-all during 
   assert.ok(liveDash.includes("return overviewNeedsYouTotal(overview);") && liveDash.includes("pendingSwitchFocusReturn"));
   assert.ok(liveDash.includes("openSignOutAllDialog(\"phone\")") && liveDash.includes("focusVisibleAccountTrigger(opener)"));
 });
+
+test("PR 2 HezSec C7 held-refresh witness: expired access token refresh interrupted by peer sign-out of inactive B is treated as signed out (0 expired labels), while genuine terminal refresh expiry control surfaces Sign in again", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const originHash = deploymentOriginHash(url);
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const userC = makeUser("33333333-3333-4333-8333-333333333333", "c@example.test", "C");
+  const live = new Map<string, typeof userA>();
+
+  let holdRefresh = false;
+  let releaseRefresh: (() => void) | null = null;
+  let refreshHeldResolve: (() => void) | null = null;
+  let refreshHeld = new Promise<void>((r) => { refreshHeldResolve = r; });
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : body.email === userC.email ? userC : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${who.id.slice(0, 4)}-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "refresh_token") {
+      if (holdRefresh) {
+        holdRefresh = false;
+        refreshHeldResolve?.();
+        await new Promise<void>((resolve) => { releaseRefresh = resolve; });
+      }
+      return Response.json(
+        { error: "invalid_grant", error_code: "refresh_token_not_found", msg: "Invalid Refresh Token: Refresh Token Not Found" },
+        { status: 400 },
+      );
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found", msg: "Session not found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/auth/v1/logout")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      live.delete(bearer);
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const sharedLs = new MemoryStorage();
+  const locks = createLocks();
+  const mgr = new AccountManager(deployment, {
+    localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+  await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+  const promB = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  const promC = await mgr.signInWithPasswordStaging({ email: userC.email, password: "pw" });
+  assert.equal(promB.kind, "promoted");
+  assert.equal(promC.kind, "promoted");
+  mgr.switchActiveAccount(userA.id);
+
+  // Backdate B's and C's stored expires_at and initialize a fresh tab manager so getSession()
+  // inside poller.pollOnce() executes the real token refresh for BOTH B (interrupted by peer) and C (genuine expiry)!
+  const expireSlot = (loginId: string): void => {
+    const key = slotStorageKey(originHash, loginId);
+    const saved = JSON.parse(sharedLs.getItem(key)!) as Record<string, unknown>;
+    saved.expires_at = Math.floor(Date.now() / 1000) - 120;
+    sharedLs.setItem(key, JSON.stringify(saved));
+  };
+  expireSlot(promB.account.loginId);
+  expireSlot(promC.account.loginId);
+  mgr.destroy();
+
+  const tabMgr = new AccountManager(deployment, {
+    localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await tabMgr.initialize();
+  tabMgr.switchActiveAccount(userA.id);
+
+  // Hold inactive B's refresh -> peer signs out inactive B (active A stays signed in so no active teardown fires!)
+  // -> release refresh -> B MUST be classified as signed out (0 expired label), while owned C's genuine terminal expiry surfaces "Sign in again"!
+  const poller = new InactiveAccountBadgePoller(tabMgr, async () => 1, { intervalMs: 0 });
+  holdRefresh = true;
+  refreshHeld = new Promise<void>((r) => { refreshHeldResolve = r; });
+  const pollTask = poller.pollOnce();
+  await refreshHeld;
+
+  const peer = new AccountManager(deployment, {
+    localStorage: sharedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await peer.initialize();
+  await peer.signOutAccount(userB.id, promB.account.loginId);
+  peer.destroy();
+
+  (releaseRefresh as (() => void) | null)?.();
+  releaseRefresh = null;
+  await pollTask;
+
+  assert.equal(poller.isExpired(userB.id, promB.account.loginId), false, "peer sign-out during held refresh must NEVER classify B as expired");
+  assert.equal(
+    poller.expiredAccounts().some((a) => a.userId === userB.id),
+    false,
+    "peer-signed-out B must NOT appear in expiredAccounts()",
+  );
+  assert.equal(poller.isExpired(userC.id, promC.account.loginId), true, "genuine terminal refresh expiry control C MUST surface Sign in again");
+  assert.equal(
+    tabMgr.listAccounts().some((a) => a.userId === userC.id) ||
+      poller.expiredAccounts().some((a) => a.userId === userC.id && a.secondary === userC.email),
+    true,
+    "genuine terminal expiry control C remains visible in switcher with Sign in again",
+  );
+
+  poller.stop();
+  tabMgr.destroy();
+});

@@ -547,6 +547,7 @@ export class AccountSessionRuntime {
 
   private disposed = false;
   private deadSession = false;
+  private terminallyExpired = false;
   private removalSnapshot: string | null = null;
   private refreshRetryAfter = 0;
   private restSessionCheck: Promise<unknown> | null = null;
@@ -638,6 +639,7 @@ export class AccountSessionRuntime {
         this.refreshRetryAfter = 0;
       } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
         this.deadSession = false;
+        this.terminallyExpired = false;
       }
       this.onSessionUpdated(event, nextSession);
     });
@@ -730,7 +732,7 @@ export class AccountSessionRuntime {
 
   /** Whether this login runtime was proven terminally expired by GoTrue (not merely removed by peer sign-out). */
   isTerminallyExpired(): boolean {
-    return this.deadSession;
+    return this.terminallyExpired;
   }
 
   /** Bounded, identity-safe verification strictly on this login's runtime (QA-010 + C2/C3). */
@@ -1023,6 +1025,10 @@ export class AccountSessionRuntime {
           (isRefresh && savedCredential?.expires_at && savedCredential.expires_at * 1000 <= this.env.now()))
       ) {
         this.removalSnapshot = savedAtStart;
+        if (!this.disposed && this.checkOwned()) {
+          this.deadSession = true;
+          this.terminallyExpired = true;
+        }
       }
       if (isRefresh && !terminal) {
         const retryAfter = response.headers.get("retry-after");
@@ -1054,15 +1060,21 @@ export class AccountSessionRuntime {
     const initialFingerprint = this.peekCredentialFingerprint();
     try {
       const { data, error: sessionError } = await this.client.auth.getSession();
+      // C7: Recheck disposal and shared ownership immediately after getSession() (which may have
+      // run a refresh interrupted by peer sign-out) before interpreting any error as terminal expiry!
+      if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
       if (sessionError) {
         if (isAuthSessionMissingError(sessionError) || TERMINAL_REFRESH_CODES.has(sessionError.code ?? "")) {
           const successor = await this.client.auth.getSession();
+          if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
           if (successor.data.session) throw new MultiAccountAuthRecoveryRequired();
           const diskAfter = this.persistent ? parseSavedSession(this.readDisk(this.slotKey) ?? null) : null;
           if (diskAfter && initialFingerprint !== null && credentialFingerprint(diskAfter) !== initialFingerprint) {
             throw new MultiAccountAuthRecoveryRequired();
           }
+          if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
           this.deadSession = true;
+          this.terminallyExpired = true;
           this.onTerminalExpiry(initialFingerprint);
           throw new MultiAccountSessionExpired();
         }
@@ -1070,7 +1082,7 @@ export class AccountSessionRuntime {
       }
       const session = data.session ?? null;
       if (!session) {
-        if (this.deadSession) throw new MultiAccountSessionExpired();
+        if (this.deadSession || this.terminallyExpired) throw new MultiAccountSessionExpired();
         return null;
       }
       const { data: userData, error } = await this.client.auth.getUser();
@@ -1086,6 +1098,7 @@ export class AccountSessionRuntime {
         }
         if (isAuthSessionMissingError(error)) {
           this.deadSession = true;
+          this.terminallyExpired = true;
           this.onTerminalExpiry(credentialFingerprint(session));
           throw new MultiAccountSessionExpired();
         }
@@ -1101,6 +1114,7 @@ export class AccountSessionRuntime {
         throw new MultiAccountAuthRecoveryRequired();
       }
       this.deadSession = false;
+      this.terminallyExpired = false;
       return latest.data.session;
     } catch (error) {
       if (error instanceof MultiAccountSessionExpired || error instanceof MultiAccountAuthRecoveryRequired) {
