@@ -259,15 +259,33 @@ private struct HistoryView: View {
                                 switch row.delivery {
                                 case .sending, .retrying: Text("Sending…")
                                 case .unconfirmed: Text("Delivery unconfirmed")
+                                case .uploadFailed: Text("Upload interrupted")
                                 case .refused: Text("Couldn’t send")
                                 case .accepted: Text(row.createdAt, format: .dateTime.hour().minute())
                                 }
                             }
                             Text(row.post.body ?? "").textSelection(.enabled)
-                            if case .unconfirmed = row.delivery {
+                            ForEach(row.files) { FileUploadProgress(intent: $0) }
+                            if case .uploadFailed = row.delivery {
+                                Button {
+                                    deliver(draft.retry(row.id))
+                                } label: {
+                                    Text("Retry upload")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                Button {
+                                    draft.editRefused(row.id)
+                                } label: {
+                                    Text("Edit message")
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                            } else if case .unconfirmed = row.delivery {
                                 Button("Retry") { deliver(draft.retry(row.id)) }
                             } else if case .refused = row.delivery {
-                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty)
+                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
                             }
                         }.id(row.id)
                     }
@@ -299,7 +317,7 @@ private struct HistoryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ConversationComposer(draft: draft, destination: item.name, send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: item.symbol != "lock", send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
             }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
@@ -332,8 +350,18 @@ private struct HistoryView: View {
         guard let post else { return }
         scrollToLatest += 1
         Task {
+            guard let row = draft.outgoing.first(where: { $0.id == post.command_id }) else { return }
+            var refs: [FileReference] = []
             do {
-                let signalID = try await api.post(post)
+                for intent in row.files {
+                    refs.append(try await api.upload(intent, workspace: workspace.id, destination: item.destination))
+                }
+            } catch {
+                if api.session.isActive { draft.uploadFailed(post.command_id) }
+                return
+            }
+            do {
+                let signalID = try await api.post(post, attachments: refs)
                 guard api.session.isActive else { return }
                 draft.accepted(post.command_id, signalID: signalID)
                 draft.reconcile(history.messages ?? [])

@@ -70,6 +70,34 @@ struct Post: Encodable {
         }
         command = fields
     }
+
+    func envelope(attachments: [FileReference]) -> some Encodable {
+        struct Command: Encodable {
+            let fields: [String: String?]
+            let attachments: [FileReference]
+            func encode(to encoder: Encoder) throws {
+                var result = encoder.container(keyedBy: CommandKey.self)
+                for (key, value) in fields { try result.encode(value, forKey: .init(stringValue: key)) }
+                if !attachments.isEmpty { try result.encode(attachments, forKey: .init(stringValue: "attachments")) }
+            }
+        }
+        struct Envelope: Encodable {
+            let command_id, workspace_id: UUID
+            let stream: [String: String]
+            let client_version: String
+            let command: Command
+        }
+        return Envelope(command_id: command_id, workspace_id: workspace_id, stream: stream, client_version: client_version,
+                        command: Command(fields: command, attachments: attachments))
+    }
+
+}
+
+private struct CommandKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
 }
 
 enum APIError: Error { case refused(Int), invalidResponse }
@@ -81,7 +109,7 @@ struct ConversationAPI {
     let publicKey: String
     let session: HumanSession
 
-    private func request(_ path: String, _ query: [String: String] = [:]) -> URLRequest {
+    func request(_ path: String, _ query: [String: String] = [:]) -> URLRequest {
         var components = URLComponents(url: origin.appending(path: path), resolvingAgainstBaseURL: false)!
         components.queryItems = query.isEmpty ? nil : query.map { URLQueryItem(name: $0.key, value: $0.value) }
         // PostgREST decodes a literal plus as a space, including the UTC offset in a cursor.
@@ -91,14 +119,14 @@ struct ConversationAPI {
         return request
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+    func send<T: Decodable>(_ request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
         guard (200..<300).contains(status) else { throw APIError.refused(status) }
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    private func rows<T: Decodable>(_ table: String, _ query: [String: String]) async throws -> [T] {
+    func rows<T: Decodable>(_ table: String, _ query: [String: String]) async throws -> [T] {
         var request = request("rest/v1/" + table, query)
         request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
         return try await send(request)
@@ -199,7 +227,7 @@ struct ConversationAPI {
     }
 
     @discardableResult
-    func post(_ post: Post) async throws -> UUID {
+    func post(_ post: Post, attachments: [FileReference] = []) async throws -> UUID {
         struct Receipt: Decodable {
             struct Signal: Decodable { let id: UUID }
             let status: String
@@ -208,7 +236,7 @@ struct ConversationAPI {
         var request = request("functions/v1/command")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(post)
+        request.httpBody = try JSONEncoder().encode(post.envelope(attachments: attachments))
         let receipt: Receipt = try await send(request)
         guard receipt.status == "accepted" else { throw APIError.invalidResponse }
         return receipt.signal.id

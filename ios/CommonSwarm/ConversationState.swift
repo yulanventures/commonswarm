@@ -4,10 +4,21 @@ import Foundation
 @MainActor
 final class Composer: ObservableObject {
     @Published var text = ""
-    enum Delivery { case sending, retrying, unconfirmed, refused, accepted(UUID) }
+    @Published var attachments: [UploadIntent] = []
+    var canSend: Bool {
+        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
+    }
+
+    func stage(_ file: StagedFile) throws {
+        guard attachments.count < 8 else { throw AttachmentError.count }
+        attachments.append(UploadIntent(file: file))
+    }
+
+    enum Delivery { case sending, retrying, uploadFailed, unconfirmed, refused, accepted(UUID) }
 
     struct Outgoing: Identifiable {
         let post: Post
+        let files: [UploadIntent]
         let createdAt = Date()
         var delivery: Delivery = .sending
         var id: UUID { post.command_id }
@@ -15,23 +26,39 @@ final class Composer: ObservableObject {
     @Published private(set) var outgoing: [Outgoing] = []
 
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 8_000 else { return nil }
-        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: text)
-        outgoing.append(Outgoing(post: post))
+        guard canSend else { return nil }
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text
+        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body)
+        outgoing.append(Outgoing(post: post, files: attachments))
+        attachments = []
         text = ""
         return post
     }
 
     func retry(_ id: UUID) -> Post? {
-        guard let i = outgoing.firstIndex(where: { $0.id == id }), case .unconfirmed = outgoing[i].delivery else { return nil }
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return nil }
+        switch outgoing[i].delivery {
+        case .unconfirmed, .uploadFailed: break
+        default: return nil
+        }
         outgoing[i].delivery = .retrying
         return outgoing[i].post
     }
 
     func editRefused(_ id: UUID) {
-        guard text.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }),
-              case .refused = outgoing[i].delivery else { return }
-        text = outgoing.remove(at: i).post.body ?? ""
+        guard text.isEmpty, attachments.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        switch outgoing[i].delivery {
+        case .refused, .uploadFailed: break
+        default: return
+        }
+        let row = outgoing.remove(at: i)
+        attachments = row.files
+        text = row.post.body ?? ""
+    }
+
+    func uploadFailed(_ id: UUID) {
+        guard let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        outgoing[i].delivery = .uploadFailed
     }
 
     func accepted(_ id: UUID, signalID: UUID) {

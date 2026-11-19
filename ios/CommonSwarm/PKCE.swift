@@ -232,6 +232,15 @@ final class HumanSession {
         return result
     }
 
+    func putStorage(_ request: URLRequest, from file: URL, delegate: URLSessionTaskDelegate) async throws -> Int {
+        guard isActive else { throw CancellationError() }
+        let (_, response) = try await transport.upload(for: request, fromFile: file, delegate: delegate)
+        guard isActive else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        return http.statusCode
+    }
+
     func composer(workspace: UUID, conversation: Conversation.ID) -> Composer {
         let key = DraftKey(workspace: workspace, conversation: conversation)
         if let draft = drafts[key] { return draft }

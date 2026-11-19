@@ -70,7 +70,24 @@ enum Verify {
         guard let channel = directory.first(where: { if case .channel = $0.id { true } else { false } }) else {
             throw Failure.mismatch("named channel")
         }
-        try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"))
+        let upload = UploadIntent(file: try StagedFile(data: Data("Test file".utf8), name: "Notes.txt"))
+        guard let closed = directory.first(where: { $0.symbol == "lock" }) else { throw Failure.mismatch("private channel") }
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: closed.destination)
+            throw Failure.mismatch("private channel admitted an upload")
+        } catch AttachmentError.placement {}
+        do {
+            _ = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+            throw Failure.mismatch("fixture did not interrupt commitment")
+        } catch APIError.refused(503) {}
+        let ref = try await api.upload(upload, workspace: ws.id, destination: channel.destination)
+        try expect(ref.file_id == upload.file.id && ref.version_n == 1, "lost commit retries the original upload")
+        let postedID = try await api.post(Post(id: UUID(), workspace: ws.id, destination: channel.destination, body: "bound channel post"), attachments: [ref])
+        let channelMessages = try await api.history(ws.id, channel.destination)
+        let postedFiles = channelMessages.first { $0.id == postedID }?.attachments ?? []
+        try expect(postedFiles.count == 1 && postedFiles.first?.file_id == ref.file_id &&
+                   postedFiles.first?.version_n == ref.version_n && postedFiles.first?.name == upload.file.name,
+                   "the retried upload appears once on the confirmed message")
         let workspaces = try await api.workspaces()
         guard let second = workspaces.first(where: { $0.id != ws.id }) else { throw Failure.mismatch("second workspace") }
         let draft = session.composer(workspace: ws.id, conversation: dm.id)
