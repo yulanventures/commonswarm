@@ -762,6 +762,96 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterEscape.activeIsTrigger, true, "Escape from Add account must return focus to desktop account trigger");
     assert.equal(afterEscape.attemptKeys.length, 0, "Escape must retire staging attempt cleanly");
 
+    // ── FLOW 2b (Designer 245c13fc keyboard focus): 1280px Enter switch + 360px phone Escape & Enter switch ──
+    // Desktop 1280px: from workspace chat, switch accounts with Enter -> focus MUST return to [data-user-menu-trigger] (not body)!
+    await page.goto(`${origin}/app?w=${sharedWs}`);
+    await page.waitForSelector("[data-composer]:not([hidden])");
+    await page.click("[data-user-menu-trigger]");
+    await page.waitForSelector(`[data-account-switch="${userA.id}"]:visible`);
+    await page.focus(`[data-account-switch="${userA.id}"]`);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(
+      (emailA: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailA,
+      userA.email,
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(250);
+    const desktopAfterSwitch = await page.evaluate(() => ({
+      tag: document.activeElement?.tagName ?? "",
+      isDesktopTrigger: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
+      liveAnnouncement: (document.querySelector<HTMLElement>("[data-account-live]")?.textContent ?? "").trim(),
+    }));
+    assert.ok(desktopAfterSwitch.liveAnnouncement.includes(userA.email), "account switch must announce the target account");
+    assert.equal(
+      desktopAfterSwitch.isDesktopTrigger,
+      true,
+      `1280px Enter switch from workspace chat must restore focus to desktop account trigger (got ${desktopAfterSwitch.tag})`,
+    );
+
+    // Phone 360px: Escape from Add account and Sign out all MUST return focus to More button (not account tile),
+    // and Enter switch from workspace chat MUST restore focus to Open navigation (not body)!
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.waitForSelector('button[aria-label="Open navigation"]:visible', { timeout: 10_000 });
+    await page.click('button[aria-label="Open navigation"]');
+    await page.waitForSelector(".cs-kylon-workspace-menu .hm-menu__trigger:visible", { timeout: 10_000 });
+    await page.click(".cs-kylon-workspace-menu .hm-menu__trigger");
+    await page.waitForSelector("[data-menu-add-account]:visible");
+    await page.click("[data-menu-add-account]");
+    await page.waitForSelector("[data-add-account-dialog][open]");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-add-account-dialog]")?.open);
+    const phoneAfterAddEscape = await page.evaluate(() => ({
+      isMoreTrigger: document.activeElement?.matches(".cs-kylon-workspace-menu .hm-menu__trigger") ?? false,
+      isAccountTile: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
+      activeLabel: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? "",
+    }));
+    assert.equal(
+      phoneAfterAddEscape.isMoreTrigger,
+      true,
+      `360px Escape from Add account must return focus to More button (got ${phoneAfterAddEscape.activeLabel})`,
+    );
+    assert.equal(phoneAfterAddEscape.isAccountTile, false, "360px Escape from Add account must NOT focus the account tile");
+
+    await page.click(".cs-kylon-workspace-menu .hm-menu__trigger");
+    await page.waitForSelector("[data-menu-sign-out-all]:visible");
+    await page.click("[data-menu-sign-out-all]");
+    await page.waitForSelector("[data-signout-all-dialog][open]");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-signout-all-dialog]")?.open);
+    const phoneAfterSignOutAllEscape = await page.evaluate(() => ({
+      isMoreTrigger: document.activeElement?.matches(".cs-kylon-workspace-menu .hm-menu__trigger") ?? false,
+      isAccountTile: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
+      activeLabel: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? "",
+    }));
+    assert.equal(
+      phoneAfterSignOutAllEscape.isMoreTrigger,
+      true,
+      `360px Escape from Sign out all must return focus to More button (got ${phoneAfterSignOutAllEscape.activeLabel})`,
+    );
+    assert.equal(phoneAfterSignOutAllEscape.isAccountTile, false, "360px Escape from Sign out all must NOT focus the account tile");
+
+    await page.click(".cs-kylon-workspace-menu .hm-menu__trigger");
+    await page.waitForSelector(`[data-menu-account-switch="${userB.id}"]:visible`);
+    await page.focus(`[data-menu-account-switch="${userB.id}"]`);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(
+      (emailB: string) => (document.querySelector<HTMLElement>("[data-rail-account-email]")?.textContent ?? "").trim() === emailB,
+      userB.email,
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(250);
+    const phoneAfterSwitch = await page.evaluate(() => ({
+      isOpenNav: document.activeElement?.matches('button[aria-label="Open navigation"]') ?? false,
+      activeLabel: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? "",
+    }));
+    assert.equal(
+      phoneAfterSwitch.isOpenNav,
+      true,
+      `360px Enter switch from workspace chat must restore focus to Open navigation (got ${phoneAfterSwitch.activeLabel})`,
+    );
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForSelector("[data-user-menu-trigger]:visible", { timeout: 10_000 });
+
     // ── FLOW 3 (C1): Real LiveDashboard.astro composer Send handler across same-workspace A->B & A->B->A ──
     // Case 3a0: Hold named-channel #ops ("open") visibility read across same-workspace A -> B -> 0 file_version_create, 0 PUT, 0 commit, 0 post!
     await page.click("[data-user-menu-trigger]");

@@ -1895,9 +1895,9 @@ test("PR 2 HezSec C7 held-poll witnesses: peer sign-out and sign-out-all during 
           people: [],
           needs_you: {
             asks: [
-              { signal_id: "a1", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
-              { signal_id: "a2", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
-              { signal_id: "a3", from: { kind: "agent", id: "ag1", name: "Bot" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "a1", from: { kind: "agent", id: "ag1" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "a2", from: { kind: "agent", id: "ag1" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
+              { signal_id: "a3", from: { kind: "agent", id: "ag1" }, created_at: "2026-11-19T00:00:00Z", until: "2026-11-20T00:00:00Z" },
             ],
             assigned: [],
             waiting: [],
@@ -1910,7 +1910,8 @@ test("PR 2 HezSec C7 held-poll witnesses: peer sign-out and sign-out-all during 
   );
   assert.equal(overviewNeedsYouTotal(null), null);
   assert.ok(liveDash.includes("return overviewNeedsYouTotal(overview);") && liveDash.includes("pendingSwitchFocusReturn"));
-  assert.ok(liveDash.includes("openSignOutAllDialog(\"phone\")") && liveDash.includes("focusVisibleAccountTrigger(opener)"));
+  assert.ok(liveDash.includes("openSignOutAllDialog(\"phone\")") && liveDash.includes('focusVisibleAccountTrigger(opener, "switch")'));
+  assert.ok(liveDash.includes("bootVersion === bootGeneration") && liveDash.includes("captureAccountDialogTrigger(opener)"));
 });
 
 test("PR 2 HezSec C7 held-refresh witness: expired access token refresh interrupted by peer sign-out of inactive B is treated as signed out (0 expired labels), while genuine terminal refresh expiry control surfaces Sign in again", async () => {
@@ -2026,6 +2027,158 @@ test("PR 2 HezSec C7 held-refresh witness: expired access token refresh interrup
       poller.expiredAccounts().some((a) => a.userId === userC.id && a.secondary === userC.email),
     true,
     "genuine terminal expiry control C remains visible in switcher with Sign in again",
+  );
+
+  poller.stop();
+  tabMgr.destroy();
+});
+
+test("PR 2 HezSec C7 post-response pre-settlement witness: peer sign-out AFTER terminal 400 refresh response sets terminallyExpired=true and BEFORE verifySession() finishes overrides expiry (0 labels), while genuine expiry control C still surfaces Sign in again", async () => {
+  const url = "https://example.supabase.co";
+  const deployment = { url, anonKey: "public-anon-key" };
+  const originHash = deploymentOriginHash(url);
+  const userA = makeUser("11111111-1111-4111-8111-111111111111", "a@example.test", "A");
+  const userB = makeUser("22222222-2222-4222-8222-222222222222", "b@example.test", "B");
+  const userC = makeUser("33333333-3333-4333-8333-333333333333", "c@example.test", "C");
+  const live = new Map<string, typeof userA>();
+
+  // Hold B's refresh until poller.pollOnce() is actively inside rtB.verifySession(), THEN let the real
+  // 400 refresh_token_not_found response arrive while B is still owned (setting terminallyExpired=true)
+  // and intercept GoTrue's slot cleanup strictly BEFORE verifiedSessionInner() finishes!
+  let holdFirstRefresh = true;
+  let releaseFirstRefresh: (() => void) | null = null;
+  let firstRefreshHeldResolve: (() => void) | null = null;
+  const firstRefreshHeld = new Promise<void>((r) => { firstRefreshHeldResolve = r; });
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "password") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { email?: string };
+      const who = body.email === userB.email ? userB : body.email === userC.email ? userC : userA;
+      const at = makeJwt(url, who.id, who.email, `sid-${who.id.slice(0, 4)}-${live.size}`);
+      live.set(at, who);
+      return Response.json({
+        access_token: at, refresh_token: `rt-${who.id.slice(0, 4)}-${live.size}`, expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: "bearer", user: who,
+      });
+    }
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "refresh_token") {
+      if (holdFirstRefresh) {
+        holdFirstRefresh = false;
+        firstRefreshHeldResolve?.();
+        await new Promise<void>((resolve) => { releaseFirstRefresh = resolve; });
+      }
+      return Response.json(
+        { error: "invalid_grant", error_code: "refresh_token_not_found", msg: "Invalid Refresh Token: Refresh Token Not Found" },
+        { status: 400 },
+      );
+    }
+    if (u.pathname.endsWith("/auth/v1/user")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      const who = live.get(bearer);
+      if (!who) return Response.json({ error_code: "session_not_found", msg: "Session not found" }, { status: 403 });
+      return Response.json(who);
+    }
+    if (u.pathname.endsWith("/auth/v1/logout")) {
+      const bearer = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /i, "");
+      live.delete(bearer);
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected fetch: ${u.href}`);
+  };
+
+  const backingLs = new MemoryStorage();
+  let onRemoveSlotB: (() => void) | null = null;
+  let watchedSlotKeyB = "";
+  const hookedLs: Storage = {
+    get length() { return backingLs.length; },
+    clear() { backingLs.clear(); },
+    key(index: number) { return backingLs.key(index); },
+    getItem(key: string) { return backingLs.getItem(key); },
+    setItem(key: string, value: string) { backingLs.setItem(key, value); },
+    removeItem(key: string) {
+      backingLs.removeItem(key);
+      if (watchedSlotKeyB && key === watchedSlotKeyB && onRemoveSlotB) {
+        const fn = onRemoveSlotB;
+        onRemoveSlotB = null;
+        fn();
+      }
+    },
+  };
+
+  const locks = createLocks();
+  const mgr = new AccountManager(deployment, {
+    localStorage: hookedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await mgr.initialize();
+  await mgr.signInWithPasswordStaging({ email: userA.email, password: "pw" });
+  const promB = await mgr.signInWithPasswordStaging({ email: userB.email, password: "pw" });
+  const promC = await mgr.signInWithPasswordStaging({ email: userC.email, password: "pw" });
+  assert.equal(promB.kind, "promoted");
+  assert.equal(promC.kind, "promoted");
+  mgr.switchActiveAccount(userA.id);
+
+  const expireSlot = (loginId: string): void => {
+    const key = slotStorageKey(originHash, loginId);
+    const saved = JSON.parse(backingLs.getItem(key)!) as Record<string, unknown>;
+    saved.expires_at = Math.floor(Date.now() / 1000) - 120;
+    backingLs.setItem(key, JSON.stringify(saved));
+  };
+  expireSlot(promB.account.loginId);
+  expireSlot(promC.account.loginId);
+  mgr.destroy();
+
+  const tabMgr = new AccountManager(deployment, {
+    localStorage: hookedLs, sessionStorage: new MemoryStorage(), fetcher, webLocks: locks, createBroadcastChannel: noopChannel,
+  });
+  await tabMgr.initialize();
+  tabMgr.switchActiveAccount(userA.id);
+
+  // Intercept GoTrue's slot cleanup right AFTER buildAuthFetch received the real 400 refresh_token_not_found
+  // while B was still owned (so runtimeB.isTerminallyExpired() is ALREADY true!) and strictly BEFORE
+  // verifiedSessionInner() finishes, simulating a peer signing out B in that exact narrow window.
+  const rtB = tabMgr.runtimeForLogin(userB.id, promB.account.loginId)!;
+  assert.ok(rtB, "inactive runtime B must exist before poll");
+  watchedSlotKeyB = slotStorageKey(originHash, promB.account.loginId);
+  let sawTerminallyExpiredBeforePeerSignOut = false;
+  let peerSignOutApplied = false;
+  onRemoveSlotB = () => {
+    sawTerminallyExpiredBeforePeerSignOut = rtB.isTerminallyExpired();
+    const ownKey = accountsStorageKey(originHash);
+    const table = JSON.parse(backingLs.getItem(ownKey)!) as { version: 1; allSignOutGen: number; accounts: Array<{ userId: string; loginId: string }> };
+    table.accounts = table.accounts.filter((a) => !(a.userId === userB.id && a.loginId === promB.account.loginId));
+    backingLs.setItem(ownKey, JSON.stringify(table));
+    peerSignOutApplied = true;
+  };
+
+  const poller = new InactiveAccountBadgePoller(tabMgr, async () => 1, { intervalMs: 0 });
+  const pollTask = poller.pollOnce();
+  await firstRefreshHeld;
+  (releaseFirstRefresh as (() => void) | null)?.();
+  releaseFirstRefresh = null;
+  await pollTask;
+
+  assert.equal(peerSignOutApplied, true, "post-response hook must have removed B from shared accounts table");
+  assert.equal(
+    sawTerminallyExpiredBeforePeerSignOut,
+    true,
+    "witness must actually exercise the post-response window where terminallyExpired was ALREADY true before peer sign-out landed",
+  );
+  assert.equal(rtB.isTerminallyExpired(), false, "ownership loss must clear cached terminallyExpired flag");
+  assert.equal(
+    poller.isExpired(userB.id, promB.account.loginId),
+    false,
+    "peer sign-out after terminal 400 response and before verifySession() finishes must NEVER mark B expired",
+  );
+  assert.equal(
+    poller.expiredAccounts().some((a) => a.userId === userB.id),
+    false,
+    "peer-signed-out B must NOT be restored into expiredAccounts()",
+  );
+  assert.equal(
+    poller.isExpired(userC.id, promC.account.loginId),
+    true,
+    "genuine terminal expiry control C MUST still surface Sign in again",
   );
 
   poller.stop();

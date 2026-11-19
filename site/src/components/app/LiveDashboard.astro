@@ -5047,8 +5047,10 @@ import "../../styles/kylon-image-viewer.css";
       syncComposerControls();
     };
 
+    let bootGeneration = 0;
     let pendingSwitchFocusReturn = false;
     let lastAccountDialogOpener: "phone" | "desktop" | null = null;
+    let lastAccountDialogTrigger: HTMLElement | null = null;
 
     const focusComposerOnEntry = (): void => {
       if (
@@ -16396,6 +16398,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const boot = async (): Promise<void> => {
       const version = ++requestVersion;
+      const bootVersion = ++bootGeneration;
       if (isMultiAccountEnabled() ? !deployment() : !client()) {
         renderSample();
         return;
@@ -16404,7 +16407,7 @@ import "../../styles/kylon-image-viewer.css";
       if (isMultiAccountEnabled()) {
         // C1 & C4: Run startup multi-account cutover & callback URL scrub BEFORE any app reads!
         const bootMulti = await bootstrapMultiAccountAuth(window.location, window.history);
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
         if (bootMulti?.cutoverClearedLegacy) {
           dropUnscopedLegacyConvenienceKeys();
         }
@@ -16421,13 +16424,14 @@ import "../../styles/kylon-image-viewer.css";
       setLoading("Checking your sign-in…");
       try {
         const verified = await currentSession();
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
         renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
         renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
         if (isMultiAccountEnabled()) renderAccountSwitcher();
         if (!session) {
+          pendingSwitchFocusReturn = false;
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
@@ -16459,11 +16463,19 @@ import "../../styles/kylon-image-viewer.css";
           target.textContent = who;
         }
         workspaces = await workspaceMemberships();
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
         if (workspaces.length === 0) {
           resetWorkspaceSessionState();
           const pending = readCreateIntent(session.user.id);
           renderCreate(session);
+          if (pendingSwitchFocusReturn && bootVersion === bootGeneration) {
+            const opener = lastAccountDialogOpener;
+            window.requestAnimationFrame(() => {
+              if (bootVersion !== bootGeneration) return;
+              pendingSwitchFocusReturn = false;
+              focusVisibleAccountTrigger(opener, "switch");
+            });
+          }
           if (refusedAddAccountMessage && isMultiAccountEnabled()) {
             openAddAccountDialog("", refusedAddAccountMessage);
           }
@@ -16473,6 +16485,7 @@ import "../../styles/kylon-image-viewer.css";
         const pending = readCreateIntent(session.user.id);
         if (pending && workspaces.some((workspace) => workspace.id === pending.workspaceId)) {
           if (pending.purpose) {
+            if (typeof pendingSwitchFocusReturn !== "undefined") pendingSwitchFocusReturn = false;
             await createFromIntent(session, pending, true);
             return;
           }
@@ -16483,27 +16496,33 @@ import "../../styles/kylon-image-viewer.css";
            than an error: the address bar is a convenience, never an authorization. */
         activeWorkspaceId = "";
         await navigateHome(resolveHomeRoute(reauthSearchForBoot(session.user.id), workspaces), "replace");
-        if (isMultiAccountEnabled() && version === requestVersion) {
+        // Note: navigateHome() intentionally increments requestVersion inside catchup/openWorkspace,
+        // so post-navigation boot checks MUST compare bootVersion === bootGeneration!
+        if (isMultiAccountEnabled() && bootVersion === bootGeneration) {
           void inactiveBadgePoller?.pollOnce();
         }
-        if (pendingSwitchFocusReturn && version === requestVersion) {
+        if (pendingSwitchFocusReturn && bootVersion === bootGeneration) {
           const opener = lastAccountDialogOpener;
-          pendingSwitchFocusReturn = false;
+          // Keep pendingSwitchFocusReturn true until this rAF runs (after focusHomeView's queued rAF
+          // has already seen it and stood down), then return focus to Open navigation (phone) or
+          // the account trigger (desktop).
           window.requestAnimationFrame(() => {
-            if (version !== requestVersion) return;
-            focusVisibleAccountTrigger(opener);
+            if (bootVersion !== bootGeneration) return;
+            pendingSwitchFocusReturn = false;
+            focusVisibleAccountTrigger(opener, "switch");
           });
         }
-        if (pendingFallbackNotice && version === requestVersion) {
+        if (pendingFallbackNotice && bootVersion === bootGeneration) {
           const notice = pendingFallbackNotice;
           pendingFallbackNotice = null;
           setComposerStatus(notice, "error");
         }
-        if (refusedAddAccountMessage && isMultiAccountEnabled() && version === requestVersion) {
+        if (refusedAddAccountMessage && isMultiAccountEnabled() && bootVersion === bootGeneration) {
           openAddAccountDialog("", refusedAddAccountMessage);
         }
       } catch (error) {
-        if (version !== requestVersion) return;
+        if (bootVersion !== bootGeneration) return;
+        pendingSwitchFocusReturn = false;
         if (error instanceof AuthRecoveryRequired) {
           authRecoveryActive = true;
           const target = panel("workspace-error");
@@ -16994,6 +17013,8 @@ import "../../styles/kylon-image-viewer.css";
       dismissAllAccountDialogsAndSecrets();
       inactiveBadgePoller?.prune();
       requestVersion += 1;
+      bootGeneration += 1;
+      lastAccountDialogTrigger = null;
       householdDashboard?.clear();
       homeOverviewCounts.clear();
       renderedAuthUserId = "";
@@ -17007,29 +17028,79 @@ import "../../styles/kylon-image-viewer.css";
       if (!el || !el.isConnected || el.closest("[hidden], [inert]")) return false;
       if (el.getClientRects().length === 0) return false;
       const style = window.getComputedStyle(el);
-      return style.display !== "none" && style.visibility !== "hidden";
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0;
     };
 
-    const focusVisibleAccountTrigger = (preferred?: "phone" | "desktop" | null): void => {
-      const phoneBar = document.querySelector<HTMLElement>(".hm-phone-bar");
-      const phoneVisible = Boolean(phoneBar && isTriggerVisible(phoneBar));
-      const phoneTrigger = phoneVisible
-        ? document.querySelector<HTMLButtonElement>(".hm-phone-bar .hm-menu__trigger")
-        : null;
+    const captureAccountDialogTrigger = (opener: "phone" | "desktop"): HTMLElement | null => {
+      if (opener === "phone") {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active.matches(".hm-menu__trigger") && isTriggerVisible(active)) {
+          return active;
+        }
+        return (
+          [...document.querySelectorAll<HTMLButtonElement>(".cs-kylon-workspace-menu .hm-menu__trigger, .hm-phone-bar .hm-menu__trigger")]
+            .find(isTriggerVisible) ?? null
+        );
+      }
+      return one<HTMLButtonElement>("[data-user-menu-trigger]");
+    };
+
+    const focusVisibleAccountTrigger = (
+      preferred?: "phone" | "desktop" | null,
+      mode: "dialog-close" | "switch" = "dialog-close",
+      explicitTrigger?: HTMLElement | null,
+    ): void => {
+      const phoneNavOpener =
+        [...document.querySelectorAll<HTMLButtonElement>('button[aria-label="Open navigation"]')]
+          .find(isTriggerVisible) ?? null;
+      const phoneMoreTrigger =
+        [...document.querySelectorAll<HTMLButtonElement>(".cs-kylon-workspace-menu .hm-menu__trigger, .hm-phone-bar .hm-menu__trigger")]
+          .find(isTriggerVisible) ?? null;
       const desktopTrigger = one<HTMLButtonElement>("[data-user-menu-trigger]");
-      if (preferred === "phone" && isTriggerVisible(phoneTrigger)) {
-        phoneTrigger.focus({ preventScroll: true });
+
+      if (mode === "switch") {
+        if (isTriggerVisible(phoneNavOpener)) {
+          phoneNavOpener.focus({ preventScroll: true });
+          return;
+        }
+        if (preferred === "phone" && isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(desktopTrigger)) {
+          desktopTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
         return;
       }
-      if (phoneVisible && isTriggerVisible(phoneTrigger)) {
-        phoneTrigger.focus({ preventScroll: true });
+
+      // Dialog dismiss (Escape / Cancel / Close): return focus to the exact trigger that opened the dialog
+      // (More button inside the phone drawer at 360px, or desktop account button at 1280px).
+      if (isTriggerVisible(explicitTrigger ?? null)) {
+        explicitTrigger!.focus({ preventScroll: true });
         return;
+      }
+      if (preferred === "phone") {
+        if (isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(phoneNavOpener)) {
+          phoneNavOpener.focus({ preventScroll: true });
+          return;
+        }
       }
       if (isTriggerVisible(desktopTrigger)) {
         desktopTrigger.focus({ preventScroll: true });
         return;
       }
-      (phoneTrigger ?? desktopTrigger)?.focus({ preventScroll: true });
+      (phoneMoreTrigger ?? phoneNavOpener ?? desktopTrigger)?.focus({ preventScroll: true });
     };
 
     const announceAccountChange = (message: string): void => {
@@ -17226,6 +17297,7 @@ import "../../styles/kylon-image-viewer.css";
       passwordChangeNotice = null;
       lastAccountDialogOpener = opener;
       pendingSwitchFocusReturn = true;
+      layout.closeNavigation(false);
       teardownActiveAccountView();
       mgr.switchActiveAccount(targetUserId);
       renderAccountSwitcher();
@@ -17267,6 +17339,7 @@ import "../../styles/kylon-image-viewer.css";
       const status = one<HTMLElement>("[data-add-account-status]");
       if (!dialog) return;
       lastAccountDialogOpener = opener;
+      lastAccountDialogTrigger = captureAccountDialogTrigger(opener);
       addAccountDialogEpoch += 1;
       addAccountClosingForPromotion = false;
       resetAddAccountOtp();
@@ -17360,12 +17433,14 @@ import "../../styles/kylon-image-viewer.css";
       });
       dialog?.addEventListener("close", () => {
         const promoted = addAccountClosingForPromotion;
+        const trigger = lastAccountDialogTrigger;
         addAccountClosingForPromotion = false;
+        lastAccountDialogTrigger = null;
         retireAddAccountAttemptsSync();
         resetAddAccountOtp();
         form?.reset();
         if (status) status.textContent = "";
-        if (!promoted && session) focusVisibleAccountTrigger(lastAccountDialogOpener);
+        if (!promoted && session) focusVisibleAccountTrigger(lastAccountDialogOpener, "dialog-close", trigger);
       });
       dialog?.addEventListener("click", (event) => { if (event.target === dialog) closeAddAccountDialog(); });
 
@@ -17512,6 +17587,7 @@ import "../../styles/kylon-image-viewer.css";
       const count = mgr.listAccounts().length;
       if (count < 2) return;
       lastAccountDialogOpener = opener;
+      lastAccountDialogTrigger = captureAccountDialogTrigger(opener);
       const menu = one<HTMLElement>("[data-user-menu]");
       if (menu) menu.hidden = true;
       one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
@@ -17534,7 +17610,9 @@ import "../../styles/kylon-image-viewer.css";
       });
       cancel?.addEventListener("click", () => dialog?.close());
       dialog?.addEventListener("close", () => {
-        if (session) focusVisibleAccountTrigger(lastAccountDialogOpener);
+        const trigger = lastAccountDialogTrigger;
+        lastAccountDialogTrigger = null;
+        if (session) focusVisibleAccountTrigger(lastAccountDialogOpener, "dialog-close", trigger);
       });
       dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
       confirm?.addEventListener("click", async () => {

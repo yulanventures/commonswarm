@@ -139,8 +139,13 @@ export interface AccountRuntimeErrors {
 
 export class MultiAccountSessionExpired extends Error {
   override name = "SessionExpired";
-  constructor() {
-    super("Your session expired — sign in again.");
+  readonly reason: "terminal_expiry" | "ownership_lost";
+  constructor(
+    message = "Your session expired — sign in again.",
+    reason: "terminal_expiry" | "ownership_lost" = "terminal_expiry",
+  ) {
+    super(message);
+    this.reason = reason;
   }
 }
 
@@ -548,6 +553,7 @@ export class AccountSessionRuntime {
   private disposed = false;
   private deadSession = false;
   private terminallyExpired = false;
+  private terminalExpiryConfirmed = false;
   private removalSnapshot: string | null = null;
   private refreshRetryAfter = 0;
   private restSessionCheck: Promise<unknown> | null = null;
@@ -732,22 +738,38 @@ export class AccountSessionRuntime {
 
   /** Whether this login runtime was proven terminally expired by GoTrue (not merely removed by peer sign-out). */
   isTerminallyExpired(): boolean {
+    if (this.terminalExpiryConfirmed) return true;
+    if (this.disposed || !this.checkOwned()) {
+      this.terminallyExpired = false;
+      return false;
+    }
     return this.terminallyExpired;
   }
 
   /** Bounded, identity-safe verification strictly on this login's runtime (QA-010 + C2/C3). */
   async verifySession(): Promise<Session | null> {
     if (this.disposed || !this.checkOwned()) {
-      throw new MultiAccountSessionExpired();
+      this.terminallyExpired = false;
+      throw new MultiAccountSessionExpired("Your sign-in ended.", "ownership_lost");
     }
     await this.ready();
+    if (this.disposed || !this.checkOwned()) {
+      this.terminallyExpired = false;
+      throw new MultiAccountSessionExpired("Your sign-in ended.", "ownership_lost");
+    }
     return this.bounded(this.verifiedSessionInner());
   }
 
   /** Dispose this login runtime: stop auto-refresh, disconnect Realtime, block further writes/auth. */
-  dispose(): void {
+  dispose(options?: { preserveTerminalExpiry?: boolean }): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (options?.preserveTerminalExpiry) {
+      this.terminalExpiryConfirmed = true;
+    } else {
+      this.terminallyExpired = false;
+      this.terminalExpiryConfirmed = false;
+    }
     this.pendingStorageWrites.clear();
     this.authMemory.clear();
     this.removalSnapshot = null;
@@ -1056,38 +1078,48 @@ export class AccountSessionRuntime {
   }
 
   private async verifiedSessionInner(): Promise<Session | null> {
-    if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+    const failIfUnowned = (): void => {
+      if (this.disposed || !this.checkOwned()) {
+        // C7: Ownership loss (peer or local sign-out) ALWAYS overrides any earlier terminal
+        // transport response so a signed-out login is never misclassified as expired.
+        this.terminallyExpired = false;
+        throw new MultiAccountSessionExpired("Your sign-in ended.", "ownership_lost");
+      }
+    };
+    failIfUnowned();
     const initialFingerprint = this.peekCredentialFingerprint();
     try {
       const { data, error: sessionError } = await this.client.auth.getSession();
-      // C7: Recheck disposal and shared ownership immediately after getSession() (which may have
-      // run a refresh interrupted by peer sign-out) before interpreting any error as terminal expiry!
-      if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+      failIfUnowned();
       if (sessionError) {
         if (isAuthSessionMissingError(sessionError) || TERMINAL_REFRESH_CODES.has(sessionError.code ?? "")) {
           const successor = await this.client.auth.getSession();
-          if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+          failIfUnowned();
           if (successor.data.session) throw new MultiAccountAuthRecoveryRequired();
           const diskAfter = this.persistent ? parseSavedSession(this.readDisk(this.slotKey) ?? null) : null;
           if (diskAfter && initialFingerprint !== null && credentialFingerprint(diskAfter) !== initialFingerprint) {
             throw new MultiAccountAuthRecoveryRequired();
           }
-          if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+          failIfUnowned();
           this.deadSession = true;
           this.terminallyExpired = true;
           this.onTerminalExpiry(initialFingerprint);
-          throw new MultiAccountSessionExpired();
+          throw new MultiAccountSessionExpired("Your sign-in expired. Sign in again.", "terminal_expiry");
         }
         throw new MultiAccountAuthRecoveryRequired();
       }
       const session = data.session ?? null;
       if (!session) {
-        if (this.deadSession || this.terminallyExpired) throw new MultiAccountSessionExpired();
+        failIfUnowned();
+        if (this.deadSession || this.terminallyExpired) {
+          this.onTerminalExpiry(initialFingerprint);
+          throw new MultiAccountSessionExpired("Your sign-in expired. Sign in again.", "terminal_expiry");
+        }
         return null;
       }
       const { data: userData, error } = await this.client.auth.getUser();
       const latest = await this.client.auth.getSession();
-      if (this.disposed || !this.checkOwned()) throw new MultiAccountSessionExpired();
+      failIfUnowned();
       if (error) {
         const diskCandidate = this.persistent ? parseSavedSession(this.readDisk(this.slotKey) ?? null) : null;
         if (
@@ -1097,10 +1129,11 @@ export class AccountSessionRuntime {
           throw new MultiAccountAuthRecoveryRequired();
         }
         if (isAuthSessionMissingError(error)) {
+          failIfUnowned();
           this.deadSession = true;
           this.terminallyExpired = true;
           this.onTerminalExpiry(credentialFingerprint(session));
-          throw new MultiAccountSessionExpired();
+          throw new MultiAccountSessionExpired("Your sign-in expired. Sign in again.", "terminal_expiry");
         }
         throw new MultiAccountAuthRecoveryRequired();
       }
@@ -3005,7 +3038,7 @@ export class AccountManager {
         }
         const expired = this.runtimes.get(record.loginId);
         this.runtimes.delete(record.loginId);
-        expired?.dispose();
+        expired?.dispose({ preserveTerminalExpiry: true });
         if (this.tabActive?.loginId === record.loginId) {
           this.tabActive = null;
           this.activeWorkspaceId = null;
@@ -3623,8 +3656,8 @@ export class InactiveAccountBadgePoller {
           if (this.stopped || this.pollGeneration !== pollGen) break;
           if (!verified || verified.user.id !== account.userId || !runtime.isLiveOwned()) {
             if (this.counts.delete(key)) updated = true;
-            // C7: Only surface "Sign in again" when GoTrue proved terminal expiry, NEVER for peer/local sign-out!
-            if (!verified && runtime.isTerminallyExpired()) {
+            // C7: Only surface "Sign in again" when this login is still live-owned AND GoTrue proved terminal expiry!
+            if (!verified && runtime.isLiveOwned() && runtime.isTerminallyExpired()) {
               this.expired.add(key);
               this.expiredRecords.set(account.userId, { ...account });
               updated = true;
@@ -3652,8 +3685,9 @@ export class InactiveAccountBadgePoller {
           if (this.stopped || this.pollGeneration !== pollGen) break;
           if (error instanceof MultiAccountSessionExpired) {
             if (this.counts.delete(key)) updated = true;
-            // C7: Distinguish proven terminal expiry from peer sign-out / disposal ownership loss!
-            if (runtime.isTerminallyExpired()) {
+            // C7: Use the exact disposition of the verification that just finished so ownership loss
+            // after an earlier terminal transport response ALWAYS overrides expiry.
+            if (error.reason === "terminal_expiry" && runtime.isTerminallyExpired()) {
               this.expired.add(key);
               this.expiredRecords.set(account.userId, { ...account });
               updated = true;
