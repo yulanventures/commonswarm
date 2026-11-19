@@ -335,7 +335,11 @@ test("a different browser user is refused on render and POST before consent can 
       method, body: method === "POST" ? `csrf_token=${TOKEN}&selection_version=0&workspace_ids=${WORKSPACE}&home_workspace_id=${WORKSPACE}` : "",
     });
     assert.equal(result.status, 409);
-    assert.match(result.body, /You signed in as a different account; start again/);
+    assert.match(result.body, /<title>You signed in with a different account<\/title>/u);
+    assert.match(result.body, /<h1>You signed in with a different account<\/h1>/u);
+    assert.match(result.body, /<p>Open the app you were connecting and start a new connection\.<\/p>/u);
+    assert.match(result.body, /<meta name="color-scheme" content="light dark">/u);
+    assert.doesNotMatch(result.body, /<a\b|<form\b|<script\b/iu);
   }
 });
 

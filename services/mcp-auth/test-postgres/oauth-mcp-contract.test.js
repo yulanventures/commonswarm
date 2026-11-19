@@ -416,7 +416,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         const otherAccount = await submit(fields());
         assert.equal(otherAccount.status, 409, 'interaction cannot be submitted by another authenticated account');
         assert.match(otherAccount.headers.get('content-type') ?? '', /^text\/html/u);
-        assert.match(await otherAccount.text(), /You signed in as a different account; start again/u);
+        assert.match(await otherAccount.text(), /You signed in with a different account/u);
         await bindSession(session, ownerEvidence);
         assert.equal((await store.requireSession(session))?.user_id, owner);
         const noHome = await submit(fields().filter(([name]) => name !== 'home_workspace_id'));
