@@ -52,15 +52,19 @@ extension ConversationAPI {
         struct Receipt: Decodable { let status: String; let conversation_id: UUID? }
         guard row.joined, row.archived_at == nil, let channel = row.channel_id,
               row.kind == .privateChannel || row.kind == .publicChannel else { throw APIError.invalidResponse }
-        let priv = row.kind == .privateChannel
+        guard let current = try await conversationList(workspace)?.first(where: { $0.id == row.id }),
+              current.joined, current.archived_at == nil, current.kind == row.kind, current.channel_id == channel
+        else { throw APIError.invalidResponse }
+        let rights = try await memberAccess(workspace: workspace, row: current)
+        let priv = current.kind == .privateChannel
         let command: Command
         switch change {
         case .add(let refs):
-            guard (1...50).contains(refs.count) else { throw APIError.invalidResponse }
+            guard rights.add, (1...50).contains(refs.count) else { throw APIError.invalidResponse }
             command = Command(kind: priv ? "channel_member_add" : "conversation_invite", channel_id: priv ? channel : nil,
                               conversation_id: priv ? nil : row.id, members: refs, member: nil)
         case .remove(let member):
-            guard member != MemberRef(kind: .user, id: session.userID) else { throw APIError.invalidResponse }
+            guard rights.remove, member != MemberRef(kind: .user, id: session.userID) else { throw APIError.invalidResponse }
             command = Command(kind: priv ? "channel_member_remove" : "conversation_remove", channel_id: priv ? channel : nil,
                               conversation_id: priv ? nil : row.id, members: nil, member: member)
         }
