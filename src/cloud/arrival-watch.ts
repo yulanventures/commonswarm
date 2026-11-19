@@ -955,8 +955,8 @@ export async function runArrivalWatch(options: {
   const seenAlertRoutes = new Map<string, string>();
   const sweepSeenAlertIds = new Set<string>();
   let alertAfter: SignalCursor | null = null;
-  let alertSweepPages = 0;
-  const MAX_ALERT_SWEEP_PAGES = 50;
+  let alertCyclePages = 0;
+  const MAX_ALERT_PAGES_PER_CYCLE = 50;
   const cancelled = () => options.signal?.aborted === true;
 
   const inspectStdout = async (): Promise<void> => {
@@ -1134,19 +1134,24 @@ export async function runArrivalWatch(options: {
       const emittedSignals: SignalRecord[] = [];
       if (alertAfter === null) {
         sweepSeenAlertIds.clear();
-        alertSweepPages = 0;
+        alertCyclePages = 0;
       }
       for (const row of page.signals) {
         if (cancelled()) break;
+        const alreadyEmittedAlert = row.system_alert !== undefined &&
+          seenAlertRoutes.get(row.system_alert.alert_id) === row.created_at;
         if (row.system_alert) {
           seenAlertRoutes.set(row.system_alert.alert_id, row.created_at);
           sweepSeenAlertIds.add(row.system_alert.alert_id);
         }
-        await options.emit(row);
-        emittedSignals.push(row);
+        if (!alreadyEmittedAlert) {
+          await options.emit(row);
+          emittedSignals.push(row);
+        }
         cursor = cursorOf(row);
         await options.store.write(cursor);
       }
+      let continueAlertBurst = false;
       if (!cancelled()) {
         const openAlerts = page.openSystemAlerts ?? [];
         for (const alertRow of openAlerts) {
@@ -1165,20 +1170,29 @@ export async function runArrivalWatch(options: {
           nextAlertCursor.created_at !== alertAfter.created_at ||
           nextAlertCursor.id !== alertAfter.id
         );
-        if (
-          page.openSystemAlertsHasMore === true &&
-          advancedAlertCursor &&
-          alertSweepPages + 1 < MAX_ALERT_SWEEP_PAGES
-        ) {
-          alertAfter = nextAlertCursor;
-          alertSweepPages += 1;
+        if (page.openSystemAlertsHasMore === true) {
+          if (advancedAlertCursor) {
+            alertAfter = nextAlertCursor;
+            alertCyclePages += 1;
+            if (alertCyclePages < MAX_ALERT_PAGES_PER_CYCLE) {
+              continueAlertBurst = true;
+            } else {
+              // Cycle budget reached: keep alertAfter and sweepSeenAlertIds, yield, and resume next cycle.
+              alertCyclePages = 0;
+            }
+          } else {
+            alertAfter = null;
+            sweepSeenAlertIds.clear();
+            alertCyclePages = 0;
+          }
         } else {
+          // End of open_system_alerts feed: prune resolved/rerouted routes and reset for next sweep.
           for (const tracked of seenAlertRoutes.keys()) {
             if (!sweepSeenAlertIds.has(tracked)) seenAlertRoutes.delete(tracked);
           }
           sweepSeenAlertIds.clear();
           alertAfter = null;
-          alertSweepPages = 0;
+          alertCyclePages = 0;
         }
       }
       if (emittedSignals.length > 0) {
@@ -1195,7 +1209,7 @@ export async function runArrivalWatch(options: {
       }
 
       const fullPage = page.rawCount >= pageLimit;
-      if (fullPage || alertAfter !== null) {
+      if (fullPage || continueAlertBurst) {
         await wait(0);
         continue;
       }

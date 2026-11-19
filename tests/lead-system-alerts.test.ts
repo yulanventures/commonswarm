@@ -266,3 +266,164 @@ test("runArrivalWatch reconciles multi-page openSystemAlerts independently of si
   );
   assert.equal(savedCursor?.id, NEWER_AHEAD, "signal cursor advances on ordinary path and never rewinds on reconciliation");
 });
+
+test("runArrivalWatch does not re-emit an alert on the ordinary path after reconciliation already emitted it, while still persisting the signal cursor", async () => {
+  const controller = new AbortController();
+  const emitted: SignalRecord[] = [];
+  const EARLIER_MSG = "66666666-6666-4666-8666-666666666601";
+  const AHEAD_ALERT = "66666666-6666-4666-8666-666666666602";
+  const earlierMessage: SignalRecord = {
+    id: EARLIER_MSG,
+    workspace_id: WS,
+    from: AFFECTED,
+    from_kind: "agent",
+    to: null,
+    to_agent: LEAD,
+    in_reply_to: null,
+    about: null,
+    kind: "note",
+    body: "Earlier normal message filling page 1.",
+    until: "2030-01-01T00:00:00.000Z",
+    created_at: "2026-11-19T16:01:00.000Z",
+    sender_owner_relation: "same_owner",
+  };
+  const aheadAlert = systemAlertToSignalRecord(
+    {
+      alert_id: AHEAD_ALERT,
+      workspace_id: WS,
+      channel_id: null,
+      kind: "agent_quiet",
+      affected_principal_id: AFFECTED,
+      affected_seat_name: "quiet-seat",
+      fix_hint: "Restart its listener.",
+      waiting_count: 1,
+      oldest_waiting_at: "2026-11-19T15:30:00.000Z",
+      routed_lead_principal_id: LEAD,
+      routed_at: "2026-11-19T16:02:00.000Z",
+      opened_at: "2026-11-19T16:02:00.000Z",
+      escalated_at: null,
+    },
+    LEAD,
+  );
+  const stream = [earlierMessage, aheadAlert];
+  const state: { cursor: { created_at: string; id: string } | null } = { cursor: null };
+  let idleCycles = 0;
+
+  await runArrivalWatch({
+    workspaceId: WS,
+    principalId: LEAD,
+    signal: controller.signal,
+    pollMs: 1,
+    pageLimit: 1,
+    sleep: async (ms) => {
+      if (ms > 0) {
+        idleCycles += 1;
+        if (idleCycles >= 2) controller.abort();
+      }
+    },
+    store: {
+      location: "memory://reconcile-then-ordinary-test",
+      read: async () => state.cursor,
+      write: async (next) => { state.cursor = next; },
+    },
+    readPage: async ({ after, limit }) => {
+      const afterMs = after ? Date.parse(after.created_at) : -Infinity;
+      const signals = stream
+        .filter((r) => Date.parse(r.created_at) > afterMs || (Date.parse(r.created_at) === afterMs && r.id > (after?.id ?? "")))
+        .slice(0, limit);
+      return {
+        signals,
+        openSystemAlerts: [aheadAlert],
+        rawCount: signals.length,
+        malformedRows: 0,
+        pendingDeliveryCount: 0,
+        nextCursor: signals.length > 0 ? { created_at: signals[signals.length - 1]!.created_at, id: signals[signals.length - 1]!.id } : null,
+        capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
+        legacyCursorFallback: false,
+      };
+    },
+    emit: async (row) => { emitted.push(row); },
+  });
+
+  assert.deepEqual(
+    emitted.map((r) => r.id),
+    [EARLIER_MSG, AHEAD_ALERT],
+    "ahead alert printed by reconciliation on page 1 must not print a second time when ordinary cursor catches up",
+  );
+  assert.equal(state.cursor?.id, AHEAD_ALERT, "ordinary cursor must still persist past the already-emitted alert");
+});
+
+test("runArrivalWatch retains reconciliation cursor across the 50-page per-cycle budget to reach page 51 and prunes only at end of feed", async () => {
+  const controller = new AbortController();
+  const emitted: SignalRecord[] = [];
+  const totalRoutes = 51;
+  const routes: SignalRecord[] = Array.from({ length: totalRoutes }, (_, index) => {
+    const n = String(index + 1).padStart(12, "0");
+    const ts = new Date(Date.parse("2026-11-19T16:00:00.000Z") + (index + 1) * 1_000).toISOString();
+    return systemAlertToSignalRecord(
+      {
+        alert_id: `77777777-7777-4777-8777-${n}`,
+        workspace_id: WS,
+        channel_id: null,
+        kind: "agent_quiet",
+        affected_principal_id: AFFECTED,
+        affected_seat_name: `quiet-seat-${index + 1}`,
+        fix_hint: "Restart its listener.",
+        waiting_count: 1,
+        oldest_waiting_at: "2026-11-19T15:30:00.000Z",
+        routed_lead_principal_id: LEAD,
+        routed_at: ts,
+        opened_at: ts,
+        escalated_at: null,
+      },
+      LEAD,
+    );
+  });
+  // Cursor is already past all 51 routes, so all 51 are behind-cursor reconciliation routes.
+  let savedCursor: { created_at: string; id: string } | null = {
+    created_at: "2026-11-19T16:59:00.000Z",
+    id: NORMAL_SIG,
+  };
+  let idleCycles = 0;
+
+  await runArrivalWatch({
+    workspaceId: WS,
+    principalId: LEAD,
+    signal: controller.signal,
+    pollMs: 1,
+    pageLimit: 1,
+    sleep: async (ms) => {
+      if (ms > 0) {
+        idleCycles += 1;
+        if (idleCycles >= 3) controller.abort();
+      }
+    },
+    store: {
+      location: "memory://budget-resume-51-test",
+      read: async () => savedCursor,
+      write: async (next) => { savedCursor = next; },
+    },
+    readPage: async ({ alertAfter, limit }) => {
+      const afterMs = alertAfter ? Date.parse(alertAfter.created_at) : -Infinity;
+      const remaining = routes.filter(
+        (r) => Date.parse(r.created_at) > afterMs || (Date.parse(r.created_at) === afterMs && r.id > (alertAfter?.id ?? "")),
+      );
+      return {
+        signals: [],
+        openSystemAlerts: remaining.slice(0, limit),
+        ...(remaining.length > limit ? { openSystemAlertsHasMore: true } : {}),
+        rawCount: 0,
+        malformedRows: 0,
+        pendingDeliveryCount: 0,
+        nextCursor: null,
+        capabilities: { cursorAfter: true, senderOwnerRelation: false, deliveryClaim: false, deliveryAck: false },
+        legacyCursorFallback: false,
+      };
+    },
+    emit: async (row) => { emitted.push(row); },
+  });
+
+  assert.equal(emitted.length, totalRoutes, "all 51 behind-cursor routes must emit exactly once across 3 cycles without repeating");
+  assert.equal(new Set(emitted.map((r) => r.id)).size, totalRoutes, "all 51 unique route IDs including page 51 must be reached");
+  assert.equal(emitted[totalRoutes - 1]!.id, routes[totalRoutes - 1]!.id, "route 51 must be delivered after resuming across the 50-page budget");
+});
