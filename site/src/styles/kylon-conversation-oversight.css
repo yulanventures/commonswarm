@@ -152,6 +152,10 @@ live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-head {
   border-block-end: 1px solid var(--carbon-line, var(--k-shell-line));
 }
 
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-head--back-only {
+  display: none;
+}
+
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-copy {
   min-inline-size: 0;
   flex: 1 1 160px;
@@ -287,6 +291,9 @@ live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message-body {
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="true"] .cs-oversight__back {
     display: inline-flex;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="true"] .cs-oversight__detail-head--back-only {
+    display: flex;
   }
 }
 

@@ -128,13 +128,34 @@ export function createInitialOversightState(): OversightPanelState {
 }
 
 /**
- * Tears down all client-held oversight conversations, messages, cursors, and errors,
- * bumping `requestGen` so any in-flight responses are discarded on arrival.
+ * Tears down all client-held oversight conversations, messages, cursors, pin, and errors
+ * so any in-flight responses are discarded and re-entering the same agent starts fresh.
  */
-export function teardownOversightState(state: OversightPanelState, nextGen: number): OversightPanelState {
+export function teardownOversightState(_state: OversightPanelState, _nextGen: number): OversightPanelState {
+  return createInitialOversightState();
+}
+
+/**
+ * Retires a conversation after an authoritative server refusal (`404 conversation_not_found`)
+ * from either the first history page or `Load older messages`: removes the denied row from the
+ * list and clears its transcript, cursor, and member summary so no denied details remain on screen.
+ */
+export function retireRefusedOversightConversation(
+  state: OversightPanelState,
+  conversationId: string,
+): OversightPanelState {
   return {
-    ...createInitialOversightState(),
-    pin: state.pin ? { ...state.pin, requestGen: nextGen } : null,
+    ...state,
+    conversations: state.conversations.filter(c => c.conversationId !== conversationId),
+    selectedId: conversationId,
+    historyStatus: "not_found",
+    historyError: CONVERSATION_UNAVAILABLE_TEXT,
+    historyConversation: null,
+    messages: [],
+    hasMore: false,
+    nextBefore: null,
+    loadingOlder: false,
+    olderError: "",
   };
 }
 
@@ -306,6 +327,13 @@ export function renderOversightPanel(
   }
 
   if (state.conversations.length === 0) {
+    if (state.historyStatus === "not_found") {
+      const p = el(doc, "p", "cs-oversight__state", CONVERSATION_UNAVAILABLE_TEXT);
+      p.dataset.oversightHistoryState = "unavailable";
+      section.append(p);
+      host.replaceChildren(section);
+      return;
+    }
     const p = el(doc, "p", "cs-oversight__state", `No conversations for ${vm.agentName} yet.`);
     p.dataset.oversightState = "empty";
     section.append(p);
@@ -364,6 +392,20 @@ export function renderOversightPanel(
 
   if (!state.selectedId) {
     detailPane.append(el(doc, "p", "cs-oversight__state", "Select a conversation to read."));
+  } else if (state.historyStatus === "not_found") {
+    const detailHead = el(doc, "div", "cs-oversight__detail-head cs-oversight__detail-head--back-only");
+    const backBtn = el(doc, "button", "cs-oversight__back", "Back");
+    backBtn.type = "button";
+    backBtn.dataset.oversightBack = "";
+    backBtn.addEventListener("click", () => callbacks.onPhoneBack());
+    detailHead.append(backBtn);
+    const box = el(doc, "div", "cs-oversight__error-box");
+    box.dataset.oversightHistoryState = "unavailable";
+    const msg = el(doc, "p", "cs-oversight__state", CONVERSATION_UNAVAILABLE_TEXT);
+    msg.tabIndex = -1;
+    msg.dataset.oversightDetailTitle = "";
+    box.append(msg);
+    detailPane.append(detailHead, box);
   } else {
     const detailHead = el(doc, "div", "cs-oversight__detail-head");
     const backBtn = el(doc, "button", "cs-oversight__back", "Back");
@@ -389,11 +431,6 @@ export function renderOversightPanel(
       const p = el(doc, "p", "cs-oversight__state", "Loading messages…");
       p.dataset.oversightHistoryState = "loading";
       detailPane.append(p);
-    } else if (state.historyStatus === "not_found") {
-      const box = el(doc, "div", "cs-oversight__error-box");
-      box.dataset.oversightHistoryState = "unavailable";
-      box.append(el(doc, "p", "cs-oversight__state", CONVERSATION_UNAVAILABLE_TEXT));
-      detailPane.append(box);
     } else if (state.historyStatus === "failed") {
       const box = el(doc, "div", "cs-oversight__error-box");
       box.dataset.oversightHistoryState = "failed";

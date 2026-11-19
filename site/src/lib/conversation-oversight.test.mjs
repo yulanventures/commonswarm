@@ -10,6 +10,7 @@ import {
   oversightPinMatches,
   parseOversightListOutcome,
   renderOversightPanel,
+  retireRefusedOversightConversation,
   sortOversightConversations,
   teardownOversightState,
 } from "./conversation-oversight.ts";
@@ -215,12 +216,34 @@ test("oversight titles, member summaries, sorting, cursor dedupe, and pin/teardo
   };
   const torn = teardownOversightState(populated, 2);
   assert.equal(torn.listStatus, "idle");
+  assert.equal(torn.pin, null, "teardown clears pin so re-entering the same agent starts fresh");
   assert.deepEqual(torn.conversations, []);
   assert.equal(torn.selectedId, null);
   assert.deepEqual(torn.messages, []);
   assert.equal(torn.hasMore, false);
   assert.equal(torn.nextBefore, null);
   assert.equal(oversightPinMatches(pinA, torn.pin), false);
+
+  const retired = retireRefusedOversightConversation(
+    {
+      ...populated,
+      conversations: [sampleGroup, sampleDm],
+      selectedId: C2,
+      historyConversation: sampleGroup,
+      loadingOlder: true,
+      olderError: "stale",
+    },
+    C2,
+  );
+  assert.deepEqual(retired.conversations.map(c => c.conversationId), [C1], "refused conversation is removed from list");
+  assert.equal(retired.historyStatus, "not_found");
+  assert.equal(retired.historyError, CONVERSATION_UNAVAILABLE_TEXT);
+  assert.equal(retired.historyConversation, null);
+  assert.deepEqual(retired.messages, []);
+  assert.equal(retired.hasMore, false);
+  assert.equal(retired.nextBefore, null);
+  assert.equal(retired.loadingOlder, false);
+  assert.equal(retired.olderError, "");
 });
 
 test("renderOversightPanel renders read-only agent conversations with zero write controls and uniform 404 non-oracle", () => {
@@ -289,17 +312,39 @@ test("renderOversightPanel renders read-only agent conversations with zero write
   host.querySelector("[data-oversight-detail]").dispatchEvent({ type: "keydown", key: "Escape" });
   assert.equal(phoneBackClicks, 1);
 
-  // Uniform non-oracle 404 state on unavailable conversation.
+  // Uniform non-oracle 404 state retires denied row, title, member summary, cursor, and transcript.
+  const retiredState = retireRefusedOversightConversation(state, C2);
   renderOversightPanel(
     host,
     {
       agentId: A1,
       agentName: "Lead",
-      state: { ...state, historyStatus: "not_found", messages: [], hasMore: false, nextBefore: null },
+      state: retiredState,
       formatTime: () => "2m ago",
       resolveMemberName: () => "Member",
     },
     baseCallbacks,
   );
   assert.equal(host.querySelector('[data-oversight-history-state="unavailable"]').textContent, CONVERSATION_UNAVAILABLE_TEXT);
+  assert.equal(host.querySelector(`[data-oversight-conv="${C2}"]`), null, "denied row must not remain in list");
+  assert.equal(host.querySelector(".cs-oversight__detail-meta"), null, "denied member summary must not remain");
+  assert.equal(host.querySelector("[data-oversight-load-older]"), null, "denied cursor action must not remain");
+  assert.equal(host.querySelectorAll(".cs-oversight__message-body").length, 0, "denied transcript must be cleared");
+  assert.equal(host.textContent.includes("Alex and Builder"), false, "denied title must not remain");
+
+  // When the refused conversation was the only row, uniform unavailable text still renders (not empty state).
+  const retiredOnly = retireRefusedOversightConversation({ ...state, conversations: [sampleGroup] }, C2);
+  renderOversightPanel(
+    host,
+    {
+      agentId: A1,
+      agentName: "Lead",
+      state: retiredOnly,
+      formatTime: () => "2m ago",
+      resolveMemberName: () => "Member",
+    },
+    baseCallbacks,
+  );
+  assert.equal(host.querySelector('[data-oversight-history-state="unavailable"]').textContent, CONVERSATION_UNAVAILABLE_TEXT);
+  assert.equal(host.querySelector('[data-oversight-state="empty"]'), null);
 });

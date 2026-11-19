@@ -1451,6 +1451,7 @@ import "../../styles/kylon-image-viewer.css";
     channelUnread,
     ConversationsUnsupportedError,
     listConversations,
+    OversightRequestRetiredError,
     readOversightConversationsRaw,
     readOversightConversationHistory,
     joinConversation,
@@ -5485,6 +5486,7 @@ import "../../styles/kylon-image-viewer.css";
     let oversightMod: OversightModule | null = null;
     let oversightModPromise: Promise<OversightModule> | null = null;
     let oversightGen = 0;
+    let oversightHistoryGen = 0;
     let oversightState: OversightPanelState | null = null;
     let oversightAgentName = "";
 
@@ -5499,6 +5501,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const teardownAgentOversight = (): void => {
       oversightGen += 1;
+      oversightHistoryGen += 1;
       oversightState = oversightMod && oversightState
         ? oversightMod.teardownOversightState(oversightState, oversightGen)
         : null;
@@ -5571,9 +5574,11 @@ import "../../styles/kylon-image-viewer.css";
             const prevId = oversightState.selectedId;
             oversightState = { ...oversightState, phoneDetailOpen: false };
             renderOversightSlot();
-            if (prevId) {
-              slotEl.querySelector<HTMLElement>(`[data-oversight-conv="${prevId}"]`)?.focus({ preventScroll: true });
-            }
+            const target = prevId
+              ? (slotEl.querySelector<HTMLElement>(`[data-oversight-conv="${prevId}"]`) ??
+                slotEl.querySelector<HTMLElement>("[data-oversight-conv]"))
+              : null;
+            target?.focus({ preventScroll: true });
           },
         },
       );
@@ -5606,6 +5611,12 @@ import "../../styles/kylon-image-viewer.css";
           olderError: "",
         };
       }
+      const myHistoryGen = ++oversightHistoryGen;
+      const isHistoryLive = (): boolean =>
+        isOversightPinLive(pin) &&
+        oversightHistoryGen === myHistoryGen &&
+        !!oversightState &&
+        oversightState.selectedId === conversationId;
       const slotSelector = `[data-oversight-slot="${pin.agentPrincipalId}"]`;
       const focusWasInDetail = !!document.activeElement?.closest(`${slotSelector} [data-oversight-detail]`);
       const focusWasOnLoadOlder = !!document.activeElement?.closest(`${slotSelector} [data-oversight-load-older]`);
@@ -5623,19 +5634,24 @@ import "../../styles/kylon-image-viewer.css";
           conversationId,
           pin.agentPrincipalId,
           { before, limit: 50, includeMentions: true, includeReactions: true },
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: isHistoryLive },
         );
       } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
         result = { ok: false, code: "other", message: readableError(error) || "Could not load messages." };
       }
-      if (!isOversightPinLive(pin) || !oversightMod || !oversightState || oversightState.selectedId !== conversationId) return;
+      if (!isHistoryLive() || !oversightMod || !oversightState) return;
       const focusStillInDetail = focusWasInDetail || !!document.activeElement?.closest(`${slotSelector} [data-oversight-detail]`);
       if (!result.ok) {
-        if (loadingOlder) {
+        if (result.code === "conversation_not_found") {
+          oversightHistoryGen += 1;
+          oversightState = oversightMod.retireRefusedOversightConversation(oversightState, conversationId);
+        } else if (loadingOlder) {
           oversightState = { ...oversightState, loadingOlder: false, olderError: result.message };
         } else {
           oversightState = {
             ...oversightState,
-            historyStatus: result.code === "conversation_not_found" ? "not_found" : "failed",
+            historyStatus: "failed",
             historyError: result.message,
             messages: [],
             hasMore: false,
@@ -5643,9 +5659,10 @@ import "../../styles/kylon-image-viewer.css";
           };
         }
         renderOversightSlot();
-        if (loadingOlder && focusStillInDetail) {
+        if (focusStillInDetail || (focusDetailTitle && openPhoneDetail)) {
           (one<HTMLElement>(`${slotSelector} [data-oversight-load-older]`) ??
-            one<HTMLElement>(`${slotSelector} [data-oversight-detail-title]`))?.focus({ preventScroll: true });
+            one<HTMLElement>(`${slotSelector} [data-oversight-detail-title]`) ??
+            one<HTMLElement>(`${slotSelector} [data-oversight-back]`))?.focus({ preventScroll: true });
         }
         return;
       }
@@ -5693,20 +5710,33 @@ import "../../styles/kylon-image-viewer.css";
       renderOversightSlot();
       let outcome: OversightListOutcome;
       try {
-        const raw = await readOversightConversationsRaw(pin.workspaceId, pin.agentPrincipalId);
+        const raw = await readOversightConversationsRaw(
+          pin.workspaceId,
+          pin.agentPrincipalId,
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: () => isOversightPinLive(pin) },
+        );
         outcome = oversightMod.parseOversightListOutcome(raw.status, raw.body);
       } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
         outcome = { status: "failed", message: readableError(error) || "Could not load agent conversations." };
       }
       if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
       if (outcome.status !== "ready") {
+        oversightHistoryGen += 1;
         oversightState = {
           ...oversightState,
           listStatus: outcome.status,
           listError: outcome.status === "failed" ? outcome.message : "",
           conversations: [],
           selectedId: null,
+          historyStatus: "idle",
+          historyError: "",
+          historyConversation: null,
           messages: [],
+          hasMore: false,
+          nextBefore: null,
+          loadingOlder: false,
+          olderError: "",
         };
         renderOversightSlot();
         return;
@@ -7124,6 +7154,14 @@ import "../../styles/kylon-image-viewer.css";
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      if (
+        route.view !== "agent" ||
+        (oversightState?.pin &&
+          (route.workspaceId.toLowerCase() !== oversightState.pin.workspaceId ||
+            route.agentId.toLowerCase() !== oversightState.pin.agentPrincipalId))
+      ) {
+        teardownAgentOversight();
+      }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;

@@ -16,7 +16,18 @@ function installOversightFixture() {
   f.oversightReads = [] as any[];
   f.oversightHistoryReads = [] as any[];
   f.commandsAfterBoot = [] as any[];
+  f.holdNextAuthUser = false;
+  f.authUserHeld = false;
+  f.releaseAuthUser = null as null | (() => void);
+  f.overrideAuthUserId = null as string | null;
+  f.holdNextSignals = false;
+  f.signalsHeld = false;
+  f.releaseSignals = null as null | (() => void);
+  f.heldHistoryA = false;
+  f.releaseHistoryA = null as null | (() => void);
+  f.historyACount = 0;
 
+  const replacementOwner = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const peerAlex = "dddd4444-4444-4444-8444-444444444444";
   const ownedLead = "eeee5555-5555-4555-8555-555555555555";
   const ownedScout = "ffff6666-6666-4666-8666-666666666666";
@@ -28,6 +39,7 @@ function installOversightFixture() {
   const scoutDm = "bbbb3333-3333-4333-8333-333333333333";
 
   f.ids = {
+    replacementOwner,
     peerAlex,
     ownedLead,
     ownedScout,
@@ -132,6 +144,33 @@ function installOversightFixture() {
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (url.origin !== "https://api.test.invalid") return previous(input, init);
+
+    if (url.pathname === "/auth/v1/user") {
+      if (f.holdNextAuthUser) {
+        f.holdNextAuthUser = false;
+        f.authUserHeld = true;
+        await new Promise<void>(resolve => { f.releaseAuthUser = resolve; });
+      }
+      if (f.overrideAuthUserId) {
+        return Response.json({
+          id: f.overrideAuthUserId,
+          aud: "authenticated",
+          role: "authenticated",
+          email: "replacement@example.test",
+          app_metadata: {},
+          user_metadata: {},
+          created_at: recent,
+        });
+      }
+      return previous(input, init);
+    }
+
+    if (url.pathname === "/rest/v1/signals" && f.holdNextSignals) {
+      f.holdNextSignals = false;
+      f.signalsHeld = true;
+      await new Promise<void>(resolve => { f.releaseSignals = resolve; });
+      return previous(input, init);
+    }
 
     if (url.pathname === "/rest/v1/member_profiles") {
       return Response.json([
@@ -264,6 +303,12 @@ function installOversightFixture() {
         const pid = String(body.agent_principal_id ?? "").toLowerCase();
         if (cid === oversightDmAlex && pid === ownedLead) {
           if (body.before_id === "55555555-5555-4555-8555-555555555501") {
+            if (f.oversightMode === "deny_older") {
+              return Response.json(
+                { error: "conversation_not_found", message: "This conversation isn't available in this workspace." },
+                { status: 404 },
+              );
+            }
             return Response.json({
               conversation: leadOversightList[0],
               messages: [
@@ -274,6 +319,18 @@ function installOversightFixture() {
               next_before: null,
               next_after: null,
             });
+          }
+          if (f.oversightMode === "aba_held_then_deny") {
+            f.historyACount += 1;
+            if (f.historyACount === 1) {
+              f.heldHistoryA = true;
+              await new Promise<void>(resolve => { f.releaseHistoryA = resolve; });
+            } else {
+              return Response.json(
+                { error: "conversation_not_found", message: "This conversation isn't available in this workspace." },
+                { status: 404 },
+              );
+            }
           }
           return Response.json({
             conversation: leadOversightList[0],
@@ -436,6 +493,111 @@ async function observeOversight() {
       return;
     }
 
+    // Condition 1a witness: rendered transcript followed by 404 on Load older clears transcript, cursor, member summary, and list row.
+    if (f.oversightMode === "deny_older") {
+      await wait("initial transcript ready", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      check(!!one(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`), "Alex row starts in list");
+      await click("[data-oversight-load-older]");
+      await wait("denied older page retired conversation", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("isn't available in this workspace"));
+      const text = one("[data-oversight-panel]")?.textContent ?? "";
+      check(!text.includes("Did the migration verify cleanly"), "denied older page must clear prior transcript");
+      check(!text.includes("All three checks passed."), "denied older page must clear prior reply");
+      check(!one("[data-oversight-load-older]"), "denied older page must clear cursor button");
+      check(!one(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`), "denied older page must remove denied row from list");
+      check(!one(".cs-oversight__detail-meta"), "denied older page must clear member summary");
+      check(!!one(`[data-oversight-conv="${f.ids.oversightGroup}"]`), "other allowed conversations remain in list");
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "deny_older" });
+      return;
+    }
+
+    // Condition 1b witness: held success for A arriving after A -> B -> A fresh denial is discarded by history generation.
+    if (f.oversightMode === "aba_held_then_deny") {
+      await wait("first request for A held", () => f.heldHistoryA === true);
+      await click(`[data-oversight-conv="${f.ids.oversightGroup}"]`);
+      await wait("switched to B", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("Summary posted to the group thread"));
+      await click(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`);
+      await wait("fresh denial for A rendered", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("isn't available in this workspace"));
+      f.releaseHistoryA?.();
+      await new Promise(resolve => setTimeout(resolve, 180));
+      const text = one("[data-oversight-panel]")?.textContent ?? "";
+      check(text.includes("isn't available in this workspace"), "fresh denial must stay visible after held success resolves");
+      check(!text.includes("All three checks passed."), "held success for A must never overwrite a newer denial");
+      check(!one(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`), "denied A row must stay removed");
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "aba_held_then_deny" });
+      return;
+    }
+
+    // Condition 2 witness: navigation retires panel synchronously BEFORE held destination await, and returning starts a fresh list read.
+    if (f.oversightMode === "nav_retire_reenter") {
+      await wait("Lead transcript rendered", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      const readsBeforeLeave = f.oversightReads.length;
+      f.holdNextSignals = true;
+      await click('a[href*="c=general"]');
+      await wait("destination channel signals held", () => f.signalsHeld === true);
+      // Assert panel and DOM are ALREADY cleared BEFORE releasing the held channel read:
+      check(!one("[data-oversight-panel]"), "oversight panel must retire synchronously before destination await settles");
+      const leftoverWhileHeld = all<HTMLElement>("[data-oversight-slot]").some(el => (el.textContent ?? "").trim().length > 0);
+      check(!leftoverWhileHeld, "oversight slot DOM must be empty while channel read is still held");
+      f.releaseSignals?.();
+      await wait("channel view settled", () => visible(one("[data-composer]")));
+      // Return to the exact same agent and assert a fresh list read runs:
+      history.pushState(null, "", `/app?w=${f.workspace}&agent=${f.ids.ownedLead}`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await wait("fresh oversight list read on re-entry", () => f.oversightReads.length > readsBeforeLeave && (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "nav_retire_reenter", reads: f.oversightReads.length });
+      return;
+    }
+
+    // Condition 3a witness: held session acquisition on list read across route retirement sends zero retired oversight requests.
+    if (f.oversightMode === "held_session_list") {
+      await wait("booted on general", () => visible(one("[data-composer]")));
+      f.holdNextAuthUser = true;
+      history.pushState(null, "", `/app?w=${f.workspace}&agent=${f.ids.ownedLead}`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await wait("list read session acquisition held", () => f.authUserHeld === true);
+      // Retire scope while currentSession() is awaiting /auth/v1/user:
+      await click('a[href*="c=general"]');
+      f.releaseAuthUser?.();
+      await new Promise(resolve => setTimeout(resolve, 180));
+      check(f.oversightReads.length === 0, "retired list read must send zero conversation_oversight requests after session acquisition, got: " + JSON.stringify(f.oversightReads));
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "held_session_list", reads: f.oversightReads.length });
+      return;
+    }
+
+    // Condition 3b witness: held session acquisition on history read across replacement account sends zero retired history requests.
+    if (f.oversightMode === "held_session_history") {
+      await wait("initial oversight settled", () => (one("[data-oversight-panel]")?.textContent ?? "").includes("All three checks passed."));
+      const beforeGroupReads = f.oversightHistoryReads.filter((r: any) => r.conversation_id === f.ids.oversightGroup).length;
+      check(beforeGroupReads === 0, "group conversation not yet fetched");
+      f.holdNextAuthUser = true;
+      await click(`[data-oversight-conv="${f.ids.oversightGroup}"]`);
+      await wait("history read session acquisition held", () => f.authUserHeld === true);
+      // Swap active session to a replacement user identity before releasing /auth/v1/user:
+      f.overrideAuthUserId = f.ids.replacementOwner;
+      localStorage.setItem("sb-api-auth-token", JSON.stringify({
+        access_token: "synthetic-replacement-bearer",
+        refresh_token: "synthetic-replacement-refresh",
+        token_type: "bearer",
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user: {
+          id: f.ids.replacementOwner,
+          aud: "authenticated",
+          role: "authenticated",
+          email: "replacement@example.test",
+          app_metadata: {},
+          user_metadata: {},
+          created_at: new Date().toISOString(),
+        },
+      }));
+      f.releaseAuthUser?.();
+      await new Promise(resolve => setTimeout(resolve, 180));
+      const afterGroupReads = f.oversightHistoryReads.filter((r: any) => r.conversation_id === f.ids.oversightGroup).length;
+      check(afterGroupReads === 0, "history read under replacement account must dispatch zero conversation_oversight_history requests");
+      document.documentElement.dataset.oversightObservation = JSON.stringify({ ok: true, mode: "held_session_history", groupReads: afterGroupReads });
+      return;
+    }
+
     // Standard ready flow (desktop and phone, plus capture modes):
     await wait("oversight list ready", () => visible(one<HTMLElement>(`[data-oversight-conv="${f.ids.oversightDmAlex}"]`)));
     const currentPanel = () => one<HTMLElement>("[data-oversight-panel]")!;
@@ -564,6 +726,11 @@ test("Step 3D-3 signed-in read-only agent oversight UI enforces isolation, curso
       { name: "unowned-agent-1024", width: 1024, height: 768, query: `w=${ws}&agent=${unownedBot}&theme=light&oversight_mode=unowned` },
       { name: "unsupported-pre2b-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=unsupported` },
       { name: "slow-switch-isolation-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=slow_switch` },
+      { name: "denied-older-page-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=deny_older` },
+      { name: "held-success-after-aba-denial-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=aba_held_then_deny` },
+      { name: "nav-retire-before-await-reenter-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=nav_retire_reenter` },
+      { name: "held-session-list-guard-1024", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&oversight_mode=held_session_list` },
+      { name: "held-session-history-guard-1024", width: 1024, height: 768, query: `w=${ws}&agent=${ownedLead}&theme=light&oversight_mode=held_session_history` },
       // Visual captures + axe-core checks for Designer at 360, 390, 1024, 1440 in light & dark:
       ...(["light", "dark"] as const).flatMap(theme => [
         { name: `1440x900-${theme}-oversight`, width: 1440, height: 900, query: `w=${ws}&agent=${ownedLead}&theme=${theme}&capture=open-detail`, screenshot: true, axe: true, scrollOversight: true },
