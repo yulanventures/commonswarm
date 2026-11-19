@@ -98,6 +98,10 @@ test("app shell preloads only Inter and binds body and home UI fonts to Inter so
     kylonFont,
     /:root\[data-app\]\s*\{[\s\S]*?--k-shell-font:\s*"CommonSwarm Inter"[\s\S]*?--font-sans:\s*var\(--k-shell-font\);[\s\S]*?--home-font-body:\s*var\(--k-shell-font\);[\s\S]*?\}/u,
   );
+  assert.match(
+    kylonFont,
+    /:root\[data-app\]\s+\.dashboard__sample-notice:not\(\[hidden\]\)\s*\{[\s\S]*?font-family:\s*"Instrument Sans"/u,
+  );
 });
 
 test("app loading and empty surfaces share status live regions and Skeleton, EmptyState, and Toast primitives (D18)", async () => {

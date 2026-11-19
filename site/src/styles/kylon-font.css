@@ -14,6 +14,13 @@
   --home-font-body: var(--k-shell-font);
 }
 
+/* Keep the sample-workspace honesty banner in its existing face only when shown, so signed-out
+   /app visits do not download Instrument Sans while the banner is hidden. */
+:root[data-app] .dashboard__sample-notice:not([hidden]) {
+  font-family: "Instrument Sans", "Instrument Sans Fallback", "DM Sans", "DM Sans Fallback",
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
 live-dashboard.dashboard[data-kylon-shell],
 admin-delegations[data-kylon-account],
 human-invitation-inbox[data-kylon-invite],
