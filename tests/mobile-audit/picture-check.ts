@@ -120,19 +120,28 @@ export async function runPictureChecks(
     return last;
   };
   try {
-    // 0. Held signing: the picture has no link yet. The frame is already at its final size and nothing of the picture is painted.
-    let sign: () => void = () => {};
-    const signHeld = new Promise<void>(done => { sign = done; });
+    // 0. Held signing: the picture has asked for its link and has none yet. The frame is already at its final size and nothing
+    // of the picture is painted. The state is read and pictured from inside the request handler, while the request is in
+    // flight, and the request then goes through: holding it until after the screen opened would never work, because
+    // opening a screen waits for every request to finish and the app gives up on one after 30 seconds.
+    const signing: { seen: boolean; picture: Picture | null } = { seen: false, picture: null };
     const unsignedPage = await open(async (p: any) => {
       await p.route(COMMAND, async (route: any) => {
-        if ((route.request().postData() ?? "").includes("file_download_url")) await signHeld;
+        if (!signing.seen && (route.request().postData() ?? "").includes("file_download_url")) {
+          signing.seen = true;
+          for (const started = Date.now(); Date.now() - started < 5_000;) {
+            signing.picture = await p.evaluate(PICTURE).catch(() => null);
+            if (signing.picture?.state === "loading") break;
+            await p.waitForTimeout(100);
+          }
+          await shot(p, "picture-signing").catch(() => {});
+        }
         await route.continue();
       });
     });
-    const unsigned = await until(unsignedPage, p => p.state === "loading");
-    check("a picture with no link yet waits in its frame and is not painted", !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted, unsigned);
-    await shot(unsignedPage, "picture-signing");
-    sign();
+    const unsigned = signing.picture;
+    check("a picture with no link yet waits in its frame and is not painted", signing.seen && !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted,
+      { seen: signing.seen, unsigned });
     const signedLater = await until(unsignedPage, p => p.loaded);
     check("it appears in the same frame once its link is signed", !!signedLater?.loaded && signedLater.painted && signedLater.state === null && near(unsigned?.frame ?? null, signedLater.frame), { unsigned: unsigned?.frame, loaded: signedLater });
     await unsignedPage.close();
