@@ -249,7 +249,22 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     // A retired provider family still holds signed, unexpired access tokens;
     // their seat and grant refusals are the hosted agent losing access.
     if (error instanceof HostedToolFailure) {
-      await reportHostedSeatRefused(error.code, call.token, providerStatus);
+      const emitted = await reportHostedSeatRefused(error.code, call.token, providerStatus);
+      if (emitted) {
+        try {
+          await authDb.begin("isolation level read committed", async (tx) => {
+            await setRole(tx, "swarm_command");
+            await tx`
+              SELECT swarm.record_hosted_seat_refused_alerts(
+                ${call.token.providerGrantId},
+                ${call.token.subject}::uuid
+              )
+            `;
+          });
+        } catch {
+          // Alert recording must never change the tool refusal returned to the caller.
+        }
+      }
     }
     throw error;
   }

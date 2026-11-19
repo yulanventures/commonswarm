@@ -177,6 +177,13 @@ interface PendingAccessReadRequest {
   workspace_id: string;
 }
 
+interface SystemAlertsReadRequest {
+  resource: "system_alerts";
+  workspace_id: string;
+  include_resolved: boolean;
+  escalated_only: boolean;
+}
+
 /**
  * The channel list for an agent credential.
  *
@@ -447,7 +454,7 @@ function exactKeys(
 function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
-  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
+  RenewalGrantReadRequest | PendingAccessReadRequest | SystemAlertsReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
   {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -472,6 +479,25 @@ function parseBody(
     return {
       resource: "pending_access",
       workspace_id: body.workspace_id.toLowerCase(),
+    };
+  }
+  if (body.resource === "system_alerts") {
+    const allowed = new Set(["resource", "workspace_id", "include_resolved", "escalated_only"]);
+    const keys = Object.keys(body);
+    if (
+      !keys.every((k) => allowed.has(k)) ||
+      typeof body.workspace_id !== "string" ||
+      !UUID_RE.test(body.workspace_id) ||
+      (body.include_resolved !== undefined && typeof body.include_resolved !== "boolean") ||
+      (body.escalated_only !== undefined && typeof body.escalated_only !== "boolean")
+    ) {
+      return null;
+    }
+    return {
+      resource: "system_alerts",
+      workspace_id: body.workspace_id.toLowerCase(),
+      include_resolved: body.include_resolved === true,
+      escalated_only: body.escalated_only === true,
     };
   }
   if (body.resource === "channel_messages") return parseChannelMessages(body);
@@ -798,7 +824,7 @@ async function handle(
   const adminRecovery = isAdminRecoveryRequest(body);
   if (adminRecovery && agentCredential) return json(403, { error: "credential_kind_forbidden" });
   if (!agentCredential && body.resource !== "renewal_grants" &&
-    body.resource !== "pending_access" && !adminRecovery) {
+    body.resource !== "pending_access" && body.resource !== "system_alerts" && !adminRecovery) {
     return json(401, { error: "unauthenticated" });
   }
   let humanUserId: string | null = null;
@@ -851,6 +877,32 @@ async function handle(
           FROM swarm_read.pending_access(${body.workspace_id}::uuid)
         `;
         return json(200, { pending });
+      }
+      if (body.resource === "system_alerts") {
+        if (body.escalated_only) {
+          const [row] = await tx<{ inbox: Record<string, unknown> | null }[]>`
+            SELECT swarm_read.owner_alert_inbox(${body.workspace_id}::uuid) AS inbox
+          `;
+          const inbox = row?.inbox;
+          return json(200, {
+            alerts: Array.isArray(inbox?.alerts) ? inbox.alerts : [],
+            total: typeof inbox?.total === "number" ? inbox.total : 0,
+            truncated: inbox?.truncated === true,
+          });
+        }
+        const alerts = await tx<Record<string, unknown>[]>`
+          SELECT alert_id, workspace_id, channel_id, kind,
+                 affected_principal_id, affected_seat_name, fix_hint,
+                 waiting_count, oldest_waiting_at, routed_lead_principal_id,
+                 opened_at, escalate_after, escalated_at,
+                 resolved_at, resolved_by_kind, resolved_by_id, resolution_note
+          FROM swarm_read.system_alerts
+          WHERE workspace_id = ${body.workspace_id}::uuid
+            AND (${body.include_resolved} = true OR resolved_at IS NULL)
+          ORDER BY opened_at ASC, alert_id ASC
+          LIMIT 100
+        `;
+        return json(200, { alerts });
       }
       const grants = await tx<Record<string, unknown>[]>`
         SELECT *
@@ -947,6 +999,9 @@ async function handle(
       }
       if (body.resource === "pending_access") {
         return json(200, { pending: [] });
+      }
+      if (body.resource === "system_alerts") {
+        return json(200, { alerts: [] });
       }
       if (body.resource === "channels") {
         return json(200, { channels: [] });
@@ -1071,6 +1126,26 @@ async function handle(
         FROM swarm_read.pending_access(${body.workspace_id}::uuid)
       `;
       return json(200, { pending });
+    }
+    if (body.resource === "system_alerts") {
+      // Agent claims never read owner-only escalation feeds; standard reads stay gated by
+      // swarm_read.system_alerts (current live lead + scope access + distinct-from-affected).
+      if (body.escalated_only) {
+        return json(200, { alerts: [] });
+      }
+      const alerts = await tx<Record<string, unknown>[]>`
+        SELECT alert_id, workspace_id, channel_id, kind,
+               affected_principal_id, affected_seat_name, fix_hint,
+               waiting_count, oldest_waiting_at, routed_lead_principal_id,
+               opened_at, escalate_after, escalated_at,
+               resolved_at, resolved_by_kind, resolved_by_id, resolution_note
+        FROM swarm_read.system_alerts
+        WHERE workspace_id = ${agent.principal_workspace_id}::uuid
+          AND (${body.include_resolved} = true OR resolved_at IS NULL)
+        ORDER BY opened_at ASC, alert_id ASC
+        LIMIT 100
+      `;
+      return json(200, { alerts });
     }
     if (body.resource === "channels") {
       /* Same eight columns and the same slug order the human REST read takes,
@@ -1584,8 +1659,75 @@ async function handle(
         CASE WHEN ${orderDesc} THEN r.reaction_id END DESC
       LIMIT ${body.limit}
     `;
+    /* Open system alerts routed to this lead seat reach its inbox as notes addressed to it,
+     * through swarm_read.system_alerts under this agent's claims (so stale leads or lost channel
+     * access immediately return zero rows). Never includes resolution_note or message bodies. */
+    const systemAlertRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
+      SELECT
+        a.alert_id AS id, a.workspace_id, a.affected_principal_id AS "from", 'agent' AS from_kind,
+        NULL::uuid AS "to", ('system_alert:' || a.kind) AS about, 'note' AS kind,
+        CASE
+          WHEN a.kind = 'agent_quiet' THEN
+            format(
+              'System alert (%s, id %s): %s has stopped listening (%s waiting since %s). Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.waiting_count,
+              to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              a.fix_hint
+            )
+          ELSE
+            format(
+              'System alert (%s, id %s): %s lost access. Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.fix_hint
+            )
+        END AS body,
+        a.opened_at + interval '7 days' AS until, a.opened_at AS created_at,
+        ${agent.principal_id}::uuid AS to_agent, NULL::uuid AS in_reply_to, NULL::text AS reply_status,
+        0 AS chain_hop, '[]'::jsonb AS attachments, a.channel_id, NULL::uuid AS thread_root_id,
+        false AS broadcast_to_channel,
+        jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', ${agent.principal_id}::uuid, 'position', 0)) AS recipients,
+        'private' AS audience,
+        ${body.include_mentions ? tx`'[]'::jsonb AS mentions,` : tx``}
+        ${body.include_reactions ? tx`'[]'::jsonb AS reactions,` : tx``}
+        'unknown' AS sender_owner_relation
+      FROM swarm_read.system_alerts AS a
+      WHERE a.workspace_id = ${body.workspace_id}::uuid
+        AND a.resolved_at IS NULL
+        AND a.routed_lead_principal_id = ${agent.principal_id}::uuid
+        AND (${body.about}::text IS NULL OR ('system_alert:' || a.kind) = ${body.about}::text)
+        AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
+        AND ${inReplyTo}::uuid IS NULL
+        AND (${channelId}::uuid IS NULL OR a.channel_id = ${channelId}::uuid)
+        AND (${unfiledOnly} = false OR a.channel_id IS NULL)
+        AND (${body.since}::timestamptz IS NULL OR a.opened_at >= ${body.since}::timestamptz)
+        AND (
+          ${useAfterCursor} = false
+          OR date_trunc('milliseconds', a.opened_at) >
+            date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+          OR (
+            date_trunc('milliseconds', a.opened_at) =
+              date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+            AND a.alert_id > ${afterId}::uuid
+          )
+        )
+      ORDER BY
+        CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', a.opened_at) END ASC,
+        CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', a.opened_at) END DESC,
+        CASE WHEN ${orderAsc} THEN a.alert_id END ASC,
+        CASE WHEN ${orderDesc} THEN a.alert_id END DESC
+      LIMIT ${body.limit}
+    `;
+    const withReactions = reactionRows.length === 0 ? rows : mergeSignalPages(rows, reactionRows, orderAsc, body.limit);
+    const mergedSignals = systemAlertRows.length === 0
+      ? withReactions
+      : mergeSignalPages(withReactions, systemAlertRows, orderAsc, body.limit);
     return json(200, {
-      signals: reactionRows.length === 0 ? rows : mergeSignalPages(rows, reactionRows, orderAsc, body.limit),
+      signals: mergedSignals,
       capabilities: body.inbox
         ? HOME_INBOX_SIGNAL_CAPABILITIES
         : SIGNAL_CAPABILITIES,
