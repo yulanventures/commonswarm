@@ -37,12 +37,7 @@ struct NewMessagePicker: View {
                                 error = nil
                             } label: {
                                 HStack {
-                                    Label {
-                                        VStack(alignment: .leading) {
-                                            Text(choice.name)
-                                            if let tag = labels[choice.id] { Text(tag).font(.caption).foregroundStyle(.secondary) }
-                                        }
-                                    } icon: { Image(systemName: choice.id.kind == .agent ? "cpu" : "person") }
+                                    MemberChoiceLabel(choice: choice, detail: labels[choice.id])
                                     Spacer()
                                     if picked { Image(systemName: "checkmark") }
                                 }.frame(minHeight: 44).contentShape(Rectangle())
