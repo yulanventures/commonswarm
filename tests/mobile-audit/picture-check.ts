@@ -540,7 +540,7 @@ export async function runPictureChecks(
       if (links.length !== 2) return null;
       links[0]!.scrollIntoView({ block: "center" });
       return { names: links.map(link => link.title), focus: links.indexOf(document.activeElement as HTMLElement),
-        loaded: links.every(link => { const image = link.querySelector("img"); return !!image && image.complete && image.naturalWidth > 0; }) };
+        loaded: links.every(link => { const image = link.querySelector("img"); return !!image && image.complete && image.naturalWidth > 0 && !link.dataset.previewState; }) };
     };
     await browse.setInputFiles("[data-composer-file-input]", ["first-view.png", "second-view.png"].map(name => ({ name, mimeType: "image/png", buffer: Buffer.from(auditPng()) })));
     await browse.waitForSelector('[data-staged-attachment="second-view.png"]', { state: "visible", timeout: 10_000 });
@@ -558,8 +558,7 @@ export async function runPictureChecks(
     if (pair?.loaded) {
       const named = (v: Viewer | null, name: string) => !!v && v.name === name && v.loaded && v.state === "" && fitted(v);
       const can = (v: Viewer | null, key: "previous" | "next") => v?.steps?.find(step => step.key === key);
-      await browse.evaluate(() => { const lists = document.querySelectorAll<HTMLElement>('.dashboard__message .hm-extras__images[data-stream-images="2"]'); lists[lists.length - 1]!.querySelector<HTMLElement>(".hm-extras__image")!.focus(); });
-      await browse.keyboard.press("Enter");
+      await browse.locator('.dashboard__message .hm-extras__images[data-stream-images="2"]').last().locator(".hm-extras__image").first().press("Enter");
       const first = await viewer(browse, v => named(v, "first-view.png, 1 of 2"));
       check("the viewer opens on the picture pressed and says which of how many", named(first, "first-view.png, 1 of 2") && can(first, "previous")?.disabled === true && can(first, "next")?.disabled === false
         && !!first!.steps!.every(step => step.ok), { name: first?.name, steps: first?.steps });
@@ -585,11 +584,13 @@ export async function runPictureChecks(
       } else if (back) {
         // A phone: one finger slid to the left from fitted size brings the next picture.
         const cdp = await browse.context().newCDPSession(browse);
-        const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
-        const at = { x: back.stage.x + back.stage.w / 2, y: back.stage.y + back.stage.h / 2 };
-        await touch("touchStart", [at]);
-        for (let move = 1; move <= 5; move++) await touch("touchMove", [{ x: at.x - move * 30, y: at.y }]);
-        await touch("touchEnd", []);
+        try {
+          const touch = (type: string, points: { x: number; y: number }[]) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+          const at = { x: back.stage.x + back.stage.w / 2, y: back.stage.y + back.stage.h / 2 };
+          await touch("touchStart", [at]);
+          for (let move = 1; move <= 5; move++) await touch("touchMove", [{ x: at.x - move * 30, y: at.y }]);
+          await touch("touchEnd", []);
+        } finally { await cdp.detach().catch(() => {}); }
       }
       const forward = await viewer(browse, v => named(v, "second-view.png, 2 of 2"));
       check(options.click ? "the right arrow key goes to the second picture" : "a one-finger swipe to the left goes to the second picture, and the viewer stays open", named(forward, "second-view.png, 2 of 2"), forward?.name ?? null);
