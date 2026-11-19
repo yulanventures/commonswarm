@@ -7,6 +7,7 @@ enum AnswerChoiceOutcome: Equatable, Sendable {
 
 enum MarkTodoDoneOutcome: Equatable, Sendable {
     case done
+    case dropped
     case failed(message: String, retryable: Bool)
 }
 
@@ -86,6 +87,11 @@ struct WaitingOnYouAPI: Sendable {
         let id: UUID
     }
 
+    private struct ActorWire: Decodable {
+        let user_id: UUID
+        let principal_id: UUID?
+    }
+
     private struct TodoWire: Decodable {
         let todo_id: UUID
         let title: String
@@ -98,7 +104,7 @@ struct WaitingOnYouAPI: Sendable {
 
     private struct TodoCommentWire: Decodable {
         let comment_id: UUID
-        let author: PartyWire
+        let author: ActorWire
         let body: String
         let created_at: String
     }
@@ -108,6 +114,7 @@ struct WaitingOnYouAPI: Sendable {
         let reason: String?
         let todo: TodoWire?
         let comments: [TodoCommentWire]?
+        let next_comment_offset: Int?
     }
 
     private struct TodoWriteReplyWire: Decodable {
@@ -135,6 +142,20 @@ struct WaitingOnYouAPI: Sendable {
     private struct TodoReadArgs: Encodable {
         let seat: String
         let todo_id: String
+        let comment_offset: Int?
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(seat, forKey: .seat)
+            try container.encode(todo_id, forKey: .todo_id)
+            if let comment_offset {
+                try container.encode(comment_offset, forKey: .comment_offset)
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case seat, todo_id, comment_offset
+        }
     }
 
     private struct TodoSetStateArgs: Encodable {
@@ -777,7 +798,7 @@ struct WaitingOnYouAPI: Sendable {
                 workspaceID: workspaceID,
                 commandID: UUID(),
                 tool: "todo_read",
-                arguments: TodoReadArgs(seat: Self.householdLocalSeat, todo_id: todoID.uuidString.lowercased())
+                arguments: TodoReadArgs(seat: Self.householdLocalSeat, todo_id: todoID.uuidString.lowercased(), comment_offset: nil)
             )
             guard readStatus == 200,
                   let readReply = try? JSONDecoder().decode(TodoReadReplyWire.self, from: readData) else {
@@ -789,8 +810,11 @@ struct WaitingOnYouAPI: Sendable {
             guard readReply.status == "ok", let todo = readReply.todo else {
                 return .failed(message: Self.todoSaveFailedMessage, retryable: true)
             }
-            if todo.state == "done" || todo.state == "dropped" {
+            if todo.state == "done" {
                 return .done
+            }
+            if todo.state == "dropped" {
+                return .dropped
             }
 
             func sendSetState(baseVersion: Int) async throws -> TodoWriteReplyWire {
@@ -816,13 +840,20 @@ struct WaitingOnYouAPI: Sendable {
 
             var reply = try await sendSetState(baseVersion: todo.version)
             if reply.status == "conflict", let current = reply.current {
-                if current.state == "done" || current.state == "dropped" {
+                if current.state == "done" {
                     return .done
+                }
+                if current.state == "dropped" {
+                    return .dropped
                 }
                 reply = try await sendSetState(baseVersion: current.version)
             }
             if reply.status == "committed" {
                 return .done
+            }
+            if reply.status == "conflict", let current = reply.current {
+                if current.state == "done" { return .done }
+                if current.state == "dropped" { return .dropped }
             }
             if reply.status == "refused" {
                 return .failed(message: Self.todoRefusalMessage(reply.reason), retryable: true)
@@ -833,12 +864,16 @@ struct WaitingOnYouAPI: Sendable {
         }
     }
 
-    func readTodoDetail(workspaceID: UUID, todoID: UUID) async throws -> WaitingTodoDetail {
+    func readTodoDetail(workspaceID: UUID, todoID: UUID, commentOffset: Int? = nil) async throws -> WaitingTodoDetail {
         let (data, status) = try await postHouseholdTool(
             workspaceID: workspaceID,
             commandID: UUID(),
             tool: "todo_read",
-            arguments: TodoReadArgs(seat: Self.householdLocalSeat, todo_id: todoID.uuidString.lowercased())
+            arguments: TodoReadArgs(
+                seat: Self.householdLocalSeat,
+                todo_id: todoID.uuidString.lowercased(),
+                comment_offset: commentOffset
+            )
         )
         guard status == 200,
               let reply = try? JSONDecoder().decode(TodoReadReplyWire.self, from: data),
@@ -877,9 +912,17 @@ struct WaitingOnYouAPI: Sendable {
             return (userNames[party.id] ?? "Member", false)
         }
 
+        func resolveActor(_ actor: ActorWire) -> (name: String, isAgent: Bool) {
+            if let principalID = actor.principal_id {
+                return (agentNames[principalID] ?? "Agent", true)
+            }
+            if actor.user_id == viewerID { return ("You", false) }
+            return (userNames[actor.user_id] ?? "Member", false)
+        }
+
         let assignee = resolveParty(todo.assignee)
         let comments: [WaitingTodoComment] = (reply.comments ?? []).map { comment in
-            let author = resolveParty(comment.author)
+            let author = resolveActor(comment.author)
             return WaitingTodoComment(
                 id: comment.comment_id,
                 authorName: author.name,
@@ -899,7 +942,8 @@ struct WaitingOnYouAPI: Sendable {
             dueOn: todo.due_on,
             assigneeName: assignee.name,
             assigneeIsAgent: assignee.isAgent,
-            comments: comments
+            comments: comments,
+            nextCommentOffset: reply.next_comment_offset
         )
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct WaitingTodoCardView: View {
     let item: WaitingTodoItem
@@ -133,12 +134,16 @@ struct WaitingTodoDetailView: View {
     let item: WaitingTodoItem
     let api: WaitingOnYouAPI
     let onMarkedDone: (UUID) -> Void
+    let onDropped: (UUID, Bool) -> Void
 
     @State private var detail: WaitingTodoDetail?
     @State private var loading = true
     @State private var loadFailed = false
     @State private var markingDone = false
     @State private var markError: String?
+    @State private var droppedNotice: String?
+    @State private var loadingMoreComments = false
+    @State private var moreCommentsError: String?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
 
@@ -194,6 +199,19 @@ struct WaitingTodoDetailView: View {
                             }
                         }
 
+                        if let droppedNotice {
+                            HStack(spacing: 8) {
+                                Image(systemName: "info.circle.fill")
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityHidden(true)
+                                Text(droppedNotice)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.vertical, 4)
+                        }
+
                         if item.canMarkDone && (detail.state == "open" || detail.state == "doing") {
                             VStack(alignment: .leading, spacing: 8) {
                                 if let markError {
@@ -233,7 +251,7 @@ struct WaitingTodoDetailView: View {
                         }
                     }
 
-                    if !detail.comments.isEmpty {
+                    if !detail.comments.isEmpty || detail.nextCommentOffset != nil {
                         Section("Comments") {
                             ForEach(detail.comments) { comment in
                                 VStack(alignment: .leading, spacing: 4) {
@@ -257,6 +275,25 @@ struct WaitingTodoDetailView: View {
                                 }
                                 .padding(.vertical, 2)
                             }
+                            if let moreCommentsError {
+                                Text(moreCommentsError)
+                                    .font(.footnote.weight(.medium))
+                                    .foregroundStyle(errorForeground)
+                            }
+                            if let nextOffset = detail.nextCommentOffset {
+                                Button {
+                                    Task { await loadMoreComments(offset: nextOffset) }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if loadingMoreComments { ProgressView() }
+                                        Text(loadingMoreComments ? "Loading comments…" : "Load more comments")
+                                            .font(.subheadline.weight(.semibold))
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                }
+                                .disabled(loadingMoreComments)
+                                .accessibilityIdentifier("waiting-todo-load-more-comments")
+                            }
                         }
                     }
                 }
@@ -274,11 +311,31 @@ struct WaitingTodoDetailView: View {
         loading = true
         loadFailed = false
         do {
-            detail = try await api.readTodoDetail(workspaceID: item.workspaceID, todoID: item.id)
+            let loaded = try await api.readTodoDetail(workspaceID: item.workspaceID, todoID: item.id)
+            detail = loaded
+            if loaded.state == "dropped" {
+                droppedNotice = "This to-do was dropped."
+                onDropped(item.id, false)
+            }
         } catch {
             if !Task.isCancelled { loadFailed = true }
         }
         loading = false
+    }
+
+    private func loadMoreComments(offset: Int) async {
+        guard !loadingMoreComments else { return }
+        loadingMoreComments = true
+        moreCommentsError = nil
+        do {
+            let nextPage = try await api.readTodoDetail(workspaceID: item.workspaceID, todoID: item.id, commentOffset: offset)
+            detail = detail?.appendingComments(nextPage.comments, nextOffset: nextPage.nextCommentOffset)
+        } catch {
+            if !Task.isCancelled {
+                moreCommentsError = "Couldn’t load more comments. Try again."
+            }
+        }
+        loadingMoreComments = false
     }
 
     private func markDone() async {
@@ -291,6 +348,11 @@ struct WaitingTodoDetailView: View {
         case .done:
             onMarkedDone(item.id)
             dismiss()
+        case .dropped:
+            detail = detail?.withState("dropped")
+            droppedNotice = "This to-do was dropped."
+            UIAccessibility.post(notification: .announcement, argument: "This to-do was dropped.")
+            onDropped(item.id, true)
         case .failed(let message, _):
             markError = message
         }

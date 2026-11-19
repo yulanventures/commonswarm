@@ -103,7 +103,7 @@ extension WaitingOnYouStore {
 
         if !sent.isEmpty {
             let text = sent.count == 1 ? "Sent" : "Sent \(sent.count) answers"
-            showStatusBanner(text)
+            showStatusBanner(.sent, text)
         }
         return WaitingReviewBatchResult(sentIDs: sent, failedIDs: failed, skippedIDs: skipped)
     }

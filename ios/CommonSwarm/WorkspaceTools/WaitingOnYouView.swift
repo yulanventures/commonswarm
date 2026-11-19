@@ -129,6 +129,18 @@ struct WaitingOnYouSheetView: View {
             : Color(red: 0.86, green: 0.96, blue: 0.89)
     }
 
+    private var neutralBannerForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.90, green: 0.91, blue: 0.94)
+            : Color(red: 0.15, green: 0.17, blue: 0.21)
+    }
+
+    private var neutralBannerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.20, green: 0.21, blue: 0.24)
+            : Color(red: 0.90, green: 0.91, blue: 0.94)
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -136,21 +148,22 @@ struct WaitingOnYouSheetView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 10)
 
-                if let banner = store.sentBanner {
+                if let banner = store.statusBanner {
+                    let isDropped = banner.kind == .dropped
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(bannerForeground)
+                        Image(systemName: isDropped ? "info.circle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(isDropped ? neutralBannerForeground : bannerForeground)
                             .accessibilityHidden(true)
-                        Text(banner)
+                        Text(banner.text)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(bannerForeground)
+                            .foregroundStyle(isDropped ? neutralBannerForeground : bannerForeground)
                         Spacer()
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(bannerBackground)
+                    .background(isDropped ? neutralBannerBackground : bannerBackground)
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel(banner == "Done" ? "To-do marked done" : "Answer sent")
+                    .accessibilityLabel(banner.accessibilityLabel)
                 }
 
                 content
@@ -166,9 +179,16 @@ struct WaitingOnYouSheetView: View {
                 }
             }
             .navigationDestination(item: $openedTodo) { todo in
-                WaitingTodoDetailView(item: todo, api: api) { completedID in
-                    store.removeCompletedTodo(completedID)
-                }
+                WaitingTodoDetailView(
+                    item: todo,
+                    api: api,
+                    onMarkedDone: { completedID in
+                        store.removeCompletedTodo(completedID)
+                    },
+                    onDropped: { droppedID, announce in
+                        store.removeDroppedTodo(droppedID, announce: announce)
+                    }
+                )
             }
             .navigationDestination(item: $reviewSnapshot) { snapshot in
                 WaitingQuestionReviewView(store: store, api: api, initialItems: snapshot)
@@ -177,9 +197,9 @@ struct WaitingOnYouSheetView: View {
         .task {
             await store.load(api: api)
         }
-        .onChange(of: store.sentBanner) { _, newValue in
+        .onChange(of: store.statusBanner) { _, newValue in
             if let newValue {
-                UIAccessibility.post(notification: .announcement, argument: newValue)
+                UIAccessibility.post(notification: .announcement, argument: newValue.text)
             }
         }
     }
