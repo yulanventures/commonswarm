@@ -1719,20 +1719,31 @@ export async function revokeAgentPrincipal(
     commandId,
     { kind: "revoke_agent_principal", principal_id: principalId },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "CommonSwarm lost the removal result. Retry or reload the list to check.",
   );
+  const code = typeof body.error === "string" ? body.error : undefined;
   if (status === 403) {
-    throw new Error(
-      "Your current project role cannot remove this agent. CommonSwarm did not change anything.",
+    throw Object.assign(
+      new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."),
+      { status, code: code ?? "forbidden" },
+    );
+  }
+  if (status === 409 && code === "command_id_conflict") {
+    throw Object.assign(
+      new Error("CommonSwarm could not confirm whether this removal already completed. Reload the list to check."),
+      { status, code, uncertain: true },
     );
   }
   if (status !== 200) {
-    throw new Error(
-      `Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`,
+    throw Object.assign(
+      new Error(`Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`),
+      { status, code, uncertain: status === 0 || status >= 500 },
     );
   }
   if (body.status !== "accepted") {
-    throw new Error(
-      `Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`,
+    throw Object.assign(
+      new Error(`Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`),
+      { status, code: typeof body.reason === "string" ? body.reason : "refused" },
     );
   }
 }

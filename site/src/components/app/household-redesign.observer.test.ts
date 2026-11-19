@@ -1696,6 +1696,7 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
     revokeAgentJoinCredential: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "code", commandId, wsId, id }); if (lose) throw new Error("lost"); },
     reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => { reloads.push({ wsId, id, receipt, action }); },
     peopleDialogFocusTarget: () => null,
+    uncertainAgentRemovals: new Set<string>(),
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1856,10 +1857,15 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
     revokeAgentToken: async (_s: any, commandId: string, wsId: string, tok: string) => {
       keyRevokes.push({ commandId, wsId, tok });
     },
+    roster: async () => ctx.serverRoster,
+    memberRoster: async () => ctx.serverMembers,
+    serverRoster: makeLiveAgents(),
+    serverMembers: [{ userId: viewerId, name: "Ana Rivera", role: "owner" }],
     reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
       reloads.push({ wsId, id, receipt, action });
     },
     peopleDialogFocusTarget: () => null,
+    uncertainAgentRemovals: new Set<string>(),
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1908,17 +1914,86 @@ test("remove-agent confirmation distinguishes hosted workspace-only vs local per
   assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
   dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
 
-  // 4. Confirmed hosted removal + lost-answer retry reuses one command ID and names the workspace in the receipt.
+  // 4. Confirmed hosted removal + lost-answer retry (not yet committed) reuses one command ID and names the workspace in the receipt.
   actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
   const confirmBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
   lose = true;
   await confirmBtn.events.get("click")?.();
   assert.equal(dialog.open, true);
   assert.equal(removals.length, 1);
+  assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /unknown/i);
   lose = false;
   await confirmBtn.events.get("click")?.();
   assert.equal(dialog.open, false);
   assert.equal(removals.length, 2);
   assert.equal(removals[0].commandId, removals[1].commandId, "retry reuses one command ID");
   assert.equal(reloads[0].receipt, `Muse removed from ${workspaceName}. Its history stays as “Muse (removed)”.`);
+
+  // 5. Secondary-workspace lost-reply witness (HezSec C1): first call commits removal once and loses its reply;
+  //    retry with the same command ID hits 409 command_id_conflict (or 403) because membership is already revoked.
+  //    While roster read fails or is unauthorized, outcome stays uncertain (never "did not change anything" / "HTTP 409")
+  //    with the same command ID; once an authorized roster read settles the removal, the dialog completes and removal ran once.
+  for (const [label, retryError, targetId, transport, btnLabel] of [
+    ["hosted 409 conflict", Object.assign(new Error("Agent removal failed (HTTP 409). CommonSwarm did not confirm a change."), { status: 409, code: "command_id_conflict", uncertain: true }), hostedId, "hosted_mcp", "Remove from workspace"],
+    ["local added-workspace 403", Object.assign(new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."), { status: 403, code: "forbidden" }), localId, "local", "Remove agent"],
+  ] as const) {
+    ctx.agents = makeLiveAgents();
+    ctx.serverRoster = makeLiveAgents();
+    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+    removals.length = 0; reloads.length = 0;
+    let committedCount = 0;
+    let rosterMode: "fail" | "unauthorized" | "settled" = "fail";
+    ctx.roster = async () => {
+      if (rosterMode === "fail") throw new Error("network down");
+      return ctx.serverRoster;
+    };
+    ctx.memberRoster = async () => {
+      if (rosterMode === "fail") throw new Error("network down");
+      if (rosterMode === "unauthorized") return [];
+      return ctx.serverMembers;
+    };
+    ctx.revokeAgentPrincipal = async (_s: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ commandId, wsId, id });
+      if (committedCount === 0) {
+        // Server commits the secondary-workspace membership removal ONCE, then reply is lost.
+        committedCount += 1;
+        ctx.serverRoster = ctx.serverRoster.filter((entry: any) => entry.principalId !== id);
+        throw new Error("CommonSwarm lost the removal result.");
+      }
+      // Retry reaches the server after membership is revoked and returns 409 command_id_conflict or 403.
+      throw retryError;
+    };
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", targetId, opener);
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === btnLabel);
+    // Attempt 1: server commits once, reply lost, roster read fails -> stays open with uncertain message.
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, true, `${label}: stays open while outcome is uncertain`);
+    assert.equal(committedCount, 1, `${label}: server committed once`);
+    let alertText = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+    assert.match(alertText, /unknown/i, `${label}: reports uncertain outcome`);
+    assert.doesNotMatch(alertText, /did not change anything|HTTP 409/i, `${label}: never claims nothing changed`);
+
+    // Attempt 2: roster read returns empty/unauthorized membership -> must NOT falsely settle; retries same command ID;
+    // server replies with 409/403 -> still preserves uncertain outcome and never claims "did not change anything".
+    rosterMode = "unauthorized";
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, true, `${label}: unauthorized empty read cannot settle removal`);
+    assert.equal(removals.length, 2, `${label}: retried once with original command ID`);
+    assert.equal(removals[0].commandId, removals[1].commandId, `${label}: kept original command ID across uncertain retry`);
+    assert.equal(committedCount, 1, `${label}: removal still happened only once`);
+    alertText = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+    assert.match(alertText, /unknown/i, `${label}: preserves uncertain outcome after post-commit 409/403`);
+    assert.doesNotMatch(alertText, /did not change anything|HTTP 409/i, `${label}: suppresses misleading 403/409 after uncertain attempt`);
+
+    // Attempt 3: authorized roster read now succeeds and confirms agent is gone -> settles cleanly with zero extra sends.
+    rosterMode = "settled";
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, false, `${label}: authorized roster read settles removal and closes dialog`);
+    assert.equal(removals.length, 2, `${label}: settled from roster read without sending another command`);
+    assert.equal(committedCount, 1, `${label}: removal happened exactly once`);
+    assert.equal(reloads.length, 1, `${label}: reloaded dialog with removal receipt`);
+    if (transport === "hosted_mcp") assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
+    else assert.match(reloads[0].receipt, /removed\./);
+  }
 });

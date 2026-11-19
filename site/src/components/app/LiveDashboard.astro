@@ -8086,6 +8086,7 @@ import "../../styles/kylon-image-viewer.css";
         resolve("asked");
       }));
     };
+    const uncertainAgentRemovals = new Set<string>();
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement, questionId?: string, pinnedKey?: { tokenId: string; grantId: string | null }): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
@@ -8113,7 +8114,38 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (action === "remove-agent") {
         if (!agent) throw new Error("This agent is no longer in this workspace. Go back and check the list.");
-        await revokeAgentPrincipal(session, questionId ?? uuid(), workspaceId, agent.principalId);
+        const commandId = questionId ?? uuid();
+        const settledRemoval = async (): Promise<boolean> => {
+          try {
+            const [nextAgents, nextMembers] = await Promise.all([roster(workspaceId), memberRoster(workspaceId)]);
+            if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return false;
+            return nextMembers.some((entry) => entry.userId === userId)
+              && !nextAgents.some((entry) => entry.principalId === agent.principalId);
+          } catch { return false; }
+        };
+        const isUncertain = (error: unknown): boolean => {
+          if (typeof error !== "object" || error === null) return true;
+          const record = error as { status?: unknown; uncertain?: unknown };
+          return record.uncertain === true || typeof record.status !== "number" || record.status === 0 || record.status >= 500;
+        };
+        let confirmed = false;
+        if (questionId && uncertainAgentRemovals.has(questionId)) confirmed = await settledRemoval();
+        if (!confirmed) {
+          try {
+            await revokeAgentPrincipal(session, commandId, workspaceId, agent.principalId);
+            confirmed = true;
+          } catch (error) {
+            const wasUncertain = Boolean(questionId && uncertainAgentRemovals.has(questionId));
+            const uncertainNow = wasUncertain || isUncertain(error);
+            if (!uncertainNow) throw error;
+            if (questionId) uncertainAgentRemovals.add(questionId);
+            confirmed = await settledRemoval();
+            if (!confirmed) {
+              throw new Error("The removal result is unknown. Reload the list to check, or try again.");
+            }
+          }
+        }
+        if (questionId) uncertainAgentRemovals.delete(questionId);
         const workspaceName = workspaces.find((entry) => entry.id === workspaceId)?.name?.trim();
         receipt = agent.transport === "hosted_mcp"
           ? `${agent.name} removed from ${workspaceName || "this workspace"}. Its history stays as “${agent.name} (removed)”.`
