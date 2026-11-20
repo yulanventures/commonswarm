@@ -1532,6 +1532,103 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   `;
   assert.equal(renewAlerts.length, 1, "post-tx local_renewal_superseded alert must record cleanly once #general is unlocked");
 
+  // Two-workspace lock-order and per-workspace isolation witnesses:
+  // Order the two workspaces by UUID so we test BOTH:
+  //  (A) lower-UUID #general locked FOR UPDATE -> lower-UUID times out at 250ms while
+  //      higher-UUID STILL records cleanly (no batch-wide drop).
+  //  (B) higher-UUID #general locked FOR UPDATE -> lower-UUID commits and releases all
+  //      conversation + alert locks BEFORE higher-UUID's conversation lock is requested,
+  //      so lower-UUID's alert is ALREADY visible while higher-UUID is still locked!
+  const [wsLow, wsHigh] = [workspace, ws2].sort() as [string, string];
+  const createTwoWorkspaceRevoked = async (label: string) => {
+    const a = await createAgent(owner.id, workspace, label);
+    await sql`
+      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
+      VALUES (${ws2}::uuid, ${a.principal}::uuid, ${owner.id}::uuid)
+    `;
+    await sql`UPDATE swarm.agent_tokens SET revoked_at = now() WHERE principal_id = ${a.principal}::uuid`;
+    return a;
+  };
+  const revokedWhenLowLocked = await createTwoWorkspaceRevoked("RevokedLowLocked");
+  const revokedWhenHighLocked = await createTwoWorkspaceRevoked("RevokedHighLocked");
+
+  // (A) Lock wsLow #general FOR UPDATE while wsHigh is unlocked.
+  let releaseLowLock!: () => void;
+  const lowLocked = new Promise<void>((r) => { releaseLowLock = r; });
+  let lowLockAcquired!: () => void;
+  const waitLowLock = new Promise<void>((r) => { lowLockAcquired = r; });
+  const lowHolder = sql.begin(async (tx) => {
+    await tx`
+      SELECT conversation_id FROM swarm.conversations
+      WHERE workspace_id = ${wsLow}::uuid AND kind = 'general'
+      FOR UPDATE
+    `;
+    lowLockAcquired();
+    await lowLocked;
+  });
+  await waitLowLock;
+  try {
+    const t0 = Date.now();
+    const resLowLocked = await send(revokedWhenLowLocked.token, {
+      kind: "post_signal", signal_kind: "note", body: "revoked while wsLow locked",
+      to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+    });
+    assert.ok(resLowLocked.status === 401 || resLowLocked.status === 403);
+    assert.ok(Date.now() - t0 < 3_000, "wsLow contention must bail within 250ms per-workspace timeout");
+    const rowsWhileLowLocked = await sql<{ workspace_id: string }[]>`
+      SELECT workspace_id::text AS workspace_id
+      FROM swarm.system_alerts
+      WHERE kind = 'local_credential_revoked' AND affected_principal_id = ${revokedWhenLowLocked.principal}::uuid
+    `;
+    assert.deepEqual(
+      rowsWhileLowLocked.map((r) => r.workspace_id),
+      [wsHigh],
+      "contention in wsLow must NOT drop wsHigh's alert",
+    );
+  } finally {
+    releaseLowLock();
+    await lowHolder;
+  }
+
+  // (B) Lock wsHigh #general FOR UPDATE while wsLow is unlocked.
+  let releaseHighLock!: () => void;
+  const highLocked = new Promise<void>((r) => { releaseHighLock = r; });
+  let highLockAcquired!: () => void;
+  const waitHighLock = new Promise<void>((r) => { highLockAcquired = r; });
+  const highHolder = sql.begin(async (tx) => {
+    await tx`
+      SELECT conversation_id FROM swarm.conversations
+      WHERE workspace_id = ${wsHigh}::uuid AND kind = 'general'
+      FOR UPDATE
+    `;
+    highLockAcquired();
+    await highLocked;
+  });
+  await waitHighLock;
+  try {
+    const t0 = Date.now();
+    const resHighLocked = await send(revokedWhenHighLocked.token, {
+      kind: "post_signal", signal_kind: "note", body: "revoked while wsHigh locked",
+      to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
+    });
+    assert.ok(resHighLocked.status === 401 || resHighLocked.status === 403);
+    assert.ok(Date.now() - t0 < 3_000, "wsHigh contention must bail within 250ms per-workspace timeout");
+    const rowsWhileHighLocked = await sql<{ workspace_id: string }[]>`
+      SELECT workspace_id::text AS workspace_id
+      FROM swarm.system_alerts
+      WHERE kind = 'local_credential_revoked' AND affected_principal_id = ${revokedWhenHighLocked.principal}::uuid
+    `;
+    assert.deepEqual(
+      rowsWhileHighLocked.map((r) => r.workspace_id),
+      [wsLow],
+      "wsLow must commit and release all conversation + alert locks BEFORE wsHigh's conversation lock wait begins",
+    );
+  } finally {
+    releaseHighLock();
+    await highHolder;
+  }
+
+  // (C) Both workspaces unlocked: both record cleanly.
   const afterRes = await send(revokedAfter.token, {
     kind: "post_signal", signal_kind: "note", body: "revoked after unlock",
     to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
@@ -1545,7 +1642,7 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   `;
   assert.deepEqual(
     recorded.map((r) => r.workspace_id),
-    [workspace, ws2].sort(),
-    "revoked multi-workspace credential must record alerts across both workspaces in deterministic workspace_id ASC order once unlocked",
+    [wsLow, wsHigh],
+    "revoked multi-workspace credential must record alerts across both workspaces once unlocked",
   );
 });
