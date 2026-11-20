@@ -72,6 +72,10 @@ const MESSAGE_STATUS_STUBS = {
   clearSeatAdminReauthIntent: () => undefined,
   pendingSeatAdminReauthNotice: false,
   activeSeatAdminDialog: null,
+  // Agent oversight has its own unit and browser observer tests.
+  oversightState: null,
+  teardownAgentOversight: () => undefined,
+  syncAgentOversight: () => undefined,
 };
 
 async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {

@@ -1415,6 +1415,7 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
+  import type { OversightListOutcome, OversightMessage, OversightPanelState, OversightScopePin } from "../../lib/conversation-oversight";
   import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
@@ -1579,6 +1580,10 @@ import "../../styles/kylon-image-viewer.css";
     channelUnread,
     ConversationsUnsupportedError,
     listConversations,
+    OversightAuthRefusedError,
+    OversightRequestRetiredError,
+    readOversightConversationsRaw,
+    readOversightConversationHistory,
     joinConversation,
     leaveConversation,
     markConversationRead,
@@ -5500,6 +5505,7 @@ import "../../styles/kylon-image-viewer.css";
     };
     const resetHomeWorkspace = (): void => {
       ++homeWorkspaceGeneration; ++homeWorkspaceRead; ++homeDetailGeneration;
+      if (typeof teardownAgentOversight === "function") teardownAgentOversight();
       homeTodosState = "pending"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "pending";
       homeDetailKey = ""; homeGateEditorId = null; homeTodoSave = "idle"; homeTodoReceipt = ""; homeTodoNotice = null;
       homeTodoDetails.clear(); homePolicies.clear();
@@ -5703,6 +5709,424 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (live()) { renderHomeShell(); renderHomeSide(); renderHomeObjectPane(); focusHomeView(); }
     };
+    type OversightModule = typeof import("../../lib/conversation-oversight");
+    let oversightMod: OversightModule | null = null;
+    let oversightModPromise: Promise<OversightModule> | null = null;
+    let oversightGen = 0;
+    let oversightHistoryGen = 0;
+    let oversightState: OversightPanelState | null = null;
+    let oversightAgentName = "";
+    let oversightDeniedFallbackId: string | null = null;
+
+    const loadOversightModule = (): Promise<OversightModule> => {
+      if (oversightMod) return Promise.resolve(oversightMod);
+      oversightModPromise ??= import("../../lib/conversation-oversight").then(mod => {
+        oversightMod = mod;
+        return mod;
+      });
+      return oversightModPromise;
+    };
+
+    const teardownAgentOversight = (): void => {
+      oversightGen += 1;
+      oversightHistoryGen += 1;
+      oversightState = oversightMod && oversightState
+        ? oversightMod.teardownOversightState(oversightState, oversightGen)
+        : null;
+      oversightAgentName = "";
+      oversightDeniedFallbackId = null;
+      for (const slot of all<HTMLElement>("[data-oversight-slot]")) {
+        slot.replaceChildren();
+        slot.hidden = true;
+      }
+    };
+
+    const isOversightPinLive = (pin: OversightScopePin): boolean =>
+      !!session &&
+      !sampleMode &&
+      homeRoute.view === "agent" &&
+      session.user.id.toLowerCase() === pin.viewerUserId &&
+      activeWorkspaceId.toLowerCase() === pin.workspaceId &&
+      homeRoute.agentId.toLowerCase() === pin.agentPrincipalId &&
+      !!oversightState?.pin &&
+      (oversightMod?.oversightPinMatches(oversightState.pin, pin) ?? false);
+
+    const resolveOversightMemberName = (member: { kind: "user" | "agent"; id: string }): string => {
+      const raw = member.id.trim();
+      const targetId = raw.toLowerCase();
+      if (member.kind === "user") {
+        const found = members.find(m => m.userId.toLowerCase() === targetId);
+        if (found?.name?.trim()) return found.name.trim();
+        return raw && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw) ? raw : "Member";
+      }
+      const found = agents.find(a => a.principalId.toLowerCase() === targetId);
+      if (found?.name?.trim()) return found.name.trim();
+      return raw && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw) ? raw : "Agent";
+    };
+
+    const captureOversightFocusKey = (slotEl: HTMLElement): string | null => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !slotEl.contains(active)) return null;
+      const convId = active.getAttribute("data-oversight-conv");
+      if (convId) return `conv:${convId}`;
+      if (active.hasAttribute("data-oversight-load-older")) return "load-older";
+      if (active.hasAttribute("data-oversight-detail-title")) return "detail-title";
+      if (active.hasAttribute("data-oversight-back")) return "back";
+      if (active.hasAttribute("data-oversight-retry-list")) return "retry-list";
+      if (active.hasAttribute("data-oversight-retry-history")) return "retry-history";
+      return "panel";
+    };
+
+    const restoreOversightFocusKey = (slotEl: HTMLElement, key: string | null): void => {
+      if (!key) return;
+      const isVisible = (el: HTMLElement | null): el is HTMLElement =>
+        !!el && !el.closest("[hidden]") && el.getClientRects().length > 0;
+      const pickVisible = (...selectors: string[]): HTMLElement | null => {
+        for (const selector of selectors) {
+          const el = slotEl.querySelector<HTMLElement>(selector);
+          if (isVisible(el)) return el;
+        }
+        return null;
+      };
+      let target: HTMLElement | null = null;
+      if (key.startsWith("conv:")) {
+        const id = key.slice(5);
+        target = pickVisible(
+          `[data-oversight-conv="${CSS.escape(id)}"]`,
+          "[data-oversight-conv]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "load-older") {
+        target = pickVisible(
+          "[data-oversight-load-older]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "detail-title") {
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "back") {
+        target = pickVisible(
+          "[data-oversight-back]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "retry-list") {
+        target = pickVisible(
+          "[data-oversight-retry-list]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "retry-history") {
+        target = pickVisible(
+          "[data-oversight-retry-history]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "list-title") {
+        target = pickVisible("[data-oversight-list-title]");
+      } else {
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      }
+      target?.focus({ preventScroll: true });
+    };
+
+    const renderOversightSlot = (explicitFocusKey?: string | null): void => {
+      if (!oversightMod || !oversightState?.pin) return;
+      const pin = oversightState.pin;
+      const slotEl = one<HTMLElement>(`[data-oversight-slot="${pin.agentPrincipalId}"]`);
+      if (!slotEl) return;
+      const preservedKey = explicitFocusKey !== undefined ? explicitFocusKey : captureOversightFocusKey(slotEl);
+      oversightMod.renderOversightPanel(
+        slotEl,
+        {
+          agentId: pin.agentPrincipalId,
+          agentName: oversightAgentName || resolveOversightMemberName({ kind: "agent", id: pin.agentPrincipalId }),
+          state: oversightState,
+          formatTime: iso => {
+            try { return formatTime(iso).relative; } catch { return ""; }
+          },
+          resolveMemberName: resolveOversightMemberName,
+        },
+        {
+          onSelect: (conversationId) => {
+            if (!isOversightPinLive(pin)) return;
+            const phone = window.matchMedia("(max-width: 52rem)").matches;
+            void loadOversightHistory(pin, conversationId, null, phone, true);
+          },
+          onRetryList: () => {
+            if (!isOversightPinLive(pin)) return;
+            void loadOversightList(pin);
+          },
+          onRetryHistory: () => {
+            if (!isOversightPinLive(pin) || !oversightState?.selectedId) return;
+            void loadOversightHistory(pin, oversightState.selectedId, null, oversightState.phoneDetailOpen, false);
+          },
+          onLoadOlder: () => {
+            if (!isOversightPinLive(pin) || !oversightState?.selectedId || !oversightState.nextBefore) return;
+            void loadOversightHistory(pin, oversightState.selectedId, oversightState.nextBefore, oversightState.phoneDetailOpen, false);
+          },
+          onPhoneBack: () => {
+            if (!isOversightPinLive(pin) || !oversightState) return;
+            const prevId = oversightState.selectedId;
+            const targetId =
+              prevId && oversightState.conversations.some(c => c.conversationId === prevId)
+                ? prevId
+                : oversightDeniedFallbackId;
+            oversightDeniedFallbackId = null;
+            oversightState = { ...oversightState, phoneDetailOpen: false };
+            renderOversightSlot(targetId ? `conv:${targetId}` : "list-title");
+          },
+        },
+      );
+      restoreOversightFocusKey(slotEl, preservedKey);
+    };
+
+    const loadOversightHistory = async (
+      pin: OversightScopePin,
+      conversationId: string,
+      before: { createdAt: string; id: string } | null,
+      openPhoneDetail: boolean,
+      focusDetailTitle: boolean,
+    ): Promise<void> => {
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      const loadingOlder = before !== null;
+      if (loadingOlder) {
+        if (oversightState.loadingOlder || oversightState.selectedId !== conversationId) return;
+        oversightState = { ...oversightState, loadingOlder: true, olderError: "" };
+      } else {
+        oversightState = {
+          ...oversightState,
+          selectedId: conversationId,
+          phoneDetailOpen: openPhoneDetail,
+          historyStatus: "loading",
+          historyError: "",
+          historyConversation: null,
+          messages: [],
+          hasMore: false,
+          nextBefore: null,
+          loadingOlder: false,
+          olderError: "",
+        };
+      }
+      const myHistoryGen = ++oversightHistoryGen;
+      const isHistoryLive = (): boolean =>
+        isOversightPinLive(pin) &&
+        oversightHistoryGen === myHistoryGen &&
+        !!oversightState &&
+        oversightState.selectedId === conversationId;
+      const slotSelector = `[data-oversight-slot="${pin.agentPrincipalId}"]`;
+      const slotBefore = loadingOlder ? one<HTMLElement>(`${slotSelector} [data-oversight-transcript]`) : null;
+      const prevScrollHeight = slotBefore?.scrollHeight ?? 0;
+      const prevScrollTop = slotBefore?.scrollTop ?? 0;
+      renderOversightSlot(!loadingOlder && focusDetailTitle && openPhoneDetail ? "detail-title" : undefined);
+      let result: Awaited<ReturnType<typeof readOversightConversationHistory>>;
+      try {
+        result = await readOversightConversationHistory(
+          pin.workspaceId,
+          conversationId,
+          pin.agentPrincipalId,
+          { before, limit: 50, includeMentions: true, includeReactions: true },
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: isHistoryLive },
+        );
+      } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isHistoryLive()) teardownAgentOversight();
+          return;
+        }
+        result = { ok: false, code: "other", message: readableError(error) || "Could not load messages." };
+      }
+      if (!isHistoryLive() || !oversightMod || !oversightState) return;
+      if (!result.ok) {
+        if (result.code === "conversation_not_found") {
+          oversightHistoryGen += 1;
+          const removedIdx = oversightState.conversations.findIndex(c => c.conversationId === conversationId);
+          oversightState = oversightMod.retireRefusedOversightConversation(oversightState, conversationId);
+          oversightDeniedFallbackId =
+            removedIdx >= 0
+              ? (oversightState.conversations[Math.min(removedIdx, oversightState.conversations.length - 1)]?.conversationId ?? null)
+              : null;
+        } else if (loadingOlder) {
+          oversightState = { ...oversightState, loadingOlder: false, olderError: result.message };
+        } else {
+          oversightState = {
+            ...oversightState,
+            historyStatus: "failed",
+            historyError: result.message,
+            messages: [],
+            hasMore: false,
+            nextBefore: null,
+          };
+        }
+        renderOversightSlot();
+        return;
+      }
+      const incoming: OversightMessage[] = result.messages.map(sig => ({
+        id: sig.id,
+        from: sig.from,
+        fromKind: sig.fromKind === "agent" ? "agent" : "user",
+        body: sig.body,
+        createdAt: sig.createdAt,
+      }));
+      const merged = loadingOlder
+        ? oversightMod.mergeOversightMessages(oversightState.messages, incoming)
+        : oversightMod.mergeOversightMessages([], incoming);
+      const stalled = loadingOlder && oversightMod.cursorsEqual(before, result.nextBefore);
+      oversightState = {
+        ...oversightState,
+        historyStatus: "ready",
+        historyError: "",
+        historyConversation: result.conversation,
+        messages: merged,
+        hasMore: stalled ? false : result.hasMore,
+        nextBefore: stalled ? null : result.nextBefore,
+        loadingOlder: false,
+        olderError: "",
+      };
+      renderOversightSlot();
+      if (loadingOlder) {
+        const transcript = one<HTMLElement>(`${slotSelector} [data-oversight-transcript]`);
+        if (transcript) {
+          const delta = transcript.scrollHeight - prevScrollHeight;
+          if (delta > 0) transcript.scrollTop = prevScrollTop + delta;
+        }
+      }
+    };
+
+    const loadOversightList = async (pin: OversightScopePin): Promise<void> => {
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      oversightState = { ...oversightState, listStatus: "loading", listError: "" };
+      renderOversightSlot();
+      let outcome: OversightListOutcome;
+      try {
+        const raw = await readOversightConversationsRaw(
+          pin.workspaceId,
+          pin.agentPrincipalId,
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: () => isOversightPinLive(pin) },
+        );
+        outcome = oversightMod.parseOversightListOutcome(raw.status, raw.body);
+      } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isOversightPinLive(pin)) teardownAgentOversight();
+          return;
+        }
+        outcome = { status: "failed", message: readableError(error) || "Could not load agent conversations." };
+      }
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      if (outcome.status !== "ready") {
+        oversightHistoryGen += 1;
+        oversightState = {
+          ...oversightState,
+          listStatus: outcome.status,
+          listError: outcome.status === "failed" ? outcome.message : "",
+          conversations: [],
+          selectedId: null,
+          historyStatus: "idle",
+          historyError: "",
+          historyConversation: null,
+          messages: [],
+          hasMore: false,
+          nextBefore: null,
+          loadingOlder: false,
+          olderError: "",
+        };
+        renderOversightSlot();
+        return;
+      }
+      const sorted = oversightMod.sortOversightConversations(outcome.conversations);
+      const stillSelected = oversightState.selectedId && sorted.some(c => c.conversationId === oversightState!.selectedId)
+        ? oversightState.selectedId
+        : null;
+      const isPhone = window.matchMedia("(max-width: 52rem)").matches;
+      const autoId = stillSelected ?? (!isPhone && sorted.length > 0 ? sorted[0]!.conversationId : null);
+      oversightState = {
+        ...oversightState,
+        listStatus: "ready",
+        listError: "",
+        conversations: sorted,
+        selectedId: autoId,
+      };
+      renderOversightSlot();
+      if (autoId && autoId !== stillSelected) {
+        void loadOversightHistory(pin, autoId, null, false, false);
+      }
+    };
+
+    const mountAgentOversight = (host: HTMLElement, principalId: string, agentLabel: string): void => {
+      if (!session || sampleMode) {
+        teardownAgentOversight();
+        return;
+      }
+      const lowerAgentId = principalId.toLowerCase();
+      const agent = agents.find(row => row.principalId.toLowerCase() === lowerAgentId);
+      if (!agent || agent.ownerUserId.toLowerCase() !== session.user.id.toLowerCase()) {
+        teardownAgentOversight();
+        return;
+      }
+      const page = host.querySelector<HTMLElement>(".hm-agent");
+      if (!page) return;
+      const slotEl = document.createElement("div");
+      slotEl.className = "cs-oversight-slot";
+      slotEl.dataset.oversightSlot = lowerAgentId;
+      slotEl.hidden = true;
+      page.append(slotEl);
+
+      const viewerId = session.user.id.toLowerCase();
+      const workspaceId = activeWorkspaceId.toLowerCase();
+      oversightAgentName = agentLabel || agent.name;
+      const sameScope =
+        oversightState?.pin &&
+        oversightState.pin.viewerUserId === viewerId &&
+        oversightState.pin.workspaceId === workspaceId &&
+        oversightState.pin.agentPrincipalId === lowerAgentId;
+
+      if (sameScope && oversightMod) {
+        renderOversightSlot();
+        return;
+      }
+      teardownAgentOversight();
+      oversightAgentName = agentLabel || agent.name;
+      const pin: OversightScopePin = {
+        viewerUserId: viewerId,
+        workspaceId,
+        agentPrincipalId: lowerAgentId,
+        requestGen: oversightGen,
+      };
+      void loadOversightModule().then(mod => {
+        if (!session || sampleMode || homeRoute.view !== "agent") return;
+        if (
+          session.user.id.toLowerCase() !== pin.viewerUserId ||
+          activeWorkspaceId.toLowerCase() !== pin.workspaceId ||
+          homeRoute.agentId.toLowerCase() !== pin.agentPrincipalId ||
+          oversightGen !== pin.requestGen
+        ) return;
+        oversightState = { ...mod.createInitialOversightState(), pin };
+        void loadOversightList(pin);
+      });
+    };
+
     const renderHomeObjectPane = (): void => {
       if (homeRoute.view !== "todo" && homeRoute.view !== "todos" && homeRoute.view !== "agent") return;
       const slot = one<HTMLElement>("[data-home-route-pane]"); if (!slot) return;
@@ -5718,7 +6142,7 @@ import "../../styles/kylon-image-viewer.css";
         const endDateFocus = connectionDateFocus(slot);
         const candidates = [...ctx.people.groups.flatMap(group => group.agents), ...ctx.people.other];
         const agent = candidates.find(agent => agent.id === id);
-        if (!agent) { const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
+        if (!agent) { teardownAgentOversight(); const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
           if (state === "checking") homePaneMessage("Checking agents…", ""); else if (state === "failed") homePaneMessage("Could not load agents.", "Reload to try again.");
           else replaceHomeRegion(slot, "agent-missing", [agentPage(document, { found: false, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) })]); return; }
         const detail = peopleDialogModel().agents.find(row => row.id === id);
@@ -5773,7 +6197,7 @@ import "../../styles/kylon-image-viewer.css";
             else if (action === "release") steerHomeTodo(row.todoId, { kind: "gate", gate: { kind: "none" } });
             else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
           } })]);
-        mountRenewalEndDate(slot, id); mountSeatAdminPanel(slot, id, "agent"); restoreConnectionDateFocus(slot, endDateFocus); return;
+        mountRenewalEndDate(slot, id); mountSeatAdminPanel(slot, id, "agent"); mountAgentOversight(slot, id, rosterAgent?.name || agent.nestedLabel); restoreConnectionDateFocus(slot, endDateFocus); return;
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
@@ -7731,6 +8155,7 @@ import "../../styles/kylon-image-viewer.css";
       if (catchUp) catchUp.hidden = !home;
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
+      if (homeRoute.view !== "agent") teardownAgentOversight();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
       syncListsChrome();
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
@@ -7787,6 +8212,14 @@ import "../../styles/kylon-image-viewer.css";
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      if (
+        route.view !== "agent" ||
+        (oversightState?.pin &&
+          (route.workspaceId.toLowerCase() !== oversightState.pin.workspaceId ||
+            route.agentId.toLowerCase() !== oversightState.pin.agentPrincipalId))
+      ) {
+        teardownAgentOversight();
+      }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;

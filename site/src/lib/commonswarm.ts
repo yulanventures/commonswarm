@@ -5206,14 +5206,43 @@ export async function setConversationNotify(
   );
 }
 
+/** Pre-dispatch identity and scope guard checked after session acquisition, immediately before fetch. */
+export interface OversightDispatchGuard {
+  expectedViewerUserId: string;
+  isScopeLive: () => boolean;
+}
+
+/** Raised when a pinned oversight read retires before HTTP dispatch (account, workspace, agent, or selection changed). */
+export class OversightRequestRetiredError extends Error {
+  constructor(message = "Oversight request retired before dispatch.") {
+    super(message);
+    this.name = "OversightRequestRetiredError";
+  }
+}
+
+/** Raised when the read service rejects oversight with an explicit sign-in refusal (403 human_sign_in_required). */
+export class OversightAuthRefusedError extends Error {
+  constructor(message = "Sign in as a person to read agent conversations.") {
+    super(message);
+    this.name = "OversightAuthRefusedError";
+  }
+}
+
 async function postConversationRead(
   payload: Record<string, unknown>,
   label: string,
+  guard?: OversightDispatchGuard,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const d = deployment();
   if (!d) throw new NoDeployment();
   const session = await currentSession();
   if (!session) throw new SessionExpired();
+  if (guard) {
+    const liveViewer = session.user?.id?.toLowerCase() ?? "";
+    if (liveViewer !== guard.expectedViewerUserId.toLowerCase() || !guard.isScopeLive()) {
+      throw new OversightRequestRetiredError();
+    }
+  }
   const deadline = requestDeadline();
   try {
     const response = await fetch(`${d.url}/functions/v1/read`, {
@@ -5231,7 +5260,7 @@ async function postConversationRead(
     const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
     return { status: response.status, body };
   } catch (error) {
-    if (error instanceof SessionExpired || error instanceof NoDeployment) throw error;
+    if (error instanceof SessionExpired || error instanceof NoDeployment || error instanceof OversightRequestRetiredError) throw error;
     if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
     throw error;
   } finally {
@@ -5286,10 +5315,12 @@ export async function readConversationHistory(
 export async function listOversightConversations(
   workspaceId: string,
   agentPrincipalId: string,
+  guard?: OversightDispatchGuard,
 ): Promise<OversightConversationSummary[]> {
   const { status, body } = await postConversationRead(
     buildOversightListRequest(workspaceId, agentPrincipalId),
     "agent conversations",
+    guard,
   );
   if (status === 404) return [];
   if (status !== 200) {
@@ -5298,17 +5329,43 @@ export async function listOversightConversations(
   return parseOversightListResponse(body);
 }
 
+/** Step 2b `resource: "conversation_oversight"` raw response for lazy oversight outcome parsing. */
+export async function readOversightConversationsRaw(
+  workspaceId: string,
+  agentPrincipalId: string,
+  guard?: OversightDispatchGuard,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await postConversationRead(
+    buildOversightListRequest(workspaceId, agentPrincipalId),
+    "agent conversations",
+    guard,
+  );
+  if (res.status === 403 && res.body.error === "human_sign_in_required") {
+    throw new OversightAuthRefusedError(
+      typeof res.body.message === "string" ? res.body.message : undefined,
+    );
+  }
+  return res;
+}
+
 /** Step 2b `resource: "conversation_oversight_history"`: read-only history bound to one owned agent. */
 export async function readOversightConversationHistory(
   workspaceId: string,
   conversationId: string,
   agentPrincipalId: string,
   options: ConversationHistoryOptions = {},
+  guard?: OversightDispatchGuard,
 ): Promise<OversightHistoryResult<Signal>> {
   const { status, body } = await postConversationRead(
     buildOversightHistoryRequest(workspaceId, conversationId, agentPrincipalId, options),
     "agent conversation history",
+    guard,
   );
+  if (status === 403 && body.error === "human_sign_in_required") {
+    throw new OversightAuthRefusedError(
+      typeof body.message === "string" ? body.message : undefined,
+    );
+  }
   return parseOversightHistoryResponse(status, body, browserSignalFromRow);
 }
 
