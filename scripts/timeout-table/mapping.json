@@ -3968,6 +3968,20 @@
             "reason": "Use of VERIFY_TIMEOUT_MS."
           }
         },
+        "site/src/lib/multi-account.ts:setInterval": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "site/src/lib/multi-account.ts:3618",
+          "detail": "Inactive account badge polling interval (default 45s) while tab is visible.",
+          "operation": {
+            "name": "browser-multi-account-badge-poller",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local polling schedule for inactive account badge counts, not a network request timeout."
+          }
+        },
         "src/listener/hook.ts:setTimeout": {
           "class": "network-api",
           "scope": "whole-operation",

@@ -636,12 +636,21 @@ import "../../styles/kylon-invitation-inbox.css";
 </style>
 
 <script>
-  import { currentSession, client } from '../../lib/commonswarm';
+  import {
+    bootstrapMultiAccountAuth,
+    currentSession,
+    client,
+    deployment,
+    isMultiAccountEnabled,
+    onAccountForcedTeardown,
+    onAuthChange,
+    pinAccountContext,
+  } from '../../lib/commonswarm';
   import { browserHumanInvitations } from '../../lib/human-invitations';
   import { createHumanInviteController } from '../../lib/human-invite-controller';
   import { showDisclosure } from '../../lib/disclosure-lines';
   const root=document.querySelector<HTMLElement>('human-invitation-inbox');
-  if(root && client()) {
+  if(root && (isMultiAccountEnabled() ? deployment() : client())) {
     const one=<T extends HTMLElement>(selector:string)=>root.querySelector<T>(selector)!;
     const roles=()=>[...root.querySelectorAll<HTMLInputElement>('[data-role]')];
     const chosenRole=()=>roles().find(input=>input.checked)?.value??'';
@@ -815,11 +824,19 @@ import "../../styles/kylon-invitation-inbox.css";
        until the dashboard has loaded so it does not jump. */
     if(dashboard)new MutationObserver(()=>paint()).observe(dashboard,{attributes:true,attributeFilter:['data-state']});
     let authGeneration=0;
-    client()!.auth.onAuthStateChange((event,session)=>{
-      if(event==='SIGNED_OUT'||account!==(session?.user.id??null)){++authGeneration;controller.setAccount(null);account=session?.user.id??null;
+    onAuthChange((event,session)=>{
+      if(event==='SIGNED_OUT'||account!==(session?.user.id??null)){++authGeneration;controller.setAccount(null);if(dialog.open)dialog.close();account=session?.user.id??null;
         const version=authGeneration;queueMicrotask(()=>{if(version===authGeneration)setAccount(account);});}
     });
+    onAccountForcedTeardown(()=>{
+      ++authGeneration;controller.setAccount(null);if(dialog.open)dialog.close();account=null;
+    });
     const version=authGeneration;
-    void currentSession().then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);}).catch(()=>{setAccount(null);});
+    void (isMultiAccountEnabled()
+      ? bootstrapMultiAccountAuth(window.location, window.history).catch(()=>null)
+      : Promise.resolve(null))
+      .then(()=>currentSession())
+      .then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);})
+      .catch(()=>{setAccount(null);});
   }
 </script>

@@ -9,6 +9,15 @@ import {
   readEndpoint,
   type CloudTarget,
 } from "./config.js";
+import { normalizeChannelSlug } from "./channels.js";
+
+const CONVERSATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A 1:1 or group DM holds at most 9 members, including the caller. */
+export const CONVERSATION_MEMBER_MAX = 9;
+
+/** Maximum members added in one channel/conversation invite command. */
+export const CONVERSATION_INVITE_MAX = 50;
 
 export type ConversationKind =
   | "general"
@@ -309,4 +318,109 @@ export async function postConversationCommand(
     }
   }
   return { status: response.status, body: parsed };
+}
+
+export type MemberSelectorClassification =
+  | { kind: "explicit"; member: ConversationMemberRef }
+  | { kind: "invalid_explicit"; message: string }
+  | { kind: "lookup" };
+
+/**
+ * Classify a CLI target token: `user:<uuid>` and `agent:<uuid>` resolve directly
+ * without a directory lookup; any other token (name or bare UUID) falls through
+ * to workspace directory resolution.
+ */
+export function classifyConversationMemberSelector(raw: string): MemberSelectorClassification {
+  const idx = raw.indexOf(":");
+  if (idx > 0) {
+    const prefix = raw.slice(0, idx);
+    const id = raw.slice(idx + 1);
+    if (prefix === "user" || prefix === "agent") {
+      if (!CONVERSATION_UUID_RE.test(id)) {
+        return {
+          kind: "invalid_explicit",
+          message: `Invalid member "${raw}": use user:<uuid> or agent:<uuid>`,
+        };
+      }
+      return { kind: "explicit", member: { kind: prefix, id: id.toLowerCase() } };
+    }
+  }
+  return { kind: "lookup" };
+}
+
+export function dedupeConversationMembers(
+  members: readonly ConversationMemberRef[],
+): ConversationMemberRef[] {
+  const seen = new Set<string>();
+  const out: ConversationMemberRef[] = [];
+  for (const member of members) {
+    const id = member.id.toLowerCase();
+    const key = `${member.kind}:${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind: member.kind, id });
+  }
+  return out;
+}
+
+/**
+ * Find a workspace channel (#general, public, or private) in the conversations
+ * list by slug ("general" or channel slug), channel_id UUID, or conversation_id UUID.
+ */
+export function findChannelConversation(
+  conversations: readonly ConversationSummaryWire[],
+  selector: string,
+): ConversationSummaryWire | null {
+  const channels = conversations.filter((c) =>
+    c.kind === "general" || c.kind === "public_channel" || c.kind === "private_channel"
+  );
+  if (CONVERSATION_UUID_RE.test(selector)) {
+    const wanted = selector.toLowerCase();
+    return channels.find((c) =>
+      c.channel_id?.toLowerCase() === wanted || c.conversation_id.toLowerCase() === wanted
+    ) ?? null;
+  }
+  const normalized = normalizeChannelSlug(selector);
+  if (normalized === "general") {
+    return channels.find((c) => c.kind === "general") ?? null;
+  }
+  return channels.find((c) =>
+    c.slug !== null && normalizeChannelSlug(c.slug) === normalized
+  ) ?? null;
+}
+
+export type ChannelMembershipAction =
+  | { action: "join" }
+  | { action: "leave" }
+  | { action: "invite"; members: ConversationMemberRef[] }
+  | { action: "remove"; member: ConversationMemberRef };
+
+/**
+ * Build the wire command for a channel membership operation. Public channels use
+ * Step 2a `conversation_*` commands; private channels route to `channel_member_*`
+ * and `channel_leave`.
+ */
+export function channelConversationCommand(
+  conv: Pick<ConversationSummaryWire, "conversation_id" | "kind" | "channel_id">,
+  op: ChannelMembershipAction,
+): Record<string, unknown> {
+  const isPrivate = conv.kind === "private_channel" && conv.channel_id !== null;
+  const conversationId = conv.conversation_id.toLowerCase();
+  const channelId = conv.channel_id?.toLowerCase() ?? null;
+  switch (op.action) {
+    case "join":
+      return { kind: "conversation_join", conversation_id: conversationId };
+    case "leave":
+      return isPrivate
+        ? { kind: "channel_leave", channel_id: channelId }
+        : { kind: "conversation_leave", conversation_id: conversationId };
+    case "invite":
+      return isPrivate
+        ? { kind: "channel_member_add", channel_id: channelId, members: op.members }
+        : { kind: "conversation_invite", conversation_id: conversationId, members: op.members };
+    case "remove":
+      return isPrivate
+        ? { kind: "channel_member_remove", channel_id: channelId, member: op.member }
+        : { kind: "conversation_remove", conversation_id: conversationId, member: op.member };
+  }
 }

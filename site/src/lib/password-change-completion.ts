@@ -40,10 +40,12 @@ export interface PasswordChangeCompletionDeps {
   verifyCurrent(): Promise<CurrentCheck>;
   /** Still the owner: the same completion, and the page shows this account or no account. */
   live(): boolean;
+  /** Optional multi-account hook: removes ONLY this exact { userId, loginId } locally while keeping other accounts intact. */
+  removeLocalLogin?: (userId: string, loginId: string) => Promise<void>;
 }
 
 export async function completePasswordChange(
-  opening: { userId: string; accessToken: string },
+  opening: { userId: string; accessToken: string; loginId?: string },
   deps: PasswordChangeCompletionDeps,
 ): Promise<PasswordChangeOutcome> {
   let remote: RemoteLogout = "ended";
@@ -65,6 +67,9 @@ export async function completePasswordChange(
   switch (current.kind) {
     case "expired":
     case "none":
+      if (opening.loginId && deps.removeLocalLogin) {
+        try { await deps.removeLocalLogin(opening.userId, opening.loginId); } catch { /* best-effort local slot cleanup */ }
+      }
       return { kind: "signed-out", remote };
     case "session":
       return current.userId === opening.userId

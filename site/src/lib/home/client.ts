@@ -1,6 +1,6 @@
-import type { Session } from '@supabase/supabase-js';
+import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../../src/protocol/household-tool-registry.ts';
-import { client, postCommand } from '../commonswarm.ts';
+import { client, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from '../commonswarm.ts';
 import type {
   ActivityItem,
   AgentQueue,
@@ -21,6 +21,9 @@ import type {
   QueueSection,
   TodoState,
   Uuid,
+  WaitingTodoEntry,
+  WaitingTodoPlacement,
+  WaitingTodosQueue,
   WriteResult,
 } from './contract.ts';
 import { todoSummary, type HomeFixtures } from './fixtures.ts';
@@ -136,6 +139,12 @@ async function householdTool(
   unknownOutcome: string,
   write = false,
 ): Promise<Record<string, unknown>> {
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   const toolArgs: Record<string, unknown> = { seat: HOUSEHOLD_LOCAL_SEAT, ...args };
   if (write) toolArgs.request_id = requestId;
   const { status, body } = await deps.postCommand(
@@ -144,7 +153,11 @@ async function householdTool(
     { kind: 'household_tool', tool, arguments: toolArgs },
     workspaceExtra(workspaceId),
     unknownOutcome,
+    pinned,
   );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 
@@ -156,7 +169,23 @@ async function householdSurface(
   command: Record<string, unknown>,
   unknownOutcome: string,
 ): Promise<Record<string, unknown>> {
-  const { status, body } = await deps.postCommand(session, requestId, command, workspaceExtra(workspaceId), unknownOutcome);
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
+  const { status, body } = await deps.postCommand(
+    session,
+    requestId,
+    command,
+    workspaceExtra(workspaceId),
+    unknownOutcome,
+    pinned,
+  );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 
@@ -191,6 +220,51 @@ export function parseDecisionQueue(data: unknown, workspaceId: Uuid): DecisionQu
     asks: data.asks.map(decisionAsk) };
 }
 
+const WAITING_TODO_REASONS = new Set(['assigned', 'request', 'after', 'hold', 'agent_removed']);
+const WAITING_TODO_PLACEMENTS = new Set<WaitingTodoPlacement>(['channel', 'general', 'workspace']);
+
+function waitingTodoEntry(value: unknown): WaitingTodoEntry {
+  if (!record(value) || typeof value.todo_id !== 'string' || typeof value.title !== 'string'
+    || (value.state !== 'open' && value.state !== 'doing')
+    || (value.due_on !== null && typeof value.due_on !== 'string')
+    || typeof value.reason !== 'string' || !WAITING_TODO_REASONS.has(value.reason)
+    || (value.agent_id !== null && typeof value.agent_id !== 'string')
+    || !isoTime(value.state_at)
+    || typeof value.placement !== 'string' || !WAITING_TODO_PLACEMENTS.has(value.placement as WaitingTodoPlacement)
+    || (value.channel_id !== null && typeof value.channel_id !== 'string')) {
+    throw new Error('home_waiting_todos_malformed');
+  }
+  const placement = value.placement as WaitingTodoPlacement;
+  if (placement === 'channel' && !value.channel_id) throw new Error('home_waiting_todos_malformed');
+  return {
+    todo_id: value.todo_id,
+    title: value.title,
+    state: value.state,
+    due_on: value.due_on,
+    reason: value.reason as WaitingTodoEntry['reason'],
+    agent_id: value.agent_id,
+    state_at: value.state_at,
+    placement,
+    channel_id: placement === 'channel' ? value.channel_id : null,
+  };
+}
+
+/** Validates swarm_read.waiting_todos_page. NULL (not a member) stays null; malformed throws. */
+export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): WaitingTodosQueue | null {
+  if (data === null) return null;
+  if (!record(data) || data.workspace_id !== workspaceId || !isoTime(data.generated_at) || !count(data.total)
+    || typeof data.truncated !== 'boolean' || !Array.isArray(data.todos) || data.todos.length > data.total) {
+    throw new Error('home_waiting_todos_malformed');
+  }
+  return {
+    workspace_id: workspaceId,
+    generated_at: data.generated_at,
+    total: data.total,
+    truncated: data.truncated,
+    todos: data.todos.map(waitingTodoEntry),
+  };
+}
+
 export class HomeToolsUnavailable extends Error {
   constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
 }
@@ -207,14 +281,28 @@ function checkedCommandBody(status: number, body: Record<string, unknown>): Reco
   return body;
 }
 
-export function createHomeServer(session: Session, deps: Partial<HomeServerDeps> = {}): HomeServer {
+export function createHomeServer(
+  session: Session,
+  deps: Partial<HomeServerDeps> = {},
+  pinnedOverride?: PinnedAccountContext | null,
+): HomeServer {
   const resolved = { ...defaultDeps(), ...deps };
+  const resolvePinnedClient = (): { c: SupabaseClient; pinned: PinnedAccountContext | null } => {
+    if (isMultiAccountEnabled()) {
+      const pinned = pinnedOverride ?? pinAccountContext({ userId: session.user.id });
+      if (!pinned || !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+      return { c: pinned.runtime.client, pinned };
+    }
+    const c = resolved.client();
+    if (!c) throw new Error('home_no_deployment');
+    return { c, pinned: null };
+  };
 
   return {
     async overview(): Promise<HomeOverview> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('home_overview');
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_overview_failed');
       if (!record(data) || typeof data.viewer_user_id !== 'string' || typeof data.generated_at !== 'string' || !Array.isArray(data.workspaces)) throw new Error('home_overview_malformed');
@@ -222,9 +310,9 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
     },
 
     async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_decision_queue_failed');
       const first = parseDecisionQueue(data, workspaceId);
@@ -239,20 +327,25 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
       let pages = 1;
       const MAX_PAGES = 20;
       while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.asks[page.asks.length - 1]!;
         let next: DecisionQueue | null = null;
+        let pageFailed = false;
         try {
           const paged = await c.schema('swarm_read').rpc('decision_queue_page', {
             p_workspace_id: workspaceId,
             p_after_created_at: last.created_at,
             p_after_id: last.signal_id,
           });
-          if (paged.error) break;
-          next = parseDecisionQueue(paged.data, workspaceId);
+          if (paged.error) pageFailed = true;
+          else next = parseDecisionQueue(paged.data, workspaceId);
         } catch {
-          break;
+          pageFailed = true;
         }
-        if (!next) break;
+        // C2: Guard after every page OUTSIDE the partial-queue catch so a view change
+        // throws and drops prior-account rows instead of returning a stale partial queue.
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+        if (pageFailed || !next) break;
         let added = 0;
         for (const ask of next.asks) {
           if (seen.has(ask.signal_id)) continue;
@@ -268,12 +361,71 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
         }
         if (added === 0) break;
       }
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       return {
         workspace_id: workspaceId,
         generated_at: page.generated_at,
         total: Math.max(page.total, asks.length),
         truncated,
         asks,
+      };
+    },
+
+    async waitingTodos(workspaceId): Promise<WaitingTodosQueue | null> {
+      const c = resolved.client();
+      if (!c) throw new Error('home_no_deployment');
+      const PAGE_LIMIT = 50;
+      const MAX_PAGES = 20;
+      const { data, error } = await c.schema('swarm_read').rpc('waiting_todos_page', {
+        p_workspace_id: workspaceId,
+        p_limit: PAGE_LIMIT,
+      });
+      if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
+      if (error) throw new Error('home_waiting_todos_failed');
+      const first = parseWaitingTodosQueue(data, workspaceId);
+      if (!first || (!first.truncated && first.todos.length >= first.total)) return first;
+      const todos = [...first.todos];
+      const seen = new Set(todos.map(todo => todo.todo_id));
+      let page = first;
+      let truncated = true;
+      let pages = 1;
+      while (truncated && pages < MAX_PAGES && page.todos.length > 0) {
+        const last = page.todos[page.todos.length - 1]!;
+        let next: WaitingTodosQueue | null = null;
+        try {
+          const paged = await c.schema('swarm_read').rpc('waiting_todos_page', {
+            p_workspace_id: workspaceId,
+            p_limit: PAGE_LIMIT,
+            p_after_state_at: last.state_at,
+            p_after_todo_id: last.todo_id,
+          });
+          if (paged.error) break;
+          next = parseWaitingTodosQueue(paged.data, workspaceId);
+        } catch {
+          break;
+        }
+        if (!next) break;
+        let added = 0;
+        for (const todo of next.todos) {
+          if (seen.has(todo.todo_id)) continue;
+          seen.add(todo.todo_id);
+          todos.push(todo);
+          added += 1;
+        }
+        page = next;
+        pages += 1;
+        if (!next.truncated) {
+          truncated = false;
+          break;
+        }
+        if (added === 0) break;
+      }
+      return {
+        workspace_id: workspaceId,
+        generated_at: page.generated_at,
+        total: Math.max(page.total, todos.length),
+        truncated,
+        todos,
       };
     },
 
@@ -478,6 +630,34 @@ export function createFixtureHomeServer(fixtures: HomeFixtures): HomeServer {
       return { workspace_id: workspaceId, generated_at: fixtures.overview.generated_at, total: asks.length, truncated: false,
         asks: asks.map((ask) => ({ signal_id: ask.signal_id, from: { ...ask.from, name: null }, body: '', created_at: ask.created_at,
           until: ask.until, reraised: null })) };
+    },
+
+    async waitingTodos(workspaceId) {
+      const row = fixtures.overview.workspaces.find((workspace) => workspace.workspace_id === workspaceId);
+      if (!row) return null;
+      const byId = new Map<string, WaitingTodoEntry>();
+      const order: string[] = [];
+      for (const todo of row.needs_you.assigned) {
+        if (todo.state === 'done' || todo.state === 'dropped') continue;
+        byId.set(todo.todo_id, {
+          todo_id: todo.todo_id, title: todo.title, state: todo.state === 'doing' ? 'doing' : 'open',
+          due_on: todo.due_on, reason: 'assigned', agent_id: null, state_at: fixtures.overview.generated_at,
+          placement: 'workspace', channel_id: null,
+        });
+        order.push(todo.todo_id);
+      }
+      for (const todo of row.needs_you.waiting) {
+        if (todo.state === 'done' || todo.state === 'dropped') continue;
+        const entry: WaitingTodoEntry = {
+          todo_id: todo.todo_id, title: todo.title, state: todo.state === 'doing' ? 'doing' : 'open',
+          due_on: todo.due_on, reason: todo.reason, agent_id: todo.agent_id, state_at: fixtures.overview.generated_at,
+          placement: 'workspace', channel_id: null,
+        };
+        if (!byId.has(todo.todo_id)) { byId.set(todo.todo_id, entry); order.push(todo.todo_id); }
+        else if (todo.reason === 'request') byId.set(todo.todo_id, entry);
+      }
+      const todos = order.map(id => byId.get(id)!).filter(Boolean);
+      return { workspace_id: workspaceId, generated_at: fixtures.overview.generated_at, total: todos.length, truncated: false, todos };
     },
 
     async activity(workspaceId, since, limit) {

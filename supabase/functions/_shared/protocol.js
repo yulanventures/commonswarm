@@ -4724,8 +4724,15 @@ var BASE_HOUSEHOLD_TOOL_REGISTRY = [
     objectTypes: todoTypes,
     operations: ["create"],
     operation: () => "create",
-    properties: { title: text2(1, TODO_TITLE_LIMIT), notes: text2(0, TODO_NOTES_LIMIT), due_on: due, assign: object({ to: party, start, gate }, ["start", "gate"]) },
-    optional: ["notes", "due_on", "assign"],
+    properties: {
+      title: text2(1, TODO_TITLE_LIMIT),
+      notes: text2(0, TODO_NOTES_LIMIT),
+      due_on: due,
+      assign: object({ to: party, start, gate }, ["start", "gate"]),
+      origin_placement: { type: "string", enum: ["workspace", "general", "channel"] },
+      origin_channel_id: { oneOf: [uuid2, { type: "null" }] }
+    },
+    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id"],
     toCore: (args) => todoCommand("todo_create", args)
   }),
   define({
@@ -5410,6 +5417,22 @@ function decideTodo(state, command, ctx) {
     if (!validTitle(command.title)) return refuse2("title_invalid");
     if (!validNotes(command.notes ?? "")) return refuse2("notes_invalid");
     if (!validDate(command.due_on ?? null)) return refuse2("due_invalid");
+    const rawPlacement = command.origin_placement;
+    const rawChannelId = command.origin_channel_id;
+    let originPlacement = "workspace";
+    let originChannelId = null;
+    if (rawPlacement === void 0) {
+      if (rawChannelId !== void 0 && rawChannelId !== null) return refuse2("target_not_found");
+    } else if (rawPlacement === "workspace" || rawPlacement === "general") {
+      if (rawChannelId !== void 0 && rawChannelId !== null) return refuse2("target_not_found");
+      originPlacement = rawPlacement;
+    } else if (rawPlacement === "channel") {
+      if (!uuid4(rawChannelId) || ctx.origin_channel_accessible !== true) return refuse2("target_not_found");
+      originPlacement = "channel";
+      originChannelId = rawChannelId.toLowerCase();
+    } else {
+      return refuse2("target_not_found");
+    }
     if (Object.values(state.todos).filter(isOpen).length >= TODO_OPEN_LIMIT) return refuse2("todo_limit_reached");
     if (!uuid4(ctx.todo_id) || own2(state.todos, ctx.todo_id)) throw new RangeError("new server to-do ID is required");
     const todo2 = {
@@ -5431,7 +5454,9 @@ function decideTodo(state, command, ctx) {
       queue_rank: null,
       state_by: actor,
       state_at: timestamp,
-      comment_count: 0
+      comment_count: 0,
+      origin_placement: originPlacement,
+      origin_channel_id: originChannelId
     };
     emit("TodoCreated", { todo: todo2 });
     if (command.assign) {
@@ -5585,6 +5610,17 @@ function reduceTodoEvents(initial, events) {
       const at = new Date(event2.occurred_at_server).toISOString();
       if (!validActor(todo.created_by) || !validActor(todo.state_by) || !validParty(todo.assignee) || !Number.isFinite(Date.parse(todo.created_at)) || !Number.isFinite(Date.parse(todo.state_at)) || todo.assignee?.kind === "agent" && isOpen(todo) && todo.queue_rank === null || gateCycles(todo.todo_id, todo.gate, todos) || todo.gate.kind === "after" && !own2(todos, todo.gate.todo_id)) fail("invalid to-do fields");
       if (todo.offer && (!uuid4(todo.offer.offer_id) || !validParty(todo.offer.to) || !id(todo.offer.decider_user_id) || !["queue", "now"].includes(todo.offer.start) || !validGate(todo.offer.gate) || !validActor(todo.offer.by) || !Number.isFinite(Date.parse(todo.offer.at)))) fail("invalid offer");
+      const hasOrigin = todo.origin_placement !== void 0 || todo.origin_channel_id !== void 0;
+      if (hasOrigin) {
+        if (todo.origin_placement !== "workspace" && todo.origin_placement !== "general" && todo.origin_placement !== "channel") {
+          fail("invalid origin placement");
+        }
+        if (todo.origin_placement === "channel") {
+          if (!uuid4(todo.origin_channel_id)) fail("invalid origin channel");
+        } else if (todo.origin_channel_id !== null) {
+          fail("invalid origin channel");
+        }
+      }
       if (create) {
         if (!equal(todo.created_by, author) || !equal(todo.state_by, author) || todo.created_at !== at || todo.state_at !== at || todo.state !== "open" || todo.assignee !== null || todo.assigned_by !== null || todo.assigned_at !== null || todo.offer !== null || todo.gate.kind !== "none" || todo.gate_set_by !== null || todo.queue_rank !== null || todo.comment_count !== 0) fail("invalid create");
       } else {
@@ -5598,7 +5634,13 @@ function reduceTodoEvents(initial, events) {
           TodoCommented: ["comment_count"]
         };
         const allowed = /* @__PURE__ */ new Set(["version", ...fields[event2.type] ?? []]);
-        if (Object.keys(current).some((key2) => !allowed.has(key2) && !equal(current[key2], todo[key2]))) fail("unrelated field changed");
+        const allKeys = /* @__PURE__ */ new Set([...Object.keys(current), ...Object.keys(todo)]);
+        const originFieldEqual = (key2) => {
+          if (key2 === "origin_placement") return (current.origin_placement ?? "workspace") === (todo.origin_placement ?? "workspace");
+          if (key2 === "origin_channel_id") return (current.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
+          return equal(current[key2], todo[key2]);
+        };
+        if ([...allKeys].some((key2) => !allowed.has(key2) && !originFieldEqual(key2))) fail("unrelated field changed");
         if (event2.type === "TodoAssigned") {
           const validSetter = acceptedOffer ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event2.command_id && acceptedOffer.offer.decider_user_id === event2.actor_user && event2.actor_agent_principal === null && sameParty(todo.assignee, acceptedOffer.offer.to) && equal(todo.gate, acceptedOffer.offer.gate) && todo.gate_set_by === (todo.gate.kind === "none" ? null : acceptedOffer.offer.by.user_id) : todo.gate_set_by === (todo.gate.kind === "none" ? null : event2.actor_user) || equal(todo.gate, current.gate) && todo.gate_set_by === current.gate_set_by;
           if (todo.state !== "open" || todo.offer !== null || !equal(todo.assigned_by, author) || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || !validSetter) fail("invalid assignment");

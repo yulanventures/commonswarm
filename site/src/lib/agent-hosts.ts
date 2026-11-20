@@ -405,7 +405,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     maker: "Connect with a one-time key",
     group: "other",
     status: null,
-    evidence: "site/src/components/connect/AgentConnect.astro:393",
+    evidence: "site/src/components/connect/AgentConnect.astro:407",
     logo: null,
     joiner: "hidden",
     desktopSignIn: false,

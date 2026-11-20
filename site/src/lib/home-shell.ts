@@ -70,10 +70,28 @@ export interface ShellCallbacks {
   accountAction?: (action: AccountMenuAction) => void;
 }
 
+export interface AccountSwitcherMenuItem {
+  userId: string;
+  label: string;
+  secondary: string;
+  initials: string;
+  active: boolean;
+  waitingCount: number | null;
+  expired?: boolean;
+}
+
 export interface AccountMenuState {
   /** Who is signed in, as the account menu already says it ("Your account" until known). */
   signedInAs: string;
+  /** Active account identifier (email/secondary) shown beside single-account sign-out actions. */
+  activeAccountIdentifier?: string;
   organizations?: OrganizationMenuItem[];
+  /** Signed-in accounts in this browser when multi-account sign-in is enabled. */
+  accounts?: readonly AccountSwitcherMenuItem[];
+  /** Whether "+ Add account" is available (hidden/disabled at 5-account cap). */
+  canAddAccount?: boolean;
+  /** Cap notice when at MAX_SIGNED_IN_ACCOUNTS. */
+  accountCapNote?: string;
   /** The theme switch's current label ("Theme: System"), or null when the page has no theme switch. */
   theme: string | null;
   connectedApps: boolean;
@@ -81,8 +99,23 @@ export interface AccountMenuState {
   password?: boolean;
   signOutOthers?: boolean;
   signOut: boolean;
+  /** Explicit sign-out label ("Sign out on this device" in multi-account mode, "Sign out" otherwise). */
+  signOutLabel?: string;
+  /** Count of signed-in accounts when 2+ (shows "Sign out all N accounts on this device"). */
+  signOutAllCount?: number;
 }
-export type AccountMenuAction = "theme" | "your-agents" | "connected-apps" | "password" | "sign-out-others" | "sign-out" | { kind: "organization"; workspaceId: string };
+export type AccountMenuAction =
+  | "theme"
+  | "your-agents"
+  | "connected-apps"
+  | "password"
+  | "sign-out-others"
+  | "sign-out"
+  | "sign-out-all"
+  | "add-account"
+  | { kind: "switch-account"; userId: string }
+  | { kind: "reauth-account"; email: string }
+  | { kind: "organization"; workspaceId: string };
 
 export interface OrganizationMenuItem {
   id: string;
@@ -483,23 +516,89 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       orgs.append(group); built.push(orgs);
     }
     const rule = node(doc, "li", "hm-menu__separator"); rule.setAttribute("role", "separator"); built.push(rule);
-    const who = node(doc, "li", "hm-menu__account", state.signedInAs);
-    who.setAttribute("role", "presentation");
-    built.push(who);
-    const entry = (text: string, action: AccountMenuAction, hook: string) => {
+    if (state.accounts?.length) {
+      const acctGroup = node(doc, "li", "hm-menu__entry hm-menu__group-entry");
+      acctGroup.setAttribute("role", "none");
+      const list = node(doc, "ul", "hm-menu__group hm-account-list");
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", "Signed-in accounts");
+      for (const acct of state.accounts) {
+        const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none");
+        const btn = node(doc, "button", acct.active ? "hm-menu__item hm-account-row hm-account-row--active" : "hm-menu__item hm-account-row");
+        btn.type = "button"; btn.tabIndex = -1;
+        btn.setAttribute("role", "menuitemradio");
+        btn.setAttribute("aria-checked", String(acct.active));
+        btn.dataset.menuAccountSwitch = acct.userId;
+        const avatar = node(doc, "span", "hm-account-row__avatar");
+        avatar.dataset.initials = acct.initials;
+        avatar.setAttribute("aria-hidden", "true");
+        const meta = node(doc, "span", "hm-account-row__meta");
+        meta.append(node(doc, "span", "hm-account-row__name", acct.label));
+        if (acct.secondary && acct.secondary !== acct.label) {
+          meta.append(node(doc, "span", "hm-account-row__secondary", acct.secondary));
+        }
+        btn.append(avatar, meta);
+        if (acct.expired) {
+          btn.append(node(doc, "span", "hm-account-row__expired", "Sign in again"));
+        } else if (!acct.active && typeof acct.waitingCount === "number" && acct.waitingCount > 0) {
+          const badge = node(doc, "span", "hm-account-row__badge", `${acct.waitingCount} waiting`);
+          btn.append(badge);
+        } else if (acct.active) {
+          btn.append(node(doc, "span", "hm-account-row__current", "Current"));
+        }
+        btn.addEventListener("click", () => {
+          close(true);
+          if (acct.expired) {
+            callbacks.accountAction?.({ kind: "reauth-account", email: acct.secondary || acct.label });
+          } else if (!acct.active) {
+            callbacks.accountAction?.({ kind: "switch-account", userId: acct.userId });
+          }
+        });
+        li.append(btn); list.append(li); accountButtons.push(btn);
+      }
+      if (state.canAddAccount) {
+        const addLi = node(doc, "li", "hm-menu__entry"); addLi.setAttribute("role", "none");
+        const addBtn = node(doc, "button", "hm-menu__item hm-account-add", "Add account");
+        addBtn.type = "button"; addBtn.tabIndex = -1; addBtn.setAttribute("role", "menuitem");
+        addBtn.dataset.menuAddAccount = "";
+        addBtn.addEventListener("click", () => { close(true); callbacks.accountAction?.("add-account"); });
+        addLi.append(addBtn); list.append(addLi); accountButtons.push(addBtn);
+      } else if (state.accountCapNote) {
+        const noteLi = node(doc, "li", "hm-menu__account hm-account-cap", state.accountCapNote);
+        noteLi.setAttribute("role", "presentation");
+        list.append(noteLi);
+      }
+      acctGroup.append(list);
+      built.push(acctGroup);
+      const sep2 = node(doc, "li", "hm-menu__separator"); sep2.setAttribute("role", "separator"); built.push(sep2);
+    } else {
+      const who = node(doc, "li", "hm-menu__account", state.signedInAs);
+      who.setAttribute("role", "presentation");
+      built.push(who);
+    }
+    const entry = (text: string, action: AccountMenuAction, hook: string, sub?: string) => {
       const li = node(doc, "li", "hm-menu__entry"); li.setAttribute("role", "none");
-      const button = node(doc, "button", "hm-menu__item", text);
+      const button = node(doc, "button", sub ? "hm-menu__item hm-menu-item--identified" : "hm-menu__item");
       button.type = "button"; button.tabIndex = -1; button.setAttribute("role", "menuitem");
       button.dataset[hook] = "";
+      if (sub) {
+        button.append(node(doc, "span", "", text), node(doc, "span", "hm-menu-item__sub", sub));
+      } else {
+        button.textContent = text;
+      }
       button.addEventListener("click", () => { close(true); callbacks.accountAction?.(action); });
       li.append(button); built.push(li); accountButtons.push(button);
     };
+    const activeIdent = state.activeAccountIdentifier || undefined;
     if (state.theme) entry(state.theme, "theme", "menuTheme");
     if (state.yourAgents) entry("Your agents", "your-agents", "menuYourAgents");
     if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
     if (state.password) entry("Password", "password", "menuPassword");
-    if (state.signOutOthers) entry("Sign out other devices", "sign-out-others", "menuSignOutOthers");
-    if (state.signOut) entry("Sign out", "sign-out", "menuSignOut");
+    if (state.signOutOthers) entry("Sign out other devices", "sign-out-others", "menuSignOutOthers", activeIdent);
+    if (state.signOut) entry(state.signOutLabel ?? "Sign out", "sign-out", "menuSignOut", activeIdent);
+    if (typeof state.signOutAllCount === "number" && state.signOutAllCount >= 2) {
+      entry(`Sign out all ${state.signOutAllCount} accounts on this device`, "sign-out-all", "menuSignOutAll");
+    }
     const home = node(doc, "li", "hm-menu__entry"); home.setAttribute("role", "none");
     const homeLink = node(doc, "a", "hm-menu__item", "CommonSwarm home");
     homeLink.href = "/"; homeLink.setAttribute("role", "menuitem"); homeLink.tabIndex = -1;

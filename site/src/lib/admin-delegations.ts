@@ -1,5 +1,5 @@
 import type { Session } from "@supabase/supabase-js";
-import { CommandOutcomeUnknown, deployment, postCommand } from "./commonswarm";
+import { CommandOutcomeUnknown, deployment, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from "./commonswarm";
 import { adminClientAction, assertAdminPageOwner } from "./admin-delegations-view";
 import {
   ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage,
@@ -13,40 +13,65 @@ export class AdminRecoveryReadError extends Error {
 }
 
 export async function loadAdminRecovery(
-  session: Session, resource: AdminReadRequest["resource"], workspaceId: string | null = null, before: string | null = null,
+  session: Session,
+  resource: AdminReadRequest["resource"],
+  workspaceId: string | null = null,
+  before: string | null = null,
+  pinnedOverride?: PinnedAccountContext | null,
 ): Promise<AdminRecoveryPage> {
-  const d = deployment();
+  const pinned = isMultiAccountEnabled()
+    ? (pinnedOverride ?? pinAccountContext({ userId: session.user.id }))
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent())) {
+    throw new AdminRecoveryReadError(401);
+  }
+  const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new Error("This build is not connected to CommonSwarm.");
   const request = adminReadRequest({ resource, workspace_id: workspaceId, before, limit: ADMIN_PAGE_DEFAULT });
   if (!request) throw new Error("Choose a valid admin history view.");
+  let token = session.access_token;
+  if (pinned) {
+    const verified = await pinned.runtime.verifySession();
+    if (!verified || verified.user.id !== session.user.id || !pinned.isCurrent()) {
+      throw new AdminRecoveryReadError(401);
+    }
+    token = verified.access_token;
+  }
   const response = await fetch(`${d.url}/functions/v1/read`, {
-    method: "POST", headers: { authorization: `Bearer ${session.access_token}`, apikey: d.anonKey, "content-type": "application/json" },
+    method: "POST", headers: { authorization: `Bearer ${token}`, apikey: d.anonKey, "content-type": "application/json" },
     body: JSON.stringify(request), signal: AbortSignal.timeout(15_000),
   });
+  if (pinned && !pinned.isCurrent()) throw new AdminRecoveryReadError(401);
   if (!response.ok) throw new AdminRecoveryReadError(response.status);
   const page = parseAdminRecoveryPage(await response.json());
   const parents: AdminGrantView[] = [...page.grants];
   const missing = new Set([...page.workers, ...page.coverage].map(row => row.grant_id));
   for (const grant of parents) if (grant.owner_user_id === session.user.id) missing.delete(grant.grant_id);
   // Dependency pages omit owners and parents. Resolve them through verified grant pages,
-  // independently of the grant page currently visible in the dialog.
+  // independently of the grant page currently visible in the dialog, carrying ONE single pin (C2).
   let cursor: string | null = null;
   const seen = new Set<string>();
   while ((resource === "admin_workers" || resource === "admin_coverage") && missing.size > 0) {
-    const grants = await loadAdminRecovery(session, "admin_grants", null, cursor);
+    if (pinned && !pinned.isCurrent()) throw new AdminRecoveryReadError(401);
+    const grants = await loadAdminRecovery(session, "admin_grants", null, cursor, pinned);
     parents.push(...grants.grants);
     for (const grant of grants.grants) missing.delete(grant.grant_id);
     cursor = grants.next_before;
     if (cursor === null || seen.has(cursor)) break;
     seen.add(cursor);
   }
+  if (pinned && !pinned.isCurrent()) throw new AdminRecoveryReadError(401);
   assertAdminPageOwner(page, session.user.id, workspaceId, parents);
   return page;
 }
 async function accountCommand(session: Session, commandId: string, command: Record<string, unknown>): Promise<void> {
+  const pinned = isMultiAccountEnabled() ? pinAccountContext({ userId: session.user.id }) : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent())) {
+    throw new AdminGrantRevokeRefused("The request was refused. Sign in as the account owner and refresh before trying again.");
+  }
   const unknown = `The result is unavailable. Refresh admin access or retry this request. Retry ID: ${commandId}.`;
   const result = await postCommand(session, commandId, command,
-    { stream: { kind: "account" }, resource: ADMIN_RECOVERY_RESOURCE }, unknown);
+    { stream: { kind: "account" }, resource: ADMIN_RECOVERY_RESOURCE }, unknown, pinned);
   if (result.status >= 500 || (result.status === 200 && (!result.body || result.body.status !== "accepted"))) throw new CommandOutcomeUnknown(unknown);
   if (result.status !== 200) throw new AdminGrantRevokeRefused("The request was refused. Sign in as the account owner and refresh before trying again.");
 }

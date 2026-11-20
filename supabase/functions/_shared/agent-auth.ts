@@ -184,6 +184,36 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
  * `access_lost` when the presented credential matches a local token whose
  * token, principal, device or renewal grant was revoked. Never throws.
  */
+/** Tight lock wait cap for best-effort access-lost system alerts so busy scopes never stall edge workers. */
+export const BEST_EFFORT_ALERT_LOCK_TIMEOUT = "250ms";
+
+/**
+ * Best-effort post-transaction alert recorder with a bounded 250ms lock_timeout.
+ * Must be called outside any primary command transaction so alert locks never compose
+ * with or hold outer command locks. Never throws.
+ */
+export async function recordBestEffortSystemAlert(
+  withTx: <T>(run: (tx: Sql) => Promise<T>) => Promise<T>,
+  workspaceId: string,
+  kind: "local_renewal_superseded" | "local_credential_revoked",
+  principalId: string,
+): Promise<void> {
+  try {
+    await withTx(async (tx) => {
+      await tx`SELECT set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)`;
+      await tx`
+        SELECT swarm.record_system_alert(
+          ${workspaceId}::uuid,
+          ${kind},
+          ${principalId}::uuid
+        )
+      `;
+    });
+  } catch {
+    // Best-effort observability must never alter refusal responses or surface 503s.
+  }
+}
+
 export async function reportRevokedLocalCredential(
   withTx: <T>(run: (tx: Sql) => Promise<T>) => Promise<T>, tokenHash: Uint8Array, now = Date.now(),
 ): Promise<void> {
@@ -192,39 +222,52 @@ export async function reportRevokedLocalCredential(
     const key = Array.from(tokenHash.subarray(0, 8), b => b.toString(16).padStart(2, "0")).join("");
     if (tokenHash.length !== 32 || !accessLostProbes.allow(`local_credential_revoked:${key}`, now)) return;
     const [row] = await withTx(async (tx) => {
-      const found = await tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
+      return await tx<{
+        principal_id: string;
+        owner_user_id: string;
+        revoked: boolean;
+        workspace_ids?: string[];
+      }[]>`
         SELECT t.principal_id::text AS principal_id, p.owner_user_id::text AS owner_user_id,
           (t.revoked_at IS NOT NULL OR p.revoked_at IS NOT NULL OR d.revoked_at IS NOT NULL
-            OR g.revoked_at IS NOT NULL) IS TRUE AS revoked
+            OR g.revoked_at IS NOT NULL) IS TRUE AS revoked,
+          COALESCE(ARRAY(
+            SELECT am.workspace_id::text
+            FROM swarm.agent_workspace_memberships AS am
+            JOIN swarm.workspaces AS w
+              ON w.workspace_id = am.workspace_id
+             AND w.archived_at IS NULL
+            WHERE am.principal_id = t.principal_id
+              AND am.revoked_at IS NULL
+            ORDER BY am.workspace_id ASC
+          ), ARRAY[]::text[]) AS workspace_ids
         FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
         JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
         LEFT JOIN swarm.devices d ON d.device_id=r.device_id
         LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
         WHERE t.token_hash=${tokenHash} AND p.transport='local'`;
-      if (found[0]?.revoked === true) {
-        try {
-          await tx.savepoint(async (sp) => {
-            await sp`
-              SELECT swarm.record_system_alert(
-                am.workspace_id,
-                'local_credential_revoked',
-                ${found[0]!.principal_id}::uuid
-              )
-              FROM swarm.agent_workspace_memberships AS am
-              JOIN swarm.workspaces AS w
-                ON w.workspace_id = am.workspace_id
-               AND w.archived_at IS NULL
-              WHERE am.principal_id = ${found[0]!.principal_id}::uuid
-                AND am.revoked_at IS NULL
-            `;
-          });
-        } catch {
-          // Alert recording must never alter auth refusal behavior.
-        }
-      }
-      return found;
     });
     if (row?.revoked !== true) return;
+    // One bounded 250ms transaction per workspace in workspace_id ASC order so workspace N's
+    // conversation and alert locks are fully released before workspace N+1 begins, and contention
+    // in one workspace never drops another workspace's alert or alters auth refusal behavior.
+    const workspaceIds = Array.isArray(row.workspace_ids) ? row.workspace_ids : [];
+    for (const workspaceId of workspaceIds) {
+      try {
+        await withTx(async (tx) => {
+          await tx`SELECT set_config('lock_timeout', ${BEST_EFFORT_ALERT_LOCK_TIMEOUT}, true)`;
+          await tx`
+            SELECT swarm.record_system_alert(
+              ${workspaceId}::uuid,
+              'local_credential_revoked',
+              ${row.principal_id}::uuid
+            )
+          `;
+        });
+      } catch {
+        // Alert recording must never alter auth refusal behavior.
+      }
+    }
     logAccessLost({ class: "local_credential_revoked", principal_ref: row.principal_id,
       owner_ref: row.owner_user_id, grant_ref: null }, now);
   } catch {

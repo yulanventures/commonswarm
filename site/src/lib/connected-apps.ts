@@ -1,7 +1,7 @@
 import { connectionPolicyFields, connectionPolicyState, type ConnectionPolicy } from "./standing-grants";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 
-import { client, postCommand, uuid } from "./commonswarm";
+import { client, postCommand, uuid, type PinnedAccountContext } from "./commonswarm";
 
 export interface ConnectedAppSeat {
   seatId: string;
@@ -119,6 +119,7 @@ export async function revokeConnectedAppGrant(
   session: Session,
   connection: Pick<ConnectedApp, "grantId" | "homeWorkspaceId">,
   commandId = uuid(),
+  pinned?: PinnedAccountContext | null,
 ): Promise<void> {
   const result = await postCommand(
     session,
@@ -126,6 +127,8 @@ export async function revokeConnectedAppGrant(
     { kind: "revoke_hosted_mcp_grant", grant_id: connection.grantId },
     { workspace_id: connection.homeWorkspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the result of disconnecting the app. Reload Connected apps before trying again.",
+    pinned,
+    { accountWideWorkspace: true },
   );
   accepted(result.status, result.body, "disconnect the app");
 }
@@ -134,6 +137,7 @@ export async function revokeConnectedAppSeat(
   session: Session,
   seat: Pick<ConnectedAppSeat, "seatId" | "workspaceId"> & { grantId: string },
   commandId = uuid(),
+  pinned?: PinnedAccountContext | null,
 ): Promise<void> {
   const result = await postCommand(
     session,
@@ -145,6 +149,8 @@ export async function revokeConnectedAppSeat(
     },
     { workspace_id: seat.workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the result of removing the agent. Reload Connected apps before trying again.",
+    pinned,
+    { accountWideWorkspace: true },
   );
   accepted(result.status, result.body, "remove the agent");
 }

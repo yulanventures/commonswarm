@@ -374,7 +374,14 @@
 .dashboard__org-menu-item { display: flex; align-items: center; gap: 10px; inline-size: 100%; }
 .dashboard__org-menu-name { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard__org-check { margin-inline-start: auto; }
-.dashboard__user-trigger-brand { flex: 1; text-align: start; }
+.dashboard__user-trigger-text { display: grid; flex: 1; min-inline-size: 0; gap: 1px; text-align: start; }
+.dashboard__user-trigger-brand { flex: 1; min-inline-size: 0; text-align: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard__user-trigger-sub {
+  font-size: 11px; font-weight: 400; line-height: 1.25;
+  color: var(--home-ink-muted, var(--text-muted));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dashboard__user-trigger-sub[hidden] { display: none; }
 @media (width > 52rem) {
   .hm-frame__rail .dashboard__user-trigger .dashboard__org-mark { display: grid; }
 }
@@ -386,3 +393,60 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__button--primary):hover:not(:disabled) {
   background: var(--home-onramp-cta-hover); color: var(--home-onramp-cta-ink); border-color: var(--home-onramp-cta-ink);
 }
+
+/* Multi-account switcher (desktop rail popover & phone top bar menu). */
+.dashboard__account-switcher { display: grid; gap: 2px; }
+.hm-account-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.hm-account-row {
+  display: flex; align-items: center; gap: 10px; inline-size: 100%;
+  min-block-size: 44px; padding: 6px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--home-ink); text-align: start; cursor: pointer;
+}
+.hm-account-row:hover { background: var(--home-hover); }
+.hm-account-row:focus-visible { outline: none; box-shadow: var(--home-focus-ring); }
+.hm-account-row--active { background: var(--home-rail-raised); }
+.hm-account-row__avatar {
+  display: inline-grid; place-items: center; flex: none; inline-size: 26px; block-size: 26px;
+  border-radius: 7px; background: var(--home-rail-raised); color: var(--home-accent-text);
+  font-size: 12px; font-weight: 700; line-height: 1;
+}
+.hm-account-row--active .hm-account-row__avatar {
+  background: var(--home-ink); color: var(--home-canvas);
+}
+.hm-account-row__avatar::before { content: attr(data-initials); }
+.hm-account-row__meta { display: grid; flex: 1; min-inline-size: 0; gap: 1px; }
+.hm-account-row__name {
+  font-size: 13px; font-weight: 600; line-height: 1.25; color: var(--home-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hm-account-row__secondary {
+  font-size: 12px; line-height: 1.3; color: var(--home-ink-muted, var(--text-muted));
+  white-space: normal; overflow-wrap: anywhere;
+}
+.hm-account-row__badge {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  padding: 2px 8px; border-radius: 999px; background: var(--home-ink); color: var(--home-canvas);
+  font-size: 11px; font-weight: 600; line-height: 1.3; white-space: nowrap;
+}
+.hm-account-row__current {
+  flex: none; font-size: 11px; font-weight: 600; line-height: 1.3;
+  color: var(--home-accent-text); white-space: nowrap;
+}
+.hm-account-row__expired {
+  flex: none; font-size: 11px; font-weight: 600; line-height: 1.3;
+  color: var(--danger, #b91c1c); white-space: nowrap;
+}
+.hm-menu-item--identified {
+  display: grid; gap: 1px; text-align: start;
+}
+.hm-menu-item__sub {
+  font-size: 12px; font-weight: 400; line-height: 1.3;
+  color: var(--home-ink-muted, var(--text-muted)); overflow-wrap: anywhere;
+}
+[data-user-menu] {
+  max-block-size: calc(100dvh - 5rem); overflow-y: auto; overscroll-behavior: contain;
+}
+.hm-account-add { font-weight: 600; color: var(--home-accent-text); }
+.hm-account-cap { margin: 2px 0; padding: 6px 10px; font-size: 12px; line-height: 1.4; color: var(--home-ink-muted, var(--text-muted)); }
+.dashboard__add-account-body { display: grid; gap: 12px; }
+.dashboard__add-account-otp { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }

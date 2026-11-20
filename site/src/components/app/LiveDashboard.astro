@@ -149,11 +149,19 @@ import "../../styles/kylon-image-viewer.css";
       </div>
 
       <div class="dashboard__auth dashboard__email-sent" data-auth-view="email-sent" hidden>
-        <p class="dashboard__email-sent-title">Check your inbox.</p>
-        <p>
+        <p class="dashboard__email-sent-title" data-email-sent-title>Check your inbox.</p>
+        <p data-email-sent-copy>
           We sent a sign-in link to <strong data-auth-email>your email</strong>. Open it in this
           browser — it brings you straight back here.
         </p>
+        <form class="dashboard__add-account-code-step" method="post" data-signed-out-otp-row hidden>
+          <label for="dashboard-signin-otp">Email sign-in code</label>
+          <input id="dashboard-signin-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required />
+          <div class="dashboard__email-row">
+            <button class="dashboard__button dashboard__button--primary" type="submit" data-signed-out-otp-verify>Verify code</button>
+            <button class="dashboard__button dashboard__button--secondary" type="button" data-signed-out-otp-resend>Send new code</button>
+          </div>
+        </form>
         <button class="dashboard__text-button" type="button" data-use-email>
           Send another link or use a different address
         </button>
@@ -282,7 +290,10 @@ import "../../styles/kylon-image-viewer.css";
               {/* The initials are drawn from the attribute (home/shell.css), not written as text: the button's visible
                   words are then the name alone, which its accessible name contains (WCAG 2.5.3). */}
               <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark data-user-avatar data-initials="U" aria-hidden="true"></span>
-              <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
+              <span class="dashboard__user-trigger-text">
+                <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
+                <span class="dashboard__user-trigger-sub" data-rail-account-email hidden></span>
+              </span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
               </svg>
@@ -297,6 +308,8 @@ import "../../styles/kylon-image-viewer.css";
             >
               <div data-org-menu></div>
               <div class="hm-menu__separator" role="separator"></div>
+              <div class="dashboard__account-switcher" data-account-switcher hidden></div>
+              <div class="hm-menu__separator" role="separator" data-account-switcher-sep hidden></div>
               <p class="dashboard__user-menu-account" data-rail-account>Your account</p>
               <button
                 class="dashboard__theme-toggle"
@@ -311,10 +324,18 @@ import "../../styles/kylon-image-viewer.css";
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-account-agents-open>Your agents</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-password-open hidden>Password</button>
-              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>Sign out other devices</button>
-              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>
+                <span data-signout-others-label>Sign out other devices</span>
+                <span class="hm-menu-item__sub" data-signout-others-sub hidden></span>
+              </button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>
+                <span data-signout-label>Sign out</span>
+                <span class="hm-menu-item__sub" data-signout-sub hidden></span>
+              </button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-all-open hidden>Sign out all accounts on this device</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
+            <p class="visually-hidden" data-account-live role="status" aria-live="polite"></p>
           </div>
 
           <div class="hm-frame__rail-content" data-home-rail-slot></div>
@@ -1182,12 +1203,12 @@ import "../../styles/kylon-image-viewer.css";
     aria-describedby="dashboard-signout-others-description"
   >
     <header class="dashboard__workspace-details-dialog-head">
-      <h2 id="dashboard-signout-others-title">Sign out other devices?</h2>
+      <h2 id="dashboard-signout-others-title" data-signout-others-title>Sign out other devices?</h2>
     </header>
     {/* Which sessions end and which one stays, as two lines: the same facts the one sentence gave. Both lines are
         the dialog's description. */}
     <div class="dashboard__connected-apps-intro dashboard__signout-others-effect" id="dashboard-signout-others-description">
-      <p><strong>Signed out:</strong> every other browser and device signed in to your account. They lose access within an hour.</p>
+      <p><strong>Signed out:</strong> <span data-signout-others-target>every other browser and device signed in to your account.</span> They lose access within an hour.</p>
       <p><strong>Stays signed in:</strong> this one.</p>
     </div>
     <p class="dashboard__connected-apps-status" data-signout-others-status role="status" aria-live="polite"></p>
@@ -1195,6 +1216,83 @@ import "../../styles/kylon-image-viewer.css";
       <button class="dashboard__danger-button" type="button" data-signout-others-confirm>Sign out other devices</button>
       <button class="dashboard__button dashboard__button--secondary" type="button" data-signout-others-cancel>Cancel</button>
     </div>
+  </dialog>
+
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__signout-others-dialog"
+    data-signout-all-dialog
+    role="alertdialog"
+    aria-labelledby="dashboard-signout-all-title"
+    aria-describedby="dashboard-signout-all-description"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-signout-all-title" data-signout-all-title>Sign out all accounts on this device?</h2>
+    </header>
+    <div class="dashboard__connected-apps-intro dashboard__signout-others-effect" id="dashboard-signout-all-description">
+      <p><strong>Signed out:</strong> <span data-signout-all-target>every account signed in to this browser on this device.</span></p>
+      <p><strong>Stays signed in:</strong> your other browsers and devices.</p>
+    </div>
+    <p class="dashboard__connected-apps-status" data-signout-all-status role="status" aria-live="polite"></p>
+    <div class="dashboard__signout-others-actions">
+      <button class="dashboard__danger-button" type="button" data-signout-all-confirm>Sign out all accounts</button>
+      <button class="dashboard__button dashboard__button--secondary" type="button" data-signout-all-cancel>Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__add-account-dialog"
+    data-add-account-dialog
+    aria-labelledby="dashboard-add-account-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-add-account-title">Add account</h2>
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-add-account-close
+        aria-label="Close Add account"
+        title="Close Add account"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="dashboard__add-account-body" data-add-account-entry>
+      <div data-add-account-providers>
+        <ProviderButtons
+          primaryClass="dashboard__button dashboard__button--primary"
+          secondaryClass="dashboard__button dashboard__button--secondary"
+          listClass="dashboard__providers"
+        >
+          <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
+        </ProviderButtons>
+      </div>
+      <form class="dashboard__email" method="post" data-add-account-form>
+        <label for="add-account-email">Email</label>
+        <input id="add-account-email" name="email" type="email" autocomplete="username" inputmode="email" required />
+        <label for="add-account-password">Password</label>
+        <input id="add-account-password" name="password" type="password" autocomplete="current-password" />
+        <p class="dashboard__connected-apps-status" data-add-account-status role="status" aria-live="polite"></p>
+        <div class="dashboard__signout-others-actions">
+          <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-password-submit>Sign in</button>
+          <button class="dashboard__button dashboard__button--secondary" type="button" data-add-account-email-code>Send sign-in code</button>
+        </div>
+      </form>
+    </div>
+    <form class="dashboard__add-account-code-step" method="post" data-add-account-code-step hidden>
+      <p class="dashboard__add-account-code-lead">
+        Enter the sign-in code sent to <strong data-add-account-code-email></strong>.
+      </p>
+      <label for="add-account-otp">Email sign-in code</label>
+      <input id="add-account-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required />
+      <p class="dashboard__connected-apps-status" data-add-account-code-status role="status" aria-live="polite"></p>
+      <div class="dashboard__signout-others-actions">
+        <button class="dashboard__button dashboard__button--primary" type="submit" data-add-account-otp-verify>Verify code</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-add-account-otp-resend>Send new code</button>
+      </div>
+      <button class="dashboard__text-button" type="button" data-add-account-otp-change>Change email</button>
+    </form>
   </dialog>
 
   <dialog data-account-agents-dialog aria-labelledby="dashboard-account-agents-title">
@@ -1306,7 +1404,7 @@ import "../../styles/kylon-image-viewer.css";
   import { createListsChrome } from "../../lib/lists-chrome";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails, catchUpReadOrder,
-    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, overviewNeedsYouTotal, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, directMessages, renameAgent } from "../../lib/commonswarm";
   import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
@@ -1315,10 +1413,10 @@ import "../../styles/kylon-image-viewer.css";
   import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
-  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
+  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
   import type { OversightListOutcome, OversightMessage, OversightPanelState, OversightScopePin } from "../../lib/conversation-oversight";
-  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface } from "../../lib/waiting-panel";
+  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1438,9 +1536,25 @@ import "../../styles/kylon-image-viewer.css";
     signInWithEmail,
     signInWithPassword,
     signInWithProvider,
+    accountManager,
+    bootstrapMultiAccountAuth,
+    currentActiveLogin,
+    InactiveAccountBadgePoller,
+    isMultiAccountEnabled,
+    MAX_SIGNED_IN_ACCOUNTS,
+    onAccountForcedTeardown,
+    onAccountOwnershipChange,
+    onAuthChange,
+    pinAccountContext,
+    setActiveWorkspaceScope,
     signOut,
+    signOutActiveAccount,
+    signOutAllBrowserAccounts,
     signOutEverywhere,
     signOutOtherDevices,
+    verifyEmailOtpSignIn,
+    type AccountRecord,
+    type PinnedAccountContext,
     setPassword,
     sendPasswordCode,
     PasswordCodeRequired,
@@ -2143,6 +2257,10 @@ import "../../styles/kylon-image-viewer.css";
     let pendingWorkspaceId = "";
     let pendingWorkspaceCreate = false;
     let renderedAuthUserId = "";
+    let renderedAuthLoginId = "";
+    let renderedAuthViewGen = -1;
+    let pendingFallbackNotice: string | null = null;
+    let activeImageViewerDialog: HTMLDialogElement | null = null;
     let authReloadQueued = false;
     let authRecoveryActive = false;
     let bootInFlight: Promise<void> | null = null;
@@ -2791,25 +2909,70 @@ import "../../styles/kylon-image-viewer.css";
       if (sampleMode) return null;
       const theme = one<HTMLButtonElement>("[data-theme-toggle]");
       const themeLabel = (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim();
-      const signOut = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const signOutBtn = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
       const apps = one<HTMLButtonElement>("[data-connected-apps-open]");
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof accountManager === "function"
+        ? accountManager()
+        : null;
+      const accounts = multi ? multi.listAccounts() : [];
+      const activeAcct = multi ? multi.activeAccount() : null;
+      const activeRecord = activeAcct
+        ? accounts.find((a) => a.userId === activeAcct.userId && a.loginId === activeAcct.loginId) ?? null
+        : null;
       return {
         organizations: organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId),
         signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
+        ...(multi && accounts.length > 0
+          ? {
+              activeAccountIdentifier: activeRecord?.secondary || activeRecord?.label || undefined,
+              accounts: [
+                ...accounts.map((acct) => ({
+                  userId: acct.userId,
+                  label: acct.label,
+                  secondary: acct.secondary,
+                  initials: initials(acct.label || acct.secondary),
+                  active: Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId),
+                  waitingCount: inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null,
+                  expired: inactiveBadgePoller?.isExpired(acct.userId, acct.loginId) ?? false,
+                })),
+                ...(inactiveBadgePoller?.expiredAccounts() ?? []).map((acct) => ({
+                  userId: acct.userId,
+                  label: acct.label,
+                  secondary: acct.secondary,
+                  initials: initials(acct.label || acct.secondary),
+                  active: false,
+                  waitingCount: null,
+                  expired: true,
+                })),
+              ],
+              canAddAccount: accounts.length < MAX_SIGNED_IN_ACCOUNTS,
+              accountCapNote: accounts.length >= MAX_SIGNED_IN_ACCOUNTS
+                ? `${MAX_SIGNED_IN_ACCOUNTS} of ${MAX_SIGNED_IN_ACCOUNTS} accounts signed in. Sign out of an account to add another.`
+                : undefined,
+              signOutLabel: "Sign out on this device",
+              signOutAllCount: accounts.length >= 2 ? accounts.length : 0,
+            }
+          : {}),
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
         yourAgents: !!session,
         password: !!session && !sampleMode,
         signOutOthers: !!session && !sampleMode,
-        signOut: !!signOut && !signOut.hidden,
+        signOut: !!signOutBtn && !signOutBtn.hidden,
       };
     };
     const accountMenuAction = (action: AccountMenuAction): void => {
-      if (typeof action === "object") { void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push"); }
+      if (typeof action === "object") {
+        if (action.kind === "switch-account") { void switchToAccount(action.userId, "phone"); return; }
+        if (action.kind === "reauth-account") { openAddAccountDialog(action.email, "Your session expired. Sign in again.", "phone"); return; }
+        void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push");
+      }
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
       else if (action === "sign-out-others") one<HTMLButtonElement>("[data-signout-others-open]")?.click();
+      else if (action === "sign-out-all") openSignOutAllDialog("phone");
+      else if (action === "add-account") openAddAccountDialog("", "", "phone");
       else if (action === "password") one<HTMLButtonElement>("[data-password-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
@@ -2931,7 +3094,11 @@ import "../../styles/kylon-image-viewer.css";
       const password = one<HTMLInputElement>("#dashboard-password");
       if (password) password.disabled = entry === "create";
       const emailLink = one<HTMLButtonElement>("[data-email-link]");
-      if (emailLink) emailLink.textContent = copy.emailLink;
+      if (emailLink) {
+        emailLink.textContent = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
+          ? "Send sign-in code"
+          : copy.emailLink;
+      }
       const other = one<HTMLAnchorElement>("[data-auth-entry-switch]");
       if (other) { other.textContent = copy.otherLabel; other.href = copy.otherHref; }
     };
@@ -3120,8 +3287,9 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
-    const roster = async (workspaceId: string): Promise<Agent[]> => {
-      const api = client();
+    const roster = async (workspaceId: string, pinned?: PinnedAccountContext | null): Promise<Agent[]> => {
+      if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+      const api = pinned ? pinned.runtime.client : client();
       if (!api) throw new NoDeployment();
       const pageSize = 200;
       const result: Agent[] = [];
@@ -3196,8 +3364,10 @@ import "../../styles/kylon-image-viewer.css";
 
     const memberRoster = async (
       workspaceId: string,
+      pinned?: PinnedAccountContext | null,
     ): Promise<{ names: Map<string, string>; members: Member[] }> => {
-      const api = client();
+      if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
+      const api = pinned ? pinned.runtime.client : client();
       if (!api) throw new NoDeployment();
       const { data, error, status } = await api
         .schema("swarm_read")
@@ -4883,6 +5053,11 @@ import "../../styles/kylon-image-viewer.css";
       syncComposerControls();
     };
 
+    let bootGeneration = 0;
+    let pendingSwitchFocusReturn = false;
+    let lastAccountDialogOpener: "phone" | "desktop" | null = null;
+    let lastAccountDialogTrigger: HTMLElement | null = null;
+
     const focusComposerOnEntry = (): void => {
       if (
         !activeWorkspaceId ||
@@ -4890,7 +5065,21 @@ import "../../styles/kylon-image-viewer.css";
         window.matchMedia("(max-width: 52rem)").matches
       ) return;
       focusedComposerWorkspaceId = activeWorkspaceId;
+      if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
+      const onAccountControl = (): boolean => {
+        const active = document.activeElement;
+        return Boolean(
+          active &&
+          typeof (active as Element).closest === "function" &&
+          (active as Element).closest(
+            '[data-user-menu-root], [data-user-menu-trigger], button[aria-label="Open navigation"], .cs-kylon-workspace-menu, .hm-phone-bar .hm-menu',
+          ),
+        );
+      };
+      if (onAccountControl()) return;
       window.requestAnimationFrame(() => {
+        if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
+        if (onAccountControl()) return;
         one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
       });
     };
@@ -5297,8 +5486,8 @@ import "../../styles/kylon-image-viewer.css";
     const homeTodoContext = (): HomeTodoContext => ({ workspaceId: activeWorkspaceId, people: currentHomePeople(), viewerId: homeViewerId(),
       editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails, tagDelivers: true });
     const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
-    const homeServer = (): HomeServer | null => {
-      if (!sampleMode) return session ? createHomeServer(session) : null;
+    const homeServer = (pinned?: PinnedAccountContext | null): HomeServer | null => {
+      if (!sampleMode) return session ? createHomeServer(session, {}, pinned) : null;
       // Fixture data uses this sample workspace's identities. This adapter is never used by a signed-in workspace.
       const replacements = new Map<string, string>([[IDS.workspaces.home, activeWorkspaceId], [IDS.users.tom, homeViewerId() ?? "sample-owner"]]);
       const own = agents.filter(agent => agent.ownerUserId === homeViewerId());
@@ -6115,9 +6304,9 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       }
     };
-    const showWaitingSent = (): void => {
+    const showWaitingStatus = (message: string): void => {
       window.clearTimeout(waitingStatusTimer);
-      waitingStatusMessage = "Sent";
+      waitingStatusMessage = message;
       waitingStatusSeq += 1;
       waitingStatusTimer = window.setTimeout(() => {
         waitingStatusTimer = undefined;
@@ -6125,7 +6314,9 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       }, 5_000);
     };
+    const showWaitingSent = (): void => showWaitingStatus("Sent");
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
     const waitingPanelTruncatedWorkspaces = new Set<string>();
@@ -6134,6 +6325,9 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+    type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
+    const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
+    const waitingTodoErrors = new Map<string, string>();
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -6201,6 +6395,207 @@ import "../../styles/kylon-image-viewer.css";
       return items;
     };
 
+    const allWaitingTodoItems = (): WaitingTodoItem[] => {
+      const items: WaitingTodoItem[] = [];
+      for (const workspace of workspaces) {
+        for (const todo of waitingPanelTodos.get(workspace.id) ?? []) {
+          const error = waitingTodoErrors.get(todo.id);
+          const pending = waitingTodoTickets.has(todo.id);
+          items.push({
+            ...todo,
+            ...(pending ? { pending: true as const } : {}),
+            ...(error ? { error, retryable: true as const } : {}),
+          });
+        }
+      }
+      return items;
+    };
+
+    const waitingTodoChannelLabel = (
+      workspaceId: string,
+      placement: "channel" | "general" | "workspace",
+      channelId: string | null,
+    ): string => {
+      if (placement === "general") return "#general";
+      if (placement === "channel" && channelId) {
+        const slug = workspaceId === activeWorkspaceId
+          ? channels.find(ch => ch.channelId === channelId)?.slug
+          : waitingWorkspaceChannels.get(workspaceId)?.get(channelId);
+        return slug ? `#${slug}` : "";
+      }
+      return "";
+    };
+
+    const mapWaitingTodosQueue = (queue: WaitingTodosQueue, workspace: Workspace): WaitingTodoItem[] =>
+      queue.todos.map(todo => ({
+        id: todo.todo_id,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        title: todo.title,
+        state: todo.state,
+        dueOn: todo.due_on ?? null,
+        reason: todo.reason,
+        href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
+        canMarkDone: todo.reason === "assigned",
+        placement: todo.placement,
+        channelId: todo.channel_id,
+        channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement, todo.channel_id),
+      }));
+
+    const extractWaitingTodos = (
+      row: { needs_you: { assigned: ReadonlyArray<{ todo_id: string; title: string; state: string; due_on: string | null }>; waiting: ReadonlyArray<{ todo_id: string; title: string; state: string; due_on: string | null; reason: "request" | "after" | "hold" | "agent_removed" }> } },
+      workspace: Workspace,
+    ): WaitingTodoItem[] => {
+      const byId = new Map<string, WaitingTodoItem>();
+      const order: string[] = [];
+      for (const todo of row.needs_you.assigned) {
+        if (todo.state === "done" || todo.state === "dropped") continue;
+        byId.set(todo.todo_id, {
+          id: todo.todo_id,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          title: todo.title,
+          state: todo.state === "doing" ? "doing" : "open",
+          dueOn: todo.due_on ?? null,
+          reason: "assigned",
+          href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
+          canMarkDone: true,
+          placement: "workspace",
+          channelId: null,
+          channelLabel: "",
+        });
+        order.push(todo.todo_id);
+      }
+      for (const todo of row.needs_you.waiting) {
+        if (todo.state === "done" || todo.state === "dropped") continue;
+        const existing = byId.get(todo.todo_id);
+        const item: WaitingTodoItem = {
+          id: todo.todo_id,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          title: todo.title,
+          state: todo.state === "doing" ? "doing" : "open",
+          dueOn: todo.due_on ?? null,
+          reason: todo.reason,
+          href: routeHref({ view: "todo", workspaceId: workspace.id, todoId: todo.todo_id }),
+          canMarkDone: false,
+          placement: "workspace",
+          channelId: null,
+          channelLabel: "",
+        };
+        if (!existing) {
+          byId.set(todo.todo_id, item);
+          order.push(todo.todo_id);
+        } else if (todo.reason === "request") {
+          // Mirrors home-map.ts pushNeed: a pending request replaces the assignment card so each to-do counts once.
+          byId.set(todo.todo_id, item);
+        }
+      }
+      return order.map(id => byId.get(id)!).filter(Boolean);
+    };
+
+    const markWaitingTodoDone = async (item: WaitingTodoItem): Promise<void> => {
+      const server = homeServer();
+      const viewer = homeViewerId();
+      if (!server || !viewer || waitingTodoTickets.has(item.id)) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      const prevCardIndex = panelBefore
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+            .findIndex(el => el.dataset.waitingTodo === item.id)
+        : -1;
+      const ticket: WaitingTodoTicket = { viewer, workspaceId: item.workspaceId, todoId: item.id };
+      waitingTodoTickets.set(item.id, ticket);
+      waitingTodoErrors.delete(item.id);
+      renderWaitingPanelView();
+      if (hadPanelFocus && waitingPanelMod && waitingSurface?.isOpen()) {
+        const savingPanel = one<HTMLElement>("[data-waiting-panel]");
+        if (savingPanel && (!document.activeElement || document.activeElement === document.body)) {
+          waitingPanelMod.focusWaitingPanelAfterAction(savingPanel, { kind: "retry-todo", todoId: item.id });
+        }
+      }
+      let ok = false;
+      let errorMessage = TODO_SAVE_FAILED;
+      try {
+        let baseVersion: number | null = null;
+        if (item.workspaceId === activeWorkspaceId) {
+          const cached = homeTodoRead?.todo.todo_id === item.id
+            ? homeTodoRead.todo
+            : homeTodoRows.find(row => row.todo_id === item.id);
+          if (cached) baseVersion = cached.version;
+        }
+        if (baseVersion === null) {
+          const read = await server.readTodo(item.workspaceId, item.id);
+          if (read.todo.state === "done" || read.todo.state === "dropped") {
+            ok = true;
+          } else {
+            baseVersion = read.todo.version;
+          }
+        }
+        if (!ok && baseVersion !== null) {
+          let result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: baseVersion, state: "done" }, uuid());
+          if (result.status === "conflict") {
+            const current = result.current;
+            if (current.state === "done" || current.state === "dropped") {
+              ok = true;
+            } else {
+              result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: current.version, state: "done" }, uuid());
+            }
+          }
+          if (!ok) {
+            if (result.status === "committed") {
+              ok = true;
+            } else if (result.status === "refused") {
+              errorMessage = homeRefusalCopy(result.reason);
+            }
+          }
+        }
+      } catch (error) {
+        errorMessage = error instanceof CommandOutcomeUnknown
+          ? TODO_RESULT_UNKNOWN
+          : error instanceof HomeCommandRefused
+            ? homeRefusalCopy(error.reason)
+            : TODO_SAVE_FAILED;
+      }
+      if (waitingTodoTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      waitingTodoTickets.delete(item.id);
+      const canRestoreFocus = (): HTMLElement | null => {
+        if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (!panelNow) return null;
+        if (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement)) {
+          return panelNow;
+        }
+        return null;
+      };
+      if (ok) {
+        waitingTodoErrors.delete(item.id);
+        const list = waitingPanelTodos.get(item.workspaceId);
+        if (list) waitingPanelTodos.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+        const prevCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+        showWaitingStatus("Done");
+        renderWaitingPanelView();
+        const focusTargetPanel = canRestoreFocus();
+        if (focusTargetPanel) {
+          waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "completed-todo", prevIndex: prevCardIndex });
+        }
+        renderHomeRail();
+        if (item.workspaceId === activeWorkspaceId) {
+          homeTodoRows = homeTodoRows.map(row => row.todo_id === item.id ? { ...row, state: "done" } : row);
+          if (homeRoute.view === "todos" || homeRoute.view === "todo") renderHomeObjectPane();
+        }
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingTodoErrors.set(item.id, errorMessage);
+      renderWaitingPanelView();
+      const focusTargetPanel = canRestoreFocus();
+      if (focusTargetPanel) {
+        waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "retry-todo", todoId: item.id });
+      }
+    };
+
     type WaitingPanelModule = typeof import("../../lib/waiting-panel");
     let waitingPanelMod: WaitingPanelModule | null = null;
     let waitingPanelModPromise: Promise<WaitingPanelModule> | null = null;
@@ -6246,6 +6641,12 @@ import "../../styles/kylon-image-viewer.css";
     const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
       if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      const prevCardIndex = panelBefore
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+            .findIndex(el => el.dataset.waitingCard === item.id)
+        : -1;
       const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
       waitingPanelTickets.set(item.id, ticket);
       waitingPanelErrors.delete(item.id);
@@ -6269,6 +6670,11 @@ import "../../styles/kylon-image-viewer.css";
         if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
         showWaitingSent();
         renderWaitingPanelView();
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()
+          && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "completed-ask", prevIndex: prevCardIndex });
+        }
         renderHomeRail();
         if (item.workspaceId === activeWorkspaceId) {
           const current = choiceRows.get(item.id);
@@ -6299,6 +6705,7 @@ import "../../styles/kylon-image-viewer.css";
       if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
       const place = currentWaitingPlace();
       const allItems = allWaitingAskItems();
+      const allTodos = allWaitingTodoItems();
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
       const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
@@ -6308,7 +6715,10 @@ import "../../styles/kylon-image-viewer.css";
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const channelTodos = waitingPanelMod.filterWaitingTodos(allTodos, "channel", place);
+      const workspaceTodos = waitingPanelMod.filterWaitingTodos(allTodos, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const visibleTodos = waitingScope === "channel" ? channelTodos : waitingScope === "workspace" ? workspaceTodos : allTodos;
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
@@ -6318,10 +6728,11 @@ import "../../styles/kylon-image-viewer.css";
           scope: waitingScope,
           place,
           items: visibleItems,
+          todos: visibleTodos,
           counts: {
-            channel: { min: channelItems.length, complete: wsLoaded },
-            workspace: { min: workspaceItems.length, complete: wsLoaded },
-            all: { min: allItems.length, complete: allLoaded },
+            channel: { min: channelItems.length + channelTodos.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length + workspaceTodos.length, complete: wsLoaded },
+            all: { min: allItems.length + allTodos.length, complete: allLoaded },
           },
           loading: waitingInFlight && !complete && !truncated,
           complete,
@@ -6352,6 +6763,13 @@ import "../../styles/kylon-image-viewer.css";
           },
           onDraftChoice: (item, draft) => {
             choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
+          },
+          onMarkTodoDone: (item) => void markWaitingTodoDone(item),
+          onRetryTodo: (item) => void markWaitingTodoDone(item),
+          onOpenTodo: (item) => {
+            clearWaitingStatus();
+            if (waitingSurface?.isPhone()) waitingSurface.close(false);
+            navigateHomeHref(item.href);
           },
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
@@ -6424,12 +6842,15 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingPanelViewer !== viewer) {
         waitingPanelViewer = viewer;
         waitingPanelAsks.clear();
+        waitingPanelTodos.clear();
         waitingPanelLoadedWorkspaces.clear();
         waitingPanelFailedWorkspaces.clear();
         waitingPanelTruncatedWorkspaces.clear();
         waitingPanelTickets.clear();
         waitingPanelErrors.clear();
         waitingPanelLastSubmissions.clear();
+        waitingTodoTickets.clear();
+        waitingTodoErrors.clear();
         waitingWorkspaceChannels.clear();
         waitingPanelOverviewFailed = false;
       }
@@ -6451,13 +6872,14 @@ import "../../styles/kylon-image-viewer.css";
             counted.set(workspace.id, null);
             waitingPanelFailedWorkspaces.add(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
-          } else if (row.needs_you.asks.length > 0) {
+          } else if (row.needs_you.asks.length > 0 || row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0) {
             counted.set(workspace.id, null);
             toRead.push(workspace);
           } else {
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
+            waitingPanelTodos.set(workspace.id, []);
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
@@ -6469,9 +6891,13 @@ import "../../styles/kylon-image-viewer.css";
         await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
           for (;;) {
             const workspace = toRead[next++]; if (!workspace) return;
-            const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
-            // A queue that cannot be read leaves its workspace uncounted, even if it was counted before: the overview
-            // says something is waiting there and this read cannot say how much.
+            const row = rows.get(workspace.id)!;
+            const hasAsks = row.needs_you.asks.length > 0;
+            const hasTodos = row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0;
+
+            let queue: DecisionQueue | null = hasAsks
+              ? await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null)
+              : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
             if (!queue) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
@@ -6492,7 +6918,6 @@ import "../../styles/kylon-image-viewer.css";
             }
             const choicesMap = new Map(choices.map(choice => [choice.signalId, choice]));
             const detail = detailOf(workspace, queue, choicesMap);
-            counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
 
             const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
             const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
@@ -6548,8 +6973,27 @@ import "../../styles/kylon-image-viewer.css";
               if (conv.kind === "unknown") anyUnknownLocation = true;
               classified.set(item.id, conv);
             }
-            const hasNamedChannel = [...classified.values()].some(conv => conv.kind === "channel");
-            if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
+
+            // Paginated waiting/assigned to-dos read (reaches item 21+ and carries authoritative channel placement).
+            let todosQueue: WaitingTodosQueue | null = null;
+            let todosFallback = false;
+            let todosReadFailed = false;
+            if (hasTodos) {
+              try {
+                todosQueue = await homeServer()?.waitingTodos(workspace.id) ?? null;
+                if (!todosQueue) todosReadFailed = true;
+              } catch (err) {
+                if (err instanceof HomeToolsUnavailable) {
+                  todosFallback = true;
+                } else {
+                  todosReadFailed = true;
+                }
+              }
+            }
+
+            const hasNamedAskChannel = [...classified.values()].some(conv => conv.kind === "channel");
+            const hasNamedTodoChannel = Boolean(todosQueue?.todos.some(todo => todo.placement === "channel" && todo.channel_id));
+            if ((hasNamedAskChannel || hasNamedTodoChannel) && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
               const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
@@ -6575,20 +7019,43 @@ import "../../styles/kylon-image-viewer.css";
                 choices: { options: item.choices.options, multi: item.choices.multi },
               }];
             });
+            let panelTodos: WaitingTodoItem[] = [];
+            let todosTruncated = false;
+            if (!hasTodos) {
+              panelTodos = [];
+            } else if (todosQueue) {
+              panelTodos = mapWaitingTodosQueue(todosQueue, workspace);
+              todosTruncated = todosQueue.truncated || todosQueue.todos.length < todosQueue.total;
+            } else if (todosFallback) {
+              panelTodos = extractWaitingTodos(row, workspace);
+              // home_overview caps assigned and waiting at 20 each: never claim a complete count when at the cap.
+              todosTruncated = row.needs_you.assigned.length >= 20 || row.needs_you.waiting.length >= 20;
+            }
             if (!live()) return;
             waitingPanelAsks.set(workspace.id, panelItems);
+            if (!todosReadFailed) waitingPanelTodos.set(workspace.id, panelTodos);
             const queueTruncated = queue.truncated || queue.asks.length < queue.total;
-            if (queueTruncated) waitingPanelTruncatedWorkspaces.add(workspace.id);
+            const anyTruncated = queueTruncated || todosTruncated;
+            const anyFailed = anyUnknownLocation || todosReadFailed;
+            if (anyTruncated) waitingPanelTruncatedWorkspaces.add(workspace.id);
             else waitingPanelTruncatedWorkspaces.delete(workspace.id);
-            if (anyUnknownLocation || queueTruncated) {
+            if (anyFailed || anyTruncated) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
             } else {
               waitingPanelLoadedWorkspaces.add(workspace.id);
             }
-            if (anyUnknownLocation) {
+            if (anyFailed) {
               waitingPanelFailedWorkspaces.add(workspace.id);
             } else {
               waitingPanelFailedWorkspaces.delete(workspace.id);
+            }
+            if (anyFailed || (todosFallback && todosTruncated)) {
+              counted.set(workspace.id, null);
+            } else {
+              const overviewTodoCount = detail.needsYou.filter(item => item.kind === "todo" || item.kind === "request").length;
+              const baseCount = homeNeedsYouCount({ workspace, state: "ready", detail });
+              const knownTodoTotal = todosQueue ? todosQueue.total : panelTodos.length;
+              counted.set(workspace.id, Math.max(0, baseCount - overviewTodoCount + knownTodoTotal));
             }
             if (workspace.id === activeWorkspaceId) renderWaitingPanelView();
           }
@@ -6633,7 +7100,26 @@ import "../../styles/kylon-image-viewer.css";
       if (name) name.textContent = viewerLabel;
       const mark = one<HTMLElement>("[data-org-mark]");
       if (mark) { mark.dataset.initials = avatarMark; mark.textContent = ""; }
-      one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${viewerLabel}, profile and account settings`);
+      const triggerEl = one<HTMLElement>("[data-user-menu-trigger]");
+      const activeEmail = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !sampleMode
+        ? (session?.user.email ?? "")
+        : "";
+      const triggerIdentity = activeEmail && activeEmail !== viewerLabel ? `${viewerLabel} (${activeEmail})` : viewerLabel;
+      triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
+      if (triggerEl) {
+        if (activeEmail) triggerEl.title = triggerIdentity;
+        else triggerEl.removeAttribute("title");
+      }
+      const triggerEmailSub = one<HTMLElement>("[data-rail-account-email]");
+      if (triggerEmailSub) {
+        if (activeEmail && activeEmail !== viewerLabel) {
+          triggerEmailSub.textContent = activeEmail;
+          triggerEmailSub.hidden = false;
+        } else {
+          triggerEmailSub.textContent = "";
+          triggerEmailSub.hidden = true;
+        }
+      }
       const orgSlot = one<HTMLElement>("[data-org-menu]");
       const orgKey = JSON.stringify(orgs);
       if (orgSlot && orgSlot.dataset.orgKey !== orgKey) {
@@ -7159,7 +7645,15 @@ import "../../styles/kylon-image-viewer.css";
       catchUpChoiceTickets.clear();
       catchUpChoiceErrors.clear();
       const viewer = homeViewerId();
-      const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
+      // C2: Carry ONE account pin across the entire Home Catch-up overview + workspace fan-out!
+      const catchUpPin = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session
+        ? pinAccountContext({ userId: session.user.id })
+        : null;
+      const live = () =>
+        generation === catchUpGeneration &&
+        homeRoute.view === "catchup" &&
+        homeViewerId() === viewer &&
+        (!catchUpPin || catchUpPin.isCurrent());
       catchUpExpanded = false;
       catchUpData = initialCatchUpData(workspaces);
       for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, null);
@@ -7167,8 +7661,9 @@ import "../../styles/kylon-image-viewer.css";
       if (sampleMode) {
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "open" })); renderHomeCatchUp(); return;
       }
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !catchUpPin) return;
       let overview;
-      try { overview = await homeOverview(); }
+      try { overview = await homeOverview(catchUpPin?.runtime); }
       catch {
         if (!live()) return;
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "failed" }));
@@ -7181,6 +7676,7 @@ import "../../styles/kylon-image-viewer.css";
         renderHomeCatchUp();
       }
       await fillCatchUpDetails(catchUpReadOrder(catchUpData, overview), async workspace => {
+        if (!live()) throw new AuthRecoveryRequired();
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
         // A workspace the overview left out has had none of its questions read. It stays "could not be checked": the
         // compatibility reads below know nothing of what waits there and would otherwise call it checked.
@@ -7189,19 +7685,27 @@ import "../../styles/kylon-image-viewer.css";
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
           // Waiting on you: the decision queue lists every open ask, oldest first, with its body. If it can't be read, the
           // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
-          const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
-          const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
+          const queue = await Promise.resolve().then(() => homeServer(catchUpPin)?.decisionQueue(workspace.id) ?? null).catch(() => null);
+          if (!live()) throw new AuthRecoveryRequired();
+          const latest = await feed(workspace.id, 50, catchUpPin).catch(() => [] as Signal[]);
+          if (!live()) throw new AuthRecoveryRequired();
           // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
           const askIds = (queue?.asks ?? []).map(ask => ask.signal_id);
-          const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
+          const choices = askIds.length ? await askChoices(workspace.id, askIds, catchUpPin).catch(() => null) : null;
+          if (!live()) throw new AuthRecoveryRequired();
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
             new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
-          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, signalPage),
-          homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
+          memberRoster(workspace.id, catchUpPin),
+          roster(workspace.id, catchUpPin),
+          agentAccessStatuses(workspace.id, undefined, catchUpPin),
+          feed(workspace.id, signalPage, catchUpPin),
+          homeWorkingOn(workspace.id, catchUpPin),
+          workspaceFiles(workspace.id, catchUpPin).then(value => homeFileCount(value), () => null),
         ]);
+        if (!live()) throw new AuthRecoveryRequired();
         // Page length is not an answer check: the read hides the viewer's own directed replies.
         return { people: mapHomePeople({ workspaceId: workspace.id, viewerId: viewer, members: nextMembers.members, agents: nextAgents,
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
@@ -7290,6 +7794,7 @@ import "../../styles/kylon-image-viewer.css";
       // home-map.ts has no label for this route yet; the page names itself.
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
+        if (typeof pendingSwitchFocusReturn !== "undefined" && pendingSwitchFocusReturn) return;
         if (one<HTMLDialogElement>("[data-roster-dialog]")?.open) return;
         // Allow's settled access render owns focus, including while consent is being completed.
         if (homeRoute.view === "lists" && listsAllowLanding) return;
@@ -7594,12 +8099,18 @@ import "../../styles/kylon-image-viewer.css";
           state.notice = "Choose a future end date."; update(); date.focus(); return;
         }
         const desired = parsed === null ? null : new Date(parsed).toISOString();
+        const expiryPin = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()
+          ? pinAccountContext({ userId: ownerSession.user.id })
+          : null;
+        if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!expiryPin || !expiryPin.isCurrent())) {
+          return;
+        }
         state.busy = true; state.notice = "Saving end date…"; update();
         // Even an unknown command outcome is reconciled by reading; never remint or send again here.
         let writeError: unknown = null;
-        try { await setConnectionExpiry(ownerSession, options.workspaceId, options.kind, options.grantId, desired); }
+        try { await setConnectionExpiry(ownerSession, options.workspaceId, options.kind, options.grantId, desired, undefined, expiryPin); }
         catch (error) { writeError = error; }
-        if (!options.isCurrent()) {
+        if (!options.isCurrent() || (expiryPin && !expiryPin.isCurrent())) {
           state.busy = false; state.needsCheck = true;
           state.notice = "Check the saved end date before saving again.";
           if (session?.user.id === ownerSession.user.id) refreshConnectionDateViews();
@@ -7679,6 +8190,7 @@ import "../../styles/kylon-image-viewer.css";
       | { phase: "loaded"; grants: SeatAdminGrantRow[] } = { phase: "idle" };
     let seatAdminOrganizations: Organization[] = [];
     let pendingSeatAdminReauthNotice = false;
+    let pendingForcedNotice: string | null = null;
     // The account whose password change is signing it out; the signed-out view then asks it to sign
     // in again. Cleared as soon as any account is signed in, or by Sign out.
     let passwordChangeNotice: { userId: string; email: string } | null = null;
@@ -8273,6 +8785,24 @@ import "../../styles/kylon-image-viewer.css";
         signIn: async draft => {
           if (!session || session.user.id.toLowerCase() !== ownerUserId) return;
           const userEmail = session.user.email ?? "";
+          // C5: Require the exact rendered { userId, loginId } pair. Never fall back to
+          // ambient currentActiveLogin(), which may already have shifted to Account B!
+          const ownerRenderedUserId = renderedAuthUserId;
+          const ownerLoginId = renderedAuthLoginId;
+          if (isMultiAccountEnabled()) {
+            const exactPinValid =
+              Boolean(ownerRenderedUserId && ownerLoginId) &&
+              ownerRenderedUserId.toLowerCase() === ownerUserId &&
+              ownerRenderedUserId === session.user.id;
+            if (!exactPinValid) {
+              disposeSeatAdminDialog();
+              const refused = await signOutActiveAccount(null);
+              renderAccountSwitcher();
+              if (refused?.notice) pendingFallbackNotice = refused.notice;
+              if (!authReloadQueued) runBoot();
+              return;
+            }
+          }
           saveSeatAdminReauthIntent({
             userId: ownerUserId,
             workspaceId: ownerWorkspaceId,
@@ -8288,9 +8818,28 @@ import "../../styles/kylon-image-viewer.css";
           requestVersion += 1;
           householdDashboard?.clear();
           renderedAuthUserId = "";
+          renderedAuthLoginId = "";
+          renderedAuthViewGen = -1;
           resetWorkspaceSessionState();
-          await client()?.auth.signOut({ scope: "local" });
-          session = null;
+          if (isMultiAccountEnabled()) {
+            const signOutRes = await signOutActiveAccount({
+              userId: ownerRenderedUserId,
+              loginId: ownerLoginId,
+            });
+            clearPerUserPrivateConvenienceKeys(ownerUserId);
+            inactiveBadgePoller?.prune();
+            session = null;
+            renderAccountSwitcher();
+            if (signOutRes?.nextActive) {
+              if (signOutRes.notice) pendingFallbackNotice = signOutRes.notice;
+              if (!authReloadQueued) runBoot();
+              openAddAccountDialog(userEmail, "Sign in again to confirm agent admin access.");
+              return;
+            }
+          } else {
+            await client()?.auth.signOut({ scope: "local" });
+            session = null;
+          }
           showAuthView("choices");
           showPanel("signed-out");
           const emailInput = one<HTMLInputElement>("#dashboard-email");
@@ -10968,15 +11517,31 @@ import "../../styles/kylon-image-viewer.css";
     const freshAttachmentDownload = async (
       fileId: string,
       version: number,
+      pinnedOverride?: PinnedAccountContext | null,
+      workspaceOverride?: string,
     ) => {
-      if (!session || !activeWorkspaceId) throw new SessionExpired();
-      return fileDownloadUrl(
-        session,
+      const dlSession = session;
+      const dlWorkspaceId = workspaceOverride ?? activeWorkspaceId;
+      if (!dlSession || !dlWorkspaceId) throw new SessionExpired();
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const dlPin = multi
+        ? (pinnedOverride ?? pinAccountContext({ userId: dlSession.user.id, workspaceId: dlWorkspaceId }))
+        : null;
+      if (multi && (!dlPin || !dlPin.isCurrent(dlWorkspaceId))) {
+        throw new AuthRecoveryRequired();
+      }
+      const signed = await fileDownloadUrl(
+        dlSession,
         uuid(),
-        activeWorkspaceId,
+        dlWorkspaceId,
         fileId,
         version,
+        dlPin,
       );
+      if (dlPin && !dlPin.isCurrent(dlWorkspaceId)) {
+        throw new AuthRecoveryRequired();
+      }
+      return signed;
     };
 
     /**
@@ -11020,18 +11585,28 @@ import "../../styles/kylon-image-viewer.css";
         fetched = true;
         show("loading");
         const signedAt = Date.now();
+        const previewWorkspaceId = activeWorkspaceId;
+        const previewPin =
+          typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session && previewWorkspaceId
+            ? pinAccountContext({ userId: session.user.id, workspaceId: previewWorkspaceId })
+            : null;
         try {
+          if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!previewPin || !previewPin.isCurrent(previewWorkspaceId))) {
+            return;
+          }
           const signed = await freshAttachmentDownload(
             attachment.file_id,
             attachment.version_n,
+            previewPin,
+            previewWorkspaceId,
           );
-          if (!image.isConnected) return;
+          if (!image.isConnected || (previewPin && !previewPin.isCurrent(previewWorkspaceId))) return;
           attachmentPreviewUrls.remember(
             attachment.file_id, attachment.version_n, signed, signedAt,
           );
           image.src = signed.url;
         } catch {
-          if (image.isConnected) unavailable();
+          if (image.isConnected && (!previewPin || previewPin.isCurrent(previewWorkspaceId))) unavailable();
         } finally {
           signing = false;
         }
@@ -11096,6 +11671,13 @@ import "../../styles/kylon-image-viewer.css";
     const openChatPicture = (attachment: { file_id: string; version_n: number; name: string }, trigger: HTMLElement): void => {
       if (chatPictureOpening || document.querySelector("dialog[open]")) return;
       const openedFeed = feedIdentity();
+      const viewerWorkspaceId = typeof activeWorkspaceId === "string" ? activeWorkspaceId : "";
+      const viewerPin =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof session !== "undefined" && session && viewerWorkspaceId
+          ? pinAccountContext({ userId: session.user.id, workspaceId: viewerWorkspaceId })
+          : null;
+      const viewerStillCurrent = (): boolean =>
+        feedIdentity() === openedFeed && (!viewerPin || viewerPin.isCurrent(viewerWorkspaceId));
       const signalId = trigger.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "";
       const slot = trigger.parentElement;
       slot?.querySelector("[data-picture-open-failed]")?.remove();
@@ -11108,29 +11690,40 @@ import "../../styles/kylon-image-viewer.css";
         : { fileId: link.dataset.streamImage ?? "", version: Number(link.dataset.streamImageVersion), name: link.title });
       chatPictureOpening = true;
       void loadImageViewer().then(({ openImageViewer }) => {
-        // Another dialog (e.g. People) or a navigation may have arrived while the viewer module was loading.
-        if (document.querySelector("dialog[open]") || feedIdentity() !== openedFeed) return;
-        openImageViewer(app, files.map(({ fileId, version, name }) => ({
+        // Another dialog (e.g. People) or a navigation/account switch may have arrived while the viewer module was loading.
+        if (document.querySelector("dialog[open]") || !viewerStillCurrent()) return;
+        const viewerDialog = openImageViewer(app, files.map(({ fileId, version, name }) => ({
           name,
           link: async () => {
+            if (!viewerStillCurrent()) throw new AuthRecoveryRequired();
             const cached = attachmentPreviewUrls.get(fileId, version, Date.now());
             if (cached) return cached;
             const signedAt = Date.now();
-            const signed = await freshAttachmentDownload(fileId, version);
+            const signed = await freshAttachmentDownload(fileId, version, viewerPin, viewerWorkspaceId);
+            if (!viewerStillCurrent()) throw new AuthRecoveryRequired();
             attachmentPreviewUrls.remember(fileId, version, signed, signedAt);
             return signed.url;
           },
           forget: () => attachmentPreviewUrls.forget(fileId, version),
           download: () => {
-            void freshAttachmentDownload(fileId, version).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error"));
+            if (!viewerStillCurrent()) return;
+            void freshAttachmentDownload(fileId, version, viewerPin, viewerWorkspaceId).then(
+              signed => { if (viewerStillCurrent()) window.location.assign(signed.url); },
+              error => { if (viewerStillCurrent()) setComposerStatus(readableError(error), "error"); },
+            );
           },
         })), Math.max(0, at), (shown) => {
+          if (typeof activeImageViewerDialog !== "undefined" && activeImageViewerDialog === viewerDialog) {
+            activeImageViewerDialog = null;
+          }
+          if (!viewerStillCurrent()) return;
           // Focus goes back to the picture last shown: its own link, or the same picture in its new row after a redraw.
           const link = at < 0 ? trigger : links[shown] ?? trigger;
           const back = link.isConnected ? link
             : one<HTMLElement>(`.dashboard__message[data-signal-id="${CSS.escape(signalId)}"] [data-stream-image="${CSS.escape(files[shown]?.fileId ?? attachment.file_id)}"]`);
           back?.focus({ preventScroll: true });
         });
+        if (typeof activeImageViewerDialog !== "undefined") activeImageViewerDialog = viewerDialog;
       }, () => {
         if (!slot || !trigger.isConnected || feedIdentity() !== openedFeed) return;
         const note = document.createElement("span");
@@ -11176,16 +11769,30 @@ import "../../styles/kylon-image-viewer.css";
         download.className = "dashboard__attachment-download";
         download.textContent = "Download";
         download.addEventListener("click", async () => {
+          const dlWorkspaceId = activeWorkspaceId;
+          const dlPin =
+            typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session && dlWorkspaceId
+              ? pinAccountContext({ userId: session.user.id, workspaceId: dlWorkspaceId })
+              : null;
+          if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && (!dlPin || !dlPin.isCurrent(dlWorkspaceId))) {
+            return;
+          }
           download.disabled = true;
           const oldLabel = download.textContent;
           download.textContent = "Getting link…";
           try {
-            window.location.assign((await freshAttachmentDownload(
+            const signed = await freshAttachmentDownload(
               attachment.file_id,
               attachment.version_n,
-            )).url);
+              dlPin,
+              dlWorkspaceId,
+            );
+            if (dlPin && !dlPin.isCurrent(dlWorkspaceId)) return;
+            window.location.assign(signed.url);
           } catch (error) {
-            setComposerStatus(readableError(error), "error");
+            if (!dlPin || dlPin.isCurrent(dlWorkspaceId)) {
+              setComposerStatus(readableError(error), "error");
+            }
           } finally {
             download.disabled = false;
             download.textContent = oldLabel;
@@ -12482,6 +13089,7 @@ import "../../styles/kylon-image-viewer.css";
       disposeCleanup();
       activeWorkspaceId = "";
       delete app.dataset.adminWorkspace;
+      if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(null);
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
       restoredComposerKey = "";
       focusedComposerWorkspaceId = "";
@@ -13081,7 +13689,8 @@ import "../../styles/kylon-image-viewer.css";
           disposeCleanup();
           activeWorkspaceId = "";
           delete app.dataset.adminWorkspace;
-          window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
+          if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(null);
+      window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
           one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
           const next = closed.nextWorkspace;
           if (next) {
@@ -13285,6 +13894,7 @@ import "../../styles/kylon-image-viewer.css";
       homeWorkClaims = [];
       homePeopleReadState = "pending";
       app.dataset.adminWorkspace = selected.id;
+      if (typeof setActiveWorkspaceScope === "function") setActiveWorkspaceScope(selected.id);
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: selected.id } }));
       syncConnectWorkspace(selected);
       const version = ++requestVersion;
@@ -16638,9 +17248,24 @@ import "../../styles/kylon-image-viewer.css";
 
     const boot = async (): Promise<void> => {
       const version = ++requestVersion;
-      if (!client()) {
+      const bootVersion = ++bootGeneration;
+      if (isMultiAccountEnabled() ? !deployment() : !client()) {
         renderSample();
         return;
+      }
+
+      if (isMultiAccountEnabled()) {
+        // C1 & C4: Run startup multi-account cutover & callback URL scrub BEFORE any app reads!
+        const bootMulti = await bootstrapMultiAccountAuth(window.location, window.history);
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
+        if (bootMulti?.cutoverClearedLegacy) {
+          dropUnscopedLegacyConvenienceKeys();
+        }
+        if (bootMulti?.callback.kind === "refused" && !returnedAuthError) {
+          returnedAuthError = bootMulti.callback.message;
+        }
+        ensureInactiveBadgePoller();
+        renderAccountSwitcher();
       }
 
       authRecoveryActive = false;
@@ -16649,23 +17274,37 @@ import "../../styles/kylon-image-viewer.css";
       setLoading("Checking your sign-in…");
       try {
         const verified = await currentSession();
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
+        renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
+        renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
+        if (isMultiAccountEnabled()) renderAccountSwitcher();
         if (!session) {
+          pendingSwitchFocusReturn = false;
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
           if (pendingSeatAdminReauthNotice && !returnedAuthError) {
             authError("Sign in again to confirm agent admin access.");
-          } else if (returnedAuthError || !showPasswordChangedNotice()) {
+          } else if (returnedAuthError) {
             authLinkError(returnedAuthError);
             returnedAuthError = null;
+          } else if (!showPasswordChangedNotice()) {
+            if (pendingForcedNotice) {
+              authError(pendingForcedNotice);
+              pendingForcedNotice = null;
+            } else {
+              authLinkError(null);
+            }
           }
           return;
         }
         pendingSeatAdminReauthNotice = false;
+        pendingForcedNotice = null;
         passwordChangeNotice = null;
+        const refusedAddAccountMessage = returnedAuthError;
+        returnedAuthError = null;
         if (!readSeatAdminReauthIntent(session.user.id)) {
           clearSeatAdminReauthIntent();
         }
@@ -16674,17 +17313,29 @@ import "../../styles/kylon-image-viewer.css";
           target.textContent = who;
         }
         workspaces = await workspaceMemberships();
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || bootVersion !== bootGeneration) return;
         if (workspaces.length === 0) {
           resetWorkspaceSessionState();
           const pending = readCreateIntent(session.user.id);
           renderCreate(session);
+          if (pendingSwitchFocusReturn && bootVersion === bootGeneration) {
+            const opener = lastAccountDialogOpener;
+            window.requestAnimationFrame(() => {
+              if (bootVersion !== bootGeneration) return;
+              pendingSwitchFocusReturn = false;
+              focusVisibleAccountTrigger(opener, "switch");
+            });
+          }
+          if (refusedAddAccountMessage && isMultiAccountEnabled()) {
+            openAddAccountDialog("", refusedAddAccountMessage);
+          }
           if (pending) await createFromIntent(session, pending, true);
           return;
         }
         const pending = readCreateIntent(session.user.id);
         if (pending && workspaces.some((workspace) => workspace.id === pending.workspaceId)) {
           if (pending.purpose) {
+            if (typeof pendingSwitchFocusReturn !== "undefined") pendingSwitchFocusReturn = false;
             await createFromIntent(session, pending, true);
             return;
           }
@@ -16695,8 +17346,35 @@ import "../../styles/kylon-image-viewer.css";
            than an error: the address bar is a convenience, never an authorization. */
         activeWorkspaceId = "";
         await navigateHome(resolveHomeRoute(reauthSearchForBoot(session.user.id), workspaces), "replace");
+        // Note: navigateHome() intentionally increments requestVersion inside catchup/openWorkspace,
+        // so post-navigation boot checks MUST compare bootVersion === bootGeneration!
+        if (isMultiAccountEnabled() && bootVersion === bootGeneration) {
+          void inactiveBadgePoller?.pollOnce();
+        }
+        if (pendingSwitchFocusReturn && bootVersion === bootGeneration) {
+          const opener = lastAccountDialogOpener;
+          if (activeWorkspaceId) focusedComposerWorkspaceId = activeWorkspaceId;
+          // Keep pendingSwitchFocusReturn true until this rAF runs (after focusHomeView's queued rAF
+          // has already seen it and stood down), then return focus to Open navigation (phone) or
+          // the account trigger (desktop).
+          window.requestAnimationFrame(() => {
+            if (bootVersion !== bootGeneration) return;
+            pendingSwitchFocusReturn = false;
+            if (activeWorkspaceId) focusedComposerWorkspaceId = activeWorkspaceId;
+            focusVisibleAccountTrigger(opener, "switch");
+          });
+        }
+        if (pendingFallbackNotice && bootVersion === bootGeneration) {
+          const notice = pendingFallbackNotice;
+          pendingFallbackNotice = null;
+          setComposerStatus(notice, "error");
+        }
+        if (refusedAddAccountMessage && isMultiAccountEnabled() && bootVersion === bootGeneration) {
+          openAddAccountDialog("", refusedAddAccountMessage);
+        }
       } catch (error) {
-        if (version !== requestVersion) return;
+        if (bootVersion !== bootGeneration) return;
+        pendingSwitchFocusReturn = false;
         if (error instanceof AuthRecoveryRequired) {
           authRecoveryActive = true;
           const target = panel("workspace-error");
@@ -16768,8 +17446,57 @@ import "../../styles/kylon-image-viewer.css";
     }
 
 
+    let activeSignedOutOtpAttemptId: string | null = null;
+    let activeSignedOutOtpEmail = "";
+    let signedOutOtpIntentGen = 0;
+    const renderSignedOutEmailSentCopy = (mode: "code" | "link", targetEmail: string): void => {
+      const titleEl = one<HTMLElement>("[data-email-sent-title]");
+      const copyEl = one<HTMLElement>("[data-email-sent-copy]");
+      const backBtn = one<HTMLButtonElement>("[data-use-email]");
+      const strong = document.createElement("strong");
+      strong.dataset.authEmail = "";
+      strong.textContent = targetEmail || "your email";
+      if (mode === "code") {
+        if (titleEl) titleEl.textContent = "Enter your sign-in code.";
+        if (copyEl) {
+          copyEl.replaceChildren("We sent a sign-in code to ", strong, ". Enter it below to sign in.");
+        }
+        if (backBtn) backBtn.textContent = "Change email";
+      } else {
+        if (titleEl) titleEl.textContent = "Check your inbox.";
+        if (copyEl) {
+          copyEl.replaceChildren(
+            "We sent a sign-in link to ",
+            strong,
+            ". Open it in this browser — it brings you straight back here.",
+          );
+        }
+        if (backBtn) backBtn.textContent = "Send another link or use a different address";
+      }
+    };
+    const resetSignedOutOtp = (cancelAttempt = false): void => {
+      signedOutOtpIntentGen += 1;
+      if (cancelAttempt && activeSignedOutOtpAttemptId) {
+        accountManager()?.cancelAttempt(activeSignedOutOtpAttemptId);
+      }
+      activeSignedOutOtpAttemptId = null;
+      activeSignedOutOtpEmail = "";
+      const otpRow = one<HTMLFormElement>("[data-signed-out-otp-row]");
+      const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
+      const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
+      if (otpRow) otpRow.hidden = true;
+      if (otpInput) otpInput.value = "";
+      if (verifyBtn) verifyBtn.disabled = false;
+      renderSignedOutEmailSentCopy("link", one<HTMLInputElement>("#dashboard-email")?.value.trim() || "your email");
+    };
+
     for (const button of all<HTMLButtonElement>("[data-use-email]")) {
-      button.addEventListener("click", () => showAuthView("choices"));
+      button.addEventListener("click", () => {
+        resetSignedOutOtp(true);
+        authError(null);
+        showAuthView("choices");
+        one<HTMLInputElement>("#dashboard-email")?.focus();
+      });
     }
 
     /* Send a new link: with an address already typed it sends the link again, otherwise it
@@ -16786,23 +17513,110 @@ import "../../styles/kylon-image-viewer.css";
       if (on) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
     };
 
+    const sendSignedOutEmailCodeOrLink = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
+      const myGen = ++signedOutOtpIntentGen;
+      busy(trigger, true);
+      authError(null);
+      try {
+        const started = await signInWithEmail(requestedEmail, new URL("/app", window.location.origin).href);
+        if (myGen !== signedOutOtpIntentGen) {
+          if (started && typeof started === "object" && started.attemptId) {
+            accountManager()?.cancelAttempt(started.attemptId);
+          }
+          return;
+        }
+        const otpRow = one<HTMLFormElement>("[data-signed-out-otp-row]");
+        const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
+        const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
+        if (isMultiAccountEnabled() && started && typeof started === "object" && started.attemptId) {
+          activeSignedOutOtpAttemptId = started.attemptId;
+          activeSignedOutOtpEmail = requestedEmail;
+          renderSignedOutEmailSentCopy("code", requestedEmail);
+          if (otpRow) otpRow.hidden = false;
+          if (verifyBtn) verifyBtn.disabled = false;
+          if (otpInput) otpInput.value = "";
+          showAuthView("email-sent");
+          otpInput?.focus();
+        } else {
+          resetSignedOutOtp(false);
+          renderSignedOutEmailSentCopy("link", requestedEmail);
+          showAuthView("email-sent");
+        }
+      } catch (error) {
+        if (myGen !== signedOutOtpIntentGen) return;
+        resetSignedOutOtp(false);
+        authError(readableError(error));
+      } finally {
+        busy(trigger, false);
+      }
+    };
+
     /* The email link reads only the address, so an empty password never blocks it. */
     one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
       const input = one<HTMLInputElement>("#dashboard-email");
       if (!input) return;
-      if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
-      busy(button, true);
+      const requestedEmail = input.value.trim();
+      if (!requestedEmail || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+      await sendSignedOutEmailCodeOrLink(requestedEmail, button);
+    });
+
+    one<HTMLButtonElement>("[data-signed-out-otp-resend]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const requestedEmail = activeSignedOutOtpEmail || one<HTMLInputElement>("#dashboard-email")?.value.trim() || "";
+      if (!requestedEmail) {
+        resetSignedOutOtp(true);
+        showAuthView("choices");
+        one<HTMLInputElement>("#dashboard-email")?.focus();
+        return;
+      }
+      if (activeSignedOutOtpAttemptId) {
+        accountManager()?.cancelAttempt(activeSignedOutOtpAttemptId);
+        activeSignedOutOtpAttemptId = null;
+      }
+      await sendSignedOutEmailCodeOrLink(requestedEmail, button);
+    });
+
+    one<HTMLFormElement>("[data-signed-out-otp-row]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const verifyBtn = one<HTMLButtonElement>("[data-signed-out-otp-verify]");
+      const resendBtn = one<HTMLButtonElement>("[data-signed-out-otp-resend]");
+      const otpInput = one<HTMLInputElement>("#dashboard-signin-otp");
+      if (!otpInput) return;
+      if (!activeSignedOutOtpAttemptId) {
+        authError("That sign-in code is no longer active. Send a new code.");
+        resendBtn?.focus();
+        return;
+      }
+      const code = otpInput.value.trim();
+      if (!code) { authError("Enter the emailed sign-in code."); otpInput.focus(); return; }
+      busy(verifyBtn, true);
       authError(null);
+      const myGen = signedOutOtpIntentGen;
+      const attemptId = activeSignedOutOtpAttemptId;
       try {
-        await signInWithEmail(input.value.trim(), new URL("/app", window.location.origin).href);
-        const email = one<HTMLElement>("[data-auth-email]");
-        if (email) email.textContent = input.value.trim();
-        showAuthView("email-sent");
+        const outcome = await verifyEmailOtpSignIn(attemptId, code);
+        if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+          if (myGen === signedOutOtpIntentGen) resetSignedOutOtp(false);
+          if (!authReloadQueued) runBoot();
+        } else {
+          if (myGen !== signedOutOtpIntentGen || activeSignedOutOtpAttemptId !== attemptId) return;
+          activeSignedOutOtpAttemptId = null;
+          if (verifyBtn) verifyBtn.disabled = true;
+          authError(outcome.message || "That sign-in code did not work or expired. Send a new code.");
+          resendBtn?.focus();
+        }
       } catch (error) {
+        if (myGen !== signedOutOtpIntentGen || activeSignedOutOtpAttemptId !== attemptId) return;
+        activeSignedOutOtpAttemptId = null;
+        if (verifyBtn) verifyBtn.disabled = true;
         authError(readableError(error));
+        resendBtn?.focus();
       } finally {
-        busy(button, false);
+        if (verifyBtn) verifyBtn.removeAttribute("aria-busy");
+        if (verifyBtn && myGen === signedOutOtpIntentGen && activeSignedOutOtpAttemptId === attemptId) {
+          verifyBtn.disabled = false;
+        }
       }
     });
 
@@ -16871,20 +17685,811 @@ import "../../styles/kylon-image-viewer.css";
       button.addEventListener("click", async () => {
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
+        if (isMultiAccountEnabled()) {
+          // C5: Require the exact rendered { userId, loginId } pair and verify consistency with
+          // session; refuse missing or inconsistent pins without sending any revoke to ambient B!
+          const signingOutUserId = renderedAuthUserId;
+          const signingOutLoginId = renderedAuthLoginId;
+          const consistentPin =
+            Boolean(signingOutUserId && signingOutLoginId) &&
+            (!session || session.user.id === signingOutUserId);
+          if (!consistentPin) {
+            const refused = await signOutActiveAccount(null);
+            inactiveBadgePoller?.prune();
+            renderAccountSwitcher();
+            button.disabled = false;
+            if (refused?.nextActive) {
+              if (refused.notice) pendingFallbackNotice = refused.notice;
+              if (!authReloadQueued) runBoot();
+              return;
+            }
+            teardownActiveAccountView();
+            showAuthView("choices");
+            showPanel("signed-out");
+            if (refused?.notice) authError(refused.notice);
+            return;
+          }
+          inactiveBadgePoller?.forgetExpired(signingOutUserId);
+          pendingSeatAdminReauthNotice = false;
+          pendingForcedNotice = null;
+          passwordChangeNotice = null;
+          clearSeatAdminReauthIntent();
+          clearCreateIntent(signingOutUserId);
+          forgetAddAgent(addAgentStore(), signingOutUserId);
+          clearPerUserPrivateConvenienceKeys(signingOutUserId);
+          teardownActiveAccountView();
+          const result = await signOutActiveAccount({
+            userId: signingOutUserId,
+            loginId: signingOutLoginId,
+          });
+          inactiveBadgePoller?.prune();
+          session = null;
+          renderAccountSwitcher();
+          button.disabled = false;
+          if (result?.nextActive) {
+            if (result.notice) pendingFallbackNotice = result.notice;
+            if (!authReloadQueued) runBoot();
+            return;
+          }
+          showAuthView("choices");
+          showPanel("signed-out");
+          if (result?.notice) authError(result.notice);
+          return;
+        }
+        const signingOutUserId = renderedAuthUserId || session?.user.id || "";
         pendingSeatAdminReauthNotice = false;
+        pendingForcedNotice = null;
         passwordChangeNotice = null;
         clearSeatAdminReauthIntent();
-        if (session) clearCreateIntent(session.user.id);
-        if (session) forgetAddAgent(addAgentStore(), session.user.id);
-        requestVersion += 1;
-        householdDashboard?.clear();
-        renderedAuthUserId = "";
-        resetWorkspaceSessionState();
+        if (signingOutUserId) {
+          clearCreateIntent(signingOutUserId);
+          forgetAddAgent(addAgentStore(), signingOutUserId);
+        }
+        teardownActiveAccountView();
         await signOut();
         session = null;
         showAuthView("choices");
         showPanel("signed-out");
         button.disabled = false;
+      });
+    }
+
+    // ── Multi-account UI helpers (switcher, per-user private key cleanup, inactive badge polling) ──
+    let inactiveBadgePoller: InactiveAccountBadgePoller | null = null;
+
+    const clearPerUserPrivateConvenienceKeys = (userId: string): void => {
+      if (!userId) return;
+      try {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i += 1) {
+          const key = window.localStorage.key(i);
+          if (!key) continue;
+          if (
+            key.startsWith(`commonswarm:composer-draft:${userId}:`) ||
+            key.startsWith(`commonswarm:composer-to:${userId}:`) ||
+            key.startsWith(`commonswarm:palette-recent:${userId}:`) ||
+            key.startsWith(`commonswarm:household-purpose:${userId}:`) ||
+            key.startsWith(`commonswarm:channel-rail-expanded:${userId}:`) ||
+            key.startsWith(`commonswarm:household-setup-needed:v1:${userId}:`)
+          ) {
+            toRemove.push(key);
+          }
+        }
+        for (const key of toRemove) window.localStorage.removeItem(key);
+      } catch { /* storage unavailable */ }
+    };
+
+    const dropUnscopedLegacyConvenienceKeys = (): void => {
+      const uuidSeg = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const prefixes = [
+        "commonswarm:composer-draft:",
+        "commonswarm:composer-to:",
+        "commonswarm:palette-recent:",
+        "commonswarm:household-purpose:",
+        "commonswarm:channel-rail-expanded:",
+      ];
+      try {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i += 1) {
+          const key = window.localStorage.key(i);
+          if (!key) continue;
+          for (const prefix of prefixes) {
+            if (!key.startsWith(prefix)) continue;
+            const firstSeg = key.slice(prefix.length).split(":")[0] ?? "";
+            if (firstSeg !== "sample" && firstSeg !== "sample-owner" && !uuidSeg.test(firstSeg)) {
+              toRemove.push(key);
+            }
+          }
+        }
+        for (const key of toRemove) window.localStorage.removeItem(key);
+      } catch { /* storage unavailable */ }
+    };
+
+    const ensureInactiveBadgePoller = (): void => {
+      if (!isMultiAccountEnabled() || inactiveBadgePoller) return;
+      const mgr = accountManager();
+      if (!mgr) return;
+      inactiveBadgePoller = new InactiveAccountBadgePoller(
+        mgr,
+        async (rt) => {
+          const overview = await homeOverview(rt);
+          return overviewNeedsYouTotal(overview);
+        },
+        {
+          intervalMs: 45_000,
+          isHidden: () => typeof document !== "undefined" && document.hidden,
+          onUpdate: () => renderAccountSwitcher(),
+        },
+      );
+      inactiveBadgePoller.start();
+      void inactiveBadgePoller.pollOnce();
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) void inactiveBadgePoller?.pollOnce();
+      });
+    };
+
+    let activeAddAccountOtpAttemptId: string | null = null;
+    let activeAddAccountOtpEmail = "";
+    let addAccountClosingForPromotion = false;
+    let addAccountDialogEpoch = 0;
+    let addAccountOtpIntentGen = 0;
+    const retireAddAccountAttemptsSync = (): void => {
+      addAccountDialogEpoch += 1;
+      addAccountOtpIntentGen += 1;
+      if (activeAddAccountOtpAttemptId) {
+        accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+        activeAddAccountOtpAttemptId = null;
+      }
+      accountManager()?.cancelAttempt();
+    };
+    const dismissAllAccountDialogsAndSecrets = (): void => {
+      retireAddAccountAttemptsSync();
+      closePasswordDialog();
+      closeWorkspaceSkillsDialog();
+      if (activeImageViewerDialog) {
+        try { activeImageViewerDialog.close(); } catch { /* ignore */ }
+        activeImageViewerDialog.remove();
+        activeImageViewerDialog = null;
+      }
+      attachmentPreviewUrls.clear();
+      for (const dlg of all<HTMLDialogElement>("dialog[open]")) {
+        try { dlg.close(); } catch { /* ignore */ }
+      }
+      for (const connectEl of all<HTMLElement & { clearPrompt?: () => void; retirePending?: () => void }>("agent-connect")) {
+        connectEl.clearPrompt?.();
+        connectEl.retirePending?.();
+      }
+    };
+
+    const teardownActiveAccountView = (): void => {
+      dismissAllAccountDialogsAndSecrets();
+      inactiveBadgePoller?.prune();
+      requestVersion += 1;
+      bootGeneration += 1;
+      lastAccountDialogTrigger = null;
+      householdDashboard?.clear();
+      homeOverviewCounts.clear();
+      renderedAuthUserId = "";
+      renderedAuthLoginId = "";
+      renderedAuthViewGen = -1;
+      resetWorkspaceSessionState();
+      session = null;
+    };
+
+    const isTriggerVisible = (el: HTMLElement | null): el is HTMLElement => {
+      if (!el || !el.isConnected || el.closest("[hidden], [inert]")) return false;
+      if (el.getClientRects().length === 0) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0;
+    };
+
+    const captureAccountDialogTrigger = (opener: "phone" | "desktop"): HTMLElement | null => {
+      if (opener === "phone") {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active.matches(".hm-menu__trigger") && isTriggerVisible(active)) {
+          return active;
+        }
+        return (
+          [...document.querySelectorAll<HTMLButtonElement>(".cs-kylon-workspace-menu .hm-menu__trigger, .hm-phone-bar .hm-menu__trigger")]
+            .find(isTriggerVisible) ?? null
+        );
+      }
+      return one<HTMLButtonElement>("[data-user-menu-trigger]");
+    };
+
+    const focusVisibleAccountTrigger = (
+      preferred?: "phone" | "desktop" | null,
+      mode: "dialog-close" | "switch" = "dialog-close",
+      explicitTrigger?: HTMLElement | null,
+    ): void => {
+      const phoneNavOpener =
+        [...document.querySelectorAll<HTMLButtonElement>('button[aria-label="Open navigation"]')]
+          .find(isTriggerVisible) ?? null;
+      const phoneMoreTrigger =
+        [...document.querySelectorAll<HTMLButtonElement>(".cs-kylon-workspace-menu .hm-menu__trigger, .hm-phone-bar .hm-menu__trigger")]
+          .find(isTriggerVisible) ?? null;
+      const desktopTrigger = one<HTMLButtonElement>("[data-user-menu-trigger]");
+
+      if (mode === "switch") {
+        if (isTriggerVisible(phoneNavOpener)) {
+          phoneNavOpener.focus({ preventScroll: true });
+          return;
+        }
+        if (preferred === "phone" && isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(desktopTrigger)) {
+          desktopTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
+        return;
+      }
+
+      // Dialog dismiss (Escape / Cancel / Close): return focus to the exact trigger that opened the dialog
+      // (More button inside the phone drawer at 360px, or desktop account button at 1280px).
+      if (isTriggerVisible(explicitTrigger ?? null)) {
+        explicitTrigger!.focus({ preventScroll: true });
+        return;
+      }
+      if (preferred === "phone") {
+        if (isTriggerVisible(phoneMoreTrigger)) {
+          phoneMoreTrigger.focus({ preventScroll: true });
+          return;
+        }
+        if (isTriggerVisible(phoneNavOpener)) {
+          phoneNavOpener.focus({ preventScroll: true });
+          return;
+        }
+      }
+      if (isTriggerVisible(desktopTrigger)) {
+        desktopTrigger.focus({ preventScroll: true });
+        return;
+      }
+      (phoneMoreTrigger ?? phoneNavOpener ?? desktopTrigger)?.focus({ preventScroll: true });
+    };
+
+    const announceAccountChange = (message: string): void => {
+      const live = one<HTMLElement>("[data-account-live]");
+      if (!live) return;
+      live.textContent = "";
+      live.textContent = message;
+    };
+
+    const renderAccountSwitcher = (): void => {
+      const container = one<HTMLElement>("[data-account-switcher]");
+      const sep = one<HTMLElement>("[data-account-switcher-sep]");
+      const signOutAllBtn = one<HTMLButtonElement>("[data-signout-all-open]");
+      const railSignOutBtn = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const railSignOutLabel = one<HTMLElement>("[data-signout-label]");
+      const railSignOutSub = one<HTMLElement>("[data-signout-sub]");
+      const railSignOutOthersBtn = one<HTMLButtonElement>("[data-signout-others-open]");
+      const railSignOutOthersSub = one<HTMLElement>("[data-signout-others-sub]");
+      const railLabel = one<HTMLElement>(".dashboard__user-menu-account");
+      const triggerEl = one<HTMLElement>("[data-user-menu-trigger]");
+      const triggerEmailSub = one<HTMLElement>("[data-rail-account-email]");
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof accountManager === "function"
+        ? accountManager()
+        : null;
+      if (!multi || sampleMode) {
+        if (container) { container.hidden = true; container.replaceChildren(); }
+        if (sep) sep.hidden = true;
+        if (signOutAllBtn) signOutAllBtn.hidden = true;
+        if (railLabel) railLabel.hidden = false;
+        if (railSignOutLabel) railSignOutLabel.textContent = "Sign out";
+        else if (railSignOutBtn) railSignOutBtn.textContent = "Sign out";
+        if (railSignOutSub) { railSignOutSub.textContent = ""; railSignOutSub.hidden = true; }
+        if (railSignOutOthersSub) { railSignOutOthersSub.textContent = ""; railSignOutOthersSub.hidden = true; }
+        railSignOutBtn?.classList.remove("hm-menu-item--identified");
+        railSignOutOthersBtn?.classList.remove("hm-menu-item--identified");
+        if (triggerEmailSub) { triggerEmailSub.textContent = ""; triggerEmailSub.hidden = true; }
+        triggerEl?.removeAttribute("title");
+        return;
+      }
+      const accounts = multi.listAccounts();
+      const activeAcct = multi.activeAccount();
+      const activeRecord = activeAcct
+        ? accounts.find((acct) => acct.userId === activeAcct.userId && acct.loginId === activeAcct.loginId) ?? null
+        : null;
+      const activeIdentifier = activeRecord?.secondary || activeRecord?.label || "";
+      if (activeRecord) {
+        const triggerIdentity = activeRecord.secondary && activeRecord.secondary !== activeRecord.label
+          ? `${activeRecord.label} (${activeRecord.secondary})`
+          : activeRecord.label;
+        triggerEl?.setAttribute("aria-label", `${triggerIdentity}, profile and account settings`);
+        if (triggerEl) {
+          if (activeRecord.secondary) triggerEl.title = triggerIdentity;
+          else triggerEl.removeAttribute("title");
+        }
+        if (triggerEmailSub) {
+          if (activeRecord.secondary && activeRecord.secondary !== activeRecord.label) {
+            triggerEmailSub.textContent = activeRecord.secondary;
+            triggerEmailSub.hidden = false;
+          } else {
+            triggerEmailSub.textContent = "";
+            triggerEmailSub.hidden = true;
+          }
+        }
+      } else {
+        triggerEl?.removeAttribute("title");
+        if (triggerEmailSub) { triggerEmailSub.textContent = ""; triggerEmailSub.hidden = true; }
+      }
+      if (railSignOutLabel) railSignOutLabel.textContent = "Sign out on this device";
+      else if (railSignOutBtn) railSignOutBtn.textContent = "Sign out on this device";
+      if (railSignOutSub) {
+        railSignOutSub.textContent = activeIdentifier;
+        railSignOutSub.hidden = !activeIdentifier;
+      }
+      if (railSignOutOthersSub) {
+        railSignOutOthersSub.textContent = activeIdentifier;
+        railSignOutOthersSub.hidden = !activeIdentifier;
+      }
+      railSignOutBtn?.classList.toggle("hm-menu-item--identified", Boolean(activeIdentifier));
+      railSignOutOthersBtn?.classList.toggle("hm-menu-item--identified", Boolean(activeIdentifier));
+      if (signOutAllBtn) {
+        signOutAllBtn.hidden = accounts.length < 2;
+        if (accounts.length >= 2) {
+          signOutAllBtn.textContent = `Sign out all ${accounts.length} accounts on this device`;
+        }
+      }
+      if (!container) return;
+      if (accounts.length === 0) {
+        container.hidden = true;
+        container.replaceChildren();
+        if (sep) sep.hidden = true;
+        if (railLabel) railLabel.hidden = false;
+        return;
+      }
+      if (railLabel) railLabel.hidden = true;
+      container.hidden = false;
+      if (sep) sep.hidden = false;
+      const list = document.createElement("div");
+      list.className = "hm-account-list";
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", "Signed-in accounts");
+      const expiredExtras = inactiveBadgePoller?.expiredAccounts() ?? [];
+      const displayAccounts = [
+        ...accounts.map((acct) => ({ acct, expiredOnly: false })),
+        ...expiredExtras.map((acct) => ({ acct, expiredOnly: true })),
+      ];
+      for (const { acct, expiredOnly } of displayAccounts) {
+        const isCurrent = !expiredOnly && Boolean(activeAcct && activeAcct.userId === acct.userId && activeAcct.loginId === acct.loginId);
+        const isExpired = expiredOnly || (!isCurrent && (inactiveBadgePoller?.isExpired(acct.userId, acct.loginId) ?? false));
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = isCurrent ? "dashboard__user-menu-item hm-account-row hm-account-row--active" : "dashboard__user-menu-item hm-account-row";
+        btn.setAttribute("role", "menuitemradio");
+        btn.setAttribute("aria-checked", String(isCurrent));
+        btn.dataset.accountSwitch = acct.userId;
+        if (isExpired) btn.dataset.accountExpired = "true";
+
+        const avatar = document.createElement("span");
+        avatar.className = "hm-account-row__avatar";
+        avatar.dataset.initials = initials(acct.label || acct.secondary);
+        avatar.setAttribute("aria-hidden", "true");
+
+        const meta = document.createElement("span");
+        meta.className = "hm-account-row__meta";
+        const nameEl = document.createElement("span");
+        nameEl.className = "hm-account-row__name";
+        nameEl.textContent = acct.label;
+        meta.append(nameEl);
+        if (acct.secondary && acct.secondary !== acct.label) {
+          const secEl = document.createElement("span");
+          secEl.className = "hm-account-row__secondary";
+          secEl.textContent = acct.secondary;
+          meta.append(secEl);
+        }
+        btn.append(avatar, meta);
+
+        const waiting = !isCurrent && !isExpired ? inactiveBadgePoller?.waitingCount(acct.userId, acct.loginId) ?? null : null;
+        if (isExpired) {
+          const expiredEl = document.createElement("span");
+          expiredEl.className = "hm-account-row__expired";
+          expiredEl.textContent = "Sign in again";
+          btn.append(expiredEl);
+        } else if (typeof waiting === "number" && waiting > 0) {
+          const badge = document.createElement("span");
+          badge.className = "hm-account-row__badge";
+          badge.textContent = `${waiting} waiting`;
+          btn.append(badge);
+        } else if (isCurrent) {
+          const currentEl = document.createElement("span");
+          currentEl.className = "hm-account-row__current";
+          currentEl.textContent = "Current";
+          btn.append(currentEl);
+        }
+        btn.addEventListener("click", () => {
+          const menu = one<HTMLElement>("[data-user-menu]");
+          if (menu) menu.hidden = true;
+          one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+          if (isExpired) {
+            openAddAccountDialog(acct.secondary || acct.label, "Your session expired. Sign in again.", "desktop");
+            return;
+          }
+          if (!isCurrent) void switchToAccount(acct.userId, "desktop");
+        });
+        list.append(btn);
+      }
+      if (accounts.length < MAX_SIGNED_IN_ACCOUNTS) {
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "dashboard__text-button dashboard__user-menu-item hm-account-add";
+        addBtn.setAttribute("role", "menuitem");
+        addBtn.dataset.addAccountOpen = "";
+        addBtn.textContent = "Add account";
+        addBtn.addEventListener("click", () => {
+          const menu = one<HTMLElement>("[data-user-menu]");
+          if (menu) menu.hidden = true;
+          one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+          openAddAccountDialog("", "", "desktop");
+        });
+        list.append(addBtn);
+      } else {
+        const cap = document.createElement("p");
+        cap.className = "hm-account-cap";
+        cap.textContent = `${MAX_SIGNED_IN_ACCOUNTS} of ${MAX_SIGNED_IN_ACCOUNTS} accounts signed in. Sign out of an account to add another.`;
+        list.append(cap);
+      }
+      container.replaceChildren(list);
+    };
+
+    const switchToAccount = async (targetUserId: string, opener: "phone" | "desktop" = "desktop"): Promise<void> => {
+      const mgr = accountManager();
+      if (!mgr || sampleMode) return;
+      const targetRecord = mgr.listAccounts().find((acct) => acct.userId === targetUserId) ?? null;
+      pendingSeatAdminReauthNotice = false;
+      pendingForcedNotice = null;
+      passwordChangeNotice = null;
+      lastAccountDialogOpener = opener;
+      pendingSwitchFocusReturn = true;
+      layout.closeNavigation(false);
+      teardownActiveAccountView();
+      mgr.switchActiveAccount(targetUserId);
+      renderAccountSwitcher();
+      if (targetRecord) {
+        const suffix = targetRecord.secondary && targetRecord.secondary !== targetRecord.label
+          ? ` (${targetRecord.secondary})`
+          : "";
+        announceAccountChange(`Switched to ${targetRecord.label}${suffix}.`);
+      }
+      if (!authReloadQueued) runBoot();
+      void inactiveBadgePoller?.pollOnce();
+    };
+
+    const showAddAccountStep = (step: "entry" | "code"): void => {
+      const entry = one<HTMLElement>("[data-add-account-entry]");
+      const codeStep = one<HTMLFormElement>("[data-add-account-code-step]");
+      if (entry) entry.hidden = step !== "entry";
+      if (codeStep) codeStep.hidden = step !== "code";
+    };
+    const resetAddAccountOtp = (): void => {
+      addAccountOtpIntentGen += 1;
+      activeAddAccountOtpAttemptId = null;
+      activeAddAccountOtpEmail = "";
+      const otpInput = one<HTMLInputElement>("#add-account-otp");
+      const codeEmail = one<HTMLElement>("[data-add-account-code-email]");
+      const codeStatus = one<HTMLElement>("[data-add-account-code-status]");
+      const verifyBtn = one<HTMLButtonElement>("[data-add-account-otp-verify]");
+      if (otpInput) otpInput.value = "";
+      if (codeEmail) codeEmail.textContent = "";
+      if (codeStatus) codeStatus.textContent = "";
+      if (verifyBtn) verifyBtn.disabled = false;
+      showAddAccountStep("entry");
+    };
+    const openAddAccountDialog = (prefillEmail = "", initialStatus = "", opener: "phone" | "desktop" = "desktop"): void => {
+      if (!isMultiAccountEnabled() || sampleMode) return;
+      const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
+      const form = one<HTMLFormElement>("[data-add-account-form]");
+      const emailInput = one<HTMLInputElement>("#add-account-email");
+      const status = one<HTMLElement>("[data-add-account-status]");
+      if (!dialog) return;
+      lastAccountDialogOpener = opener;
+      lastAccountDialogTrigger = captureAccountDialogTrigger(opener);
+      addAccountDialogEpoch += 1;
+      addAccountClosingForPromotion = false;
+      resetAddAccountOtp();
+      form?.reset();
+      if (emailInput && prefillEmail) emailInput.value = prefillEmail;
+      if (status) status.textContent = initialStatus;
+      if (!dialog.open) dialog.showModal();
+      if (prefillEmail) {
+        one<HTMLInputElement>("#add-account-password")?.focus();
+      } else {
+        emailInput?.focus();
+      }
+    };
+
+    // Poll inactive account badges when opening the desktop account menu.
+    one<HTMLButtonElement>("[data-user-menu-trigger]")?.addEventListener("click", () => {
+      if (isMultiAccountEnabled()) {
+        renderAccountSwitcher();
+        void inactiveBadgePoller?.pollOnce();
+      }
+    });
+
+    // Wire Add account dialog (OAuth S256 PKCE, pinned-email OTP step, password staging, sync cancel + focus return).
+    {
+      const dialog = one<HTMLDialogElement>("[data-add-account-dialog]");
+      const form = one<HTMLFormElement>("[data-add-account-form]");
+      const codeStepForm = one<HTMLFormElement>("[data-add-account-code-step]");
+      const emailInput = one<HTMLInputElement>("#add-account-email");
+      const pwInput = one<HTMLInputElement>("#add-account-password");
+      const otpInput = one<HTMLInputElement>("#add-account-otp");
+      const status = one<HTMLElement>("[data-add-account-status]");
+      const codeEmailEl = one<HTMLElement>("[data-add-account-code-email]");
+      const codeStatusEl = one<HTMLElement>("[data-add-account-code-status]");
+      const emailCodeBtn = one<HTMLButtonElement>("[data-add-account-email-code]");
+      const otpVerifyBtn = one<HTMLButtonElement>("[data-add-account-otp-verify]");
+      const otpResendBtn = one<HTMLButtonElement>("[data-add-account-otp-resend]");
+      const otpChangeBtn = one<HTMLButtonElement>("[data-add-account-otp-change]");
+      const pwSubmitBtn = one<HTMLButtonElement>("[data-add-account-password-submit]");
+
+      const sendAddAccountCode = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
+        if (!status) return;
+        const openingEpoch = addAccountDialogEpoch;
+        const myGen = ++addAccountOtpIntentGen;
+        if (trigger) trigger.disabled = true;
+        status.textContent = "";
+        if (codeStatusEl) codeStatusEl.textContent = "";
+        try {
+          const started = await signInWithEmail(
+            requestedEmail,
+            new URL("/app", window.location.origin).href,
+            "add-account",
+          );
+          if (started && typeof started === "object" && started.attemptId) {
+            if (!dialog?.open || addAccountDialogEpoch !== openingEpoch || myGen !== addAccountOtpIntentGen) {
+              accountManager()?.cancelAttempt(started.attemptId);
+              return;
+            }
+            activeAddAccountOtpAttemptId = started.attemptId;
+            activeAddAccountOtpEmail = requestedEmail;
+            if (codeEmailEl) codeEmailEl.textContent = requestedEmail;
+            if (codeStatusEl) codeStatusEl.textContent = "";
+            if (otpVerifyBtn) otpVerifyBtn.disabled = false;
+            showAddAccountStep("code");
+            if (otpInput) { otpInput.value = ""; otpInput.focus(); }
+          }
+        } catch (error) {
+          if (!dialog?.open || addAccountDialogEpoch !== openingEpoch || myGen !== addAccountOtpIntentGen) return;
+          if (activeAddAccountOtpEmail) {
+            if (codeStatusEl) codeStatusEl.textContent = readableError(error);
+          } else {
+            resetAddAccountOtp();
+            status.textContent = readableError(error);
+          }
+        } finally {
+          if (trigger) trigger.disabled = false;
+        }
+      };
+
+      // C3: Synchronously retire any in-flight OAuth/OTP attempt on close button, backdrop, and Escape
+      // BEFORE dialog.close() queues its async close event, preventing race-window redirects.
+      const closeAddAccountDialog = (): void => {
+        retireAddAccountAttemptsSync();
+        dialog?.close();
+      };
+      one<HTMLButtonElement>("[data-add-account-close]")?.addEventListener("click", () => closeAddAccountDialog());
+      dialog?.addEventListener("cancel", () => {
+        retireAddAccountAttemptsSync();
+      });
+      dialog?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") retireAddAccountAttemptsSync();
+      });
+      dialog?.addEventListener("close", () => {
+        const promoted = addAccountClosingForPromotion;
+        const trigger = lastAccountDialogTrigger;
+        addAccountClosingForPromotion = false;
+        lastAccountDialogTrigger = null;
+        retireAddAccountAttemptsSync();
+        resetAddAccountOtp();
+        form?.reset();
+        if (status) status.textContent = "";
+        if (!promoted && session) focusVisibleAccountTrigger(lastAccountDialogOpener, "dialog-close", trigger);
+      });
+      dialog?.addEventListener("click", (event) => { if (event.target === dialog) closeAddAccountDialog(); });
+
+      for (const button of all<HTMLButtonElement>("[data-add-account-dialog] [data-signin-provider]")) {
+        button.addEventListener("click", async () => {
+          const openingEpoch = addAccountDialogEpoch;
+          button.disabled = true;
+          if (status) status.textContent = "";
+          try {
+            await signInWithProvider(
+              button.dataset.signinProvider ?? "",
+              new URL("/app", window.location.origin).href,
+              "add-account",
+              { shouldNavigate: () => Boolean(dialog?.open && addAccountDialogEpoch === openingEpoch) },
+            );
+          } catch (error) {
+            if (status && dialog?.open && addAccountDialogEpoch === openingEpoch) {
+              status.textContent = readableError(error);
+            }
+            button.disabled = false;
+          }
+        });
+      }
+
+      emailCodeBtn?.addEventListener("click", async () => {
+        if (!emailInput) return;
+        const requestedEmail = emailInput.value.trim();
+        if (!requestedEmail || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        await sendAddAccountCode(requestedEmail, emailCodeBtn);
+      });
+
+      otpResendBtn?.addEventListener("click", async () => {
+        const requestedEmail = activeAddAccountOtpEmail || emailInput?.value.trim() || "";
+        if (!requestedEmail) {
+          resetAddAccountOtp();
+          emailInput?.focus();
+          return;
+        }
+        if (activeAddAccountOtpAttemptId) {
+          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+          activeAddAccountOtpAttemptId = null;
+        }
+        await sendAddAccountCode(requestedEmail, otpResendBtn);
+      });
+
+      otpChangeBtn?.addEventListener("click", () => {
+        if (activeAddAccountOtpAttemptId) {
+          accountManager()?.cancelAttempt(activeAddAccountOtpAttemptId);
+        }
+        resetAddAccountOtp();
+        emailInput?.focus();
+      });
+
+      codeStepForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!otpInput || !codeStatusEl) return;
+        if (!activeAddAccountOtpAttemptId) {
+          codeStatusEl.textContent = "That sign-in code is no longer active. Send a new code.";
+          otpResendBtn?.focus();
+          return;
+        }
+        const token = otpInput.value.trim();
+        if (!token) { codeStatusEl.textContent = "Enter the emailed sign-in code."; otpInput.focus(); return; }
+        if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+        codeStatusEl.textContent = "";
+        const openingEpoch = addAccountDialogEpoch;
+        const myGen = addAccountOtpIntentGen;
+        const attemptId = activeAddAccountOtpAttemptId;
+        const priorUserId = session?.user.id ?? "";
+        const isCurrentVerify = (): boolean =>
+          Boolean(dialog?.open) &&
+          addAccountDialogEpoch === openingEpoch &&
+          addAccountOtpIntentGen === myGen &&
+          activeAddAccountOtpAttemptId === attemptId;
+        try {
+          const outcome = await verifyEmailOtpSignIn(attemptId, token);
+          if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+            addAccountClosingForPromotion = true;
+            if (isCurrentVerify()) resetAddAccountOtp();
+            const promotedUserId = outcome.account.userId;
+            if (promotedUserId !== priorUserId) {
+              teardownActiveAccountView();
+            } else {
+              dialog?.close();
+            }
+            renderAccountSwitcher();
+            if (!authReloadQueued && promotedUserId !== priorUserId) runBoot();
+          } else {
+            if (!isCurrentVerify()) return;
+            activeAddAccountOtpAttemptId = null;
+            if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+            codeStatusEl.textContent = outcome.message || "That sign-in code did not work or expired. Send a new code.";
+            otpResendBtn?.focus();
+          }
+        } catch (error) {
+          if (!isCurrentVerify()) return;
+          activeAddAccountOtpAttemptId = null;
+          if (otpVerifyBtn) otpVerifyBtn.disabled = true;
+          codeStatusEl.textContent = readableError(error);
+          otpResendBtn?.focus();
+        } finally {
+          if (otpVerifyBtn && isCurrentVerify()) otpVerifyBtn.disabled = false;
+        }
+      });
+
+      form?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!emailInput || !pwInput || !status || !pwSubmitBtn) return;
+        const requestedEmail = emailInput.value.trim();
+        if (!requestedEmail || !emailInput.checkValidity()) { emailInput.reportValidity(); emailInput.focus(); return; }
+        if (!pwInput.value) { status.textContent = "Enter your password or send a sign-in code."; pwInput.focus(); return; }
+        pwSubmitBtn.disabled = true;
+        status.textContent = "";
+        const priorUserId = session?.user.id ?? "";
+        try {
+          await signInWithPassword(requestedEmail, pwInput.value, undefined, { purpose: "add-account", returnRoute: "/app" });
+          const nextUserId = accountManager()?.activeAccount()?.userId ?? "";
+          addAccountClosingForPromotion = true;
+          if (nextUserId && nextUserId !== priorUserId) {
+            teardownActiveAccountView();
+          } else {
+            dialog?.close();
+          }
+          renderAccountSwitcher();
+          if (!authReloadQueued && nextUserId && nextUserId !== priorUserId) runBoot();
+        } catch (error) {
+          status.textContent = readableError(error);
+        } finally {
+          pwSubmitBtn.disabled = false;
+        }
+      });
+    }
+
+    // Wire "Sign out all accounts on this device" confirmation dialog (C5).
+    const openSignOutAllDialog = (opener: "phone" | "desktop" = "desktop"): void => {
+      const dialog = one<HTMLDialogElement>("[data-signout-all-dialog]");
+      const titleEl = one<HTMLElement>("[data-signout-all-title]");
+      const targetEl = one<HTMLElement>("[data-signout-all-target]");
+      const confirm = one<HTMLButtonElement>("[data-signout-all-confirm]");
+      const cancel = one<HTMLButtonElement>("[data-signout-all-cancel]");
+      const status = one<HTMLElement>("[data-signout-all-status]");
+      const mgr = accountManager();
+      if (!dialog || !confirm || !cancel || !status || !mgr || sampleMode) return;
+      const count = mgr.listAccounts().length;
+      if (count < 2) return;
+      lastAccountDialogOpener = opener;
+      lastAccountDialogTrigger = captureAccountDialogTrigger(opener);
+      const menu = one<HTMLElement>("[data-user-menu]");
+      if (menu) menu.hidden = true;
+      one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+      if (titleEl) titleEl.textContent = `Sign out all ${count} accounts on this device?`;
+      if (targetEl) targetEl.textContent = `all ${count} accounts signed in to this browser on this device.`;
+      status.textContent = "";
+      confirm.hidden = false;
+      confirm.disabled = false;
+      cancel.textContent = "Cancel";
+      dialog.showModal();
+      cancel.focus();
+    };
+    {
+      const dialog = one<HTMLDialogElement>("[data-signout-all-dialog]");
+      const confirm = one<HTMLButtonElement>("[data-signout-all-confirm]");
+      const cancel = one<HTMLButtonElement>("[data-signout-all-cancel]");
+      const status = one<HTMLElement>("[data-signout-all-status]");
+      one<HTMLButtonElement>("[data-signout-all-open]")?.addEventListener("click", () => {
+        openSignOutAllDialog("desktop");
+      });
+      cancel?.addEventListener("click", () => dialog?.close());
+      dialog?.addEventListener("close", () => {
+        const trigger = lastAccountDialogTrigger;
+        lastAccountDialogTrigger = null;
+        if (session) focusVisibleAccountTrigger(lastAccountDialogOpener, "dialog-close", trigger);
+      });
+      dialog?.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+      confirm?.addEventListener("click", async () => {
+        if (!confirm || !cancel || !status || confirm.disabled) return;
+        confirm.disabled = true;
+        confirm.setAttribute("aria-busy", "true");
+        const accountsBefore = accountManager()?.listAccounts() ?? [];
+        pendingSeatAdminReauthNotice = false;
+        pendingForcedNotice = null;
+        passwordChangeNotice = null;
+        clearSeatAdminReauthIntent();
+        for (const acct of accountsBefore) {
+          clearCreateIntent(acct.userId);
+          forgetAddAgent(addAgentStore(), acct.userId);
+          clearPerUserPrivateConvenienceKeys(acct.userId);
+        }
+        teardownActiveAccountView();
+        inactiveBadgePoller?.clear();
+        const res = await signOutAllBrowserAccounts();
+        renderAccountSwitcher();
+        showAuthView("choices");
+        showPanel("signed-out");
+        if (res?.notice) authError(res.notice);
+        confirm.removeAttribute("aria-busy");
+        confirm.disabled = false;
       });
     }
 
@@ -17156,6 +18761,13 @@ import "../../styles/kylon-image-viewer.css";
       const status = one<HTMLElement>("[data-signout-others-status]");
       one<HTMLButtonElement>("[data-signout-others-open]")?.addEventListener("click", () => {
         if (!dialog || !confirm || !cancel || !status || !session || sampleMode) return;
+        if (isMultiAccountEnabled()) {
+          const who = accountName(session);
+          const titleEl = one<HTMLElement>("[data-signout-others-title]");
+          const targetEl = one<HTMLElement>("[data-signout-others-target]");
+          if (titleEl) titleEl.textContent = `Sign out other devices for ${who}?`;
+          if (targetEl) targetEl.textContent = `every other browser and device signed in to ${who}.`;
+        }
         status.textContent = ""; confirm.hidden = false; confirm.disabled = false; cancel.textContent = "Cancel";
         dialog.showModal(); cancel.focus();
       });
@@ -17241,12 +18853,22 @@ import "../../styles/kylon-image-viewer.css";
           const opening = ownSession(ticket);
           if (!opening) return;
           const notice = { userId: opening.user.id, email: opening.user.email ?? "" };
+          const openingLoginId = isMultiAccountEnabled() ? accountManager()?.activeAccount()?.loginId : undefined;
           passwordChangeNotice = notice;
-          const outcome = await completePasswordChange({ userId: notice.userId, accessToken: opening.access_token }, {
-            signOutEverywhere: (accessToken) => signOutEverywhere({ access_token: accessToken }),
-            verifyCurrent: verifyCurrentForPasswordChange,
-            live: () => passwordChangeNotice === notice && (session === null || session.user.id === notice.userId),
-          });
+          const outcome = await completePasswordChange({ userId: notice.userId, accessToken: opening.access_token, loginId: openingLoginId }, {
+              signOutEverywhere: (accessToken) => signOutEverywhere({ access_token: accessToken }),
+              verifyCurrent: verifyCurrentForPasswordChange,
+              live: () => passwordChangeNotice === notice && (session === null || session.user.id === notice.userId),
+              removeLocalLogin: isMultiAccountEnabled()
+                ? async (u, l) => {
+                    await accountManager()?.signOutAccount(u, l);
+                    clearPerUserPrivateConvenienceKeys(u);
+                    inactiveBadgePoller?.prune();
+                    renderAccountSwitcher();
+                  }
+                : undefined,
+            },
+          );
           // Signed out: the signed-out render shows the notice. If this page has not seen the
           // sign-out yet (no SDK session was left to remove), close the dialog and render it now.
           if (outcome.kind === "signed-out") {
@@ -18093,6 +19715,18 @@ import "../../styles/kylon-image-viewer.css";
          See `composerSendToken` where it is declared for what went wrong when the screen's
          generation was asked that question instead. */
       const sendToken = ++composerSendToken;
+      // C1: Capture initiating session & login/workspace/viewGen pin SYNCHRONOUSLY at Send!
+      const sendSession = session;
+      const sendMulti = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const sendPinned = sendMulti && sendSession
+        ? pinAccountContext({ userId: sendSession.user.id, workspaceId })
+        : null;
+      if (sendMulti && (!sendPinned || !sendPinned.isCurrent(workspaceId))) {
+        composerSendToken += 1;
+        setComposerSending(false);
+        setComposerStatus("Your active account or workspace changed. Confirm again before sending.", "error");
+        return;
+      }
       setComposerSending(true);
       visualMentions.set(pendingId, rowMentions);
       /* The pending row draws its mentions at once, from what this send is about to store. */
@@ -18131,15 +19765,21 @@ import "../../styles/kylon-image-viewer.css";
           attachmentRefs.push(...await uploadAttachmentsFor({
             channelId: placementChannelId,
             files: attachmentSnapshot,
-            readVisibility: channelId => channelVisibilityNow(workspaceId, channelId),
+            readVisibility: channelId => channelVisibilityNow(workspaceId, channelId, sendPinned),
             upload: (attachment, index) => {
+              if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
+                throw new AuthRecoveryRequired();
+              }
               setComposerStatus(
                 `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
                 "posting",
               );
-              return uploadBrowserAttachment(session!, workspaceId, attachment.intent);
+              return uploadBrowserAttachment(sendSession!, workspaceId, attachment.intent, sendPinned);
             },
           }));
+          if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
+            throw new AuthRecoveryRequired();
+          }
         }
         setComposerStatus("Posting message…", "posting");
         if (sampleMode) await sampleSendWindow();
@@ -18161,7 +19801,7 @@ import "../../styles/kylon-image-viewer.css";
               broadcastToChannel,
             }
           : await postBrowserSignal(
-              session!,
+              sendSession!,
               commandId,
               workspaceId,
               rawBody,
@@ -18169,6 +19809,7 @@ import "../../styles/kylon-image-viewer.css";
               signalKind,
               attachmentRefs,
               placement,
+              sendPinned,
             );
         /* THE SEND'S OWN STORAGE IS FINISHED FIRST, before the guard below, because it is not
            about the screen. The guard exists so a send that outlived its workspace cannot
@@ -19190,9 +20831,27 @@ import "../../styles/kylon-image-viewer.css";
 
     const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
-      const identityChanged = signedOut || nextUserId !== renderedAuthUserId;
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const nextLoginId = multi && nextSession && typeof currentActiveLogin === "function"
+        ? (currentActiveLogin()?.loginId ?? "")
+        : "";
+      const nextViewGen = multi && nextSession && typeof accountManager === "function"
+        ? (accountManager()?.currentViewGeneration() ?? -1)
+        : -1;
+      const identityChanged =
+        signedOut ||
+        nextUserId !== renderedAuthUserId ||
+        (multi && (nextLoginId !== renderedAuthLoginId || nextViewGen !== renderedAuthViewGen));
       if (!identityChanged && !recovered) return;
       if (identityChanged) {
+        if (multi) {
+          dismissAllAccountDialogsAndSecrets();
+          householdDashboard?.clear();
+          homeOverviewCounts.clear();
+          session = null;
+          renderedAuthLoginId = nextLoginId;
+          renderedAuthViewGen = nextViewGen;
+        }
         resetWorkspaceSessionState();
         renderedAuthUserId = nextUserId;
         requestVersion += 1;
@@ -19210,7 +20869,7 @@ import "../../styles/kylon-image-viewer.css";
 
     /* /start now preserves its query and hash while handing old callbacks to /app, so this
        listener is the one auth-return controller for both current and compatibility links. */
-    client()?.auth.onAuthStateChange((event, nextSession) => {
+    onAuthChange((event, nextSession) => {
       // A sign-out or a different account in any tab ends an open Password dialog.
       if (passwordGuard.observeAuth(event, nextSession?.user.id)) closePasswordDialog();
       // SDK events can carry saved, unverified identity during initialization.
@@ -19227,6 +20886,38 @@ import "../../styles/kylon-image-viewer.css";
         queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }
     });
+
+    if (isMultiAccountEnabled()) {
+      onAccountOwnershipChange(() => {
+        inactiveBadgePoller?.prune();
+        renderAccountSwitcher();
+      });
+      // Rev 4 §4: Forced teardown (cross-tab sign-out, Sign out all, terminal expiry)
+      // overrides keepConnectCredentialVisible() and immediately clears all private DOM/secrets!
+      onAccountForcedTeardown((detail) => {
+        pendingSeatAdminReauthNotice = false;
+        if (detail.reason === "all-signed-out") {
+          inactiveBadgePoller?.clear();
+        } else if (detail.reason === "signed-out" && detail.userId) {
+          inactiveBadgePoller?.forgetExpired(detail.userId);
+        }
+        if (detail.reason === "expired" && !passwordChangeNotice) {
+          pendingForcedNotice = new SessionExpired().message;
+        }
+        teardownActiveAccountView();
+        renderAccountSwitcher();
+        const nextActive = accountManager()?.activeAccount();
+        if (nextActive && detail.reason === "signed-out") {
+          if (!authReloadQueued) runBoot();
+          return;
+        }
+        showAuthView("choices");
+        showPanel("signed-out");
+        if (!showPasswordChangedNotice() && pendingForcedNotice) {
+          authError(pendingForcedNotice);
+        }
+      });
+    }
 
     /*
      * THIS PAGE IS NOT WHAT THE SERVER IS SERVING. Not "newer" — a rollback serves a different
