@@ -644,9 +644,9 @@ test("C3 Conditions 2 & 3: narrow addressed thread root audience, unmapped root 
     (error: unknown) => error instanceof ReviewCheckError && error.status === 404,
   );
 
-  // Outside workspace administrator sees ZERO of those private channel audit rows; private-channel member owner sees all 7!
+  // Outside workspace administrator sees ZERO of those private channel audit rows; private-channel member owner sees all 6 committed tagged rows (post-removal 404 replay rolls back cleanly).
   assert.equal((await auditRowsFor(outsideAdmin.id, mark1)).length, 0, "outside workspace admin must see ZERO private review_check open/stamp/replay/conflict audit rows");
-  assert.equal((await auditRowsFor(owner.id, mark1)).length, 7, "private channel member owner must see all 7 tagged audit rows");
+  assert.equal((await auditRowsFor(owner.id, mark1)).length, 6, "private channel member owner must see all 6 committed tagged audit rows");
 
   // Unknown vs hidden private check probe by outsideAdmin -> identical 404 and identical audit_log visibility!
   const markUnknown = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
