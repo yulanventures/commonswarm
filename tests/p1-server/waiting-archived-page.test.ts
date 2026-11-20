@@ -712,7 +712,15 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       `;
       await tx`
         INSERT INTO swarm.ask_choices (signal_id, workspace_id, multi, options)
-        VALUES (${crossUiAskId}::uuid, ${wsId}::uuid, false, ${tx.json([{ id: "secret_opt", label: "Secret Choice Label" }])}::jsonb)
+        VALUES (
+          ${crossUiAskId}::uuid,
+          ${wsId}::uuid,
+          false,
+          ${tx.json([
+            { id: "secret_opt", label: "Secret Choice Label" },
+            { id: "alt_opt", label: "Alternate Option" },
+          ])}::jsonb
+        )
       `;
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, channel_id, in_reply_to, until, created_at)
