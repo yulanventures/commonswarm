@@ -21,7 +21,8 @@ const secondWorkspace = "00000000-0000-4000-8000-000000000005";
 const longChannel = "00000000-0000-4000-8000-000000000006";
 const verify = process.argv[2] === "--verify";
 const upgrade = process.argv[2] === "--upgrade";
-const review = verify || upgrade || process.argv[2] === "--review";
+const conversationsEnabled = verify || process.argv[2] === "--conversations";
+const review = conversationsEnabled || upgrade || process.argv[2] === "--review";
 const workspaces = [{ workspace_id: workspace, name: "Simulator workspace" }];
 const channels = [{ channel_id: channel, slug: "mobile", visibility: "open" }];
 if (review) {
@@ -32,6 +33,7 @@ let olderPageInterrupted = false;
 const codes = new Map();
 let emailCodePending = false;
 const emailWire = {};
+const conversationWire = new Map();
 // Record the actual Swift request, with stable key order for the CI fixture.
 function recordEmailRequest(url, body) {
   if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
@@ -53,7 +55,21 @@ const fileBytes = Buffer.from("Workspace notes");
 const signedPath = "/storage/v1/object/sign/swarm-files/" + workspace + "/" + file + "/2";
 const fixtureFile = { file_id: file, version_n: 2, name: "Notes.txt", content_type: "text/plain", size_bytes: fileBytes.length };
 
-const address = (command) => command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general";
+const members = [{ kind: "user", id: me, name: "You" }, { kind: "agent", id: agent, name: "Atlas" }];
+let capabilityProbeReads = 0;
+let probeLegacyRequests = 0;
+const capabilityProbe = "00000000-0000-4000-8000-000000000091";
+const teammate = { kind: "user", id: "00000000-0000-4000-8000-000000000088", name: "Morgan" };
+const twins = ["012345ab-0000-4000-8000-000000000001", "012345cd-0000-4000-8000-000000000002"]
+  .map(id => ({ kind: "agent", id, name: "Riley" }));
+const threadRows = [
+  { conversation_id: "00000000-0000-4000-8000-000000000020", kind: "general", slug: "general", joined: true },
+  { conversation_id: "00000000-0000-4000-8000-000000000021", kind: "public_channel", channel_id: channel, slug: "mobile", joined: true, members: [members[0]] },
+  { conversation_id: "00000000-0000-4000-8000-000000000022", kind: "private_channel", channel_id: longChannel, slug: "design", joined: true, members: [members[0]] },
+  { conversation_id: "00000000-0000-4000-8000-000000000023", kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
+  { conversation_id: "00000000-0000-4000-8000-000000000024", kind: "dm", joined: true, members, mention_count: 103 }
+];
+const address = (command) => command.conversation_id?.toLowerCase() ?? (command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general");
 if (review) {
   for (let i = 130; i > 0; i--) {
     messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
@@ -61,6 +77,15 @@ if (review) {
   }
   messages[0].attachments = [fixtureFile];
 }
+const privateCheck = { conversation_id: randomUUID(), kind: "private_channel", channel_id: randomUUID(), slug: "access-check", joined: true };
+if (verify) threadRows.push(privateCheck);
+let privateDenied = false;
+let threadPosts = 0;
+let holdNextMembershipRead = false;
+const membershipReadHeld = Promise.withResolvers();
+const releaseMembershipRead = Promise.withResolvers();
+let memberWrites = 0;
+let loseMemberReply = false;
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -85,6 +110,18 @@ const server = createServer(async (req, res) => {
       return reply(200, refreshAttempts === 4 ? "complete" : sessions.size ? "restore" : "sign-in");
     }
     if (verify && req.method === "GET" && url.pathname.startsWith("/fixture/")) {
+      if (url.pathname === "/fixture/hold-membership") { holdNextMembershipRead = true; return reply(200, 0); }
+      if (url.pathname === "/fixture/membership-held") { await membershipReadHeld.promise; return reply(200, 0); }
+      if (url.pathname === "/fixture/resume-membership") { releaseMembershipRead.resolve(); return reply(200, 0); }
+      if (url.pathname === "/fixture/probe-legacy-requests") return reply(200, probeLegacyRequests);
+      if (url.pathname === "/fixture/lose-member-reply") { loseMemberReply = true; return reply(200, memberWrites); }
+      if (url.pathname === "/fixture/member-writes") return reply(200, memberWrites);
+      if (url.pathname === "/fixture/lose-public") {
+        threadRows.find(r => r.slug === "garden").joined = false;
+        return reply(200, threadPosts);
+      }
+      if (url.pathname === "/fixture/deny-private") { privateDenied = true; return reply(200, threadPosts); }
+      if (url.pathname === "/fixture/thread-posts") return reply(200, threadPosts);
       if (url.pathname === "/fixture/wait-for-post") {
         await postReceived;
       } else if (url.pathname === "/fixture/release") {
@@ -162,6 +199,38 @@ const server = createServer(async (req, res) => {
     }
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
+    if (req.method === "POST" && url.pathname === "/functions/v1/read") {
+      const ws = body.workspace_id?.toLowerCase();
+      if (verify && ws === capabilityProbe) {
+        capabilityProbeReads++;
+        if (capabilityProbeReads === 1) return reply(200, { conversations: [] });
+        if (capabilityProbeReads === 2) return reply(404, { error: "forbidden" });
+        return reply(400, { error: "invalid_request" });
+      }
+      if (!conversationsEnabled || ws === secondWorkspace) return reply(400, { error: "invalid_request" });
+      if (ws !== workspace) return reply(403, { error: "forbidden" });
+      if (body.resource === "conversations" && body.include_archived === false) {
+        if (verify && holdNextMembershipRead) {
+          holdNextMembershipRead = false;
+          const snapshot = structuredClone(threadRows);
+          membershipReadHeld.resolve();
+          await releaseMembershipRead.promise;
+          return reply(200, { conversations: snapshot });
+        }
+        return reply(200, { conversations: threadRows });
+      }
+      const row = threadRows.find(r => r.conversation_id === body.conversation_id?.toLowerCase());
+      if (body.resource !== "conversation_history" || !row) return reply(404, { error: "conversation_not_found" });
+      if (row === privateCheck) {
+        if (privateDenied) return reply(404, { error: "conversation_not_found" });
+        return reply(200, { conversation: row, messages: [messages[0]] });
+      }
+      const targets = [row.conversation_id, row.kind === "general" ? "general" : row.channel_id];
+      const history = messages.filter(m => targets.includes(m.fixtureDestination) && m.workspace === ws &&
+        (!body.before_created_at || m.created_at < body.before_created_at ||
+          (m.created_at === body.before_created_at && m.id < body.before_id.toLowerCase())));
+      return reply(200, { conversation: row, messages: history.slice(0, body.limit).reverse() });
+    }
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
       if (typeof body.client_version !== "string" || body.client_version !== expectedClientVersion) {
         if (verify) console.error("Invalid client_version for", body.command?.kind);
@@ -172,6 +241,48 @@ const server = createServer(async (req, res) => {
         return reply(200, { ...fixtureFile, status: "accepted", download_path: signedPath + "?token=fixture" });
       }
       const cmd = body.command;
+      if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
+      if (verify && ["conversation_join", "conversation_open", "conversation_invite", "conversation_remove"].includes(cmd?.kind)) {
+        if (cmd.kind !== "conversation_open" || cmd.members.length > 1) conversationWire.set(cmd.kind, cmd);
+      }
+      if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
+        const candidates = [...members, teammate, ...twins];
+        const refs = [members[0], ...cmd.members.map(m => candidates.find(c => c.id === m.id.toLowerCase() && c.kind === m.kind))];
+        if (refs.some(m => !m)) return reply(400, {});
+        const unique = [...new Set(refs)];
+        const same = threadRows.find(r => r.kind.endsWith("dm") && r.members.length === unique.length &&
+          unique.every(m => r.members.includes(m)));
+        const thread = same ?? { conversation_id: randomUUID(), kind: unique.length > 2 ? "group_dm" : "dm",
+          members: unique, joined: true };
+        if (!same) threadRows.push(thread);
+        return reply(200, { status: "accepted", conversation: thread });
+      }
+      if (["conversation_invite", "conversation_remove", "channel_member_add", "channel_member_remove"].includes(cmd?.kind)) {
+        if (body.workspace_id?.toLowerCase() !== workspace) return reply(403, {});
+        const isPrivate = cmd.kind.startsWith("channel_member_");
+        const target = threadRows.find(r => isPrivate
+          ? r.kind === "private_channel" && r.channel_id === cmd.channel_id?.toLowerCase()
+          : r.kind === "public_channel" && r.conversation_id === cmd.conversation_id?.toLowerCase());
+        if (!target || !target.joined) return reply(403, {});
+        if (cmd.members) {
+          for (const ref of cmd.members) {
+            const person = [...members, teammate, ...twins].find(m => m.kind === ref.kind && m.id === ref.id.toLowerCase());
+            if (!person) return reply(400, {});
+            if (!target.members.includes(person)) target.members.push(person);
+          }
+        } else {
+          target.members = target.members.filter(m => m.kind !== cmd.member.kind || m.id !== cmd.member.id.toLowerCase());
+        }
+        memberWrites++;
+        if (loseMemberReply) { loseMemberReply = false; return reply(503, {}); }
+        return reply(200, isPrivate ? { status: "accepted" } : { status: "accepted", conversation_id: target.conversation_id });
+      }
+      if (cmd?.kind === "conversation_join" && body.workspace_id?.toLowerCase() === workspace) {
+        const target = threadRows.find(r => r.conversation_id === cmd.conversation_id.toLowerCase() && r.kind === "public_channel");
+        if (!target) return reply(404, {});
+        target.joined = true;
+        return reply(200, { status: "accepted", conversation_id: target.conversation_id });
+      }
       if (body.workspace_id?.toLowerCase() === workspace && ["file_version_create", "file_version_commit"].includes(cmd?.kind)) {
         if (fileReceipts.has(body.command_id)) return reply(200, fileReceipts.get(body.command_id));
         if (cmd.kind === "file_version_create") {
@@ -216,6 +327,9 @@ const server = createServer(async (req, res) => {
       }
       return reply(200, { status: "accepted", signal: receipts.get(body.command_id).signal });
     }
+    if (url.pathname.startsWith("/rest/v1/") && url.searchParams.get("workspace_id")?.toLowerCase() === "eq." + capabilityProbe) {
+      probeLegacyRequests++;
+    }
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
     const ws = workspaces.find(row => "eq." + row.workspace_id === url.searchParams.get("workspace_id")?.toLowerCase());
@@ -225,8 +339,9 @@ const server = createServer(async (req, res) => {
         const filter = url.searchParams.get("channel_id");
         return reply(200, ws.workspace_id === workspace ? channels.filter(c => !filter || "eq." + c.channel_id === filter.toLowerCase()) : []);
       }
-      case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }]);
-      case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }]);
+      case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }, ...(conversationsEnabled ? [{ user_id: teammate.id, display_name: teammate.name }] : [])]);
+      case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }, ...(conversationsEnabled ? twins.map(m => ({ principal_id: m.id, name: m.name })) : [])]);
+      case "/rest/v1/memberships": return reply(200, [{ role: "owner" }]);
       case "/rest/v1/signals": {
         const destination = url.searchParams.has("recipients->1") ? "direct" :
           url.searchParams.get("channel_id") === "is.null" ? "general" : url.searchParams.get("channel_id")?.slice(3).toLowerCase();
@@ -255,6 +370,10 @@ server.listen(verify ? 0 : 8765, "127.0.0.1", () => {
   child.once("exit", (status) => {
     if (status === 0 && process.argv[4]) {
       writeFileSync(join(dirname(process.argv[4]), "email-code.json"), JSON.stringify(emailWire, null, 2) + "\n");
+      const sortedKeys = (_, value) => value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value;
+      writeFileSync(join(dirname(process.argv[4]), "conversation-commands.json"),
+        JSON.stringify([...conversationWire.values()], sortedKeys, 2) + "\n");
     }
     process.exitCode = status ?? 1;
     server.close();
