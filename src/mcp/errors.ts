@@ -10,6 +10,11 @@ import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
 import { FilePutPreflightError, RequestIdConflict } from "../cloud/exact-file-put.js";
 import { isAskChainRefusalCode, printableAskRefusalMessage } from "../cloud/ask-chain-constants.js";
 import { MENTION_REFUSAL_SENTENCES, MentionResolutionError } from "../protocol/mention-address.js";
+import { reasonForErrorCode, type AxErrorReason } from "../protocol/error-catalog.js";
+
+export function mcpErrorReason(code: string | null | undefined): AxErrorReason {
+  return reasonForErrorCode(code) ?? "command_failed";
+}
 
 type Action = "retry the same call" | "retry this call with the same request_id" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "use a new request_id for new content" | "read the topic again and use a NEW request_id for new content" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id" | "send a new ask if it still matters" | "call check to read the replies" | "wait until 24 hours after the last re-raise, then use a new request_id" | "send it as a plain ask, without options, choices or multi";
 type Sentence = { message: string; next_step: Action };

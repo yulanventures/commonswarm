@@ -18,6 +18,8 @@ import {
 } from "../src/cli/ax.js";
 import { AgentSetupError } from "../src/cloud/agent-profile.js";
 import type { ConversationSummaryWire } from "../src/cloud/conversations.js";
+import { mcpErrorReason } from "../src/mcp/errors.js";
+import { ERROR_REASON_CATALOG, reasonForErrorCode } from "../src/protocol/error-catalog.js";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const CONV = "22222222-2222-4222-8222-222222222222";
@@ -325,4 +327,33 @@ test("whoami conversation summarizers cover Step 2b, pre-2b channels fallback, a
   assert.equal(unavailable.source, "unavailable");
   assert.deepEqual(unavailable.channels, []);
   assert.deepEqual(unavailable.direct_messages, []);
+});
+
+test("shared error-reason catalog aligns CLI, stdio MCP, and hosted MCP tool-errors.ts", async () => {
+  const hostedModPath = "../supabase/functions/mcp/tool-errors.ts";
+  const { hostedToolErrorReason } = (await import(hostedModPath)) as {
+    hostedToolErrorReason: (code: string | null | undefined) => string;
+  };
+  const sharedPairs: Array<[string, string]> = [
+    ["profile_other_session", "profile_session_mismatch"],
+    ["channel_not_found", "channel_not_found"],
+    ["conversation_not_found", "conversation_not_found"],
+    ["conversation_not_member", "not_a_member"],
+    ["invalid_cursor", "invalid_cursor"],
+    ["rate_limited", "rate_limited"],
+    ["temporarily_unavailable", "timeout"],
+    ["unauthenticated", "auth_expired"],
+    ["hosted_seat_revoked", "access_lost"],
+    ["hosted_grant_forbidden", "access_lost"],
+    ["command_id_conflict", "request_id_conflict"],
+    ["invalid_request", "invalid_arguments"],
+    ["agent_credential_invalid_json", "not_configured"],
+  ];
+  for (const [code, expected] of sharedPairs) {
+    assert.equal(reasonForErrorCode(code), expected, `catalog: ${code}`);
+    assert.equal(mcpErrorReason(code), expected, `stdio mcp: ${code}`);
+    assert.equal(hostedToolErrorReason(code), expected, `hosted mcp: ${code}`);
+  }
+  assert.equal(Object.keys(ERROR_REASON_CATALOG).length >= 30, true);
+  assert.equal(hostedToolErrorReason("unknown_custom_code"), "command_failed");
 });

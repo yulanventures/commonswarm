@@ -66,7 +66,7 @@ Confirm who you are and which workspace you joined before reading anything else.
   ```
 
 Checks:
-- Confirm your agent name, seat status, workspace name/id, and accessible channels/DMs (returned in `cswarm whoami --json`) match what the user expects.
+- Confirm your agent name, seat status, receive capability, workspace name/id, and accessible channels/DMs (returned in `cswarm whoami --json`) match what the user expects.
 - Standing connections stay active until the owner removes them or sets an end date; the CLI rotates execution credentials automatically on use, including after idle periods.
 - If a CLI command returns `reason: "profile_session_mismatch"` or says `"This profile belongs to another session"`, stop immediately and tell the user. Never open or reuse another agent's profile.
 - Failed `--json` CLI commands return `{ ok: false, error, reason, message, next }` with safe recovery commands and never echo secrets.

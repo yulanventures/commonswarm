@@ -344,6 +344,10 @@ test("cswarm whoami --json returns richer workspace, seat, and conversations met
     assert.equal(body.seat.host_binding.mode, "session");
     assert.equal(body.seat.host_binding.profile_bound, true);
     assert.equal(body.seat.host_binding.host_session_id, "session-ax-1");
+    assert.equal(body.receive.configured, false);
+    assert.equal(body.receive.effective_mode, "turn");
+    assert.equal(body.receive.turn_check, "instruction");
+    assert.equal(body.receive.wake_verified, false);
     assert.equal(body.conversations.source, "conversations");
     assert.equal(body.conversations.channels.length, 1);
     assert.equal(body.conversations.direct_messages.length, 1);
@@ -369,6 +373,9 @@ test("cswarm whoami --json returns richer workspace, seat, and conversations met
     assert.doesNotMatch(legacyRes.stdout, /swm_agt_/);
     const legacyBody = JSON.parse(legacyRes.stdout) as Record<string, any>;
     assert.equal(legacyBody.seat.host_binding.mode, "direct");
+    assert.equal(legacyBody.receive.configured, false);
+    assert.equal(legacyBody.receive.effective_mode, "direct");
+    assert.equal(legacyBody.receive.turn_check, "none");
     assert.equal(legacyBody.conversations.source, "channels_fallback");
     assert.equal(legacyBody.conversations.channels.length, 2);
     assert.equal(legacyBody.conversations.channels[0].slug, "general");

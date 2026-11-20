@@ -8,6 +8,14 @@
 import type { AgentChannelList } from "../cloud/channels.js";
 import type { ConversationSummaryWire } from "../cloud/conversations.js";
 import { quoteAgentArgument } from "../cloud/agent-onboarding-contract.js";
+import {
+  ERROR_REASON_CATALOG,
+  reasonForErrorCode,
+  type AxErrorReason,
+} from "../protocol/error-catalog.js";
+
+export { ERROR_REASON_CATALOG, reasonForErrorCode };
+export type CliAxReason = AxErrorReason;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -161,21 +169,6 @@ export function scrubCliSecrets(value: string): string {
     .slice(0, 1000);
 }
 
-export type CliAxReason =
-  | "profile_session_mismatch"
-  | "not_configured"
-  | "auth_expired"
-  | "access_lost"
-  | "channel_not_found"
-  | "conversation_not_found"
-  | "not_a_member"
-  | "invalid_cursor"
-  | "invalid_arguments"
-  | "rate_limited"
-  | "timeout"
-  | "request_id_conflict"
-  | "command_failed";
-
 export interface CliJsonErrorEnvelope {
   ok: false;
   error: string;
@@ -311,12 +304,12 @@ export function classifyCliError(
   const lower = message.toLowerCase();
   const flags = safeAuthFlags(ctx);
   const setupHint = "cswarm setup --connection-file <private-file> --host-session-id <this-session-id> --json";
+  const catalogReason = reasonForErrorCode(rawCode);
 
   // 1. Invalid cursor
   if (
     error instanceof InvalidCursorError ||
-    rawCode === "invalid_cursor" ||
-    rawCode === "cursor_not_found"
+    catalogReason === "invalid_cursor"
   ) {
     const next = ctx.verb === "conversation" && ctx.subcommand === "read" && ctx.conversationId && UUID_RE.test(ctx.conversationId)
       ? [`cswarm conversation read ${ctx.conversationId.toLowerCase()}${flags} --json`]
@@ -328,10 +321,7 @@ export function classifyCliError(
 
   // 2. Profile / host-session binding mismatch
   if (
-    rawCode === "profile_other_session" ||
-    rawCode === "host_session_required" ||
-    rawCode === "setup_host_session_required" ||
-    rawCode === "host_session_invalid" ||
+    catalogReason === "profile_session_mismatch" ||
     lower.includes("this profile belongs to another session")
   ) {
     if (rawCode === "profile_other_session" || lower.includes("this profile belongs to another session")) {
@@ -353,7 +343,7 @@ export function classifyCliError(
   }
 
   // 3. Request ID conflict
-  if (rawCode === "request_id_conflict" || name === "RequestIdConflict") {
+  if (catalogReason === "request_id_conflict" || name === "RequestIdConflict") {
     return {
       error: "request_id_conflict",
       reason: "request_id_conflict",
@@ -363,7 +353,7 @@ export function classifyCliError(
 
   // 4. Channel / conversation not found & not-a-member
   if (
-    rawCode === "channel_not_found" ||
+    catalogReason === "channel_not_found" ||
     lower.includes("there is no channel named") ||
     lower.includes("there is no channel with") ||
     lower.includes("no channel with that")
@@ -379,7 +369,7 @@ export function classifyCliError(
   }
 
   if (
-    rawCode === "conversation_not_found" ||
+    catalogReason === "conversation_not_found" ||
     lower.includes("this conversation isn't available")
   ) {
     return {
@@ -390,7 +380,7 @@ export function classifyCliError(
   }
 
   if (
-    rawCode === "conversation_not_member" ||
+    catalogReason === "not_a_member" ||
     lower.includes("join the channel before") ||
     lower.includes("join the conversation first") ||
     lower.includes("aren't in this channel")
@@ -411,12 +401,7 @@ export function classifyCliError(
     ctx.isUsageError === true ||
     name === "UsageError" ||
     name === "ReplyStatusUsageError" ||
-    rawCode === "check_options_invalid" ||
-    rawCode === "hook_options_invalid" ||
-    rawCode === "receive_command_invalid" ||
-    rawCode === "profile_flags_conflict" ||
-    rawCode === "profile_command_invalid" ||
-    rawCode === "invalid_request" ||
+    catalogReason === "invalid_arguments" ||
     lower.startsWith("unknown option:") ||
     lower.includes("requires a value") ||
     lower.includes("too few positional arguments") ||
@@ -434,8 +419,7 @@ export function classifyCliError(
   // 6. Rate-limit / quota
   if (
     status === 429 ||
-    rawCode === "rate_limited" ||
-    rawCode === "quota_exceeded" ||
+    catalogReason === "rate_limited" ||
     lower.includes("rate limit") ||
     lower.includes("rate-limit") ||
     lower.includes("too many requests")
@@ -449,8 +433,7 @@ export function classifyCliError(
 
   // 7. Timeouts
   if (
-    rawCode === "check_timeout" ||
-    rawCode === "ETIMEDOUT" ||
+    catalogReason === "timeout" ||
     name === "SignalReadTimeoutError" ||
     name === "FileLockTimeoutError" ||
     name === "TimeoutError" ||
@@ -475,14 +458,7 @@ export function classifyCliError(
     status === 403 ||
     name === "RenewalRevoked" ||
     name === "RenewalSuspended" ||
-    rawCode === "forbidden" ||
-    rawCode === "authenticated_identity_mismatch" ||
-    rawCode === "renewal_grant_revoked" ||
-    rawCode === "renewal_lineage_revoked" ||
-    rawCode === "predecessor_revoked" ||
-    rawCode === "renewal_grant_suspended" ||
-    rawCode === "hosted_seat_revoked" ||
-    rawCode === "hosted_seat_forbidden" ||
+    catalogReason === "access_lost" ||
     lower.includes("revoked") ||
     lower.includes("suspended") ||
     lower.includes("forbidden")
@@ -509,9 +485,7 @@ export function classifyCliError(
   if (
     status === 401 ||
     name === "RenewalReauthorisationRequired" ||
-    rawCode === "unauthenticated" ||
-    rawCode === "token_expired" ||
-    rawCode === "human_session_refresh_failed" ||
+    catalogReason === "auth_expired" ||
     lower.includes("unauthenticated") ||
     lower.includes("expired") ||
     lower.includes("reauthori")
@@ -531,13 +505,7 @@ export function classifyCliError(
 
   // 10. Not configured / missing setup, target, credential, or workspace
   if (
-    rawCode === "profile_missing" ||
-    rawCode === "profile_credential_missing" ||
-    rawCode === "human_session_missing" ||
-    rawCode === "workspace_not_selected" ||
-    rawCode === "workspace_ambiguous" ||
-    rawCode === "no_workspaces" ||
-    rawCode?.startsWith("agent_credential_") === true ||
+    catalogReason === "not_configured" ||
     lower.includes("not logged in") ||
     lower.includes("run cswarm login") ||
     lower.includes("--connection-file is required") ||

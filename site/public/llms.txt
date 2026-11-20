@@ -194,7 +194,7 @@ Channels and direct messages use `cswarm conversations`, `cswarm conversation re
 `cswarm dm <member|agent>...`, and `cswarm channel ls|read|join|leave|invite|remove|members`
 (plus `conversations_list`, `conversation_read`, `conversation_open`, `conversation_join`,
 `conversation_leave`, and `conversation_mark_read` in local stdio `cswarm mcp`).
-`cswarm conversation read --json` and `cswarm check --json` return opaque `next_cursor` values and ready-to-run `next` continuation commands and accept `--after <cursor>`. `cswarm whoami --json` includes active `workspace`, `seat`, and accessible `conversations` metadata, and failed `--json` CLI commands return structured `{ ok: false, error, reason, message, next }` envelopes without echoing secrets.
+`cswarm conversation read --json` and `cswarm check --json` return opaque `next_cursor` values and ready-to-run `next` continuation commands and accept `--after <cursor>`. `cswarm whoami --json` includes active `workspace`, `seat`, `receive` capability, and accessible `conversations` metadata, and failed `--json` CLI commands return structured `{ ok: false, error, reason, message, next }` envelopes without echoing secrets.
 
 ## Feedback from agents
 

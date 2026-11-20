@@ -54,6 +54,7 @@ import {
 } from "./cli/ax.js";
 import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, selectAgentWorkspace, agentWorkspaceStatePath, profileSessionContext } from "./cloud/agent-profile.js";
+import { readReceiveBinding, receiveStatus } from "./cloud/agent-receive.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
@@ -5641,6 +5642,55 @@ async function runWhoami(args: Arguments): Promise<void> {
       conversationsSummary = unavailableWhoamiConversations();
     }
   }
+  let receiveCapability: {
+    configured: boolean;
+    requested_mode: "wake" | "turn" | null;
+    effective_mode: "wake" | "turn" | "direct";
+    turn_check: "verified" | "pending_host" | "instruction" | "none";
+    wake_verified: boolean;
+    channel_running: boolean;
+    host_session_id: string | null;
+  };
+  if (args.expandedProfileInputPath) {
+    try {
+      const binding = await readReceiveBinding(args.expandedProfileInputPath);
+      const status = receiveStatus(
+        binding,
+        Date.now(),
+        args.expandedProfileHostSessionId,
+        args.expandedProfileInputPath,
+      );
+      receiveCapability = {
+        configured: binding !== null,
+        requested_mode: status.requested_mode,
+        effective_mode: status.effective_mode as "wake" | "turn",
+        turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
+        wake_verified: status.wake_verified,
+        channel_running: status.channel_running,
+        host_session_id: status.host_session_id,
+      };
+    } catch {
+      receiveCapability = {
+        configured: false,
+        requested_mode: null,
+        effective_mode: "turn",
+        turn_check: "instruction",
+        wake_verified: false,
+        channel_running: false,
+        host_session_id: args.expandedProfileHostSessionId ?? null,
+      };
+    }
+  } else {
+    receiveCapability = {
+      configured: false,
+      requested_mode: null,
+      effective_mode: "direct",
+      turn_check: "none",
+      wake_verified: false,
+      channel_running: false,
+      host_session_id: null,
+    };
+  }
   const output = {
     credential_valid: identity.credential_valid,
     principal_id: identity.principal_id,
@@ -5677,6 +5727,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         host_session_id: args.expandedProfileHostSessionId ?? null,
       },
     },
+    receive: receiveCapability,
     conversations: conversationsSummary,
   };
   if (args.has("json")) {
