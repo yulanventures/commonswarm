@@ -57,6 +57,6 @@ test("malformed conversation commands are refused at the wire", () => {
 test("the iPhone conversation requests are accepted by the command parser", () => {
   const commands = JSON.parse(readFileSync("ios/Development/conversation-commands.json", "utf8")) as Record<string, unknown>[];
   assert.deepEqual(commands.map(cmd => cmd.kind).sort(),
-    ["conversation_invite", "conversation_join", "conversation_open", "conversation_remove"]);
+    ["conversation_invite", "conversation_join", "conversation_leave", "conversation_mark_read", "conversation_open", "conversation_remove", "conversation_set_notify"]);
   for (const cmd of commands) assert.equal(parseConversationCommand(cmd).ok, true, String(cmd.kind));
 });

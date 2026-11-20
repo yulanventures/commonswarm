@@ -17,6 +17,16 @@ struct DirectoryView: View {
     @SwiftUI.State private var selected: ThreadRoute?
 
 
+    private struct ActionTarget: Identifiable {
+        let id: UUID
+        let row: ConversationSummary
+        let action: ConversationAction
+    }
+    @SwiftUI.State private var leaveTarget: ConversationSummary?
+    @SwiftUI.State private var editing = Set<UUID>()
+    @SwiftUI.State private var retryAction: ActionTarget?
+    @SwiftUI.State private var actionError: String?
+
     var body: some View {
         Group {
             switch state {
@@ -26,15 +36,29 @@ struct DirectoryView: View {
             case .ready(let rows): list(rows)
             }
         }.navigationTitle(workspace.name).task { await refresh() }
+        .confirmationDialog(leaveTarget.map { "Leave " + $0.item(viewer: api.session.userID, labels: labels).name + "?" } ?? "Leave conversation?",
+                            isPresented: Binding(get: { leaveTarget != nil }, set: { if !$0 { leaveTarget = nil } }),
+                            titleVisibility: .visible, presenting: leaveTarget) { row in
+            Button("Leave", role: .destructive) { start(.leave, row) }
+            Button("Cancel", role: .cancel) {}
+        } message: { row in
+            if row.kind == .group { Text("You’ll lose access to this group’s history. A current member must start a new group to include you again.") }
+            else if row.kind == .privateChannel { Text("You’ll need a new invitation to return.") }
+        }
+        .alert(actionError ?? "", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+            if let target = retryAction { Button("Retry " + target.row.item(viewer: api.session.userID, labels: labels).name) { Task { await perform(target) } } }
+            Button("Cancel", role: .cancel) { retryAction = nil }
+        }
     }
 
     private func list(_ rows: [ConversationSummary]) -> some View {
         let live = rows.filter { $0.joined && $0.archived_at == nil }
-        let channels = live.filter { !$0.kind.direct }.sorted {
+        let starred = live.filter { $0.starred == true }.sorted { ($0.star_rank ?? Int.max, $0.id.uuidString) < ($1.star_rank ?? Int.max, $1.id.uuidString) }
+        let channels = live.filter { !$0.kind.direct && $0.starred != true }.sorted {
             if ($0.kind == .general) != ($1.kind == .general) { return $0.kind == .general }
             return ($0.slug ?? "") < ($1.slug ?? "")
         }
-        let directs = live.filter { $0.kind.direct }.sorted {
+        let directs = live.filter { $0.kind.direct && $0.starred != true }.sorted {
             if $0.last_message_at == $1.last_message_at { return $0.id.uuidString < $1.id.uuidString }
             return ($0.last_message_at ?? "") > ($1.last_message_at ?? "")
         }
@@ -50,12 +74,13 @@ struct DirectoryView: View {
                     Label("Files", systemImage: "folder")
                 }
             }
+            if !starred.isEmpty { Section("Starred") { ForEach(starred) { row in link(row) } } }
             Section("Channels") {
                 ForEach(channels) { row in link(row) }
                 NavigationLink("All channels", value: ChannelDirectoryRoute())
             }
             Section("Direct messages") {
-                if directs.isEmpty { Text("No direct messages yet").foregroundStyle(.secondary) }
+                if !live.contains(where: { $0.kind.direct }) { Text("No direct messages yet").foregroundStyle(.secondary) }
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
@@ -111,6 +136,10 @@ struct DirectoryView: View {
                                  return member.contact.name + " · " + id
                              }, waitingChannelID: row.channel_id).id(row.id)
                      .toolbar {
+                         if row.joined {
+                             ConversationOptionsButton(draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { actions(row) }
+                                 .disabled(editing.contains(row.id))
+                         }
                          MembersButton(api: api, workspace: workspace.id, row: row,
                                        draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { state = .ready($0) }
                      }
@@ -159,7 +188,83 @@ struct DirectoryView: View {
                 } else if row.notify_level != "muted", (row.unread_count ?? 0) > 0 {
                     Circle().fill(.tint).frame(width: 8, height: 8).accessibilityLabel("Unread")
                 }
+                if row.notify_level == "muted" {
+                    Image(systemName: "bell.slash").accessibilityLabel("Muted")
+                }
             }.accessibilityElement(children: .combine)
+        }.contextMenu { if row.joined { actions(row) } }
+    }
+
+    @ViewBuilder private func actions(_ row: ConversationSummary) -> some View {
+        if let through = row.last_message_id, (row.unread_count ?? 0) > 0 || (row.mention_count ?? 0) > 0 {
+            Button("Mark as read") { start(.markRead(through: through), row) }
+        }
+        Button(row.starred == true ? "Unstar" : "Star") { start(.star(row.starred != true), row) }
+        Menu("Notifications") {
+            ForEach(["everything", "mentions", "muted"], id: \.self) { level in
+                Button { start(.notify(level), row) } label: {
+                    let name = level == "muted" ? "Mute" : level == "mentions" ? "Mentions only" : "All messages"
+                    if (row.notify_level ?? "everything") == level { Label(name, systemImage: "checkmark") }
+                    else { Text(name) }
+                }
+            }
+        }
+        if row.kind.canLeave {
+            Button("Leave…", role: .destructive) { leaveTarget = row }
+        }
+    }
+
+    private func start(_ action: ConversationAction, _ row: ConversationSummary) {
+        Task { await perform(.init(id: UUID(), row: row, action: action)) }
+    }
+
+    private func perform(_ target: ActionTarget) async {
+        let id = target.row.id
+        guard case .ready(let before) = state, before.contains(where: { $0.id == id && $0.joined }),
+              editing.insert(id).inserted else { return }
+        defer { editing.remove(id) }
+        do {
+            let updated = try await api.perform(target.action, on: target.row, workspace: workspace.id, commandID: target.id)
+            guard !Task.isCancelled, case .ready(var rows) = state, let i = rows.firstIndex(where: { $0.id == id }) else { return }
+            generation = UUID()
+            switch target.action {
+            case .leave:
+                if updated.kind == .publicChannel { rows[i].joined = false; rows[i].starred = false }
+                else { rows.remove(at: i) }
+            case .markRead:
+                if rows[i].last_message_id == target.row.last_message_id {
+                    rows[i].mention_count = 0
+                    rows[i].unread_count = 0
+                }
+            case .star, .notify:
+                rows[i].starred = updated.starred
+                rows[i].star_rank = updated.star_rank
+                rows[i].notify_level = updated.notify_level
+            }
+            state = .ready(rows)
+            retryAction = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            retryAction = target
+            if let refusal = error as? ConversationRefusal, refusal.error == "channel_last_manager" {
+                actionError = "Add another channel manager before leaving."
+                retryAction = nil
+            } else {
+                let name = target.row.item(viewer: api.session.userID, labels: labels).name
+                switch target.action {
+                case .leave: actionError = "Couldn’t confirm leaving " + name + "."
+                case .markRead: actionError = "Couldn’t confirm marking " + name + " as read."
+                case .star, .notify: actionError = "Couldn’t confirm preferences for " + name + "."
+                }
+                // A lost Leave reply can still mean access has ended. A fresh list retires that draft.
+                if case .leave = target.action, let rows = try? await api.conversationList(workspace.id),
+                   !Task.isCancelled, !rows.contains(where: { $0.id == id && $0.joined }) {
+                    generation = UUID()
+                    state = .ready(rows)
+                    retryAction = nil
+                    actionError = nil
+                }
+            }
         }
     }
 
@@ -179,3 +284,14 @@ struct DirectoryView: View {
 struct ThreadRoute: Hashable { let id: UUID }
 
 private struct ChannelDirectoryRoute: Hashable {}
+
+
+private struct ConversationOptionsButton<Actions: View>: View {
+    @ObservedObject var draft: Composer
+    @ViewBuilder let actions: () -> Actions
+
+    var body: some View {
+        Menu(content: actions) { Label("Conversation options", systemImage: "ellipsis.circle") }
+            .disabled(draft.access != .joined)
+    }
+}

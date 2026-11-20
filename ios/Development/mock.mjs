@@ -68,7 +68,7 @@ const threadRows = [
   { conversation_id: "00000000-0000-4000-8000-000000000021", kind: "public_channel", channel_id: channel, slug: "mobile", joined: true, members: [members[0]] },
   { conversation_id: "00000000-0000-4000-8000-000000000022", kind: "private_channel", channel_id: longChannel, slug: "design", joined: true, members: [members[0]] },
   { conversation_id: "00000000-0000-4000-8000-000000000023", kind: "public_channel", channel_id: randomUUID(), slug: "garden", joined: false },
-  { conversation_id: "00000000-0000-4000-8000-000000000024", kind: "dm", joined: true, members, mention_count: 103 }
+  { conversation_id: "00000000-0000-4000-8000-000000000024", kind: "dm", joined: true, members, mention_count: 103, last_message_id: "00000000-0000-4000-8000-000000000033" }
 ];
 const address = (command) => command.conversation_id?.toLowerCase() ?? (command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general");
 if (review) {
@@ -257,6 +257,35 @@ const server = createServer(async (req, res) => {
       if (cmd?.kind === "post_signal" && cmd.conversation_id) threadPosts++;
       if (verify && ["conversation_join", "conversation_open", "conversation_invite", "conversation_remove"].includes(cmd?.kind)) {
         if (cmd.kind !== "conversation_open" || cmd.members.length > 1) conversationWire.set(cmd.kind, cmd);
+      }
+      if (["conversation_leave", "conversation_mark_read", "conversation_set_notify", "channel_preference_set", "channel_leave"].includes(cmd?.kind)) {
+        if (body.workspace_id?.toLowerCase() !== workspace) return reply(403, {});
+        const priv = cmd.kind.startsWith("channel_");
+        const row = threadRows.find(r => priv
+          ? r.kind === "private_channel" && r.channel_id === cmd.channel_id?.toLowerCase()
+          : r.conversation_id === cmd.conversation_id?.toLowerCase());
+        if (!row?.joined) return reply(404, {});
+        if (cmd.kind.endsWith("_leave")) {
+          if (!["private_channel","public_channel","group_dm"].includes(row.kind) || (row.kind === "private_channel") !== priv) return reply(409, {});
+          row.joined = false;
+          if (!priv && row.kind === "public_channel") conversationWire.set(cmd.kind, cmd);
+          return reply(200, priv ? { status: "accepted", channel_id: row.channel_id, left: true } :
+            { status: "accepted", conversation_id: row.conversation_id, changed: true });
+        }
+        if (cmd.kind === "conversation_mark_read") {
+          if (cmd.through_signal_id?.toLowerCase() !== row.last_message_id) return reply(404, {});
+          conversationWire.set(cmd.kind, cmd);
+          row.unread_count = 0; row.mention_count = 0;
+          return reply(200, { status: "accepted", conversation_id: row.conversation_id, read_through_at: new Date().toISOString() });
+        }
+        if ((row.kind === "private_channel") !== priv) return reply(409, {});
+        row.starred = cmd.starred ?? row.starred ?? false;
+        row.notify_level = (priv ? cmd.involvement : cmd.notify_level) ?? row.notify_level ?? "everything";
+        row.star_rank = row.starred ? 1 : null;
+        if (!priv) conversationWire.set(cmd.kind, cmd);
+        const preference = { starred: row.starred, star_rank: row.star_rank };
+        return reply(200, priv ? { status: "accepted", preference: { ...preference, workspace_id: workspace, channel_id: row.channel_id, involvement: row.notify_level } }
+          : { ...preference, status: "accepted", conversation_id: row.conversation_id, notify_level: row.notify_level });
       }
       if (cmd?.kind === "conversation_open" && body.workspace_id?.toLowerCase() === workspace) {
         const candidates = [...members, teammate, ...twins];

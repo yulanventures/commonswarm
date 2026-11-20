@@ -78,6 +78,40 @@ final class ReaderPositionTests: XCTestCase {
         screenshot("thread-reply-reconciled")
     }
 
+    func testConversationStarMuteAndLeave() throws {
+        continueAfterFailure = false
+        app.launch()
+        if app.buttons["Continue with email"].waitForExistence(timeout: 3) {
+            try tap("Continue with email")
+            let field = app.textFields["Email address"]
+            field.tap()
+            field.typeText("reader@example.test")
+            try tap("Send code")
+            let code = app.secureTextFields["Email code"]
+            code.tap()
+            code.typeText("012345")
+            try tap("Sign in")
+        }
+        try tap("Simulator workspace")
+        try tap("#mobile")
+        try tap("Conversation options")
+        try tap("Star")
+        try tap("Conversation options")
+        XCTAssertTrue(app.buttons["Unstar"].exists)
+        try tap("Notifications")
+        try tap("Mute")
+        try tap("Conversation options")
+        try tap("Leave…")
+        try tap("Cancel")
+        XCTAssertTrue(app.textFields["Message #mobile"].exists)
+        try tap("Conversation options")
+        try tap("Leave…")
+        try tap("Leave")
+        XCTAssertTrue(app.buttons["Join #mobile"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.textFields["Message #mobile"].exists)
+        screenshot("left-channel-preview")
+    }
+
     func testReadingPositionSurvivesPrependAndOlderRetry() throws {
         continueAfterFailure = false
         app.launch()
