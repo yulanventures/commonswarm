@@ -205,6 +205,10 @@ const server = createServer(async (req, res) => {
       omitObjectInSearchOnce = url.searchParams.get("object_id") || null;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/clear-definitions") {
+      definitions.clear();
+      return reply(200, { ok: true });
+    }
     if (req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, recordedCommands);
     }

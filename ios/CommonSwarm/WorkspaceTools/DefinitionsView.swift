@@ -89,6 +89,7 @@ struct DefinitionsListView: View {
 
     @StateObject private var store: DefinitionsListStore
     @State private var createdRoute: DefinitionDetailRoute?
+    @Environment(\.colorScheme) private var colorScheme
 
     init(api: ConversationAPI, workspace: Workspace) {
         self.api = api
@@ -99,6 +100,8 @@ struct DefinitionsListView: View {
     private var definitionsAPI: DefinitionsAPI { DefinitionsAPI(api: api) }
 
     var body: some View {
+        let palette = DefinitionBadgePalette(colorScheme: colorScheme)
+
         Group {
             if let accessError = store.accessError {
                 ContentUnavailableView(
@@ -114,15 +117,15 @@ struct DefinitionsListView: View {
                     description: Text("This server does not support workspace definitions yet.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if store.isLoading && store.definitions.isEmpty {
+            } else if store.isLoading && store.definitions.isEmpty && !store.showsListRecoverySurface {
                 ProgressView("Loading definitions…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if store.loadFailed && store.definitions.isEmpty {
+            } else if store.loadFailed && store.definitions.isEmpty && !store.showsListRecoverySurface {
                 RetryView(text: "Couldn’t load definitions") {
                     await store.load(api: definitionsAPI)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if store.definitions.isEmpty {
+            } else if store.definitions.isEmpty && !store.showsListRecoverySurface {
                 ContentUnavailableView(
                     "No definitions yet",
                     systemImage: "book.closed"
@@ -130,6 +133,15 @@ struct DefinitionsListView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
+                    if let createError = store.createError {
+                        Section {
+                            Text(verbatim: createError)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(palette.errorForeground)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("definitions-list-create-error")
+                        }
+                    }
                     if store.canEdit && store.hasUnknownPendingCreate {
                         Section {
                             Button {
@@ -139,7 +151,8 @@ struct DefinitionsListView: View {
                                     }
                                 }
                             } label: {
-                                Text(store.isCreating ? "Checking…" : "Retry pending definition")
+                                let label = store.pendingCreateTerm.map { "Retry creating “\($0)”" } ?? "Retry pending definition"
+                                Text(store.isCreating ? "Checking…" : label)
                                     .font(.subheadline.weight(.semibold))
                                     .frame(maxWidth: .infinity, minHeight: 44)
                             }
@@ -151,10 +164,17 @@ struct DefinitionsListView: View {
                         Section {
                             Text(verbatim: status)
                                 .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(palette.statusForeground)
+                                .accessibilityIdentifier("definitions-list-status")
                         }
                     }
-                    if store.filteredDefinitions.isEmpty {
+                    if store.definitions.isEmpty {
+                        ContentUnavailableView(
+                            "No definitions yet",
+                            systemImage: "book.closed"
+                        )
+                        .listRowBackground(Color.clear)
+                    } else if store.filteredDefinitions.isEmpty {
                         ContentUnavailableView.search(text: store.searchQuery)
                             .listRowBackground(Color.clear)
                     } else {
@@ -310,6 +330,10 @@ struct DefinitionDetailView: View {
                                 .accessibilityIdentifier("definition-error-message")
                         }
 
+                        if let unsent = store.conflictDraft {
+                            unsentDraftCard(unsent, palette: palette)
+                        }
+
                         fieldsCard(
                             title: nil,
                             term: nil,
@@ -425,6 +449,7 @@ struct DefinitionDetailView: View {
                 initialTerm: pending?.term ?? editSession.beforeFields.term,
                 initialMeaning: pending?.meaning ?? editSession.beforeFields.meaning,
                 initialSource: pending?.source ?? editSession.beforeFields.source,
+                unsentDraft: pending == nil ? store.conflictDraft : nil,
                 isSaving: store.isSaving,
                 errorMessage: store.errorMessage
             ) { term, meaning, source in
@@ -545,6 +570,85 @@ struct DefinitionDetailView: View {
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
+    private func unsentDraftCard(_ draft: DefinitionFields, palette: DefinitionBadgePalette) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Your unsent changes")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            if !draft.term.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Term")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.mutedForeground)
+                    Text(verbatim: draft.term)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            if !draft.meaning.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Meaning")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.mutedForeground)
+                    Text(verbatim: draft.meaning)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            if !draft.source.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Source")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.mutedForeground)
+                    Text(verbatim: draft.source)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            HStack(spacing: 10) {
+                if store.canEdit {
+                    Button {
+                        store.beginEdit()
+                    } label: {
+                        Text("Review in Edit")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .background(palette.primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("definition-conflict-edit-button")
+                }
+                Button {
+                    store.dismissConflictDraft()
+                } label: {
+                    Text("Discard")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isSaving)
+                .accessibilityIdentifier("definition-conflict-discard-button")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("definition-unsent-draft-card")
+    }
+
     private func comparisonSection(
         certified: DefinitionCertifiedVersion,
         proposed: DefinitionVersion,
@@ -577,6 +681,7 @@ struct DefinitionDetailView: View {
 private struct DefinitionEditorSheet: View {
     let title: String
     let actionTitle: String
+    let unsentDraft: DefinitionFields?
     let isSaving: Bool
     let errorMessage: String?
     let onSubmit: (String, String, String) async -> Void
@@ -593,12 +698,14 @@ private struct DefinitionEditorSheet: View {
         initialTerm: String,
         initialMeaning: String,
         initialSource: String,
+        unsentDraft: DefinitionFields? = nil,
         isSaving: Bool,
         errorMessage: String?,
         onSubmit: @escaping (String, String, String) async -> Void
     ) {
         self.title = title
         self.actionTitle = actionTitle
+        self.unsentDraft = unsentDraft
         self.isSaving = isSaving
         self.errorMessage = errorMessage
         self.onSubmit = onSubmit
@@ -624,6 +731,41 @@ private struct DefinitionEditorSheet: View {
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(palette.errorForeground)
                             .accessibilityIdentifier("definition-editor-error")
+                    }
+                }
+                if let unsentDraft {
+                    Section("Your unsent wording") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !unsentDraft.term.isEmpty {
+                                Text(verbatim: "Term: \(unsentDraft.term)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                            }
+                            if !unsentDraft.meaning.isEmpty {
+                                Text(verbatim: "Meaning: \(unsentDraft.meaning)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                            if !unsentDraft.source.isEmpty {
+                                Text(verbatim: "Source: \(unsentDraft.source)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .accessibilityIdentifier("definition-editor-unsent-draft")
+
+                        Button("Use my unsent wording") {
+                            term = unsentDraft.term
+                            meaning = unsentDraft.meaning
+                            source = unsentDraft.source
+                        }
+                        .disabled(isSaving)
+                        .accessibilityIdentifier("definition-editor-apply-unsent")
                     }
                 }
                 Section("Term") {

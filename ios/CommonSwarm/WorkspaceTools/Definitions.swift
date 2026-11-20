@@ -305,6 +305,16 @@ final class DefinitionsListStore: ObservableObject {
         pendingCreate?.outcomeUnknown == true
     }
 
+    var pendingCreateTerm: String? {
+        guard let pending = pendingCreate, pending.outcomeUnknown else { return nil }
+        return pending.fields.term
+    }
+
+    /// True when the list must render recovery controls or outcomes even if zero definitions are loaded.
+    var showsListRecoverySurface: Bool {
+        (canEdit && hasUnknownPendingCreate) || createError != nil || statusMessage != nil
+    }
+
     var filteredDefinitions: [DefinitionSummary] {
         DefinitionsRules.filterDefinitions(definitions, query: searchQuery)
     }
@@ -682,6 +692,7 @@ final class DefinitionDetailStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var conflictDraft: DefinitionFields?
     @Published var activeEditSession: DefinitionEditSession?
 
     let workspaceID: UUID
@@ -726,6 +737,10 @@ final class DefinitionDetailStore: ObservableObject {
         if isRetired {
             isRetired = false
         }
+    }
+
+    func dismissConflictDraft() {
+        conflictDraft = nil
     }
 
     @discardableResult
@@ -1027,6 +1042,14 @@ final class DefinitionDetailStore: ObservableObject {
         guard activeEditSession?.id == editSession.id,
               editSession.objectID == objectID,
               detail?.current.revision.token == editSession.baseRevision.token else {
+            let unsent = DefinitionFields(
+                term: DefinitionsRules.normalizeTerm(rawTerm),
+                meaning: DefinitionsRules.normalizeBody(rawMeaning),
+                source: DefinitionsRules.normalizeBody(rawSource)
+            )
+            if !unsent.term.isEmpty || !unsent.meaning.isEmpty || !unsent.source.isEmpty {
+                conflictDraft = unsent
+            }
             activeEditSession = nil
             errorMessage = "A newer version was loaded. Review it, then tap Edit to start from the latest version."
             return false
@@ -1147,12 +1170,15 @@ final class DefinitionDetailStore: ObservableObject {
         switch outcome {
         case .committed:
             pendingUpdate = nil
+            conflictDraft = nil
             activeEditSession = nil
             statusMessage = "Saved."
             await load(api: api, preserveNotice: true)
             return true
         case .conflict(let message):
-            // Conflict reached the reducer past receipt lookup -> definite non-commit; retire stale editor.
+            // Conflict reached the reducer past receipt lookup -> definite non-commit; retire stale editor
+            // while preserving the author's unsent wording alongside the refreshed server version.
+            conflictDraft = record.afterFields
             activeEditSession = nil
             pendingUpdate = nil
             errorMessage = message
@@ -1200,6 +1226,7 @@ final class DefinitionDetailStore: ObservableObject {
         accessError = message
         needsConsent = consent
         activeEditSession = nil
+        conflictDraft = nil
         if clearPending {
             pendingCertify = nil
             pendingUpdate = nil

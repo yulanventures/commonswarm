@@ -457,7 +457,100 @@ struct VerifyDefinitions {
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/unsupported?on=1")!)
         await unsupStore.load(api: fastDefsAPI)
         expect(await MainActor.run { unsupStore.isUnsupported && unsupStore.definitions.isEmpty }, "unknown_tool must surface unsupported cleanly")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/unsupported?on=0")!)
 
-        print("PASS: VerifyDefinitions (C1 canDispatch held-bearer zero-send across retire/editor-close/Editor->Reader + prod 401/403/404 + held-list, C2 frozen edit session, C3 held-write-across-refusal + same-login 401 + inconclusive-read preservation + definite receipt replay with at-most-one write + sign-out cleanup)")
+        // 8. Designer Witnesses:
+        //    8a. Edit conflict preserves unsent wording alongside the refreshed latest server version
+        //        so reopening Edit never loses the author's addition, and committing clears conflictDraft.
+        let conflictDetail = await MainActor.run { DefinitionDetailStore(workspaceID: ws.id, objectID: "def-arr") }
+        await conflictDetail.load(api: fastDefsAPI)
+        let beforeConflictRev = await MainActor.run { conflictDetail.detail!.current.revision.token }
+        let conflictEditSess = await MainActor.run { conflictDetail.beginEdit() }!
+        let unsentMeaning = "Annualized recurring subscription revenue. Include renewals."
+        try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
+        let conflictSaveOK = await conflictDetail.update(
+            session: conflictEditSess,
+            term: "ARR",
+            meaning: unsentMeaning,
+            source: "stripe.subscriptions",
+            api: fastDefsAPI
+        )
+        let conflictRecoveredOK = await MainActor.run {
+            !conflictSaveOK
+                && conflictDetail.activeEditSession == nil
+                && conflictDetail.errorMessage != nil
+                && conflictDetail.detail?.current.revision.token != beforeConflictRev
+                && conflictDetail.conflictDraft?.meaning == unsentMeaning
+        }
+        expect(conflictRecoveredOK, "Edit conflict must reload server version while preserving unsent wording in conflictDraft")
+        let reopenedEditSess = await MainActor.run { conflictDetail.beginEdit() }!
+        let stillHasUnsentInReopenedEdit = await MainActor.run {
+            reopenedEditSess.baseRevision.token == conflictDetail.detail?.current.revision.token
+                && conflictDetail.conflictDraft?.meaning == unsentMeaning
+        }
+        expect(stillHasUnsentInReopenedEdit, "Reopening Edit after conflict must bind to fresh baseRevision while keeping unsent wording available")
+        let mergedSaveOK = await conflictDetail.update(
+            session: reopenedEditSess,
+            term: "ARR",
+            meaning: "\(reopenedEditSess.beforeFields.meaning) Include renewals.",
+            source: reopenedEditSess.beforeFields.source,
+            api: fastDefsAPI
+        )
+        let clearedAfterMerge = await MainActor.run {
+            mergedSaveOK && conflictDetail.conflictDraft == nil && (conflictDetail.detail?.current.meaning.contains("Include renewals.") == true)
+        }
+        expect(clearedAfterMerge, "Saving merged definition after conflict must clear conflictDraft")
+
+        //    8b. Empty list keeps pending Retry visible AND surfaces refused create-retry explanation on the list
+        //        even when the New definition form is closed and definitions.isEmpty.
+        try await postFixture(origin.appending(path: "fixture/clear-definitions"))
+        let emptyListStore = await MainActor.run { DefinitionsListStore(workspaceID: ws.id) }
+        await emptyListStore.load(api: fastDefsAPI)
+        expect(await MainActor.run { emptyListStore.definitions.isEmpty && !emptyListStore.showsListRecoverySurface }, "Empty list starts with no recovery surface")
+
+        let emptyCreateSess = await MainActor.run { emptyListStore.openCreateSheet() }!
+        try await postFixture(origin.appending(path: "fixture/fail-next-write"))
+        let emptyFirstCreate = await emptyListStore.createDefinition(
+            session: emptyCreateSess,
+            term: "Booked ARR",
+            meaning: "Contracted annual recurring revenue.",
+            source: "crm.contracts",
+            api: fastDefsAPI
+        )
+        // Close the New definition sheet — user is back on the empty list!
+        await MainActor.run { emptyListStore.dismissCreateSession(emptyCreateSess.id) }
+        let emptyListShowsRetry = await MainActor.run {
+            emptyFirstCreate == nil
+                && emptyListStore.definitions.isEmpty
+                && emptyListStore.activeCreateSession == nil
+                && emptyListStore.hasUnknownPendingCreate
+                && emptyListStore.pendingCreateTerm == "Booked ARR"
+                && emptyListStore.showsListRecoverySurface
+        }
+        expect(emptyListShowsRetry, "Empty list must show pending Retry surface when zero definitions exist")
+
+        // Retry from the list (sheet closed) and get a refusal -> error must remain visible on the list!
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/pre-receipt-refusal?reason=rate_limited")!)
+        let refusedListRetry = await emptyListStore.retryPendingCreate(api: fastDefsAPI)
+        let refusedExplainedOnList = await MainActor.run {
+            refusedListRetry == nil
+                && emptyListStore.definitions.isEmpty
+                && emptyListStore.activeCreateSession == nil
+                && emptyListStore.hasUnknownPendingCreate
+                && (emptyListStore.createError?.isEmpty == false)
+                && emptyListStore.showsListRecoverySurface
+        }
+        expect(refusedExplainedOnList, "Refused create retry from closed form on empty list must expose its explanation and pending Retry on the list")
+
+        // Subsequent retry from empty list succeeds and clears pendingCreate
+        let resolvedEmptyRetry = await emptyListStore.retryPendingCreate(api: fastDefsAPI)
+        let resolvedEmptyOK = await MainActor.run {
+            resolvedEmptyRetry == "def-booked-arr"
+                && !emptyListStore.hasUnknownPendingCreate
+                && emptyListStore.definitions.count == 1
+        }
+        expect(resolvedEmptyOK, "Retrying pending create from empty list must succeed and populate list")
+
+        print("PASS: VerifyDefinitions (C1 canDispatch held-bearer zero-send across retire/editor-close/Editor->Reader + prod 401/403/404 + held-list, C2 frozen edit session, C3 held-write-across-refusal + same-login 401 + inconclusive-read preservation + definite receipt replay with at-most-one write + sign-out cleanup, Designer conflict unsent wording + empty-list Retry/refusal recovery)")
     }
 }
