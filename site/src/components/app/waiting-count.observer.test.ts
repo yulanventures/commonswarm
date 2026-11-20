@@ -781,9 +781,22 @@ async function observeWaitingCount() {
       panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
       await wait(() => panel()?.querySelector('[data-survey-option="yes"]')?.getAttribute("aria-pressed") === "true", "Q1 choice staged");
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
-      // Q2: Skip.
+      // Q2: type "Keep this for later" under Something else, Skip, then Back -> draft is restored;
+      // Skip again -> stays skipped and omitted from final Send 2 answers.
       await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3", "stepped to Q2");
       check(Boolean(panel()?.contains(document.activeElement)), "Next must keep focus inside panel");
+      panel()!.querySelector<HTMLButtonElement>("[data-survey-other-toggle]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")), "Other input opened on Q2");
+      const q2Other = panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!;
+      q2Other.value = "Keep this for later";
+      q2Other.dispatchEvent(new Event("input", { bubbles: true }));
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "stepped to Q3 after skipping Q2");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-back]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3" &&
+        shown(panel()?.querySelector("[data-survey-other-input]")) &&
+        panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!.value === "Keep this for later",
+        "Back after Skip restored Q2 Other draft");
       panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]")!.click();
       // Q3: Something else + custom text, then close and reopen panel to prove session drafts persist.
       await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "stepped to Q3");

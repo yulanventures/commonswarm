@@ -413,3 +413,103 @@ test("renderWaitingSurvey preserves focused option/toggle across rerenders and p
   assert.equal(restoredInput.selectionStart, 6);
   assert.equal(restoredInput.selectionEnd, 6);
 });
+
+test("Check E draft retention on Skip: keeps session draft, restores it on Back, and omits skipped question from final send until re-included", () => {
+  const doc = makeDoc();
+  const body = doc.createElement("div");
+  const q1 = makeAsk("q1", { what: "Which boiler quote?" });
+  const q2 = makeAsk("q2", { what: "Which paint finish?" });
+  const items = [q1, q2];
+  const drafts = new Map();
+  const skipped = new Set();
+  const errors = new Map();
+  const sent = [];
+  let mode = "step";
+  let index = 0;
+
+  const render = () => {
+    renderWaitingSurvey(body, { items, scope: "channel", mode, index, drafts, skipped, errors, sending: false }, handlers);
+  };
+  const handlers = {
+    onExit: () => {},
+    onStep: (nextIndex) => {
+      if (mode === "step" && nextIndex > index) {
+        const cur = items[index];
+        if (cur && surveySubmissionFromDraft(drafts.get(surveyDraftKey(cur.workspaceId, cur.id)))) {
+          skipped.delete(cur.id);
+        }
+      }
+      mode = "step";
+      index = nextIndex;
+      render();
+    },
+    onDraftChange: (item, draft, quiet) => {
+      drafts.set(surveyDraftKey(item.workspaceId, item.id), draft);
+      skipped.delete(item.id);
+      if (!quiet) render();
+    },
+    onSkip: (item) => {
+      skipped.add(item.id);
+      if (index >= items.length - 1) mode = "review";
+      else index += 1;
+      render();
+    },
+    onReview: () => {
+      if (mode === "step") {
+        const cur = items[index];
+        if (cur && surveySubmissionFromDraft(drafts.get(surveyDraftKey(cur.workspaceId, cur.id)))) {
+          skipped.delete(cur.id);
+        }
+      }
+      mode = "review";
+      render();
+    },
+    onEdit: (item) => {
+      mode = "step";
+      index = items.findIndex(x => x.id === item.id);
+      render();
+    },
+    onSendAll: (entries) => sent.push(entries),
+  };
+
+  render();
+  // Q1: type "Keep this for later" under Something else, then Skip.
+  body.querySelector("[data-survey-other-toggle]").click();
+  const q1Input = body.querySelector("[data-survey-other-input]");
+  q1Input.value = "Keep this for later";
+  q1Input.dispatch("input");
+  body.querySelector("[data-waiting-survey-skip]").click();
+  assert.equal(index, 1);
+  assert.equal(skipped.has("q1"), true);
+  assert.equal(drafts.get(surveyDraftKey(q1.workspaceId, q1.id))?.otherText, "Keep this for later");
+
+  // Back to Q1: draft must be restored while Q1 remains skipped until re-included.
+  body.querySelector("[data-waiting-survey-back]").click();
+  assert.equal(index, 0);
+  assert.equal(body.querySelector("[data-survey-other-input]")?.value, "Keep this for later");
+  assert.equal(skipped.has("q1"), true);
+  assert.equal(surveyReadyEntries(items, drafts, skipped).length, 0);
+
+  // Skip Q1 again, answer Q2, reach Review: Q1 must be omitted from Send 1 answer and marked Skipped.
+  body.querySelector("[data-waiting-survey-skip]").click();
+  body.querySelector('[data-survey-option="opt-a"]').click();
+  body.querySelector("[data-waiting-survey-next]").click();
+  assert.equal(mode, "review");
+  assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Send 1 answer");
+  assert.match(body.querySelector('[data-waiting-survey-item="q1"]').textContent, /Skipped/);
+  body.querySelector("[data-waiting-survey-send]").click();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].map(e => e.item.id), ["q2"]);
+
+  // Re-open Q1 from review (Answer), see draft restored, and click Next to re-include Q1.
+  body.querySelector('[data-waiting-survey-edit="q1"]').click();
+  assert.equal(mode, "step");
+  assert.equal(index, 0);
+  assert.equal(body.querySelector("[data-survey-other-input]")?.value, "Keep this for later");
+  body.querySelector("[data-waiting-survey-next]").click();
+  assert.equal(skipped.has("q1"), false);
+  body.querySelector("[data-waiting-survey-next]").click();
+  assert.equal(mode, "review");
+  assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Send 2 answers");
+  assert.match(body.querySelector('[data-waiting-survey-item="q1"]').textContent, /Other: Keep this for later/);
+});

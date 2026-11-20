@@ -59,9 +59,11 @@ export function surveySubmissionFromDraft(draft: SurveyDraft | undefined): Choic
 export function surveyReadyEntries(
   items: readonly WaitingAskItem[],
   drafts: ReadonlyMap<string, SurveyDraft>,
+  skipped?: ReadonlySet<string>,
 ): Array<{ item: WaitingAskItem; submission: ChoiceSubmission }> {
   const out: Array<{ item: WaitingAskItem; submission: ChoiceSubmission }> = [];
   for (const item of items) {
+    if (skipped?.has(item.id)) continue;
     const sub = surveySubmissionFromDraft(drafts.get(surveyDraftKey(item.workspaceId, item.id)));
     if (sub) out.push({ item, submission: sub });
   }
@@ -200,6 +202,7 @@ function surveySignature(vm: WaitingSurveyVM, typingOtherItemId: string | null):
         d?.optionIds ?? [],
         d?.otherOpen ?? false,
         ignoreText ? "<typing>" : (d?.otherText ?? ""),
+        vm.skipped.has(item.id),
       ];
     }),
   ]);
@@ -258,7 +261,7 @@ export function renderWaitingSurvey(
 
   if (vm.mode === "review") {
     const scroll = el(doc, "div", "cs-waiting-survey__scroll");
-    const ready = surveyReadyEntries(vm.items, vm.drafts);
+    const ready = surveyReadyEntries(vm.items, vm.drafts, vm.skipped);
     const skippedCount = vm.items.length - ready.length;
     const summaryText =
       skippedCount > 0
@@ -269,7 +272,7 @@ export function renderWaitingSurvey(
     const list = el(doc, "div", "cs-waiting-survey__review-list");
     for (const item of vm.items) {
       const key = surveyDraftKey(item.workspaceId, item.id);
-      const sub = surveySubmissionFromDraft(vm.drafts.get(key));
+      const sub = vm.skipped.has(item.id) ? null : surveySubmissionFromDraft(vm.drafts.get(key));
       const err = vm.errors.get(item.id);
       const row = el(doc, "article", "cs-waiting-card cs-waiting-survey__review-item");
       row.dataset.waitingSurveyItem = item.id;

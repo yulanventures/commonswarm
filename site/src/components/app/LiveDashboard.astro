@@ -6615,6 +6615,12 @@ import "../../styles/kylon-image-viewer.css";
               waitingPanelMod?.focusWaitingSurvey(container, "exit");
             },
             onStep: (nextIndex) => {
+              if (waitingSurvey.mode === "step" && nextIndex > waitingSurvey.index) {
+                const cur = surveyItems[waitingSurvey.index];
+                if (cur && waitingPanelMod?.surveySubmissionFromDraft(waitingSurveyDrafts.get(`${cur.workspaceId}:${cur.id}`))) {
+                  waitingSurveySkipped.delete(cur.id);
+                }
+              }
               waitingSurvey.mode = "step";
               waitingSurvey.index = Math.max(0, Math.min(nextIndex, Math.max(0, surveyItems.length - 1)));
               renderWaitingPanelView();
@@ -6634,8 +6640,6 @@ import "../../styles/kylon-image-viewer.css";
               }
             },
             onSkip: (item) => {
-              const key = `${item.workspaceId}:${item.id}`;
-              waitingSurveyDrafts.delete(key);
               waitingSurveyErrors.delete(item.id);
               waitingSurveySkipped.add(item.id);
               const wentToReview = waitingSurvey.index >= surveyItems.length - 1;
@@ -6648,6 +6652,12 @@ import "../../styles/kylon-image-viewer.css";
               waitingPanelMod?.focusWaitingSurvey(container, wentToReview ? "review" : "step");
             },
             onReview: () => {
+              if (waitingSurvey.mode === "step") {
+                const cur = surveyItems[waitingSurvey.index];
+                if (cur && waitingPanelMod?.surveySubmissionFromDraft(waitingSurveyDrafts.get(`${cur.workspaceId}:${cur.id}`))) {
+                  waitingSurveySkipped.delete(cur.id);
+                }
+              }
               waitingSurvey.mode = "review";
               renderWaitingPanelView();
               waitingPanelMod?.focusWaitingSurvey(container, "review");
