@@ -224,6 +224,17 @@ unitTest("served witness fixture compiles real LiveDashboard and InviteOnramp wi
     assert.equal(parsedConv.status, "ready");
     assert.equal(parsedConv.conversations.length, 1);
     assert.equal(parsedConv.conversations[0]?.joined, true);
+    const sampleInvite = memberInviteUrl(url, {
+      v: 1,
+      url,
+      anon_key: "anon",
+      workspace_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      invitation_token: `swm_inv_${"a".repeat(43)}`,
+      workspace_name: "Family Cabin",
+      inviter_display_name: "Host",
+      inviter_user_id: "33333333-3333-4333-8333-333333333333",
+    });
+    assert.ok(sampleInvite.includes("#invite="));
   } finally {
     srv.closeAllConnections();
     await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -1171,7 +1182,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       url: origin,
       anon_key: anonKey,
       workspace_id: inviteWs,
-      invitation_token: "tok_served_invite_1",
+      invitation_token: `swm_inv_${"a".repeat(43)}`,
       workspace_name: "Family Cabin",
       inviter_display_name: "Host",
       inviter_user_id: inviterId,
