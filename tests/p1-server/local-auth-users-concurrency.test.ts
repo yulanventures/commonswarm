@@ -372,50 +372,93 @@ test(
       });
 
       const logStart = functionLogs.length;
-      // Fire a production-concurrency burst across sibling agents + owner while
-      // BOTH parkedAgent (mid-command) AND ownerLock (swarm.users FOR NO KEY UPDATE) are held.
-      const burstStart = Date.now();
-      const burstResults = await Promise.all([
+      // Phase A: fire all 6 production paths concurrently while BOTH parkedAgent
+      // (mid-command, holding 1 of command/index.ts's 2 pool connections with a 5s
+      // lock_timeout) AND ownerLock (swarm.users FOR NO KEY UPDATE) are held.
+      const phaseAStart = Date.now();
+      const phaseAResults = await Promise.all([
+        send(siblings[0]!.token, {
+          kind: "renew_wake_lease",
+          watcher_id: siblings[0]!.watcherId,
+          generation: siblings[0]!.generation,
+        }).then((r) => ({ label: `renew_wake_lease:${siblings[0]!.name}`, expected: 200, ...r })),
+        send(siblings[1]!.token, {
+          kind: "renew_wake_lease",
+          watcher_id: siblings[1]!.watcherId,
+          generation: siblings[1]!.generation,
+        }).then((r) => ({ label: `renew_wake_lease:${siblings[1]!.name}`, expected: 200, ...r })),
+        send(siblings[2]!.token, {
+          kind: "signals_seen",
+          signal_ids: [broadcastSignalId],
+        }).then((r) => ({ label: `agent_signals_seen:${siblings[2]!.name}`, expected: 200, ...r })),
+        send(siblings[3]!.token, {
+          kind: "claim_agent_inbox",
+          listener_instance_id: randomUUID(),
+          limit: 5,
+        }).then((r) => ({ label: `claim_agent_inbox:${siblings[3]!.name}`, expected: 200, ...r })),
+        send(siblings[4]!.token, { kind: "touch_presence" })
+          .then((r) => ({ label: `touch_presence:${siblings[4]!.name}`, expected: 200, ...r })),
+        sendActivity(siblings[0]!.token, 1)
+          .then((r) => ({ label: `activity:${siblings[0]!.name}`, expected: 202, ...r })),
+        send(owner.jwt, { kind: "signals_seen", signal_ids: [broadcastSignalId] })
+          .then((r) => ({ label: "human_signals_seen:1", expected: 200, ...r })),
+      ]);
+      const phaseAElapsedMs = Date.now() - phaseAStart;
+
+      for (const r of phaseAResults) {
+        assert.equal(r.status, r.expected, `${r.label} failed (${r.status}): ${JSON.stringify(r.body)}`);
+      }
+      assert.equal(
+        parkedAckSettled,
+        false,
+        `all 7 concurrent sibling/owner commands finished in ${phaseAElapsedMs}ms while parkedAgent was still held (parkedAckResult=${JSON.stringify(parkedAckResult)})`,
+      );
+      assert.ok(phaseAElapsedMs < 4_500, `Phase A completed in ${phaseAElapsedMs}ms (must beat 5s lock_timeout)`);
+
+      // Release parkedAgent's delivery lock while keeping ownerLock (swarm.users FOR NO KEY UPDATE) held.
+      deliveryLock.release();
+      await deliveryLock.done;
+      deliveryLock = null;
+      const parkedAck = await parkedAckPromise!;
+      assert.equal(parkedAck.status, 200, `parked ack after release: ${JSON.stringify(parkedAck.body)}`);
+
+      // Phase B: with ownerLock STILL holding swarm.users FOR NO KEY UPDATE, fire a full
+      // 18-request burst across all 5 sibling agents + owner human signals_seen.
+      const phaseBResults = await Promise.all([
         ...siblings.map((a) =>
           send(a.token, {
             kind: "renew_wake_lease",
             watcher_id: a.watcherId,
             generation: a.generation,
-          }).then((r) => ({ label: `renew_wake_lease:${a.name}`, expected: 200, ...r })),
+          }).then((r) => ({ label: `phaseB:renew_wake_lease:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.map((a) =>
           send(a.token, {
             kind: "signals_seen",
             signal_ids: [broadcastSignalId],
-          }).then((r) => ({ label: `agent_signals_seen:${a.name}`, expected: 200, ...r })),
+          }).then((r) => ({ label: `phaseB:agent_signals_seen:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.slice(0, 3).map((a) =>
           send(a.token, {
             kind: "claim_agent_inbox",
             listener_instance_id: randomUUID(),
             limit: 5,
-          }).then((r) => ({ label: `claim_agent_inbox:${a.name}`, expected: 200, ...r })),
+          }).then((r) => ({ label: `phaseB:claim_agent_inbox:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.slice(3, 5).map((a) =>
           send(a.token, { kind: "touch_presence" })
-            .then((r) => ({ label: `touch_presence:${a.name}`, expected: 200, ...r })),
+            .then((r) => ({ label: `phaseB:touch_presence:${a.name}`, expected: 200, ...r })),
         ),
-        ...siblings.slice(0, 3).map((a, i) =>
-          sendActivity(a.token, i + 1)
-            .then((r) => ({ label: `activity:${a.name}`, expected: 202, ...r })),
-        ),
+        sendActivity(siblings[1]!.token, 2)
+          .then((r) => ({ label: `phaseB:activity:${siblings[1]!.name}`, expected: 202, ...r })),
         send(owner.jwt, { kind: "signals_seen", signal_ids: [broadcastSignalId] })
-          .then((r) => ({ label: "human_signals_seen:1", expected: 200, ...r })),
+          .then((r) => ({ label: "phaseB:human_signals_seen:1", expected: 200, ...r })),
         send(owner.jwt, { kind: "signals_seen", signal_ids: [broadcastSignalId] })
-          .then((r) => ({ label: "human_signals_seen:2", expected: 200, ...r })),
+          .then((r) => ({ label: "phaseB:human_signals_seen:2", expected: 200, ...r })),
       ]);
-      const burstElapsedMs = Date.now() - burstStart;
-
-      for (const r of burstResults) {
+      for (const r of phaseBResults) {
         assert.equal(r.status, r.expected, `${r.label} failed (${r.status}): ${JSON.stringify(r.body)}`);
       }
-      assert.equal(parkedAckSettled, false, "all 20 concurrent sibling/owner commands finished while parkedAgent was still held");
-      assert.ok(burstElapsedMs < 4_500, `burst completed in ${burstElapsedMs}ms (must beat 5s lock_timeout)`);
       assert.doesNotMatch(functionLogs.slice(logStart), /55P03|40P01/u, `unexpected lock timeout or deadlock in logs:\n${functionLogs.slice(logStart)}`);
     } finally {
       ownerLock?.release();
@@ -423,9 +466,6 @@ test(
       if (ownerLock) await ownerLock.done;
       if (deliveryLock) await deliveryLock.done;
     }
-
-    const parkedAck = await parkedAckPromise!;
-    assert.equal(parkedAck.status, 200, `parked ack after release: ${JSON.stringify(parkedAck.body)}`);
   },
 );
 
