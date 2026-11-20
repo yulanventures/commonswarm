@@ -7,7 +7,7 @@
  * descriptions, Something else text) enters only through textContent.
  */
 import { buildChoiceCard } from "./choice-card";
-import type { AskChoiceState, ChoiceDraft, ChoiceOption, ChoiceSubmission } from "./choices";
+import { cleanOtherText, OTHER_TEXT_MAX, STALE_ASK_CLOSE_BODY, type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
 import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
 import {
@@ -15,8 +15,31 @@ import {
   type WaitingConversation,
   type WaitingSignalPlacement,
 } from "./waiting-count";
+import {
+  focusWaitingSurvey,
+  renderWaitingSurvey,
+  surveyDraftKey,
+  surveyReadyEntries,
+  surveySubmissionFromDraft,
+  type SurveyDraft,
+  type WaitingSurveyFocusTarget,
+  type WaitingSurveyHandlers,
+  type WaitingSurveyVM,
+} from "./waiting-survey";
 
-export { classifyAskConversation, type WaitingConversation, type WaitingSignalPlacement };
+export {
+  classifyAskConversation,
+  focusWaitingSurvey,
+  surveyDraftKey,
+  surveyReadyEntries,
+  surveySubmissionFromDraft,
+  type SurveyDraft,
+  type WaitingConversation,
+  type WaitingSignalPlacement,
+  type WaitingSurveyFocusTarget,
+  type WaitingSurveyHandlers,
+  type WaitingSurveyVM,
+};
 
 export type WaitingScope = "channel" | "workspace" | "all";
 
@@ -50,6 +73,26 @@ export interface WaitingAskItem {
     draft?: ChoiceDraft;
     retryable?: true;
   };
+}
+
+export interface WaitingPlainAskItem {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  conversation: WaitingConversation;
+  channelLabel: string;
+  from: PersonVM | AgentVM;
+  fromKind: "agent" | "user";
+  fromId: string;
+  what: string;
+  when: string;
+  createdAt: string;
+  until: string;
+  draftText?: string;
+  pending?: true;
+  pendingMode?: "answer" | "stale";
+  error?: string;
+  retryable?: true;
 }
 
 export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "agent_removed";
@@ -88,6 +131,7 @@ export interface WaitingPanelVM {
   scope: WaitingScope;
   place: WaitingPlace;
   items: WaitingAskItem[];
+  plainAsks?: WaitingPlainAskItem[];
   todos?: WaitingTodoItem[];
   counts: WaitingPanelCounts;
   loading: boolean;
@@ -95,6 +139,7 @@ export interface WaitingPanelVM {
   failed: boolean;
   truncated?: boolean;
   catchUpHref?: string;
+  survey?: WaitingSurveyVM | null;
   statusMessage: string;
   statusSeq: number;
 }
@@ -106,22 +151,27 @@ export interface WaitingPanelHandlers {
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
+  onSubmitPlainAsk?: (item: WaitingPlainAskItem, bodyText: string, mode: "answer" | "stale") => void;
+  onRetryPlainAsk?: (item: WaitingPlainAskItem) => void;
+  onDraftPlainAsk?: (item: WaitingPlainAskItem, text: string) => void;
   onMarkTodoDone?: (item: WaitingTodoItem) => void;
   onRetryTodo?: (item: WaitingTodoItem) => void;
   onOpenTodo?: (item: WaitingTodoItem) => void;
   onOpenCatchUp?: (href: string) => void;
+  onStartSurvey?: () => void;
+  surveyHandlers?: WaitingSurveyHandlers;
 }
 
 export const WAITING_PANEL_ID = "cs-waiting-panel";
 export const WAITING_SHEET_ID = "cs-waiting-sheet";
 export const WAITING_SHEET_MEDIA = "(max-width: 52rem), (max-height: 32rem)";
 
-/** Filters open choice asks by the selected scope and active conversation. */
-export function filterWaitingItems(
-  items: readonly WaitingAskItem[],
+/** Filters open asks (choice or historical plain-text) by the selected scope and active conversation. */
+export function filterWaitingItems<T extends { workspaceId: string; conversation: WaitingConversation }>(
+  items: readonly T[],
   scope: WaitingScope,
   place: WaitingPlace,
-): WaitingAskItem[] {
+): T[] {
   if (scope === "all") return [...items];
   if (scope === "workspace") return items.filter(item => item.workspaceId === place.workspaceId);
   return items.filter(item => {
@@ -310,7 +360,7 @@ function placeHeadingText(vm: WaitingPanelVM): string {
   return "All workspaces";
 }
 
-function cardLocationText(item: WaitingAskItem, scope: WaitingScope): string | null {
+function cardLocationText(item: Pick<WaitingAskItem, "workspaceName" | "channelLabel">, scope: WaitingScope): string | null {
   if (scope === "channel") return null;
   if (scope === "workspace") return item.channelLabel || null;
   return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
@@ -331,6 +381,122 @@ function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
     item.choices.retryable ?? false,
     item.choices.options.map(option => [option.id, option.label, option.description ?? "", option.recommended ?? false]),
   ]);
+}
+
+function plainAskCardSignature(item: WaitingPlainAskItem, scope: WaitingScope): string {
+  return JSON.stringify([
+    item.id,
+    item.workspaceId,
+    item.conversation,
+    item.channelLabel,
+    item.from.name,
+    item.what,
+    scope,
+    item.pending ?? false,
+    item.pendingMode ?? "",
+    item.error ?? "",
+    item.retryable ?? false,
+  ]);
+}
+
+function buildPlainAskCard(
+  doc: Document,
+  item: WaitingPlainAskItem,
+  scope: WaitingScope,
+  handlers: WaitingPanelHandlers,
+): HTMLElement {
+  const card = node(doc, "article", "cs-waiting-card cs-waiting-card--plain");
+  card.dataset.waitingPlainAsk = item.id;
+  card.dataset.waitingWorkspace = item.workspaceId;
+  card.dataset.waitingCardSig = plainAskCardSignature(item, scope);
+
+  const head = node(doc, "div", "cs-waiting-card__head");
+  const avatar = isAgent(item.from) ? agentOrb(doc, item.from, true) : personAvatar(doc, item.from);
+  const meta = node(doc, "div", "cs-waiting-card__meta");
+  const sender = node(doc, "span", "cs-waiting-card__sender", item.from.name);
+  const time = node(doc, "time", "cs-waiting-card__when", item.when);
+  if (Number.isFinite(Date.parse(item.createdAt))) time.dateTime = item.createdAt;
+  const line = node(doc, "div", "cs-waiting-card__byline");
+  line.append(sender, time);
+  meta.append(line);
+
+  const location = cardLocationText(item, scope);
+  if (location) meta.append(node(doc, "span", "cs-waiting-card__place", location));
+  head.append(avatar, meta);
+
+  const question = node(doc, "p", "cs-waiting-card__question", item.what);
+
+  const pending = item.pending === true;
+  const pendingStale = pending && item.pendingMode === "stale";
+  const safeId = item.id.replace(/[^a-zA-Z0-9_-]/gu, "-");
+  const form = node(doc, "form", "cs-waiting-plain__form");
+  form.noValidate = true;
+
+  const input = node(doc, "input", "cs-waiting-plain__input");
+  input.type = "text";
+  input.id = `cs-waiting-plain-input-${safeId}`;
+  input.maxLength = OTHER_TEXT_MAX;
+  input.autocomplete = "off";
+  input.dataset.waitingPlainInput = item.id;
+  input.setAttribute("aria-label", "Answer");
+  input.placeholder = "Type your answer…";
+  input.value = item.draftText ?? "";
+  if (pending) input.readOnly = true;
+
+  const actions = node(doc, "div", "cs-waiting-plain__actions");
+  const clearBtn = node(doc, "button", "cs-waiting-plain__stale", pendingStale ? "Clearing…" : "Clear as stale");
+  clearBtn.type = "button";
+  clearBtn.id = `cs-waiting-plain-stale-${safeId}`;
+  clearBtn.dataset.waitingPlainStale = item.id;
+  if (pending) clearBtn.setAttribute("aria-disabled", "true");
+  clearBtn.addEventListener("click", () => {
+    if (pending) return;
+    handlers.onSubmitPlainAsk?.(item, STALE_ASK_CLOSE_BODY, "stale");
+  });
+
+  const sendBtn = node(doc, "button", "cs-waiting-plain__send", pending && !pendingStale ? "Sending…" : "Send");
+  sendBtn.type = "submit";
+  sendBtn.id = `cs-waiting-plain-send-${safeId}`;
+  sendBtn.dataset.waitingPlainSend = item.id;
+  if (pending) sendBtn.setAttribute("aria-disabled", "true");
+
+  const syncSend = () => {
+    sendBtn.disabled = !pending && cleanOtherText(input.value) === null;
+  };
+  input.addEventListener("input", () => {
+    if (pending) return;
+    syncSend();
+    handlers.onDraftPlainAsk?.(item, input.value);
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (pending) return;
+    const text = cleanOtherText(input.value);
+    if (text === null) return;
+    handlers.onSubmitPlainAsk?.(item, text, "answer");
+  });
+  syncSend();
+
+  actions.append(clearBtn, sendBtn);
+  form.append(input);
+  if (item.error) {
+    const err = node(doc, "p", "cs-waiting-card__error", item.error);
+    err.setAttribute("role", "alert");
+    form.append(err);
+  }
+  form.append(actions);
+  card.append(head, question, form);
+
+  if (item.error && item.retryable && !pending) {
+    const retryRow = node(doc, "div", "cs-waiting-card__retry-row");
+    const retry = node(doc, "button", "cs-waiting-card__retry", "Retry");
+    retry.type = "button";
+    retry.dataset.waitingPlainRetry = item.id;
+    retry.addEventListener("click", () => handlers.onRetryPlainAsk?.(item));
+    retryRow.append(retry);
+    card.append(retryRow);
+  }
+  return card;
 }
 
 function buildAskCard(
@@ -429,6 +595,7 @@ export function renderWaitingPanel(
     header.append(headingGroup, closeBtn);
 
     const controls = node(doc, "div", "cs-waiting-panel__controls");
+    controls.dataset.waitingControls = "";
     const scope = node(doc, "select", "cs-waiting-panel__scope");
     scope.dataset.waitingScope = "";
     scope.setAttribute("aria-label", "Scope");
@@ -437,7 +604,11 @@ export function renderWaitingPanel(
       opt.value = value;
       scope.append(opt);
     }
-    controls.append(scope);
+    const reviewBtn = node(doc, "button", "cs-waiting-panel__review-btn");
+    reviewBtn.type = "button";
+    reviewBtn.dataset.waitingReviewStart = "";
+    reviewBtn.hidden = true;
+    controls.append(scope, reviewBtn);
 
     // Visible confirmation banner and polite live region: announces "Sent" and stays visible after the last answer.
     const status = node(doc, "p", "cs-waiting-panel__status");
@@ -477,6 +648,19 @@ export function renderWaitingPanel(
     };
   }
 
+  const controlsEl = root.querySelector<HTMLElement>("[data-waiting-controls]");
+  if (controlsEl) controlsEl.hidden = Boolean(vm.survey);
+
+  const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
+  if (reviewBtn) {
+    const showReview = !vm.survey && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
+    reviewBtn.hidden = !showReview;
+    if (showReview) {
+      reviewBtn.textContent = "Review questions";
+      reviewBtn.onclick = () => handlers.onStartSurvey?.();
+    }
+  }
+
   const statusEl = root.querySelector<HTMLElement>("[data-waiting-status]");
   if (statusEl) {
     const hasStatus = vm.statusMessage.trim() !== "";
@@ -489,6 +673,14 @@ export function renderWaitingPanel(
 
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
   if (!body) return;
+
+  if (vm.survey && handlers.surveyHandlers) {
+    delete body.dataset.waitingEmptyKey;
+    renderWaitingSurvey(body, vm.survey, handlers.surveyHandlers);
+    return;
+  }
+  delete body.dataset.waitingSurveySig;
+  delete body.dataset.waitingSurveyTypingSig;
 
   const buildCatchUpLink = (): HTMLAnchorElement | null => {
     if (!vm.catchUpHref) return null;
@@ -505,8 +697,9 @@ export function renderWaitingPanel(
     return link;
   };
 
+  const plainAsks = vm.plainAsks ?? [];
   const todos = vm.todos ?? [];
-  if (vm.items.length === 0 && todos.length === 0) {
+  if (vm.items.length === 0 && plainAsks.length === 0 && todos.length === 0) {
     const emptyState = vm.failed ? "failed" : vm.truncated ? "truncated" : vm.loading || !vm.complete ? "loading" : "empty";
     const wsNum = formatScopeCount(vm.counts.workspace);
     const allNum = formatScopeCount(vm.counts.all);
@@ -616,21 +809,25 @@ export function renderWaitingPanel(
   for (const child of Array.from(list.children)) {
     const el = child as HTMLElement;
     if (el.dataset.waitingCard) existing.set(`ask:${el.dataset.waitingCard}`, el);
+    else if (el.dataset.waitingPlainAsk) existing.set(`plain:${el.dataset.waitingPlainAsk}`, el);
     else if (el.dataset.waitingTodo) existing.set(`todo:${el.dataset.waitingTodo}`, el);
   }
 
   const keepKeys = new Set<string>([
     ...vm.items.map(item => `ask:${item.id}`),
+    ...plainAsks.map(item => `plain:${item.id}`),
     ...todos.map(todo => `todo:${todo.id}`),
   ]);
   const rawActive = doc.activeElement;
   const activeEl = rawActive && typeof (rawActive as HTMLElement).closest === "function" ? (rawActive as HTMLElement) : null;
-  const activeCardEl = activeEl?.closest<HTMLElement>("[data-waiting-card], [data-waiting-todo]") ?? null;
+  const activeCardEl = activeEl?.closest<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]") ?? null;
   const activeKey = activeCardEl?.dataset.waitingCard
     ? `ask:${activeCardEl.dataset.waitingCard}`
-    : activeCardEl?.dataset.waitingTodo
-      ? `todo:${activeCardEl.dataset.waitingTodo}`
-      : null;
+    : activeCardEl?.dataset.waitingPlainAsk
+      ? `plain:${activeCardEl.dataset.waitingPlainAsk}`
+      : activeCardEl?.dataset.waitingTodo
+        ? `todo:${activeCardEl.dataset.waitingTodo}`
+        : null;
   const activeControlId = activeKey && activeEl?.id ? activeEl.id : null;
 
   for (const [key, el] of existing) {
@@ -676,6 +873,31 @@ export function renderWaitingPanel(
         list.insertBefore(built, cursor);
       }
       card = built;
+    }
+    if (card !== cursor) list.insertBefore(card, cursor);
+    else cursor = cursor.nextSibling;
+  }
+
+  for (const plain of plainAsks) {
+    const key = `plain:${plain.id}`;
+    const sig = plainAskCardSignature(plain, vm.scope);
+    let card = existing.get(key);
+    if (card && card.dataset.waitingCardSig === sig) {
+      const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
+      if (timeEl && timeEl.textContent !== plain.when) timeEl.textContent = plain.when;
+    } else {
+      const built = buildPlainAskCard(doc, plain, vm.scope, handlers);
+      if (card) {
+        if (cursor === card) cursor = built;
+        card.replaceWith(built);
+      } else {
+        list.insertBefore(built, cursor);
+      }
+      card = built;
+      if (activeKey === key && activeControlId) {
+        const restored = doc.getElementById(activeControlId);
+        if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
+      }
     }
     if (card !== cursor) list.insertBefore(card, cursor);
     else cursor = cursor.nextSibling;
@@ -903,8 +1125,9 @@ export function createWaitingSurface(
 }
 
 export interface WaitingFocusHint {
-  kind: "retry-todo" | "completed-todo" | "completed-ask";
+  kind: "retry-todo" | "completed-todo" | "retry-plain" | "completed-plain" | "completed-ask";
   todoId?: string;
+  signalId?: string;
   prevIndex?: number;
 }
 
@@ -930,10 +1153,24 @@ export function focusWaitingPanelAfterAction(
       if (target) return focusEl(target);
     }
   }
+  if (hint.kind === "retry-plain" && hint.signalId) {
+    const cards = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-plain-ask]"));
+    const card = cards.find(el => el.dataset.waitingPlainAsk === hint.signalId);
+    if (card) {
+      const target =
+        card.querySelector<HTMLElement>("[data-waiting-plain-retry]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-plain-input]")
+        ?? card.querySelector<HTMLElement>("[data-waiting-plain-stale]");
+      if (target) return focusEl(target);
+    }
+  }
   const body = container.querySelector<HTMLElement>("[data-waiting-body]");
   const remainingCards = body
     ? Array.from(body.querySelectorAll<HTMLElement>("article")).filter(
-        el => el.dataset.waitingCard !== undefined || el.dataset.waitingTodo !== undefined,
+        el =>
+          el.dataset.waitingCard !== undefined ||
+          el.dataset.waitingPlainAsk !== undefined ||
+          el.dataset.waitingTodo !== undefined,
       )
     : [];
   if (remainingCards.length > 0) {
