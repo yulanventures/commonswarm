@@ -52,13 +52,13 @@ import {
   signalReachesAgent,
   type SignalCursor,
 } from "./signals.js";
-import { readSecureJsonFileIfPresent, withFileLock } from "./storage.js";
+import { FileLockTimeoutError, readSecureJsonFileIfPresent, withFileLock } from "./storage.js";
 
 const execFileAsync = promisify(execFile);
 
 const CODEX_WAKE_HEARTBEAT_MS = 5_000;
 const CODEX_WAKE_POLL_MS = 30_000;
-const CODEX_QUEUE_TIMEOUT_MS = 15_000;
+const CODEX_QUEUE_TIMEOUT_MS = 12_000;
 
 export type CodexQueueRunner = (
   executable: string,
@@ -337,18 +337,48 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
     }));
   });
 
-  const touch = async () =>
-    updateReceiveBinding(profilePath, host, (b) => {
-      if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") {
-        stop();
-        return b;
+  let touching = false;
+  const bindingStillOwned = async (): Promise<boolean> => {
+    const current = await readReceiveBinding(profilePath, host).catch(() => null);
+    return (
+      current !== null &&
+      current.requested_mode === "wake" &&
+      current.channel_instance_id === runtimeId
+    );
+  };
+  const touch = async (): Promise<void> => {
+    if (stopped || abort.signal.aborted || touching) return;
+    touching = true;
+    try {
+      if (bridge.isDispatching()) {
+        if (!(await bindingStillOwned())) {
+          stop();
+        }
+        return;
       }
-      return { ...b, channel_heartbeat_at: new Date(now()).toISOString() };
-    });
+      await updateReceiveBinding(profilePath, host, (b) => {
+        if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") {
+          stop();
+          return b;
+        }
+        return { ...b, channel_heartbeat_at: new Date(now()).toISOString() };
+      });
+    } catch (error) {
+      if (error instanceof FileLockTimeoutError) {
+        if (!(await bindingStillOwned())) {
+          stop();
+        }
+        return;
+      }
+      stop();
+    } finally {
+      touching = false;
+    }
+  };
 
   try {
     heartbeat = setInterval(() => {
-      void touch().catch(stop);
+      void touch();
     }, heartbeatMs);
     manager?.start();
 
@@ -453,6 +483,9 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
         const decision = await bridge.tick(abort.signal);
         if (decision.action === "binding_inactive") {
           break;
+        }
+        if (decision.action === "sent" || decision.action === "error") {
+          await touch();
         }
         if (decision.action === "error" && decision.code !== lastErrorCode) {
           process.stderr.write(`CommonSwarm codex wake: ${decision.code}: ${decision.detail}\n`);

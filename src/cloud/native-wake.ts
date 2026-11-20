@@ -462,6 +462,7 @@ export class NativeWakeBridge {
   private readonly beforeDispatch: ((batch: number) => Promise<void> | void) | undefined;
   private arrivalQueuedAtMs: number | null = null;
   private inFlight = false;
+  private dispatching = false;
 
   constructor(options: NativeWakeBridgeOptions) {
     this.profilePath = privatePath(options.profilePath);
@@ -475,6 +476,11 @@ export class NativeWakeBridge {
     this.retryAfterMs = options.retryAfterMs ?? NATIVE_WAKE_RETRY_AFTER_MS;
     this.now = options.now ?? Date.now;
     this.beforeDispatch = options.beforeDispatch;
+  }
+
+  /** True while this bridge holds the receive lock to dispatch a wake subprocess. */
+  isDispatching(): boolean {
+    return this.dispatching;
   }
 
   /** Record a fresh arrival; coalesced by the 5 s debounce window. */
@@ -614,44 +620,53 @@ export class NativeWakeBridge {
       // re-check live opt-in immediately before execFile, and serialize subprocess execution
       // against opt-out so a wake can NEVER be queued after opt-out completes.
       const receiveLockName = `receive-${profileScopeKey(this.hostSessionId)}`;
-      const dispatchOutcome = await withFileLock<
+      this.dispatching = true;
+      let dispatchOutcome:
         | { kind: "binding_inactive"; code: string; detail: string }
         | { kind: "ok" }
-        | { kind: "error"; code: string; detail: string }
-      >(
-        dirname(this.profilePath),
-        receiveLockName,
-        async () => {
-          const liveAuth = await resolveAuthorizedWakeBinding({
-            profilePath: this.profilePath,
-            hostSessionId: this.hostSessionId,
-            expectedProvider: this.expectedProvider,
-            ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
-          });
-          if (!liveAuth.ok) {
-            return { kind: "binding_inactive", code: liveAuth.code, detail: liveAuth.detail };
-          }
-          try {
-            const outcome = await this.adapter.sendWake({
+        | { kind: "error"; code: string; detail: string };
+      try {
+        dispatchOutcome = await withFileLock<
+          | { kind: "binding_inactive"; code: string; detail: string }
+          | { kind: "ok" }
+          | { kind: "error"; code: string; detail: string }
+        >(
+          dirname(this.profilePath),
+          receiveLockName,
+          async () => {
+            const liveAuth = await resolveAuthorizedWakeBinding({
+              profilePath: this.profilePath,
               hostSessionId: this.hostSessionId,
-              prompt,
-              batch: reservation.batch,
-              cwd: liveAuth.binding.cwd || reservation.cwd || this.cwd,
-              ...(signal ? { signal } : {}),
+              expectedProvider: this.expectedProvider,
+              ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
             });
-            return outcome.ok
-              ? { kind: "ok" }
-              : { kind: "error", code: outcome.code, detail: outcome.detail };
-          } catch (error) {
-            return {
-              kind: "error",
-              code: "wake_dispatch_ambiguous",
-              detail: error instanceof Error ? error.message : "Wake adapter threw unexpectedly.",
-            };
-          }
-        },
-        { timeoutMs: 20_000 },
-      );
+            if (!liveAuth.ok) {
+              return { kind: "binding_inactive", code: liveAuth.code, detail: liveAuth.detail };
+            }
+            try {
+              const outcome = await this.adapter.sendWake({
+                hostSessionId: this.hostSessionId,
+                prompt,
+                batch: reservation.batch,
+                cwd: liveAuth.binding.cwd || reservation.cwd || this.cwd,
+                ...(signal ? { signal } : {}),
+              });
+              return outcome.ok
+                ? { kind: "ok" }
+                : { kind: "error", code: outcome.code, detail: outcome.detail };
+            } catch (error) {
+              return {
+                kind: "error",
+                code: "wake_dispatch_ambiguous",
+                detail: error instanceof Error ? error.message : "Wake adapter threw unexpectedly.",
+              };
+            }
+          },
+          { timeoutMs: 20_000 },
+        );
+      } finally {
+        this.dispatching = false;
+      }
 
       if (dispatchOutcome.kind === "binding_inactive") {
         await updateNativeWakeState(

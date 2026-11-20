@@ -605,6 +605,155 @@ test("Opt-out/dispatch lock serialization: opting out while a wake is reserved c
   }
 });
 
+test("serveCodexWakeBridge survives a slow codex queue call past the heartbeat lock deadline, keeps polling, and still stops promptly on opt-out", { timeout: 25_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-slow-"));
+  const previousHome = process.env.HOME;
+  const previousState = process.env.SWARM_AGENT_STATE_DIR;
+  process.env.HOME = root;
+  process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
+
+  const inboxSignals: Array<Record<string, unknown>> = [];
+  const codexInvocations: Array<readonly string[]> = [];
+  let callNum = 0;
+  let secondCallStarted!: () => void;
+  const waitForSecondCall = new Promise<void>((done) => { secondCallStarted = done; });
+  let releaseSecondCall!: () => void;
+  const secondCallGate = new Promise<void>((done) => { releaseSecondCall = done; });
+
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      if (req.method !== "POST" || !raw.trim()) {
+        res.writeHead(404).end();
+        return;
+      }
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      if (body.resource === "members") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          members: [{ user_id: OWNER, display_name: "Owner" }],
+          agents: [{ principal_id: AGENT, name: "CodexSeat", owner_user_id: OWNER }],
+          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER, workspace_name: "TestWS" },
+        }));
+        return;
+      }
+      if (body.resource === "signals") {
+        const afterAt = typeof body.after_created_at === "string" ? Date.parse(body.after_created_at) : -Infinity;
+        const afterId = typeof body.after_id === "string" ? body.after_id : "";
+        const filtered = inboxSignals.filter((s) => {
+          const ts = Date.parse(String(s.created_at));
+          return ts > afterAt || (ts === afterAt && String(s.id) > afterId);
+        });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          signals: filtered,
+          pending_delivery_count: filtered.length,
+          capabilities: { cursor_after: 1, delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        }));
+        return;
+      }
+      if (body.resource === "renewal_grants") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+        return;
+      }
+      const cmd = body.command as Record<string, unknown> | undefined;
+      if (cmd?.kind === "touch_presence" || cmd?.kind === "ack_agent_delivery" || cmd?.kind === "signals_seen") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, status: "accepted", event_ids: [] }));
+        return;
+      }
+      res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "unexpected" }));
+    });
+  });
+
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const abort = new AbortController();
+  let serving: Promise<void> | undefined;
+  let serveExited = false;
+  try {
+    const port = (server.address() as { port: number }).port;
+    const { cwd, profile } = await setupBoundCodexSeat(root, `http://127.0.0.1:${port}`);
+    serving = serveCodexWakeBridge({
+      profilePath: profile,
+      hostSessionId: THREAD,
+      adapter: new CodexQueueAdapter({
+        codexExecutable: "codex",
+        runner: async (_exe, args, opts) => {
+          callNum += 1;
+          codexInvocations.push(args);
+          if (callNum === 1) {
+            // Hold longer than updateReceiveBinding's 2s lock timeout + multiple 150ms heartbeat ticks.
+            await delay(2_500, undefined, { signal: opts.signal });
+            assert.equal(opts.signal?.aborted ?? false, false, "heartbeat contention must NOT abort the slow codex queue subprocess");
+          } else if (callNum === 2) {
+            secondCallStarted();
+            await secondCallGate;
+          }
+          return { stdout: "ok\n", stderr: "" };
+        },
+      }),
+      debounceMs: 50,
+      minIntervalMs: 100,
+      pollMs: 60,
+      heartbeatMs: 150,
+      signal: abort.signal,
+    }).finally(() => {
+      serveExited = true;
+    });
+
+    await eventually(async () => receiveStatus(await readReceiveBinding(profile, THREAD)).channel_running);
+
+    // 1. Trigger a slow (2.5s) codex queue call overlapping >15 heartbeat intervals and >2s lock deadline.
+    const t0 = Date.now() + 1_000;
+    inboxSignals.push({
+      id: SIGNAL_1, workspace_id: WS, from: OWNER, from_kind: "user", to: null, to_agent: AGENT,
+      in_reply_to: null, about: null, kind: "ask", body: "SLOW_CALL_ONE",
+      created_at: new Date(t0).toISOString(), until: "2099-01-01T00:00:00.000Z", sender_owner_relation: "same_owner",
+    });
+    await eventually(() => codexInvocations.length === 1);
+    await delay(2_800);
+    assert.equal(serveExited, false, "standalone receiver must survive slow codex queue call without self-stopping");
+    assert.equal(receiveStatus(await readReceiveBinding(profile, THREAD)).channel_running, true);
+
+    // 2. Receiver continues polling: check acks batch 1, second DM triggers batch 2, and opt-out while call 2 is in flight stops cleanly.
+    await checkAgentMessages({ profilePath: profile, hostSessionId: THREAD, present: async () => {} });
+    inboxSignals.push({
+      id: SIGNAL_2, workspace_id: WS, from: OWNER, from_kind: "user", to: null, to_agent: AGENT,
+      in_reply_to: null, about: null, kind: "ask", body: "SLOW_CALL_TWO",
+      created_at: new Date(t0 + 5_000).toISOString(), until: "2099-01-01T00:00:00.000Z", sender_owner_relation: "same_owner",
+    });
+    await waitForSecondCall;
+    let optOutDone = false;
+    const optOutPromise = configureAgentReceive({
+      profilePath: profile,
+      mode: "turn",
+      provider: "codex",
+      hostSessionId: THREAD,
+      cwd,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] },
+    }).then((res) => {
+      optOutDone = true;
+      return res;
+    });
+    await delay(150);
+    assert.equal(optOutDone, false, "opt-out must still wait on the shared receive lock while slow call 2 is in flight");
+    releaseSecondCall();
+    await optOutPromise;
+    await serving;
+    assert.equal(serveExited, true, "receiver must stop promptly once opt-out completes");
+    assert.equal(receiveStatus(await readReceiveBinding(profile, THREAD)).channel_running, false);
+    assert.equal(codexInvocations.length, 2);
+  } finally {
+    releaseSecondCall();
+    abort.abort();
+    await serving?.catch(() => undefined);
+    if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+    else process.env.SWARM_AGENT_STATE_DIR = previousState;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await new Promise<void>((done) => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("serveCodexWakeBridge refuses wake when wake mode is withdrawn during a held poll", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-codex-withdraw-"));
   const previousHome = process.env.HOME;
