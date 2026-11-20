@@ -47,13 +47,22 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     invite.dataset.peoplePageInvite = ""; invite.dataset.pdFocus = "page-invite";
     invite.addEventListener("click", () => nav.invite?.()); actions.append(invite);
   }
-  if (action === "add-agent" && nav.addAgentHref) {
-    const add = make("a", "pd-page-secondary", "Add an agent"); add.href = nav.addAgentHref;
+  if (action === "add-agent" && (nav.addAgent || nav.addAgentHref)) {
+    const add = nav.addAgent
+      ? make("button", "pd-page-secondary", "Add an agent")
+      : make("a", "pd-page-secondary", "Add an agent");
+    if (add instanceof HTMLButtonElement) {
+      add.type = "button";
+      add.addEventListener("click", () => nav.addAgent?.());
+    } else {
+      add.href = nav.addAgentHref!;
+      if (nav.navigate) add.addEventListener("click", event => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); nav.navigate?.(add.href, event);
+      });
+    }
     add.dataset.peoplePageAddAgent = ""; add.dataset.pdFocus = "page-add-agent";
-    if (nav.navigate) add.addEventListener("click", event => {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      event.preventDefault(); nav.navigate?.(add.href, event);
-    }); actions.append(add);
+    actions.append(add);
   }
   if (actions.childElementCount) head.append(actions);
   const footer = make("footer", "pd-context-footer");

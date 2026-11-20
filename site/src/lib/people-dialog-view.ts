@@ -58,7 +58,9 @@ export interface PeopleDialogPage {
   workspacesHref?: string;
   /** Back. When given, the back link calls it instead of following its href. */
   back?: (event: MouseEvent) => void;
-  /** The existing add-an-agent route. Absent or null hides the action. */
+  /** Open Add an agent inside the People & agents dialog when given, instead of navigating away. */
+  addAgent?: () => void;
+  /** The existing add-an-agent route. Absent or null hides the action when `addAgent` is omitted. */
   addAgentHref?: string | null;
   /** The existing agent page for one agent: each manageable agent row links to it as Manage. */
   agentHref?: (agentId: string) => string;
