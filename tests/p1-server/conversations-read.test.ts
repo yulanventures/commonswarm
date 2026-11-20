@@ -29,6 +29,13 @@ import {
   parseOversightHistoryResponse,
   parseOversightListResponse,
 } from "../../site/src/lib/conversations.js";
+import {
+  encodeConversationCursor,
+  executeWait,
+  parseWaitOptions,
+  runWaitCli,
+} from "../../src/cli/wait.js";
+import { cloudTarget } from "../../src/cloud/config.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 type Person = { id: string; jwt: string };
@@ -998,4 +1005,147 @@ test("6. Zero server-side DM / group-DM / DM-thread leakage into #general or out
       );
     }
   }
+});
+
+test("7. C5 cswarm wait aligns with real Postgres ms-bucket+UUID pagination and observes returned agent deliveries", { timeout: 60_000 }, async () => {
+  const waitBot = await createAgent(ann, "WaitC5Bot", workspace);
+  const dmWait = String(((ok(await send(ann.jwt, {
+    kind: "conversation_open", members: [aRef(waitBot)],
+  }), "open ann-waitBot DM")).conversation as Row).conversation_id);
+
+  // Part A: Plant an anchor and two same-millisecond messages with reversed UUID vs microsecond order
+  // directly into Postgres so `conversation_history`'s `date_trunc('milliseconds', created_at) ASC, signal_id ASC`
+  // puts `lowId` (.123888) BEFORE `highId` (.123111).
+  const anchorId = randomUUID();
+  const suffix = randomUUID().slice(8);
+  const lowId = `00000000${suffix}`;
+  const highId = `ffffffff${suffix}`;
+  const nowMs = Date.now();
+  const baseSec = new Date(nowMs - 60_000).toISOString().slice(0, 19);
+  const anchorSec = new Date(nowMs - 65_000).toISOString().slice(0, 19);
+  const anchorTs = `${anchorSec}.000000+00`;
+  const highTs = `${baseSec}.123111+00`;
+  const lowTs = `${baseSec}.123888+00`;
+
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_kind, from_principal, to_agent_principal_id, kind, body, until, created_at)
+      VALUES
+        (${anchorId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
+         'note', 'c5 wait anchor', statement_timestamp() + interval '1 day', ${anchorTs}::timestamptz),
+        (${highId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
+         'note', 'c5 same-ms higher uuid earlier microsecond', statement_timestamp() + interval '1 day', ${highTs}::timestamptz),
+        (${lowId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
+         'note', 'c5 same-ms lower uuid later microsecond', statement_timestamp() + interval '1 day', ${lowTs}::timestamptz)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
+      VALUES
+        (${anchorId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${anchorTs}::timestamptz, 'conversation'),
+        (${highId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${highTs}::timestamptz, 'conversation'),
+        (${lowId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${lowTs}::timestamptz, 'conversation')
+    `;
+  });
+
+  const target = cloudTarget(local.API_URL, local.ANON_KEY);
+  const anchorCursor = encodeConversationCursor({
+    created_at: `${anchorSec}.000Z`,
+    id: anchorId,
+  });
+
+  const first = await executeWait({
+    target,
+    workspaceId: workspace,
+    credentialKind: "agent",
+    getBearer: async () => waitBot.token,
+    actor: { kind: "agent", id: waitBot.id },
+    options: parseWaitOptions({ conversation: dmWait, after: anchorCursor, timeout: "10s", json: true }),
+    fetcher: fetch,
+  });
+  assert.equal(first.ok, true, "first wait against real Postgres must match same-ms lower UUID first");
+  if (!first.ok) return;
+  assert.equal(first.event.id, lowId, "Postgres ms-bucket ordering returns lowId before highId");
+
+  const second = await executeWait({
+    target,
+    workspaceId: workspace,
+    credentialKind: "agent",
+    getBearer: async () => waitBot.token,
+    actor: { kind: "agent", id: waitBot.id },
+    options: parseWaitOptions({ conversation: dmWait, after: first.cursor, timeout: "10s", json: true }),
+    fetcher: fetch,
+  });
+  assert.equal(second.ok, true, "resumed wait against real Postgres must return same-ms higher UUID without skipping it");
+  if (!second.ok) return;
+  assert.equal(second.event.id, highId, "resumed wait must deliver highId in the same millisecond bucket");
+
+  // Part B: Post a live ask addressed to waitBot in dmWait, run runWaitCli, and prove
+  // the delivery is observed in swarm.signal_deliveries so claim_agent_inbox does NOT repeat it.
+  const liveAsk = await posted(ann.jwt, {
+    conversation_id: dmWait,
+    signal_kind: "ask",
+    to_agent_principal_id: waitBot.id,
+    body: "C5 real-DB delivery ack check",
+  });
+  const askId = String(liveAsk.id);
+
+  const beforeAck = await sql<{ acked_at: Date | null; ack_outcome: string | null }[]>`
+    SELECT acked_at, ack_outcome
+    FROM swarm.signal_deliveries
+    WHERE workspace_id = ${workspace}::uuid
+      AND signal_id = ${askId}::uuid
+      AND recipient_agent_principal_id = ${waitBot.id}::uuid
+  `;
+  assert.equal(beforeAck.length, 1, "DM ask to waitBot must create an unclaimed delivery row");
+  assert.equal(beforeAck[0]!.acked_at, null, "delivery must start unacked before cswarm wait runs");
+
+  let stdoutBuf = "";
+  const exitCode = await runWaitCli({
+    rawFlags: { conversation: dmWait, after: second.cursor, timeout: "10s", json: true },
+    installSignals: false,
+    stdout: {
+      write(chunk: string, cb?: (err?: Error | null) => void) {
+        stdoutBuf += chunk;
+        cb?.(null);
+        return true;
+      },
+    },
+    resolveContext: async () => ({
+      target,
+      workspaceId: workspace,
+      credentialKind: "agent",
+      getBearer: async () => waitBot.token,
+      actor: { kind: "agent", id: waitBot.id },
+      fetcher: fetch,
+    }),
+  });
+  assert.equal(exitCode, 0);
+  const waitPayload = JSON.parse(stdoutBuf) as { ok: boolean; event: { id: string } };
+  assert.equal(waitPayload.ok, true);
+  assert.equal(waitPayload.event.id, askId);
+
+  const afterAck = await sql<{ acked_at: Date | null; ack_outcome: string | null }[]>`
+    SELECT acked_at, ack_outcome
+    FROM swarm.signal_deliveries
+    WHERE workspace_id = ${workspace}::uuid
+      AND signal_id = ${askId}::uuid
+      AND recipient_agent_principal_id = ${waitBot.id}::uuid
+  `;
+  assert.equal(afterAck.length, 1);
+  assert.ok(afterAck[0]!.acked_at !== null, "cswarm wait must acknowledge the returned delivery after writing stdout");
+  assert.equal(afterAck[0]!.ack_outcome, "observed");
+
+  const claimed = ok(await send(waitBot.token, {
+    kind: "claim_agent_inbox",
+    listener_instance_id: randomUUID(),
+    limit: 20,
+  }), "claim_agent_inbox after cswarm wait");
+  const claimedIds = ((claimed.deliveries as Array<{ signal?: { id?: string } }>) ?? [])
+    .map((d) => String(d.signal?.id ?? ""));
+  assert.equal(
+    claimedIds.includes(askId),
+    false,
+    "message already returned and acknowledged by cswarm wait must not be re-delivered by claim_agent_inbox",
+  );
 });

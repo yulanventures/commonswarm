@@ -9,12 +9,17 @@
  * jittered backoff, and tears down cleanly on `SIGINT` / `SIGTERM`.
  */
 import { channelSelectorProblem, isGeneralChannel } from "../cloud/channels.js";
+import type { SignalRecord } from "../cloud/command-client.js";
 import { readEndpoint, type CloudTarget } from "../cloud/config.js";
 import {
   findChannelConversation,
   type ConversationCursorWire,
   type ConversationSummaryWire,
 } from "../cloud/conversations.js";
+import {
+  observeSurfacedDeliveries,
+  surfacedDeliveryIds,
+} from "../cloud/delivery-observation.js";
 import { parseServerErrorEnvelope } from "../cloud/error-envelope.js";
 import { parseRetryAfterMs } from "../cloud/signals.js";
 
@@ -269,7 +274,11 @@ export function buildWaitNextCommand(
   return parts.join(" ");
 }
 
-function timestampNs(iso: string): bigint {
+/**
+ * Exact UTC millisecond bucket matching Postgres `date_trunc('milliseconds', created_at)`
+ * used by `swarm.conversation_history_page` (migration 20261120000001).
+ */
+export function timestampMsBucket(iso: string): bigint {
   const match = WAIT_ISO_TIMESTAMP_RE.exec(iso);
   if (match) {
     const year = Number(match[1]);
@@ -278,21 +287,27 @@ function timestampNs(iso: string): bigint {
     const hour = Number(match[4]);
     const minute = Number(match[5]);
     const second = Number(match[6]);
-    const fracNs = BigInt((match[7] ?? "").padEnd(9, "0"));
+    // Truncate fractional seconds to 3 digits (milliseconds) toward floor,
+    // matching Postgres `date_trunc('milliseconds', timestamptz)`.
+    const fracMs = BigInt((match[7] ?? "").padEnd(3, "0").slice(0, 3));
     let wholeSec = Math.floor(Date.UTC(year, month - 1, day, hour, minute, second) / 1000);
     if (match[8] !== "Z") {
       const sign = match[9] === "+" ? 1 : -1;
       const offsetSec = (Number(match[10]) * 60 + Number(match[11])) * 60;
       wholeSec -= sign * offsetSec;
     }
-    return BigInt(wholeSec) * 1_000_000_000n + fracNs;
+    return BigInt(wholeSec) * 1_000n + fracMs;
   }
-  return BigInt(Math.trunc(Date.parse(iso))) * 1_000_000n;
+  return BigInt(Math.floor(Date.parse(iso)));
 }
 
+/**
+ * Cursor comparator aligned with server `conversation_history` pagination:
+ * `ORDER BY date_trunc('milliseconds', created_at) ASC, signal_id ASC`.
+ */
 export function compareCursor(a: ConversationCursorWire, b: ConversationCursorWire): number {
-  const ta = timestampNs(a.created_at);
-  const tb = timestampNs(b.created_at);
+  const ta = timestampMsBucket(a.created_at);
+  const tb = timestampMsBucket(b.created_at);
   if (ta !== tb) return ta < tb ? -1 : 1;
   const ia = a.id.toLowerCase();
   const ib = b.id.toLowerCase();
@@ -1087,6 +1102,12 @@ export async function executeWait(deps: WaitLoopDeps): Promise<WaitMatchResult |
   }
 }
 
+export interface WaitWritableStream {
+  write(chunk: string, cb?: (err?: Error | null) => void): boolean;
+  once?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
+}
+
 export interface RunWaitCliArgs {
   rawFlags: WaitRawFlags;
   resolveContext: () => Promise<{
@@ -1097,19 +1118,79 @@ export interface RunWaitCliArgs {
     actor: WaitActorIdentity | null;
     fetcher: typeof fetch;
   }>;
-  stdout?: Pick<NodeJS.WriteStream, "write">;
-  stderr?: Pick<NodeJS.WriteStream, "write">;
+  stdout?: WaitWritableStream;
+  stderr?: WaitWritableStream;
   installSignals?: boolean;
+}
+
+async function writeWaitOutput(stream: WaitWritableStream, value: string): Promise<void> {
+  if (!value) return;
+  if (typeof stream.once === "function" && typeof stream.off === "function") {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error);
+      stream.once!("error", onError);
+      try {
+        stream.write(value, (error) => {
+          stream.off!("error", onError);
+          if (error) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        stream.off!("error", onError);
+        reject(error);
+      }
+    });
+    return;
+  }
+  if (stream.write.length >= 2) {
+    await new Promise<void>((resolve, reject) => {
+      try {
+        stream.write(value, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    return;
+  }
+  stream.write(value);
+}
+
+function normalizeSignalForObservation(event: Record<string, unknown>): SignalRecord {
+  const lowerId = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value.toLowerCase() : null;
+  const normalizeRefList = (list: unknown) =>
+    Array.isArray(list)
+      ? list.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const rec = entry as Record<string, unknown>;
+        const id = lowerId(rec.id);
+        if ((rec.kind !== "user" && rec.kind !== "agent") || id === null) return [];
+        return [{ ...rec, kind: rec.kind, id }];
+      })
+      : undefined;
+  return {
+    ...(event as unknown as SignalRecord),
+    id: lowerId(event.id) ?? "",
+    from: lowerId(event.from) ?? "",
+    to: lowerId(event.to),
+    to_agent: lowerId(event.to_agent),
+    ...(event.recipients !== undefined ? { recipients: normalizeRefList(event.recipients) as SignalRecord["recipients"] } : {}),
+    ...(event.mentions !== undefined ? { mentions: normalizeRefList(event.mentions) as SignalRecord["mentions"] } : {}),
+  };
 }
 
 /**
  * CLI entry point invoked from `src/cli.ts`.
  * Installs clean `SIGINT`/`SIGTERM` handlers for the wait duration and formats
- * either structured `--json` or concise human output, returning the process exit code.
+ * either structured `--json` or concise human output, acknowledging returned
+ * agent deliveries only after stdout has received the bytes.
  */
 export async function runWaitCli(params: RunWaitCliArgs): Promise<number> {
-  const stdout = params.stdout ?? process.stdout;
-  const stderr = params.stderr ?? process.stderr;
+  const stdout: WaitWritableStream = params.stdout ?? process.stdout;
+  const stderr: WaitWritableStream = params.stderr ?? process.stderr;
   const parsed = parseWaitOptions(params.rawFlags);
 
   let context: Awaited<ReturnType<RunWaitCliArgs["resolveContext"]>>;
@@ -1142,7 +1223,7 @@ export async function runWaitCli(params: RunWaitCliArgs): Promise<number> {
     });
 
     if (parsed.json) {
-      stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      await writeWaitOutput(stdout, `${JSON.stringify(result, null, 2)}\n`);
     } else if (result.ok) {
       const m = result.event;
       const createdAt = sanitizeWaitText(String(m.created_at ?? ""));
@@ -1150,16 +1231,45 @@ export async function runWaitCli(params: RunWaitCliArgs): Promise<number> {
       const fromKind = sanitizeWaitText(String(m.from_kind ?? ""));
       const from = sanitizeWaitText(String(m.from ?? ""));
       const body = sanitizeWaitText(String(m.body ?? ""));
-      stdout.write(`${createdAt} · ${id} · ${fromKind}:${from} · ${body}\n`);
+      const lines = [`${createdAt} · ${id} · ${fromKind}:${from} · ${body}\n`];
       if (result.next.length > 0) {
-        stdout.write(`Next: ${result.next[0]}\n`);
+        lines.push(`Next: ${result.next[0]}\n`);
       }
+      await writeWaitOutput(stdout, lines.join(""));
     } else {
-      stderr.write(`cswarm: ${result.message}\n`);
+      const lines = [`cswarm: ${result.message}\n`];
       if (result.next.length > 0) {
-        stderr.write(`Next: ${result.next[0]}\n`);
+        lines.push(`Next: ${result.next[0]}\n`);
+      }
+      await writeWaitOutput(stderr, lines.join(""));
+    }
+
+    // Observe the returned agent delivery strictly AFTER output is written so turn-mode
+    // hooks and `cswarm check` do not repeat it. Best effort: never alters output or exit code.
+    if (result.ok && context.credentialKind === "agent" && !controller.signal.aborted) {
+      const principalId = context.actor?.kind === "agent" ? context.actor.id.toLowerCase() : null;
+      const signalIds = surfacedDeliveryIds(
+        [normalizeSignalForObservation(result.event)],
+        principalId,
+        { excludeOwn: true },
+      );
+      if (signalIds.length > 0) {
+        try {
+          const credential = await context.getBearer();
+          await observeSurfacedDeliveries({
+            target: context.target,
+            fetcher: context.fetcher,
+            credential,
+            workspaceId: context.workspaceId.toLowerCase(),
+            signalIds,
+            signal: controller.signal,
+          });
+        } catch {
+          // Best-effort observation: output, cursor, and exit status never depend on it.
+        }
       }
     }
+
     return result.ok ? 0 : WAIT_TIMED_OUT_EXIT_CODE;
   } finally {
     if (useSignals) {

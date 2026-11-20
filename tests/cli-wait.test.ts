@@ -15,6 +15,8 @@ import {
   messageMatchesWaitFilter,
   parseWaitOptions,
   parseWaitTimeoutMs,
+  runWaitCli,
+  timestampMsBucket,
 } from "../src/cli/wait.js";
 import { cloudTarget } from "../src/cloud/config.js";
 import type { ConversationSummaryWire } from "../src/cloud/conversations.js";
@@ -505,48 +507,94 @@ test("executeWait stops immediately on 401/403/404 access loss without leaking s
   }
 });
 
-test("compareCursor preserves sub-millisecond Postgres timestamps and classifySetupError maps profile_session_mismatch", async () => {
+test("compareCursor matches server conversation_history ms-bucket+UUID ordering and classifySetupError maps profile_session_mismatch", async () => {
   const HIGH_UUID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
   const LOW_UUID = "00000000-0000-4000-8000-000000000001";
-  const msg1 = { created_at: "2026-11-20T10:00:00.123456Z", id: HIGH_UUID };
-  const msg2 = { created_at: "2026-11-20T10:00:00.123789Z", id: LOW_UUID };
-  // Same millisecond with reversed UUID order: msg2 must sort strictly AFTER msg1.
-  assert.equal(compareCursor(msg1, msg2), -1);
-  assert.equal(compareCursor(msg2, msg1), 1);
-  // Timezone offsets representing the same microsecond instant must compare equal on timestamp.
+  const msgHigh = { created_at: "2026-11-20T10:00:00.123456Z", id: HIGH_UUID };
+  const msgLow = { created_at: "2026-11-20T10:00:00.123789Z", id: LOW_UUID };
+  // Postgres conversation_history orders by `date_trunc('milliseconds', created_at) ASC, signal_id ASC`:
+  // both timestamps share the `.123` millisecond bucket, so LOW_UUID sorts BEFORE HIGH_UUID.
+  assert.equal(timestampMsBucket(msgHigh.created_at), timestampMsBucket(msgLow.created_at));
+  assert.equal(compareCursor(msgLow, msgHigh), -1);
+  assert.equal(compareCursor(msgHigh, msgLow), 1);
+  // Timezone offsets representing the same UTC millisecond bucket compare equal on timestamp.
   assert.equal(
     compareCursor(
-      { created_at: "2026-11-20T12:00:00.123456+02:00", id: LOW_UUID },
-      { created_at: "2026-11-20T10:00:00.123456Z", id: LOW_UUID },
+      { created_at: "2026-11-20T12:00:00.123999+02:00", id: LOW_UUID },
+      { created_at: "2026-11-20T10:00:00.123001Z", id: LOW_UUID },
     ),
     0,
   );
+  // Distinct millisecond buckets still order strictly by timestamp regardless of UUID.
+  assert.equal(
+    compareCursor(
+      { created_at: "2026-11-20T10:00:00.123999Z", id: HIGH_UUID },
+      { created_at: "2026-11-20T10:00:00.124000Z", id: LOW_UUID },
+    ),
+    -1,
+  );
 
-  // Full executeWait witness: anchoring at msg1 (.123456Z, ffff...) must NOT drop msg2 (.123789Z, 0000...).
-  const afterMsg1 = encodeConversationCursor(msg1);
-  const res = await executeWait({
+  // Full 2-call executeWait resume witness matching server pagination:
+  // Server returns rows where (date_trunc('ms', created_at), id) > (after_ms, after_id) in ms+UUID order.
+  const allRows = [
+    { id: LOW_UUID, created_at: msgLow.created_at, body: "same-ms lower UUID (returned first by server)" },
+    { id: HIGH_UUID, created_at: msgHigh.created_at, body: "same-ms higher UUID (returned second by server)" },
+  ];
+  const serverOrderedFetch: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const afterCur = typeof body.after_created_at === "string" && typeof body.after_id === "string"
+      ? { created_at: body.after_created_at, id: body.after_id }
+      : null;
+    const filtered = allRows.filter((row) =>
+      afterCur === null || compareCursor({ created_at: row.created_at, id: row.id }, afterCur) > 0
+    );
+    return jsonResponse(200, {
+      conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+      messages: filtered,
+      has_more: false,
+      next_after: filtered.length > 0
+        ? { created_at: filtered[filtered.length - 1]!.created_at, id: filtered[filtered.length - 1]!.id }
+        : null,
+    });
+  };
+
+  const anchorBefore = encodeConversationCursor({ created_at: "2026-11-20T10:00:00.000Z", id: LOW_UUID });
+  const first = await executeWait({
     target: TARGET,
     workspaceId: WS,
     credentialKind: "agent",
     getBearer: async () => SECRET_BEARER,
-    options: parseWaitOptions({ conversation: GEN_CONV, after: afterMsg1, timeout: "30s", json: true }),
-    fetcher: async () =>
-      jsonResponse(200, {
-        conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
-        messages: [
-          { id: HIGH_UUID, created_at: msg1.created_at, body: "first in ms" },
-          { id: LOW_UUID, created_at: msg2.created_at, body: "second in same ms" },
-        ],
-        has_more: false,
-        next_after: msg2,
-      }),
+    options: parseWaitOptions({ conversation: GEN_CONV, after: anchorBefore, timeout: "30s", json: true }),
+    fetcher: serverOrderedFetch,
     now: () => 6_000_000,
     sleep: async () => {},
   });
-  assert.equal(res.ok, true);
-  if (res.ok) {
-    assert.equal(res.event.id, LOW_UUID);
-    assert.equal(res.cursor, encodeConversationCursor(msg2));
+  assert.equal(first.ok, true);
+  if (first.ok) {
+    assert.equal(first.event.id, LOW_UUID);
+    assert.equal(first.cursor, encodeConversationCursor(msgLow));
+  }
+
+  // Resuming from first.cursor MUST return msgHigh (never skipped in same ms bucket).
+  const second = await executeWait({
+    target: TARGET,
+    workspaceId: WS,
+    credentialKind: "agent",
+    getBearer: async () => SECRET_BEARER,
+    options: parseWaitOptions({
+      conversation: GEN_CONV,
+      after: first.ok ? first.cursor : anchorBefore,
+      timeout: "30s",
+      json: true,
+    }),
+    fetcher: serverOrderedFetch,
+    now: () => 6_000_000,
+    sleep: async () => {},
+  });
+  assert.equal(second.ok, true);
+  if (second.ok) {
+    assert.equal(second.event.id, HIGH_UUID);
+    assert.equal(second.cursor, encodeConversationCursor(msgHigh));
   }
 
   // classifySetupError maps profile_session_mismatch / profile_other_session / canonical message to V1 taxonomy.
@@ -560,6 +608,196 @@ test("compareCursor preserves sub-millisecond Postgres timestamps and classifySe
     assert.equal(mapped.payload.error, "profile_session_mismatch");
     assert.equal(mapped.payload.reason, "profile_session_mismatch");
     assert.deepEqual(mapped.payload.next, ["cswarm setup guide"]);
+  }
+});
+
+test("runWaitCli acknowledges returned agent deliveries strictly after stdout write and never alters output or exit code on ack failure", async () => {
+  const after = encodeConversationCursor({ created_at: "2026-11-20T15:00:00.000Z", id: SIG_1 });
+  const addressedMsg = {
+    id: SIG_2,
+    workspace_id: WS,
+    from: USER_A,
+    from_kind: "user",
+    to: null,
+    to_agent: AGENT_A,
+    kind: "ask",
+    body: "Please check PR #697",
+    created_at: "2026-11-20T15:00:05.000Z",
+    recipients: [{ kind: "agent", id: AGENT_A, position: 0 }],
+    mentions: [],
+  };
+
+  // 1. Happy path: stdout callback resolves strictly BEFORE command observation POST fires.
+  const timeline: string[] = [];
+  const commandPayloads: Record<string, unknown>[] = [];
+  let printed = "";
+  const exitCode = await runWaitCli({
+    rawFlags: { conversation: GEN_CONV, after, timeout: "30s", json: true },
+    installSignals: false,
+    stdout: {
+      write(chunk: string, cb?: (err?: Error | null) => void) {
+        printed += chunk;
+        setTimeout(() => {
+          timeline.push("stdout_written");
+          cb?.(null);
+        }, 5);
+        return true;
+      },
+    },
+    resolveContext: async () => ({
+      target: TARGET,
+      workspaceId: WS,
+      credentialKind: "agent",
+      getBearer: async () => SECRET_BEARER,
+      actor: { kind: "agent", id: AGENT_A },
+      fetcher: async (input, init) => {
+        const url = String(input);
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        if (url.includes("/functions/v1/read")) {
+          return jsonResponse(200, {
+            conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+            messages: [addressedMsg],
+            has_more: false,
+            next_after: { created_at: addressedMsg.created_at, id: addressedMsg.id },
+          });
+        }
+        if (url.includes("/functions/v1/command")) {
+          timeline.push("observe_command_sent");
+          commandPayloads.push(body);
+          return jsonResponse(200, {
+            ok: true,
+            status: "accepted",
+            observed: [SIG_2],
+            refused: [],
+          });
+        }
+        throw new Error(`unexpected URL ${url}`);
+      },
+    }),
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(timeline, ["stdout_written", "observe_command_sent"]);
+  assert.equal(commandPayloads.length, 1);
+  const cmd = commandPayloads[0]?.command as Record<string, unknown>;
+  assert.equal(cmd.kind, "ack_agent_delivery");
+  assert.equal(cmd.outcome, "observed");
+  assert.deepEqual(cmd.signal_ids, [SIG_2]);
+  const parsedOut = JSON.parse(printed) as Record<string, unknown>;
+  assert.equal(parsedOut.ok, true);
+  assert.equal((parsedOut.event as Record<string, unknown>).id, SIG_2);
+
+  // 2. Failed stdout write must observe NOTHING.
+  let failedWriteObserveCalls = 0;
+  await assert.rejects(
+    () =>
+      runWaitCli({
+        rawFlags: { conversation: GEN_CONV, after, timeout: "30s", json: true },
+        installSignals: false,
+        stdout: {
+          write(_chunk: string, cb?: (err?: Error | null) => void) {
+            cb?.(new Error("EPIPE"));
+            return false;
+          },
+        },
+        resolveContext: async () => ({
+          target: TARGET,
+          workspaceId: WS,
+          credentialKind: "agent",
+          getBearer: async () => SECRET_BEARER,
+          actor: { kind: "agent", id: AGENT_A },
+          fetcher: async (input) => {
+            const url = String(input);
+            if (url.includes("/functions/v1/read")) {
+              return jsonResponse(200, {
+                conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+                messages: [addressedMsg],
+                has_more: false,
+                next_after: { created_at: addressedMsg.created_at, id: addressedMsg.id },
+              });
+            }
+            failedWriteObserveCalls += 1;
+            return jsonResponse(200, { ok: true, observed: [SIG_2], refused: [] });
+          },
+        }),
+      }),
+    /EPIPE/,
+  );
+  assert.equal(failedWriteObserveCalls, 0, "failed stdout write must not acknowledge delivery");
+
+  // 3. Observation HTTP 503 never alters stdout or exit code 0.
+  let printedOnAckErr = "";
+  const exitOnAckErr = await runWaitCli({
+    rawFlags: { conversation: GEN_CONV, after, timeout: "30s", json: true },
+    installSignals: false,
+    stdout: {
+      write(chunk: string) {
+        printedOnAckErr += chunk;
+        return true;
+      },
+    },
+    resolveContext: async () => ({
+      target: TARGET,
+      workspaceId: WS,
+      credentialKind: "agent",
+      getBearer: async () => SECRET_BEARER,
+      actor: { kind: "agent", id: AGENT_A },
+      fetcher: async (input) => {
+        if (String(input).includes("/functions/v1/read")) {
+          return jsonResponse(200, {
+            conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+            messages: [addressedMsg],
+            has_more: false,
+            next_after: { created_at: addressedMsg.created_at, id: addressedMsg.id },
+          });
+        }
+        return jsonResponse(503, { error: "temporarily_unavailable" });
+      },
+    }),
+  });
+  assert.equal(exitOnAckErr, 0);
+  assert.equal((JSON.parse(printedOnAckErr) as { ok: boolean }).ok, true);
+
+  // 4. Human credential, own agent message, and unaddressed broadcast send ZERO observation commands.
+  for (const scenario of [
+    { credentialKind: "human" as const, actor: { kind: "user" as const, id: USER_A }, msg: addressedMsg },
+    {
+      credentialKind: "agent" as const,
+      actor: { kind: "agent" as const, id: AGENT_A },
+      msg: { ...addressedMsg, from: AGENT_A, from_kind: "agent" },
+    },
+    {
+      credentialKind: "agent" as const,
+      actor: { kind: "agent" as const, id: AGENT_A },
+      msg: { ...addressedMsg, to_agent: null, recipients: [], mentions: [] },
+    },
+  ]) {
+    let commandCalls = 0;
+    const code = await runWaitCli({
+      rawFlags: { conversation: GEN_CONV, after, timeout: "30s", json: true },
+      installSignals: false,
+      stdout: { write() { return true; } },
+      resolveContext: async () => ({
+        target: TARGET,
+        workspaceId: WS,
+        credentialKind: scenario.credentialKind,
+        getBearer: async () => SECRET_BEARER,
+        actor: scenario.actor,
+        fetcher: async (input) => {
+          if (String(input).includes("/functions/v1/read")) {
+            return jsonResponse(200, {
+              conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+              messages: [scenario.msg],
+              has_more: false,
+              next_after: { created_at: scenario.msg.created_at, id: scenario.msg.id },
+            });
+          }
+          commandCalls += 1;
+          return jsonResponse(200, { ok: true, observed: [], refused: [] });
+        },
+      }),
+    });
+    assert.equal(code, 0);
+    assert.equal(commandCalls, 0);
   }
 });
 

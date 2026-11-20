@@ -94,6 +94,14 @@ test("cswarm wait end-to-end: channel match, cursor chaining, fail-closed channe
       requests.push({ path, body });
       res.setHeader("content-type", "application/json");
 
+      if (path === "/functions/v1/command") {
+        const cmd = (body.command ?? {}) as Record<string, unknown>;
+        if (cmd.kind === "ack_agent_delivery" && cmd.outcome === "observed" && Array.isArray(cmd.signal_ids)) {
+          res.end(JSON.stringify({ ok: true, status: "accepted", observed: cmd.signal_ids, refused: [] }));
+          return;
+        }
+      }
+
       if (path === "/functions/v1/read" && body.resource === "conversations") {
         res.end(JSON.stringify({ conversations }));
         return;
@@ -117,9 +125,9 @@ test("cswarm wait end-to-end: channel match, cursor chaining, fail-closed channe
             res.end(JSON.stringify({
               conversation: conversations[1],
               messages: [
-                { id: SIG_2, created_at: "2026-11-20T15:00:02.000Z", thread_root_id: ROOT_1, mentions: [], body: "unmentioned" },
-                { id: SIG_3, created_at: "2026-11-20T15:00:03.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "first match" },
-                { id: SIG_4, created_at: "2026-11-20T15:00:04.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "second match" },
+                { id: SIG_2, kind: "note", created_at: "2026-11-20T15:00:02.000Z", thread_root_id: ROOT_1, mentions: [], body: "unmentioned" },
+                { id: SIG_3, kind: "note", created_at: "2026-11-20T15:00:03.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "first match" },
+                { id: SIG_4, kind: "note", created_at: "2026-11-20T15:00:04.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "second match" },
               ],
               has_more: false,
               next_after: { created_at: "2026-11-20T15:00:04.000Z", id: SIG_4 },
@@ -130,7 +138,7 @@ test("cswarm wait end-to-end: channel match, cursor chaining, fail-closed channe
             res.end(JSON.stringify({
               conversation: conversations[1],
               messages: [
-                { id: SIG_4, created_at: "2026-11-20T15:00:04.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "second match" },
+                { id: SIG_4, kind: "note", created_at: "2026-11-20T15:00:04.000Z", thread_root_id: ROOT_1, mentions: [{ kind: "agent", id: AGENT_A }], body: "second match" },
               ],
               has_more: false,
               next_after: { created_at: "2026-11-20T15:00:04.000Z", id: SIG_4 },
@@ -227,6 +235,15 @@ test("cswarm wait end-to-end: channel match, cursor chaining, fail-closed channe
     const out2 = JSON.parse(match2.stdout) as { ok: boolean; event: { id: string }; cursor: string };
     assert.equal(out2.ok, true);
     assert.equal(out2.event.id, SIG_4);
+    const observedSignals = requests
+      .filter((r) => r.path === "/functions/v1/command")
+      .flatMap((r) => {
+        const cmd = r.body.command as { kind?: unknown; outcome?: unknown; signal_ids?: unknown } | undefined;
+        return cmd?.kind === "ack_agent_delivery" && cmd.outcome === "observed" && Array.isArray(cmd.signal_ids)
+          ? (cmd.signal_ids as string[])
+          : [];
+      });
+    assert.deepEqual(observedSignals, [SIG_3, SIG_4], "spawned cswarm wait must observe each returned agent delivery");
 
     // 3. Unknown --channel fails closed with channel_not_found and never hits /functions/v1/command.
     const beforeCmdCount = requests.filter((r) => r.path === "/functions/v1/command").length;
