@@ -40,6 +40,9 @@ struct DirectoryView: View {
         }
         return List {
             Section("Workspace") {
+                NavigationLink(value: SharedObjectsRoute()) {
+                    Label("Lists & docs", systemImage: "list.bullet.rectangle")
+                }
                 NavigationLink(value: WorkspaceFilesRoute()) {
                     Label("Files", systemImage: "folder")
                 }
@@ -53,6 +56,9 @@ struct DirectoryView: View {
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
+         .navigationDestination(for: SharedObjectsRoute.self) { _ in
+             SharedObjectsListView(api: api, workspace: workspace)
+         }
          .navigationDestination(for: WorkspaceFilesRoute.self) { _ in
              WorkspaceFilesView(api: api, workspace: workspace)
          }

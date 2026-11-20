@@ -333,7 +333,7 @@ test("post_signal with conversation_id: the route rule, and every other address 
   assert.equal(outsider.body.error, "conversation_not_member");
   assert.equal((await send(ann.jwt, note({ conversation_id: id, mentions: [agent(annBot)] }))).body.error, "conversation_mentions");
   assert.equal((await send(ann.jwt, note({ conversation_id: id, signal_kind: "working-on" }))).status, 400);
-  for (const extra of [{ channel: "general" }, { to_user_id: ben.id }, { thread_root_id: fromPerson }, { conversation_id: "nope" }]) {
+  for (const extra of [{ channel: "general" }, { to_user_id: ben.id }, { in_reply_to: fromPerson }, { thread_root_id: fromPerson, broadcast_to_channel: true }, { conversation_id: "nope" }]) {
     assert.equal((await send(ann.jwt, note({ conversation_id: id, ...extra }))).status, 400, JSON.stringify(extra));
   }
   const unknown = await send(ann.jwt, note({ conversation_id: randomUUID() }));

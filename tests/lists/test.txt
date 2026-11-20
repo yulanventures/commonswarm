@@ -132,6 +132,7 @@ tests/workspace-skills.test.ts
 tests/attended-canary.test.ts
 tests/slow-command-log.test.ts
 tests/conversations-commands-parse.test.ts
+tests/conversations-read.test.ts
 tests/interactive-replies-client.test.ts
 tests/api-md-contract.test.ts
 tests/mention-address.test.ts
