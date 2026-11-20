@@ -106,10 +106,10 @@ final class ReaderPositionTests: XCTestCase {
         try tap("Notify for mentions only")
         try tap("Attach files")
         try tap("Photos and videos")
-        let photo = app.collectionViews.cells.firstMatch
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 10), "Seed one photo in the test simulator")
         photo.tap()
-        try tap("Add")
+        try tap("Done")
         let attachment = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove ")).firstMatch
         XCTAssertTrue(attachment.waitForExistence(timeout: 10))
         let attachmentLabel = attachment.label
