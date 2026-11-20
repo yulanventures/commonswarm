@@ -97,20 +97,24 @@ export interface WorkspaceCatchUp {
 }
 export interface HomeOverview { viewer_user_id: Uuid; generated_at: IsoTime; workspaces: WorkspaceCatchUp[] }
 /** One open ask addressed to the viewer. `body` is untrusted text. */
+export type DecisionConversationKind = 'general' | 'public_channel' | 'private_channel' | 'dm' | 'group_dm';
 export interface DecisionAsk {
   signal_id: Uuid; from: { kind: 'agent' | 'user'; id: Uuid; name: string | null };
   body: string; created_at: IsoTime; until: IsoTime;
+  conversation_id?: Uuid | null;
+  conversation_kind?: DecisionConversationKind | null;
   reraised: { count: number; last_at: IsoTime } | null;
 }
 /** The viewer's open asks in one workspace, oldest first, at most 100 (`truncated` when more). */
 export interface DecisionQueue { workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; asks: DecisionAsk[] }
-/** Where a waiting/assigned to-do originated: a specific channel, #general, or workspace-only. */
-export type WaitingTodoPlacement = 'channel' | 'general' | 'workspace';
+/** Where a waiting/assigned to-do originated: a specific channel, #general, a DM/group DM, or workspace-only. */
+export type WaitingTodoPlacement = 'channel' | 'general' | 'workspace' | 'dm' | 'group_dm';
 export interface WaitingTodoEntry {
   todo_id: Uuid; title: string; state: 'open' | 'doing'; due_on: LocalDate | null;
   reason: 'assigned' | 'request' | 'after' | 'hold' | 'agent_removed';
   agent_id: Uuid | null; state_at: IsoTime;
   placement: WaitingTodoPlacement; channel_id: Uuid | null;
+  conversation_id?: Uuid | null;
 }
 /** The viewer's open/doing assigned and waiting to-dos in one workspace (`truncated` when more pages remain). */
 export interface WaitingTodosQueue {
@@ -141,7 +145,8 @@ export interface HomeServer {
     Promise<{ comments: Comment[]; next_offset: number | null }>;
   agentQueue(workspaceId: Uuid, principalId: Uuid, q?: { section?: QueueSection; offset?: number; limit?: number /* <= 50 */ }): Promise<AgentQueue>;
   createTodo(workspaceId: Uuid, input: { title: string; notes?: string; due_on?: LocalDate | null;
-    assign?: AssignInput }, requestId: string): Promise<WriteResult<Todo>>;
+    assign?: AssignInput; origin_placement?: WaitingTodoPlacement; origin_channel_id?: Uuid | null;
+    origin_conversation_id?: Uuid | null }, requestId: string): Promise<WriteResult<Todo>>;
   updateTodo(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number; title?: string;
     notes?: string; due_on?: LocalDate | null }, requestId: string): Promise<WriteResult<Todo>>;
   assignTodo(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number }

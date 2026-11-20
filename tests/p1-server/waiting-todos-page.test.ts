@@ -113,8 +113,9 @@ interface WaitingTodoRow {
   reason: "assigned" | "request" | "after" | "hold" | "agent_removed";
   agent_id: string | null;
   state_at: string;
-  placement: "channel" | "general" | "workspace";
+  placement: "channel" | "general" | "workspace" | "dm" | "group_dm";
   channel_id: string | null;
+  conversation_id: string | null;
 }
 
 interface WaitingTodosPagePayload {
@@ -632,6 +633,391 @@ test("waiting_todos_page paginates past 20, preserves stable channel origin acro
       `;
       assert.equal(agentRow!.r, null);
       await tx`ROLLBACK TO SAVEPOINT sp_authz`;
+
+      throw ROLLBACK_WITNESS;
+    });
+  } catch (err) {
+    if (err !== ROLLBACK_WITNESS) throw err;
+  }
+});
+
+interface DecisionQueueAskRow {
+  signal_id: string;
+  body: string;
+  created_at: string;
+  conversation_id: string | null;
+  conversation_kind: "general" | "public_channel" | "private_channel" | "dm" | "group_dm" | null;
+}
+
+interface DecisionQueuePayload {
+  workspace_id: string;
+  total: number;
+  truncated: boolean;
+  asks: DecisionQueueAskRow[];
+}
+
+test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritative decision_queue conversation_id across restarted groups", async () => {
+  const viewerId = randomUUID();
+  const mayaId = randomUUID();
+  const outsiderId = randomUUID();
+  const nonMemberId = randomUUID();
+  const wsId = randomUUID();
+  const foreignWsId = randomUUID();
+  const scoutAgentId = randomUUID();
+  const store = makeTodoStore();
+  const viewerIdentity: HouseholdIdentity = { user_id: viewerId, principal_id: null, run_id: null, connection: null };
+  const mayaIdentity: HouseholdIdentity = { user_id: mayaId, principal_id: null, run_id: null, connection: null };
+  const outsiderIdentity: HouseholdIdentity = { user_id: outsiderId, principal_id: null, run_id: null, connection: null };
+
+  try {
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO auth.users (id, email)
+        VALUES
+          (${viewerId}::uuid, ${`dm-v-${viewerId}@example.test`}),
+          (${mayaId}::uuid, ${`dm-m-${mayaId}@example.test`}),
+          (${outsiderId}::uuid, ${`dm-o-${outsiderId}@example.test`}),
+          (${nonMemberId}::uuid, ${`dm-nm-${nonMemberId}@example.test`})
+      `;
+      await tx`
+        INSERT INTO swarm.users (user_id, display_name)
+        VALUES
+          (${viewerId}::uuid, 'DMViewer'),
+          (${mayaId}::uuid, 'DMMaya'),
+          (${outsiderId}::uuid, 'DMOutsider'),
+          (${nonMemberId}::uuid, 'DMNonMember')
+      `;
+      await tx`
+        INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+        VALUES
+          (${wsId}::uuid, 'DMConvWS', ${viewerId}::uuid),
+          (${foreignWsId}::uuid, 'DMForeignWS', ${nonMemberId}::uuid)
+      `;
+      await tx`
+        INSERT INTO swarm.memberships (workspace_id, user_id, role)
+        VALUES
+          (${wsId}::uuid, ${viewerId}::uuid, 'owner'),
+          (${wsId}::uuid, ${mayaId}::uuid, 'member'),
+          (${wsId}::uuid, ${outsiderId}::uuid, 'member'),
+          (${foreignWsId}::uuid, ${nonMemberId}::uuid, 'owner')
+      `;
+      await tx`
+        INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout')
+      `;
+      await tx`
+        INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
+        VALUES (${wsId}::uuid, 'shared'), (${foreignWsId}::uuid, 'shared')
+      `;
+      await tx`
+        INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+        VALUES
+          (${wsId}::uuid, ${viewerId}::uuid, 'editor', ${randomUUID()}::uuid, now()),
+          (${wsId}::uuid, ${mayaId}::uuid, 'editor', ${randomUUID()}::uuid, now()),
+          (${wsId}::uuid, ${outsiderId}::uuid, 'editor', ${randomUUID()}::uuid, now()),
+          (${foreignWsId}::uuid, ${nonMemberId}::uuid, 'editor', ${randomUUID()}::uuid, now())
+      `;
+
+      // Open 1:1 DM (viewer + Scout), Group DM Gen 1 (viewer + Maya + Scout), and restarted Gen 2 (same member set).
+      const [dmOpen] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
+        SELECT swarm.conversation_open(
+          ${wsId}::uuid, 'user', ${viewerId}::uuid, '{}'::uuid[], ARRAY[${scoutAgentId}]::uuid[], false
+        ) AS r
+      `;
+      const [g1Open] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
+        SELECT swarm.conversation_open(
+          ${wsId}::uuid, 'user', ${viewerId}::uuid, ARRAY[${mayaId}]::uuid[], ARRAY[${scoutAgentId}]::uuid[], false
+        ) AS r
+      `;
+      // Have Maya leave temporarily to allow starting a fresh generation (Gen 2) with the same founding members,
+      // OR insert Gen 2 directly via conversation_open(..., new_group => true) after Maya leaves a dummy group —
+      // even cleaner: use conversation_open(..., new_group => true) after a second group member set or direct generation=1 row.
+      const convDmScout = dmOpen!.r.conversation.conversation_id;
+      const convGroupGen1 = g1Open!.r.conversation.conversation_id;
+      const [g1Meta] = await tx<{ member_key: string }[]>`
+        SELECT member_key FROM swarm.conversations WHERE conversation_id = ${convGroupGen1}::uuid
+      `;
+      const convGroupGen2 = randomUUID();
+      await tx`
+        INSERT INTO swarm.conversations (
+          conversation_id, workspace_id, kind, member_key, generation, created_by_kind, created_by_principal
+        ) VALUES (
+          ${convGroupGen2}::uuid, ${wsId}::uuid, 'group_dm', ${g1Meta!.member_key}, 1, 'user', ${viewerId}::uuid
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_user_id, member_agent_principal_id)
+        VALUES
+          (${convGroupGen2}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL),
+          (${convGroupGen2}::uuid, ${wsId}::uuid, ${mayaId}::uuid, NULL),
+          (${convGroupGen2}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid)
+      `;
+      const [foreignDmOpen] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
+        SELECT swarm.conversation_open(
+          ${foreignWsId}::uuid, 'user', ${nonMemberId}::uuid, ARRAY[${nonMemberId}]::uuid[], '{}'::uuid[], false
+        ) AS r
+      `;
+      const convForeignDm = foreignDmOpen!.r.conversation.conversation_id;
+
+      // Post an open ask from Scout explicitly filed into Gen 1 (while Gen 2 also exists with identical members).
+      const gen1AskId = randomUUID();
+      await tx`SET CONSTRAINTS ALL DEFERRED`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      await tx`
+        INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at
+        ) VALUES (
+          ${gen1AskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid,
+          'ask', 'Gen 1 group ask: approve boiler?', statement_timestamp() + interval '1 day', statement_timestamp()
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES
+          (${gen1AskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 0),
+          (${gen1AskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 1)
+      `;
+      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1AskId}::uuid, ${convGroupGen1}::uuid)`;
+      await tx`RESET ROLE`;
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+
+      // 1. Write-time authz on todo_create for dm / group_dm origins.
+      await tx`SAVEPOINT sp_dm_todo_writes`;
+      await tx`SET LOCAL ROLE swarm_command`;
+
+      const refusedDirectCreates: Array<{ label: string; who: HouseholdIdentity; cmd: todos.TodoCommand }> = [
+        {
+          label: "outsider group_dm origin",
+          who: outsiderIdentity,
+          cmd: { kind: "todo_create", title: "Outsider group todo", origin_placement: "group_dm", origin_conversation_id: convGroupGen1 },
+        },
+        {
+          label: "foreign workspace dm origin",
+          who: viewerIdentity,
+          cmd: { kind: "todo_create", title: "Foreign dm todo", origin_placement: "dm", origin_conversation_id: convForeignDm },
+        },
+        {
+          label: "wrong kind dm vs group_dm",
+          who: viewerIdentity,
+          cmd: { kind: "todo_create", title: "Wrong kind 1", origin_placement: "dm", origin_conversation_id: convGroupGen1 },
+        },
+        {
+          label: "wrong kind group_dm vs dm",
+          who: viewerIdentity,
+          cmd: { kind: "todo_create", title: "Wrong kind 2", origin_placement: "group_dm", origin_conversation_id: convDmScout },
+        },
+        {
+          label: "nonexistent conversation_id",
+          who: viewerIdentity,
+          cmd: { kind: "todo_create", title: "Missing conv", origin_placement: "group_dm", origin_conversation_id: randomUUID() },
+        },
+        {
+          label: "group_dm with null conversation_id",
+          who: viewerIdentity,
+          cmd: { kind: "todo_create", title: "Missing id", origin_placement: "group_dm", origin_conversation_id: null },
+        },
+      ];
+      for (const entry of refusedDirectCreates) {
+        const res = await store.write(tx, wsId, entry.who, `req-${randomUUID()}`, entry.cmd);
+        assert.deepEqual(
+          res.outcome,
+          { status: "refused", reason: "target_not_found" },
+          `expected uniform non-oracle refusal for ${entry.label}`,
+        );
+      }
+
+      const groupViewerTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Book plumber from Gen 1",
+        origin_placement: "group_dm",
+        origin_conversation_id: convGroupGen1,
+        assign: { to: { kind: "user", id: viewerId } },
+      }));
+      const groupOutsiderTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Outsider assigned group task",
+        origin_placement: "group_dm",
+        origin_conversation_id: convGroupGen1,
+        assign: { to: { kind: "user", id: outsiderId } },
+      }));
+      const groupMayaTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Maya assigned group task",
+        origin_placement: "group_dm",
+        origin_conversation_id: convGroupGen1,
+        assign: { to: { kind: "user", id: mayaId } },
+      }));
+      const dmViewerTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Follow up with Scout",
+        origin_placement: "dm",
+        origin_conversation_id: convDmScout,
+        assign: { to: { kind: "user", id: viewerId } },
+      }));
+      for (const written of [groupViewerTodo, groupOutsiderTodo, groupMayaTodo, dmViewerTodo]) {
+        assert.equal("origin_conversation_id" in written, false, "todo_create must strip origin_conversation_id");
+        assert.equal("origin_placement" in written, false, "todo_create must strip origin_placement");
+      }
+
+      // Updating preserves immutable origin_conversation_id in event replay.
+      await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+        kind: "todo_update",
+        todo_id: groupViewerTodo.todo_id,
+        base_version: groupViewerTodo.version,
+        title: "Book plumber from Gen 1 (updated)",
+      });
+      const eventRows = await tx<{ event: todos.TodoEvent }[]>`
+        SELECT event FROM swarm.household_todo_events WHERE workspace_id = ${wsId}::uuid ORDER BY seq ASC
+      `;
+      const [streamRow] = await tx<{ stream_id: string }[]>`
+        SELECT stream_id FROM swarm.household_todo_streams WHERE workspace_id = ${wsId}::uuid
+      `;
+      const replayed = todos.reduceTodoEvents(
+        todos.emptyHouseholdTodoState(wsId, String(streamRow!.stream_id)),
+        eventRows.map((r) => r.event),
+      );
+      assert.equal(replayed.todos[groupViewerTodo.todo_id]!.origin_placement, "group_dm");
+      assert.equal(replayed.todos[groupViewerTodo.todo_id]!.origin_conversation_id, convGroupGen1);
+      assert.equal(replayed.todos[dmViewerTodo.todo_id]!.origin_placement, "dm");
+      assert.equal(replayed.todos[dmViewerTodo.todo_id]!.origin_conversation_id, convDmScout);
+      await tx`RELEASE SAVEPOINT sp_dm_todo_writes`;
+      await tx`RESET ROLE`;
+
+      // DB constraints: cross-tenant FK (23503) and shape CHECK (23514).
+      await tx`SAVEPOINT sp_dm_db_constraints`;
+      await assert.rejects(
+        () => tx`
+          INSERT INTO swarm.household_todos (
+            workspace_id, todo_id, version, title, notes, state,
+            created_by_user, created_at, gate_kind, state_by_user, state_at, comment_count, last_seq,
+            origin_placement, origin_conversation_id
+          ) VALUES (
+            ${wsId}::uuid, ${randomUUID()}::uuid, 1, 'Cross-tenant conv FK', '', 'open',
+            ${viewerId}::uuid, now(), 'none', ${viewerId}::uuid, now(), 0, 999,
+            'dm', ${convForeignDm}::uuid
+          )
+        `,
+        (err: { code?: string }) => err?.code === "23503",
+      );
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_db_constraints`;
+      await assert.rejects(
+        () => tx`
+          INSERT INTO swarm.household_todos (
+            workspace_id, todo_id, version, title, notes, state,
+            created_by_user, created_at, gate_kind, state_by_user, state_at, comment_count, last_seq,
+            origin_placement, origin_conversation_id
+          ) VALUES (
+            ${wsId}::uuid, ${randomUUID()}::uuid, 1, 'Bad conv shape', '', 'open',
+            ${viewerId}::uuid, now(), 'none', ${viewerId}::uuid, now(), 0, 999,
+            'workspace', ${convGroupGen1}::uuid
+          )
+        `,
+        (err: { code?: string }) => err?.code === "23514",
+      );
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_db_constraints`;
+
+      // 2. Active member reads: waiting_todos_page returns dm/group_dm + conversation_id;
+      //    decision_queue & decision_queue_page return authoritative conversation_id=convGroupGen1 (not Gen 2).
+      await tx`SAVEPOINT sp_dm_viewer_reads`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: viewerId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [viewerTodos] = await tx<{ r: WaitingTodosPagePayload | null }[]>`
+        SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r
+      `;
+      const byTodoId = new Map(viewerTodos!.r!.todos.map((t) => [t.todo_id, t]));
+      assert.deepEqual(
+        {
+          placement: byTodoId.get(groupViewerTodo.todo_id)!.placement,
+          channel_id: byTodoId.get(groupViewerTodo.todo_id)!.channel_id,
+          conversation_id: byTodoId.get(groupViewerTodo.todo_id)!.conversation_id,
+        },
+        { placement: "group_dm", channel_id: null, conversation_id: convGroupGen1 },
+      );
+      assert.deepEqual(
+        {
+          placement: byTodoId.get(dmViewerTodo.todo_id)!.placement,
+          channel_id: byTodoId.get(dmViewerTodo.todo_id)!.channel_id,
+          conversation_id: byTodoId.get(dmViewerTodo.todo_id)!.conversation_id,
+        },
+        { placement: "dm", channel_id: null, conversation_id: convDmScout },
+      );
+
+      const [dqRow] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue(${wsId}::uuid) AS r
+      `;
+      const [dqpRow] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
+      `;
+      for (const [label, payload] of [["decision_queue", dqRow!.r], ["decision_queue_page", dqpRow!.r]] as const) {
+        assert.ok(payload, `${label} should return payload for viewer`);
+        const ask = payload.asks.find((a) => a.signal_id === gen1AskId);
+        assert.ok(ask, `${label} must include Gen 1 ask`);
+        assert.equal(ask.conversation_id, convGroupGen1, `${label} must return authoritative Gen 1 conversation_id`);
+        assert.notEqual(ask.conversation_id, convGroupGen2, `${label} must not confuse Gen 1 with restarted Gen 2`);
+        assert.equal(ask.conversation_kind, "group_dm", `${label} must return conversation_kind='group_dm'`);
+      }
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_viewer_reads`;
+
+      // 3. Outsider redaction: outsider assigned a group_dm to-do sees it redacted to workspace/null/null.
+      await tx`SAVEPOINT sp_dm_outsider_read`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: outsiderId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [outsiderTodos] = await tx<{ r: WaitingTodosPagePayload | null }[]>`
+        SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r
+      `;
+      assert.equal(outsiderTodos!.r!.total, 1);
+      assert.equal(outsiderTodos!.r!.todos[0]!.todo_id, groupOutsiderTodo.todo_id);
+      assert.equal(outsiderTodos!.r!.todos[0]!.placement, "workspace");
+      assert.equal(outsiderTodos!.r!.todos[0]!.channel_id, null);
+      assert.equal(outsiderTodos!.r!.todos[0]!.conversation_id, null);
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_outsider_read`;
+
+      // 4. Left-member redaction & write refusal: Maya leaves convGroupGen1 ->
+      //    todo_create refuses, waiting_todos_page redacts to workspace/null/null,
+      //    and decision_queue/decision_queue_page redact conversation_id & conversation_kind to null.
+      await tx`
+        UPDATE swarm.conversation_members
+        SET left_at = statement_timestamp()
+        WHERE conversation_id = ${convGroupGen1}::uuid AND member_user_id = ${mayaId}::uuid
+      `;
+
+      await tx`SAVEPOINT sp_dm_left_write`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const leftWrite = await store.write(tx, wsId, mayaIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Left member create",
+        origin_placement: "group_dm",
+        origin_conversation_id: convGroupGen1,
+      });
+      assert.deepEqual(leftWrite.outcome, { status: "refused", reason: "target_not_found" });
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_left_write`;
+
+      await tx`SAVEPOINT sp_dm_left_read`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: mayaId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [mayaTodos] = await tx<{ r: WaitingTodosPagePayload | null }[]>`
+        SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r
+      `;
+      assert.equal(mayaTodos!.r!.total, 1);
+      assert.equal(mayaTodos!.r!.todos[0]!.todo_id, groupMayaTodo.todo_id);
+      assert.equal(mayaTodos!.r!.todos[0]!.placement, "workspace");
+      assert.equal(mayaTodos!.r!.todos[0]!.channel_id, null);
+      assert.equal(mayaTodos!.r!.todos[0]!.conversation_id, null);
+
+      const [mayaDq] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue(${wsId}::uuid) AS r
+      `;
+      const [mayaDqp] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
+      `;
+      for (const [label, payload] of [["decision_queue", mayaDq!.r], ["decision_queue_page", mayaDqp!.r]] as const) {
+        const ask = payload?.asks.find((a) => a.signal_id === gen1AskId);
+        if (ask) {
+          assert.equal(ask.conversation_id, null, `${label} must redact left-group conversation_id to null`);
+          assert.equal(ask.conversation_kind, null, `${label} must redact left-group conversation_kind to null`);
+        }
+      }
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_left_read`;
 
       throw ROLLBACK_WITNESS;
     });

@@ -6695,11 +6695,16 @@ import "../../styles/kylon-image-viewer.css";
             !conversation.conversationId &&
             conversation.participantKey
           ) {
-            const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
-            if (matched) {
-              conversation = matched.kind === "group_dm"
-                ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
-                : { ...conversation, conversationId: matched.conversationId };
+            if (activeDirectIndex.has(conversation.participantKey)) {
+              const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
+              if (matched) {
+                conversation = matched.kind === "group_dm"
+                  ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
+                  : { ...conversation, conversationId: matched.conversationId };
+              } else {
+                // Ambiguous restarted group DM without an authoritative conversationId: keep unresolved (never false zero).
+                conversation = { kind: "unknown" };
+              }
             }
           }
           const draft = choiceDrafts.get(choiceDraftKey(ask.workspaceId, ask.id));
@@ -6739,11 +6744,16 @@ import "../../styles/kylon-image-viewer.css";
             !conversation.conversationId &&
             conversation.participantKey
           ) {
-            const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
-            if (matched) {
-              conversation = matched.kind === "group_dm"
-                ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
-                : { ...conversation, conversationId: matched.conversationId };
+            if (activeDirectIndex.has(conversation.participantKey)) {
+              const matched = activeDirectIndex.get(conversation.participantKey) ?? null;
+              if (matched) {
+                conversation = matched.kind === "group_dm"
+                  ? { kind: "group_dm", conversationId: matched.conversationId, participantKey: conversation.participantKey }
+                  : { ...conversation, conversationId: matched.conversationId };
+              } else {
+                // Ambiguous restarted group DM without an authoritative conversationId: keep unresolved (never false zero).
+                conversation = { kind: "unknown" };
+              }
             }
           }
           const ticket = waitingPlainTickets.get(ask.id);
@@ -6772,6 +6782,7 @@ import "../../styles/kylon-image-viewer.css";
           const pending = waitingTodoTickets.has(todo.id);
           items.push({
             ...todo,
+            channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement ?? "workspace", todo.channelId ?? null, todo.conversationId ?? null),
             ...(pending ? { pending: true as const } : {}),
             ...(error ? { error, retryable: true as const } : {}),
           });
@@ -6782,8 +6793,9 @@ import "../../styles/kylon-image-viewer.css";
 
     const waitingTodoChannelLabel = (
       workspaceId: string,
-      placement: "channel" | "general" | "workspace",
+      placement: "channel" | "general" | "workspace" | "dm" | "group_dm",
       channelId: string | null,
+      conversationId: string | null = null,
     ): string => {
       if (placement === "general") return "#general";
       if (placement === "channel" && channelId) {
@@ -6791,6 +6803,12 @@ import "../../styles/kylon-image-viewer.css";
           ? channels.find(ch => ch.channelId === channelId)?.slug
           : waitingWorkspaceChannels.get(workspaceId)?.get(channelId);
         return slug ? `#${slug}` : "";
+      }
+      if (placement === "dm" || placement === "group_dm") {
+        const conv: WaitingConversation = placement === "group_dm"
+          ? { kind: "group_dm", ...(conversationId ? { conversationId } : {}), participantKey: "" }
+          : { kind: "dm", partnerKind: "person", partnerId: "", ...(conversationId ? { conversationId } : {}) };
+        return waitingChannelName(workspaceId, conv);
       }
       return "";
     };
@@ -6808,7 +6826,8 @@ import "../../styles/kylon-image-viewer.css";
         canMarkDone: todo.reason === "assigned",
         placement: todo.placement,
         channelId: todo.channel_id,
-        channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement, todo.channel_id),
+        conversationId: todo.conversation_id ?? null,
+        channelLabel: waitingTodoChannelLabel(workspace.id, todo.placement, todo.channel_id, todo.conversation_id ?? null),
       }));
 
     const extractWaitingTodos = (
@@ -7269,11 +7288,17 @@ import "../../styles/kylon-image-viewer.css";
       const allItems = allWaitingAskItems();
       const allPlainAsks = allWaitingPlainAskItems();
       const allTodos = allWaitingTodoItems();
-      const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
-      const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
+      const activeHasUnknown =
+        allItems.some(i => i.workspaceId === place.workspaceId && i.conversation.kind === "unknown") ||
+        allPlainAsks.some(i => i.workspaceId === place.workspaceId && i.conversation.kind === "unknown");
+      const anyHasUnknown =
+        allItems.some(i => i.conversation.kind === "unknown") ||
+        allPlainAsks.some(i => i.conversation.kind === "unknown");
+      const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId) && !activeHasUnknown;
+      const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId) || activeHasUnknown;
       const wsTruncated = waitingPanelTruncatedWorkspaces.has(place.workspaceId);
-      const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id));
-      const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id));
+      const allLoaded = workspaces.length > 0 && workspaces.every(ws => waitingPanelLoadedWorkspaces.has(ws.id)) && !anyHasUnknown;
+      const anyWsFailed = workspaces.some(ws => waitingPanelFailedWorkspaces.has(ws.id)) || anyHasUnknown;
       const anyWsTruncated = workspaces.some(ws => waitingPanelTruncatedWorkspaces.has(ws.id));
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
@@ -7696,13 +7721,37 @@ import "../../styles/kylon-image-viewer.css";
               ...(sig.recipients !== undefined ? { recipients: sig.recipients } : {}),
             });
             for (const item of allAskNeeds) {
+              const rawAsk = askById.get(item.id);
+              const askConvId = rawAsk?.conversation_id ?? null;
+              const askConvKind = rawAsk?.conversation_kind ?? null;
+              if (askConvId && askConvKind) {
+                const channelId = askConvKind === "public_channel" || askConvKind === "private_channel" ? askConvId : null;
+                locations.set(item.id, {
+                  id: item.id,
+                  channelId,
+                  to: null,
+                  toAgent: null,
+                  threadRootId: null,
+                  from: rawAsk?.from.id ?? "",
+                  fromKind: rawAsk?.from.kind ?? "",
+                  conversationId: askConvId,
+                  conversationKind: askConvKind,
+                });
+                continue;
+              }
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
-              if (liveSignal && !needsRecipientLookup(liveSignal)) {
-                locations.set(item.id, toLiveLocation(liveSignal));
+              if (liveSignal && (!needsRecipientLookup(liveSignal) || askConvId)) {
+                locations.set(item.id, {
+                  ...toLiveLocation(liveSignal),
+                  ...(askConvId ? { conversationId: askConvId } : {}),
+                });
                 if (liveSignal.channelId === null && liveSignal.threadRootId !== null) {
                   const liveRoot = signals.find(s => s.id === liveSignal.threadRootId);
-                  if (liveRoot && !needsRecipientLookup(liveRoot)) {
-                    locations.set(liveRoot.id, toLiveLocation(liveRoot));
+                  if (liveRoot && (!needsRecipientLookup(liveRoot) || askConvId)) {
+                    locations.set(liveRoot.id, {
+                      ...toLiveLocation(liveRoot),
+                      ...(askConvId ? { conversationId: askConvId } : {}),
+                    });
                   } else {
                     missingIds.push(liveSignal.threadRootId);
                   }
@@ -7716,16 +7765,27 @@ import "../../styles/kylon-image-viewer.css";
               try {
                 const fetched = await signalLocations(workspace.id, missingIds, pinned);
                 if (!live()) return;
-                for (const [sigId, loc] of fetched) locations.set(sigId, loc);
+                for (const [sigId, loc] of fetched) {
+                  const rawAsk = askById.get(sigId);
+                  locations.set(sigId, {
+                    ...loc,
+                    ...(!loc.conversationId && rawAsk?.conversation_id ? { conversationId: rawAsk.conversation_id } : {}),
+                    ...(rawAsk?.conversation_kind ? { conversationKind: rawAsk.conversation_kind } : {}),
+                  });
+                }
               } catch {
                 if (!live()) return;
                 locationReadFailed = true;
               }
             }
-            const directByParticipantKey = workspace.id === activeWorkspaceId &&
+            const activeConvs = workspace.id === activeWorkspaceId &&
               typeof workspaceConversations !== "undefined" &&
               workspaceConversations
-              ? indexDirectConversations(workspaceConversations)
+              ? workspaceConversations
+              : null;
+            const directByParticipantKey = activeConvs ? indexDirectConversations(activeConvs) : undefined;
+            const conversationsById = activeConvs
+              ? new Map(activeConvs.map(c => [c.conversationId, { kind: c.kind, channelId: c.channelId }]))
               : undefined;
             const classified = new Map<string, WaitingConversation>();
             let anyUnknownLocation = locationReadFailed;
@@ -7735,7 +7795,9 @@ import "../../styles/kylon-image-viewer.css";
               const conv = classifyAskConversation(
                 loc,
                 rootLoc,
-                directByParticipantKey ? { directByParticipantKey } : undefined,
+                directByParticipantKey || conversationsById
+                  ? { ...(directByParticipantKey ? { directByParticipantKey } : {}), ...(conversationsById ? { conversationsById } : {}) }
+                  : undefined,
               );
               if (conv.kind === "unknown") anyUnknownLocation = true;
               classified.set(item.id, conv);

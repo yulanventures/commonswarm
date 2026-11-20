@@ -130,6 +130,8 @@ const literal = JSON.stringify([
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'SELECT', false],
   ['swarm_command', 'FUNCTION', 'swarm.actor_can_access_channel(uuid,uuid,text,uuid)', 'EXECUTE', false],
+  // Waiting on you DM convergence (20261120000002): todo_create verifies active direct-conversation membership.
+  ['swarm_command', 'FUNCTION', 'swarm.actor_can_access_direct_conversation(uuid,uuid,text,text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.hosted_mcp_agent_workspace_adds', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.hosted_mcp_grant_agents', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.local_content_approval_workspaces', 'SELECT', false],

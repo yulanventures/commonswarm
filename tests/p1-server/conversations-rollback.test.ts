@@ -7,7 +7,9 @@ import { releaseCatalogQuery } from '../support/release-catalog-query.js';
 
 const root = 'deploy/release-proofs/conversations/20261118000004';
 const root2a = 'deploy/release-proofs/conversations-2a/20261118000005';
-const rollback2b = repoSql('deploy/release-proofs/conversations-2b/20261120000001-rollback.sql');
+// Drop later migration 20261120000002's FK to swarm.conversations before rolling Step 2b/2a/1 back.
+const rollback2b = 'ALTER TABLE swarm.household_todos DROP CONSTRAINT IF EXISTS household_todos_origin_conversation_fk;\n'
+  + repoSql('deploy/release-proofs/conversations-2b/20261120000001-rollback.sql');
 const catalog2a = (rollback = false) => dbAssert(
   releaseCatalogQuery(repoSql(`${root2a}-${rollback ? 'rollback-catalog' : 'catalog'}.sql`), rollback ? 'rollback_ok' : 'catalog_ok')
     .trim().replace(/;$/, ''), rollback ? 'conversations 2a rollback catalog' : 'conversations 2a catalog');

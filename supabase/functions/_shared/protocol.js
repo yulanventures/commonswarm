@@ -4729,10 +4729,11 @@ var BASE_HOUSEHOLD_TOOL_REGISTRY = [
       notes: text2(0, TODO_NOTES_LIMIT),
       due_on: due,
       assign: object({ to: party, start, gate }, ["start", "gate"]),
-      origin_placement: { type: "string", enum: ["workspace", "general", "channel"] },
-      origin_channel_id: { oneOf: [uuid2, { type: "null" }] }
+      origin_placement: { type: "string", enum: ["workspace", "general", "channel", "dm", "group_dm"] },
+      origin_channel_id: { oneOf: [uuid2, { type: "null" }] },
+      origin_conversation_id: { oneOf: [uuid2, { type: "null" }] }
     },
-    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id"],
+    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],
     toCore: (args) => todoCommand("todo_create", args)
   }),
   define({
@@ -5419,17 +5420,31 @@ function decideTodo(state, command, ctx) {
     if (!validDate(command.due_on ?? null)) return refuse2("due_invalid");
     const rawPlacement = command.origin_placement;
     const rawChannelId = command.origin_channel_id;
+    const rawConversationId = command.origin_conversation_id;
     let originPlacement = "workspace";
     let originChannelId = null;
+    let originConversationId = null;
     if (rawPlacement === void 0) {
-      if (rawChannelId !== void 0 && rawChannelId !== null) return refuse2("target_not_found");
+      if (rawChannelId !== void 0 && rawChannelId !== null || rawConversationId !== void 0 && rawConversationId !== null) {
+        return refuse2("target_not_found");
+      }
     } else if (rawPlacement === "workspace" || rawPlacement === "general") {
-      if (rawChannelId !== void 0 && rawChannelId !== null) return refuse2("target_not_found");
+      if (rawChannelId !== void 0 && rawChannelId !== null || rawConversationId !== void 0 && rawConversationId !== null) {
+        return refuse2("target_not_found");
+      }
       originPlacement = rawPlacement;
     } else if (rawPlacement === "channel") {
-      if (!uuid4(rawChannelId) || ctx.origin_channel_accessible !== true) return refuse2("target_not_found");
+      if (!uuid4(rawChannelId) || rawConversationId !== void 0 && rawConversationId !== null || ctx.origin_channel_accessible !== true) {
+        return refuse2("target_not_found");
+      }
       originPlacement = "channel";
       originChannelId = rawChannelId.toLowerCase();
+    } else if (rawPlacement === "dm" || rawPlacement === "group_dm") {
+      if (!uuid4(rawConversationId) || rawChannelId !== void 0 && rawChannelId !== null || ctx.origin_conversation_accessible !== true) {
+        return refuse2("target_not_found");
+      }
+      originPlacement = rawPlacement;
+      originConversationId = rawConversationId.toLowerCase();
     } else {
       return refuse2("target_not_found");
     }
@@ -5456,7 +5471,8 @@ function decideTodo(state, command, ctx) {
       state_at: timestamp,
       comment_count: 0,
       origin_placement: originPlacement,
-      origin_channel_id: originChannelId
+      origin_channel_id: originChannelId,
+      origin_conversation_id: originConversationId
     };
     emit("TodoCreated", { todo: todo2 });
     if (command.assign) {
@@ -5610,15 +5626,20 @@ function reduceTodoEvents(initial, events) {
       const at = new Date(event2.occurred_at_server).toISOString();
       if (!validActor(todo.created_by) || !validActor(todo.state_by) || !validParty(todo.assignee) || !Number.isFinite(Date.parse(todo.created_at)) || !Number.isFinite(Date.parse(todo.state_at)) || todo.assignee?.kind === "agent" && isOpen(todo) && todo.queue_rank === null || gateCycles(todo.todo_id, todo.gate, todos) || todo.gate.kind === "after" && !own2(todos, todo.gate.todo_id)) fail("invalid to-do fields");
       if (todo.offer && (!uuid4(todo.offer.offer_id) || !validParty(todo.offer.to) || !id(todo.offer.decider_user_id) || !["queue", "now"].includes(todo.offer.start) || !validGate(todo.offer.gate) || !validActor(todo.offer.by) || !Number.isFinite(Date.parse(todo.offer.at)))) fail("invalid offer");
-      const hasOrigin = todo.origin_placement !== void 0 || todo.origin_channel_id !== void 0;
+      const hasOrigin = todo.origin_placement !== void 0 || todo.origin_channel_id !== void 0 || todo.origin_conversation_id !== void 0;
       if (hasOrigin) {
-        if (todo.origin_placement !== "workspace" && todo.origin_placement !== "general" && todo.origin_placement !== "channel") {
+        if (todo.origin_placement !== "workspace" && todo.origin_placement !== "general" && todo.origin_placement !== "channel" && todo.origin_placement !== "dm" && todo.origin_placement !== "group_dm") {
           fail("invalid origin placement");
         }
         if (todo.origin_placement === "channel") {
           if (!uuid4(todo.origin_channel_id)) fail("invalid origin channel");
-        } else if (todo.origin_channel_id !== null) {
+        } else if (todo.origin_channel_id !== void 0 && todo.origin_channel_id !== null) {
           fail("invalid origin channel");
+        }
+        if (todo.origin_placement === "dm" || todo.origin_placement === "group_dm") {
+          if (!uuid4(todo.origin_conversation_id)) fail("invalid origin conversation");
+        } else if (todo.origin_conversation_id !== void 0 && todo.origin_conversation_id !== null) {
+          fail("invalid origin conversation");
         }
       }
       if (create) {
@@ -5638,6 +5659,7 @@ function reduceTodoEvents(initial, events) {
         const originFieldEqual = (key2) => {
           if (key2 === "origin_placement") return (current.origin_placement ?? "workspace") === (todo.origin_placement ?? "workspace");
           if (key2 === "origin_channel_id") return (current.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
+          if (key2 === "origin_conversation_id") return (current.origin_conversation_id ?? null) === (todo.origin_conversation_id ?? null);
           return equal(current[key2], todo[key2]);
         };
         if ([...allKeys].some((key2) => !allowed.has(key2) && !originFieldEqual(key2))) fail("unrelated field changed");

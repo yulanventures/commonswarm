@@ -19,7 +19,8 @@ import { releaseCatalogQuery } from '../support/release-catalog-query.js';
 const proofRoot = 'deploy/release-proofs/household-todo/20261006000001';
 const rollback = () => repoSql(`${proofRoot}-rollback.sql`);
 const migration = () => repoSql('supabase/migrations/20261006000001_household_todos.sql');
-const originMigration = () => repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql');
+const originMigration = () => repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql')
+  + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql');
 const core = { ...todos, ...todoPolicy, ...objectPolicy };
 class RollbackProof extends Error {}
 function fixture() {

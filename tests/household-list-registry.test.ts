@@ -110,7 +110,7 @@ test('hosted inventory and unchanged local catalog match independently built pre
     let bytes = ''; const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText() === name) bytes = node.initializer!.getText(); ts.forEachChild(node, visit); };
     visit(ts.createSourceFile('registry.ts', source, ts.ScriptTarget.Latest, true)); assert.ok(bytes); return bytes;
   };
-  // #655 intentionally adds optional origin_placement and origin_channel_id to todo_create; every other base tool stays byte-identical.
+  // #655 + #694 intentionally add optional origin_placement, origin_channel_id and origin_conversation_id to todo_create; every other base tool stays byte-identical.
   const todoCreatePre655 = '    properties: { title: text(1, TODO_TITLE_LIMIT), notes: text(0, TODO_NOTES_LIMIT), due_on: due, assign: object({ to: party, start, gate }, [\'start\', \'gate\']) }, optional: ["notes", "due_on", "assign"],';
   const todoCreateWithOrigin = [
     '    properties: {',
@@ -118,10 +118,11 @@ test('hosted inventory and unchanged local catalog match independently built pre
     '      notes: text(0, TODO_NOTES_LIMIT),',
     '      due_on: due,',
     "      assign: object({ to: party, start, gate }, ['start', 'gate']),",
-    "      origin_placement: { type: 'string', enum: ['workspace', 'general', 'channel'] },",
+    "      origin_placement: { type: 'string', enum: ['workspace', 'general', 'channel', 'dm', 'group_dm'] },",
     "      origin_channel_id: { oneOf: [uuid, { type: 'null' }] },",
+    "      origin_conversation_id: { oneOf: [uuid, { type: 'null' }] },",
     '    },',
-    '    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id"],',
+    '    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id", "origin_conversation_id"],',
   ].join('\n');
   assert.ok(snapshot.includes(todoCreatePre655));
   const expectedSnapshot = snapshot.replace(todoCreatePre655, todoCreateWithOrigin);

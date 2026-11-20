@@ -286,6 +286,7 @@ function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
     item.workspaceName,
     item.placement ?? "workspace",
     item.channelId ?? "",
+    item.conversationId ?? "",
     item.channelLabel ?? "",
     item.title,
     item.state,

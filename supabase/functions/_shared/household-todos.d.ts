@@ -14,7 +14,7 @@ export interface TodoActor {
 }
 export type TodoState = 'open' | 'doing' | 'done' | 'dropped';
 export type TodoStart = 'queue' | 'now';
-export type TodoOriginPlacement = 'workspace' | 'general' | 'channel';
+export type TodoOriginPlacement = 'workspace' | 'general' | 'channel' | 'dm' | 'group_dm';
 export type TodoGate = {
     kind: 'none';
 } | {
@@ -59,6 +59,7 @@ export interface Todo {
     comment_count: number;
     origin_placement?: TodoOriginPlacement;
     origin_channel_id?: string | null;
+    origin_conversation_id?: string | null;
 }
 export type CommentTarget = {
     kind: 'todo';
@@ -183,6 +184,7 @@ export type TodoCommand = {
     assign?: AssignInput;
     origin_placement?: TodoOriginPlacement;
     origin_channel_id?: string | null;
+    origin_conversation_id?: string | null;
 } | {
     kind: 'todo_update';
     todo_id: string;
@@ -257,6 +259,8 @@ export interface DecideTodoContext {
     }[];
     /** Verified in-transaction channel access for todo_create when origin_placement === 'channel'. */
     origin_channel_accessible?: boolean;
+    /** Verified in-transaction direct conversation membership for todo_create when origin_placement is 'dm' or 'group_dm'. */
+    origin_conversation_accessible?: boolean;
     identity_write_attempts: number;
     workspace_write_attempts: number;
 }

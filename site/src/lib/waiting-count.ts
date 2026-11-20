@@ -159,11 +159,13 @@ export interface WaitingSignalPlacement {
   from: string;
   fromKind: string;
   conversationId?: string | null;
+  conversationKind?: "general" | "public_channel" | "private_channel" | "dm" | "group_dm" | null;
   recipients?: readonly WaitingParticipantRef[];
 }
 
 export interface ClassifyAskOptions {
   directByParticipantKey?: ReadonlyMap<string, DirectConversationIndexEntry | null>;
+  conversationsById?: ReadonlyMap<string, { kind: string; channelId?: string | null }>;
 }
 
 function collectParticipants(
@@ -201,10 +203,47 @@ function collectParticipants(
 export function classifyAskConversation(
   loc: WaitingSignalPlacement | null,
   rootLoc: (Pick<WaitingSignalPlacement, "channelId" | "to" | "toAgent"> &
-    Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "conversationId" | "recipients">>) | null = null,
+    Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "conversationId" | "conversationKind" | "recipients">>) | null = null,
   options?: ClassifyAskOptions,
 ): WaitingConversation {
   if (!loc) return { kind: "unknown" };
+
+  let explicitConversationId: string | null = loc.conversationId?.trim() ? loc.conversationId.trim().toLowerCase() : null;
+  let explicitKind = loc.conversationKind ?? null;
+  if (!explicitConversationId && rootLoc?.conversationId?.trim()) {
+    explicitConversationId = rootLoc.conversationId.trim().toLowerCase();
+  }
+  if (!explicitKind && rootLoc?.conversationKind) {
+    explicitKind = rootLoc.conversationKind;
+  }
+  const knownConv = explicitConversationId ? options?.conversationsById?.get(explicitConversationId) ?? null : null;
+  const resolvedKind = explicitKind ?? knownConv?.kind ?? null;
+
+  if (resolvedKind === "general") return { kind: "general" };
+  if (resolvedKind === "public_channel" || resolvedKind === "private_channel") {
+    const channelId = loc.channelId ?? rootLoc?.channelId ?? knownConv?.channelId ?? explicitConversationId;
+    return channelId ? { kind: "channel", channelId } : { kind: "unknown" };
+  }
+  if (resolvedKind === "group_dm" && explicitConversationId) {
+    const participants = collectParticipants(rootLoc && (rootLoc.from || rootLoc.recipients?.length) ? rootLoc : loc);
+    return {
+      kind: "group_dm",
+      conversationId: explicitConversationId,
+      participantKey: conversationParticipantKey(participants),
+    };
+  }
+  if (resolvedKind === "dm" && explicitConversationId) {
+    const participants = collectParticipants(rootLoc && (rootLoc.from || rootLoc.recipients?.length) ? rootLoc : loc);
+    const participantKey = conversationParticipantKey(participants);
+    return {
+      kind: "dm",
+      partnerKind: loc.fromKind === "agent" ? "agent" : "person",
+      partnerId: loc.from,
+      conversationId: explicitConversationId,
+      ...(participantKey ? { participantKey } : {}),
+    };
+  }
+
   if (loc.channelId !== null) return { kind: "channel", channelId: loc.channelId };
 
   const isUnaddressed = (
@@ -217,7 +256,6 @@ export function classifyAskConversation(
 
   let source: Pick<WaitingSignalPlacement, "to" | "toAgent"> &
     Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "conversationId" | "recipients">> = loc;
-  let explicitConversationId: string | null = loc.conversationId?.trim() ? loc.conversationId.trim().toLowerCase() : null;
 
   if (loc.threadRootId !== null) {
     if (!rootLoc) return { kind: "unknown" };
@@ -233,6 +271,16 @@ export function classifyAskConversation(
 
   const participants = collectParticipants(source);
   const participantKey = conversationParticipantKey(participants);
+  const hasAmbiguousParticipantKey = Boolean(
+    !explicitConversationId &&
+    participantKey &&
+    options?.directByParticipantKey?.has(participantKey) &&
+    options.directByParticipantKey.get(participantKey) === null,
+  );
+  // Two or more direct conversations share this exact participant set (e.g. a restarted group DM)
+  // and the ask carries no authoritative conversationId: keep placement unresolved (never a false zero).
+  if (hasAmbiguousParticipantKey) return { kind: "unknown" };
+
   const matched = participantKey ? options?.directByParticipantKey?.get(participantKey) ?? null : null;
   const conversationId = explicitConversationId ?? matched?.conversationId;
 

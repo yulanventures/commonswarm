@@ -165,7 +165,8 @@ test('hosted to-do reads use the household read path and refuse another workspac
   const f = fixture();
   const schema = emptyApplicationSchema() + repoSql('supabase/household-todo-reserve/20261006000001-rollback.sql')
     + repoSql('supabase/migrations/20261006000001_household_todos.sql')
-    + repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql');
+    + repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql')
+    + repoSql('supabase/migrations/20261120000002_waiting_dm_convergence.sql');
   const result = spawnSync('deno', ['eval', '--no-lock', '--config', 'supabase/functions/command/deno.json', harness], {
     cwd: process.cwd(), encoding: 'utf8', input: JSON.stringify({ f, schema, setup: f.setup }),
     env: { PATH: process.env.PATH ?? '', ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
