@@ -90,6 +90,7 @@ function installWaitingFixture() {
     convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
+    ambiguousResolved: false,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -132,7 +133,14 @@ function installWaitingFixture() {
       const baseMs = Date.now() - 600_000;
       const rows = dmAmbiguousCase
         ? [
-            { signal_id: dmAsks.groupSM, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Unresolved restarted group question?", offset: 0, conversation_id: undefined, conversation_kind: undefined },
+            {
+              signal_id: dmAsks.groupSM,
+              from: { kind: "agent" as const, id: agent, name: "Scout" },
+              body: "Unresolved restarted group question?",
+              offset: 0,
+              conversation_id: f.ambiguousResolved ? convGroupSM : undefined,
+              conversation_kind: f.ambiguousResolved ? ("group_dm" as const) : undefined,
+            },
           ]
         : [
             { signal_id: dmAsks.gen, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "General channel question?", offset: 0, conversation_id: convGeneral, conversation_kind: "general" as const },
@@ -1052,9 +1060,15 @@ async function observeWaitingCount() {
         "ambiguous restarted group DM without conversation_id stays visibly incomplete");
       check(!panel()!.textContent!.includes("Nothing waiting"),
         "ambiguous restarted group DM must never render a false Nothing waiting: " + panel()!.textContent);
-      check(scope()!.options[0]!.textContent === "This conversation (0+)",
-        "ambiguous restarted group DM must not show exact zero: " + scope()!.options[0]!.textContent);
-      check(name()?.includes("still counting") === true, "top bar must stay incomplete while ask placement is unresolved: " + name());
+      check(scope()!.options[0]!.textContent === "This conversation",
+        "ambiguous restarted group DM must omit local count (never exact zero): " + scope()!.options[0]!.textContent);
+      // Once authoritative conversation_id arrives, Retry recovers Gen 1 cleanly with count 1.
+      f.ambiguousResolved = true;
+      panel()!.querySelector<HTMLElement>("[data-waiting-retry]")!.click();
+      await wait(() => shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`)) &&
+        scope()!.options[0]!.textContent === "This conversation (1)" &&
+        !panel()?.querySelector("[data-waiting-retry]"),
+        "Retry recovers authoritative Gen 1 ask with count 1 once conversation_id is supplied");
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
