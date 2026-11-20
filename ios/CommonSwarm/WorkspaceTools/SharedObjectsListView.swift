@@ -8,6 +8,8 @@ struct SharedObjectsListView: View {
 
     @StateObject private var store: SharedObjectsListStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showCreateSheet = false
+    @State private var createdObject: SharedObjectSummary?
 
     init(api: ConversationAPI, workspace: Workspace) {
         self.api = api
@@ -80,7 +82,36 @@ struct SharedObjectsListView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Lists & docs")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if store.access?.canCreate == true {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        store.resetCreateState()
+                        showCreateSheet = true
+                    } label: {
+                        Label("New", systemImage: "plus")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("New list or doc")
+                    .accessibilityIdentifier("shared-objects-new-button")
+                }
+            }
+        }
+        .sheet(isPresented: $showCreateSheet) {
+            CreateSharedObjectSheet(store: store, api: objectsAPI) { created in
+                createdObject = created
+            }
+        }
         .navigationDestination(for: SharedObjectSummary.self) { summary in
+            SharedObjectDetailView(
+                api: api,
+                workspace: workspace,
+                summary: summary,
+                access: store.access
+            )
+        }
+        .navigationDestination(item: $createdObject) { summary in
             SharedObjectDetailView(
                 api: api,
                 workspace: workspace,

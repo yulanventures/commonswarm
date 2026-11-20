@@ -142,10 +142,14 @@ struct SharedObjectDetailView: View {
                 await store.load(api: objectsAPI)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let detail = store.detail {
+        } else if let detail = store.displayedDetail {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     headerCard(detail: detail)
+
+                    if store.isViewingEarlierRevision {
+                        earlierRevisionBanner
+                    }
 
                     if let refreshMessage = store.postSaveRefreshMessage {
                         noticeCard(
@@ -156,14 +160,26 @@ struct SharedObjectDetailView: View {
                             secondaryTitle: nil,
                             onSecondary: nil
                         )
+                    } else if let conflict = store.recoveredConflict {
+                        SharedConflictReviewCard(store: store, conflict: conflict, api: objectsAPI)
                     } else if let conflictMessage = store.conflictMessage {
                         noticeCard(
                             title: "Someone saved another revision",
                             message: conflictMessage,
-                            primaryTitle: "Reload current",
-                            onPrimary: { Task { await store.load(api: objectsAPI) } },
-                            secondaryTitle: nil,
-                            onSecondary: nil
+                            primaryTitle: store.conflictDraftID != nil
+                                ? (store.isRecoveringDraft ? "Recovering…" : "Recover my draft")
+                                : "Reload current",
+                            onPrimary: {
+                                Task {
+                                    if store.conflictDraftID != nil {
+                                        await store.recoverDraft(api: objectsAPI)
+                                    } else {
+                                        await store.load(api: objectsAPI)
+                                    }
+                                }
+                            },
+                            secondaryTitle: store.conflictDraftID != nil ? "Reload current" : nil,
+                            onSecondary: store.conflictDraftID != nil ? { Task { await store.load(api: objectsAPI) } } : nil
                         )
                     } else if let saveError = store.saveError {
                         noticeCard(
@@ -184,11 +200,15 @@ struct SharedObjectDetailView: View {
                         )
                     }
 
-                    switch detail.content {
-                    case .list:
-                        listCard(detail: detail)
-                    case .doc(let markdown):
-                        docCard(markdown: markdown)
+                    if store.recoveredConflict == nil {
+                        switch detail.content {
+                        case .list:
+                            listCard(detail: detail)
+                        case .doc(let markdown):
+                            docCard(markdown: markdown)
+                        }
+
+                        SharedHistorySectionCard(store: store, api: objectsAPI)
                     }
                 }
                 .padding()
@@ -198,6 +218,32 @@ struct SharedObjectDetailView: View {
                 await store.load(api: objectsAPI)
             }
         }
+    }
+
+    private var earlierRevisionBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Reading an earlier revision")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Text("Editing is paused while viewing history.")
+                .font(.footnote)
+                .foregroundStyle(mutedForeground)
+            Button {
+                store.backToCurrent()
+            } label: {
+                Text("Back to current revision")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 44)
+                    .background(primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("shared-history-back-to-current")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func headerCard(detail: SharedObjectDetail) -> some View {
@@ -404,54 +450,129 @@ struct SharedObjectDetailView: View {
 
     private func docCard(markdown: String) -> some View {
         let blocks = SharedObjectsRules.parseInertMarkdown(markdown)
-        return VStack(alignment: .leading, spacing: 10) {
-            if blocks.isEmpty {
-                Text("This document is empty.")
-                    .font(.subheadline)
-                    .foregroundStyle(mutedForeground)
+        return VStack(alignment: .leading, spacing: 12) {
+            if store.isEditingDoc {
+                if store.newerRevisionAvailableWhileEditing {
+                    Text("Someone saved a newer revision while you were editing. Saving will open a comparison so you can review both versions.")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(errorForeground)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                TextEditor(text: $store.docDraftText)
+                    .font(.body)
+                    .frame(minHeight: 180)
+                    .padding(8)
+                    .scrollContentBackground(.hidden)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .disabled(store.isSaving)
+                    .accessibilityLabel("Document editor")
+                    .accessibilityIdentifier("shared-doc-editor")
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await store.saveDoc(api: objectsAPI) }
+                    } label: {
+                        if store.isSaving {
+                            ProgressView()
+                                .tint(.white)
+                                .frame(minWidth: 88, minHeight: 44)
+                        } else {
+                            Text("Save")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 18)
+                                .frame(minWidth: 88, minHeight: 44)
+                        }
+                    }
+                    .background(
+                        primaryBackground.opacity(store.canEditDoc ? 1 : 0.45),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
+                    .buttonStyle(.plain)
+                    .disabled(!store.canEditDoc)
+                    .accessibilityIdentifier("shared-doc-save-button")
+
+                    Button {
+                        store.cancelEditingDoc()
+                    } label: {
+                        Text("Cancel")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(secondaryForeground)
+                            .padding(.horizontal, 16)
+                            .frame(minWidth: 80, minHeight: 44)
+                            .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("shared-doc-cancel-button")
+                }
             } else {
-                ForEach(blocks) { block in
-                    switch block {
-                    case .heading(_, let level, let text):
-                        Text(text)
-                            .font(level <= 1 ? .title3.weight(.bold) : .headline)
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, level <= 1 ? 4 : 2)
-                    case .bullet(_, let text):
-                        HStack(alignment: .top, spacing: 8) {
-                            Text("•")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(mutedForeground)
-                                .accessibilityHidden(true)
+                if store.canEditDoc {
+                    HStack {
+                        Spacer()
+                        Button {
+                            store.beginEditingDoc()
+                        } label: {
+                            Text("Edit")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(secondaryForeground)
+                                .padding(.horizontal, 16)
+                                .frame(minWidth: 72, minHeight: 44)
+                                .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("shared-doc-edit-button")
+                    }
+                }
+
+                if blocks.isEmpty {
+                    Text("This document is empty.")
+                        .font(.subheadline)
+                        .foregroundStyle(mutedForeground)
+                } else {
+                    ForEach(blocks) { block in
+                        switch block {
+                        case .heading(_, let level, let text):
+                            Text(text)
+                                .font(level <= 1 ? .title3.weight(.bold) : .headline)
+                                .foregroundStyle(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, level <= 1 ? 4 : 2)
+                        case .bullet(_, let text):
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("•")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(mutedForeground)
+                                    .accessibilityHidden(true)
+                                Text(text)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        case .numbered(_, let number, let text):
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(number)
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(mutedForeground)
+                                Text(text)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        case .codeBlock(_, let text):
+                            Text(text)
+                                .font(.footnote.monospaced())
+                                .foregroundStyle(.primary)
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .fixedSize(horizontal: false, vertical: true)
+                        case .paragraph(_, let text):
                             Text(text)
                                 .font(.body)
                                 .foregroundStyle(.primary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                    case .numbered(_, let number, let text):
-                        HStack(alignment: .top, spacing: 8) {
-                            Text(number)
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(mutedForeground)
-                            Text(text)
-                                .font(.body)
-                                .foregroundStyle(.primary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    case .codeBlock(_, let text):
-                        Text(text)
-                            .font(.footnote.monospaced())
-                            .foregroundStyle(.primary)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .fixedSize(horizontal: false, vertical: true)
-                    case .paragraph(_, let text):
-                        Text(text)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

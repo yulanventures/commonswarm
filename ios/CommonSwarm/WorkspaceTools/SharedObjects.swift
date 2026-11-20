@@ -145,6 +145,7 @@ enum SharedListPatchOp: Encodable, Equatable, Sendable {
     case add(itemID: String, text: String, checked: Bool, afterItemID: String?)
     case set(itemID: String, beforeText: String, beforeChecked: Bool, text: String, checked: Bool)
     case remove(itemID: String, beforeText: String, beforeChecked: Bool)
+    case move(itemID: String, beforeOrder: Int, afterItemID: String?)
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -167,12 +168,78 @@ enum SharedListPatchOp: Encodable, Equatable, Sendable {
             try container.encode(itemID, forKey: .item_id)
             try container.encode(beforeText, forKey: .before_text)
             try container.encode(beforeChecked, forKey: .before_checked)
+        case .move(let itemID, let beforeOrder, let afterItemID):
+            try container.encode("move", forKey: .kind)
+            try container.encode(itemID, forKey: .item_id)
+            try container.encode(beforeOrder, forKey: .before_order)
+            try container.encode(afterItemID, forKey: .after_item_id)
         }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, item_id, text, checked, after_item_id, before_text, before_checked
+        case kind, item_id, text, checked, after_item_id, before_text, before_checked, before_order
     }
+}
+
+struct SharedDocSplice: Encodable, Equatable, Sendable {
+    let start: Int
+    let before: String
+    let after: String
+}
+
+enum SharedPatch: Encodable, Equatable, Sendable {
+    case list([SharedListPatchOp])
+    case doc([SharedDocSplice])
+
+    var isEmpty: Bool {
+        switch self {
+        case .list(let ops): ops.isEmpty
+        case .doc(let splices): splices.isEmpty
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .list(let operations):
+            try container.encode("list", forKey: .kind)
+            try container.encode(operations, forKey: .operations)
+        case .doc(let splices):
+            try container.encode("doc", forKey: .kind)
+            try container.encode(splices, forKey: .splices)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, operations, splices
+    }
+}
+
+struct SharedRevisionEntry: Hashable, Identifiable, Sendable {
+    let revision: SharedRevisionRef
+    let title: String
+    let authorLabel: String
+    let authorIsAgent: Bool
+    let occurredAtServerMs: Int64
+    let live: Bool
+
+    var id: String { revision.token }
+
+    var formattedSavedAt: String {
+        guard occurredAtServerMs > 0 else { return "" }
+        let date = Date(timeIntervalSince1970: Double(occurredAtServerMs) / 1000.0)
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+struct SharedConflictDraft: Equatable, Sendable {
+    let workspaceID: UUID
+    let objectID: String
+    let draftID: String
+    let ownerUserID: UUID
+    let base: SharedObjectDetail
+    let current: SharedObjectDetail
+    let proposed: SharedContent
 }
 
 enum SharedObjectsError: Error, Equatable, Sendable {
@@ -233,6 +300,50 @@ enum SharedObjectsRules {
         return (personName ?? "Member", false)
     }
 
+    /// Mirrors householdContentPatch in site/src/lib/household-objects-view.ts.
+    static func buildPatch(from base: SharedContent, to proposed: SharedContent) -> SharedPatch? {
+        switch (base, proposed) {
+        case (.doc(let baseMarkdown), .doc(let proposedMarkdown)):
+            return .doc([SharedDocSplice(start: 0, before: baseMarkdown, after: proposedMarkdown)])
+        case (.list(let baseItems), .list(let proposedItems)):
+            guard Set(proposedItems.map(\.item_id)).count == proposedItems.count else { return nil }
+            var operations: [SharedListPatchOp] = []
+            var working = baseItems.sorted { $0.order < $1.order }
+            let proposedIDs = Set(proposedItems.map(\.item_id))
+            for item in working where !proposedIDs.contains(item.item_id) {
+                operations.append(.remove(itemID: item.item_id, beforeText: item.text, beforeChecked: item.checked))
+                working.removeAll { $0.item_id == item.item_id }
+            }
+            let wanted = proposedItems.sorted { $0.order < $1.order }
+            for (index, item) in wanted.enumerated() {
+                let afterID = index > 0 ? wanted[index - 1].item_id : nil
+                if let found = working.firstIndex(where: { $0.item_id == item.item_id }) {
+                    let old = working[found]
+                    if old.text != item.text || old.checked != item.checked {
+                        operations.append(.set(
+                            itemID: item.item_id,
+                            beforeText: old.text,
+                            beforeChecked: old.checked,
+                            text: item.text,
+                            checked: item.checked
+                        ))
+                    }
+                    if found != index {
+                        operations.append(.move(itemID: item.item_id, beforeOrder: found, afterItemID: afterID))
+                        working.remove(at: found)
+                        working.insert(item, at: min(index, working.count))
+                    }
+                } else {
+                    operations.append(.add(itemID: item.item_id, text: item.text, checked: item.checked, afterItemID: afterID))
+                    working.insert(item, at: min(index, working.count))
+                }
+            }
+            return .list(operations)
+        default:
+            return nil
+        }
+    }
+
     static func refusalMessage(_ reason: String) -> String {
         switch reason {
         case "content_read_only":
@@ -250,7 +361,7 @@ enum SharedObjectsRules {
         case "object_not_found":
             return "This item is no longer available."
         case "revision_not_found", "patch_base_mismatch":
-            return "This list changed since it loaded. Reload it to review."
+            return "This item changed since it loaded. Reload it to review."
         case "title_invalid":
             return "That title is not valid."
         default:
@@ -355,7 +466,6 @@ enum SharedObjectsRules {
     /// Strips basic Markdown emphasis/link syntax into inert plain text so links and HTML remain inert text.
     private static func stripInlineMarkdown(_ text: String) -> String {
         var out = text
-        // Convert [label](url) to inert "label" text (no clickable URLs, no fetches)
         if let linkRegex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)]+)\)"#) {
             let range = NSRange(out.startIndex..<out.endIndex, in: out)
             out = linkRegex.stringByReplacingMatches(in: out, range: range, withTemplate: "$1")
@@ -366,11 +476,18 @@ enum SharedObjectsRules {
     }
 }
 
-struct SharedPendingListEdit: Equatable, Sendable {
+struct SharedPendingEdit: Equatable, Sendable {
     let commandID: UUID
     let base: SharedRevisionRef
-    let operations: [SharedListPatchOp]
+    let patch: SharedPatch
     let pendingNewItemText: String?
+}
+
+struct SharedPendingCreate: Equatable, Sendable {
+    let commandID: UUID
+    let objectID: String
+    let title: String
+    let content: SharedContent
 }
 
 @MainActor
@@ -380,6 +497,9 @@ final class SharedObjectsListStore: ObservableObject {
     @Published private(set) var objects: [SharedObjectSummary] = []
     @Published private(set) var isLoading = false
     @Published private(set) var loadFailed = false
+    @Published private(set) var isCreating = false
+    @Published private(set) var createError: String?
+    @Published private(set) var pendingCreate: SharedPendingCreate?
 
     let workspaceID: UUID
 
@@ -434,6 +554,87 @@ final class SharedObjectsListStore: ObservableObject {
         }
         isLoading = false
     }
+
+    func createObject(
+        title rawTitle: String,
+        kind: SharedObjectKind,
+        initialMarkdown: String = "",
+        api: SharedObjectsAPI
+    ) async -> SharedObjectSummary? {
+        guard access?.canCreate == true, !isCreating else { return nil }
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            createError = "Enter a title."
+            return nil
+        }
+        let content: SharedContent = kind == .doc ? .doc(initialMarkdown) : .list([])
+        let req: SharedPendingCreate
+        if let existing = pendingCreate, existing.title == title, existing.content == content {
+            req = existing
+        } else {
+            req = SharedPendingCreate(
+                commandID: UUID(),
+                objectID: "obj_" + UUID().uuidString.lowercased(),
+                title: title,
+                content: content
+            )
+        }
+        pendingCreate = req
+        isCreating = true
+        createError = nil
+
+        let outcome = await api.createObject(
+            workspaceID: workspaceID,
+            objectID: req.objectID,
+            title: req.title,
+            content: req.content,
+            requestID: req.commandID
+        )
+        isCreating = false
+
+        switch outcome {
+        case .committed(let rev):
+            pendingCreate = nil
+            createError = nil
+            let created = SharedObjectSummary(objectID: req.objectID, kind: kind, title: req.title, revision: rev)
+            if let fresh = try? await api.listObjects(workspaceID: workspaceID) {
+                objects = fresh
+            } else if !objects.contains(where: { $0.objectID == created.objectID }) {
+                objects.insert(created, at: 0)
+            }
+            return created
+        case .refused(let reason, let message):
+            switch reason {
+            case "workspace_access_refused", "connection_access_refused":
+                objects = []
+                pendingCreate = nil
+                accessStatus = .refused(reason: reason)
+            case "content_consent_required":
+                objects = []
+                pendingCreate = nil
+                accessStatus = .needsConfirmation(reason: reason)
+            case "content_read_only":
+                pendingCreate = nil
+                accessStatus = .granted(SharedAccess(role: .reader, operations: ["read"]))
+            default:
+                break
+            }
+            createError = message
+            return nil
+        case .conflict:
+            pendingCreate = nil
+            createError = "That item already exists. Reload to see it."
+            return nil
+        case .unconfirmed(let message):
+            createError = message
+            return nil
+        }
+    }
+
+    func resetCreateState() {
+        createError = nil
+        pendingCreate = nil
+    }
 }
 
 @MainActor
@@ -441,15 +642,31 @@ final class SharedObjectDetailStore: ObservableObject {
     @Published private(set) var access: SharedAccess?
     @Published private(set) var accessStatus: SharedAccessStatus?
     @Published private(set) var detail: SharedObjectDetail?
+    @Published private(set) var openedRevision: SharedObjectDetail?
+    @Published private(set) var history: [SharedRevisionEntry] = []
+    @Published private(set) var nextHistoryOffset: Int?
+    @Published private(set) var isLoadingHistory = false
+    @Published var showRevisionIDs = false
+
     @Published private(set) var isLoading = false
     @Published private(set) var loadFailed = false
     @Published private(set) var isSaving = false
     @Published private(set) var saveBanner: String?
     @Published private(set) var postSaveRefreshMessage: String?
     @Published private(set) var conflictMessage: String?
+    @Published private(set) var conflictDraftID: String?
+    @Published private(set) var recoveredConflict: SharedConflictDraft?
+    @Published private(set) var isRecoveringDraft = false
+    @Published var showOriginalInConflict = false
+    @Published var reviewedConflictConfirmed = false
+
     @Published private(set) var saveError: String?
-    @Published private(set) var pendingEdit: SharedPendingListEdit?
+    @Published private(set) var pendingEdit: SharedPendingEdit?
     @Published var newItemText = ""
+    @Published var isEditingDoc = false
+    @Published var docDraftText = ""
+    @Published private(set) var docEditBaseRevision: SharedRevisionRef?
+    @Published private(set) var docEditBaseMarkdown: String?
 
     let workspaceID: UUID
     let objectID: String
@@ -464,8 +681,21 @@ final class SharedObjectDetailStore: ObservableObject {
         self.accessStatus = access.map { .granted($0) }
     }
 
+    var displayedDetail: SharedObjectDetail? {
+        openedRevision ?? detail
+    }
+
+    var isViewingEarlierRevision: Bool {
+        openedRevision != nil
+    }
+
     var needsRefreshAfterSave: Bool {
         postSaveRefreshMessage != nil
+    }
+
+    var newerRevisionAvailableWhileEditing: Bool {
+        guard isEditingDoc, let base = docEditBaseRevision, let current = detail?.revision else { return false }
+        return base != current
     }
 
     var canEditList: Bool {
@@ -475,6 +705,19 @@ final class SharedObjectDetailStore: ObservableObject {
             && conflictMessage == nil
             && pendingEdit == nil
             && !needsRefreshAfterSave
+            && !isViewingEarlierRevision
+            && recoveredConflict == nil
+    }
+
+    var canEditDoc: Bool {
+        expectedKind == .doc
+            && (access?.canUpdate ?? false)
+            && !isSaving
+            && conflictMessage == nil
+            && pendingEdit == nil
+            && !needsRefreshAfterSave
+            && !isViewingEarlierRevision
+            && recoveredConflict == nil
     }
 
     private var postSaveRefreshCopy: String {
@@ -486,10 +729,20 @@ final class SharedObjectDetailStore: ObservableObject {
     private func applyAccessEnded(_ status: SharedAccessStatus) {
         bannerTask?.cancel()
         detail = nil
+        openedRevision = nil
+        history = []
+        nextHistoryOffset = nil
         access = nil
         accessStatus = status
         pendingEdit = nil
         conflictMessage = nil
+        conflictDraftID = nil
+        recoveredConflict = nil
+        showOriginalInConflict = false
+        reviewedConflictConfirmed = false
+        isEditingDoc = false
+        docEditBaseRevision = nil
+        docEditBaseMarkdown = nil
         saveError = nil
         postSaveRefreshMessage = nil
         saveBanner = nil
@@ -526,6 +779,11 @@ final class SharedObjectDetailStore: ObservableObject {
                 accessStatus = .granted(freshAccess)
                 if !freshAccess.canUpdate {
                     pendingEdit = nil
+                    isEditingDoc = false
+                    docEditBaseRevision = nil
+                    docEditBaseMarkdown = nil
+                    recoveredConflict = nil
+                    conflictDraftID = nil
                 }
             }
 
@@ -535,11 +793,20 @@ final class SharedObjectDetailStore: ObservableObject {
                 return
             }
             detail = loaded
+            openedRevision = nil
             conflictMessage = nil
+            conflictDraftID = nil
+            recoveredConflict = nil
+            showOriginalInConflict = false
+            reviewedConflictConfirmed = false
             saveError = nil
             pendingEdit = nil
             postSaveRefreshMessage = nil
             loadFailed = false
+            if case .doc(let md) = loaded.content, !isEditingDoc {
+                docDraftText = md
+            }
+            await refreshHistory(api: api)
         } catch SharedObjectsError.refused(let reason) {
             if !Task.isCancelled {
                 handleReadRefusal(reason)
@@ -557,6 +824,109 @@ final class SharedObjectDetailStore: ObservableObject {
         await load(api: api)
     }
 
+    private func refreshHistory(api: SharedObjectsAPI) async {
+        do {
+            let page = try await api.readHistory(workspaceID: workspaceID, objectID: objectID, offset: 0)
+            guard !Task.isCancelled else { return }
+            history = page.revisions
+            nextHistoryOffset = page.nextOffset
+        } catch SharedObjectsError.refused(let reason) {
+            if !Task.isCancelled {
+                handleReadRefusal(reason)
+            }
+        } catch {
+            // Keep existing history if history fetch transiently fails
+        }
+    }
+
+    func loadMoreHistory(api: SharedObjectsAPI) async {
+        guard let offset = nextHistoryOffset, !isLoadingHistory else { return }
+        isLoadingHistory = true
+        do {
+            let page = try await api.readHistory(workspaceID: workspaceID, objectID: objectID, offset: offset)
+            guard !Task.isCancelled else {
+                isLoadingHistory = false
+                return
+            }
+            let existing = Set(history.map(\.id))
+            for entry in page.revisions where !existing.contains(entry.id) {
+                history.append(entry)
+            }
+            nextHistoryOffset = page.nextOffset
+        } catch SharedObjectsError.refused(let reason) {
+            if !Task.isCancelled {
+                handleReadRefusal(reason)
+            }
+        } catch {
+            // Non-fatal; user can retry Load more history
+        }
+        isLoadingHistory = false
+    }
+
+    func openRevision(_ entry: SharedRevisionEntry, api: SharedObjectsAPI) async {
+        if entry.revision == detail?.revision {
+            openedRevision = nil
+            return
+        }
+        isLoading = true
+        do {
+            let historical = try await api.readObject(
+                workspaceID: workspaceID,
+                objectID: objectID,
+                expectedKind: expectedKind,
+                revision: entry.revision
+            )
+            guard !Task.isCancelled else {
+                isLoading = false
+                return
+            }
+            openedRevision = historical
+            isEditingDoc = false
+        } catch SharedObjectsError.refused(let reason) {
+            if !Task.isCancelled {
+                handleReadRefusal(reason)
+            }
+        } catch {
+            // Keep current view if historical revision transiently failed to load
+        }
+        isLoading = false
+    }
+
+    func backToCurrent() {
+        openedRevision = nil
+    }
+
+    func beginEditingDoc() {
+        guard canEditDoc, let current = detail, case .doc(let md) = current.content else { return }
+        docEditBaseRevision = current.revision
+        docEditBaseMarkdown = md
+        docDraftText = md
+        isEditingDoc = true
+        saveError = nil
+    }
+
+    func cancelEditingDoc() {
+        isEditingDoc = false
+        docEditBaseRevision = nil
+        docEditBaseMarkdown = nil
+        if case .doc(let md) = detail?.content {
+            docDraftText = md
+        }
+        saveError = nil
+        pendingEdit = nil
+    }
+
+    func saveDoc(api: SharedObjectsAPI) async {
+        guard canEditDoc, let current = detail, case .doc(let currentMarkdown) = current.content else { return }
+        let baseRevision = docEditBaseRevision ?? current.revision
+        let baseMarkdown = docEditBaseMarkdown ?? currentMarkdown
+        let patch = SharedPatch.doc([SharedDocSplice(start: 0, before: baseMarkdown, after: docDraftText)])
+        await applyPatch(
+            SharedPendingEdit(commandID: UUID(), base: baseRevision, patch: patch, pendingNewItemText: nil),
+            api: api
+        )
+    }
+
     func toggleItem(_ item: SharedListItem, api: SharedObjectsAPI) async {
         guard canEditList, let current = detail else { return }
         let op = SharedListPatchOp.set(
@@ -566,8 +936,8 @@ final class SharedObjectDetailStore: ObservableObject {
             text: item.text,
             checked: !item.checked
         )
-        await applyListPatch(
-            SharedPendingListEdit(commandID: UUID(), base: current.revision, operations: [op], pendingNewItemText: nil),
+        await applyPatch(
+            SharedPendingEdit(commandID: UUID(), base: current.revision, patch: .list([op]), pendingNewItemText: nil),
             api: api
         )
     }
@@ -579,8 +949,8 @@ final class SharedObjectDetailStore: ObservableObject {
             beforeText: item.text,
             beforeChecked: item.checked
         )
-        await applyListPatch(
-            SharedPendingListEdit(commandID: UUID(), base: current.revision, operations: [op], pendingNewItemText: nil),
+        await applyPatch(
+            SharedPendingEdit(commandID: UUID(), base: current.revision, patch: .list([op]), pendingNewItemText: nil),
             api: api
         )
     }
@@ -595,15 +965,70 @@ final class SharedObjectDetailStore: ObservableObject {
             checked: false,
             afterItemID: afterID
         )
-        await applyListPatch(
-            SharedPendingListEdit(commandID: UUID(), base: current.revision, operations: [op], pendingNewItemText: trimmed),
+        await applyPatch(
+            SharedPendingEdit(commandID: UUID(), base: current.revision, patch: .list([op]), pendingNewItemText: trimmed),
             api: api
         )
     }
 
     func retryPendingEdit(api: SharedObjectsAPI) async {
         guard let pendingEdit, !isSaving else { return }
-        await applyListPatch(pendingEdit, api: api)
+        await applyPatch(pendingEdit, api: api)
+    }
+
+    func recoverDraft(api: SharedObjectsAPI) async {
+        guard let draftID = conflictDraftID, !isRecoveringDraft else { return }
+        isRecoveringDraft = true
+        saveError = nil
+        do {
+            let recovered = try await api.recoverDraft(
+                workspaceID: workspaceID,
+                objectID: objectID,
+                draftID: draftID,
+                expectedKind: expectedKind
+            )
+            guard !Task.isCancelled else {
+                isRecoveringDraft = false
+                return
+            }
+            recoveredConflict = recovered
+            showOriginalInConflict = false
+            reviewedConflictConfirmed = false
+        } catch SharedObjectsError.refused(let reason) {
+            if !Task.isCancelled {
+                if reason == "workspace_access_refused" || reason == "connection_access_refused" || reason == "content_consent_required" {
+                    handleReadRefusal(reason)
+                } else {
+                    saveError = "Couldn’t recover your draft. Reload to see the current version."
+                }
+            }
+        } catch {
+            if !Task.isCancelled {
+                saveError = "Couldn’t recover your draft. Reload to see the current version."
+            }
+        }
+        isRecoveringDraft = false
+    }
+
+    func saveReviewedConflict(api: SharedObjectsAPI) async {
+        guard access?.canUpdate == true,
+              !isSaving,
+              !needsRefreshAfterSave,
+              reviewedConflictConfirmed,
+              let conflict = recoveredConflict else {
+            return
+        }
+        if let pendingEdit {
+            await applyPatch(pendingEdit, api: api)
+            return
+        }
+        guard let patch = SharedObjectsRules.buildPatch(from: conflict.current.content, to: conflict.proposed) else {
+            return
+        }
+        await applyPatch(
+            SharedPendingEdit(commandID: UUID(), base: conflict.current.revision, patch: patch, pendingNewItemText: nil),
+            api: api
+        )
     }
 
     private func handleReadRefusal(_ reason: String) {
@@ -615,6 +1040,7 @@ final class SharedObjectDetailStore: ObservableObject {
         case "object_not_found":
             bannerTask?.cancel()
             detail = nil
+            openedRevision = nil
             pendingEdit = nil
             postSaveRefreshMessage = nil
             saveBanner = nil
@@ -626,31 +1052,43 @@ final class SharedObjectDetailStore: ObservableObject {
         }
     }
 
-    private func applyListPatch(_ edit: SharedPendingListEdit, api: SharedObjectsAPI) async {
+    private func applyPatch(_ edit: SharedPendingEdit, api: SharedObjectsAPI) async {
         isSaving = true
         defer { isSaving = false }
         saveError = nil
         conflictMessage = nil
         pendingEdit = edit
 
-        let outcome = await api.updateList(
+        let outcome = await api.updateObject(
             workspaceID: workspaceID,
             objectID: objectID,
             base: edit.base,
-            operations: edit.operations,
+            patch: edit.patch,
             requestID: edit.commandID
         )
 
         switch outcome {
         case .committed:
             pendingEdit = nil
+            conflictDraftID = nil
+            recoveredConflict = nil
+            reviewedConflictConfirmed = false
+            isEditingDoc = false
+            docEditBaseRevision = nil
+            docEditBaseMarkdown = nil
             if edit.pendingNewItemText != nil {
                 newItemText = ""
             }
             await refreshAfterCommittedSave(api: api)
-        case .conflict:
+        case .conflict(_, let draftID):
             pendingEdit = nil
-            conflictMessage = "Someone saved another revision. Reload to see the current list before trying again."
+            isEditingDoc = false
+            docEditBaseRevision = nil
+            docEditBaseMarkdown = nil
+            conflictDraftID = draftID
+            recoveredConflict = nil
+            reviewedConflictConfirmed = false
+            conflictMessage = "Someone saved another revision. Recover your draft to compare changes before saving."
         case .refused(let reason, let message):
             switch reason {
             case "workspace_access_refused", "connection_access_refused":
@@ -662,6 +1100,11 @@ final class SharedObjectDetailStore: ObservableObject {
                 access = reader
                 accessStatus = .granted(reader)
                 pendingEdit = nil
+                isEditingDoc = false
+                docEditBaseRevision = nil
+                docEditBaseMarkdown = nil
+                recoveredConflict = nil
+                conflictDraftID = nil
                 saveError = message
             default:
                 saveError = message
@@ -691,8 +1134,13 @@ final class SharedObjectDetailStore: ObservableObject {
             }
             let fresh = try await api.readObject(workspaceID: workspaceID, objectID: objectID, expectedKind: expectedKind)
             detail = fresh
+            openedRevision = nil
             postSaveRefreshMessage = nil
             loadFailed = false
+            if case .doc(let md) = fresh.content {
+                docDraftText = md
+            }
+            await refreshHistory(api: api)
             showSavedBanner("Saved")
         } catch SharedObjectsError.refused(let reason) {
             if reason == "content_consent_required" || reason == "workspace_access_refused" || reason == "connection_access_refused" {
