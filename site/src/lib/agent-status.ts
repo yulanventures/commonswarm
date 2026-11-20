@@ -16,6 +16,12 @@
 
 import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud/agent-presence";
 import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
+import {
+  classifySeatStatus,
+  type SeatIndicator,
+  type SeatStatus,
+  type SeatWakeInput,
+} from "../../../src/protocol/seat-status";
 import { wakePathMark } from "./wake-path";
 import { connectionPolicyState, renewalGrantEnded, type GrantRiskInput, type ConnectionPolicy } from "./standing-grants";
 import type { AgentStateVM } from "./home-types";
@@ -120,6 +126,14 @@ export interface PeopleAgentStatusInput extends AgentStatusInput {
   /** Callers pass policy and roster only for the same canonical connection. */
   connectionPolicy?: ConnectionPolicy;
   oldestUnobservedAt?: string | null;
+  unseenCount?: number | null;
+  lastActivityAt?: string | null;
+  workingOn?: { at?: string; createdAt?: string; since?: string | null; until?: string | null } | null;
+  doingTodo?: { since?: string | null; startedAt?: string | null } | null;
+  wake?: SeatWakeInput | null;
+  serverWork?: "working" | "idle" | "disconnected";
+  locale?: string;
+  timeZone?: string;
   app?: string | null;
   ownerName: string | null;
   own: boolean;
@@ -131,17 +145,62 @@ export interface PeopleAgentStatus {
   label: string;
   sentence: string;
   attention: boolean;
+  /** Visual shape: "dot" ONLY for verified live working/listening, "diamond" for attention/fault, "ring" otherwise. */
+  indicator: SeatIndicator;
+  /** Shared C2 seat status classification (single source of truth with CLI and MCP). */
+  seatStatus: SeatStatus;
   fix: { action: "resume" | "new-key" | "guide-chat" | "guide-local" | null; allowed: boolean; askWho: string | null };
 }
 
 /** One translation of the same wire facts, with attention and viewer-specific next steps. */
 export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now()): PeopleAgentStatus {
   const base = agentStatus(input, now);
+  const seatStatus = classifySeatStatus({
+    transport: input.transport,
+    turnOnly: input.turnOnly,
+    connection: input.connection,
+    revoked: input.revoked,
+    suspended: input.suspended,
+    presence: input.presence,
+    wake: input.wake,
+    lastActivityAt: input.lastActivityAt,
+    workingOn: input.workingOn
+      ? {
+          since: input.workingOn.since ?? input.workingOn.at ?? input.workingOn.createdAt ?? null,
+          until: input.workingOn.until ?? null,
+          // People & agents never displays private work titles in the status line.
+          text: null,
+          scope: "private_channel",
+        }
+      : null,
+    doingTodo: input.doingTodo
+      ? { since: input.doingTodo.since ?? input.doingTodo.startedAt ?? null }
+      : null,
+    serverWork: input.serverWork,
+    waitingSince: input.oldestUnobservedAt,
+    unseenCount: input.unseenCount,
+    locale: input.locale,
+    timeZone: input.timeZone,
+  }, now);
   const owner = input.ownerName?.split(/\s+/)[0] ?? "its owner";
-  const result = (kind: PeopleAgentStatusKind, label: string, sentence: string,
-    action: PeopleAgentStatus["fix"]["action"] = null, permitted = false, askWho: string | null = null,
-    attention = true): PeopleAgentStatus => ({ kind, label, sentence, attention,
-      fix: { action, allowed: permitted && !input.sample, askWho } });
+  const result = (
+    kind: PeopleAgentStatusKind,
+    label: string,
+    sentence: string,
+    action: PeopleAgentStatus["fix"]["action"] = null,
+    permitted = false,
+    askWho: string | null = null,
+    attention = true,
+    indicator: SeatIndicator = attention ? "diamond" : seatStatus.indicator,
+  ): PeopleAgentStatus => ({
+    kind,
+    label,
+    sentence,
+    attention,
+    indicator,
+    seatStatus,
+    fix: { action, allowed: permitted && !input.sample, askWho },
+  });
   const keyFix = (kind: "key-off" | "key-ended", label: string) => result(kind, label,
     input.own ? "It needs a new key to connect again."
       : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
@@ -165,16 +224,31 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
   if (familyEnded)
     return result("key-ended", "Connection ended", "Its end date has passed. This connection cannot be resumed.");
   if (ended) return keyFix("key-ended", "Key ended");
-  if (wakePathMark(input.oldestUnobservedAt, now)) {
+  if (seatStatus.kind === "waiting" && seatStatus.stale_waiting) {
     const hosted = input.transport === "hosted_mcp";
-    return result("stale-messages", `Hasn’t picked up messages for ${WAKE_STALE_MS / 60_000}+ min`,
+    return result("stale-messages", seatStatus.line,
       hosted ? "Open the chat app you use it in and say: check CommonSwarm." : "Start its cswarm process.",
-      hosted ? "guide-chat" : "guide-local", input.own, input.own ? null : owner);
+      hosted ? "guide-chat" : "guide-local", input.own, input.own ? null : owner, true, "diamond");
   }
   if (grant?.newHostAt) return result("new-computer", "Used from a new computer", "Keep using it if you recognize this computer.");
-  const label = base.kind === "active" && base.chip !== "Active now" && input.presence?.last_command_at
-    ? `Active ${peopleAgentActivityTime(input.presence.last_command_at, now)}` : base.chip;
-  return result(base.kind, label, base.receive ?? "Message checks have not been reported.", null, false, null, false);
+  const kind: PeopleAgentStatusKind =
+    seatStatus.kind === "working" || seatStatus.kind === "listening"
+      ? "active"
+      : seatStatus.kind === "unknown"
+        ? "connected"
+        : seatStatus.last_activity_age_ms !== null && seatStatus.last_activity_age_ms >= AGENT_INACTIVE_AFTER_MS
+          ? "inactive"
+          : "idle";
+  return result(
+    kind,
+    seatStatus.line,
+    base.receive ?? "Message checks have not been reported.",
+    null,
+    false,
+    null,
+    false,
+    seatStatus.indicator,
+  );
 }
 
 export function agentResumeReceipt(name: string): string {

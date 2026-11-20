@@ -4060,6 +4060,66 @@ async function recordAgentPresence(
   `;
 }
 
+/**
+ * Coarse turn-only presence for hosted MCP seats (C2).
+ * Records only last_command_at and turn_at (throttled to 60s), never push-listener routes,
+ * and is suppressed whenever a command/batch touches only private channels.
+ */
+async function recordHostedCoarsePresence(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string,
+): Promise<void> {
+  await tx`
+    INSERT INTO swarm.agent_presence AS presence (
+      workspace_id, principal_id, last_command_at, client_build,
+      watcher_at, channel_at, listener_at, turn_at
+    ) VALUES (
+      ${workspaceId}::uuid,
+      ${principalId}::uuid,
+      statement_timestamp(),
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      statement_timestamp()
+    )
+    ON CONFLICT (workspace_id, principal_id) DO UPDATE SET
+      last_command_at = CASE
+        WHEN presence.last_command_at <= statement_timestamp() - interval '60 seconds'
+        THEN statement_timestamp()
+        ELSE presence.last_command_at
+      END,
+      turn_at = CASE
+        WHEN presence.turn_at IS NULL
+          OR presence.turn_at <= statement_timestamp() - interval '60 seconds'
+        THEN statement_timestamp()
+        ELSE presence.turn_at
+      END
+  `;
+}
+
+/** True when signalIds is empty or includes at least one non-private signal. */
+async function hasNonPrivateSignal(
+  tx: Sql,
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<boolean> {
+  if (signalIds.length === 0) return true;
+  const [row] = await tx<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM swarm.signals AS s
+      LEFT JOIN swarm.channels AS c
+        ON c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id
+      WHERE s.workspace_id = ${workspaceId}::uuid
+        AND s.id = ANY(${signalIds as string[]}::uuid[])
+        AND (s.channel_id IS NULL OR c.visibility IS DISTINCT FROM 'private')
+    ) AS exists
+  `;
+  return row?.exists === true;
+}
+
 function stateFromRow(row: Record<string, unknown> | undefined): TaskState | null {
   if (!row) return null;
   const submission = record(row.submission);
@@ -16242,8 +16302,12 @@ async function handleTransaction(
     const decided = (result:HttpResult):HttpResult => {
       outcome.value={kind:'decided',result}; return result;
     };
-    const localState: { authenticatedAgent: AgentAuthRow | null; localPlan: LocalAuthLockPlan | null } = {
-      authenticatedAgent: null, localPlan: null,
+    const localState: {
+      authenticatedAgent: AgentAuthRow | null;
+      hostedAgent: { workspaceId: string; principalId: string } | null;
+      localPlan: LocalAuthLockPlan | null;
+    } = {
+      authenticatedAgent: null, hostedAgent: null, localPlan: null,
     };
     let acceptedPresenceRoute: PresenceRoute | null = null;
     const result = await (async (): Promise<HttpResult> => {
@@ -16575,6 +16639,9 @@ async function handleTransaction(
     // Hosted turns do not advertise listener presence or touch local delivery
     // state. Their durable authorization was reloaded above for this call.
     localState.authenticatedAgent = hostedSeat === null ? auth.agent : null;
+    localState.hostedAgent = hostedSeat !== null && auth.agent !== null
+      ? { workspaceId: auth.agent.principal_workspace_id, principalId: auth.agent.principal_id }
+      : null;
 
     if (
       auth.agent?.transport === "hosted_mcp" &&
@@ -20020,6 +20087,24 @@ async function handleTransaction(
           acceptedPresenceRoute,
         );
       }
+    } else if (
+      !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.hostedAgent !== null
+      && localBody?.ok !== false && localBody?.status !== "rejected" && localBody?.status !== "refused"
+      && record(localBody?.result)?.status !== "refused"
+    ) {
+      const suppressPrivatePresence = await isPrivateChannelAgentCommand(
+        tx,
+        String(body.workspace_id ?? ""),
+        kind,
+        localBody,
+      );
+      if (!suppressPrivatePresence) {
+        await recordHostedCoarsePresence(
+          tx,
+          localState.hostedAgent.workspaceId,
+          localState.hostedAgent.principalId,
+        );
+      }
     }
     if (agentTokenHash!==null && localState.localPlan && localState.authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {
       const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localState.localPlan);
@@ -20716,6 +20801,9 @@ async function handleHostedChannelReadSeen(
           "hosted_channel_read_receipt_failed", undefined, dbCode(error) ?? null);
       }
     }
+    if (input.signal_ids.length > 0 && await hasNonPrivateSignal(tx, seat.workspace_id, input.signal_ids)) {
+      await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
+    }
     return { status: 200, body: { ok: true } };
   });
 }
@@ -20970,8 +21058,9 @@ async function handleHostedCheck(
 
     const acknowledgeBatchId = decision.acknowledge_batch_id ?? null;
     const advanceCursor = decision.advance_cursor ?? null;
+    let acknowledgedSignalIds: string[] = [];
     if (acknowledgeBatchId !== null && advanceCursor !== null) {
-      const closed = await tx<{ batch_id: string }[]>`
+      const closed = await tx<{ batch_id: string; signal_ids: string[] | null }[]>`
         UPDATE swarm.hosted_mcp_check_batches
         SET acknowledged_at = date_trunc('milliseconds', statement_timestamp())
         WHERE batch_id = ${acknowledgeBatchId}::uuid
@@ -20979,9 +21068,10 @@ async function handleHostedCheck(
           AND grant_id = ${seat.grant_id}::uuid
           AND workspace_id = ${seat.workspace_id}::uuid
           AND acknowledged_at IS NULL
-        RETURNING batch_id
+        RETURNING batch_id, signal_ids
       `;
       if (closed.length !== 1) throw new Error("hosted check ACK lost its locked batch");
+      acknowledgedSignalIds = Array.isArray(closed[0]?.signal_ids) ? closed[0]!.signal_ids! : [];
       await tx`
         UPDATE swarm.hosted_mcp_check_cursors
         SET cursor_created_at = ${advanceCursor.created_at}::timestamptz,
@@ -21020,6 +21110,11 @@ async function handleHostedCheck(
 
     const batch = decision.return_batch;
     if (batch === null) {
+      const recordCheckPresence = acknowledgeBatchId === null
+        || await hasNonPrivateSignal(tx, seat.workspace_id, acknowledgedSignalIds);
+      if (recordCheckPresence) {
+        await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
+      }
       return { status: 200, body: {
         context,
         batch_id: null,
@@ -21064,6 +21159,9 @@ async function handleHostedCheck(
     }
     // 👀 and Seen on what this check returns, under the seat's claims installed above. Never fails the check.
     await markHostedSeatSeen(tx, seat.workspace_id, seat.principal_id, signals, input.command.kind);
+    if (await hasNonPrivateSignal(tx, seat.workspace_id, batch.signal_ids)) {
+      await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
+    }
     return { status: 200, body: {
       context,
       batch_id: batch.batch_id,

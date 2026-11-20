@@ -148,3 +148,4 @@ tests/review-checks.test.ts
 tests/local-auth-users-concurrency.test.ts
 tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts
+tests/seat-status.test.ts

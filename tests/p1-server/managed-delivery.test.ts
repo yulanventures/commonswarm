@@ -1449,7 +1449,7 @@ test("box functional proof exits nonzero for missing and ineligible seeds", { ti
       WHERE id = '${competitor}'::uuid;
     ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only;`;
   const viewOmitted = runProof(seed, `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
-    SELECT workspace_id, principal_id, min(enqueued_at) AS oldest_unobserved_at
+    SELECT workspace_id, principal_id, min(enqueued_at) AS oldest_unobserved_at, count(*)::integer AS unseen_count
     FROM swarm_read.agent_wake_path_deliveries WHERE false GROUP BY workspace_id, principal_id;`);
   assert.notEqual(viewOmitted.code, 0);
   assert.match(viewOmitted.output, /wake-path view omitted exact seeded unobserved delivery/);
