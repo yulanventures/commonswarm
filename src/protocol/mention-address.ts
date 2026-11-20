@@ -471,3 +471,85 @@ export function resolveMentions(input: {
   }
   return ordered.map((row) => ({ kind: row.kind, id: row.id.toLowerCase() }));
 }
+
+export interface GroupDmAgentMember {
+  id: string;
+  name: string;
+}
+
+export type GroupDmMentionResolution =
+  | { ok: true; agents: WireMention[] }
+  | { ok: false; error: "mention_ambiguous"; message: string };
+
+/**
+ * Sound superset pre-filter: returns only agents whose folded name could possibly match an
+ * `@Name` tag in `body`, so the server probes conversation membership only for plausible hits.
+ */
+export function prefilterMentionCandidateAgents(
+  body: string,
+  agents: readonly GroupDmAgentMember[],
+): GroupDmAgentMember[] {
+  if (!bodyMayMention(body) || agents.length === 0) return [];
+  const tails: string[] = [];
+  for (let at = body.indexOf("@"); at !== -1; at = body.indexOf("@", at + 1)) {
+    const before = at === 0 ? "" : body[at - 1]!;
+    if (before === "" || OPENS_TAG.test(before)) {
+      tails.push(foldMentionName(body.slice(at + 1)));
+    }
+  }
+  if (tails.length === 0) return [];
+  return agents.filter((agent) => {
+    if (!isTaggable(agent.name)) return false;
+    const foldedName = foldMentionName(agent.name);
+    return tails.some((tail) => tail.startsWith(foldedName));
+  });
+}
+
+/**
+ * Resolve `@Agent` mentions in a group-DM body strictly against the verified live peer agents
+ * of that group DM, returning any additional agent recipients not already named in `explicitTo`.
+ */
+export function resolveGroupDmAgentMentions(input: {
+  body: string;
+  peerAgents: readonly GroupDmAgentMember[];
+  explicitTo?: readonly WireMention[];
+}): GroupDmMentionResolution {
+  if (!bodyMayMention(input.body) || input.peerAgents.length === 0) {
+    return { ok: true, agents: [] };
+  }
+  const roster: MentionRosterEntry[] = input.peerAgents.map((agent) => ({
+    kind: "agent",
+    id: agent.id.toLowerCase(),
+    name: agent.name,
+  }));
+  const explicitAgentIds = new Set(
+    (input.explicitTo ?? [])
+      .filter((entry) => entry.kind === "agent")
+      .map((entry) => entry.id.toLowerCase()),
+  );
+  const parsed = addressFromBody(input.body, mentionTargetsFromRoster(roster));
+  if (parsed.ambiguous.length > 0) {
+    const sentences: string[] = [];
+    for (const name of parsed.ambiguous) {
+      const rows = roster.filter((row) => foldMentionName(row.name ?? "") === foldMentionName(name));
+      if (rows.some((row) => explicitAgentIds.has(row.id))) continue;
+      sentences.push(
+        `"@${name}" names more than one agent in this group, so it mentions nobody. Name one of them in to: ${
+          choicesFor(rows)
+        }.`,
+      );
+    }
+    if (sentences.length > 0) {
+      return { ok: false, error: "mention_ambiguous", message: sentences.join(" ") };
+    }
+  }
+  const seen = new Set(explicitAgentIds);
+  const added: WireMention[] = [];
+  for (const entity of parsed.recipients) {
+    const id = entity.id.toLowerCase();
+    if (entity.kind !== "agent" || seen.has(id)) continue;
+    seen.add(id);
+    added.push({ kind: "agent", id });
+  }
+  return { ok: true, agents: added };
+}

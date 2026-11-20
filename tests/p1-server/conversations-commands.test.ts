@@ -18,7 +18,7 @@ import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readin
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 type Person = { id: string; jwt: string };
-type Agent = { id: string; token: string };
+type Agent = { id: string; token: string; name: string };
 type Row = Record<string, unknown>;
 
 let local: Local;
@@ -125,21 +125,22 @@ const filed = async (signal: string) => {
   return row ? { ...row } : undefined;
 };
 
-async function makeAgent(owner: Person, label: string): Promise<Agent> {
+async function makeAgent(owner: Person, label: string, exactName?: string): Promise<Agent> {
   const id = randomUUID();
+  const name = exactName ?? `${label}-${id.slice(0, 6)}`;
   const device = randomUUID();
   const run = randomUUID();
   const token = `swm_agt_${randomBytes(32).toString("base64url")}`;
   await sql.begin(async (tx) => {
     await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, ${label})`;
     await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
-      VALUES (${id}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${`${label}-${id.slice(0, 6)}`})`;
+      VALUES (${id}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${name})`;
     await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${id}::uuid, ${device}::uuid)`;
     await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
       VALUES (${randomUUID()}::uuid, ${id}::uuid, ${run}::uuid, ${tx.json(["post_signal"])}::jsonb,
         ${createHash("sha256").update(token).digest()}, statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)`;
   });
-  return { id, token };
+  return { id, token, name };
 }
 
 before(async () => {
@@ -497,4 +498,84 @@ test("a group someone left: the one who left is told so first; a member still in
   const picker = await send(ben.jwt, note({ to: without(ben) }));
   assert.deepEqual({ status: picker.status, ...picker.body }, { status: 409, error: "conversation_member_left",
     message: "Someone left this group. Choose different recipients to send this message." }, "today's picker, with no name");
+});
+
+test("C1e: @Agent mentions typed in a group-DM body route into recipients without leaking or waking outsiders", { timeout: 90_000 }, async () => {
+  const extraBot = await makeAgent(ben, "c1e-extra");
+  const outsiderBot = await makeAgent(cat, "c1e-outsider");
+  const sharedName = `SharedBot-${randomBytes(3).toString("hex")}`;
+  const inGroupShared = await makeAgent(ann, "c1e-shared-in", sharedName);
+  const outGroupShared = await makeAgent(cat, "c1e-shared-out", sharedName);
+
+  // 1) Human + agents group DM: @deeBot in body wakes deeBot without explicit `to`, and keeps human recipients.
+  const mixed = await opened(ann.jwt, [user(ben), agent(annBot), agent(deeBot), agent(extraBot), agent(inGroupShared)], { new_group: true });
+  const mixedId = String(mixed.conversation_id);
+  const bodyMention = await posted(annBot.token, { conversation_id: mixedId, body: `Hey @${deeBot.name}, please review this.` });
+  assert.deepEqual(await filed(bodyMention), { conversation: mixedId, audience: "conversation" });
+  assert.deepEqual(await deliveredTo(bodyMention), [deeBot.id], "body @Agent wakes only the mentioned peer agent");
+  const [{ people }] = await sql<{ people: string[] }[]>`SELECT array_agg(recipient_user_id::text ORDER BY recipient_user_id)
+    FILTER (WHERE recipient_user_id IS NOT NULL) AS people FROM swarm.signal_recipients WHERE signal_id = ${bodyMention}::uuid`;
+  assert.deepEqual(people ?? [], [ann.id, ben.id].sort(), "and still delivers to every human in the group");
+
+  // 2) Thread reply inside the group DM also resolves @Agent mentions in body.
+  const threadMention = await posted(annBot.token, {
+    conversation_id: mixedId,
+    thread_root_id: bodyMention,
+    body: `Looping in @${extraBot.name} on this thread.`,
+  });
+  assert.deepEqual(await deliveredTo(threadMention), [extraBot.id], "group DM thread reply resolves @Agent in body");
+
+  // 3) Explicit `to` + body @Agent merge without duplicates.
+  const merged = await posted(annBot.token, {
+    conversation_id: mixedId,
+    to: [agent(extraBot)],
+    body: `Both @${extraBot.name} and @${deeBot.name} please check.`,
+  });
+  assert.deepEqual(await deliveredTo(merged), [deeBot.id, extraBot.id].sort(), "explicit to and body @Agent merge cleanly");
+
+  // 4) Self mention and outsider mention never wake self or outsider.
+  const selfAndOutsider = await posted(annBot.token, {
+    conversation_id: mixedId,
+    body: `Note mentioning @${annBot.name} and @${outsiderBot.name} only.`,
+  });
+  assert.deepEqual(await deliveredTo(selfAndOutsider), [], "self and non-member @Agent mentions wake zero agents");
+
+  // 5) Same name in workspace (one inside group, one outside) resolves unambiguously to the in-group agent.
+  const disambByMembership = await posted(annBot.token, {
+    conversation_id: mixedId,
+    body: `Checking with @${sharedName} here.`,
+  });
+  assert.deepEqual(await deliveredTo(disambByMembership), [inGroupShared.id],
+    "outsider with colliding name never shadows or makes in-group @Agent ambiguous");
+  assert.ok(!(await deliveredTo(disambByMembership)).includes(outGroupShared.id));
+
+  // 6) Agent-only group DM: @deeBot in body succeeds without explicit `to`; no mention returns 409 conversation_no_recipients.
+  const agentsOnly = await opened(annBot.token, [agent(deeBot), agent(extraBot)], { new_group: true });
+  const agentsOnlyId = String(agentsOnly.conversation_id);
+  const agentOnlyNoTarget = await send(annBot.token, note({ conversation_id: agentsOnlyId, body: "Status without mention" }));
+  assert.equal(agentOnlyNoTarget.status, 409);
+  assert.equal(agentOnlyNoTarget.body.error, "conversation_no_recipients");
+  const agentOnlyMention = await posted(annBot.token, { conversation_id: agentsOnlyId, body: `@${deeBot.name} can you handle this?` });
+  assert.deepEqual(await deliveredTo(agentOnlyMention), [deeBot.id], "agent-only group DM routes via body @Agent");
+
+  // 7) Stranger agent posting with @Agent gets exact 404 matching unknown conversation (zero oracle).
+  const unknown = await send(outsiderBot.token, note({ conversation_id: randomUUID(), body: `@${deeBot.name} hi` }));
+  const stranger = await send(outsiderBot.token, note({ conversation_id: mixedId, body: `@${deeBot.name} hi` }));
+  assert.deepEqual([stranger.status, stranger.body], [404, unknown.body], "non-member agent gets non-leaking 404");
+
+  // 8) Two live agents sharing a name inside the SAME group DM refuse with 400 mention_ambiguous
+  //    naming only those two in-group IDs; explicit `to` disambiguates cleanly.
+  const dupGroup = await opened(annBot.token, [agent(inGroupShared), agent(outGroupShared)], { new_group: true });
+  const dupGroupId = String(dupGroup.conversation_id);
+  const ambiguous = await send(annBot.token, note({ conversation_id: dupGroupId, body: `Ping @${sharedName}` }));
+  assert.equal(ambiguous.status, 400);
+  assert.equal(ambiguous.body.error, "mention_ambiguous");
+  assert.ok(String(ambiguous.body.message).includes(inGroupShared.id));
+  assert.ok(String(ambiguous.body.message).includes(outGroupShared.id));
+  const byExplicitTo = await posted(annBot.token, {
+    conversation_id: dupGroupId,
+    to: [agent(outGroupShared)],
+    body: `Ping @${sharedName}`,
+  });
+  assert.deepEqual(await deliveredTo(byExplicitTo), [outGroupShared.id], "explicit to disambiguates colliding in-group name");
 });
