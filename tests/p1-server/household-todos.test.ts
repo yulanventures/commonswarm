@@ -19,6 +19,7 @@ import { releaseCatalogQuery } from '../support/release-catalog-query.js';
 const proofRoot = 'deploy/release-proofs/household-todo/20261006000001';
 const rollback = () => repoSql(`${proofRoot}-rollback.sql`);
 const migration = () => repoSql('supabase/migrations/20261006000001_household_todos.sql');
+const originMigration = () => repoSql('supabase/migrations/20261119000005_waiting_todos_page.sql');
 const core = { ...todos, ...todoPolicy, ...objectPolicy };
 class RollbackProof extends Error {}
 function fixture() {
@@ -130,7 +131,7 @@ test('store rechecks access, commits multiple events once, persists notice recei
   const db = database(), adapter = store(postNotice), g = fixture();
   try {
     await assert.rejects(db.begin(async tx => {
-      await tx.unsafe(emptyApplicationSchema()); await tx.unsafe(rollback()); await tx.unsafe(migration()); await tx.unsafe(g.setup);
+      await tx.unsafe(emptyApplicationSchema()); await tx.unsafe(rollback()); await tx.unsafe(migration()); await tx.unsafe(originMigration()); await tx.unsafe(g.setup);
       const write = async (command: todos.TodoCommand, identity = g.human, request = randomUUID(), workspace = g.workspace) => {
         await tx`SET LOCAL ROLE swarm_command`;
         const result = await adapter.write(tx, workspace, identity, request, command);
@@ -273,7 +274,7 @@ test('read pages fit the double-serialized 28 KiB transport budget and keep sect
   const db = database(), adapter = store(postNotice), g = fixture();
   try {
     await assert.rejects(db.begin(async tx => {
-      await tx.unsafe(emptyApplicationSchema()); await tx.unsafe(rollback()); await tx.unsafe(migration()); await tx.unsafe(g.setup);
+      await tx.unsafe(emptyApplicationSchema()); await tx.unsafe(rollback()); await tx.unsafe(migration()); await tx.unsafe(originMigration()); await tx.unsafe(g.setup);
       await tx`INSERT INTO swarm.household_todo_streams(workspace_id,stream_id) VALUES (${g.workspace}::uuid,${randomUUID()}::uuid)`;
       const ids = Array.from({ length: 200 }, () => randomUUID());
       for (const [i, id] of ids.entries()) await tx`INSERT INTO swarm.household_todos(workspace_id,todo_id,version,title,notes,state,created_by_user,created_at,assignee_principal,queue_rank,gate_kind,gate_note,offer_id,offer_principal,offer_decider,offer_start,offer_gate,offer_by_user,offered_at,state_by_user,state_at,last_seq)

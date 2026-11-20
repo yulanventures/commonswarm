@@ -871,6 +871,56 @@
     ]
   },
   {
+    "id": "app.chat.waiting-panel.todos",
+    "kind": "view",
+    "path": "/app?w={offerWorkspace}&c=general",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-switch-scope=\"workspace\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "dialog#cs-waiting-sheet[open] [data-waiting-switch-scope=\"workspace\"]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-switch-scope=\"workspace\"]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": "#cs-waiting-panel:not([hidden]) [data-waiting-switch-scope=\"workspace\"]"
+      }
+    ],
+    "ready": "[data-waiting-panel]:not([hidden]) [data-waiting-todo=\"{todo.assigned}\"] [data-waiting-todo-done]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_todo_offer"
+    ],
+    "frame": [
+      "[data-waiting-panel]:not([hidden]) [data-waiting-todo=\"{todo.assigned}\"] .cs-waiting-card__question",
+      "[data-waiting-panel]:not([hidden]) [data-waiting-todo=\"{todo.assigned}\"] [data-waiting-todo-done]"
+    ]
+  },
+  {
     "id": "app.chat.waiting-panel.empty",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.long}",

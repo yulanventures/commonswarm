@@ -27,7 +27,8 @@ function todo(todoId = first, extra: Partial<Todo> = {}): Todo {
   return { workspace_id: 'home', todo_id: todoId, version: 1, title: 'Buy milk', notes: '', due_on: null,
     state: 'open', created_by: { user_id: alice, principal_id: null }, created_at: at,
     assignee: null, assigned_by: null, assigned_at: null, offer: null, gate: { kind: 'none' }, gate_set_by: null,
-    queue_rank: null, state_by: { user_id: alice, principal_id: null }, state_at: at, comment_count: 0, ...extra };
+    queue_rank: null, state_by: { user_id: alice, principal_id: null }, state_at: at, comment_count: 0,
+    origin_placement: 'workspace', origin_channel_id: null, ...extra };
 }
 function state(...todos: Todo[]): HouseholdTodoState {
   return { ...emptyHouseholdTodoState('home', 'stream'), todos: Object.fromEntries(todos.map(t => [t.todo_id, t])) };
@@ -731,4 +732,103 @@ test('AM16 reducer rejects comment controls and hold notes consistently with the
       receipt.outcome.value.gate = { kind: 'hold', note: 'Wait\u0001' };
   }
   assert.throws(() => reduceTodoEvents(initial, invalid), /invalid/);
+});
+
+test('origin_placement and origin_channel_id validate on create, replay deterministically, remain immutable across updates, and keep legacy events replayable', () => {
+  const chBoiler = uid(9001);
+  const chReno = uid(9002);
+
+  // 1. Default workspace origin when omitted.
+  const wsTodo = value(run(state(), { kind: 'todo_create', title: 'Workspace task' }));
+  assert.equal(wsTodo.origin_placement, 'workspace');
+  assert.equal(wsTodo.origin_channel_id, null);
+
+  // 2. #general origin.
+  const genDecision = run(state(), { kind: 'todo_create', title: 'General task', origin_placement: 'general' });
+  const genTodo = value(genDecision);
+  assert.equal(genTodo.origin_placement, 'general');
+  assert.equal(genTodo.origin_channel_id, null);
+  assert.equal(reduceTodoEvents(state(), genDecision.events).todos[genTodo.todo_id]!.origin_placement, 'general');
+
+  // 3. Named channel origin requires verified origin_channel_accessible=true and normalizes UUID.
+  const chCmd: TodoCommand = {
+    kind: 'todo_create',
+    title: 'Boiler task',
+    origin_placement: 'channel',
+    origin_channel_id: chBoiler.toUpperCase(),
+  };
+  refused(decideTodo(state(), chCmd, { ...context(state(), chCmd), origin_channel_accessible: false }), 'target_not_found');
+  refused(run(state(), chCmd), 'target_not_found');
+
+  const chDecision = decideTodo(state(), chCmd, { ...context(state(), chCmd), origin_channel_accessible: true });
+  const chTodo = value(chDecision);
+  assert.equal(chTodo.origin_placement, 'channel');
+  assert.equal(chTodo.origin_channel_id, chBoiler);
+  const replayedCh = reduceTodoEvents(state(), chDecision.events);
+  assert.equal(replayedCh.todos[chTodo.todo_id]!.origin_channel_id, chBoiler);
+
+  // 4. Mismatched origin_placement / origin_channel_id shapes refuse uniformly.
+  refused(run(state(), { kind: 'todo_create', title: 'Bad1', origin_channel_id: chBoiler }), 'target_not_found');
+  refused(run(state(), { kind: 'todo_create', title: 'Bad2', origin_placement: 'workspace', origin_channel_id: chBoiler }), 'target_not_found');
+  refused(run(state(), { kind: 'todo_create', title: 'Bad3', origin_placement: 'general', origin_channel_id: chBoiler }), 'target_not_found');
+  refused(run(state(), { kind: 'todo_create', title: 'Bad4', origin_placement: 'channel', origin_channel_id: null }), 'target_not_found');
+  refused(run(state(), { kind: 'todo_create', title: 'Bad5', origin_placement: 'channel', origin_channel_id: 'not-a-uuid' }), 'target_not_found');
+
+  // 5. Updating a channel-origin to-do preserves origin_placement/origin_channel_id, and forged mutations are rejected by reducer.
+  const updated = run(replayedCh, { kind: 'todo_update', todo_id: chTodo.todo_id, base_version: 1, title: 'Boiler task v2' });
+  assert.equal(value(updated).origin_placement, 'channel');
+  assert.equal(value(updated).origin_channel_id, chBoiler);
+  const forgedUpdate = structuredClone(updated.events);
+  if (forgedUpdate[0]!.type === 'TodoDetailsChanged') {
+    forgedUpdate[0]!.payload.todo.origin_channel_id = chReno;
+  }
+  assert.throws(() => reduceTodoEvents(replayedCh, forgedUpdate), /unrelated field changed/);
+
+  // 6. Legacy pre-migration TodoCreated event without origin fields still replays cleanly,
+  //    accepts a post-migration update hydrated with explicit ('workspace', null), and still
+  //    rejects forged mutations to 'channel' or 'general' or stripping a channel origin.
+  const legacyTodo = todo();
+  delete legacyTodo.origin_placement;
+  delete legacyTodo.origin_channel_id;
+  const legacyEvent: TodoEvent = {
+    ...golden,
+    payload: {
+      todo: legacyTodo,
+      receipt: { principal: alice, command_id: 'golden', request_digest: 'b'.repeat(64), outcome: { status: 'committed', value: legacyTodo } },
+    },
+  };
+  const legacyState = reduceTodoEvents(state(), [legacyEvent]);
+  assert.deepEqual(legacyState.todos[first], legacyTodo);
+  // Simulate post-migration projection hydration (SQL DEFAULT 'workspace' / NULL) followed by a real todo_update.
+  const hydratedState: HouseholdTodoState = {
+    ...legacyState,
+    todos: { [first]: { ...legacyTodo, origin_placement: 'workspace', origin_channel_id: null } },
+  };
+  const postMigrationUpdate = run(hydratedState, { kind: 'todo_update', todo_id: first, base_version: 1, title: 'Migrated edit' });
+  assert.equal(postMigrationUpdate.outcome.status, 'committed');
+  const replayedAcrossMigration = reduceTodoEvents(state(), [legacyEvent, ...postMigrationUpdate.events]);
+  assert.equal(replayedAcrossMigration.todos[first]!.title, 'Migrated edit');
+  assert.equal(replayedAcrossMigration.todos[first]!.origin_placement, 'workspace');
+  assert.equal(replayedAcrossMigration.todos[first]!.origin_channel_id, null);
+
+  const forgedLegacyChannelEdit: TodoEvent = {
+    ...golden,
+    seq: 1,
+    type: 'TodoDetailsChanged',
+    payload: { todo: { ...legacyTodo, version: 2, title: 'Edited', origin_placement: 'channel', origin_channel_id: chBoiler } },
+  };
+  assert.throws(() => reduceTodoEvents(legacyState, [forgedLegacyChannelEdit]), /unrelated field changed/);
+  const forgedLegacyGeneralEdit: TodoEvent = {
+    ...golden,
+    seq: 1,
+    type: 'TodoDetailsChanged',
+    payload: { todo: { ...legacyTodo, version: 2, title: 'Edited', origin_placement: 'general', origin_channel_id: null } },
+  };
+  assert.throws(() => reduceTodoEvents(legacyState, [forgedLegacyGeneralEdit]), /unrelated field changed/);
+  const forgedChannelStrip = structuredClone(updated.events);
+  if (forgedChannelStrip[0]!.type === 'TodoDetailsChanged') {
+    delete forgedChannelStrip[0]!.payload.todo.origin_placement;
+    delete forgedChannelStrip[0]!.payload.todo.origin_channel_id;
+  }
+  assert.throws(() => reduceTodoEvents(replayedCh, forgedChannelStrip), /unrelated field changed/);
 });

@@ -6,6 +6,8 @@ import {
   classifyAskConversation,
   createWaitingSurface,
   filterWaitingItems,
+  filterWaitingTodos,
+  focusWaitingPanelAfterAction,
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
@@ -635,4 +637,214 @@ test("renderWaitingPanel keeps truncated queues incomplete, avoids false channel
   const truncatedNotice = host.querySelector("[data-waiting-truncated]");
   assert.ok(truncatedNotice);
   assert.ok(truncatedNotice.querySelector("[data-waiting-open-catchup]"));
+});
+
+test("filterWaitingTodos separates channel-origin, #general, and workspace-only to-dos, and focusWaitingPanelAfterAction keeps focus inside the panel", () => {
+  const todoBoiler = {
+    id: "todo-boiler",
+    workspaceId: "ws-1",
+    workspaceName: "Rivera Household",
+    title: "Confirm boiler quote <urgent>",
+    state: "open",
+    dueOn: "2026-11-22",
+    reason: "assigned",
+    href: "/app?w=ws-1&v=todo&id=todo-boiler",
+    canMarkDone: true,
+    placement: "channel",
+    channelId: "ch-boiler",
+    channelLabel: "#boiler-quotes",
+  };
+  const todoReno = {
+    id: "todo-reno",
+    workspaceId: "ws-1",
+    workspaceName: "Rivera Household",
+    title: "Approve tile sample",
+    state: "open",
+    dueOn: null,
+    reason: "assigned",
+    href: "/app?w=ws-1&v=todo&id=todo-reno",
+    canMarkDone: true,
+    placement: "channel",
+    channelId: "ch-reno",
+    channelLabel: "#renovation",
+  };
+  const todoGeneral = {
+    id: "todo-general",
+    workspaceId: "ws-1",
+    workspaceName: "Rivera Household",
+    title: "Review household checklist",
+    state: "open",
+    dueOn: null,
+    reason: "assigned",
+    href: "/app?w=ws-1&v=todo&id=todo-general",
+    canMarkDone: true,
+    placement: "general",
+    channelId: null,
+    channelLabel: "#general",
+  };
+  const todoWs = {
+    id: "todo-ws",
+    workspaceId: "ws-1",
+    workspaceName: "Rivera Household",
+    title: "Drop off spare keys",
+    state: "open",
+    dueOn: null,
+    reason: "assigned",
+    href: "/app?w=ws-1&v=todo&id=todo-ws",
+    canMarkDone: true,
+    placement: "workspace",
+    channelId: null,
+    channelLabel: "",
+  };
+  const todoOtherWs = {
+    id: "todo-2",
+    workspaceId: "ws-2",
+    workspaceName: "Studio",
+    title: "Approve contractor request",
+    state: "open",
+    dueOn: null,
+    reason: "request",
+    href: "/app?w=ws-2&v=todo&id=todo-2",
+    canMarkDone: false,
+    placement: "workspace",
+    channelId: null,
+    channelLabel: "",
+  };
+  const allTodos = [todoBoiler, todoReno, todoGeneral, todoWs, todoOtherWs];
+  const boilerPlace = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "channel", channelId: "ch-boiler", label: "#boiler-quotes" };
+  const renoPlace = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "channel", channelId: "ch-reno", label: "#renovation" };
+  const generalPlace = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "general", channelId: null, label: "#general" };
+  const dmPlace = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "dm", channelId: null, label: "Sam", dm: { kind: "person", id: "u-2" } };
+  const allMessagesPlace = { workspaceId: "ws-1", workspaceName: "Rivera Household", kind: "all", channelId: null, label: "All messages" };
+
+  assert.deepEqual(filterWaitingTodos(allTodos, "channel", boilerPlace).map(t => t.id), ["todo-boiler"]);
+  assert.deepEqual(filterWaitingTodos(allTodos, "channel", renoPlace).map(t => t.id), ["todo-reno"]);
+  assert.deepEqual(filterWaitingTodos(allTodos, "channel", generalPlace).map(t => t.id), ["todo-general"]);
+  assert.deepEqual(filterWaitingTodos(allTodos, "channel", dmPlace), []);
+  assert.deepEqual(filterWaitingTodos(allTodos, "channel", allMessagesPlace).map(t => t.id), ["todo-boiler", "todo-reno", "todo-general", "todo-ws"]);
+  assert.deepEqual(filterWaitingTodos(allTodos, "workspace", boilerPlace).map(t => t.id), ["todo-boiler", "todo-reno", "todo-general", "todo-ws"]);
+  assert.deepEqual(filterWaitingTodos(allTodos, "all", boilerPlace).map(t => t.id), ["todo-boiler", "todo-reno", "todo-general", "todo-ws", "todo-2"]);
+
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const doneClicks = [];
+  const retryClicks = [];
+  const openClicks = [];
+  const handlers = {
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onMarkTodoDone: item => doneClicks.push(item.id),
+    onRetryTodo: item => retryClicks.push(item.id),
+    onOpenTodo: item => openClicks.push(item.id),
+  };
+
+  renderWaitingPanel(host, {
+    scope: "all",
+    place: boilerPlace,
+    items: [],
+    todos: [todoBoiler, todoOtherWs],
+    counts: {
+      channel: { min: 1, complete: true },
+      workspace: { min: 1, complete: true },
+      all: { min: 2, complete: true },
+    },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "",
+    statusSeq: 0,
+  }, handlers);
+
+  const card1 = host.querySelector('[data-waiting-todo="todo-boiler"]');
+  const card2 = host.querySelector('[data-waiting-todo="todo-2"]');
+  assert.ok(card1 && card2);
+  assert.equal(card1.querySelector(".cs-waiting-card__question").textContent, "Confirm boiler quote <urgent>");
+  assert.equal(card1.querySelector(".cs-waiting-card__todo-due").textContent, "Due Nov 22");
+  assert.equal(card1.querySelector(".cs-waiting-card__place").textContent, "Rivera Household · #boiler-quotes");
+  const doneBtn = card1.querySelector('[data-waiting-todo-done="todo-boiler"]');
+  assert.equal(doneBtn.textContent, "Mark done");
+  doneBtn.click();
+  assert.deepEqual(doneClicks, ["todo-boiler"]);
+
+  // Request to-do has Open (no direct Mark done) and Open delegates in-app navigation without completing it.
+  assert.equal(card2.querySelector('[data-waiting-todo-done="todo-2"]'), null);
+  const openLink = card2.querySelector('[data-waiting-todo-open="todo-2"]');
+  assert.equal(openLink.textContent, "Open");
+  openLink.click();
+  assert.deepEqual(openClicks, ["todo-2"]);
+
+  // Unchanged refresh preserves exact to-do card DOM node.
+  renderWaitingPanel(host, {
+    scope: "all",
+    place: boilerPlace,
+    items: [],
+    todos: [todoBoiler, todoOtherWs],
+    counts: { channel: { min: 1, complete: true }, workspace: { min: 1, complete: true }, all: { min: 2, complete: true } },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "",
+    statusSeq: 0,
+  }, handlers);
+  assert.strictEqual(host.querySelector('[data-waiting-todo="todo-boiler"]'), card1);
+
+  // Failed Mark done keeps the card visible with role="alert", Retry, and focuses Retry on the same card.
+  renderWaitingPanel(host, {
+    scope: "all",
+    place: boilerPlace,
+    items: [],
+    todos: [{ ...todoBoiler, error: "Could not save to-do.", retryable: true }, todoOtherWs],
+    counts: { channel: { min: 1, complete: true }, workspace: { min: 1, complete: true }, all: { min: 2, complete: true } },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "",
+    statusSeq: 0,
+  }, handlers);
+  const failedCard = host.querySelector('[data-waiting-todo="todo-boiler"]');
+  assert.equal(failedCard.querySelector(".cs-waiting-card__error").textContent, "Could not save to-do.");
+  const retryBtn = failedCard.querySelector('[data-waiting-todo-retry="todo-boiler"]');
+  focusWaitingPanelAfterAction(host, { kind: "retry-todo", todoId: "todo-boiler" });
+  assert.strictEqual(doc.activeElement, retryBtn, "failure must focus Retry on the same card");
+  retryBtn.click();
+  assert.deepEqual(retryClicks, ["todo-boiler"]);
+
+  // Completing card 1 when card 2 remains focuses card 2's action.
+  renderWaitingPanel(host, {
+    scope: "all",
+    place: boilerPlace,
+    items: [],
+    todos: [todoOtherWs],
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 1, complete: true } },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "Done",
+    statusSeq: 1,
+  }, handlers);
+  focusWaitingPanelAfterAction(host, { kind: "completed-todo", prevIndex: 0 });
+  assert.strictEqual(doc.activeElement, host.querySelector('[data-waiting-todo-open="todo-2"]'));
+
+  // After last item completes, visible Done banner shows and focus lands on a stable panel control (not body).
+  renderWaitingPanel(host, {
+    scope: "workspace",
+    place: boilerPlace,
+    items: [],
+    todos: [],
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false,
+    complete: true,
+    failed: false,
+    statusMessage: "Done",
+    statusSeq: 2,
+  }, handlers);
+  assert.equal(host.querySelector("[data-waiting-status]").hidden, false);
+  assert.equal(host.querySelector("[data-waiting-status]").textContent, "Done");
+  focusWaitingPanelAfterAction(host, { kind: "completed-todo", prevIndex: 0 });
+  assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-scope]"));
 });

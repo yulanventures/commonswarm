@@ -41,11 +41,35 @@ function installWaitingFixture() {
   const multiBatch = batch51 || batch101 || truncatedQueue;
   const ask51 = askIdAt(51);
   const ask101 = askIdAt(101);
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch,
+  const todoId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const todoIdAt = (n: number) => "dddddddd-dddd-4ddd-8ddd-" + String(n).padStart(12, "0");
+  const chBoiler = "cccccccc-cccc-4ccc-8ccc-000000000001";
+  const chReno = "cccccccc-cccc-4ccc-8ccc-000000000002";
+  const todoCase = scenario.startsWith("todos-");
+  const todo21Case = scenario.startsWith("todos-21-");
+  const todoTruncatedCase = scenario.startsWith("todos-truncated-");
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101,
+    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
+    todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
+    todoPages: 0,
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
+  const ws1Todos21 = () => {
+    const baseMs = Date.now() - 3600_000;
+    return Array.from({ length: 21 }, (_, i) => i + 1).map(n => ({
+      todo_id: todoIdAt(n),
+      title: n === 1 ? "Boiler channel task #1" : n === 21 ? "Renovation channel task #21" : "Workspace task #" + n,
+      state: "open" as const,
+      due_on: n === 1 ? "2026-11-22" : null,
+      reason: "assigned" as const,
+      agent_id: null,
+      state_at: new Date(baseMs + (22 - n) * 1000).toISOString(),
+      placement: n === 1 || n === 21 ? "channel" as const : "workspace" as const,
+      channel_id: n === 1 ? chBoiler : n === 21 ? chReno : null,
+    }));
+  };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
     const count = batch51 ? 51 : batch101 ? 101 : truncatedQueue ? 100 : 0;
@@ -77,11 +101,16 @@ function installWaitingFixture() {
           const asks = id === ids[0] && multiBatch
             ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
             : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
+          const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
+            ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
+            : id === ids[0] && todoCase && !f.todoDone
+              ? [{ todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22" }]
+              : [];
           return {
             workspace_id: id, name: "Workspace " + number(id), role: "owner", last_seen_at: recent, new_messages: 0, content: null,
             // No agents on the roster: an agent of the viewer's that needs fixing would be counted too.
             people: [{ user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true, agents: [] }],
-            needs_you: { asks, assigned: [], waiting: [] },
+            needs_you: { asks, assigned, waiting: [] },
           };
         }) });
     }
@@ -109,6 +138,37 @@ function installWaitingFixture() {
           total: asks.length, truncated: rest.length > 100, asks: rest.slice(0, 100) });
       }
       return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
+    }
+    if (url.pathname === "/rest/v1/rpc/waiting_todos_page") {
+      const id = body?.p_workspace_id; f.log.push("waiting_todos_page:" + number(id));
+      if (todoTruncatedCase) {
+        return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
+      }
+      if (id === ids[0] && todo21Case) {
+        f.todoPages += 1;
+        const all = ws1Todos21();
+        const afterAt = body?.p_after_state_at;
+        const afterId = body?.p_after_todo_id;
+        const rest = afterAt && afterId
+          ? all.filter(t => t.state_at < afterAt || (t.state_at === afterAt && t.todo_id > afterId))
+          : all;
+        const page = rest.slice(0, 20);
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          total: all.length,
+          truncated: rest.length > 20,
+          todos: page,
+        });
+      }
+      if (id === ids[0] && todoCase) {
+        const list = f.todoDone ? [] : [{
+          todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22",
+          reason: "assigned", agent_id: null, state_at: recent, placement: "workspace", channel_id: null,
+        }];
+        return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: list.length, truncated: false, todos: list });
+      }
+      return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: 0, truncated: false, todos: [] });
     }
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
@@ -139,6 +199,44 @@ function installWaitingFixture() {
     if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[8] && url.searchParams.get("id")?.includes(ask)) {
       return Response.json([{ id: ask, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent" }]);
     }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_read") {
+      f.log.push("todo_read");
+      return Response.json({
+        status: "ok",
+        todo: {
+          workspace_id: ids[0], todo_id: todoId, version: 3, title: "Confirm boiler visit time", notes: "",
+          state: f.todoDone ? "done" : "open", due_on: "2026-11-22",
+          created_by: { user_id: owner, principal_id: null }, created_at: recent,
+          assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
+          offer: null, gate: { kind: "none" }, gate_clear: true, queue_position: null,
+          state_by: { user_id: owner, principal_id: null }, state_at: recent, comment_count: 0,
+        },
+        comments: [],
+        next_comment_offset: null,
+      });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_set_state") {
+      f.todoWrites.push(body.command.arguments);
+      f.log.push("todo_set_state");
+      if (f.todoFailOnce) {
+        f.todoFailOnce = false;
+        return Response.json({ status: "refused", reason: "not_permitted" });
+      }
+      f.todoDone = true;
+      return Response.json({
+        status: "committed",
+        value: {
+          workspace_id: ids[0], todo_id: todoId, version: 4, title: "Confirm boiler visit time", notes: "",
+          state: "done", due_on: "2026-11-22",
+          created_by: { user_id: owner, principal_id: null }, created_at: recent,
+          assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
+          offer: null, gate: { kind: "none" }, gate_clear: true, queue_position: null,
+          state_by: { user_id: owner, principal_id: null }, state_at: recent, comment_count: 0,
+        },
+        notices: [],
+        replayed: false,
+      });
+    }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
       // From here on the answered ask is no longer waiting.
       f.answers.push(body); f.answered = true;
@@ -146,11 +244,23 @@ function installWaitingFixture() {
       f.log.push("answer");
       return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id } });
     }
-    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && multiBatch) {
+    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case)) {
+      if (todo21Case) {
+        return Response.json([
+          { channel_id: chBoiler, slug: "boiler-quotes", title: "Boiler quotes", kind: "public", archived_at: null },
+          { channel_id: chReno, slug: "renovation", title: "Renovation", kind: "public", archived_at: null },
+        ]);
+      }
       return Response.json([{ channel_id: otherChannel, slug: "other", title: "Other", kind: "public", archived_at: null }]);
     }
     if (url.pathname === "/rest/v1/rpc/channel_unread") return Response.json({ workspace_id: body?.p_workspace_id ?? ids[0],
-      generated_at: new Date().toISOString(), channels: [{ channel_id: null, slug: "general", unread: null }] });
+      generated_at: new Date().toISOString(), channels: todo21Case && body?.p_workspace_id === ids[0]
+        ? [
+            { channel_id: null, slug: "general", unread: null },
+            { channel_id: chBoiler, slug: "boiler-quotes", unread: null },
+            { channel_id: chReno, slug: "renovation", unread: null },
+          ]
+        : [{ channel_id: null, slug: "general", unread: null }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json(ids.map(id => (
       { workspace_id: id, org_id: org, name: "Workspace " + number(id), archived_at: null })));
     if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
@@ -294,6 +404,84 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("todos-21-")) {
+      await wait(() => shown(control()) && count() === "21" && f.todoPages >= 2,
+        "top bar counts all 21 to-dos after waiting_todos_page paginates past 20");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const todo1Card = () => panel()?.querySelector<HTMLElement>(`[data-waiting-todo="${f.todo1}"]`) ?? null;
+      const todo21Card = () => panel()?.querySelector<HTMLElement>(`[data-waiting-todo="${f.todo21}"]`) ?? null;
+      await wait(() => shown(todo1Card()), "#boiler-quotes This channel shows only its channel-origin to-do #1");
+      const scope = panel()!.querySelector<HTMLSelectElement>("[data-waiting-scope]")!;
+      check(scope.value === "channel" && scope.options[0]!.textContent === "This channel (1)" && scope.options[1]!.textContent === "All channels (21)",
+        "unexpected scope labels for 21-todo two-channel workspace: " + Array.from(scope.options).map(o => o.textContent).join(" | "));
+      check(!todo21Card() && panel()!.querySelectorAll("[data-waiting-todo]").length === 1,
+        "#boiler-quotes must not show #renovation or workspace-only to-dos");
+      // Switch to #renovation in the channel rail: desktop column stays open and shows item #21 (past overview's 20-item cap)!
+      const renoLink = document.querySelector<HTMLElement>(`a[href*="c=${f.chReno}"]`);
+      check(Boolean(renoLink), "expected #renovation channel link in sidebar");
+      renoLink!.click();
+      await wait(() => shown(todo21Card()) && !todo1Card(),
+        "switching to #renovation updates This channel to show channel-origin to-do #21");
+      check(scope.options[0]!.textContent === "This channel (1)" && panel()!.querySelectorAll("[data-waiting-todo]").length === 1,
+        "#renovation must show only its own to-do #21");
+      // Switching to All channels shows all 21 to-dos (channel-origin + workspace-only).
+      scope.value = "workspace";
+      scope.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => panel()!.querySelectorAll("[data-waiting-todo]").length === 21 && shown(todo1Card()) && shown(todo21Card()),
+        "All channels lists all 21 to-dos including items 1 and 21");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("todos-truncated-")) {
+      await wait(() => shown(control()) && f.log.includes("waiting_todos_page:1"), "waiting_todos_page fallback triggered");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      await wait(() => shown(panel()?.querySelector('[data-waiting-state="truncated"]')),
+        "unpaged 20-cap fallback shows truncated notice instead of false exact 20");
+      const scope = panel()!.querySelector<HTMLSelectElement>("[data-waiting-scope]")!;
+      check(scope.options[0]!.textContent === "This channel" && scope.options[1]!.textContent === "All channels (20+)",
+        "20-capped overview must show 20+ minimum, never exact 20: " + Array.from(scope.options).map(o => o.textContent).join(" | "));
+      check(count() !== "20", "top bar must not claim exact 20 when overview is at its 20-item cap: " + count());
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("todos-")) {
+      await wait(() => shown(control()) && count() === "1", "assigned to-do is counted in the top bar");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const showWs = () => panel()?.querySelector<HTMLButtonElement>('[data-waiting-switch-scope="workspace"]') ?? null;
+      await wait(() => shown(showWs()) && showWs()!.textContent === "Show all channels (1)",
+        "This channel stays channel-specific and offers Show all channels (1) for the workspace to-do");
+      showWs()!.click();
+      const todoCard = () => panel()?.querySelector<HTMLElement>(`[data-waiting-todo="${f.todoId}"]`) ?? null;
+      const doneBtn = () => todoCard()?.querySelector<HTMLButtonElement>(`[data-waiting-todo-done="${f.todoId}"]`) ?? null;
+      const openLink = () => todoCard()?.querySelector<HTMLAnchorElement>(`[data-waiting-todo-open="${f.todoId}"]`) ?? null;
+      await wait(() => shown(todoCard()) && shown(doneBtn()) && shown(openLink()), "assigned to-do renders with Mark done and Open");
+      check(doneBtn()!.getBoundingClientRect().height >= 44 && openLink()!.getBoundingClientRect().height >= 44, "to-do action targets under 44px");
+      // First attempt fails (refused) while focused: card stays visible with role="alert" and focus lands on Retry (never document.body).
+      doneBtn()!.focus();
+      doneBtn()!.click();
+      const retryBtn = () => todoCard()?.querySelector<HTMLButtonElement>(`[data-waiting-todo-retry="${f.todoId}"]`) ?? null;
+      await wait(() => shown(retryBtn()) && shown(todoCard()?.querySelector('[role="alert"]')), "failed Mark done keeps to-do card visible with Retry");
+      check(document.activeElement === retryBtn(), "failed Mark done must focus Retry on the same card, got " + (document.activeElement?.tagName ?? "null"));
+      // Retry commits state=done, removes card, shows visible Done banner, updates count to 0, and keeps focus inside panel.
+      retryBtn()!.click();
+      await wait(() => !todoCard() && shown(panel()?.querySelector("[data-waiting-status]")) &&
+        panel()?.querySelector("[data-waiting-status]")?.textContent === "Done" && count() === "0",
+        "Retry completes to-do, displays Done banner, and updates count to 0");
+      check(document.activeElement !== document.body && Boolean(panel()?.contains(document.activeElement)),
+        "after completion, focus must remain inside panel rather than document.body, got " + (document.activeElement?.tagName ?? "null"));
+      if (!f.phone) {
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        await wait(() => Boolean(panel()?.hidden) && document.activeElement === control(),
+          "Escape closes desktop column after to-do completion and returns focus to opener");
+      }
+      check(f.todoWrites.length === 2 && f.todoWrites[1].state === "done" && f.todoWrites[1].base_version === 3,
+        "unexpected todo_set_state calls: " + JSON.stringify(f.todoWrites));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -379,7 +567,11 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     for (const scenario of scenarios) {
       // A phone (390 x 844) draws the control in the shell's top bar; a desktop (1280 x 800) in the workspace header.
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
-      const channelParam = (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue")) ? "&c=general" : "";
+      const channelParam = scenario.startsWith("todos-21-")
+        ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-"))
+          ? "&c=general"
+          : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa" + channelParam + "&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-waiting-observation="([^"]*)"/)?.[1];
@@ -407,5 +599,10 @@ test("Waiting on you: an uncounted workspace makes the count a minimum, never ze
 
 test("Waiting on you: pages past 50 and 100 choice asks and keeps unpaged truncated queues incomplete", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["batch-51-desktop", "batch-101-desktop", "truncated-queue-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: assigned to-dos paginate past 20, scope to channel-origin vs workspace-only, and keep keyboard focus on failure and completion", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["todos-desktop", "todos-phone", "todos-21-channels-desktop", "todos-truncated-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

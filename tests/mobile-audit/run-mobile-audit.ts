@@ -494,6 +494,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.chat.waiting-panel": [{ name: "waiting-panel", rows: "[data-waiting-panel]:not([hidden]) [data-waiting-card]",
     prefer: "[data-waiting-card]:first-child", require: ["[data-waiting-card]:first-child"], max: 1, focus: true,
     focusTarget: ".hm-decision [data-decision-option]" }],
+  "app.chat.waiting-panel.todos": [{ name: "waiting-panel-todos", rows: "[data-waiting-panel]:not([hidden]) [data-waiting-todo]",
+    prefer: '[data-waiting-todo="{todo.assigned}"]', require: ['[data-waiting-todo="{todo.assigned}"]'], max: 1, focus: true,
+    focusTarget: "[data-waiting-todo-done]" }],
   /* Typed Something else text survives a real feed rebuild: its field is focused, a note in this channel makes the app's
      own poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while
      the card's Done is shown and enabled, which it is only while the draft still holds the typed text. Last on the page,

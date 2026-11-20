@@ -1007,6 +1007,11 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         const value = offered.body.value as { todo_id?: string; offer?: { decider_user_id?: string } | null } | undefined;
         if (ok("todo_create offer", offered) && value?.todo_id && value.offer?.decider_user_id === owner.id) {
           ids["todo.offer"] = value.todo_id;
+          // Also seed one open to-do assigned directly to the viewer so Waiting on you PR 2 captures both assigned (Mark done + Open) and request (Open) cards without touching the main workspace.
+          const assigned = await toolAs(owner.token, offerWorkspace, "todo_create", { title: "Drop off the spare boiler key", due_on: "2026-11-22",
+            assign: { to: { kind: "user", id: owner.id }, start: "queue", gate: { kind: "none" } } });
+          const assignedVal = assigned.body.value as { todo_id?: string } | undefined;
+          if (ok("todo_create assigned", assigned) && assignedVal?.todo_id) ids["todo.assigned"] = assignedVal.todo_id;
           // The offer's notice and the member's note start already seen by the viewer, as in the main workspace.
           await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
             SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
