@@ -16,6 +16,7 @@ struct DirectoryView: View {
     @SwiftUI.State private var opened: ThreadRoute?
     @SwiftUI.State private var selected: ThreadRoute?
 
+
     var body: some View {
         Group {
             switch state {
@@ -38,6 +39,11 @@ struct DirectoryView: View {
             return ($0.last_message_at ?? "") > ($1.last_message_at ?? "")
         }
         return List {
+            Section("Workspace") {
+                NavigationLink(value: SharedObjectsRoute()) {
+                    Label("Lists & docs", systemImage: "list.bullet.rectangle")
+                }
+            }
             Section("Channels") {
                 ForEach(channels) { row in link(row) }
                 NavigationLink("All channels", value: ChannelDirectoryRoute())
@@ -47,6 +53,9 @@ struct DirectoryView: View {
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
+         .navigationDestination(for: SharedObjectsRoute.self) { _ in
+             SharedObjectsListView(api: api, workspace: workspace)
+         }
          .navigationDestination(for: ChannelDirectoryRoute.self) { _ in
              List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
                  VStack(alignment: .leading) {
@@ -89,6 +98,10 @@ struct DirectoryView: View {
                                        let id = labels[MemberRef(kind: member.kind, id: member.id)] else { return nil }
                                  return member.contact.name + " · " + id
                              }, waitingChannelID: row.channel_id).id(row.id)
+                     .toolbar {
+                         MembersButton(api: api, workspace: workspace.id, row: row,
+                                       draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { state = .ready($0) }
+                     }
              } else { ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left") }
     }
 

@@ -64,10 +64,30 @@ test("read-only, elevated, owner and sample action gates are distinct", () => {
   data.sample = true; for (const action of ["new-key","remove-agent","withdraw","connected-apps","allow"]) assert.equal(peopleDialogCanAct(data, action, value.id), false);
   assert.equal(peopleDialogCanAct(data, "cancel-invite", "invite"), false);
 });
-test("confirm consequences distinguish permanent identity removal, key timing and reversible access", () => {
-  const removed = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true });
-  assert.deepEqual(removed.stops, ["Muse will lose access to this space. Its identity and every connection will end.", "This cannot be undone."]);
-  assert.deepEqual(removed.stays, ["Its history stays as “Muse (removed)”.", "Its owner can connect a new agent with the same name."]);
+test("confirm consequences distinguish workspace-only hosted removal, local workspace vs permanent removal, unknown scope, key timing and reversible access", () => {
+  const hostedRemoved = peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true, workspaceName: "Herb garden" });
+  assert.equal(hostedRemoved.title, "Remove Muse from Herb garden?");
+  assert.equal(hostedRemoved.button, "Remove from workspace");
+  assert.deepEqual(hostedRemoved.stops, ["It loses access to this workspace immediately."]);
+  assert.deepEqual(hostedRemoved.stays, ["Its history stays as “Muse (removed)”. Its app connection and other workspaces stay, and its owner can add it back here."]);
+  assert.equal(peopleConfirmationCopy("remove-agent", { name: "Muse", hosted: true }).title, "Remove Muse?");
+  const localWorkspace = peopleConfirmationCopy("remove-agent", { name: "Sprout", hosted: false, workspaceName: "Herb garden", removalScope: "workspace" });
+  assert.equal(localWorkspace.title, "Remove Sprout from Herb garden?");
+  assert.equal(localWorkspace.button, "Remove from workspace");
+  assert.deepEqual(localWorkspace.stops, ["It loses access to this workspace immediately."]);
+  assert.deepEqual(localWorkspace.stays, ["Its history stays as “Sprout (removed)”. Its key and other workspaces stay, and its owner can add it back here."]);
+  const localPermanent = peopleConfirmationCopy("remove-agent", { name: "Sprout", hosted: false, workspaceName: "Herb garden", removalScope: "permanent" });
+  assert.equal(localPermanent.title, "Remove Sprout?");
+  assert.equal(localPermanent.button, "Permanently remove agent");
+  assert.deepEqual(localPermanent.stops, [
+    "Access ends immediately in every workspace where it is connected.",
+    "Its identity, keys, and connections end permanently. This cannot be undone.",
+  ]);
+  assert.deepEqual(localPermanent.stays, ["Its history stays as “Sprout (removed)”."]);
+  const localFailed = peopleConfirmationCopy("remove-agent", { name: "Sprout", hosted: false, workspaceName: "Herb garden", removalScope: "failed" });
+  assert.equal(localFailed.title, "Remove Sprout?");
+  assert.equal(localFailed.button, "");
+  assert.match(localFailed.error ?? "", /Could not check/);
   assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "This key and its renewals stop immediately for new requests, in any workspace where it is used.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei", workspaceName: "Herb garden" }).stays[0], "Workspace history stays. They keep their other memberships.");
@@ -208,9 +228,14 @@ test("withdraw copy names the agent and workspace and keeps hosted and local con
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse", workspaceName: "   " }).title, "Withdraw Muse’s Lists & docs access?");
 });
 
-test('local workspace removal is scoped and only an owner can disconnect the reusable local key',()=>{
-  const copy=peopleConfirmationCopy('remove-agent',{name:'Local',hosted:false});
-  assert.deepEqual(copy.stops,['Local will lose access to this workspace immediately.']);
+test('local workspace removal requires server scope and only an owner can disconnect the reusable local key',()=>{
+  const wsCopy=peopleConfirmationCopy('remove-agent',{name:'Local',hosted:false,workspaceName:'Home',removalScope:'workspace'});
+  assert.equal(wsCopy.title,'Remove Local from Home?');
+  assert.equal(wsCopy.button,'Remove from workspace');
+  assert.deepEqual(wsCopy.stops,['It loses access to this workspace immediately.']);
+  const permCopy=peopleConfirmationCopy('remove-agent',{name:'Local',hosted:false,workspaceName:'Home',removalScope:'permanent'});
+  assert.equal(permCopy.title,'Remove Local?');
+  assert.equal(permCopy.button,'Permanently remove agent');
   const data=model();data.agents[0].liveKey=true;data.agents[0].mayManage=true;data.agents[0].hosted=false;data.agents[0].own=false;
   assert.equal(peopleDialogCanAct(data,'remove-agent',data.agents[0].id),true);
   assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);

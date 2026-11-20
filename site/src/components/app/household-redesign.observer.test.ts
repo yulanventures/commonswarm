@@ -1453,6 +1453,7 @@ test("turn-off-key pins the opened key, reuses one command id per question, canc
       reloads.push({ wsId, id, receipt, action });
     },
     peopleDialogFocusTarget: () => opener,
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1580,6 +1581,7 @@ test("remove-person confirmation names the workspace, reuses one command ID, and
       reloads.push({ wsId, id, receipt, action });
     },
     peopleDialogFocusTarget: () => opener,
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1696,6 +1698,8 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
     revokeAgentJoinCredential: async (_s: any, commandId: string, wsId: string, id: string) => { sent.push({ kind: "code", commandId, wsId, id }); if (lose) throw new Error("lost"); },
     reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => { reloads.push({ wsId, id, receipt, action }); },
     peopleDialogFocusTarget: () => null,
+    uncertainAgentRemovals: new Set<string>(),
+    confirmScopeGeneration: 0,
   };
   const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
 
@@ -1782,4 +1786,507 @@ test("cancel-invite confirmation identifies each invite kind, keeps Go back focu
   assert.equal(sent.length, 2);
   assert.equal(sent[1].kind, "code");
   assert.equal(sent[1].id, idB);
+});
+
+test("remove-agent confirmation distinguishes hosted workspace-only vs local permanent-origin removal, keeps Turn off key instead reachable where applicable, and reuses one command ID", async () => {
+  const { peopleDialogCanAct, showPeopleConfirmation } = await import("../../lib/people-dialog-view.ts");
+  const { peopleInviteDisplayDetail } = await import("../../lib/people-invites.ts");
+  const { doc } = approvalDom();
+  const focused: any[] = [];
+  const makeDialog = () => {
+    const dialog: any = doc.createElement("dialog");
+    dialog.open = false;
+    dialog.ownerDocument = doc;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.closest = () => null;
+    dialog.toggleAttribute = (name: string, force?: boolean) => { if (force) dialog.attributes[name] = ""; else delete dialog.attributes[name]; };
+    return dialog;
+  };
+  const origCreate = doc.createElement;
+  doc.createElement = (tag: string) => {
+    const el: any = origCreate(tag);
+    el.focus = () => { focused.push(el); };
+    el.closest = () => null;
+    el.isConnected = true;
+    el.getClientRects = () => [{}];
+    return el;
+  };
+  doc.querySelector = () => null;
+  doc.body = doc.createElement("body");
+  const dialog = makeDialog();
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const workspaceName = "Rivera household & studio";
+  const viewerId = "22222222-2222-4222-8222-222222222222";
+  const otherOwnerId = "22222222-2222-4222-8222-222222222229";
+  const localId = "33333333-3333-4333-8333-333333333331";
+  const foreignLocalId = "33333333-3333-4333-8333-333333333332";
+  const hostedId = "33333333-3333-4333-8333-333333333333";
+  const grantId = "44444444-4444-4444-8444-444444444441";
+  const tokenId = "55555555-5555-4555-8555-555555555551";
+
+  let ids = 0, lose = false;
+  const removals: any[] = [], keyRevokes: any[] = [], reloads: any[] = [];
+  const makeLiveAgents = () => ([
+    { principalId: localId, ownerUserId: viewerId, name: "Sprout", transport: "local", work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } } },
+    { principalId: foreignLocalId, ownerUserId: otherOwnerId, name: "Peer", transport: "local", work: { facts: { transport: "local", renewal_grant_id: grantId, token_id: tokenId } } },
+    { principalId: hostedId, ownerUserId: viewerId, name: "Muse", transport: "hosted_mcp" },
+  ]);
+  const ctx: any = {
+    session: { user: { id: viewerId } },
+    activeWorkspaceId: workspaceId,
+    workspaces: [{ id: workspaceId, name: workspaceName }],
+    members: [],
+    agents: makeLiveAgents(),
+    accessStatuses: [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }],
+    catchUpData: [], removedAgents: new Map(), removedAgentOwners: new Map(),
+    requestVersion: 0, catchUpGeneration: 0, railOverviewGeneration: 0, homeWorkspaceRead: 0, livePromptPrincipalId: "",
+    renderRoster: () => {}, renderHomeSide: () => {}, renderHomeObjectPane: () => {}, renderMentionPicker: () => {},
+    peopleDialogModel: () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: true,
+      })),
+    }),
+    peopleDialogCanAct, homeConnectionAccess, homeConnectionTokenMatches, showPeopleConfirmation, peopleInviteDisplayDetail,
+    one: (sel: string) => sel === "[data-people-confirm]" ? dialog : null,
+    uuid: () => `cmd-${++ids}`,
+    readableError: (error: Error) => error.message,
+    revokeAgentPrincipal: async (_s: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ commandId, wsId, id });
+      if (lose) throw new Error("lost");
+    },
+    revokeAgentToken: async (_s: any, commandId: string, wsId: string, tok: string) => {
+      keyRevokes.push({ commandId, wsId, tok });
+    },
+    roster: async () => ctx.serverRoster,
+    memberRoster: async () => ({ names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers }),
+    serverRoster: makeLiveAgents(),
+    serverMembers: [{ userId: viewerId, name: "Ana Rivera", role: "owner" }],
+    reloadPeopleDialog: async (wsId: string, id: string, receipt: string, action: string) => {
+      reloads.push({ wsId, id, receipt, action });
+    },
+    peopleDialogFocusTarget: () => null,
+    uncertainAgentRemovals: new Set<string>(),
+    confirmedRemovalScopes: new Map<string, "workspace" | "permanent">(),
+    confirmScopeGeneration: 0,
+    readAgentRemovalScope: async () => ctx.scopeAnswer,
+    scopeAnswer: "permanent" as "workspace" | "permanent" | null,
+  };
+  const actions = execute(`${section(script, "const peopleDialogAction = async", "/** Open above the current view")}; ({ peopleDialogAction, confirmPeopleDialogAction });`, ctx);
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  // 1. Hosted agent: workspace-only heading, 1 stop, quiet history/continuity note, no dead key alternative, Escape returns to opener with 0 removals.
+  const hostedOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Muse from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 1);
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent,
+    "Its history stays as “Muse (removed)”. Its app connection and other workspaces stay, and its owner can add it back here.");
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), hostedOpener);
+  assert.equal(removals.length, 0);
+
+  // 2. Local agent scope check failure -> Go back focused + Retry offered, NO Remove button enabled; Retry resolves to workspace-only or permanent.
+  const localOpener: any = doc.createElement("button");
+  let failScope = true;
+  ctx.readAgentRemovalScope = async () => { if (failScope) throw new Error("offline"); return ctx.scopeAnswer; };
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  assert.equal(dialog.dataset.confirmReady, "false", "loading state holds off Remove");
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back");
+  await flush();
+  assert.equal(dialog.dataset.confirmReady, "true");
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back,Retry");
+  const scopeError = dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-error");
+  assert.ok(scopeError && scopeError.getAttribute("role") === "alert", "failed-read explanation uses normal-ink pd-confirm-error with role=alert");
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  assert.equal(removals.length, 0);
+
+  // Retry succeeds with workspace-only scope (added workspace): names workspace, labels Remove from workspace, omits Turn off key instead.
+  failScope = false; ctx.scopeAnswer = "workspace";
+  dialog.querySelectorAll("button").find((b: any) => b.dataset?.confirmRetry !== undefined).click();
+  await flush();
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, `Remove Sprout from ${workspaceName}?`);
+  assert.equal(dialog.querySelectorAll("button").map((b: any) => b.textContent).join(","), "Go back,Remove from workspace");
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), localOpener);
+
+  // 3. Own local agent with permanent scope + live key: states access ends in every workspace, labels Permanently remove agent,
+  //    and Turn off key instead opens the key confirmation WITHOUT removing the agent.
+  ctx.scopeAnswer = "permanent";
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  await flush();
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Remove Sprout?");
+  assert.equal(dialog.querySelectorAll("li").filter((li: any) => li.className === "stop").length, 2);
+  assert.equal(dialog.querySelectorAll("li")[0]?.children?.[1]?.textContent, "Access ends immediately in every workspace where it is connected.");
+  assert.equal(dialog.querySelectorAll("p").find((p: any) => p.className === "pd-confirm-note")?.textContent, "Its history stays as “Sprout (removed)”.");
+  assert.ok(dialog.querySelectorAll("button").some((b: any) => b.textContent === "Permanently remove agent"));
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  const insteadBtn = dialog.querySelectorAll("button").find((b: any) => b.dataset?.turnOffKeyInstead !== undefined);
+  assert.ok(insteadBtn, "Turn off key instead is reachable for own local agent facing permanent retirement");
+  insteadBtn.click();
+  assert.equal(removals.length, 0, "switching to Turn off key instead never removes the agent");
+  assert.equal(keyRevokes.length, 0, "switching to Turn off key instead does not revoke a key until confirmed");
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, "Turn off Sprout’s key?");
+  assert.equal(focused.at(-1)?.textContent, "Go back");
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(dialog.open, false);
+  assert.equal(focused.at(-1), localOpener, "Escape from the switched key dialog still returns to the original opener");
+  assert.equal(removals.length, 0);
+  assert.equal(keyRevokes.length, 0);
+
+  // 4. Another member's local agent (permanent scope): admin cannot turn off their local key, so Turn off key instead is omitted.
+  const peerOpener: any = doc.createElement("button");
+  actions.confirmPeopleDialogAction("remove-agent", foreignLocalId, peerOpener);
+  await flush();
+  assert.equal(dialog.querySelectorAll("button").some((b: any) => b.dataset?.turnOffKeyInstead !== undefined), false);
+  dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+
+  // 5. Confirmed hosted removal + lost-answer retry (not yet committed) reuses one command ID and names the workspace in the receipt.
+  actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener);
+  const confirmBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+  lose = true;
+  await confirmBtn.events.get("click")?.();
+  assert.equal(dialog.open, true);
+  assert.equal(removals.length, 1);
+  assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /unknown/i);
+  lose = false;
+  await confirmBtn.events.get("click")?.();
+  assert.equal(dialog.open, false);
+  assert.equal(removals.length, 2);
+  assert.equal(removals[0].commandId, removals[1].commandId, "retry reuses one command ID");
+  assert.equal(reloads[0].receipt, `Muse removed from ${workspaceName}. Its history stays as “Muse (removed)”.`);
+
+  // 6. Secondary-workspace lost-reply witness (HezSec C1): first call commits removal once and loses its reply;
+  //    retry with the same command ID hits 409 command_id_conflict (or 403) because membership is already revoked.
+  //    While roster read fails or is unauthorized, outcome stays uncertain (never "did not change anything" / "HTTP 409")
+  //    with the same command ID; once an authorized roster read settles the removal, the dialog completes and removal ran once.
+  for (const [label, retryError, targetId, transport, btnLabel] of [
+    ["hosted 409 conflict", Object.assign(new Error("Agent removal failed (HTTP 409). CommonSwarm did not confirm a change."), { status: 409, code: "command_id_conflict", uncertain: true }), hostedId, "hosted_mcp", "Remove from workspace"],
+    ["local added-workspace 403", Object.assign(new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."), { status: 403, code: "forbidden" }), localId, "local", "Remove from workspace"],
+  ] as const) {
+    ctx.agents = makeLiveAgents();
+    ctx.serverRoster = makeLiveAgents();
+    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+    ctx.scopeAnswer = "workspace";
+    removals.length = 0; reloads.length = 0;
+    let committedCount = 0;
+    let rosterMode: "fail" | "stale-agent" | "settled" = "fail";
+    ctx.roster = async () => {
+      if (rosterMode === "fail") throw new Error("network down");
+      if (rosterMode === "stale-agent") return makeLiveAgents();
+      return ctx.serverRoster;
+    };
+    ctx.memberRoster = async () => {
+      if (rosterMode === "fail") throw new Error("network down");
+      return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
+    };
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
+      if (committedCount === 0) {
+        // Server commits the secondary-workspace membership removal ONCE, then reply is lost.
+        committedCount += 1;
+        ctx.serverRoster = ctx.serverRoster.filter((entry: any) => entry.principalId !== id);
+        throw new Error("CommonSwarm lost the removal result.");
+      }
+      // Retry reaches the server after membership is revoked and returns 409 command_id_conflict or 403.
+      throw retryError;
+    };
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", targetId, opener);
+    await flush();
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === btnLabel);
+    // Attempt 1: server commits once, reply lost, roster read fails -> stays open with uncertain message.
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, true, `${label}: stays open while outcome is uncertain`);
+    assert.equal(committedCount, 1, `${label}: server committed once`);
+    let alertText = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+    assert.match(alertText, /unknown/i, `${label}: reports uncertain outcome`);
+    assert.doesNotMatch(alertText, /did not change anything|HTTP 409/i, `${label}: never claims nothing changed`);
+
+    // Attempt 2: viewer is still an authorized owner, but roster read has not yet dropped the agent -> retries same command ID;
+    // server replies with 409/403 -> still preserves uncertain outcome and never claims "did not change anything".
+    rosterMode = "stale-agent";
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, true, `${label}: stale roster read cannot settle removal`);
+    assert.equal(removals.length, 2, `${label}: retried once with original command ID`);
+    assert.equal(removals[0].commandId, removals[1].commandId, `${label}: kept original command ID across uncertain retry`);
+    assert.equal(removals[1].callerSession.user.id, viewerId, `${label}: retry passes pinned session`);
+    assert.equal(committedCount, 1, `${label}: removal still happened only once`);
+    alertText = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+    assert.match(alertText, /unknown/i, `${label}: preserves uncertain outcome after post-commit 409/403`);
+    assert.doesNotMatch(alertText, /did not change anything|HTTP 409/i, `${label}: suppresses misleading 403/409 after uncertain attempt`);
+
+    // Attempt 3: authorized roster read now succeeds and confirms agent is gone -> settles cleanly with zero extra sends.
+    rosterMode = "settled";
+    await btn.events.get("click")?.();
+    assert.equal(dialog.open, false, `${label}: authorized roster read settles removal and closes dialog`);
+    assert.equal(removals.length, 2, `${label}: settled from roster read without sending another command`);
+    assert.equal(committedCount, 1, `${label}: removal happened exactly once`);
+    assert.equal(reloads.length, 1, `${label}: reloaded dialog with removal receipt`);
+    assert.match(reloads[0].receipt, new RegExp(`removed from ${workspaceName}`));
+  }
+
+  // 7. Retry after uncertain removal aborts with 0 sends when account, workspace, live question, row, authority,
+  //    or a fresh membership/role refusal changes during checkRemovalRead(), even while cached UI still shows admin.
+  for (const kind of ["account-switch", "workspace-switch", "authority-lost", "row-removed", "dialog-replaced", "fresh-demotion", "fresh-no-membership", "fresh-403"] as const) {
+    ctx.session = { user: { id: viewerId } };
+    ctx.activeWorkspaceId = workspaceId;
+    ctx.agents = makeLiveAgents();
+    ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+    ctx.serverRoster = makeLiveAgents();
+    ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "admin" }];
+    let mayManageNow = true;
+    ctx.peopleDialogModel = () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: mayManageNow,
+      })),
+    });
+    const isFreshCase = kind === "fresh-demotion" || kind === "fresh-no-membership" || kind === "fresh-403";
+    const targetForCase = isFreshCase ? foreignLocalId : hostedId;
+    ctx.readAgentRemovalScope = async () => "workspace";
+    removals.length = 0; reloads.length = 0;
+    let firstCall = true;
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
+      if (firstCall) { firstCall = false; throw new Error("lost"); }
+    };
+    ctx.roster = async () => { throw new Error("offline"); };
+    ctx.memberRoster = async () => { throw new Error("offline"); };
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", targetForCase, opener);
+    await flush();
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+    // Attempt 1 leaves questionId in uncertainAgentRemovals.
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, 1, `${kind}: initial uncertain send recorded`);
+    removals.length = 0;
+
+    // Attempt 2: mutate context or return a fresh refusal from memberRoster() while cached UI still shows admin.
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    ctx.roster = async () => {
+      await readGate;
+      if (kind === "fresh-demotion") throw new Error("roster offline");
+      return ctx.serverRoster;
+    };
+    ctx.memberRoster = async () => {
+      await readGate;
+      if (kind === "fresh-403") throw Object.assign(new Error("Forbidden"), { status: 403, code: "forbidden" });
+      if (kind === "fresh-no-membership") return { names: new Map(), members: [] };
+      if (kind === "fresh-demotion") return { names: new Map([[viewerId, "Ana Rivera"]]), members: [{ userId: viewerId, name: "Ana Rivera", role: "member" }] };
+      return { names: new Map(ctx.serverMembers.map((m: any) => [m.userId, m.name])), members: ctx.serverMembers };
+    };
+    const retryPromise = btn.events.get("click")?.();
+    if (kind === "account-switch") ctx.session = { user: { id: otherOwnerId } };
+    else if (kind === "workspace-switch") ctx.activeWorkspaceId = "99999999-9999-4999-8999-999999999999";
+    else if (kind === "authority-lost") mayManageNow = false;
+    else if (kind === "row-removed") ctx.agents = ctx.agents.filter((a: any) => a.principalId !== targetForCase);
+    else if (kind === "dialog-replaced") actions.confirmPeopleDialogAction("turn-off-key", localId, opener);
+    releaseRead();
+    await retryPromise;
+    assert.equal(removals.length, 0, `${kind}: must send 0 removal commands after context changed or fresh refusal`);
+    if (isFreshCase) {
+      assert.equal(mayManageNow, true, `${kind}: cached UI still showed admin, yet fresh refusal blocked the retry`);
+      assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /no longer available/i);
+    }
+  }
+
+  // 8. C3: Late readAgentRemovalScope response cannot overwrite a later turn-off-key, hosted remove-agent,
+  //    remove-person, cancel-invite, or closed-and-reopened withdraw confirmation.
+  ctx.session = { user: { id: viewerId } };
+  ctx.activeWorkspaceId = workspaceId;
+  ctx.agents = makeLiveAgents();
+  ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+  const peerMemberId = "66666666-6666-4666-8666-666666666666";
+  const pendingInviteId = "77777777-7777-4777-8777-777777777777";
+  ctx.peopleDialogModel = () => ({
+    sample: false, workspaceName,
+    people: [{ id: peerMemberId, name: "Mei Lin", role: "member", own: false, mayRemove: true }],
+    invites: [{ id: pendingInviteId, kind: "person", name: "mei@example.test", workspaceId, detail: "Sent today", mayCancel: true }],
+    agents: ctx.agents.map((a: any) => ({
+      id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+      liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+      own: a.ownerUserId === viewerId, mayManage: true,
+    })),
+  });
+  for (const [label, openNext, expectedTitle] of [
+    ["turn-off-key", () => actions.confirmPeopleDialogAction("turn-off-key", localId, localOpener), "Turn off Sprout’s key?"],
+    ["hosted remove-agent", () => actions.confirmPeopleDialogAction("remove-agent", hostedId, hostedOpener), `Remove Muse from ${workspaceName}?`],
+    ["remove-person", () => actions.confirmPeopleDialogAction("remove-person", peerMemberId, localOpener), `Remove Mei Lin from ${workspaceName}?`],
+    ["cancel-invite", () => actions.confirmPeopleDialogAction("cancel-invite", pendingInviteId, localOpener), "Cancel the invitation for mei@example.test?"],
+    ["close then reopen withdraw", () => {
+      dialog.oncancel({ preventDefault() {}, stopPropagation() {} });
+      showPeopleConfirmation(dialog, "withdraw", { name: "Muse", hosted: true, workspaceName }, hostedOpener, async () => {}, (e: any) => e.message);
+    }, `Withdraw Muse’s Lists & docs access in ${workspaceName}?`],
+  ] as const) {
+    let resolveLate!: (scope: "workspace" | "permanent" | null) => void;
+    ctx.readAgentRemovalScope = () => new Promise((resolve) => { resolveLate = resolve; });
+    actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+    assert.equal(dialog.dataset.confirmReady, "false", `${label}: starts in loading state`);
+    openNext();
+    assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, expectedTitle, `${label}: opens replacement dialog`);
+    resolveLate("permanent");
+    await flush();
+    assert.equal(dialog.querySelectorAll("h2")[0]?.textContent, expectedTitle, `${label}: held local scope reply must not overwrite dialog`);
+  }
+
+  // 9. C4: Permanent local retirement is NEVER settled from workspace-roster absence alone;
+  //    only an authoritative revoke_agent_principal receipt may claim "permanently removed".
+  ctx.session = { user: { id: viewerId } };
+  ctx.activeWorkspaceId = workspaceId;
+  ctx.agents = makeLiveAgents();
+  ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+  // Roster ALREADY omits localId while viewer is still a live member.
+  ctx.serverRoster = makeLiveAgents().filter((a: any) => a.principalId !== localId);
+  ctx.serverMembers = [{ userId: viewerId, name: "Ana Rivera", role: "owner" }];
+  ctx.roster = async () => ctx.serverRoster;
+  ctx.memberRoster = async () => ({ names: new Map([[viewerId, "Ana Rivera"]]), members: ctx.serverMembers });
+  ctx.readAgentRemovalScope = async () => "permanent";
+  removals.length = 0; reloads.length = 0;
+  let permAttempt = 0;
+  ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+    removals.push({ callerSession, commandId, wsId, id });
+    permAttempt += 1;
+    if (permAttempt === 1) throw new Error("CommonSwarm lost the removal result.");
+    if (permAttempt === 2) throw Object.assign(new Error("Agent removal failed (HTTP 409)."), { status: 409, code: "command_id_conflict", uncertain: true });
+    // Attempt 3 returns authoritative server receipt.
+  };
+  actions.confirmPeopleDialogAction("remove-agent", localId, localOpener);
+  await flush();
+  const permBtn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Permanently remove agent");
+  assert.ok(permBtn, "permanent scope enables Permanently remove agent");
+  // Attempt 1: lost reply + agent absent from origin workspace roster (e.g., workspace-only removal while agent survives elsewhere)
+  // -> MUST NOT claim permanently removed; reports workspace absence plus permanent-removal uncertainty.
+  await permBtn.events.get("click")?.();
+  assert.equal(dialog.open, true, "C4: roster absence must not settle permanent retirement on lost reply");
+  assert.equal(reloads.length, 0, "C4: no permanent-removed receipt emitted without authoritative reply");
+  const c4Alert1 = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+  assert.match(c4Alert1, new RegExp(`no longer in ${workspaceName}`), "C4: reports workspace absence");
+  assert.match(c4Alert1, /permanent removal could not be confirmed/i, "C4: reports permanent-removal uncertainty");
+  assert.doesNotMatch(c4Alert1, /permanently removed/i, "C4: never claims permanent retirement from roster absence");
+  // Attempt 2: retry hits 409 while origin roster still omits agent -> still shows workspace absence + uncertainty, reuses command ID.
+  await permBtn.events.get("click")?.();
+  assert.equal(dialog.open, true, "C4: roster absence must not settle permanent retirement on uncertain retry");
+  assert.equal(removals.length, 2);
+  assert.equal(removals[0].commandId, removals[1].commandId);
+  assert.equal(reloads.length, 0);
+  const c4Alert2 = dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "";
+  assert.match(c4Alert2, /permanent removal could not be confirmed/i, "C4: keeps uncertainty explicit across 409 retry");
+  // Attempt 3 (positive control): authoritative revoke_agent_principal 200 receipt arrives -> closes and claims permanently removed.
+  await permBtn.events.get("click")?.();
+  assert.equal(dialog.open, false, "C4: authoritative receipt closes permanent removal dialog");
+  assert.equal(removals.length, 3);
+  assert.equal(removals[0].commandId, removals[2].commandId);
+  assert.equal(reloads.length, 1);
+  assert.equal(reloads[0].receipt, "Sprout permanently removed. Its history stays as “Sprout (removed)”.");
+
+  // 10. Real roster() and memberRoster() transport witness (HezSec C2):
+  //     actual PostgREST 403 responses preserve HTTP status + code through BOTH live helpers and stop retry (0 sends)
+  //     while cached UI still shows admin; transient 503 failure control still allows retrying the same command ID.
+  const makeQuery = (reply: () => Promise<any>) => {
+    const chain: any = {
+      select: () => chain, eq: () => chain, is: () => chain, order: () => chain, range: () => reply(), limit: () => reply(),
+      then: (resolve: any, reject: any) => reply().then(resolve, reject),
+    };
+    return chain;
+  };
+  let agentPostgrestReply: () => Promise<any> = async () => ({ data: [], error: null, status: 200 });
+  let memberPostgrestReply: () => Promise<any> = async () => ({ data: [], error: null, status: 200 });
+  const realReaders = execute(
+    `${section(script, "const roster = async", "// Names and roles are already membership-gated")}; ({ roster, memberRoster });`,
+    {
+      client: () => ({
+        schema: () => ({
+          from: (table: string) => {
+            if (table === "agent_principals") return makeQuery(() => agentPostgrestReply());
+            if (table === "member_profiles") return makeQuery(() => memberPostgrestReply());
+            return makeQuery(async () => ({ data: [], error: null, status: 200 }));
+          },
+        }),
+      }),
+      NoDeployment: class extends Error {},
+      rosterAgentsFromRows: (rows: any[]) => rows.map((r) => ({
+        principalId: r.principal_id, name: r.name, model: r.model ?? null,
+        transport: r.transport, turnOnly: Boolean(r.turn_only), ownerUserId: r.owner_user_id,
+      })),
+      browserAgentPresenceRows: () => new Map(),
+    },
+  );
+  ctx.roster = realReaders.roster;
+  ctx.memberRoster = realReaders.memberRoster;
+  for (const [label, agentReply, memberReply, expectedSends] of [
+    [
+      "real memberRoster 403 stops retry",
+      async () => ({ data: null, error: { message: "upstream unavailable", code: "57014" }, status: 503 }),
+      async () => ({ data: null, error: { message: "permission denied for view member_profiles", code: "42501" }, status: 403 }),
+      0,
+    ],
+    [
+      "real roster 403 stops retry",
+      async () => ({ data: null, error: { message: "permission denied for view agent_principals", code: "42501" }, status: 403 }),
+      async () => ({ data: [{ user_id: viewerId, display_name: "Ana Rivera", role: "admin" }], error: null, status: 200 }),
+      0,
+    ],
+    [
+      "real 503 transient failure control still retries same command ID",
+      async () => ({ data: null, error: { message: "service unavailable", code: "57014" }, status: 503 }),
+      async () => ({ data: null, error: { message: "service unavailable", code: "57014" }, status: 503 }),
+      1,
+    ],
+  ] as const) {
+    ctx.session = { user: { id: viewerId } };
+    ctx.activeWorkspaceId = workspaceId;
+    ctx.agents = makeLiveAgents();
+    ctx.accessStatuses = [{ workspaceId, principalId: localId, ownerUserId: viewerId, grantId, tokenId }];
+    ctx.peopleDialogModel = () => ({
+      sample: false, workspaceName, people: [], invites: [],
+      agents: ctx.agents.map((a: any) => ({
+        id: a.principalId, name: a.name, hosted: a.transport === "hosted_mcp",
+        liveKey: a.principalId === localId || a.principalId === foreignLocalId,
+        own: a.ownerUserId === viewerId, mayManage: true,
+      })),
+    });
+    ctx.readAgentRemovalScope = async () => "workspace";
+    removals.length = 0; reloads.length = 0;
+    let firstAttempt = true;
+    ctx.revokeAgentPrincipal = async (callerSession: any, commandId: string, wsId: string, id: string) => {
+      removals.push({ callerSession, commandId, wsId, id });
+      if (firstAttempt) { firstAttempt = false; throw new Error("lost"); }
+    };
+    // Initial attempt fails while PostgREST is down (503) so questionId stays uncertain.
+    agentPostgrestReply = async () => ({ data: null, error: { message: "down", code: "57014" }, status: 503 });
+    memberPostgrestReply = async () => ({ data: null, error: { message: "down", code: "57014" }, status: 503 });
+    const opener: any = doc.createElement("button");
+    actions.confirmPeopleDialogAction("remove-agent", foreignLocalId, opener);
+    await flush();
+    const btn = dialog.querySelectorAll("button").find((b: any) => b.textContent === "Remove from workspace");
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, 1, `${label}: initial send recorded`);
+    const firstCommandId = removals[0].commandId;
+    removals.length = 0;
+
+    // Retry goes through the REAL roster() and memberRoster() helpers with PostgREST 403 / 503 replies.
+    agentPostgrestReply = agentReply;
+    memberPostgrestReply = memberReply;
+    await btn.events.get("click")?.();
+    assert.equal(removals.length, expectedSends, `${label}: expected ${expectedSends} retry send(s)`);
+    if (expectedSends === 1) {
+      assert.equal(removals[0].commandId, firstCommandId, `${label}: transient control reuses original command ID`);
+    } else {
+      assert.match(dialog.querySelectorAll("p").find((p: any) => p.attributes.role === "alert")?.textContent ?? "", /no longer available/i);
+    }
+  }
 });
