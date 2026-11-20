@@ -27,6 +27,8 @@ export interface ListenerChildSpec {
   pollInterval?: string;
   route?: "main";
   deferOver?: number;
+  wakeProfilePath?: string;
+  wakeHostSessionId?: string;
   nodeExecArgv?: string[];
 }
 
@@ -96,6 +98,12 @@ export function buildListenerChildArgs(spec: ListenerChildSpec): string[] {
       throw new Error(`an absolute ${flag} path is required when it is given; the listener starts no model`);
     }
   }
+  if ((spec.wakeProfilePath === undefined) !== (spec.wakeHostSessionId === undefined)) {
+    throw new Error("--wake-profile and --wake-host-session-id must be paired");
+  }
+  if (spec.wakeProfilePath !== undefined && !isNativeAbsolutePath(spec.wakeProfilePath)) {
+    throw new Error("an absolute --wake-profile path is required when it is given");
+  }
   return [
     ...listenerNodeExecArgv(spec.nodeExecArgv ?? []),
     spec.entrypoint,
@@ -133,6 +141,9 @@ export function buildListenerChildArgs(spec: ListenerChildSpec): string[] {
     ...(provider === "grok" && spec.effort ? ["--effort", spec.effort] : []),
     ...(spec.turnBudget ? ["--turn-budget", spec.turnBudget] : []),
     ...(spec.pollInterval ? ["--poll-interval", spec.pollInterval] : []),
+    ...(spec.wakeProfilePath && spec.wakeHostSessionId
+      ? ["--wake-profile", spec.wakeProfilePath, "--wake-host-session-id", spec.wakeHostSessionId]
+      : []),
     "--route",
     spec.route ?? "main",
   ];

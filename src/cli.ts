@@ -87,6 +87,14 @@ import {
   writeOnboardingOutput,
 } from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
+import {
+  findProfileReceiveBinding,
+  NativeWakeBridge,
+  resolveAuthorizedWakeBinding,
+  wakeRouteForBinding,
+  type NativeWakeRoute,
+} from "./cloud/native-wake.js";
+import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -748,6 +756,7 @@ export const KNOWN_FLAGS = new Set([
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
+  "wake-profile", "wake-host-session-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
   "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
@@ -5642,10 +5651,13 @@ async function runWhoami(args: Arguments): Promise<void> {
       conversationsSummary = unavailableWhoamiConversations();
     }
   }
+  let wakeRoute: NativeWakeRoute = "none";
+  let wakeVerified = false;
   let receiveCapability: {
     configured: boolean;
     requested_mode: "wake" | "turn" | null;
     effective_mode: "wake" | "turn" | "direct";
+    wake_route: NativeWakeRoute;
     turn_check: "verified" | "pending_host" | "instruction" | "none";
     wake_verified: boolean;
     channel_running: boolean;
@@ -5663,10 +5675,13 @@ async function runWhoami(args: Arguments): Promise<void> {
         args.expandedProfileHostSessionId,
         args.expandedProfileInputPath,
       );
+      wakeRoute = wakeRouteForBinding(binding);
+      wakeVerified = status.wake_verified;
       receiveCapability = {
         configured: binding !== null,
         requested_mode: status.requested_mode,
         effective_mode: status.effective_mode as "wake" | "turn",
+        wake_route: wakeRoute,
         turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
         wake_verified: status.wake_verified,
         channel_running: status.channel_running,
@@ -5677,6 +5692,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         configured: false,
         requested_mode: null,
         effective_mode: "turn",
+        wake_route: "none",
         turn_check: "instruction",
         wake_verified: false,
         channel_running: false,
@@ -5688,6 +5704,7 @@ async function runWhoami(args: Arguments): Promise<void> {
       configured: false,
       requested_mode: null,
       effective_mode: "direct",
+      wake_route: "none",
       turn_check: "none",
       wake_verified: false,
       channel_running: false,
@@ -5709,6 +5726,8 @@ async function runWhoami(args: Arguments): Promise<void> {
     owner_user_id: identity.owner_user_id,
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
+    wake_route: wakeRoute,
+    wake_verified: wakeVerified,
     renewal_grant: activeGrant,
     workspace: {
       workspace_id: identity.workspace_id,
@@ -5745,6 +5764,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         ? "Role: workspace lead (untagged channel messages route to you).\n"
         : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
+      `Wake route: ${wakeRoute}${wakeRoute !== "none" ? (wakeVerified ? " (verified)" : " (unverified)") : ""}.\n` +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"
         : `${describeRenewalGrant(output.renewal_grant).join("\n")}\n`),
@@ -8141,6 +8161,8 @@ async function runConfiguredListener(options: {
   pollMs?: number;
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
+  profilePath?: string;
+  hostSessionId?: string;
 }): Promise<ListenerStatus> {
   if (options.provider === "opencode" && options.effort) {
     throw new Error(
@@ -8417,6 +8439,35 @@ async function runConfiguredListener(options: {
   const routeMode = options.routeMode ?? "main";
   const deferOverChars = options.deferOverChars ?? null;
   const pendingMainQueue = new FilePendingMainQueue(paths.instanceDirectory);
+  let codexWakeBridge: NativeWakeBridge | null = null;
+  if (
+    options.provider === "codex" &&
+    options.profilePath !== undefined &&
+    options.hostSessionId !== undefined
+  ) {
+    const expectedSeat = {
+      workspaceId: options.workspaceId,
+      principalId: options.principalId,
+    };
+    const auth = await resolveAuthorizedWakeBinding({
+      profilePath: options.profilePath,
+      hostSessionId: options.hostSessionId,
+      expectedProvider: "codex",
+      expectedSeat,
+    });
+    if (auth.ok) {
+      codexWakeBridge = new NativeWakeBridge({
+        profilePath: options.profilePath,
+        hostSessionId: auth.binding.host_session_id,
+        cwd: auth.binding.cwd,
+        expectedProvider: "codex",
+        expectedSeat,
+        adapter: new CodexQueueAdapter({
+          ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
+        }),
+      });
+    }
+  }
   process.on("SIGINT", onProcessSignal);
   process.on("SIGTERM", onProcessSignal);
   try {
@@ -8508,6 +8559,11 @@ async function runConfiguredListener(options: {
         const instrumentedModel = activity.instrumentModel(
           await newModel(onCanaryAttempt, activity.events),
         );
+        const wakeBridgeTimer = codexWakeBridge === null
+          ? null
+          : setInterval(() => {
+            void codexWakeBridge.tick(signal).catch(() => undefined);
+          }, 1_000);
         try {
           return await runListenerRuntime({
             target: options.cloud,
@@ -8541,10 +8597,19 @@ async function runConfiguredListener(options: {
             deliveryHoldBudgetMs: turnBudgetMs,
             ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
             pendingMainQueue,
+            ...(codexWakeBridge === null
+              ? {}
+              : {
+                onMainArrival: () => {
+                  codexWakeBridge.notifyArrival();
+                  void codexWakeBridge.tick(signal).catch(() => undefined);
+                },
+              }),
             fetcher: boundFetch,
             signal: sessionManager === null ? signal : AbortSignal.any([signal, leaseAbort.signal]),
           });
         } finally {
+          if (wakeBridgeTimer !== null) clearInterval(wakeBridgeTimer);
           activity.close();
         }
       },
@@ -8688,6 +8753,10 @@ async function runListenStart(args: Arguments): Promise<void> {
         ? { codexExecutable: args.required("codex-executable") }
         : {}),
       ...(stateDirectory ? { stateDirectory } : {}),
+      ...(args.expandedProfilePath ? { profilePath: args.expandedProfilePath } : {}),
+      ...((args.expandedProfileHostSessionId ?? args.optional("host-session-id"))
+        ? { hostSessionId: args.expandedProfileHostSessionId ?? args.optional("host-session-id") }
+        : {}),
     });
   } else {
     const entrypoint = process.argv[1];
@@ -8721,6 +8790,7 @@ async function runListenStart(args: Arguments): Promise<void> {
      * an earlier run in this config-hash-keyed directory, whatever pid it carries. Taking it
      * after the spawn would race the child's own first write and could discard a real failure. */
     const startedAtFloorMs = Date.now();
+    const detachedWakeHostSessionId = args.expandedProfileHostSessionId ?? args.optional("host-session-id");
     const child = await spawnDetachedListener({
       spec: {
         entrypoint,
@@ -8734,6 +8804,12 @@ async function runListenStart(args: Arguments): Promise<void> {
         nodeExecArgv: process.execArgv,
         route: routing.routeMode,
         ...(stateDirectory ? { stateDirectory } : {}),
+        ...(args.expandedProfilePath && detachedWakeHostSessionId
+          ? {
+            wakeProfilePath: args.expandedProfilePath,
+            wakeHostSessionId: detachedWakeHostSessionId,
+          }
+          : {}),
         ...(args.optional("model") ? { model: args.required("model") } : {}),
         ...(args.optional("effort") ? { effort: args.required("effort") } : {}),
         ...(args.optional("turn-budget")
@@ -8882,6 +8958,8 @@ export const RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS = [
     "poll-interval",
     "route",
     "defer-over",
+    "wake-profile",
+    "wake-host-session-id",
     ...SESSION_CONTEXT_FLAGS,
   ] as const;
 
@@ -8907,6 +8985,14 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
   assertDurableListenerCredential(agent, principalId);
   const cwd = args.required("cwd");
   if (!isAbsolute(cwd)) throw new Error("--cwd must be an absolute path");
+  const wakeProfile = args.optional("wake-profile");
+  const wakeHostSessionId = args.optional("wake-host-session-id");
+  if ((wakeProfile === undefined) !== (wakeHostSessionId === undefined)) {
+    throw new Error("--wake-profile and --wake-host-session-id must be paired");
+  }
+  if (wakeProfile !== undefined && !isAbsolute(wakeProfile)) {
+    throw new Error("--wake-profile must be an absolute path");
+  }
   const status = await runConfiguredListener({
     cloud,
     workspaceId,
@@ -8934,6 +9020,9 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
       : {}),
     ...(listenerStateDirectory(args)
       ? { stateDirectory: listenerStateDirectory(args) }
+      : {}),
+    ...(wakeProfile && wakeHostSessionId
+      ? { profilePath: wakeProfile, hostSessionId: wakeHostSessionId }
       : {}),
   });
   if (status.state === "failed") {
@@ -12190,7 +12279,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalErrorMode: "onboarding",
   }),
 
-  "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
+  "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over", "wake-profile", "wake-host-session-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
   hook: group({
     check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id", "message-status"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>] [--message-status]"], errorMode: "hook-check" }),
     status: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message-status hook.", mutates: true, flags: ["principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook status --principal-id <uuid>"], errorMode: "hook-check" }),

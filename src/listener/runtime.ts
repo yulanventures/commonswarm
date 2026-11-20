@@ -434,6 +434,8 @@ export interface ListenerRuntimeOptions {
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
   pendingMainQueue?: Pick<FilePendingMainQueue, "enqueue"> & Partial<Pick<FilePendingMainQueue, "count">>;
+  /** Optional native-wake arrival hook (e.g., CodexQueueAdapter via NativeWakeBridge). */
+  onMainArrival?: (signal: SignalRecord) => Promise<void> | void;
   /**
    * Bound on one delivery's hold of the worker seat, measured from the moment
    * the claim was RESERVED (the journal's claimCreatedAt), which precedes the
@@ -1104,6 +1106,11 @@ export async function runListenerRuntime(
       droppedCount: queued.droppedCount,
       ts: eventTime(now),
     });
+    if (options.onMainArrival) {
+      try {
+        await options.onMainArrival(signal);
+      } catch { /* Native wake is best-effort and must never disrupt durable queueing. */ }
+    }
     const existing = await options.store.read(signal.id);
     if (existing !== null) {
       if (!sameEffectSignal(existing, signal)) {
