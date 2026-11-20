@@ -88,7 +88,6 @@ struct DefinitionsListView: View {
     let workspace: Workspace
 
     @StateObject private var store: DefinitionsListStore
-    @State private var showingCreate = false
     @State private var createdRoute: DefinitionDetailRoute?
 
     init(api: ConversationAPI, workspace: Workspace) {
@@ -131,6 +130,13 @@ struct DefinitionsListView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
+                    if let status = store.statusMessage {
+                        Section {
+                            Text(verbatim: status)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     if store.filteredDefinitions.isEmpty {
                         ContentUnavailableView.search(text: store.searchQuery)
                             .listRowBackground(Color.clear)
@@ -163,8 +169,7 @@ struct DefinitionsListView: View {
             if store.canEdit {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        store.clearCreateError()
-                        showingCreate = true
+                        store.openCreateSheet()
                     } label: {
                         Label("New definition", systemImage: "plus")
                     }
@@ -188,13 +193,14 @@ struct DefinitionsListView: View {
                 onChanged: { await store.load(api: definitionsAPI) }
             )
         }
-        .sheet(isPresented: $showingCreate) {
+        .sheet(isPresented: $store.showingCreateSheet) {
+            let pending = store.pendingCreate?.outcomeUnknown == true ? store.pendingCreate?.fields : nil
             DefinitionEditorSheet(
                 title: "New definition",
-                actionTitle: "Create",
-                initialTerm: "",
-                initialMeaning: "",
-                initialSource: "",
+                actionTitle: pending != nil ? "Retry" : "Create",
+                initialTerm: pending?.term ?? "",
+                initialMeaning: pending?.meaning ?? "",
+                initialSource: pending?.source ?? "",
                 isSaving: store.isCreating,
                 errorMessage: store.createError
             ) { term, meaning, source in
@@ -204,13 +210,15 @@ struct DefinitionsListView: View {
                     source: source,
                     api: definitionsAPI
                 ) {
-                    showingCreate = false
                     createdRoute = DefinitionDetailRoute(objectID: createdID)
                 }
             }
         }
         .task {
             await store.load(api: definitionsAPI)
+        }
+        .onDisappear {
+            store.retire()
         }
     }
 }
@@ -222,7 +230,6 @@ struct DefinitionDetailView: View {
     var onChanged: (() async -> Void)?
 
     @StateObject private var store: DefinitionDetailStore
-    @State private var showingEdit = false
     @Environment(\.colorScheme) private var colorScheme
 
     init(
@@ -335,41 +342,46 @@ struct DefinitionDetailView: View {
         .navigationTitle(store.detail?.current.term ?? "Definition")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if store.canEdit, store.detail != nil {
+            if store.canEdit {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Edit") {
-                        showingEdit = true
+                        store.beginEdit()
                     }
                     .disabled(store.isSaving)
                     .accessibilityIdentifier("definition-edit-button")
                 }
             }
         }
-        .sheet(isPresented: $showingEdit) {
-            if let current = store.detail?.current {
-                DefinitionEditorSheet(
-                    title: "Edit definition",
-                    actionTitle: "Save",
-                    initialTerm: current.term,
-                    initialMeaning: current.meaning,
-                    initialSource: current.source,
-                    isSaving: store.isSaving,
-                    errorMessage: store.errorMessage
-                ) { term, meaning, source in
-                    if await store.update(
-                        term: term,
-                        meaning: meaning,
-                        source: source,
-                        api: definitionsAPI
-                    ) {
-                        showingEdit = false
-                        await onChanged?()
-                    }
+        .sheet(item: $store.activeEditSession) { editSession in
+            let pending = store.pendingUpdate?.outcomeUnknown == true
+                && store.pendingUpdate?.baseRevision.token == editSession.baseRevision.token
+                ? store.pendingUpdate?.afterFields
+                : nil
+            DefinitionEditorSheet(
+                title: "Edit definition",
+                actionTitle: pending != nil ? "Retry" : "Save",
+                initialTerm: pending?.term ?? editSession.beforeFields.term,
+                initialMeaning: pending?.meaning ?? editSession.beforeFields.meaning,
+                initialSource: pending?.source ?? editSession.beforeFields.source,
+                isSaving: store.isSaving,
+                errorMessage: store.errorMessage
+            ) { term, meaning, source in
+                if await store.update(
+                    session: editSession,
+                    term: term,
+                    meaning: meaning,
+                    source: source,
+                    api: definitionsAPI
+                ) {
+                    await onChanged?()
                 }
             }
         }
         .task {
             await store.load(api: definitionsAPI)
+        }
+        .onDisappear {
+            store.retire()
         }
     }
 

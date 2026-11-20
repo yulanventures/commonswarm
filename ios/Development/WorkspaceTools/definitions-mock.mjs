@@ -90,11 +90,20 @@ seedDefinitions();
 
 let contentRole = "editor";
 let accessRefused = false;
+let edge403Mode = false;
+let edge401Mode = false;
+let edge404Mode = false;
 let consentNeeded = false;
 let unsupportedMode = false;
 let failNextWrite = false;
+let commitThen503NextWrite = false;
+let preReceiptRefusalOnce = null;
 let conflictNextUpdate = false;
 let staleNextCertify = false;
+let holdNextList = false;
+let heldListResolver = null;
+let writeMutations = 0;
+const receipts = new Map();
 const recordedCommands = [];
 
 let emailCodePending = false;
@@ -118,6 +127,18 @@ const server = createServer(async (req, res) => {
       accessRefused = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, accessRefused });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/edge-403") {
+      edge403Mode = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, edge403Mode });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/edge-401") {
+      edge401Mode = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, edge401Mode });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/edge-404") {
+      edge404Mode = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, edge404Mode });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/consent-needed") {
       consentNeeded = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, consentNeeded });
@@ -130,6 +151,14 @@ const server = createServer(async (req, res) => {
       failNextWrite = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/commit-then-503") {
+      commitThen503NextWrite = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/pre-receipt-refusal") {
+      preReceiptRefusalOnce = url.searchParams.get("reason") || "rate_limited";
+      return reply(200, { ok: true, preReceiptRefusalOnce });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/conflict-next-update") {
       conflictNextUpdate = true;
       return reply(200, { ok: true });
@@ -138,8 +167,26 @@ const server = createServer(async (req, res) => {
       staleNextCertify = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-next-list") {
+      holdNextList = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/list-held") {
+      return reply(200, { held: heldListResolver !== null });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-held-list") {
+      if (heldListResolver) {
+        const resolve = heldListResolver;
+        heldListResolver = null;
+        resolve();
+      }
+      return reply(200, { ok: true });
+    }
     if (req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, recordedCommands);
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/mutations") {
+      return reply(200, { count: writeMutations });
     }
 
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
@@ -210,6 +257,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
       const cmd = body.command;
+      // Production-shaped command-edge auth/membership/workspace errors BEFORE household handler
+      if (edge401Mode) return reply(401, { message: "JWT expired" });
+      if (edge403Mode) return reply(403, { error: "forbidden" });
+      if (edge404Mode) return reply(404, { error: "not_found" });
+
       if (cmd?.kind === "household_access") {
         if (accessRefused) return reply(403, { status: "refused", reason: "workspace_access_refused" });
         if (consentNeeded) return reply(200, { status: "refused", reason: "content_consent_required" });
@@ -219,12 +271,21 @@ const server = createServer(async (req, res) => {
 
       if (cmd?.kind === "household_definition_certify") {
         recordedCommands.push({ command_id: body.command_id, kind: cmd.kind, object_id: cmd.object_id, token: cmd.revision?.token });
+        // Pre-receipt refusal checks happen BEFORE receipt lookup (matches src/protocol/household-objects.ts:281-297)
+        if (preReceiptRefusalOnce) {
+          const reason = preReceiptRefusalOnce;
+          preReceiptRefusalOnce = null;
+          return reply(403, { status: "refused", reason });
+        }
+        if (accessRefused) return reply(403, { status: "refused", reason: "workspace_access_refused" });
+        if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
+        if (receipts.has(body.command_id)) {
+          return reply(200, { ...receipts.get(body.command_id), replayed: true });
+        }
         if (failNextWrite) {
           failNextWrite = false;
           return reply(503, { error: "temporary_unavailable" });
         }
-        if (accessRefused) return reply(403, { status: "refused", reason: "workspace_access_refused" });
-        if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
         const entry = definitions.get(cmd.object_id);
         if (!entry) return reply(404, { status: "refused", reason: "revision_not_found" });
         if (staleNextCertify || cmd.revision?.token !== entry.current.revision.token) {
@@ -239,7 +300,14 @@ const server = createServer(async (req, res) => {
           certified_by: me,
           certified_at: Date.now(),
         };
-        return reply(200, { status: "committed", object_id: entry.object_id, revision: entry.current.revision });
+        writeMutations += 1;
+        const committed = { status: "committed", object_id: entry.object_id, revision: entry.current.revision };
+        receipts.set(body.command_id, committed);
+        if (commitThen503NextWrite) {
+          commitThen503NextWrite = false;
+          return reply(503, { error: "gateway_timeout" });
+        }
+        return reply(200, committed);
       }
 
       if (cmd?.kind === "household_tool") {
@@ -266,11 +334,16 @@ const server = createServer(async (req, res) => {
                 }
               : null,
           }));
-          return reply(200, {
+          const payload = {
             status: "ok",
             definitions: slice,
             next_offset: offset + limit < sorted.length ? offset + limit : null,
-          });
+          };
+          if (holdNextList) {
+            holdNextList = false;
+            await new Promise((resolve) => { heldListResolver = resolve; });
+          }
+          return reply(200, payload);
         }
 
         if (cmd.tool === "definition_read") {
@@ -288,12 +361,20 @@ const server = createServer(async (req, res) => {
         if (cmd.tool === "definition_create") {
           const args = cmd.arguments;
           recordedCommands.push({ command_id: body.command_id, kind: "definition_create", object_id: args.object_id, request_id: args.request_id });
+          if (preReceiptRefusalOnce) {
+            const reason = preReceiptRefusalOnce;
+            preReceiptRefusalOnce = null;
+            return reply(403, { status: "refused", reason });
+          }
+          if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
+          if (args.request_id !== body.command_id) return reply(400, { status: "refused", reason: "request_id_mismatch" });
+          if (receipts.has(body.command_id)) {
+            return reply(200, { ...receipts.get(body.command_id), replayed: true });
+          }
           if (failNextWrite) {
             failNextWrite = false;
             return reply(503, { error: "temporary_unavailable" });
           }
-          if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
-          if (args.request_id !== body.command_id) return reply(400, { status: "refused", reason: "request_id_mismatch" });
           const termKey = String(args.term ?? "").trim().toLowerCase();
           for (const existing of definitions.values()) {
             if (existing.current.term.trim().toLowerCase() === termKey) {
@@ -314,22 +395,52 @@ const server = createServer(async (req, res) => {
             },
             certified: null,
           });
-          return reply(200, { status: "committed", object_id: args.object_id, revision: rev });
+          writeMutations += 1;
+          const committed = { status: "committed", object_id: args.object_id, revision: rev };
+          receipts.set(body.command_id, committed);
+          if (commitThen503NextWrite) {
+            commitThen503NextWrite = false;
+            return reply(503, { error: "gateway_timeout" });
+          }
+          return reply(200, committed);
         }
 
         if (cmd.tool === "definition_update") {
           const args = cmd.arguments;
-          recordedCommands.push({ command_id: body.command_id, kind: "definition_update", object_id: args.object_id, request_id: args.request_id });
+          recordedCommands.push({
+            command_id: body.command_id,
+            kind: "definition_update",
+            object_id: args.object_id,
+            request_id: args.request_id,
+            base_token: args.base?.token ?? null,
+          });
+          if (preReceiptRefusalOnce) {
+            const reason = preReceiptRefusalOnce;
+            preReceiptRefusalOnce = null;
+            return reply(403, { status: "refused", reason });
+          }
+          if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
+          if (args.request_id !== body.command_id) return reply(400, { status: "refused", reason: "request_id_mismatch" });
+          if (receipts.has(body.command_id)) {
+            return reply(200, { ...receipts.get(body.command_id), replayed: true });
+          }
           if (failNextWrite) {
             failNextWrite = false;
             return reply(503, { error: "temporary_unavailable" });
           }
-          if (contentRole !== "editor") return reply(403, { status: "refused", reason: "content_read_only" });
-          if (args.request_id !== body.command_id) return reply(400, { status: "refused", reason: "request_id_mismatch" });
           const entry = definitions.get(args.object_id);
           if (!entry) return reply(404, { status: "refused", reason: "revision_not_found" });
           if (conflictNextUpdate || args.base?.token !== entry.current.revision.token) {
             conflictNextUpdate = false;
+            // Advance server revision so reload reflects another editor's saved version
+            entry.seq += 1;
+            const newerRev = makeRev(entry.object_id, entry.seq);
+            entry.current = {
+              ...entry.current,
+              revision: newerRev,
+              meaning: `${entry.current.meaning} (concurrent server edit)`,
+              occurred_at_server: Date.now(),
+            };
             return reply(409, { status: "conflict", object_id: entry.object_id, current: entry.current.revision });
           }
           entry.seq += 1;
@@ -342,7 +453,14 @@ const server = createServer(async (req, res) => {
             author: { user_id: me, principal_id: null },
             occurred_at_server: Date.now(),
           };
-          return reply(200, { status: "committed", object_id: entry.object_id, revision: nextRev });
+          writeMutations += 1;
+          const committed = { status: "committed", object_id: entry.object_id, revision: nextRev };
+          receipts.set(body.command_id, committed);
+          if (commitThen503NextWrite) {
+            commitThen503NextWrite = false;
+            return reply(503, { error: "gateway_timeout" });
+          }
+          return reply(200, committed);
         }
       }
       return reply(400, { error: "invalid_request" });

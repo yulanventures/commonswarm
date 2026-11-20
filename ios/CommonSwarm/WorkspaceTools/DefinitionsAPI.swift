@@ -2,6 +2,7 @@ import Foundation
 
 struct DefinitionsAPI: Sendable {
     let api: ConversationAPI
+    var session: HumanSession { api.session }
 
     private static let householdLocalSeat = "seat_0000000000000000000000"
     private static let pageLimit = 100
@@ -17,6 +18,18 @@ struct DefinitionsAPI: Sendable {
         let client_version = ConversationAPI.clientVersion
         let stream = CommandStream()
         let command: Command
+    }
+
+    private struct HouseholdAccessCommand: Encodable {
+        let kind = "household_access"
+    }
+
+    private struct AccessReplyWire: Decodable {
+        let status: String?
+        let reason: String?
+        let error: String?
+        let content_role: SharedContentRole?
+        let operations: [String]?
     }
 
     private struct HouseholdToolCommand<Arguments: Encodable>: Encodable {
@@ -220,7 +233,36 @@ struct DefinitionsAPI: Sendable {
     }
 
     func access(workspaceID: UUID) async throws -> SharedAccessStatus {
-        try await SharedObjectsAPI(api: api).access(workspaceID: workspaceID)
+        let (data, status) = try await postCommand(
+            workspaceID: workspaceID,
+            commandID: UUID(),
+            command: HouseholdAccessCommand()
+        )
+        let reply = try? JSONDecoder().decode(AccessReplyWire.self, from: data)
+        if status == 401 {
+            return .refused(reason: "unauthorized")
+        }
+        if status == 404 {
+            return .refused(reason: reply?.reason ?? reply?.error ?? "not_found")
+        }
+        if status == 403 {
+            let reason = reply?.reason ?? reply?.error ?? "forbidden"
+            if reason == "content_consent_required" {
+                return .needsConfirmation(reason: reason)
+            }
+            return .refused(reason: reason)
+        }
+        guard status == 200, let reply else {
+            throw APIError.refused(status)
+        }
+        if reply.status == "ok", let role = reply.content_role, let operations = reply.operations {
+            return .granted(SharedAccess(role: role, operations: Set(operations)))
+        }
+        let reason = reply.reason ?? reply.error ?? "content_consent_required"
+        if reason == "content_consent_required" {
+            return .needsConfirmation(reason: reason)
+        }
+        return .refused(reason: reason)
     }
 
     func listDefinitions(workspaceID: UUID) async throws -> [DefinitionSummary] {
@@ -241,8 +283,17 @@ struct DefinitionsAPI: Sendable {
                     )
                 )
             )
-            guard status == 200 || status == 400 || status == 403,
-                  let reply = try? JSONDecoder().decode(SearchReplyWire.self, from: data) else {
+            let reply = try? JSONDecoder().decode(SearchReplyWire.self, from: data)
+            if status == 401 {
+                throw DefinitionsError.refused(reason: "unauthorized")
+            }
+            if status == 404 {
+                throw DefinitionsError.refused(reason: reply?.reason ?? reply?.error ?? "not_found")
+            }
+            if status == 403 {
+                throw DefinitionsError.refused(reason: reply?.reason ?? reply?.error ?? "forbidden")
+            }
+            guard status == 200 || status == 400, let reply else {
                 throw APIError.refused(status)
             }
             if reply.status == "refused" {
@@ -251,9 +302,6 @@ struct DefinitionsAPI: Sendable {
                     throw DefinitionsError.unsupported
                 }
                 throw DefinitionsError.refused(reason: reason)
-            }
-            if status == 403, let err = reply.error, !err.isEmpty {
-                throw DefinitionsError.refused(reason: err)
             }
             guard status == 200, reply.status == "ok", let rows = reply.definitions else {
                 throw APIError.invalidResponse
@@ -318,18 +366,23 @@ struct DefinitionsAPI: Sendable {
                 )
             )
         )
-        guard status == 200 || status == 403,
-              let reply = try? JSONDecoder().decode(ReadReplyWire.self, from: data) else {
+        let reply = try? JSONDecoder().decode(ReadReplyWire.self, from: data)
+        if status == 401 {
+            throw DefinitionsError.refused(reason: "unauthorized")
+        }
+        if status == 404 {
+            throw DefinitionsError.refused(reason: reply?.reason ?? reply?.error ?? "not_found")
+        }
+        if status == 403 {
+            throw DefinitionsError.refused(reason: reply?.reason ?? reply?.error ?? "forbidden")
+        }
+        guard status == 200, let reply else {
             throw APIError.refused(status)
         }
         if reply.status == "refused" {
             throw DefinitionsError.refused(reason: reply.reason ?? "workspace_access_refused")
         }
-        if status == 403, let err = reply.error, !err.isEmpty {
-            throw DefinitionsError.refused(reason: err)
-        }
-        guard status == 200,
-              reply.status == "ok",
+        guard reply.status == "ok",
               (reply.object_id == nil || reply.object_id == objectID),
               let rawCurrent = reply.current,
               rawCurrent.revision.isBound(workspaceID: workspaceID, objectID: objectID) else {
@@ -483,8 +536,19 @@ struct DefinitionsAPI: Sendable {
         expectedObjectID: String,
         fallbackMessage: String = "Couldn’t save definition."
     ) -> DefinitionMutationOutcome {
-        guard status == 200 || status == 400 || status == 403 || status == 409,
-              let reply = try? JSONDecoder().decode(WriteReplyWire.self, from: data) else {
+        let reply = try? JSONDecoder().decode(WriteReplyWire.self, from: data)
+        if status == 401 {
+            return .refused(reason: "unauthorized", message: DefinitionsRules.refusalMessage("unauthorized", fallback: fallbackMessage))
+        }
+        if status == 404 {
+            let reason = reply?.reason ?? reply?.error ?? "not_found"
+            return .refused(reason: reason, message: DefinitionsRules.refusalMessage(reason, fallback: fallbackMessage))
+        }
+        if status == 403 {
+            let reason = reply?.reason ?? reply?.error ?? "forbidden"
+            return .refused(reason: reason, message: DefinitionsRules.refusalMessage(reason, fallback: fallbackMessage))
+        }
+        guard status == 200 || status == 400 || status == 409, let reply else {
             return .unconfirmed(message: Self.unconfirmedMessage)
         }
         if reply.status == "committed",
@@ -500,9 +564,6 @@ struct DefinitionsAPI: Sendable {
         if reply.status == "refused" {
             let reason = reply.reason ?? "refused"
             return .refused(reason: reason, message: DefinitionsRules.refusalMessage(reason, fallback: fallbackMessage))
-        }
-        if status == 403, let err = reply.error, !err.isEmpty {
-            return .refused(reason: err, message: DefinitionsRules.refusalMessage(err, fallback: fallbackMessage))
         }
         return .unconfirmed(message: Self.unconfirmedMessage)
     }

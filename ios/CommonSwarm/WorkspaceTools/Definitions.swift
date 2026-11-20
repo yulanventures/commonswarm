@@ -30,6 +30,15 @@ struct DefinitionFields: Equatable, Hashable, Sendable {
     let source: String
 }
 
+/// Frozen snapshot captured when the user explicitly opens the Edit sheet.
+/// Edits ALWAYS send this exact `baseRevision` and `beforeFields` — never re-reading mutable `detail.current`.
+struct DefinitionEditSession: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let objectID: String
+    let baseRevision: SharedRevisionRef
+    let beforeFields: DefinitionFields
+}
+
 struct DefinitionVersion: Equatable, Hashable, Sendable {
     let revision: SharedRevisionRef
     let term: String
@@ -186,13 +195,15 @@ enum DefinitionsRules {
             return "Confirm Lists & docs access before changing definitions."
         case "patch_base_mismatch":
             return "This definition changed since you loaded it. Reload it to review."
-        case "revision_not_found":
-            return "The version you started from is no longer available. Reload to review."
+        case "revision_not_found", "not_found", "workspace_not_found":
+            return "This definition is no longer available."
         case "object_quota_reached":
             return "This workspace reached its list and document limit."
         case "storage_quota_reached":
             return "The workspace storage limit is full."
-        case "workspace_access_refused", "connection_access_refused":
+        case "unauthorized":
+            return "Your session expired. Sign in again to access definitions."
+        case "forbidden", "workspace_access_refused", "connection_access_refused":
             return "You don’t have access to definitions in this workspace."
         default:
             return fallback
@@ -203,6 +214,14 @@ enum DefinitionsRules {
         reason == "workspace_access_refused"
             || reason == "connection_access_refused"
             || reason == "content_consent_required"
+            || reason == "forbidden"
+            || reason == "unauthorized"
+            || reason == "not_found"
+            || reason == "workspace_not_found"
+    }
+
+    static func unknownOutcomeAfterRefusalMessage(action: String, refusalMessage: String) -> String {
+        "Your earlier \(action) outcome is still unknown and may already have saved; this retry was refused (\(refusalMessage)). Reload once access is restored to check."
     }
 }
 
@@ -222,6 +241,14 @@ enum DefinitionValidationError: Error, Equatable, Sendable {
 
 @MainActor
 final class DefinitionsListStore: ObservableObject {
+    struct PendingCreateRecord: Equatable, Sendable {
+        let sessionID: ObjectIdentifier
+        let fields: DefinitionFields
+        let commandID: UUID
+        let objectID: String
+        var outcomeUnknown: Bool
+    }
+
     @Published private(set) var definitions: [DefinitionSummary] = []
     @Published private(set) var access: SharedAccess?
     @Published private(set) var accessError: String?
@@ -231,11 +258,16 @@ final class DefinitionsListStore: ObservableObject {
     @Published private(set) var loadFailed = false
     @Published private(set) var isCreating = false
     @Published private(set) var createError: String?
+    @Published private(set) var statusMessage: String?
+    @Published var showingCreateSheet = false
     @Published var searchQuery = ""
 
     let workspaceID: UUID
     private var loadGeneration = 0
-    private var pendingCreate: (fields: DefinitionFields, commandID: UUID, objectID: String)?
+    private var accessGeneration = 0
+    private var isRetired = false
+    private var activeSessionID: ObjectIdentifier?
+    private(set) var pendingCreate: PendingCreateRecord?
 
     init(workspaceID: UUID) {
         self.workspaceID = workspaceID
@@ -245,74 +277,153 @@ final class DefinitionsListStore: ObservableObject {
         access?.canCreate == true && access?.canUpdate == true
     }
 
+    var hasUnknownPendingCreate: Bool {
+        pendingCreate?.outcomeUnknown == true
+    }
+
     var filteredDefinitions: [DefinitionSummary] {
         DefinitionsRules.filterDefinitions(definitions, query: searchQuery)
     }
 
+    func retire() {
+        isRetired = true
+        loadGeneration += 1
+        accessGeneration += 1
+        isLoading = false
+        showingCreateSheet = false
+    }
+
+    func activate() {
+        if isRetired {
+            isRetired = false
+        }
+    }
+
+    private func bindSession(_ session: HumanSession) -> Bool {
+        let sid = ObjectIdentifier(session)
+        if let previous = activeSessionID, previous != sid {
+            pendingCreate = nil
+            clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+        }
+        activeSessionID = sid
+        guard session.isActive else {
+            clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            return false
+        }
+        return true
+    }
+
+    private func canCommitRead(generation: Int, capturedAccessGen: Int, session: HumanSession) -> Bool {
+        !Task.isCancelled
+            && !isRetired
+            && session.isActive
+            && generation == loadGeneration
+            && capturedAccessGen == accessGeneration
+            && activeSessionID == ObjectIdentifier(session)
+    }
+
     func load(api: DefinitionsAPI) async {
+        activate()
+        guard bindSession(api.session) else { return }
+
         loadGeneration += 1
         let generation = loadGeneration
+        let capturedAccessGen = accessGeneration
+        let capturedSession = api.session
         isLoading = true
         loadFailed = false
         isUnsupported = false
 
         do {
             let status = try await api.access(workspaceID: workspaceID)
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             switch status {
             case .needsConfirmation(let reason):
-                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: true)
-                isLoading = false
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: true, clearPending: false)
                 return
             case .refused(let reason):
-                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: false)
-                isLoading = false
+                clearOnAccessLoss(
+                    message: DefinitionsRules.refusalMessage(reason),
+                    consent: false,
+                    clearPending: reason == "unauthorized"
+                )
                 return
             case .granted(let granted):
                 access = granted
                 accessError = nil
                 needsConsent = false
+                if !canEdit {
+                    showingCreateSheet = false
+                }
             }
 
             let loaded = try await api.listDefinitions(workspaceID: workspaceID)
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             definitions = loaded
             loadFailed = false
+
+            // Reconcile any previously unconfirmed create against this authorized read.
+            if let pending = pendingCreate, pending.sessionID == ObjectIdentifier(capturedSession), pending.outcomeUnknown {
+                let normalizedPendingTerm = pending.fields.term.lowercased()
+                let alreadySaved = loaded.contains {
+                    $0.objectID == pending.objectID || $0.term.lowercased() == normalizedPendingTerm
+                }
+                pendingCreate = nil
+                createError = nil
+                if alreadySaved {
+                    statusMessage = "Your earlier definition was already saved."
+                }
+            }
         } catch DefinitionsError.unsupported {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             definitions = []
             isUnsupported = true
             loadFailed = false
         } catch DefinitionsError.refused(let reason) {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
             if DefinitionsRules.isAccessLossReason(reason) {
                 clearOnAccessLoss(
                     message: DefinitionsRules.refusalMessage(reason),
-                    consent: reason == "content_consent_required"
+                    consent: reason == "content_consent_required",
+                    clearPending: reason == "unauthorized"
                 )
             } else {
                 loadFailed = true
             }
         } catch is CancellationError {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            }
             return
         } catch {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             loadFailed = true
         }
 
-        if generation == loadGeneration {
+        if generation == loadGeneration && capturedAccessGen == accessGeneration {
             isLoading = false
         }
     }
 
-    /// Creates a new definition, reusing (commandID, objectID) across retries for identical fields.
+    func openCreateSheet() {
+        guard canEdit else { return }
+        if pendingCreate?.outcomeUnknown != true {
+            createError = nil
+        }
+        showingCreateSheet = true
+    }
+
+    /// Creates a new definition, preserving (commandID, objectID, fields) across unconfirmed results and pre-receipt refusals.
     func createDefinition(
         term rawTerm: String,
         meaning rawMeaning: String,
         source rawSource: String,
         api: DefinitionsAPI
     ) async -> String? {
+        guard bindSession(api.session) else { return nil }
         guard canEdit, !isCreating else { return nil }
+
         let validated: DefinitionFields
         switch DefinitionsRules.validateFields(term: rawTerm, meaning: rawMeaning, source: rawSource) {
         case .success(let fields):
@@ -322,78 +433,150 @@ final class DefinitionsListStore: ObservableObject {
             return nil
         }
 
-        let commandID: UUID
-        let objectID: String
-        if let pending = pendingCreate, pending.fields == validated {
-            commandID = pending.commandID
-            objectID = pending.objectID
+        let capturedSession = api.session
+        let sessionID = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
+
+        let record: PendingCreateRecord
+        if let existing = pendingCreate, existing.sessionID == sessionID {
+            if existing.fields == validated {
+                record = existing
+            } else if existing.outcomeUnknown {
+                createError = "An earlier create for “\(existing.fields.term)” has an unknown outcome. Retry that unchanged save or reload to check before creating a different definition."
+                return nil
+            } else {
+                record = PendingCreateRecord(
+                    sessionID: sessionID,
+                    fields: validated,
+                    commandID: UUID(),
+                    objectID: DefinitionsRules.makeObjectID(
+                        term: validated.term,
+                        existingIDs: Set(definitions.map(\.objectID))
+                    ),
+                    outcomeUnknown: false
+                )
+                pendingCreate = record
+            }
         } else {
-            commandID = UUID()
-            objectID = DefinitionsRules.makeObjectID(
-                term: validated.term,
-                existingIDs: Set(definitions.map(\.objectID))
+            record = PendingCreateRecord(
+                sessionID: sessionID,
+                fields: validated,
+                commandID: UUID(),
+                objectID: DefinitionsRules.makeObjectID(
+                    term: validated.term,
+                    existingIDs: Set(definitions.map(\.objectID))
+                ),
+                outcomeUnknown: false
             )
-            pendingCreate = (validated, commandID, objectID)
+            pendingCreate = record
         }
 
+        let wasAlreadyUnknown = record.outcomeUnknown
         isCreating = true
         createError = nil
+        statusMessage = nil
         defer { isCreating = false }
 
         let outcome = await api.createDefinition(
             workspaceID: workspaceID,
-            objectID: objectID,
-            fields: validated,
-            requestID: commandID
+            objectID: record.objectID,
+            fields: record.fields,
+            requestID: record.commandID
         )
+
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, activeSessionID == sessionID else {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            }
+            return nil
+        }
+        guard capturedAccessGen == accessGeneration else { return nil }
+
         switch outcome {
         case .committed(let committedID, _):
             pendingCreate = nil
+            showingCreateSheet = false
             await load(api: api)
             return committedID
         case .conflict(let message):
-            pendingCreate = nil
-            createError = message
+            if !wasAlreadyUnknown {
+                pendingCreate = nil
+            }
+            createError = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "create", refusalMessage: message)
+                : message
             await load(api: api)
             return nil
         case .refused(let reason, let message):
-            pendingCreate = nil
+            let displayMessage = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "create", refusalMessage: message)
+                : message
+            if !wasAlreadyUnknown {
+                pendingCreate = nil
+            }
             if DefinitionsRules.isAccessLossReason(reason) {
-                clearOnAccessLoss(message: message, consent: reason == "content_consent_required")
+                clearOnAccessLoss(
+                    message: displayMessage,
+                    consent: reason == "content_consent_required",
+                    clearPending: reason == "unauthorized"
+                )
+                createError = displayMessage
             } else if reason == "content_read_only" {
                 downgradeToReader()
-                createError = message
+                createError = displayMessage
             } else {
-                createError = message
+                createError = displayMessage
             }
             return nil
         case .unconfirmed(let message):
+            var unknown = record
+            unknown.outcomeUnknown = true
+            pendingCreate = unknown
             createError = message
             return nil
         }
     }
 
-    func clearCreateError() {
-        createError = nil
-        pendingCreate = nil
-    }
-
-    private func clearOnAccessLoss(message: String, consent: Bool) {
+    private func clearOnAccessLoss(message: String, consent: Bool, clearPending: Bool) {
+        loadGeneration += 1
+        accessGeneration += 1
+        isLoading = false
         definitions = []
         access = nil
         accessError = message
         needsConsent = consent
-        pendingCreate = nil
+        showingCreateSheet = false
+        if clearPending {
+            pendingCreate = nil
+        }
         loadFailed = false
     }
 
     private func downgradeToReader() {
+        accessGeneration += 1
         access = SharedAccess(role: .reader, operations: ["read"])
+        showingCreateSheet = false
     }
 }
 
 @MainActor
 final class DefinitionDetailStore: ObservableObject {
+    struct PendingCertifyRecord: Equatable, Sendable {
+        let sessionID: ObjectIdentifier
+        let revision: SharedRevisionRef
+        let commandID: UUID
+        var outcomeUnknown: Bool
+    }
+
+    struct PendingUpdateRecord: Equatable, Sendable {
+        let sessionID: ObjectIdentifier
+        let baseRevision: SharedRevisionRef
+        let beforeFields: DefinitionFields
+        let afterFields: DefinitionFields
+        let commandID: UUID
+        var outcomeUnknown: Bool
+    }
+
     @Published private(set) var detail: DefinitionDetail?
     @Published private(set) var access: SharedAccess?
     @Published private(set) var accessError: String?
@@ -403,12 +586,16 @@ final class DefinitionDetailStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var errorMessage: String?
+    @Published var activeEditSession: DefinitionEditSession?
 
     let workspaceID: UUID
     let objectID: String
     private var loadGeneration = 0
-    private var pendingCertify: (token: String, commandID: UUID)?
-    private var pendingUpdate: (baseToken: String, fields: DefinitionFields, commandID: UUID)?
+    private var accessGeneration = 0
+    private var isRetired = false
+    private var activeSessionID: ObjectIdentifier?
+    private(set) var pendingCertify: PendingCertifyRecord?
+    private(set) var pendingUpdate: PendingUpdateRecord?
 
     init(workspaceID: UUID, objectID: String) {
         self.workspaceID = workspaceID
@@ -416,16 +603,81 @@ final class DefinitionDetailStore: ObservableObject {
     }
 
     var canEdit: Bool {
-        access?.canUpdate == true
+        access?.canUpdate == true && detail != nil
     }
 
     var canCertify: Bool {
         canEdit && detail?.proposalPending == true
     }
 
+    var hasUnknownPendingCertify: Bool {
+        pendingCertify?.outcomeUnknown == true
+    }
+
+    var hasUnknownPendingUpdate: Bool {
+        pendingUpdate?.outcomeUnknown == true
+    }
+
+    func retire() {
+        isRetired = true
+        loadGeneration += 1
+        accessGeneration += 1
+        isLoading = false
+        activeEditSession = nil
+    }
+
+    func activate() {
+        if isRetired {
+            isRetired = false
+        }
+    }
+
+    @discardableResult
+    func beginEdit() -> DefinitionEditSession? {
+        guard canEdit, let current = detail?.current else { return nil }
+        let session = DefinitionEditSession(
+            objectID: objectID,
+            baseRevision: current.revision,
+            beforeFields: current.fields
+        )
+        activeEditSession = session
+        if !hasUnknownPendingUpdate {
+            errorMessage = nil
+        }
+        return session
+    }
+
+    private func bindSession(_ session: HumanSession) -> Bool {
+        let sid = ObjectIdentifier(session)
+        if let previous = activeSessionID, previous != sid {
+            clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+        }
+        activeSessionID = sid
+        guard session.isActive else {
+            clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            return false
+        }
+        return true
+    }
+
+    private func canCommitRead(generation: Int, capturedAccessGen: Int, session: HumanSession) -> Bool {
+        !Task.isCancelled
+            && !isRetired
+            && session.isActive
+            && generation == loadGeneration
+            && capturedAccessGen == accessGeneration
+            && activeSessionID == ObjectIdentifier(session)
+    }
+
     func load(api: DefinitionsAPI, preserveNotice: Bool = false) async {
+        activate()
+        guard bindSession(api.session) else { return }
+
         loadGeneration += 1
         let generation = loadGeneration
+        let capturedAccessGen = accessGeneration
+        let capturedSession = api.session
+        let sessionID = ObjectIdentifier(capturedSession)
         isLoading = true
         loadFailed = false
         if !preserveNotice {
@@ -435,59 +687,117 @@ final class DefinitionDetailStore: ObservableObject {
 
         do {
             let status = try await api.access(workspaceID: workspaceID)
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             switch status {
             case .needsConfirmation(let reason):
-                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: true)
-                isLoading = false
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: true, clearPending: false)
                 return
             case .refused(let reason):
-                clearOnAccessLoss(message: DefinitionsRules.refusalMessage(reason), consent: false)
-                isLoading = false
+                clearOnAccessLoss(
+                    message: DefinitionsRules.refusalMessage(reason),
+                    consent: false,
+                    clearPending: reason == "unauthorized"
+                )
                 return
             case .granted(let granted):
                 access = granted
                 accessError = nil
                 needsConsent = false
+                if granted.canUpdate == false {
+                    activeEditSession = nil
+                }
             }
 
             let loaded = try await api.readDefinition(workspaceID: workspaceID, objectID: objectID)
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             detail = loaded
             loadFailed = false
+
+            // If an editor was open on an older revision, retire it so the user reviews the latest revision first.
+            if let open = activeEditSession, open.baseRevision.token != loaded.current.revision.token {
+                activeEditSession = nil
+            }
+
+            // Reconcile any unconfirmed writes against this authorized read.
+            reconcilePendingWrites(against: loaded, sessionID: sessionID)
         } catch DefinitionsError.refused(let reason) {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
-            if DefinitionsRules.isAccessLossReason(reason) {
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
+            if DefinitionsRules.isAccessLossReason(reason) || reason == "revision_not_found" {
                 clearOnAccessLoss(
                     message: DefinitionsRules.refusalMessage(reason),
-                    consent: reason == "content_consent_required"
+                    consent: reason == "content_consent_required",
+                    clearPending: reason == "unauthorized"
                 )
             } else {
                 loadFailed = true
             }
         } catch is CancellationError {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            }
             return
         } catch {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard canCommitRead(generation: generation, capturedAccessGen: capturedAccessGen, session: capturedSession) else { return }
             loadFailed = true
         }
 
-        if generation == loadGeneration {
+        if generation == loadGeneration && capturedAccessGen == accessGeneration {
             isLoading = false
         }
     }
 
+    private func reconcilePendingWrites(against loaded: DefinitionDetail, sessionID: ObjectIdentifier) {
+        if let cert = pendingCertify, cert.sessionID == sessionID, cert.outcomeUnknown {
+            if loaded.certified?.revision.token == cert.revision.token {
+                pendingCertify = nil
+                errorMessage = nil
+                statusMessage = "Your earlier certification was already saved."
+            } else if loaded.current.revision.token != cert.revision.token {
+                pendingCertify = nil
+            } else {
+                // Authorized read confirmed this revision is still uncertified; keep commandID only if unchanged retry, clear unknown flag.
+                pendingCertify = nil
+            }
+        }
+        if let upd = pendingUpdate, upd.sessionID == sessionID, upd.outcomeUnknown {
+            if loaded.current.revision.token != upd.baseRevision.token {
+                pendingUpdate = nil
+                if loaded.current.fields == upd.afterFields {
+                    errorMessage = nil
+                    statusMessage = "Your earlier edit was already saved."
+                }
+            } else {
+                pendingUpdate = nil
+            }
+        }
+    }
+
     func certify(api: DefinitionsAPI) async -> Bool {
+        guard bindSession(api.session) else { return false }
         guard canCertify, !isSaving, let current = detail?.current else { return false }
 
-        let commandID: UUID
-        if let pending = pendingCertify, pending.token == current.revision.token {
-            commandID = pending.commandID
+        let capturedSession = api.session
+        let sessionID = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
+
+        let record: PendingCertifyRecord
+        if let existing = pendingCertify, existing.sessionID == sessionID {
+            if existing.revision.token == current.revision.token {
+                record = existing
+            } else if existing.outcomeUnknown {
+                errorMessage = "An earlier certification has an unknown outcome. Reload to check before certifying another version."
+                return false
+            } else {
+                record = PendingCertifyRecord(sessionID: sessionID, revision: current.revision, commandID: UUID(), outcomeUnknown: false)
+                pendingCertify = record
+            }
         } else {
-            commandID = UUID()
-            pendingCertify = (current.revision.token, commandID)
+            record = PendingCertifyRecord(sessionID: sessionID, revision: current.revision, commandID: UUID(), outcomeUnknown: false)
+            pendingCertify = record
         }
 
+        let wasAlreadyUnknown = record.outcomeUnknown
         isSaving = true
         statusMessage = nil
         errorMessage = nil
@@ -496,9 +806,18 @@ final class DefinitionDetailStore: ObservableObject {
         let outcome = await api.certifyDefinition(
             workspaceID: workspaceID,
             objectID: objectID,
-            revision: current.revision,
-            requestID: commandID
+            revision: record.revision,
+            requestID: record.commandID
         )
+
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, activeSessionID == sessionID else {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            }
+            return false
+        }
+        guard capturedAccessGen == accessGeneration else { return false }
+
         switch outcome {
         case .committed:
             pendingCertify = nil
@@ -506,37 +825,66 @@ final class DefinitionDetailStore: ObservableObject {
             await load(api: api, preserveNotice: true)
             return true
         case .conflict(let message):
-            pendingCertify = nil
-            errorMessage = message
+            if !wasAlreadyUnknown {
+                pendingCertify = nil
+            }
+            errorMessage = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "certification", refusalMessage: message)
+                : message
             await load(api: api, preserveNotice: true)
             return false
         case .refused(let reason, let message):
-            pendingCertify = nil
+            let displayMessage = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "certification", refusalMessage: message)
+                : message
+            if !wasAlreadyUnknown {
+                pendingCertify = nil
+            }
             if reason == "definition_not_current" {
-                errorMessage = message
+                errorMessage = displayMessage
                 await load(api: api, preserveNotice: true)
-            } else if DefinitionsRules.isAccessLossReason(reason) {
-                clearOnAccessLoss(message: message, consent: reason == "content_consent_required")
+            } else if DefinitionsRules.isAccessLossReason(reason) || reason == "revision_not_found" {
+                clearOnAccessLoss(
+                    message: displayMessage,
+                    consent: reason == "content_consent_required",
+                    clearPending: reason == "unauthorized"
+                )
+                errorMessage = displayMessage
             } else if reason == "content_read_only" {
                 downgradeToReader()
-                errorMessage = message
+                errorMessage = displayMessage
             } else {
-                errorMessage = message
+                errorMessage = displayMessage
             }
             return false
         case .unconfirmed(let message):
+            var unknown = record
+            unknown.outcomeUnknown = true
+            pendingCertify = unknown
             errorMessage = message
             return false
         }
     }
 
+    /// Submits an edit strictly bound to the frozen `session` opened by the user.
+    /// Never re-reads `detail.current` to rebase a stale editor onto a newer revision.
     func update(
+        session editSession: DefinitionEditSession,
         term rawTerm: String,
         meaning rawMeaning: String,
         source rawSource: String,
         api: DefinitionsAPI
     ) async -> Bool {
-        guard canEdit, !isSaving, let current = detail?.current else { return false }
+        guard bindSession(api.session) else { return false }
+        guard canEdit, !isSaving else { return false }
+        guard activeEditSession?.id == editSession.id,
+              editSession.objectID == objectID,
+              detail?.current.revision.token == editSession.baseRevision.token else {
+            activeEditSession = nil
+            errorMessage = "A newer version was loaded. Review it, then tap Edit to start from the latest version."
+            return false
+        }
+
         let validated: DefinitionFields
         switch DefinitionsRules.validateFields(term: rawTerm, meaning: rawMeaning, source: rawSource) {
         case .success(let fields):
@@ -546,16 +894,43 @@ final class DefinitionDetailStore: ObservableObject {
             return false
         }
 
-        let commandID: UUID
-        if let pending = pendingUpdate,
-           pending.baseToken == current.revision.token,
-           pending.fields == validated {
-            commandID = pending.commandID
+        let capturedSession = api.session
+        let sessionID = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
+
+        let record: PendingUpdateRecord
+        if let existing = pendingUpdate, existing.sessionID == sessionID {
+            if existing.baseRevision.token == editSession.baseRevision.token
+                && existing.beforeFields == editSession.beforeFields
+                && existing.afterFields == validated {
+                record = existing
+            } else if existing.outcomeUnknown {
+                errorMessage = "An earlier edit has an unknown outcome. Retry that unchanged save or reload to check before saving different changes."
+                return false
+            } else {
+                record = PendingUpdateRecord(
+                    sessionID: sessionID,
+                    baseRevision: editSession.baseRevision,
+                    beforeFields: editSession.beforeFields,
+                    afterFields: validated,
+                    commandID: UUID(),
+                    outcomeUnknown: false
+                )
+                pendingUpdate = record
+            }
         } else {
-            commandID = UUID()
-            pendingUpdate = (current.revision.token, validated, commandID)
+            record = PendingUpdateRecord(
+                sessionID: sessionID,
+                baseRevision: editSession.baseRevision,
+                beforeFields: editSession.beforeFields,
+                afterFields: validated,
+                commandID: UUID(),
+                outcomeUnknown: false
+            )
+            pendingUpdate = record
         }
 
+        let wasAlreadyUnknown = record.outcomeUnknown
         isSaving = true
         statusMessage = nil
         errorMessage = nil
@@ -564,50 +939,87 @@ final class DefinitionDetailStore: ObservableObject {
         let outcome = await api.updateDefinition(
             workspaceID: workspaceID,
             objectID: objectID,
-            base: current.revision,
-            before: current.fields,
-            after: validated,
-            requestID: commandID
+            base: record.baseRevision,
+            before: record.beforeFields,
+            after: record.afterFields,
+            requestID: record.commandID
         )
+
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, activeSessionID == sessionID else {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(message: DefinitionsRules.refusalMessage("unauthorized"), consent: false, clearPending: true)
+            }
+            return false
+        }
+        guard capturedAccessGen == accessGeneration else { return false }
+
         switch outcome {
         case .committed:
             pendingUpdate = nil
+            activeEditSession = nil
             statusMessage = "Saved."
             await load(api: api, preserveNotice: true)
             return true
         case .conflict(let message):
-            pendingUpdate = nil
-            errorMessage = message
+            // Retire the open editor so the user MUST review the refreshed definition before editing again.
+            activeEditSession = nil
+            if !wasAlreadyUnknown {
+                pendingUpdate = nil
+            }
+            errorMessage = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "edit", refusalMessage: message)
+                : message
             await load(api: api, preserveNotice: true)
             return false
         case .refused(let reason, let message):
-            pendingUpdate = nil
-            if DefinitionsRules.isAccessLossReason(reason) {
-                clearOnAccessLoss(message: message, consent: reason == "content_consent_required")
+            let displayMessage = wasAlreadyUnknown
+                ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "edit", refusalMessage: message)
+                : message
+            if !wasAlreadyUnknown {
+                pendingUpdate = nil
+            }
+            if DefinitionsRules.isAccessLossReason(reason) || reason == "revision_not_found" {
+                clearOnAccessLoss(
+                    message: displayMessage,
+                    consent: reason == "content_consent_required",
+                    clearPending: reason == "unauthorized"
+                )
+                errorMessage = displayMessage
             } else if reason == "content_read_only" {
                 downgradeToReader()
-                errorMessage = message
+                errorMessage = displayMessage
             } else {
-                errorMessage = message
+                errorMessage = displayMessage
             }
             return false
         case .unconfirmed(let message):
+            var unknown = record
+            unknown.outcomeUnknown = true
+            pendingUpdate = unknown
             errorMessage = message
             return false
         }
     }
 
-    private func clearOnAccessLoss(message: String, consent: Bool) {
+    private func clearOnAccessLoss(message: String, consent: Bool, clearPending: Bool) {
+        loadGeneration += 1
+        accessGeneration += 1
+        isLoading = false
         detail = nil
         access = nil
         accessError = message
         needsConsent = consent
-        pendingCertify = nil
-        pendingUpdate = nil
+        activeEditSession = nil
+        if clearPending {
+            pendingCertify = nil
+            pendingUpdate = nil
+        }
         loadFailed = false
     }
 
     private func downgradeToReader() {
+        accessGeneration += 1
         access = SharedAccess(role: .reader, operations: ["read"])
+        activeEditSession = nil
     }
 }
