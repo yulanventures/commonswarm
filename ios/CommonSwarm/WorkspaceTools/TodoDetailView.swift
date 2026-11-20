@@ -467,26 +467,29 @@ struct TodoDetailView: View {
     }
 
     private func unsentEditCard(_ draft: TodoConflictDraft) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let edited = draft.editedKeys
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Your unsent changes")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
-            if !draft.title.isEmpty {
-                Text(verbatim: "Title: \(draft.title)")
+            if edited.contains(.title) {
+                Text(verbatim: "Title: \(draft.editedTitle)")
                     .font(.footnote)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-            if !draft.notes.isEmpty {
-                Text(verbatim: "Notes: \(draft.notes)")
+            if edited.contains(.notes) {
+                let notesDisplay = draft.editedNotes.isEmpty ? "(cleared)" : draft.editedNotes
+                Text(verbatim: "Notes: \(notesDisplay)")
                     .font(.footnote)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-            if let dueOn = draft.dueOn, let formatted = TodoCalendarDate.formatDate(dueOn) {
-                Text(verbatim: "Due: \(formatted)")
+            if edited.contains(.dueOn) {
+                let dueDisplay = draft.editedDueOn.flatMap { TodoCalendarDate.formatDate($0) } ?? "(cleared)"
+                Text(verbatim: "Due: \(dueDisplay)")
                     .font(.footnote)
                     .foregroundStyle(.primary)
             }
@@ -738,6 +741,7 @@ private struct TodoEditSheet: View {
     @State private var notes: String
     @State private var hasDueDate: Bool
     @State private var dueDate: Date
+    @State private var conflictingFields: Set<TodoFieldKey> = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -785,43 +789,68 @@ private struct TodoEditSheet: View {
                             .foregroundStyle(errorForeground)
                     }
                 }
-                if let unsentDraft {
+                if let unsentDraft, !unsentDraft.editedKeys.isEmpty {
+                    let currentDue = hasDueDate ? TodoCalendarDate.formatLocal(dueDate) : nil
+                    let preview = unsentDraft.merge(onto: title, latestNotes: notes, latestDueOn: currentDue)
+                    let activeConflicts = conflictingFields.union(preview.conflictingFields)
+                    let edited = unsentDraft.editedKeys
                     Section("Your unsent changes") {
                         VStack(alignment: .leading, spacing: 6) {
-                            if !unsentDraft.title.isEmpty {
-                                Text(verbatim: "Title: \(unsentDraft.title)")
+                            if edited.contains(.title) {
+                                Text(verbatim: "Title: \(unsentDraft.editedTitle)" + (activeConflicts.contains(.title) ? " (both edited)" : ""))
                                     .font(.footnote)
                                     .foregroundStyle(.primary)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
                             }
-                            if !unsentDraft.notes.isEmpty {
-                                Text(verbatim: "Notes: \(unsentDraft.notes)")
+                            if edited.contains(.notes) {
+                                let notesDisplay = unsentDraft.editedNotes.isEmpty ? "(cleared)" : unsentDraft.editedNotes
+                                Text(verbatim: "Notes: \(notesDisplay)" + (activeConflicts.contains(.notes) ? " (both edited)" : ""))
                                     .font(.footnote)
                                     .foregroundStyle(.primary)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
                             }
-                            if let dueOn = unsentDraft.dueOn, let formatted = TodoCalendarDate.formatDate(dueOn) {
-                                Text(verbatim: "Due: \(formatted)")
+                            if edited.contains(.dueOn) {
+                                let dueDisplay = unsentDraft.editedDueOn.flatMap { TodoCalendarDate.formatDate($0) } ?? "(cleared)"
+                                Text(verbatim: "Due: \(dueDisplay)" + (activeConflicts.contains(.dueOn) ? " (both edited)" : ""))
                                     .font(.footnote)
                                     .foregroundStyle(.primary)
+                            }
+                            if !activeConflicts.isEmpty {
+                                let names = TodoFieldKey.allCases
+                                    .filter { activeConflicts.contains($0) }
+                                    .map(\.label)
+                                    .joined(separator: ", ")
+                                Text(verbatim: "Both you and a teammate edited \(names). The latest version is kept below so you can compare or copy your text.")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(errorForeground)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .accessibilityIdentifier("todo-edit-conflict-warning")
                             }
                         }
                         .accessibilityIdentifier("todo-edit-unsent-draft")
 
-                        Button("Use my unsent changes") {
-                            title = unsentDraft.title
-                            notes = unsentDraft.notes
-                            if let parsed = TodoCalendarDate.parseLocal(unsentDraft.dueOn) {
-                                hasDueDate = true
-                                dueDate = parsed
-                            } else {
-                                hasDueDate = false
+                        if !preview.appliedFields.isEmpty {
+                            Button("Use my unsent changes") {
+                                let merged = unsentDraft.merge(
+                                    onto: title,
+                                    latestNotes: notes,
+                                    latestDueOn: currentDue
+                                )
+                                title = merged.title
+                                notes = merged.notes
+                                if let mergedDue = merged.dueOn, let parsed = TodoCalendarDate.parseLocal(mergedDue) {
+                                    hasDueDate = true
+                                    dueDate = parsed
+                                } else {
+                                    hasDueDate = false
+                                }
+                                conflictingFields = merged.conflictingFields
                             }
+                            .disabled(isSaving)
+                            .accessibilityIdentifier("todo-edit-apply-unsent")
                         }
-                        .disabled(isSaving)
-                        .accessibilityIdentifier("todo-edit-apply-unsent")
                     }
                 }
                 Section("Title") {

@@ -318,30 +318,117 @@ struct VerifyTodoActions {
         let offerClearedAfterWithdraw = await MainActor.run { detailVM.detail?.offer == nil }
         expect(withdrawOK && offerClearedAfterWithdraw, "Offerer must be able to withdraw own work request")
 
-        // 3f. Frozen TodoEditSession: conflict closes editor + preserves unsent notes/title alongside latest version
-        //     + stale edit sends ZERO calls; fresh edit commits with real write receipt and clears conflictDraft
+        // 3f. Frozen TodoEditSession + field-level conflict recovery:
+        //     3f-1: Author edits ONLY notes while a teammate changes title -> conflict reloads teammate's title,
+        //           merge carries forward teammate's newer title & due date while restoring author's notes,
+        //           and the saved record read back preserves BOTH teammate's title and author's notes.
+        //     3f-2: Same-field conflict (both edit title) keeps teammate's title in the form while keeping
+        //           author's competing title available in conflictDraft for review.
         let staleEdit = await MainActor.run { detailVM.beginEdit() }!
-        try await postFixture("\(base)/fixture/conflict-next-write")
-        let conflictUpdate = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
+        let openedTitle = staleEdit.initialTitle
+        let openedDueOn = staleEdit.initialDueOn
+        try await postFixture("\(base)/fixture/advance-version?title=Updated%20by%20teammate")
+        let conflictUpdate = await detailVM.updateDetails(
+            session: staleEdit,
+            title: openedTitle,
+            notes: "Keep the blue sample.",
+            dueOn: openedDueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
         let editClosedWithUnsent = await MainActor.run {
             detailVM.activeEditSession == nil
+                && detailVM.detail?.title == "Updated by teammate"
                 && (detailVM.actionError ?? "").contains("Someone else updated")
-                && detailVM.conflictDraft?.notes == "Keep the blue sample."
-                && detailVM.conflictDraft?.title == "Stale title"
+                && detailVM.conflictDraft?.editedKeys == [.notes]
+                && detailVM.conflictDraft?.editedNotes == "Keep the blue sample."
         }
-        expect(!conflictUpdate && editClosedWithUnsent, "Conflict update must close editor, decode conflict.current, and preserve unsent notes in conflictDraft")
+        expect(!conflictUpdate && editClosedWithUnsent, "Conflict update must close editor, load teammate's newer title, and track ONLY author-edited fields in conflictDraft")
         let cmdsBeforeStaleEdit = try await recordedCommands(origin).count
-        let blockedEdit = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
+        let blockedEdit = await detailVM.updateDetails(
+            session: staleEdit,
+            title: openedTitle,
+            notes: "Keep the blue sample.",
+            dueOn: openedDueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
         let cmdsAfterStaleEdit = try await recordedCommands(origin).count
         expect(!blockedEdit && cmdsBeforeStaleEdit == cmdsAfterStaleEdit, "Stale edit session must send ZERO network calls")
 
         let freshEdit = await MainActor.run { detailVM.beginEdit() }!
-        let unsentStillVisibleInReopenedEdit = await MainActor.run { detailVM.conflictDraft?.notes == "Keep the blue sample." }
-        expect(unsentStillVisibleInReopenedEdit, "Reopening Edit after conflict must keep unsent notes available alongside latest server version")
-        let editOK = await detailVM.updateDetails(session: freshEdit, title: "Confirm tile delivery", notes: "Updated notes. Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
-        let editedDetail = await MainActor.run { detailVM.detail! }
+        let mergedDisjoint = await MainActor.run {
+            detailVM.conflictDraft?.merge(
+                onto: freshEdit.initialTitle,
+                latestNotes: freshEdit.initialNotes,
+                latestDueOn: freshEdit.initialDueOn
+            )
+        }
+        expect(
+            mergedDisjoint?.title == "Updated by teammate"
+                && mergedDisjoint?.notes == "Keep the blue sample."
+                && mergedDisjoint?.dueOn == openedDueOn
+                && mergedDisjoint?.appliedFields == [.notes]
+                && mergedDisjoint?.conflictingFields.isEmpty == true,
+            "Recovering notes-only unsent edit must carry forward teammate's newer title and due date without clobbering them"
+        )
+        let editOK = await detailVM.updateDetails(
+            session: freshEdit,
+            title: mergedDisjoint!.title,
+            notes: mergedDisjoint!.notes,
+            dueOn: mergedDisjoint!.dueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let savedMergedDetail = await MainActor.run { detailVM.detail! }
         let conflictDraftCleared = await MainActor.run { detailVM.conflictDraft == nil }
-        expect(editOK && conflictDraftCleared && editedDetail.title == "Confirm tile delivery" && editedDetail.notes == "Updated notes. Keep the blue sample.", "Fresh edit must commit with production stored write receipt and clear conflictDraft")
+        expect(
+            editOK
+                && conflictDraftCleared
+                && savedMergedDetail.title == "Updated by teammate"
+                && savedMergedDetail.notes == "Keep the blue sample."
+                && savedMergedDetail.due_on == openedDueOn,
+            "Saved record after conflict recovery must preserve BOTH teammate's newer title and author's recovered notes"
+        )
+
+        // 3f-2: Same-field conflict keeps teammate's title in the form while preserving author's competing title for review
+        let sameFieldEdit = await MainActor.run { detailVM.beginEdit() }!
+        try await postFixture("\(base)/fixture/advance-version?title=Teammate%20final%20title")
+        let sameFieldConflict = await detailVM.updateDetails(
+            session: sameFieldEdit,
+            title: "Author competing title",
+            notes: sameFieldEdit.initialNotes,
+            dueOn: sameFieldEdit.initialDueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        let sameFieldReopen = await MainActor.run { detailVM.beginEdit() }!
+        let sameFieldMerge = await MainActor.run {
+            detailVM.conflictDraft?.merge(
+                onto: sameFieldReopen.initialTitle,
+                latestNotes: sameFieldReopen.initialNotes,
+                latestDueOn: sameFieldReopen.initialDueOn
+            )
+        }
+        let authorTitleKeptForReview = await MainActor.run { detailVM.conflictDraft?.editedTitle == "Author competing title" }
+        expect(
+            !sameFieldConflict
+                && sameFieldMerge?.title == "Teammate final title"
+                && sameFieldMerge?.conflictingFields == [.title]
+                && authorTitleKeptForReview,
+            "Same-field title conflict must keep teammate's title while preserving author's competing title in conflictDraft for review"
+        )
+        let sameFieldResolved = await detailVM.updateDetails(
+            session: sameFieldReopen,
+            title: "Confirm tile delivery",
+            notes: "Updated notes. Keep the blue sample.",
+            dueOn: nil,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        let sameFieldCleared = await MainActor.run { detailVM.conflictDraft == nil }
+        expect(sameFieldResolved && sameFieldCleared, "Saving reviewed same-field merge must commit and clear conflictDraft")
 
         // 3g. Start eligibility: hidden when assigned to another party (Atlas or Maya) or gate_clear == false;
         //     shown only when open, gate_clear == true, and unassigned or assigned to the human viewer.

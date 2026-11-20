@@ -524,12 +524,82 @@ struct TodoEditSession: Identifiable, Equatable, Sendable {
     let initialDueOn: String?
 }
 
-/// Unsent edit preserved when a concurrent server edit causes a conflict so the author
-/// can review the latest server version alongside their unsent title, notes, and due date.
-struct TodoConflictDraft: Equatable, Sendable {
+enum TodoFieldKey: String, Hashable, CaseIterable, Sendable {
+    case title
+    case notes
+    case dueOn
+
+    var label: String {
+        switch self {
+        case .title: "Title"
+        case .notes: "Notes"
+        case .dueOn: "Due date"
+        }
+    }
+}
+
+struct TodoConflictMergeResult: Equatable, Sendable {
     let title: String
     let notes: String
     let dueOn: String?
+    let appliedFields: Set<TodoFieldKey>
+    let conflictingFields: Set<TodoFieldKey>
+}
+
+/// Preserves both the version the author opened (`base*`) and their unsent edits (`edited*`)
+/// so conflict recovery restores ONLY fields the author changed and carries forward any
+/// teammate updates to other fields (e.g. a teammate's newer title or due date).
+struct TodoConflictDraft: Equatable, Sendable {
+    let baseTitle: String
+    let baseNotes: String
+    let baseDueOn: String?
+    let editedTitle: String
+    let editedNotes: String
+    let editedDueOn: String?
+
+    var editedKeys: Set<TodoFieldKey> {
+        var keys: Set<TodoFieldKey> = []
+        if editedTitle != baseTitle { keys.insert(.title) }
+        if editedNotes != baseNotes { keys.insert(.notes) }
+        if editedDueOn != baseDueOn { keys.insert(.dueOn) }
+        return keys
+    }
+
+    func merge(onto latestTitle: String, latestNotes: String, latestDueOn: String?) -> TodoConflictMergeResult {
+        var applied: Set<TodoFieldKey> = []
+        var conflicts: Set<TodoFieldKey> = []
+
+        func resolveString(_ key: TodoFieldKey, base: String, edited: String, current: String) -> String {
+            guard edited != base else { return current }
+            if current == base || current == edited {
+                applied.insert(key)
+                return edited
+            }
+            conflicts.insert(key)
+            return current
+        }
+
+        func resolveOptional(_ key: TodoFieldKey, base: String?, edited: String?, current: String?) -> String? {
+            guard edited != base else { return current }
+            if current == base || current == edited {
+                applied.insert(key)
+                return edited
+            }
+            conflicts.insert(key)
+            return current
+        }
+
+        let mergedTitle = resolveString(.title, base: baseTitle, edited: editedTitle, current: latestTitle)
+        let mergedNotes = resolveString(.notes, base: baseNotes, edited: editedNotes, current: latestNotes)
+        let mergedDue = resolveOptional(.dueOn, base: baseDueOn, edited: editedDueOn, current: latestDueOn)
+        return TodoConflictMergeResult(
+            title: mergedTitle,
+            notes: mergedNotes,
+            dueOn: mergedDue,
+            appliedFields: applied,
+            conflictingFields: conflicts
+        )
+    }
 }
 
 /// Frozen snapshot captured when the user opens Assign; submits strictly against `baseVersion`.
@@ -2560,8 +2630,18 @@ final class TodoDetailViewModel: ObservableObject {
               detail?.version == editSession.baseVersion else {
             let unsentTitle = TodoRules.cleanTitle(rawTitle)
             let unsentNotes = TodoRules.cleanBody(rawNotes)
-            if !unsentTitle.isEmpty || !unsentNotes.isEmpty || dueOn != nil {
-                conflictDraft = TodoConflictDraft(title: unsentTitle, notes: unsentNotes, dueOn: dueOn)
+            let baseTitle = TodoRules.cleanTitle(editSession.initialTitle)
+            let baseNotes = TodoRules.cleanBody(editSession.initialNotes)
+            let draft = TodoConflictDraft(
+                baseTitle: baseTitle,
+                baseNotes: baseNotes,
+                baseDueOn: editSession.initialDueOn,
+                editedTitle: unsentTitle,
+                editedNotes: unsentNotes,
+                editedDueOn: dueOn
+            )
+            if !draft.editedKeys.isEmpty {
+                conflictDraft = draft
             }
             activeEditSession = nil
             actionError = "Someone else updated this to-do. Review the latest version, then tap Edit again."
@@ -2591,6 +2671,9 @@ final class TodoDetailViewModel: ObservableObject {
         return await executeUpdate(
             todoID: editSession.todoID,
             baseVersion: editSession.baseVersion,
+            baseTitle: TodoRules.cleanTitle(editSession.initialTitle),
+            baseNotes: TodoRules.cleanBody(editSession.initialNotes),
+            baseDueOn: editSession.initialDueOn,
             title: title,
             notes: notes,
             dueOn: dueOn,
@@ -2606,6 +2689,9 @@ final class TodoDetailViewModel: ObservableObject {
     private func executeUpdate(
         todoID: UUID,
         baseVersion: Int,
+        baseTitle: String? = nil,
+        baseNotes: String? = nil,
+        baseDueOn: String? = nil,
         title: String,
         notes: String,
         dueOn: String?,
@@ -2667,7 +2753,20 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
         if case .conflict = outcome {
-            conflictDraft = TodoConflictDraft(title: title, notes: notes, dueOn: dueOn)
+            let bTitle = baseTitle ?? detail.map { TodoRules.cleanTitle($0.title) } ?? title
+            let bNotes = baseNotes ?? detail.map { TodoRules.cleanBody($0.notes) } ?? notes
+            let bDue = baseTitle != nil ? baseDueOn : detail?.due_on
+            let draft = TodoConflictDraft(
+                baseTitle: bTitle,
+                baseNotes: bNotes,
+                baseDueOn: bDue,
+                editedTitle: title,
+                editedNotes: notes,
+                editedDueOn: dueOn
+            )
+            if !draft.editedKeys.isEmpty {
+                conflictDraft = draft
+            }
         }
         let ok = await handleTodoWrite(
             outcome,
