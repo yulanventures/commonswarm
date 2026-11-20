@@ -19,13 +19,16 @@ function installDmThreadsFixture() {
   const peerAlex = "dddd4444-4444-4444-8444-444444444444";
   const peerLead = "eeee5555-5555-4555-8555-555555555555";
   const generalConv = "99990000-0000-4000-8000-000000000001";
+  const secretChannel = "77777777-7777-4777-8777-777777777777";
+  const secretConv = "99990000-0000-4000-8000-000000000007";
   const dmAlexConv = "aaaa1111-1111-4111-8111-111111111111";
   const dmGroupConv = "bbbb2222-2222-4222-8222-222222222222";
   const alexRootId = "f1000001-0000-4000-8000-000000000001";
   const groupRootId = "f2000001-0000-4000-8000-000000000001";
   const groupExistingReplyId = "f2000002-0000-4000-8000-000000000002";
   const missingRootId = "f2000003-0000-4000-8000-000000000003";
-  f.ids = { peerAlex, peerLead, generalConv, dmAlexConv, dmGroupConv, alexRootId, groupRootId, groupExistingReplyId, missingRootId };
+  const privateMissingRootId = "f3000001-0000-4000-8000-000000000001";
+  f.ids = { peerAlex, peerLead, generalConv, secretChannel, secretConv, dmAlexConv, dmGroupConv, alexRootId, groupRootId, groupExistingReplyId, missingRootId, privateMissingRootId };
 
   const now = Date.now();
   const iso = (offsetSec: number) => new Date(now + offsetSec * 1000).toISOString();
@@ -38,6 +41,17 @@ function installDmThreadsFixture() {
       read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
       last_message_at: iso(-120), last_message_id: null,
     },
+    ...(f.capture === "flow" ? [{
+      conversation_id: secretConv, kind: "private_channel", channel_id: secretChannel, slug: "secret-ops", description: "Private incident room.",
+      archived_at: null, joined: true, generation: 0, lead_mode: "workspace", lead_agent_principal_id: null,
+      members: [
+        { kind: "user", id: f.owner, name: "Synthetic owner", left_at: null },
+        { kind: "user", id: peerAlex, name: "Alex", left_at: null },
+      ],
+      notify_level: "everything", starred: false, star_rank: null,
+      read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
+      last_message_at: iso(-100), last_message_id: privateMissingRootId,
+    }] : []),
     {
       conversation_id: dmAlexConv, kind: "dm", channel_id: null, slug: null, description: null,
       archived_at: null, joined: true, generation: 1, lead_mode: null, lead_agent_principal_id: null,
@@ -97,7 +111,13 @@ function installDmThreadsFixture() {
       f.uploadCalls.push(url.pathname);
       return Response.json({ Key: "synthetic" });
     }
-    if (url.pathname === "/rest/v1/channels") return Response.json([]);
+    if (url.pathname === "/rest/v1/channels") {
+      return Response.json(f.capture === "flow" ? [{
+        channel_id: secretChannel, workspace_id: f.workspace, slug: "secret-ops",
+        purpose: "Private incident room.", created_by_principal: f.owner, created_by_kind: "user",
+        created_at: "2026-11-01T00:00:00Z", archived_at: null, visibility: "private",
+      }] : []);
+    }
     if (url.pathname === "/rest/v1/member_profiles") {
       return Response.json([
         { user_id: f.owner, display_name: "Synthetic owner", role: "owner" },
@@ -110,7 +130,16 @@ function installDmThreadsFixture() {
         { principal_id: peerLead, name: "Lead", model: "Claude", transport: "local", turn_only: false, owner_user_id: f.owner, revoked_at: null, workspace_id: f.workspace, created_at: "2026-11-01T00:00:00Z" },
       ]);
     }
-    if (url.pathname === "/rest/v1/signals") return Response.json(rowsByConv[generalConv]);
+    if (url.pathname === "/rest/v1/signals") {
+      return Response.json(f.capture === "flow"
+        ? [
+          ...rowsByConv[generalConv],
+          mkMsg(privateMissingRootId, "Secret ops incident root.", iso(-100), {
+            to: null, channel_id: secretChannel, conversation_id: secretConv, conversation_kind: "private_channel",
+          }),
+        ]
+        : rowsByConv[generalConv]);
+    }
     if (url.pathname === "/rest/v1/rpc/channel_unread") {
       return Response.json({ workspace_id: f.workspace, generated_at: iso(0), channels: [{ channel_id: null, slug: "general", unread: false }] });
     }
@@ -142,7 +171,7 @@ function installDmThreadsFixture() {
       }
       if (command?.kind === "post_signal") {
         f.signalCommands.push(command);
-        if (command.thread_root_id === missingRootId) {
+        if (command.thread_root_id === missingRootId || command.thread_root_id === privateMissingRootId) {
           return Response.json(
             { status: "rejected", error: "thread_root_not_found", message: "There is no live message with that id in this workspace." },
             { status: 404 },
@@ -328,6 +357,42 @@ async function observeDmThreads() {
       location.search.includes("c=general") && !visible(one("[data-composer-reply]")),
     );
     check(one("[data-composer-audience]")?.getAttribute("data-audience") === "public", "switching from DM thread to #general must restore public audience");
+
+    // HezSec C1: a refused 404 thread_root_not_found on a private-channel reply started from All messages
+    // must NEVER close the reply bar into the workspace-wide #general composer or turn private text into a #general draft.
+    await click(".hm-menu__trigger:visible");
+    await wait("more menu open for All messages", () => visible(shown('[data-menu-channel-place=""]')));
+    await click('[data-menu-channel-place=""]:visible');
+    await wait("All messages loaded with private-channel root", () =>
+      !location.search.includes("c=") &&
+      (one("[data-feed-list]")?.textContent ?? "").includes("Secret ops incident root."),
+    );
+    await openReply(f.ids.privateMissingRootId);
+    await wait("private-channel reply bar open in All messages", () =>
+      visible(one("[data-composer-reply]")) &&
+      (one("[data-composer-reply-target-text]")?.textContent ?? "").includes("#secret-ops"),
+    );
+    const cmdsBeforePrivate404 = f.signalCommands.length;
+    input.value = "Private channel reply that must never post to general";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await click("[data-composer-send]:visible");
+    await wait("private-channel 404 refusal shown", () =>
+      f.signalCommands.length === cmdsBeforePrivate404 + 1 &&
+      (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+    );
+    check(visible(one("[data-composer-reply]")), "HezSec C1: private-channel 404 must keep reply bar bound to #secret-ops, never close to #general");
+    check(
+      (one("[data-composer-reply-target-text]")?.textContent ?? "").includes("#secret-ops"),
+      "HezSec C1: reply bar must stay bound to #secret-ops: " + one("[data-composer-reply-target-text]")?.textContent,
+    );
+    // A follow-up ordinary Send must STILL target the refused private thread_root_id and NEVER post top-level to #general.
+    await click("[data-composer-send]:visible");
+    await wait("second Send stayed bound to private thread root", () => f.signalCommands.length === cmdsBeforePrivate404 + 2);
+    const privateAttempts = f.signalCommands.slice(cmdsBeforePrivate404);
+    check(
+      privateAttempts.every((c: any) => c.thread_root_id === f.ids.privateMissingRootId && !("channel" in c) && !("conversation_id" in c)),
+      "HezSec C1: refused private-channel reply must never re-target #general or workspace composer: " + JSON.stringify(privateAttempts),
+    );
 
     document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
       ok: true,

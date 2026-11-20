@@ -21249,7 +21249,14 @@ import "../../styles/kylon-image-viewer.css";
           return;
         }
         const sameDraftScope = sendDraftKey === composerDraftKey(workspaceId);
-        if (!landed && placementThreadRootId !== null &&
+        // HezSec C1: only canonical Step 2b DM / group DM replies close and restore into the
+        // same DM composer on 404 thread_root_not_found; channel/private-channel replies keep
+        // the existing channel-thread failure path so private text never re-targets #general.
+        const isCanonicalDirectThread = isDirectReply && placementConversationId !== null &&
+          (freshPlacementConversationKind === "dm" || freshPlacementConversationKind === "group_dm");
+        const sameDirectConversation = isCanonicalDirectThread &&
+          activeDmConversationId === placementConversationId && sameDraftScope;
+        if (!landed && isCanonicalDirectThread && placementThreadRootId !== null &&
           (caught instanceof ThreadRootUnavailableError || readableError(caught) === THREAD_ROOT_UNAVAILABLE_TEXT)) {
           signals = signals.filter((signal) => signal.id !== pendingId);
           visualMentions.delete(pendingId);
@@ -21259,7 +21266,7 @@ import "../../styles/kylon-image-viewer.css";
           if (replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
             setThreadReplyRoot(null);
           }
-          if (sameDraftScope) {
+          if (sameDirectConversation) {
             input.value = rawBody;
             stagedAttachments = attachmentSnapshot;
             renderStagedAttachments();
