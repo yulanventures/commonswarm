@@ -157,6 +157,7 @@ import {
   type ConversationMemberRef,
   type ConversationSummaryWire,
 } from "./cloud/conversations.js";
+import { runWaitCli, WaitCommandError } from "./cli/wait.js";
 import {
   getMemoryAsAgent,
   MEMORY_KINDS,
@@ -733,6 +734,7 @@ export const KNOWN_FLAGS = new Set([
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
   "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
+  "conversation", "mentions", "after", "after-created-at", "after-id", "timeout",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -755,6 +757,7 @@ export const BOOLEAN_FLAGS = new Set([
   "json",
   "link-stdin",
   "local",
+  "mentions",
   "ndjson",
   "notify",
   "take-over",
@@ -811,7 +814,8 @@ export class Arguments {
       if (!name || name.includes("=")) {
         throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
-      if (BOOLEAN_FLAGS.has(name) || (name === "wait" &&
+      const isWaitThreadFlag = name === "thread" && this.positionals[0] === "wait";
+      if ((BOOLEAN_FLAGS.has(name) && !isWaitThreadFlag) || (name === "wait" &&
           this.positionals[0] === "listen" && this.positionals[1] === "stop")) {
         this.push(name, "true");
         this.originalOptions.push({ name });
@@ -5076,6 +5080,57 @@ export const RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS = [
   "json",
   ...SESSION_CONTEXT_FLAGS,
 ] as const;
+
+export const RUN_WAIT_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "conversation",
+  "channel",
+  "thread",
+  "mentions",
+  "after",
+  "after-created-at",
+  "after-id",
+  "timeout",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+async function runWait(args: Arguments): Promise<void> {
+  args.assertShape(RUN_WAIT_ACCEPTED_FLAGS, 1);
+  const exitCode = await runWaitCli({
+    rawFlags: {
+      conversation: args.optional("conversation"),
+      channel: args.optional("channel"),
+      thread: args.optional("thread"),
+      mentions: args.has("mentions"),
+      after: args.optional("after"),
+      afterCreatedAt: args.optional("after-created-at"),
+      afterId: args.optional("after-id"),
+      timeout: args.optional("timeout"),
+      json: args.has("json"),
+    },
+    resolveContext: async () => {
+      const cloud = await target(args);
+      const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+      const actor = selected.kind === "human" && selected.human
+        ? { kind: "user" as const, id: selected.human.userId.toLowerCase() }
+        : selected.kind === "agent" && selected.agent?.principalId
+        ? { kind: "agent" as const, id: selected.agent.principalId.toLowerCase() }
+        : null;
+      return {
+        target: cloud,
+        workspaceId: selected.selectedWorkspace,
+        credentialKind: selected.kind,
+        getBearer: () => selected.session ? selected.session.bearer() : Promise.resolve(selected.bearer),
+        actor,
+        fetcher: selected.fetcher,
+      };
+    },
+  });
+  if (exitCode !== 0) process.exitCode = exitCode;
+}
 
 async function runConversationsList(args: Arguments): Promise<void> {
   args.assertShape(RUN_CONVERSATIONS_ACCEPTED_FLAGS, 1);
@@ -12104,6 +12159,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runConversation",
   }),
   dm: commandEntry({ ...noTool("local MCP exposes conversation_open"), handler: traced("runDm", runDm), description: "Find or open a 1:1 DM or group DM by member or agent name or id.", mutates: true, flags: [...agentFlags, "new-group"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 32, visible: true, help: ["cswarm dm <member|agent>... [--new-group] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  wait: commandEntry({ ...noTool("blocking wait is CLI-facing"), handler: traced("runWait", runWait), description: "Block until a new message arrives in a conversation, channel, or thread (exits 0 on match, 124 on timeout).", mutates: false, flags: [...agentFlags, "conversation", "channel", "thread", "mentions", "after", "after-created-at", "after-id", "timeout"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 33, visible: true, help: ["cswarm wait (--conversation <uuid> | --channel <slug>) [--thread <root-id>] [--mentions] [--after <cursor> | --after-created-at <iso> --after-id <uuid>] [--timeout <dur, default 5m, max 30m>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
@@ -12244,6 +12300,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "conversation.leave": RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS,
   "conversation.mark-read": RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS,
   dm: RUN_DM_ACCEPTED_FLAGS,
+  wait: RUN_WAIT_ACCEPTED_FLAGS,
   react: RUN_REACT_ACCEPTED_FLAGS,
   unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
@@ -12454,6 +12511,7 @@ function markRestartable(error: Error): Error {
 }
 
 function exitCodeFor(error: unknown): number {
+  if (error instanceof WaitCommandError) return error.exitCode;
   if (error instanceof LoginProviderError || error instanceof ReplyStatusUsageError) return 2;
   if (error instanceof NotifyStdoutClosedError) return EXIT_NOTIFY_ORPHANED;
   if (error instanceof WakeLeaseLostError) return error.exitCode;
@@ -12560,6 +12618,18 @@ if (isCliMain()) {
         }
       }
       process.exitCode = 1;
+      return;
+    }
+    if (error instanceof WaitCommandError) {
+      if (selected?.args.has("json")) {
+        process.stdout.write(`${JSON.stringify(error.payload, null, 2)}\n`);
+      } else {
+        process.stderr.write(`cswarm: ${safeError(error)}\n`);
+        for (const hint of error.payload.next) {
+          process.stderr.write(`Next: ${sanitizeForTerminal(hint)}\n`);
+        }
+      }
+      process.exitCode = error.exitCode;
       return;
     }
     if (error instanceof UsageError) {
