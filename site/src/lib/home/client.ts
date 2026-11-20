@@ -129,6 +129,11 @@ export class HomeCommandRefused extends Error {
   }
 }
 
+interface HomeCommandPinOptions {
+  pinnedOverride?: PinnedAccountContext | null;
+  accountRouted?: boolean;
+}
+
 async function householdTool(
   deps: HomeServerDeps,
   session: Session,
@@ -138,11 +143,17 @@ async function householdTool(
   args: Record<string, unknown>,
   unknownOutcome: string,
   write = false,
+  pinOptions: HomeCommandPinOptions = {},
 ): Promise<Record<string, unknown>> {
+  const accountRouted = pinOptions.accountRouted === true;
   const pinned = isMultiAccountEnabled()
-    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    ? (pinOptions.pinnedOverride ?? pinAccountContext(
+      accountRouted ? { userId: session.user.id } : { userId: session.user.id, workspaceId },
+    ))
     : null;
-  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+  const isCurrent = (ctx: PinnedAccountContext): boolean =>
+    accountRouted ? ctx.isCurrent() : ctx.isCurrent(workspaceId);
+  if (isMultiAccountEnabled() && (!pinned || !isCurrent(pinned))) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
   const toolArgs: Record<string, unknown> = { seat: HOUSEHOLD_LOCAL_SEAT, ...args };
@@ -153,9 +164,9 @@ async function householdTool(
     { kind: 'household_tool', tool, arguments: toolArgs },
     workspaceExtra(workspaceId),
     unknownOutcome,
-    pinned,
+    accountRouted ? { pinned, accountWideWorkspace: true } : pinned,
   );
-  if (pinned && !pinned.isCurrent(workspaceId)) {
+  if (pinned && !isCurrent(pinned)) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
   return checkedCommandBody(status, body);
@@ -168,11 +179,17 @@ async function householdSurface(
   requestId: string,
   command: Record<string, unknown>,
   unknownOutcome: string,
+  pinOptions: HomeCommandPinOptions = {},
 ): Promise<Record<string, unknown>> {
+  const accountRouted = pinOptions.accountRouted === true;
   const pinned = isMultiAccountEnabled()
-    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    ? (pinOptions.pinnedOverride ?? pinAccountContext(
+      accountRouted ? { userId: session.user.id } : { userId: session.user.id, workspaceId },
+    ))
     : null;
-  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+  const isCurrent = (ctx: PinnedAccountContext): boolean =>
+    accountRouted ? ctx.isCurrent() : ctx.isCurrent(workspaceId);
+  if (isMultiAccountEnabled() && (!pinned || !isCurrent(pinned))) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
   const { status, body } = await deps.postCommand(
@@ -181,9 +198,9 @@ async function householdSurface(
     command,
     workspaceExtra(workspaceId),
     unknownOutcome,
-    pinned,
+    accountRouted ? { pinned, accountWideWorkspace: true } : pinned,
   );
-  if (pinned && !pinned.isCurrent(workspaceId)) {
+  if (pinned && !isCurrent(pinned)) {
     throw new HomeCommandRefused('workspace_access_refused');
   }
   return checkedCommandBody(status, body);
@@ -285,8 +302,13 @@ export function createHomeServer(
   session: Session,
   deps: Partial<HomeServerDeps> = {},
   pinnedOverride?: PinnedAccountContext | null,
+  options?: { accountRouted?: boolean },
 ): HomeServer {
   const resolved = { ...defaultDeps(), ...deps };
+  const pinOptions: HomeCommandPinOptions = {
+    pinnedOverride,
+    accountRouted: options?.accountRouted === true,
+  };
   const resolvePinnedClient = (): { c: SupabaseClient; pinned: PinnedAccountContext | null } => {
     if (isMultiAccountEnabled()) {
       const pinned = pinnedOverride ?? pinAccountContext({ userId: session.user.id });
@@ -440,14 +462,14 @@ export function createHomeServer(
         kind: 'household_activity',
         since,
         limit,
-      }, 'The activity could not be loaded. Reload to try again.'));
+      }, 'The activity could not be loaded. Reload to try again.', pinOptions));
       return readArray<ActivityItem>(body.items);
     },
 
     async listTodos(workspaceId, q) {
       const args: Record<string, unknown> = { scope: q.scope, offset: q.offset, limit: boundedLimit(q.limit, 50) };
       if (q.assignee) args.assignee = q.assignee;
-      const body = parseOkBody(await householdTool(resolved, session, workspaceId, crypto.randomUUID(), 'todo_list', args, 'The to-dos could not be loaded. Reload to try again.'));
+      const body = parseOkBody(await householdTool(resolved, session, workspaceId, crypto.randomUUID(), 'todo_list', args, 'The to-dos could not be loaded. Reload to try again.', false, pinOptions));
       return {
         todos: readArray<TodoSummary>(body.todos),
         next_offset: pageOffset(body.next_offset),
@@ -456,7 +478,7 @@ export function createHomeServer(
 
     async readTodo(workspaceId, todoId, commentOffset = 0) {
       const args: Record<string, unknown> = { todo_id: todoId, comment_offset: commentOffset };
-      const body = parseOkBody(await householdTool(resolved, session, workspaceId, crypto.randomUUID(), 'todo_read', args, 'The to-do could not be loaded. Reload to try again.'));
+      const body = parseOkBody(await householdTool(resolved, session, workspaceId, crypto.randomUUID(), 'todo_read', args, 'The to-do could not be loaded. Reload to try again.', false, pinOptions));
       if (!record(body.todo) || typeof body.todo.todo_id !== 'string') throw new Error('home_read_malformed');
       return {
         todo: body.todo as unknown as Todo,
@@ -470,7 +492,7 @@ export function createHomeServer(
         target,
         offset,
         limit,
-      }, 'The comments could not be loaded. Reload to try again.'));
+      }, 'The comments could not be loaded. Reload to try again.', false, pinOptions));
       return {
         comments: readArray<Comment>(body.comments),
         next_offset: pageOffset(body.next_offset),
@@ -483,7 +505,7 @@ export function createHomeServer(
         ...(q.section === undefined ? {} : { section: q.section }),
         offset: q.offset ?? 0,
         limit: boundedLimit(q.limit ?? 50, 50),
-      }, 'The line could not be loaded. Reload to try again.'));
+      }, 'The line could not be loaded. Reload to try again.', false, pinOptions));
       return parseAgentQueue(body);
     },
 
@@ -492,7 +514,7 @@ export function createHomeServer(
       if (input.notes !== undefined) args.notes = input.notes;
       if (input.due_on !== undefined) args.due_on = input.due_on;
       if (input.assign) args.assign = input.assign;
-      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_create', args, 'The to-do may or may not have been saved. Reload to check.', true);
+      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_create', args, 'The to-do may or may not have been saved. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -504,7 +526,7 @@ export function createHomeServer(
       if (input.title !== undefined) args.title = input.title;
       if (input.notes !== undefined) args.notes = input.notes;
       if (input.due_on !== undefined) args.due_on = input.due_on;
-      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_update', args, 'The to-do may or may not have been updated. Reload to check.', true);
+      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_update', args, 'The to-do may or may not have been updated. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -520,7 +542,7 @@ export function createHomeServer(
         if (assign.start !== undefined) args.start = assign.start;
         if (assign.gate !== undefined) args.gate = assign.gate;
       }
-      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_assign', args, 'The assignment may or may not have changed. Reload to check.', true);
+      const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_assign', args, 'The assignment may or may not have changed. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -529,14 +551,14 @@ export function createHomeServer(
         todo_id: input.todo_id,
         base_version: input.base_version,
         state: input.state,
-      }, 'The to-do state may or may not have changed. Reload to check.', true);
+      }, 'The to-do state may or may not have changed. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
     async startTodo(workspaceId, input, requestId) {
       const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_start', {
         todo_id: input.todo_id,
-      }, 'The to-do may or may not be in Doing. Reload to check.', true);
+      }, 'The to-do may or may not be in Doing. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -546,7 +568,7 @@ export function createHomeServer(
         todo_id: input.todo_id,
         offer_id: input.offer_id,
         answer: input.answer,
-      }, 'The request may or may not have been answered. Reload to check.');
+      }, 'The request may or may not have been answered. Reload to check.', pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -556,7 +578,7 @@ export function createHomeServer(
         todo_id: input.todo_id,
         base_version: input.base_version,
         action: input.action,
-      }, 'The line may or may not have changed. Reload to check.');
+      }, 'The line may or may not have changed. Reload to check.', pinOptions);
       return parseWriteResult<Todo>(body);
     },
 
@@ -565,7 +587,7 @@ export function createHomeServer(
         kind: 'household_agent_work_policy',
         principal_id: input.principal_id,
         accepts_from: input.accepts_from,
-      }, 'Who can give this agent work may or may not have changed. Reload to check.');
+      }, 'Who can give this agent work may or may not have changed. Reload to check.', pinOptions);
       return parseWriteResult(body);
     },
 
@@ -574,7 +596,7 @@ export function createHomeServer(
         target: input.target,
         body: input.body,
         mentions: input.mentions,
-      }, 'The comment may or may not have been posted. Reload to check.', true);
+      }, 'The comment may or may not have been posted. Reload to check.', true, pinOptions);
       return parseWriteResult<Comment>(body);
     },
   };

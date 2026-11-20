@@ -14,6 +14,7 @@ import {
 import {
   AuthRecoveryRequired,
   addChannelMembers,
+  answerChoice,
   configureMultiAccountForTesting,
   directMessages,
   isPromotedPrivateChannelManager,
@@ -788,4 +789,170 @@ test("PR3 4: LiveDashboard teardown isolation contract & MULTI_ACCOUNT_ENABLED r
   assert.ok(clearKeysMatch, "clearPerUserPrivateConvenienceKeys block must exist");
   assert.ok(clearKeysMatch[0].includes("commonswarm:app-create-intent:v1:${userId}"));
   assert.ok(clearKeysMatch[0].includes("forgetAddAgent(addAgentStore(), userId)"));
+
+  // Cross-workspace Waiting on you & Catch up answers route through account-routed scope pinned to owning account.
+  const waitingChoiceMatch = liveDashboard.match(/const sendWaitingPanelChoice = async [\s\S]*?\n    \};/);
+  assert.ok(waitingChoiceMatch, "sendWaitingPanelChoice must exist");
+  assert.ok(waitingChoiceMatch[0].includes("accountWideWorkspace: true"), "sendWaitingPanelChoice must use accountWideWorkspace: true");
+  assert.ok(waitingChoiceMatch[0].includes("workspaces.some(ws => ws.id === item.workspaceId)"), "sendWaitingPanelChoice must verify workspace belongs to account");
+
+  const catchUpChoiceMatch = liveDashboard.match(/const sendCatchUpChoice = async [\s\S]*?\n    \};/);
+  assert.ok(catchUpChoiceMatch, "sendCatchUpChoice must exist");
+  assert.ok(catchUpChoiceMatch[0].includes("accountWideWorkspace: true"), "sendCatchUpChoice must use accountWideWorkspace: true");
+  assert.ok(catchUpChoiceMatch[0].includes("workspaces.some(ws => ws.id === item.workspace.id)"), "sendCatchUpChoice must verify workspace belongs to account");
+
+  const waitingTodoMatch = liveDashboard.match(/const markWaitingTodoDone = async [\s\S]*?\n    \};/);
+  assert.ok(waitingTodoMatch, "markWaitingTodoDone must exist");
+  assert.ok(waitingTodoMatch[0].includes("homeServer(pinned, { accountRouted: true })"), "markWaitingTodoDone must use accountRouted HomeServer");
+  assert.ok(waitingTodoMatch[0].includes("workspaces.some(ws => ws.id === item.workspaceId)"), "markWaitingTodoDone must verify workspace belongs to account");
+});
+
+test("PR3 5: cross-workspace Waiting on you answers (answerChoice + accountRouted HomeServer) route via account-routed-workspace pinned to owning account and fail closed on switch", async () => {
+  const WS_2 = "88888888-8888-4888-8888-888888888888";
+  const SIG_2 = "99999999-9999-4999-8999-999999999999";
+  const TODO_2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const originalFetch = globalThis.fetch;
+  const sessionA = makeSession(USER_A, "tok_waiting_A");
+
+  try {
+    setMultiAccountEnabledForTesting(true);
+    configureMultiAccountForTesting({ deployment: DEPLOYMENT });
+
+    // Active workspace is WS_1, while the answered Waiting on you ask/to-do belongs to WS_2 owned by Account A.
+    let activeUser = USER_A;
+    let viewGen = 1;
+    const makeAccountPinForA = (): PinnedAccountContext => {
+      const capturedGen = viewGen;
+      return makeFakePinned({
+        userId: USER_A,
+        workspaceId: WS_1, // User is viewing WS_1 in the rail!
+        verifySession: async () => sessionA,
+        isCurrent: (ws) =>
+          activeUser === USER_A &&
+          viewGen === capturedGen &&
+          (ws === undefined || ws === WS_1),
+      });
+    };
+
+    const sentEnvelopes: Array<{ auth: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      sentEnvelopes.push({ auth, body });
+      const cmd = body.command as Record<string, unknown> | undefined;
+      if (cmd?.kind === "household_tool" && cmd.tool === "todo_read") {
+        return Response.json({
+          status: "ok",
+          todo: {
+            todo_id: TODO_2,
+            title: "Cross-workspace task",
+            state: "open",
+            version: 3,
+          },
+          comments: [],
+          next_comment_offset: null,
+        });
+      }
+      if (cmd?.kind === "household_tool" && cmd.tool === "todo_set_state") {
+        return Response.json({
+          status: "committed",
+          value: { todo_id: TODO_2, title: "Cross-workspace task", state: "done", version: 4 },
+          notices: [],
+        });
+      }
+      return Response.json({
+        status: "accepted",
+        choice_answer: { option_id: "opt_yes", option_ids: ["opt_yes"], other_text: null },
+      });
+    }) as typeof fetch;
+
+    // 5a: Cross-workspace answerChoice for WS_2 while viewing WS_1 succeeds via account-routed scope.
+    const pinA = makeAccountPinForA();
+    const ans = await answerChoice(
+      sessionA,
+      "cmd-waiting-ask-ws2",
+      WS_2,
+      SIG_2,
+      false,
+      { optionIds: ["opt_yes"], otherText: null },
+      { pinned: pinA, accountWideWorkspace: true, isAlive: () => pinA.isCurrent() },
+    );
+    assert.equal(ans.ok, true);
+    assert.equal(sentEnvelopes.length, 1);
+    assert.equal(sentEnvelopes[0]!.auth, "Bearer tok_waiting_A");
+    assert.equal(sentEnvelopes[0]!.body.workspace_id, WS_2);
+
+    // 5a negative: Held cross-workspace answerChoice across A -> B -> A rejects with AuthRecoveryRequired (never commits).
+    const heldAns = deferred<Response>();
+    globalThis.fetch = (async () => await heldAns.promise) as typeof fetch;
+    const pinA2 = makeAccountPinForA();
+    const pendingAns = answerChoice(
+      sessionA,
+      "cmd-waiting-ask-switched",
+      WS_2,
+      SIG_2,
+      false,
+      { optionIds: ["opt_yes"], otherText: null },
+      { pinned: pinA2, accountWideWorkspace: true },
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    activeUser = USER_B;
+    viewGen += 1;
+    activeUser = USER_A;
+    viewGen += 1;
+    heldAns.resolve(Response.json({ status: "accepted" }));
+    await assert.rejects(() => pendingAns, (err: unknown) => err instanceof AuthRecoveryRequired);
+
+    // 5b: Cross-workspace accountRouted HomeServer reads & completes WS_2 to-do while viewing WS_1.
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      sentEnvelopes.push({ auth, body });
+      const cmd = body.command as Record<string, unknown> | undefined;
+      if (cmd?.kind === "household_tool" && cmd.tool === "todo_read") {
+        return Response.json({
+          status: "ok",
+          todo: { todo_id: TODO_2, title: "Cross-workspace task", state: "open", version: 3 },
+          comments: [],
+          next_comment_offset: null,
+        });
+      }
+      return Response.json({
+        status: "committed",
+        value: { todo_id: TODO_2, title: "Cross-workspace task", state: "done", version: 4 },
+        notices: [],
+      });
+    }) as typeof fetch;
+
+    const pinTodoA = makeAccountPinForA();
+    const routedServer = createHomeServer(sessionA, {}, pinTodoA, { accountRouted: true });
+    const readRes = await routedServer.readTodo(WS_2, TODO_2);
+    assert.equal(readRes.todo.version, 3);
+    const doneRes = await routedServer.setTodoState(WS_2, { todo_id: TODO_2, base_version: 3, state: "done" }, "cmd-waiting-todo-ws2");
+    assert.equal(doneRes.status, "committed");
+    assert.equal(sentEnvelopes.at(-1)!.auth, "Bearer tok_waiting_A");
+    assert.equal(sentEnvelopes.at(-1)!.body.workspace_id, WS_2);
+
+    // 5b negative (account switch): accountRouted HomeServer fails closed once switched away from Account A.
+    activeUser = USER_B;
+    viewGen += 1;
+    await assert.rejects(
+      () => routedServer.setTodoState(WS_2, { todo_id: TODO_2, base_version: 4, state: "done" }, "cmd-waiting-todo-after-switch"),
+      (err: unknown) => err instanceof HomeCommandRefused && err.reason === "workspace_access_refused",
+    );
+
+    // 5b negative (strict default): non-accountRouted HomeServer STILL refuses WS_2 when activeWorkspaceId is WS_1.
+    activeUser = USER_A;
+    viewGen += 1;
+    const strictPin = makeAccountPinForA();
+    const strictServer = createHomeServer(sessionA, {}, strictPin);
+    await assert.rejects(
+      () => strictServer.setTodoState(WS_2, { todo_id: TODO_2, base_version: 4, state: "done" }, "cmd-strict-ws2-refused"),
+      (err: unknown) => err instanceof HomeCommandRefused && err.reason === "workspace_access_refused",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    setMultiAccountEnabledForTesting(false);
+    resetAccountManagerForTesting();
+  }
 });

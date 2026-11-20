@@ -5705,8 +5705,11 @@ import "../../styles/kylon-image-viewer.css";
     const homeTodoContext = (): HomeTodoContext => ({ workspaceId: activeWorkspaceId, people: currentHomePeople(), viewerId: homeViewerId(),
       editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails, tagDelivers: true });
     const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
-    const homeServer = (pinned?: PinnedAccountContext | null): HomeServer | null => {
-      if (!sampleMode) return session ? createHomeServer(session, {}, pinned) : null;
+    const homeServer = (
+      pinned?: PinnedAccountContext | null,
+      options?: { accountRouted?: boolean },
+    ): HomeServer | null => {
+      if (!sampleMode) return session ? createHomeServer(session, {}, pinned, options) : null;
       // Fixture data uses this sample workspace's identities. This adapter is never used by a signed-in workspace.
       const replacements = new Map<string, string>([[IDS.workspaces.home, activeWorkspaceId], [IDS.users.tom, homeViewerId() ?? "sample-owner"]]);
       const own = agents.filter(agent => agent.ownerUserId === homeViewerId());
@@ -6754,11 +6757,18 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const markWaitingTodoDone = async (item: WaitingTodoItem): Promise<void> => {
-      const server = homeServer();
       const viewer = homeViewerId();
       const authGen = waitingAuthGeneration;
-      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
-      if (!server || !viewer || !isAlive || !isAlive() || waitingTodoTickets.has(item.id)) return;
+      const authAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      const pinned =
+        !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && viewer && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewer })
+          : null;
+      if (!sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      if (!sampleMode && !workspaces.some(ws => ws.id === item.workspaceId)) return;
+      const server = homeServer(pinned, { accountRouted: true });
+      const isAlive = (): boolean => Boolean(authAlive && authAlive()) && (!pinned || pinned.isCurrent());
+      if (!server || !viewer || !isAlive() || waitingTodoTickets.has(item.id)) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
@@ -6822,7 +6832,7 @@ import "../../styles/kylon-image-viewer.css";
             ? homeRefusalCopy(error.reason)
             : TODO_SAVE_FAILED;
       }
-      if (!isAlive() || waitingTodoTickets.get(item.id) !== ticket) return;
+      if (!isAlive() || waitingTodoTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
       waitingTodoTickets.delete(item.id);
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
@@ -6992,8 +7002,14 @@ import "../../styles/kylon-image-viewer.css";
       const activeSession = session;
       const viewer = renderedAuthUserId;
       const authGen = waitingAuthGeneration;
-      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
-      if (!activeSession || sampleMode || !viewer || !isAlive || !isAlive() || waitingPanelTickets.has(item.id)) return;
+      const authAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      if (!activeSession || sampleMode || !viewer || !authAlive || !authAlive() || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      if (!workspaces.some(ws => ws.id === item.workspaceId)) return;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: activeSession.user.id })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
@@ -7005,13 +7021,22 @@ import "../../styles/kylon-image-viewer.css";
       waitingPanelErrors.delete(item.id);
       waitingPanelLastSubmissions.set(item.id, submission);
       renderWaitingPanelView();
+      const isAlive = (): boolean =>
+        authAlive() &&
+        waitingPanelTickets.get(item.id) === ticket &&
+        homeViewerId() === ticket.viewer &&
+        (!pinned || pinned.isCurrent());
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive });
+        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission, {
+          pinned,
+          accountWideWorkspace: true,
+          isAlive,
+        });
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
-      if (!isAlive() || waitingPanelTickets.get(item.id) !== ticket) return;
+      if (!isAlive()) return;
       waitingPanelTickets.delete(item.id);
       if (result.ok) {
         choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
@@ -8292,17 +8317,31 @@ import "../../styles/kylon-image-viewer.css";
     const sendCatchUpChoice = async (item: NeedsYouVM, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
       if (!activeSession || sampleMode || !item.choices || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
+      if (!workspaces.some(ws => ws.id === item.workspace.id)) return;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: activeSession.user.id })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const ticket: CatchUpChoiceTicket = { viewer: activeSession.user.id, generation: catchUpGeneration };
       catchUpChoiceTickets.set(item.id, ticket);
       catchUpChoiceErrors.delete(item.id);
       renderHomeCatchUp();
+      const isAlive = (): boolean =>
+        catchUpChoiceTickets.get(item.id) === ticket &&
+        catchUpChoiceTicketLive(ticket) &&
+        (!pinned || pinned.isCurrent());
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, item.choices.multi, submission);
+        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, item.choices.multi, submission, {
+          pinned,
+          accountWideWorkspace: true,
+          isAlive,
+        });
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
-      if (catchUpChoiceTickets.get(item.id) !== ticket || !catchUpChoiceTicketLive(ticket)) return;
+      if (!isAlive()) return;
       catchUpChoiceTickets.delete(item.id);
       if (result.ok) { choiceDrafts.delete(choiceDraftKey(item.workspace.id, item.id)); void loadHomeCatchUp(); return; }
       catchUpChoiceErrors.set(item.id, result.message);
@@ -11104,16 +11143,30 @@ import "../../styles/kylon-image-viewer.css";
       const workspaceId = activeWorkspaceId;
       const state = choiceRows.get(signalId);
       if (!activeSession || !workspaceId || !state || state.answer !== null || choiceIsPending(signalId)) return;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: activeSession.user.id, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const ticket: ChoiceTicket = { viewer: activeSession.user.id, workspaceId, version: requestVersion, epoch: choiceEpoch };
       choiceTickets.set(signalId, ticket);
       choiceErrors.delete(signalId);
       renderFeed();
+      const isAlive = (): boolean =>
+        choiceTickets.get(signalId) === ticket &&
+        choiceTicketLive(ticket) &&
+        (!pinned || pinned.isCurrent(workspaceId));
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, state.multi, submission);
+        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, state.multi, submission, {
+          pinned,
+          isAlive,
+        });
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
+      // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
+      if (!isAlive()) return;
       // An answer, here or anywhere, changes what is waiting.
       if (result.ok) {
         if (typeof waitingPanelAsks !== "undefined") {
@@ -11123,8 +11176,6 @@ import "../../styles/kylon-image-viewer.css";
         }
         if (typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
       }
-      // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
-      if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
       choiceTickets.delete(signalId);
       const current = choiceRows.get(signalId);
       /* The server accepted this person's answer: theirs, with the options it names. Its time comes
