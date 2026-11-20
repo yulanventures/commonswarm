@@ -442,9 +442,10 @@ test("C3 Conditions 2 & 3: narrow addressed thread root audience, unmapped root 
 
   // 1. Narrow addressed root inside a PUBLIC channel: owner -> seatSec ONLY (outsider is in workspace
   //    and can open the public channel, but CANNOT read the addressed root!).
+  const pubChSlug = `rc-addr-${randomBytes(4).toString("hex")}`;
   const pubCh = await send(owner.jwt, {
     kind: "channel_create",
-    slug: `rc-addr-${randomBytes(4).toString("hex")}`,
+    slug: pubChSlug,
     purpose: "Addressed root test",
   });
   assert.equal(pubCh.status, 200);
@@ -452,7 +453,7 @@ test("C3 Conditions 2 & 3: narrow addressed thread root audience, unmapped root 
   const addrRootPost = await send(owner.jwt, {
     kind: "post_signal",
     signal_kind: "ask",
-    conversation_id: pubChId,
+    channel: pubChSlug,
     to_user_id: null,
     to_agent_principal_id: seatSec.principal,
     in_reply_to: null,
