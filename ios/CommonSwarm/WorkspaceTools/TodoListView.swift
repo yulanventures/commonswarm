@@ -49,7 +49,7 @@ private struct TodoRowView: View {
         let dueText = TodoCalendarDate.formatDue(todo.due_on)
 
         VStack(alignment: .leading, spacing: 6) {
-            Text(todo.title)
+            Text(verbatim: todo.title)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(todo.state == .dropped ? .secondary : .primary)
                 .lineLimit(3)
@@ -87,7 +87,7 @@ private struct TodoRowView: View {
                 Image(systemName: directory.assigneeSymbol(party))
                     .accessibilityHidden(true)
             }
-            Text(name)
+            Text(verbatim: name)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -100,6 +100,7 @@ struct TodoListView: View {
     let api: TodoAPI
     let workspaceID: UUID
     @StateObject private var viewModel: TodoListViewModel
+    @State private var createdSummary: TodoSummary?
 
     init(api: TodoAPI, workspaceID: UUID) {
         self.api = api
@@ -124,8 +125,50 @@ struct TodoListView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("To-dos")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !viewModel.isReadOnly, viewModel.todos != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        viewModel.openCreateSheet()
+                    } label: {
+                        Label("Add to-do", systemImage: "plus")
+                    }
+                    .accessibilityIdentifier("todos-create-button")
+                }
+            }
+        }
+        .navigationDestination(item: $createdSummary) { summary in
+            TodoDetailView(
+                api: api,
+                workspaceID: workspaceID,
+                summary: summary,
+                directory: viewModel.directory,
+                onChanged: { await load() }
+            )
+        }
+        .sheet(isPresented: $viewModel.showingCreateSheet) {
+            TodoCreateSheet(
+                directory: viewModel.directory,
+                isSaving: viewModel.isCreating,
+                errorMessage: viewModel.createError
+            ) { title, notes, dueOn, assignee in
+                if let created = await viewModel.createTodo(
+                    title: title,
+                    notes: notes,
+                    dueOn: dueOn,
+                    assignee: assignee,
+                    api: api,
+                    workspaceID: workspaceID
+                ) {
+                    createdSummary = created.summary
+                }
+            }
+        }
         .task(id: viewModel.filter) {
             await load()
+        }
+        .onDisappear {
+            viewModel.retire()
         }
     }
 
@@ -158,11 +201,13 @@ struct TodoListView: View {
                                     api: api,
                                     workspaceID: workspaceID,
                                     summary: todo,
-                                    directory: viewModel.directory
+                                    directory: viewModel.directory,
+                                    onChanged: { await load() }
                                 )
                             } label: {
                                 TodoRowView(todo: todo, directory: viewModel.directory)
                             }
+                            .accessibilityIdentifier("todo-row-\(todo.todo_id.uuidString.lowercased())")
                         }
                     }
                 }
@@ -174,5 +219,97 @@ struct TodoListView: View {
 
     private func load() async {
         await viewModel.load(api: api, workspaceID: workspaceID)
+    }
+}
+
+private struct TodoCreateSheet: View {
+    let directory: TodoDirectory
+    let isSaving: Bool
+    let errorMessage: String?
+    let onSubmit: (String, String, String?, TodoParty?) async -> Void
+
+    @State private var title = ""
+    @State private var notes = ""
+    @State private var hasDueDate = false
+    @State private var dueDate = Date()
+    @State private var assignee: TodoParty?
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var errorForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 1.00, green: 0.48, blue: 0.46)
+            : Color(red: 0.72, green: 0.08, blue: 0.08)
+    }
+
+    private var canSubmit: Bool {
+        !isSaving && !TodoRules.cleanTitle(title).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let errorMessage {
+                    Section {
+                        Text(verbatim: errorMessage)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(errorForeground)
+                            .accessibilityIdentifier("todo-create-error")
+                    }
+                }
+
+                Section("Title") {
+                    TextField("What needs to happen?", text: $title)
+                        .disabled(isSaving)
+                        .accessibilityIdentifier("todo-create-title")
+                }
+
+                Section("Notes") {
+                    TextEditor(text: $notes)
+                        .frame(minHeight: 84)
+                        .disabled(isSaving)
+                        .accessibilityLabel("Notes")
+                        .accessibilityIdentifier("todo-create-notes")
+                }
+
+                Section {
+                    Toggle("Due date", isOn: $hasDueDate)
+                        .disabled(isSaving)
+                    if hasDueDate {
+                        DatePicker("Due", selection: $dueDate, displayedComponents: .date)
+                            .disabled(isSaving)
+                    }
+                }
+
+                Section("Assign to") {
+                    Picker("Assignee", selection: $assignee) {
+                        Text("Unassigned").tag(Optional<TodoParty>.none)
+                        ForEach(directory.sortedPeople) { entry in
+                            Text(verbatim: entry.label).tag(Optional(entry.party))
+                        }
+                        ForEach(directory.sortedAgents) { entry in
+                            Text(verbatim: "\(entry.label) (Agent)").tag(Optional(entry.party))
+                        }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .navigationTitle("New to-do")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "Adding…" : "Add") {
+                        let dueStr = hasDueDate ? TodoCalendarDate.formatLocal(dueDate) : nil
+                        Task { await onSubmit(title, notes, dueStr, assignee) }
+                    }
+                    .disabled(!canSubmit)
+                    .accessibilityIdentifier("todo-create-submit")
+                }
+            }
+        }
     }
 }
