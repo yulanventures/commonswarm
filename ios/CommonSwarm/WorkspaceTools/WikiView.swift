@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct WikiRoute: Hashable {}
 
@@ -217,6 +220,24 @@ struct WikiTopicDetailView: View {
         store.endPresentation(presentation)
     }
 
+    private var primaryBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.08, green: 0.40, blue: 0.80)
+            : Color(red: 0.00, green: 0.35, blue: 0.80)
+    }
+
+    private var secondaryBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.22, green: 0.22, blue: 0.24)
+            : Color(red: 0.90, green: 0.90, blue: 0.92)
+    }
+
+    private var secondaryForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.94, green: 0.94, blue: 0.96)
+            : Color(red: 0.11, green: 0.11, blue: 0.12)
+    }
+
     private var statusForeground: Color {
         colorScheme == .dark
             ? Color(red: 0.64, green: 0.96, blue: 0.72)
@@ -270,6 +291,7 @@ struct WikiTopicDetailView: View {
                 topic: editSession.topic,
                 baseVersion: editSession.baseVersion,
                 initialMarkdown: editSession.initialMarkdown,
+                unsentMarkdown: store.conflictDraft?.fileID == editSession.fileID ? store.conflictDraft?.unsentMarkdown : nil,
                 isSaving: store.isSaving,
                 errorMessage: store.actionError
             ) { updatedMarkdown in
@@ -346,6 +368,10 @@ struct WikiTopicDetailView: View {
                             .foregroundStyle(errorForeground)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("wiki-detail-error")
+                    }
+
+                    if let unsent = store.conflictDraft, unsent.fileID == topic.fileID {
+                        unsentDraftCard(unsent, canEdit: store.canEditTopic(topic.fileID))
                     }
 
                     if !pendingRetries.isEmpty {
@@ -455,6 +481,79 @@ struct WikiTopicDetailView: View {
                 await store.openTopic(fileID: topic.fileID, version: viewingVersion)
             }
         }
+    }
+
+    private func unsentDraftCard(_ draft: WikiConflictDraft, canEdit: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Your unsent Markdown")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            ScrollView {
+                Text(verbatim: draft.unsentMarkdown)
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 140)
+            .padding(8)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .accessibilityIdentifier("wiki-unsent-markdown-preview")
+
+            HStack(spacing: 10) {
+                if canEdit {
+                    Button {
+                        store.beginEdit(fileID: draft.fileID)
+                    } label: {
+                        Text("Review in Edit")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .background(primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("wiki-conflict-edit-button")
+                }
+
+                Button {
+                    #if canImport(UIKit)
+                    UIPasteboard.general.string = draft.unsentMarkdown
+                    #endif
+                } label: {
+                    Text("Copy")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(secondaryForeground)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("wiki-conflict-copy-button")
+
+                Button {
+                    store.dismissConflictDraft()
+                } label: {
+                    Text("Discard")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(secondaryForeground)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isSaving)
+                .accessibilityIdentifier("wiki-conflict-discard-button")
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("wiki-unsent-draft-card")
     }
 }
 
@@ -619,11 +718,15 @@ private struct WikiMarkdownContentView: View {
                     } label: {
                         Label(topic, systemImage: "book.pages")
                             .font(.footnote.weight(.semibold))
-                            .padding(.horizontal, 10)
+                            .padding(.horizontal, 12)
                             .frame(minHeight: 36)
                             .background(Color(.tertiarySystemFill), in: Capsule())
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
                     .accessibilityIdentifier("wiki-topic-link-\(topic)")
                 }
             }
@@ -635,11 +738,13 @@ private struct WikiMarkdownContentView: View {
 private struct WikiEditSheet: View {
     let topic: String
     let baseVersion: Int
+    let unsentMarkdown: String?
     let isSaving: Bool
     let errorMessage: String?
     let onSubmit: (String) async -> Void
 
     @State private var markdown: String
+    @State private var copiedUnsent = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -647,12 +752,14 @@ private struct WikiEditSheet: View {
         topic: String,
         baseVersion: Int,
         initialMarkdown: String,
+        unsentMarkdown: String? = nil,
         isSaving: Bool,
         errorMessage: String?,
         onSubmit: @escaping (String) async -> Void
     ) {
         self.topic = topic
         self.baseVersion = baseVersion
+        self.unsentMarkdown = unsentMarkdown
         self.isSaving = isSaving
         self.errorMessage = errorMessage
         self.onSubmit = onSubmit
@@ -681,7 +788,36 @@ private struct WikiEditSheet: View {
                     }
                 }
 
-                Section("v\(baseVersion) → v\(baseVersion + 1)") {
+                if let unsentMarkdown {
+                    Section("Your unsent Markdown") {
+                        ScrollView {
+                            Text(verbatim: unsentMarkdown)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 180)
+                        .accessibilityIdentifier("wiki-edit-unsent-markdown")
+
+                        Button(copiedUnsent ? "Copied unsent Markdown" : "Copy unsent Markdown") {
+                            #if canImport(UIKit)
+                            UIPasteboard.general.string = unsentMarkdown
+                            #endif
+                            copiedUnsent = true
+                        }
+                        .accessibilityIdentifier("wiki-edit-copy-unsent")
+
+                        Button("Replace editor with unsent Markdown") {
+                            markdown = unsentMarkdown
+                        }
+                        .disabled(isSaving)
+                        .accessibilityIdentifier("wiki-edit-apply-unsent")
+                    }
+                }
+
+                Section("Latest (v\(baseVersion) → v\(baseVersion + 1))") {
                     TextEditor(text: $markdown)
                         .font(.system(.body, design: .monospaced))
                         .frame(minHeight: 260)

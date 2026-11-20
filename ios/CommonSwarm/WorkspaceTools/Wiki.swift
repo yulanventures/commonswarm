@@ -50,6 +50,13 @@ struct WikiEditSession: Identifiable, Equatable, Sendable {
     let initialMarkdown: String
 }
 
+struct WikiConflictDraft: Equatable, Sendable {
+    let fileID: UUID
+    let topic: String
+    let baseVersion: Int
+    let unsentMarkdown: String
+}
+
 struct WikiCreateSession: Identifiable, Equatable, Sendable {
     let id = UUID()
 }
@@ -396,6 +403,7 @@ final class WikiStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var actionError: String?
+    @Published private(set) var conflictDraft: WikiConflictDraft?
     @Published var activeEditSession: WikiEditSession?
     @Published var activeCreateSession: WikiCreateSession?
     @Published private(set) var pendingSaves: [UUID: WikiPendingSave] = [:]
@@ -548,6 +556,10 @@ final class WikiStore: ObservableObject {
         if activeEditSession?.id == id {
             activeEditSession = nil
         }
+    }
+
+    func dismissConflictDraft() {
+        conflictDraft = nil
     }
 
     func clearLinkNotice() {
@@ -794,6 +806,14 @@ final class WikiStore: ObservableObject {
         guard activeEditSession?.id == editSession.id,
               let liveTopic = topics?.first(where: { $0.fileID == editSession.fileID }),
               liveTopic.currentVersion == editSession.baseVersion else {
+            if activeEditSession?.id == editSession.id {
+                conflictDraft = WikiConflictDraft(
+                    fileID: editSession.fileID,
+                    topic: editSession.topic,
+                    baseVersion: editSession.baseVersion,
+                    unsentMarkdown: markdown
+                )
+            }
             activeEditSession = nil
             actionError = "This wiki page changed since you opened Edit. Review the latest version and edit again."
             return false
@@ -1090,6 +1110,9 @@ final class WikiStore: ObservableObject {
             if pendingSaves[record.fileID]?.commitCommandID == record.commitCommandID {
                 pendingSaves.removeValue(forKey: record.fileID)
             }
+            if conflictDraft?.fileID == savedFileID {
+                conflictDraft = nil
+            }
             activeEditSession = nil
             activeCreateSession = nil
 
@@ -1121,6 +1144,12 @@ final class WikiStore: ObservableObject {
             if pendingSaves[record.fileID]?.commitCommandID == record.commitCommandID {
                 pendingSaves.removeValue(forKey: record.fileID)
             }
+            conflictDraft = WikiConflictDraft(
+                fileID: record.fileID,
+                topic: record.topic,
+                baseVersion: record.baseVersion,
+                unsentMarkdown: record.markdown
+            )
             activeEditSession = nil
             actionError = message
             _ = await loadTopics(preserveNotice: true)
@@ -1188,6 +1217,7 @@ final class WikiStore: ObservableObject {
         activeVersionState = nil
         contentError = nil
         linkNotice = nil
+        conflictDraft = nil
         closeWriteSurfaces()
         loadFailure = .refused(reason)
         if clearPending {

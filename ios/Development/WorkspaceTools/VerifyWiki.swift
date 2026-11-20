@@ -401,7 +401,8 @@ struct VerifyWiki {
         let commitsAfter = try await commitMutations(origin)
         expect(replayClean && commitsAfter == commitsBefore + 1, "Bound retry must replay with EXACTLY 1 commit and must NOT regress displayed version")
 
-        // 409 file_version_precondition_failed: concurrent server update closes editor and refreshes to latest
+        // 409 file_version_precondition_failed: concurrent server update closes editor, refreshes to latest,
+        // AND preserves unsent Markdown alongside the latest version so the user can compare/copy and save a merge.
         let conflictEditSess = await MainActor.run { store.beginEdit(fileID: checklist.fileID) }!
         try await postFixture("\(base)/fixture/advance-version?file_id=\(checklist.fileID.uuidString.lowercased())")
         let conflictSaveOK = await store.saveEdit(session: conflictEditSess, markdown: "# Conflicting edit\n")
@@ -410,8 +411,28 @@ struct VerifyWiki {
                 && store.activeEditSession == nil
                 && (store.actionError ?? "").contains("Someone else updated")
                 && store.activeTopic?.currentVersion == newerVer + 2
+                && store.conflictDraft?.fileID == checklist.fileID
+                && store.conflictDraft?.unsentMarkdown == "# Conflicting edit\n"
+                && store.activeMarkdown != "# Conflicting edit\n"
         }
-        expect(conflictHandled, "409 file_version_precondition_failed must close stale editor and refresh to latest version")
+        expect(conflictHandled, "409 file_version_precondition_failed must close stale editor, refresh to latest version, and keep unsent Markdown in conflictDraft")
+
+        // Reopening Edit shows latest server Markdown in the editor while keeping unsent Markdown available to compare/copy.
+        let reopenedAfterConflict = await MainActor.run { store.beginEdit(fileID: checklist.fileID) }!
+        let reopenedKeepsBoth = await MainActor.run {
+            reopenedAfterConflict.baseVersion == newerVer + 2
+                && reopenedAfterConflict.initialMarkdown == store.activeMarkdown
+                && store.conflictDraft?.unsentMarkdown == "# Conflicting edit\n"
+        }
+        expect(reopenedKeepsBoth, "Reopening Edit after conflict must keep latest Markdown in the editor AND unsent Markdown available in conflictDraft")
+        let mergedWikiBody = reopenedAfterConflict.initialMarkdown + "\n# Conflicting edit\n"
+        let mergedSaveOK = await store.saveEdit(session: reopenedAfterConflict, markdown: mergedWikiBody)
+        let mergedDraftCleared = await MainActor.run {
+            store.conflictDraft == nil
+                && store.activeTopic?.currentVersion == newerVer + 3
+                && store.activeMarkdown == mergedWikiBody
+        }
+        expect(mergedSaveOK && mergedDraftCleared, "Saving merged wiki Markdown after conflict must commit cleanly and clear conflictDraft")
 
         // =========================================================================
         // 5. Create new topic (`if_version: 0`) + same-name/same-version/different-UUID replacement witnesses
