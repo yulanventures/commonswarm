@@ -3,7 +3,14 @@ import Foundation
 struct Workspace: Decodable, Hashable, Identifiable {
     let workspace_id: UUID
     let name: String
+    let org_id: UUID?
     var id: UUID { workspace_id }
+
+    init(workspace_id: UUID, name: String, org_id: UUID? = nil) {
+        self.workspace_id = workspace_id
+        self.name = name
+        self.org_id = org_id
+    }
 }
 
 struct Conversation: Hashable, Identifiable {
@@ -136,7 +143,7 @@ struct ConversationAPI {
     }
 
     func workspaces() async throws -> [Workspace] {
-        try await rows("workspaces", ["select": "workspace_id,name", "archived_at": "is.null", "order": "name,workspace_id"])
+        try await rows("workspaces", ["select": "workspace_id,name,org_id", "archived_at": "is.null", "order": "name,workspace_id"])
     }
 
     func directory(_ workspace: UUID) async throws -> [Conversation] {
