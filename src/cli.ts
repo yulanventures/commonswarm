@@ -5653,7 +5653,10 @@ async function runWhoami(args: Arguments): Promise<void> {
   };
   if (args.expandedProfileInputPath) {
     try {
-      const binding = await readReceiveBinding(args.expandedProfileInputPath);
+      const binding = await readReceiveBinding(
+        args.expandedProfileInputPath,
+        args.expandedProfileHostSessionId,
+      );
       const status = receiveStatus(
         binding,
         Date.now(),

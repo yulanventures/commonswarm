@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { saveAgentProfile } from "../../src/cloud/agent-profile.js";
+import { configureAgentReceive } from "../../src/cloud/agent-receive.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { decodeOpaqueCursor, encodeOpaqueCursor } from "../../src/cli/ax.js";
 
@@ -353,6 +354,33 @@ test("cswarm whoami --json returns richer workspace, seat, and conversations met
     assert.equal(body.conversations.direct_messages.length, 1);
     assert.equal(body.conversations.total_unread, 3);
     assert.equal(body.conversations.total_mentions, 1);
+
+    // Host-bound receive witness: once configured for session-ax-1, whoami --json MUST report receive.configured: true!
+    const projectDir = join(dir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    await configureAgentReceive({
+      profilePath,
+      mode: "turn",
+      provider: "codex",
+      hostSessionId: "session-ax-1",
+      cwd: projectDir,
+      execution: { command: process.execPath, args: [CLI_PATH] },
+    });
+    const configuredRes = await runCli(dir, [
+      "whoami",
+      "--profile",
+      profilePath,
+      "--host-session-id",
+      "session-ax-1",
+      "--json",
+    ]);
+    assert.equal(configuredRes.code, 0, configuredRes.stderr);
+    const configuredBody = JSON.parse(configuredRes.stdout) as Record<string, any>;
+    assert.equal(configuredBody.receive.configured, true);
+    assert.equal(configuredBody.receive.requested_mode, "turn");
+    assert.equal(configuredBody.receive.effective_mode, "turn");
+    assert.equal(configuredBody.receive.turn_check, "pending_host");
+    assert.equal(configuredBody.receive.host_session_id, "session-ax-1");
 
     // Pre-2b fallback path via direct token file
     const tokenPath = join(dir, "agent.token");
