@@ -17118,7 +17118,12 @@ import "../../styles/kylon-image-viewer.css";
       one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
     };
     /** Immediately wipe client-held rows, cursors, optimistic rows, and local draft for a left or revoked conversation. */
-    const evictConversationLocalState = (workspaceId: string, conversationId: string, markUnavailable: boolean): void => {
+    const evictConversationLocalState = (
+      workspaceId: string,
+      conversationId: string,
+      markUnavailable: boolean,
+      invalidateArchive = true,
+    ): void => {
       const pinnedUserId = session?.user.id ?? "";
       evictedConversationIds.add(`${workspaceId}:${conversationId}`);
       cancelComposerDraftTimer();
@@ -17131,6 +17136,9 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (workspaceConversations) {
         workspaceConversations = workspaceConversations.filter((c) => c.conversationId !== conversationId);
+      }
+      if (invalidateArchive && typeof invalidateWaitingArchived === "function") {
+        invalidateWaitingArchived(workspaceId);
       }
       const viewingEvicted =
         activeDmConversationId === conversationId ||
@@ -17177,6 +17185,7 @@ import "../../styles/kylon-image-viewer.css";
           renderHomeShell();
           renderChannelBlocked();
           renderFeed();
+          if (typeof syncWaitingPanel === "function") syncWaitingPanel();
         } else {
           conversationHistory = null;
           unavailableDmConversationId = null;
@@ -17212,8 +17221,10 @@ import "../../styles/kylon-image-viewer.css";
       conversationsReadState = "ready";
       conversationsReadError = "";
       if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
-      if (typeof hasLostConversationAccess === "function" && hasLostConversationAccess(workspaceId, prevList, rows)) {
-        if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
+      const invalidatedArchive =
+        typeof hasLostConversationAccess === "function" && hasLostConversationAccess(workspaceId, prevList, rows);
+      if (invalidatedArchive && typeof invalidateWaitingArchived === "function") {
+        invalidateWaitingArchived(workspaceId);
       }
       // Reconcile authoritative omission even while the active conversation's first history page is still loading.
       const requestedDmId = activeDmConversationId ??
@@ -17223,7 +17234,7 @@ import "../../styles/kylon-image-viewer.css";
       if (requestedDmId !== null) {
         const freshDm = rows.find((r) => r.conversationId === requestedDmId);
         if (!freshDm || !freshDm.joined) {
-          evictConversationLocalState(workspaceId, requestedDmId, true);
+          evictConversationLocalState(workspaceId, requestedDmId, true, !invalidatedArchive);
           return true;
         }
       }
@@ -17235,7 +17246,7 @@ import "../../styles/kylon-image-viewer.css";
         if (openPrivateConvId !== null) {
           const freshPrivate = rows.find((r) => r.conversationId === openPrivateConvId);
           if (!freshPrivate || !freshPrivate.joined) {
-            evictConversationLocalState(workspaceId, openPrivateConvId, true);
+            evictConversationLocalState(workspaceId, openPrivateConvId, true, !invalidatedArchive);
             return true;
           }
         }
@@ -17517,7 +17528,6 @@ import "../../styles/kylon-image-viewer.css";
       groupLeaveSucceeded = true;
       syncGroupLeaveDialogControls();
       one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
-      invalidateWaitingArchived(target.workspaceId);
       void refreshConversations(target.workspaceId, true, true, pinned);
     };
 
