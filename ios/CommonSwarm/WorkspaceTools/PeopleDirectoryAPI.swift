@@ -87,10 +87,16 @@ struct PeopleDirectoryAPI: Sendable {
         let grant_id: String?
         let principal_id: UUID?
         let level: String?
+        let organization_id: String?
         let workspace_ids: [String]?
         let expires_at: String?
         let state: String?
         let created_at: String?
+    }
+
+    private struct WorkspaceOrgWire: Decodable {
+        let workspace_id: UUID?
+        let org_id: UUID?
     }
 
     private struct PostgrestErrorWire: Decodable {
@@ -197,6 +203,7 @@ struct PeopleDirectoryAPI: Sendable {
 
     func loadDirectory(
         workspaceID: UUID,
+        organizationID: UUID? = nil,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true },
         onOwnerGrantsDenied: @escaping @MainActor @Sendable () -> Void = {}
     ) async throws -> PeopleDirectoryLoadResult {
@@ -440,30 +447,56 @@ struct PeopleDirectoryAPI: Sendable {
             effectiveAdminGrantsAll = false
             do {
                 let myRows = try await fetchMyAdminGrantsRPC(canDispatch: canDispatch)
+                var resolvedOrgID = organizationID
+                let hasActiveOrgGrant = myRows.contains {
+                    $0.state?.lowercased() == "active"
+                        && $0.level?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "organization"
+                }
+                if resolvedOrgID == nil && hasActiveOrgGrant {
+                    let wsRows: [WorkspaceOrgWire] = try await fetchView(
+                        "workspaces",
+                        query: [
+                            "select": "workspace_id,org_id",
+                            "workspace_id": wsFilter,
+                            "limit": "1",
+                        ],
+                        canDispatch: canDispatch
+                    )
+                    resolvedOrgID = wsRows.first(where: { $0.workspace_id == workspaceID })?.org_id
+                }
                 let targetWorkspace = workspaceID.uuidString.lowercased()
+                let targetOrganization = resolvedOrgID?.uuidString.lowercased()
                 let now = Date()
                 effectiveAdminGrants = myRows.compactMap { row in
                     guard let grantID = row.grant_id, !grantID.isEmpty,
                           let principalID = row.principal_id,
-                          row.state?.lowercased() == "active" else {
-                        return nil
-                    }
-                    let workspaceIDs = (row.workspace_ids ?? []).map { $0.lowercased() }
-                    guard workspaceIDs.contains(targetWorkspace) else {
+                          row.state?.lowercased() == "active",
+                          let agentName = agentNamesByID[principalID] else {
                         return nil
                     }
                     let expiresAt = PeopleDirectoryRules.parseISO8601(row.expires_at)
                     if let expiresAt, expiresAt <= now {
                         return nil
                     }
-                    let agentName = agentNamesByID[principalID] ?? "Agent"
+                    let normalizedLevel = row.level?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "scoped"
+                    let matchesHere: Bool
+                    if normalizedLevel == "organization" {
+                        let grantOrg = row.organization_id?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        matchesHere = targetOrganization != nil && grantOrg != nil && grantOrg == targetOrganization
+                    } else {
+                        let workspaceIDs = (row.workspace_ids ?? []).map { $0.lowercased() }
+                        matchesHere = workspaceIDs.contains(targetWorkspace)
+                    }
+                    guard matchesHere else {
+                        return nil
+                    }
                     return WorkspaceAgentAdminGrant(
                         grantID: grantID,
                         principalID: principalID,
                         agentName: agentName,
                         ownerUserID: viewerID,
                         ownerDisplay: "You",
-                        level: row.level?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "scoped",
+                        level: normalizedLevel,
                         expiresAt: expiresAt,
                         createdAt: PeopleDirectoryRules.parseISO8601(row.created_at),
                         mayEnd: true

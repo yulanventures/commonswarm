@@ -130,10 +130,11 @@ struct VerifyPeopleDirectory {
         let workspaces = try await convAPI.workspaces()
         expect(workspaces.count == 1, "Expected 1 workspace")
         let ws = workspaces[0]
+        expect(ws.org_id != nil, "Expected workspace org_id decoded from rest/v1/workspaces")
         let directoryAPI = PeopleDirectoryAPI(api: convAPI)
 
         // 1. Full load via production POST rest/v1/rpc/workspace_seat_admin_grants (owner shape: { grants: [...] })
-        let store = await MainActor.run { PeopleDirectoryStore(workspaceID: ws.id) }
+        let store = await MainActor.run { PeopleDirectoryStore(workspaceID: ws.id, organizationID: ws.org_id) }
         let defaultTabIsAgents = await MainActor.run { store.selectedTab == .agents }
         expect(defaultTabIsAgents, "Default tab must be Agents")
         await store.load(api: directoryAPI)
@@ -588,18 +589,21 @@ struct VerifyPeopleDirectory {
         await store.load(api: directoryAPI)
         let memberOwnGrantsOK = await MainActor.run {
             let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            let grantIDs = Set(store.visibleAdminGrants.map(\.grantID))
+            let orgGrant = store.visibleAdminGrants.first(where: { $0.grantID == "my_grant_atlas_org_here" })
             return !store.accessUnavailable
                 && !store.viewerIsOwner
                 && !store.adminGrantsAll
                 && store.adminGrantsReady
                 && !store.adminGrantsFailed
-                && store.visibleAdminGrants.count == 1
-                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
-                && store.visibleAdminGrants.first?.agentName == "Atlas"
+                && grantIDs == ["my_grant_atlas_active", "my_grant_atlas_org_here"]
+                && orgGrant?.level == "organization"
+                && orgGrant?.levelLabel == "Organization admin"
+                && orgGrant?.agentName == "Atlas"
                 && store.managers.count == 1
-                && adminsTab?.count == 2
+                && adminsTab?.count == 3
         }
-        expect(memberOwnGrantsOK, "Non-owner member must load active own grants for THIS workspace via my_seat_admin_grants (filtering out other-workspace, ended, and expired grants)")
+        expect(memberOwnGrantsOK, "Non-owner member must load active scoped AND matching-organization grants for workspace agents (filtering out other-org, null-org, non-member-agent, other-workspace, ended, and expired grants)")
 
         // 11b. Grant-read 503 while people load keeps people/managers visible and flags adminGrantsFailed (never empty state)
         try await postFixture("\(base)/fixture/fail-my-admin-grants?on=1")
@@ -619,16 +623,16 @@ struct VerifyPeopleDirectory {
         try await postFixture("\(base)/fixture/fail-my-admin-grants?on=0")
         await store.load(api: directoryAPI)
         let grantsRecovered = await MainActor.run {
-            !store.adminGrantsFailed
+            let grantIDs = Set(store.visibleAdminGrants.map(\.grantID))
+            return !store.adminGrantsFailed
                 && store.adminGrantsReady
-                && store.visibleAdminGrants.count == 1
-                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
+                && grantIDs == ["my_grant_atlas_active", "my_grant_atlas_org_here"]
         }
-        expect(grantsRecovered, "Retrying after grant-read 503 must recover viewer's active grants cleanly")
+        expect(grantsRecovered, "Retrying after grant-read 503 must recover viewer's active scoped and matching-org grants cleanly")
 
         // 11d. HezSec witness: demotion with my_seat_admin_grants held clears cached owner-wide
         //      grant rows and Admins count BEFORE the own-grants RPC settles, then releasing it
-        //      delivers ONLY the caller's own active grant for this workspace.
+        //      delivers ONLY the caller's own active grants for this workspace/organization.
         try await postFixture("\(base)/fixture/viewer-role?role=owner")
         try await postFixture("\(base)/fixture/non-owner-grants?on=0")
         try await postFixture("\(base)/fixture/own-admin-grants?on=0")
@@ -663,16 +667,16 @@ struct VerifyPeopleDirectory {
         await heldDemotionTask.value
         let settledOwnGrantsAfterRelease = await MainActor.run {
             let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            let grantIDs = Set(store.visibleAdminGrants.map(\.grantID))
             return !store.accessUnavailable
                 && !store.viewerIsOwner
                 && !store.adminGrantsAll
                 && store.adminGrantsReady
                 && !store.adminGrantsFailed
-                && store.visibleAdminGrants.count == 1
-                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
-                && adminsTab?.count == 2
+                && grantIDs == ["my_grant_atlas_active", "my_grant_atlas_org_here"]
+                && adminsTab?.count == 3
         }
-        expect(settledOwnGrantsAfterRelease, "Releasing held my_seat_admin_grants must still deliver the demoted caller's own active workspace grant")
+        expect(settledOwnGrantsAfterRelease, "Releasing held my_seat_admin_grants must deliver the demoted caller's active scoped and matching-org grants")
         try await postFixture("\(base)/fixture/viewer-role?role=owner")
         try await postFixture("\(base)/fixture/non-owner-grants?on=0")
         try await postFixture("\(base)/fixture/own-admin-grants?on=0")

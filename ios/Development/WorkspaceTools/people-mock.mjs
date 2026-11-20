@@ -14,8 +14,11 @@ const maya = "00000000-0000-4000-8000-000000000011";
 const devon = "00000000-0000-4000-8000-000000000012";
 const wsMain = "00000000-0000-4000-8000-000000000003";
 const wsOther = "00000000-0000-4000-8000-000000000099";
+const orgMain = "00000000-0000-4000-8000-000000000010";
+const orgOther = "00000000-0000-4000-8000-000000000020";
+const goneAgent = "00000000-0000-4000-8000-000000000088";
 
-const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
+const workspaces = [{ workspace_id: wsMain, org_id: orgMain, name: "Simulator workspace" }];
 
 let accessRefused = false;
 let edge401 = false;
@@ -300,6 +303,50 @@ const server = createServer(async (req, res) => {
             organization_id: null,
             scope_names: ["members.invite"],
             workspace_ids: [wsMain],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_atlas_org_here",
+            principal_id: atlas,
+            level: "organization",
+            organization_id: orgMain,
+            scope_names: ["role:organization_admin"],
+            workspace_ids: [],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_atlas_org_other",
+            principal_id: atlas,
+            level: "organization",
+            organization_id: orgOther,
+            scope_names: ["role:organization_admin"],
+            workspace_ids: [],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_atlas_org_unknown",
+            principal_id: atlas,
+            level: "organization",
+            organization_id: null,
+            scope_names: ["role:organization_admin"],
+            workspace_ids: [],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_gone_org_here",
+            principal_id: goneAgent,
+            level: "organization",
+            organization_id: orgMain,
+            scope_names: ["role:organization_admin"],
+            workspace_ids: [],
             expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
             state: "active",
             created_at: new Date(Date.now() - 3600 * 1000).toISOString(),

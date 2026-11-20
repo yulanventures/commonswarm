@@ -74,7 +74,7 @@ final class PeopleDirectoryUITests: XCTestCase {
         // 4. Switch to Admins tab and verify human managers + agent admin grant
         try tapButton("people-tab-admins")
         XCTAssertTrue(app.staticTexts["People who manage this workspace"].firstMatch.waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["Agents with scoped admin access"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["Admin access given to agents"].firstMatch.exists)
         capture("people-admins-tab")
     }
 }

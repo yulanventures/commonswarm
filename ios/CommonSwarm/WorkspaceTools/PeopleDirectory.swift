@@ -293,14 +293,16 @@ final class PeopleDirectoryStore: ObservableObject {
     @Published private(set) var accessUnavailable = false
 
     let workspaceID: UUID
+    let organizationID: UUID?
     private var loadGeneration = 0
     private var isRetired = false
     private var isListVisible = false
     private var activeDetailTokens: Set<UUID> = []
     private var activeSessionID: ObjectIdentifier?
 
-    init(workspaceID: UUID) {
+    init(workspaceID: UUID, organizationID: UUID? = nil) {
         self.workspaceID = workspaceID
+        self.organizationID = organizationID
     }
 
     func activate() {
@@ -479,6 +481,7 @@ final class PeopleDirectoryStore: ObservableObject {
         do {
             let result = try await api.loadDirectory(
                 workspaceID: workspaceID,
+                organizationID: organizationID,
                 canDispatch: readGate,
                 onOwnerGrantsDenied: clearOwnerGrantsOnDenial
             )
