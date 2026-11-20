@@ -10621,8 +10621,13 @@ import "../../styles/kylon-image-viewer.css";
           const approval = own && householdConnectionsReadState === "succeeded"
             ? householdConnections.filter((connection) => connection.principal_id === agent.principalId)
               .map(connectionApproval).find((value) => value !== null) ?? null : null;
-          const waitingSince = agent.oldestUnobservedAt ?? agent.work?.facts.messages_waiting_since ?? null;
-          const waitingCount = agent.unseenCount ?? agent.work?.facts.messages_waiting_count ?? null;
+          const overviewHasWaiting = (agent.work?.facts.messages_waiting_count ?? 0) > 0;
+          const waitingSince = overviewHasWaiting
+            ? (agent.work?.facts.messages_waiting_since ?? agent.oldestUnobservedAt ?? null)
+            : (agent.oldestUnobservedAt ?? agent.work?.facts.messages_waiting_since ?? null);
+          const waitingCount = overviewHasWaiting
+            ? (agent.work?.facts.messages_waiting_count ?? null)
+            : (agent.unseenCount ?? agent.work?.facts.messages_waiting_count ?? null);
           const activityTimes = [agent.presence?.last_command_at, agent.work?.facts.last_activity_at]
             .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
             .sort((left, right) => Date.parse(right) - Date.parse(left));
