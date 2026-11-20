@@ -484,6 +484,127 @@ test("Condition 2: two concurrent listener paths share one atomic reservation, a
   }
 });
 
+test("Opt-out/dispatch lock serialization: opting out while a wake is reserved causes zero codex queue calls, and opt-out waits for in-flight dispatch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-wake-optout-race-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
+  try {
+    // Part A: opt out AFTER a wake is durably reserved, BEFORE execFile -> zero codex queue calls!
+    const { cwd, profile } = await setupBoundCodexSeat(root);
+    let clock = Date.parse("2026-11-20T20:30:00.000Z");
+    const codexCalls: Array<readonly string[]> = [];
+    const adapter = new CodexQueueAdapter({
+      codexExecutable: "codex",
+      runner: async (_exe, args) => {
+        codexCalls.push(args);
+        return { stdout: "ok\n", stderr: "" };
+      },
+    });
+    let reservedBatchSeen: number | null = null;
+    const bridge = new NativeWakeBridge({
+      profilePath: profile,
+      hostSessionId: THREAD,
+      cwd,
+      expectedProvider: "codex",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      adapter,
+      now: () => clock,
+      beforeDispatch: async (batch) => {
+        const reserved = await readNativeWakeState(profile, THREAD);
+        assert.equal(reserved?.pending_batch, batch, "wake must already be durably reserved before opt-out runs");
+        reservedBatchSeen = batch;
+        await configureAgentReceive({
+          profilePath: profile,
+          mode: "turn",
+          provider: "codex",
+          hostSessionId: THREAD,
+          cwd,
+          execution: { command: process.execPath, args: [resolve("dist/cli.js")] },
+        });
+      },
+    });
+    bridge.notifyArrival();
+    clock += NATIVE_WAKE_DEBOUNCE_MS;
+    const decision = await bridge.tick();
+    assert.equal(reservedBatchSeen, 1);
+    assert.equal(decision.action, "binding_inactive");
+    assert.equal(decision.code, "wake_opted_out");
+    assert.equal(codexCalls.length, 0, "opting out while a wake is reserved must produce ZERO codex queue calls");
+
+    // Part B: opt-out shares the same receive lock as an in-flight codex queue call and never completes before dispatch finishes.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "codex",
+      hostSessionId: THREAD,
+      cwd,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] },
+    });
+    await acknowledgeNativeWakeOnCheck({ profilePath: profile, hostSessionId: THREAD, now: () => clock });
+    clock += NATIVE_WAKE_MIN_INTERVAL_MS;
+
+    let enteredExec!: () => void;
+    const execEntered = new Promise<void>((done) => { enteredExec = done; });
+    let releaseExec!: () => void;
+    const execGate = new Promise<void>((done) => { releaseExec = done; });
+    const heldAdapter = new CodexQueueAdapter({
+      codexExecutable: "codex",
+      runner: async (_exe, args) => {
+        codexCalls.push(args);
+        enteredExec();
+        await execGate;
+        return { stdout: "ok\n", stderr: "" };
+      },
+    });
+    const heldBridge = new NativeWakeBridge({
+      profilePath: profile,
+      hostSessionId: THREAD,
+      cwd,
+      expectedProvider: "codex",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      adapter: heldAdapter,
+      now: () => clock,
+    });
+    heldBridge.notifyArrival();
+    clock += NATIVE_WAKE_DEBOUNCE_MS;
+    const dispatchPromise = heldBridge.tick();
+    await execEntered;
+
+    let optOutFinished = false;
+    const optOutPromise = configureAgentReceive({
+      profilePath: profile,
+      mode: "turn",
+      provider: "codex",
+      hostSessionId: THREAD,
+      cwd,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] },
+    }).then((res) => {
+      optOutFinished = true;
+      return res;
+    });
+    await delay(150);
+    assert.equal(optOutFinished, false, "opt-out must wait on the shared receive lock while codex queue is in flight");
+    releaseExec();
+    assert.deepEqual(await dispatchPromise, { action: "sent", batch: 2, retry: false });
+    await optOutPromise;
+    assert.equal(optOutFinished, true);
+    assert.equal(codexCalls.length, 1);
+
+    // Once opt-out has completed, no further wake can ever be queued.
+    await acknowledgeNativeWakeOnCheck({ profilePath: profile, hostSessionId: THREAD, now: () => clock });
+    clock += NATIVE_WAKE_MIN_INTERVAL_MS;
+    heldBridge.notifyArrival();
+    clock += NATIVE_WAKE_DEBOUNCE_MS;
+    const afterOptOut = await heldBridge.tick();
+    assert.equal(afterOptOut.action, "binding_inactive");
+    assert.equal(codexCalls.length, 1);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("serveCodexWakeBridge refuses wake when wake mode is withdrawn during a held poll", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-codex-withdraw-"));
   const previousHome = process.env.HOME;

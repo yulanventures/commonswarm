@@ -344,7 +344,7 @@ export async function configureAgentReceive(options: {
       ...(provider === "grok-bot" && options.mode === "wake" ? { host_step: `On this Bot computer, with gateway.json present, start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(startCommand ? { start_command: startCommand, host_step: "Resume this same Claude session with this command and approve the channel when Claude asks. Organization policy still applies. This command does not start a separate worker." } : {}),
     };
-  }, { timeoutMs: 2_000 });
+  }, { timeoutMs: 20_000 });
 }
 
 export interface ReceiveHookEventResult {

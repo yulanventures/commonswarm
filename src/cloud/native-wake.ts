@@ -430,6 +430,8 @@ export interface NativeWakeBridgeOptions {
   minIntervalMs?: number;
   retryAfterMs?: number;
   now?: () => number;
+  /** Test seam invoked after a wake is durably reserved and before acquiring the receive dispatch lock. */
+  beforeDispatch?: (batch: number) => Promise<void> | void;
 }
 
 function defaultProviderForRoute(route: Exclude<NativeWakeRoute, "none">): ReceiveProvider {
@@ -457,6 +459,7 @@ export class NativeWakeBridge {
   private readonly minIntervalMs: number;
   private readonly retryAfterMs: number;
   private readonly now: () => number;
+  private readonly beforeDispatch: ((batch: number) => Promise<void> | void) | undefined;
   private arrivalQueuedAtMs: number | null = null;
   private inFlight = false;
 
@@ -471,6 +474,7 @@ export class NativeWakeBridge {
     this.minIntervalMs = options.minIntervalMs ?? NATIVE_WAKE_MIN_INTERVAL_MS;
     this.retryAfterMs = options.retryAfterMs ?? NATIVE_WAKE_RETRY_AFTER_MS;
     this.now = options.now ?? Date.now;
+    this.beforeDispatch = options.beforeDispatch;
   }
 
   /** Record a fresh arrival; coalesced by the 5 s debounce window. */
@@ -599,25 +603,74 @@ export class NativeWakeBridge {
         return reservation.decision;
       }
 
+      if (this.beforeDispatch !== undefined) {
+        await this.beforeDispatch(reservation.batch);
+      }
+
       const prompt = formatNativeWakePrompt(reservation.batch);
       assertFixedNativeWakePrompt(prompt);
-      let outcome: { ok: true } | { ok: false; code: string; detail: string };
-      try {
-        outcome = await this.adapter.sendWake({
-          hostSessionId: this.hostSessionId,
-          prompt,
-          batch: reservation.batch,
-          cwd: reservation.cwd || this.cwd,
-          ...(signal ? { signal } : {}),
-        });
-      } catch (error) {
-        outcome = {
-          ok: false,
-          code: "wake_dispatch_ambiguous",
-          detail: error instanceof Error ? error.message : "Wake adapter threw unexpectedly.",
+
+      // Hold the exact same receive-<scope> lock that configureAgentReceive(--mode turn) uses,
+      // re-check live opt-in immediately before execFile, and serialize subprocess execution
+      // against opt-out so a wake can NEVER be queued after opt-out completes.
+      const receiveLockName = `receive-${profileScopeKey(this.hostSessionId)}`;
+      const dispatchOutcome = await withFileLock<
+        | { kind: "binding_inactive"; code: string; detail: string }
+        | { kind: "ok" }
+        | { kind: "error"; code: string; detail: string }
+      >(
+        dirname(this.profilePath),
+        receiveLockName,
+        async () => {
+          const liveAuth = await resolveAuthorizedWakeBinding({
+            profilePath: this.profilePath,
+            hostSessionId: this.hostSessionId,
+            expectedProvider: this.expectedProvider,
+            ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
+          });
+          if (!liveAuth.ok) {
+            return { kind: "binding_inactive", code: liveAuth.code, detail: liveAuth.detail };
+          }
+          try {
+            const outcome = await this.adapter.sendWake({
+              hostSessionId: this.hostSessionId,
+              prompt,
+              batch: reservation.batch,
+              cwd: liveAuth.binding.cwd || reservation.cwd || this.cwd,
+              ...(signal ? { signal } : {}),
+            });
+            return outcome.ok
+              ? { kind: "ok" }
+              : { kind: "error", code: outcome.code, detail: outcome.detail };
+          } catch (error) {
+            return {
+              kind: "error",
+              code: "wake_dispatch_ambiguous",
+              detail: error instanceof Error ? error.message : "Wake adapter threw unexpectedly.",
+            };
+          }
+        },
+        { timeoutMs: 20_000 },
+      );
+
+      if (dispatchOutcome.kind === "binding_inactive") {
+        await updateNativeWakeState(
+          this.profilePath,
+          this.hostSessionId,
+          this.adapter.route,
+          (cur) => ({
+            ...cur,
+            route: this.adapter.route,
+            last_error: `${dispatchOutcome.code}: ${dispatchOutcome.detail}`.slice(0, 240),
+          }),
+        );
+        return {
+          action: "binding_inactive",
+          code: dispatchOutcome.code,
+          detail: dispatchOutcome.detail,
         };
       }
-      if (!outcome.ok) {
+      if (dispatchOutcome.kind === "error") {
         // Keep the charged reservation (pending_batch, retry_sent_at, last_wake_at) intact so
         // refused or ambiguous subprocess results cannot bypass the rate floor or single-retry cap.
         await updateNativeWakeState(
@@ -627,10 +680,10 @@ export class NativeWakeBridge {
           (cur) => ({
             ...cur,
             route: this.adapter.route,
-            last_error: `${outcome.code}: ${outcome.detail}`.slice(0, 240),
+            last_error: `${dispatchOutcome.code}: ${dispatchOutcome.detail}`.slice(0, 240),
           }),
         );
-        return { action: "error", code: outcome.code, detail: outcome.detail };
+        return { action: "error", code: dispatchOutcome.code, detail: dispatchOutcome.detail };
       }
       return { action: "sent", batch: reservation.batch, retry: reservation.isRetry };
     } finally {
