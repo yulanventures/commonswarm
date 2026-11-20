@@ -1067,21 +1067,76 @@ test("Step 2b DM and group DM convergence: zero cross-DM bleed from the same sen
   const decodedQueue = parseDecisionQueue({
     workspace_id: "ws-1",
     generated_at: "2026-11-19T12:00:00Z",
-    total: 1,
+    total: 3,
     truncated: false,
-    asks: [{
-      signal_id: "sig-1",
-      from: { kind: "agent", id: "ag-1", name: "Scout" },
-      body: "Approve?",
-      created_at: "2026-11-19T11:55:00Z",
-      until: "2026-11-20T11:55:00Z",
-      conversation_id: "CONV-GEN1",
-      conversation_kind: "group_dm",
-      reraised: null,
-    }],
+    asks: [
+      {
+        signal_id: "sig-1",
+        from: { kind: "agent", id: "ag-1", name: "Scout" },
+        body: "Approve?",
+        created_at: "2026-11-19T11:55:00Z",
+        until: "2026-11-20T11:55:00Z",
+        conversation_id: "CONV-GEN1",
+        conversation_kind: "group_dm",
+        reraised: null,
+      },
+      {
+        signal_id: "sig-redacted",
+        from: { kind: "user", id: alice, name: "Alice" },
+        body: "Left group ask",
+        created_at: "2026-11-19T11:56:00Z",
+        until: "2026-11-20T11:56:00Z",
+        conversation_id: null,
+        conversation_kind: null,
+        reraised: null,
+      },
+      {
+        signal_id: "sig-legacy",
+        from: { kind: "user", id: alice, name: "Alice" },
+        body: "Pre-migration ask",
+        created_at: "2026-11-19T11:57:00Z",
+        until: "2026-11-20T11:57:00Z",
+        reraised: null,
+      },
+    ],
   }, "ws-1");
   assert.equal(decodedQueue.asks[0].conversation_id, "conv-gen1");
   assert.equal(decodedQueue.asks[0].conversation_kind, "group_dm");
+  assert.equal(decodedQueue.asks[1].conversation_id, null);
+  assert.equal(decodedQueue.asks[1].conversation_kind, null);
+  assert.equal(decodedQueue.asks[2].conversation_id, undefined);
+  assert.equal(decodedQueue.asks[2].conversation_kind, undefined);
+
+  // Explicit null/null redaction (viewer left group DM gen 1 while restarted gen 2 is uniquely active)
+  // stays unattached ("redacted"): excluded from gen 2 / This conversation, shown in All channels / All workspaces,
+  // and never classified as "unknown".
+  const onlyGen2Active = indexDirectConversations([
+    { conversationId: "conv-gen2", kind: "group_dm", members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }] },
+  ]);
+  const redactedConv = classifyAskConversation(
+    {
+      channelId: null, to: null, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      conversationId: decodedQueue.asks[1].conversation_id,
+      conversationKind: decodedQueue.asks[1].conversation_kind,
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+    { directByParticipantKey: onlyGen2Active },
+  );
+  assert.deepEqual(redactedConv, { kind: "redacted" }, "explicit null/null must classify as redacted, never gen 2 or unknown");
+  const redactedAsk = sampleAsk({ id: "ask-left-gen1", conversation: redactedConv, channelLabel: "" });
+  const placeOnlyGen2 = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Bob",
+    conversationId: "conv-gen2", participantKey: keyGrpAB,
+  };
+  const placeAllMessages = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "all", channelId: null, label: "All messages",
+  };
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", placeOnlyGen2).map(i => i.id), [], "redacted left-gen-1 ask must stay out of restarted gen 2");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", place1to1).map(i => i.id), [], "redacted ask must stay out of 1:1 DM");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "workspace", placeOnlyGen2).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All channels");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "all", placeOnlyGen2).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All workspaces");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", placeAllMessages).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All messages");
 
   const decodedTodos = parseWaitingTodosQueue({
     workspace_id: "ws-1",

@@ -149,6 +149,7 @@ export type WaitingConversation =
     conversationId?: string;
     participantKey: string;
   }
+  | { kind: "redacted" }
   | { kind: "unknown" };
 
 export interface WaitingSignalPlacement {
@@ -207,6 +208,12 @@ export function classifyAskConversation(
   options?: ClassifyAskOptions,
 ): WaitingConversation {
   if (!loc) return { kind: "unknown" };
+  // Explicit null/null from a 20261120000002+ decision_queue server means the conversation
+  // was intentionally redacted (e.g. viewer left a group DM). Keep it unattached so it stays
+  // out of This conversation (including any restarted generation) without becoming "unknown".
+  if (loc.conversationId === null && loc.conversationKind === null) {
+    return { kind: "redacted" };
+  }
 
   let explicitConversationId: string | null = loc.conversationId?.trim() ? loc.conversationId.trim().toLowerCase() : null;
   let explicitKind = loc.conversationKind ?? null;

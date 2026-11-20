@@ -6670,7 +6670,7 @@ import "../../styles/kylon-image-viewer.css";
         }
         return conversation.kind === "group_dm" ? "Group direct message" : "Direct message";
       }
-      if (conversation.kind === "unknown") return "";
+      if (conversation.kind === "unknown" || conversation.kind === "redacted") return "";
       const { channelId } = conversation;
       if (workspaceId === activeWorkspaceId) {
         const found = channels.find(ch => ch.channelId === channelId);
@@ -7722,6 +7722,20 @@ import "../../styles/kylon-image-viewer.css";
             });
             for (const item of allAskNeeds) {
               const rawAsk = askById.get(item.id);
+              if (rawAsk && rawAsk.conversation_id === null && rawAsk.conversation_kind === null) {
+                locations.set(item.id, {
+                  id: item.id,
+                  channelId: null,
+                  to: null,
+                  toAgent: null,
+                  threadRootId: null,
+                  from: rawAsk.from.id,
+                  fromKind: rawAsk.from.kind,
+                  conversationId: null,
+                  conversationKind: null,
+                });
+                continue;
+              }
               const askConvId = rawAsk?.conversation_id ?? null;
               const askConvKind = rawAsk?.conversation_kind ?? null;
               if (askConvId && askConvKind) {
