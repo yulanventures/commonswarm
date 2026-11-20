@@ -134,7 +134,14 @@ struct PeopleDirectoryView: View {
             }
         }
         .task {
+            store.activate()
             await store.load(api: directoryAPI)
+        }
+        .onAppear {
+            store.activate()
+        }
+        .onDisappear {
+            store.retire()
         }
     }
 
@@ -326,7 +333,7 @@ struct PeopleDirectoryView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(person.name)
+                    Text(verbatim: person.name)
                         .font(.headline)
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -378,7 +385,7 @@ struct PeopleDirectoryView: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(agent.name)
+                Text(verbatim: agent.name)
                     .font(.headline)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -403,7 +410,7 @@ struct PeopleDirectoryView: View {
                     guard let value, !value.isEmpty else { return nil }
                     return value
                 }
-                Text(metaParts.joined(separator: " · "))
+                Text(verbatim: metaParts.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(mutedForeground)
                     .fixedSize(horizontal: false, vertical: true)
@@ -424,7 +431,7 @@ struct PeopleDirectoryView: View {
     private func inviteCard(_ invite: WorkspacePendingInvite) -> some View {
         let expired = invite.isExpired()
         return VStack(alignment: .leading, spacing: 6) {
-            Text(invite.email)
+            Text(verbatim: invite.email)
                 .font(.headline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -439,7 +446,7 @@ struct PeopleDirectoryView: View {
             }
 
             let details = [invite.invitedByLabel, invite.expiryLabel].filter { !$0.isEmpty }.joined(separator: " · ")
-            Text(details)
+            Text(verbatim: details)
                 .font(.caption)
                 .foregroundStyle(mutedForeground)
                 .fixedSize(horizontal: false, vertical: true)
@@ -451,17 +458,21 @@ struct PeopleDirectoryView: View {
 
     private func adminGrantCard(_ grant: WorkspaceAgentAdminGrant) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(grant.agentName)
+            Text(verbatim: grant.agentName)
                 .font(.headline)
                 .foregroundStyle(.primary)
-            if !grant.scopes.isEmpty {
-                Text(grant.scopes.joined(separator: ", "))
+                .fixedSize(horizontal: false, vertical: true)
+
+            let meta = [grant.levelLabel, grant.grantedByLabel].compactMap { $0 }.joined(separator: " · ")
+            if !meta.isEmpty {
+                Text(verbatim: meta)
                     .font(.caption)
                     .foregroundStyle(mutedForeground)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
             if let expiresAt = grant.expiresAt {
-                Text("Expires \(expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(verbatim: "Expires \(expiresAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption)
                     .foregroundStyle(mutedForeground)
             }
@@ -489,10 +500,10 @@ private struct WorkspacePersonDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(person.name)
+                    Text(verbatim: person.name)
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.primary)
-                    Text("\(person.role.label) in \(workspaceName)")
+                    Text(verbatim: "\(person.role.label) in \(workspaceName)")
                         .font(.subheadline)
                         .foregroundStyle(mutedForeground)
                 }
@@ -511,10 +522,10 @@ private struct WorkspacePersonDetailView: View {
                     } else {
                         ForEach(ownedAgents) { agent in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(agent.name)
+                                Text(verbatim: agent.name)
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.primary)
-                                Text("\(agent.hostLabel) · \(agent.lastActiveLabel())")
+                                Text(verbatim: "\(agent.hostLabel) · \(agent.lastActiveLabel())")
                                     .font(.caption)
                                     .foregroundStyle(mutedForeground)
                             }
@@ -565,10 +576,10 @@ private struct WorkspaceAgentDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(agent.name)
+                    Text(verbatim: agent.name)
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.primary)
-                    Text("\(agent.ownerLabel) · \(workspaceName)")
+                    Text(verbatim: "\(agent.ownerLabel) · \(workspaceName)")
                         .font(.subheadline)
                         .foregroundStyle(mutedForeground)
                 }
@@ -610,17 +621,17 @@ private struct WorkspaceAgentDetailView: View {
 
                     if showTechnical {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Agent ID: \(agent.principalID.uuidString.lowercased())")
+                            Text(verbatim: "Agent ID: \(agent.principalID.uuidString.lowercased())")
                                 .font(.caption.monospaced())
                                 .foregroundStyle(mutedForeground)
                                 .textSelection(.enabled)
                             if let build = agent.clientBuild, !build.isEmpty {
-                                Text("Client build: \(build)")
+                                Text(verbatim: "Client build: \(build)")
                                     .font(.caption.monospaced())
                                     .foregroundStyle(mutedForeground)
                             }
                             if let ack = agent.lastAckVia, !ack.isEmpty {
-                                Text("Last ack via: \(ack)")
+                                Text(verbatim: "Last ack via: \(ack)")
                                     .font(.caption.monospaced())
                                     .foregroundStyle(mutedForeground)
                             }
@@ -644,7 +655,7 @@ private struct WorkspaceAgentDetailView: View {
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(mutedForeground)
-            Text(value)
+            Text(verbatim: value)
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)

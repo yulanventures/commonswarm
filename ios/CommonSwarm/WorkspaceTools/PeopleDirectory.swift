@@ -176,10 +176,28 @@ struct WorkspaceAgentAdminGrant: Hashable, Identifiable, Sendable {
     let grantID: String
     let principalID: UUID
     let agentName: String
-    let scopes: [String]
+    let ownerUserID: UUID?
+    let ownerDisplay: String?
+    let level: String
     let expiresAt: Date?
+    let createdAt: Date?
+    let mayEnd: Bool
 
     var id: String { grantID }
+
+    var levelLabel: String {
+        switch level.lowercased() {
+        case "scoped": "Scoped admin"
+        case "workspace": "Workspace admin"
+        case "organization": "Organization admin"
+        default: level.isEmpty ? "Admin access" : level.capitalized
+        }
+    }
+
+    var grantedByLabel: String? {
+        guard let ownerDisplay, !ownerDisplay.isEmpty else { return nil }
+        return "Granted by \(ownerDisplay)"
+    }
 }
 
 struct PeopleTabSummary: Equatable, Identifiable, Sendable {
@@ -274,9 +292,21 @@ final class PeopleDirectoryStore: ObservableObject {
 
     let workspaceID: UUID
     private var loadGeneration = 0
+    private var isRetired = false
+    private var activeSessionID: ObjectIdentifier?
 
     init(workspaceID: UUID) {
         self.workspaceID = workspaceID
+    }
+
+    func activate() {
+        isRetired = false
+    }
+
+    func retire() {
+        isRetired = true
+        loadGeneration += 1
+        isLoading = false
     }
 
     var managers: [WorkspacePerson] {
@@ -338,7 +368,8 @@ final class PeopleDirectoryStore: ObservableObject {
         guard !needle.isEmpty else { return adminGrants }
         return adminGrants.filter {
             $0.agentName.lowercased().contains(needle)
-                || $0.scopes.contains(where: { $0.lowercased().contains(needle) })
+                || $0.levelLabel.lowercased().contains(needle)
+                || ($0.ownerDisplay?.lowercased().contains(needle) ?? false)
         }
     }
 
@@ -347,15 +378,36 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     func load(api: PeopleDirectoryAPI) async {
+        guard !isRetired else { return }
+        let capturedSession = api.session
+        let sessionID = ObjectIdentifier(capturedSession)
+        if let prev = activeSessionID, prev != sessionID {
+            applyAccessUnavailable()
+        }
+        activeSessionID = sessionID
+        guard capturedSession.isActive else {
+            applyAccessUnavailable()
+            return
+        }
+
         loadGeneration += 1
         let generation = loadGeneration
         isLoading = true
         loadFailed = false
         invitesFailed = false
 
+        let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return !self.isRetired
+                && capturedSession.isActive
+                && self.activeSessionID == sessionID
+                && self.loadGeneration == generation
+        }
+
         do {
-            let snapshot = try await api.loadDirectory(workspaceID: workspaceID)
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            let snapshot = try await api.loadDirectory(workspaceID: workspaceID, canDispatch: readGate)
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  activeSessionID == sessionID, generation == loadGeneration else { return }
             people = snapshot.people
             agents = snapshot.agents
             invites = snapshot.invites
@@ -367,13 +419,23 @@ final class PeopleDirectoryStore: ObservableObject {
             accessUnavailable = false
             loadFailed = false
         } catch PeopleDirectoryError.accessRefused {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard !Task.isCancelled, !isRetired,
+                  activeSessionID == sessionID, generation == loadGeneration else { return }
             applyAccessUnavailable()
+        } catch is CancellationError {
+            if !capturedSession.isActive {
+                applyAccessUnavailable()
+            }
         } catch {
-            guard !Task.isCancelled, generation == loadGeneration else { return }
-            loadFailed = true
+            guard !Task.isCancelled, !isRetired,
+                  activeSessionID == sessionID, generation == loadGeneration else { return }
+            if !capturedSession.isActive {
+                applyAccessUnavailable()
+            } else {
+                loadFailed = true
+            }
         }
-        if generation == loadGeneration {
+        if generation == loadGeneration && !isRetired {
             isLoading = false
         }
     }

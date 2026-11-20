@@ -12,6 +12,8 @@ struct PeopleDirectorySnapshot: Sendable {
 struct PeopleDirectoryAPI: Sendable {
     let api: ConversationAPI
 
+    var session: HumanSession { api.session }
+
     private struct MemberWire: Decodable {
         let user_id: UUID?
         let display_name: String?
@@ -43,22 +45,42 @@ struct PeopleDirectoryAPI: Sendable {
         let expires_at: String?
     }
 
+    private struct AdminGrantsRPCBody: Encodable {
+        let p_workspace_id: String
+    }
+
+    private struct AdminGrantsRPCResponse: Decodable {
+        let grants: [AdminGrantWire]?
+    }
+
     private struct AdminGrantWire: Decodable {
         let grant_id: String?
         let principal_id: UUID?
-        let scopes: [String]?
+        let agent_name: String?
+        let owner_user_id: UUID?
+        let owner_display: String?
+        let level: String?
         let expires_at: String?
-        let revoked_at: String?
+        let created_at: String?
+        let may_end: Bool?
     }
 
-    private func fetchView<Row: Decodable>(_ path: String, query: [String: String]) async throws -> [Row] {
+    private struct PostgrestErrorWire: Decodable {
+        let code: String?
+    }
+
+    private func fetchView<Row: Decodable>(
+        _ path: String,
+        query: [String: String],
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [Row] {
         var request = api.request("rest/v1/" + path, query)
         request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
-        let (data, response) = try await api.session.data(for: request)
+        let (data, response) = try await api.session.data(for: request, canDispatch: canDispatch)
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
             throw APIError.invalidResponse
         }
-        if status == 403 {
+        if status == 401 || status == 403 || status == 404 {
             throw PeopleDirectoryError.accessRefused
         }
         guard status == 200 else {
@@ -67,7 +89,51 @@ struct PeopleDirectoryAPI: Sendable {
         return try JSONDecoder().decode([Row].self, from: data)
     }
 
-    func loadDirectory(workspaceID: UUID) async throws -> PeopleDirectorySnapshot {
+    /// Calls `POST rest/v1/rpc/workspace_seat_admin_grants` with `{"p_workspace_id": "<uuid>"}`.
+    /// Returns `nil` when the server returns JSON `null` (viewer is not a live workspace owner) or
+    /// when the RPC is not yet deployed (`404` / `PGRST202` / `42883`), matching `site/src/lib/seat-admin.ts`.
+    private func fetchAdminGrantsRPC(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [AdminGrantWire]? {
+        var request = api.request("rest/v1/rpc/workspace_seat_admin_grants")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        request.setValue("swarm_read", forHTTPHeaderField: "Content-Profile")
+        request.httpBody = try JSONEncoder().encode(
+            AdminGrantsRPCBody(p_workspace_id: workspaceID.uuidString.lowercased())
+        )
+        let (data, response) = try await api.session.data(for: request, canDispatch: canDispatch)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+            throw APIError.invalidResponse
+        }
+        if status == 401 || status == 403 {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if status != 200 {
+            let errWire = try? JSONDecoder().decode(PostgrestErrorWire.self, from: data)
+            if status == 404 || errWire?.code == "PGRST202" || errWire?.code == "42883" {
+                return nil
+            }
+            throw APIError.refused(status)
+        }
+        let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "null" {
+            return nil
+        }
+        let decoded = try JSONDecoder().decode(AdminGrantsRPCResponse.self, from: data)
+        guard let grants = decoded.grants else {
+            throw APIError.invalidResponse
+        }
+        return grants
+    }
+
+    func loadDirectory(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> PeopleDirectorySnapshot {
         let wsFilter = "eq." + workspaceID.uuidString.lowercased()
         let viewerID = await MainActor.run { api.session.userID }
 
@@ -77,7 +143,8 @@ struct PeopleDirectoryAPI: Sendable {
                 "select": "user_id,display_name,role",
                 "workspace_id": wsFilter,
                 "limit": "1000",
-            ]
+            ],
+            canDispatch: canDispatch
         )
         async let agentsTask: [AgentWire] = fetchView(
             "agent_principals",
@@ -87,16 +154,25 @@ struct PeopleDirectoryAPI: Sendable {
                 "revoked_at": "is.null",
                 "order": "name.asc,principal_id.asc",
                 "limit": "500",
-            ]
+            ],
+            canDispatch: canDispatch
         )
-        async let presenceTask: [PresenceWire]? = try? await fetchView(
-            "agent_presence",
-            query: [
-                "select": "principal_id,last_command_at,client_build,last_ack_via",
-                "workspace_id": wsFilter,
-                "limit": "500",
-            ]
-        )
+        async let presenceTask: Result<[PresenceWire], Error> = {
+            do {
+                let rows: [PresenceWire] = try await fetchView(
+                    "agent_presence",
+                    query: [
+                        "select": "principal_id,last_command_at,client_build,last_ack_via",
+                        "workspace_id": wsFilter,
+                        "limit": "500",
+                    ],
+                    canDispatch: canDispatch
+                )
+                return .success(rows)
+            } catch {
+                return .failure(error)
+            }
+        }()
         async let invitesTask: Result<[InviteWire], Error> = {
             do {
                 let rows: [InviteWire] = try await fetchView(
@@ -106,25 +182,17 @@ struct PeopleDirectoryAPI: Sendable {
                         "workspace_id": wsFilter,
                         "order": "created_at.desc",
                         "limit": "50",
-                    ]
+                    ],
+                    canDispatch: canDispatch
                 )
                 return .success(rows)
             } catch {
                 return .failure(error)
             }
         }()
-        async let adminGrantsTask: Result<[AdminGrantWire], Error> = {
+        async let adminGrantsTask: Result<[AdminGrantWire]?, Error> = {
             do {
-                let rows: [AdminGrantWire] = try await fetchView(
-                    "workspace_seat_admin_grants",
-                    query: [
-                        "select": "grant_id,principal_id,scopes,expires_at,revoked_at",
-                        "workspace_id": wsFilter,
-                        "revoked_at": "is.null",
-                        "limit": "200",
-                    ]
-                )
-                return .success(rows)
+                return .success(try await fetchAdminGrantsRPC(workspaceID: workspaceID, canDispatch: canDispatch))
             } catch {
                 return .failure(error)
             }
@@ -132,16 +200,26 @@ struct PeopleDirectoryAPI: Sendable {
 
         let memberRows = try await membersTask
         let agentRows = try await agentsTask
-        let presenceRows = await presenceTask
+        let presenceResult = await presenceTask
         let invitesResult = await invitesTask
         let grantsResult = await adminGrantsTask
 
-        // Propagate explicit 403 access refusal if secondary views report it
+        // Propagate access refusal (401/403/404) or cancellation from secondary reads.
+        if case .failure(PeopleDirectoryError.accessRefused) = presenceResult {
+            throw PeopleDirectoryError.accessRefused
+        }
         if case .failure(PeopleDirectoryError.accessRefused) = invitesResult {
             throw PeopleDirectoryError.accessRefused
         }
         if case .failure(PeopleDirectoryError.accessRefused) = grantsResult {
             throw PeopleDirectoryError.accessRefused
+        }
+
+        let presenceRows: [PresenceWire]?
+        if case .success(let rows) = presenceResult {
+            presenceRows = rows
+        } else {
+            presenceRows = nil
         }
 
         let people: [WorkspacePerson] = memberRows.compactMap { row in
@@ -165,12 +243,13 @@ struct PeopleDirectoryAPI: Sendable {
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
 
-        let namesByUserID = Dictionary(uniqueKeysWithValues: people.map { ($0.userID, $0.name) })
+        let namesByUserID = Dictionary(people.map { ($0.userID, $0.name) }, uniquingKeysWith: { first, _ in first })
         let presenceByAgentID: [UUID: PresenceWire] = Dictionary(
-            uniqueKeysWithValues: (presenceRows ?? []).compactMap { row in
+            (presenceRows ?? []).compactMap { row in
                 guard let id = row.principal_id else { return nil }
                 return (id, row)
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         let presenceAvailable = presenceRows != nil
 
@@ -200,7 +279,7 @@ struct PeopleDirectoryAPI: Sendable {
             )
         }
 
-        let agentNamesByID = Dictionary(uniqueKeysWithValues: agents.map { ($0.principalID, $0.name) })
+        let agentNamesByID = Dictionary(agents.map { ($0.principalID, $0.name) }, uniquingKeysWith: { first, _ in first })
 
         let invitesLoaded: Bool
         let invites: [WorkspacePendingInvite]
@@ -230,25 +309,39 @@ struct PeopleDirectoryAPI: Sendable {
         let adminGrantsLoaded: Bool
         let adminGrants: [WorkspaceAgentAdminGrant]
         switch grantsResult {
-        case .success(let rows):
+        case .success(let maybeRows):
+            // Both live owners ({ grants: [...] }) and non-owners (null -> []) complete cleanly.
             adminGrantsLoaded = true
+            let rows = maybeRows ?? []
             adminGrants = rows.compactMap { row in
-                guard row.revoked_at == nil,
-                      let grantID = row.grant_id, !grantID.isEmpty,
+                guard let grantID = row.grant_id, !grantID.isEmpty,
                       let principalID = row.principal_id else {
                     return nil
+                }
+                let rawAgentName = row.agent_name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let agentName = rawAgentName.isEmpty ? (agentNamesByID[principalID] ?? "Agent") : rawAgentName
+                let rawOwnerDisplay = row.owner_display?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let ownerDisplay: String?
+                if let rawOwnerDisplay, !rawOwnerDisplay.isEmpty {
+                    ownerDisplay = rawOwnerDisplay
+                } else if let ownerID = row.owner_user_id {
+                    ownerDisplay = ownerID == viewerID ? "You" : namesByUserID[ownerID]
+                } else {
+                    ownerDisplay = nil
                 }
                 return WorkspaceAgentAdminGrant(
                     grantID: grantID,
                     principalID: principalID,
-                    agentName: agentNamesByID[principalID] ?? "Agent",
-                    scopes: row.scopes ?? [],
-                    expiresAt: PeopleDirectoryRules.parseISO8601(row.expires_at)
+                    agentName: agentName,
+                    ownerUserID: row.owner_user_id,
+                    ownerDisplay: ownerDisplay,
+                    level: row.level?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "scoped",
+                    expiresAt: PeopleDirectoryRules.parseISO8601(row.expires_at),
+                    createdAt: PeopleDirectoryRules.parseISO8601(row.created_at),
+                    mayEnd: row.may_end ?? false
                 )
             }
         case .failure:
-            // Treat 404/unavailable view gracefully when not yet deployed on older servers,
-            // while still reflecting adminGrantsLoaded = false if it errored.
             adminGrantsLoaded = false
             adminGrants = []
         }

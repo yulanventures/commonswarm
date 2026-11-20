@@ -17,8 +17,13 @@ const wsMain = "00000000-0000-4000-8000-000000000003";
 const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
 
 let accessRefused = false;
+let edge401 = false;
+let edge404 = false;
 let failInvites = false;
 let failAdminGrants = false;
+let nonOwnerGrants = false;
+let duplicateRows = false;
+let readRequestCount = 0;
 
 let emailCodePending = false;
 const sessions = new Set();
@@ -37,6 +42,14 @@ const server = createServer(async (req, res) => {
       accessRefused = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, accessRefused });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/edge-401") {
+      edge401 = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, edge401 });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/edge-404") {
+      edge404 = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, edge404 });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/fail-invites") {
       failInvites = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failInvites });
@@ -44,6 +57,17 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/fail-admin-grants") {
       failAdminGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failAdminGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/non-owner-grants") {
+      nonOwnerGrants = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, nonOwnerGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/duplicate-rows") {
+      duplicateRows = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, duplicateRows });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/requests") {
+      return reply(200, { reads: readRequestCount });
     }
 
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
@@ -112,8 +136,40 @@ const server = createServer(async (req, res) => {
       return reply(400, { error: "invalid_request" });
     }
 
+    // Production RPC: POST /rest/v1/rpc/workspace_seat_admin_grants
+    if (req.method === "POST" && url.pathname === "/rest/v1/rpc/workspace_seat_admin_grants") {
+      readRequestCount += 1;
+      if (req.headers["accept-profile"] !== "swarm_read" || req.headers["content-profile"] !== "swarm_read") {
+        return reply(400, { error: "missing_profile" });
+      }
+      if (edge401) return reply(401, {});
+      if (accessRefused) return reply(403, { error: "forbidden" });
+      if (failAdminGrants) return reply(503, { error: "unavailable" });
+      if ((body?.p_workspace_id ?? "").toLowerCase() !== wsMain) return reply(200, null);
+      if (nonOwnerGrants) return reply(200, null);
+      return reply(200, {
+        grants: [
+          {
+            grant_id: "grant_atlas_1",
+            principal_id: atlas,
+            agent_name: "Atlas",
+            owner_user_id: me,
+            owner_display: "Alex Rivera",
+            level: "scoped",
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            created_at: new Date(Date.now() - 86400 * 1000).toISOString(),
+            may_end: true,
+          },
+        ],
+      });
+    }
+
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
+
+    readRequestCount += 1;
+    if (edge401) return reply(401, {});
+    if (edge404) return reply(404, { error: "workspace_not_found" });
 
     const wsParam = url.searchParams.get("workspace_id")?.toLowerCase();
     if (wsParam !== `eq.${wsMain}`) return reply(403, {});
@@ -121,14 +177,17 @@ const server = createServer(async (req, res) => {
     if (accessRefused) return reply(403, { message: "workspace_access_refused" });
 
     switch (url.pathname) {
-      case "/rest/v1/member_profiles":
-        return reply(200, [
+      case "/rest/v1/member_profiles": {
+        const rows = [
           { user_id: me, display_name: "Alex Rivera", role: "owner" },
           { user_id: maya, display_name: "Maya Chen", role: "admin" },
           { user_id: devon, display_name: "Devon Park", role: "member" },
-        ]);
-      case "/rest/v1/agent_principals":
-        return reply(200, [
+        ];
+        if (duplicateRows) rows.push({ user_id: maya, display_name: "Maya Chen", role: "admin" });
+        return reply(200, rows);
+      }
+      case "/rest/v1/agent_principals": {
+        const rows = [
           {
             principal_id: atlas,
             name: "Atlas",
@@ -149,9 +208,12 @@ const server = createServer(async (req, res) => {
             revoked_at: null,
             workspace_id: wsMain,
           },
-        ]);
-      case "/rest/v1/agent_presence":
-        return reply(200, [
+        ];
+        if (duplicateRows) rows.push({ ...rows[0] });
+        return reply(200, rows);
+      }
+      case "/rest/v1/agent_presence": {
+        const rows = [
           {
             principal_id: atlas,
             last_command_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
@@ -164,7 +226,10 @@ const server = createServer(async (req, res) => {
             client_build: "mcp-hosted 1.2",
             last_ack_via: "turn",
           },
-        ]);
+        ];
+        if (duplicateRows) rows.push({ ...rows[0] });
+        return reply(200, rows);
+      }
       case "/rest/v1/pending_invitations":
         if (failInvites) return reply(503, { error: "unavailable" });
         return reply(200, [
@@ -177,18 +242,8 @@ const server = createServer(async (req, res) => {
             expires_at: new Date(Date.now() + 5 * 86400 * 1000).toISOString(),
           },
         ]);
-      case "/rest/v1/workspace_seat_admin_grants":
-        if (failAdminGrants) return reply(503, { error: "unavailable" });
-        return reply(200, [
-          {
-            grant_id: "grant_atlas_1",
-            principal_id: atlas,
-            scopes: ["manage_channels", "invite_members"],
-            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
-            revoked_at: null,
-          },
-        ]);
       default:
+        // Note: GET /rest/v1/workspace_seat_admin_grants intentionally returns 404 (it is a POST RPC in production).
         return reply(404, {});
     }
   } catch {
