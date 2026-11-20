@@ -318,21 +318,68 @@ struct VerifyTodoActions {
         let offerClearedAfterWithdraw = await MainActor.run { detailVM.detail?.offer == nil }
         expect(withdrawOK && offerClearedAfterWithdraw, "Offerer must be able to withdraw own work request")
 
-        // 3f. Frozen TodoEditSession: conflict closes editor + stale edit sends ZERO calls; fresh edit commits with real write receipt
+        // 3f. Frozen TodoEditSession: conflict closes editor + preserves unsent notes/title alongside latest version
+        //     + stale edit sends ZERO calls; fresh edit commits with real write receipt and clears conflictDraft
         let staleEdit = await MainActor.run { detailVM.beginEdit() }!
         try await postFixture("\(base)/fixture/conflict-next-write")
-        let conflictUpdate = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Stale", dueOn: nil, api: todoAPI, workspaceID: ws.id)
-        let editClosed = await MainActor.run { detailVM.activeEditSession == nil && (detailVM.actionError ?? "").contains("Someone else updated") }
-        expect(!conflictUpdate && editClosed, "Conflict update must close editor and decode production stored conflict.current")
+        let conflictUpdate = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
+        let editClosedWithUnsent = await MainActor.run {
+            detailVM.activeEditSession == nil
+                && (detailVM.actionError ?? "").contains("Someone else updated")
+                && detailVM.conflictDraft?.notes == "Keep the blue sample."
+                && detailVM.conflictDraft?.title == "Stale title"
+        }
+        expect(!conflictUpdate && editClosedWithUnsent, "Conflict update must close editor, decode conflict.current, and preserve unsent notes in conflictDraft")
         let cmdsBeforeStaleEdit = try await recordedCommands(origin).count
-        let blockedEdit = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Stale", dueOn: nil, api: todoAPI, workspaceID: ws.id)
+        let blockedEdit = await detailVM.updateDetails(session: staleEdit, title: "Stale title", notes: "Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
         let cmdsAfterStaleEdit = try await recordedCommands(origin).count
         expect(!blockedEdit && cmdsBeforeStaleEdit == cmdsAfterStaleEdit, "Stale edit session must send ZERO network calls")
 
         let freshEdit = await MainActor.run { detailVM.beginEdit() }!
-        let editOK = await detailVM.updateDetails(session: freshEdit, title: "Confirm tile delivery", notes: "Updated notes", dueOn: nil, api: todoAPI, workspaceID: ws.id)
+        let unsentStillVisibleInReopenedEdit = await MainActor.run { detailVM.conflictDraft?.notes == "Keep the blue sample." }
+        expect(unsentStillVisibleInReopenedEdit, "Reopening Edit after conflict must keep unsent notes available alongside latest server version")
+        let editOK = await detailVM.updateDetails(session: freshEdit, title: "Confirm tile delivery", notes: "Updated notes. Keep the blue sample.", dueOn: nil, api: todoAPI, workspaceID: ws.id)
         let editedDetail = await MainActor.run { detailVM.detail! }
-        expect(editOK && editedDetail.title == "Confirm tile delivery" && editedDetail.notes == "Updated notes", "Fresh edit must commit with production stored write receipt")
+        let conflictDraftCleared = await MainActor.run { detailVM.conflictDraft == nil }
+        expect(editOK && conflictDraftCleared && editedDetail.title == "Confirm tile delivery" && editedDetail.notes == "Updated notes. Keep the blue sample.", "Fresh edit must commit with production stored write receipt and clear conflictDraft")
+
+        // 3g. Start eligibility: hidden when assigned to another party (Atlas or Maya) or gate_clear == false;
+        //     shown only when open, gate_clear == true, and unassigned or assigned to the human viewer.
+        let startRulesOK = await MainActor.run {
+            let baseDetail = detailVM.detail!
+            func makeDetail(state: TodoState, assignee: TodoParty?, gateClear: Bool) -> TodoDetail {
+                TodoDetail(
+                    workspace_id: baseDetail.workspace_id,
+                    todo_id: baseDetail.todo_id,
+                    version: baseDetail.version,
+                    title: baseDetail.title,
+                    notes: baseDetail.notes,
+                    state: state,
+                    due_on: baseDetail.due_on,
+                    created_by: baseDetail.created_by,
+                    created_at: baseDetail.created_at,
+                    assignee: assignee,
+                    assigned_by: baseDetail.assigned_by,
+                    assigned_at: baseDetail.assigned_at,
+                    offer: nil,
+                    gate: gateClear ? nil : TodoGateDetail(kind: "hold", note: "Waiting", todo_id: nil, at: nil),
+                    gate_clear: gateClear,
+                    queue_position: baseDetail.queue_position,
+                    state_by: baseDetail.state_by,
+                    state_at: baseDetail.state_at,
+                    comment_count: baseDetail.comment_count
+                )
+            }
+            let viewerParty = TodoParty(kind: .user, id: tokens.userID)
+            let atlasBlocked = !detailVM.canStart(makeDetail(state: .open, assignee: atlasParty, gateClear: true), viewerUserID: tokens.userID)
+            let otherUserBlocked = !detailVM.canStart(makeDetail(state: .open, assignee: mayaParty, gateClear: true), viewerUserID: tokens.userID)
+            let gatedBlocked = !detailVM.canStart(makeDetail(state: .open, assignee: viewerParty, gateClear: false), viewerUserID: tokens.userID)
+            let doingBlocked = !detailVM.canStart(makeDetail(state: .doing, assignee: viewerParty, gateClear: true), viewerUserID: tokens.userID)
+            let viewerAllowed = detailVM.canStart(makeDetail(state: .open, assignee: viewerParty, gateClear: true), viewerUserID: tokens.userID)
+            let unassignedAllowed = detailVM.canStart(makeDetail(state: .open, assignee: nil, gateClear: true), viewerUserID: tokens.userID)
+            return atlasBlocked && otherUserBlocked && gatedBlocked && doingBlocked && viewerAllowed && unassignedAllowed
+        }
+        expect(startRulesOK, "Start must be shown ONLY when open, gate_clear == true, and unassigned or assigned to the viewer (never for Atlas/other assignees or blocked gates)")
 
         // =========================================================================
         // 4. C3: Committed-then-503 + same-login 401 + pre-receipt/unclassified refusal + inconclusive read + canonical mention order + exact 1 mutation
@@ -884,6 +931,125 @@ struct VerifyTodoActions {
                 && switchedDetail.eligiblePendingRetries(viewerUserID: tokens.userID).isEmpty
         }
         expect(switchedClean, "Account switch must immediately clear prior session bucket and expose zero prior retries")
+
+        // =========================================================================
+        // 5g. Designer: Comment Retry composer clearing (both outcomes):
+        //     - Outcome A: untouched draft clears and disables Post with EXACTLY 1 comment recorded.
+        //     - Outcome B: draft edited or retagged while Retry is pending survives with EXACTLY 1 comment recorded.
+        // =========================================================================
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let mutBeforeUntouchedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        await MainActor.run {
+            detailVM.commentDraftText = "Untouched draft after 503"
+            detailVM.commentDraftMentions = [atlasParty]
+        }
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let untouchedFirst = await detailVM.postComment(
+            body: "Untouched draft after 503",
+            mentions: [atlasParty],
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        expect(!untouchedFirst, "Committed-then-503 comment should leave pending retry")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let untouchedRetryItem = await MainActor.run {
+            detailVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .comment = $0.action { return true }
+                return false
+            }
+        }
+        let untouchedStillInComposerBeforeRetry = await MainActor.run {
+            detailVM.commentDraftText == "Untouched draft after 503"
+                && detailVM.commentDraftMentions == [atlasParty]
+                && detailVM.canPostCommentDraft
+        }
+        expect(untouchedRetryItem != nil && untouchedStillInComposerBeforeRetry, "Untouched draft should remain in composer before Retry")
+        let untouchedRetryOK = await detailVM.retryPending(untouchedRetryItem!, api: todoAPI, workspaceID: ws.id)
+        let mutAfterUntouchedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let untouchedClearedAfterRetry = await MainActor.run {
+            untouchedRetryOK
+                && detailVM.commentDraftText.isEmpty
+                && detailVM.commentDraftMentions.isEmpty
+                && !detailVM.canPostCommentDraft
+        }
+        expect(
+            untouchedClearedAfterRetry && mutAfterUntouchedRetry == mutBeforeUntouchedRetry + 1,
+            "Successful Retry of untouched comment draft must clear composer, disable Post, and record EXACTLY 1 mutation"
+        )
+
+        // Outcome B1: draft text edited while Retry is pending survives
+        let mutBeforeEditedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        await MainActor.run {
+            detailVM.commentDraftText = "Original pending comment"
+            detailVM.commentDraftMentions = [atlasParty]
+        }
+        try await postFixture("\(base)/fixture/commit-then-503")
+        _ = await detailVM.postComment(body: "Original pending comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let editedRetryItem = await MainActor.run {
+            detailVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .comment = $0.action { return true }
+                return false
+            }
+        }!
+        await MainActor.run { bearer.holdNext(1) }
+        let editedRetryTask = Task { await detailVM.retryPending(editedRetryItem, api: todoAPI, workspaceID: ws.id) }
+        await bearer.waitUntilHeld()
+        await MainActor.run {
+            detailVM.commentDraftText = "Newer follow-up comment"
+            bearer.release()
+        }
+        let editedRetryOK = await editedRetryTask.value
+        let mutAfterEditedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let editedDraftSurvived = await MainActor.run {
+            editedRetryOK
+                && detailVM.commentDraftText == "Newer follow-up comment"
+                && detailVM.commentDraftMentions == [atlasParty]
+                && detailVM.canPostCommentDraft
+        }
+        expect(
+            editedDraftSurvived && mutAfterEditedRetry == mutBeforeEditedRetry + 1,
+            "Draft text edited while Retry is pending must survive confirmation with EXACTLY 1 mutation"
+        )
+
+        // Outcome B2: draft mentions retagged while Retry is pending survives
+        let mutBeforeRetaggedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        await MainActor.run {
+            detailVM.commentDraftText = "Retagged pending comment"
+            detailVM.commentDraftMentions = [atlasParty]
+        }
+        try await postFixture("\(base)/fixture/commit-then-503")
+        _ = await detailVM.postComment(body: "Retagged pending comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let retaggedRetryItem = await MainActor.run {
+            detailVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .comment = $0.action { return true }
+                return false
+            }
+        }!
+        await MainActor.run { bearer.holdNext(1) }
+        let retaggedRetryTask = Task { await detailVM.retryPending(retaggedRetryItem, api: todoAPI, workspaceID: ws.id) }
+        await bearer.waitUntilHeld()
+        await MainActor.run {
+            detailVM.commentDraftMentions = [mayaParty]
+            bearer.release()
+        }
+        let retaggedRetryOK = await retaggedRetryTask.value
+        let mutAfterRetaggedRetry = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let retaggedDraftSurvived = await MainActor.run {
+            retaggedRetryOK
+                && detailVM.commentDraftText == "Retagged pending comment"
+                && detailVM.commentDraftMentions == [mayaParty]
+                && detailVM.canPostCommentDraft
+        }
+        expect(
+            retaggedDraftSurvived && mutAfterRetaggedRetry == mutBeforeRetaggedRetry + 1,
+            "Draft retagged while Retry is pending must survive confirmation with EXACTLY 1 mutation"
+        )
+        await MainActor.run {
+            detailVM.commentDraftText = ""
+            detailVM.commentDraftMentions.removeAll()
+        }
 
         // =========================================================================
         // 6. C1: Refusal clears named directory, closes mention picker & sheets, and drops older held comment page errors

@@ -8,8 +8,6 @@ struct TodoDetailView: View {
     var onChanged: (() async -> Void)?
 
     @StateObject private var viewModel = TodoDetailViewModel()
-    @State private var commentText = ""
-    @State private var selectedMentions: Set<TodoParty> = []
     @Environment(\.colorScheme) private var colorScheme
 
     private var primaryBackground: Color {
@@ -96,6 +94,7 @@ struct TodoDetailView: View {
                 initialTitle: editSession.initialTitle,
                 initialNotes: editSession.initialNotes,
                 initialDueOn: editSession.initialDueOn,
+                unsentDraft: viewModel.conflictDraft,
                 isSaving: viewModel.isMutating,
                 errorMessage: viewModel.actionError
             ) { title, notes, dueOn in
@@ -117,7 +116,7 @@ struct TodoDetailView: View {
         .sheet(isPresented: $viewModel.showingMentionPicker) {
             TodoMentionPickerSheet(
                 directory: directory,
-                selected: $selectedMentions
+                selected: $viewModel.commentDraftMentions
             )
         }
         .task { await load() }
@@ -164,6 +163,10 @@ struct TodoDetailView: View {
                             .accessibilityIdentifier("todo-detail-error")
                     }
 
+                    if let unsent = viewModel.conflictDraft {
+                        unsentEditCard(unsent)
+                    }
+
                     let pendingRetries = viewModel.eligiblePendingRetries(viewerUserID: directory.viewerUserID)
                     if !pendingRetries.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
@@ -199,6 +202,8 @@ struct TodoDetailView: View {
                         assigneeRowContent(detail: detail, assigneeName: assigneeName)
                     }
                     .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                     .disabled(viewModel.isMutating)
                     .accessibilityIdentifier("todo-assign-button")
                 } else {
@@ -319,7 +324,7 @@ struct TodoDetailView: View {
                 .disabled(viewModel.isMutating)
                 .accessibilityIdentifier("todo-mark-done-button")
 
-                if detail.state == .open {
+                if viewModel.canStart(detail, viewerUserID: directory.viewerUserID) {
                     Button {
                         Task {
                             if await viewModel.setState(.doing, todoID: displayedID, baseVersion: displayedVersion, api: api, workspaceID: workspaceID) {
@@ -461,8 +466,73 @@ struct TodoDetailView: View {
         .padding(.vertical, 4)
     }
 
+    private func unsentEditCard(_ draft: TodoConflictDraft) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Your unsent changes")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            if !draft.title.isEmpty {
+                Text(verbatim: "Title: \(draft.title)")
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if !draft.notes.isEmpty {
+                Text(verbatim: "Notes: \(draft.notes)")
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if let dueOn = draft.dueOn, let formatted = TodoCalendarDate.formatDate(dueOn) {
+                Text(verbatim: "Due: \(formatted)")
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+            }
+            HStack(spacing: 10) {
+                if viewModel.canUpdate {
+                    Button {
+                        viewModel.beginEdit()
+                    } label: {
+                        Text("Review in Edit")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .background(primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isMutating)
+                    .accessibilityIdentifier("todo-conflict-edit-button")
+                }
+                Button {
+                    viewModel.dismissConflictDraft()
+                } label: {
+                    Text("Discard")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(secondaryForeground)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isMutating)
+                .accessibilityIdentifier("todo-conflict-discard-button")
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("todo-unsent-draft-card")
+    }
+
     private func assigneeRowContent(detail: TodoDetail, assigneeName: String) -> some View {
-        LabeledContent("Assigned to") {
+        HStack(spacing: 8) {
+            Text("Assigned to")
+                .foregroundStyle(.primary)
+            Spacer(minLength: 12)
             HStack(spacing: 5) {
                 if let party = detail.assignee {
                     Image(systemName: directory.assigneeSymbol(party))
@@ -479,18 +549,19 @@ struct TodoDetailView: View {
             }
             .foregroundStyle(detail.assignee == nil ? .secondary : .primary)
         }
-        .frame(minHeight: 44)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var commentComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Add a comment…", text: $commentText, axis: .vertical)
+            TextField("Add a comment…", text: $viewModel.commentDraftText, axis: .vertical)
                 .lineLimit(1...5)
                 .disabled(viewModel.isPostingComment)
                 .accessibilityIdentifier("todo-comment-field")
 
-            if !selectedMentions.isEmpty {
-                let names = TodoRules.canonicalMentions(selectedMentions)
+            if !viewModel.commentDraftMentions.isEmpty {
+                let names = TodoRules.canonicalMentions(viewModel.commentDraftMentions)
                     .map { directory.assigneeLabel($0) }
                     .joined(separator: ", ")
                 Text(verbatim: "Notifies: \(names)")
@@ -502,7 +573,10 @@ struct TodoDetailView: View {
                 Button {
                     viewModel.showingMentionPicker = true
                 } label: {
-                    Label(selectedMentions.isEmpty ? "Tag" : "Tagged (\(selectedMentions.count))", systemImage: "at")
+                    Label(
+                        viewModel.commentDraftMentions.isEmpty ? "Tag" : "Tagged (\(viewModel.commentDraftMentions.count))",
+                        systemImage: "at"
+                    )
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(secondaryForeground)
                         .padding(.horizontal, 12)
@@ -516,8 +590,8 @@ struct TodoDetailView: View {
                 Spacer()
 
                 Button {
-                    let text = commentText
-                    let mentions = TodoRules.canonicalMentions(selectedMentions)
+                    let text = viewModel.commentDraftText
+                    let mentions = TodoRules.canonicalMentions(viewModel.commentDraftMentions)
                     Task {
                         if await viewModel.postComment(
                             body: text,
@@ -525,8 +599,6 @@ struct TodoDetailView: View {
                             api: api,
                             workspaceID: workspaceID
                         ) {
-                            commentText = ""
-                            selectedMentions.removeAll()
                             await onChanged?()
                         }
                     }
@@ -539,7 +611,7 @@ struct TodoDetailView: View {
                         .background(primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .disabled(viewModel.isPostingComment || TodoRules.cleanBody(commentText).isEmpty)
+                .disabled(!viewModel.canPostCommentDraft)
                 .accessibilityIdentifier("todo-comment-post-button")
             }
         }
@@ -657,6 +729,7 @@ private struct TodoAssignSheet: View {
 }
 
 private struct TodoEditSheet: View {
+    let unsentDraft: TodoConflictDraft?
     let isSaving: Bool
     let errorMessage: String?
     let onSubmit: (String, String, String?) async -> Void
@@ -672,10 +745,12 @@ private struct TodoEditSheet: View {
         initialTitle: String,
         initialNotes: String,
         initialDueOn: String?,
+        unsentDraft: TodoConflictDraft? = nil,
         isSaving: Bool,
         errorMessage: String?,
         onSubmit: @escaping (String, String, String?) async -> Void
     ) {
+        self.unsentDraft = unsentDraft
         self.isSaving = isSaving
         self.errorMessage = errorMessage
         self.onSubmit = onSubmit
@@ -708,6 +783,45 @@ private struct TodoEditSheet: View {
                         Text(verbatim: errorMessage)
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(errorForeground)
+                    }
+                }
+                if let unsentDraft {
+                    Section("Your unsent changes") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !unsentDraft.title.isEmpty {
+                                Text(verbatim: "Title: \(unsentDraft.title)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                            if !unsentDraft.notes.isEmpty {
+                                Text(verbatim: "Notes: \(unsentDraft.notes)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                            if let dueOn = unsentDraft.dueOn, let formatted = TodoCalendarDate.formatDate(dueOn) {
+                                Text(verbatim: "Due: \(formatted)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .accessibilityIdentifier("todo-edit-unsent-draft")
+
+                        Button("Use my unsent changes") {
+                            title = unsentDraft.title
+                            notes = unsentDraft.notes
+                            if let parsed = TodoCalendarDate.parseLocal(unsentDraft.dueOn) {
+                                hasDueDate = true
+                                dueDate = parsed
+                            } else {
+                                hasDueDate = false
+                            }
+                        }
+                        .disabled(isSaving)
+                        .accessibilityIdentifier("todo-edit-apply-unsent")
                     }
                 }
                 Section("Title") {

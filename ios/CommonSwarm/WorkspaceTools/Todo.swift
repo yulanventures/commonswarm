@@ -378,6 +378,16 @@ enum TodoRules {
         return Array(unique.prefix(maxMentions))
     }
 
+    static func commentDraftMatchesConfirmed(
+        draftText: String,
+        draftMentions: Set<TodoParty>,
+        confirmedBody: String,
+        confirmedMentions: [TodoParty]
+    ) -> Bool {
+        cleanBody(draftText) == cleanBody(confirmedBody)
+            && canonicalMentions(draftMentions) == canonicalMentions(confirmedMentions)
+    }
+
     static func isAccessLossReason(_ reason: String) -> Bool {
         reason == "workspace_access_refused"
             || reason == "connection_access_refused"
@@ -512,6 +522,14 @@ struct TodoEditSession: Identifiable, Equatable, Sendable {
     let initialTitle: String
     let initialNotes: String
     let initialDueOn: String?
+}
+
+/// Unsent edit preserved when a concurrent server edit causes a conflict so the author
+/// can review the latest server version alongside their unsent title, notes, and due date.
+struct TodoConflictDraft: Equatable, Sendable {
+    let title: String
+    let notes: String
+    let dueOn: String?
 }
 
 /// Frozen snapshot captured when the user opens Assign; submits strictly against `baseVersion`.
@@ -1341,6 +1359,9 @@ final class TodoDetailViewModel: ObservableObject {
     @Published private(set) var isPostingComment = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var actionError: String?
+    @Published private(set) var conflictDraft: TodoConflictDraft?
+    @Published var commentDraftText = ""
+    @Published var commentDraftMentions: Set<TodoParty> = []
     @Published var activeEditSession: TodoEditSession?
     @Published var activeAssignSession: TodoAssignSession?
     @Published var showingMentionPicker = false
@@ -1362,8 +1383,24 @@ final class TodoDetailViewModel: ObservableObject {
         !isRetired && access?.canCreate == true && detail != nil
     }
 
+    var canPostCommentDraft: Bool {
+        canCreateComment && !isPostingComment && !TodoRules.cleanBody(commentDraftText).isEmpty
+    }
+
     var canUpdate: Bool {
         !isRetired && access?.canUpdate == true && detail != nil
+    }
+
+    /// Matches server `todo_start` / `todo_set_state(doing)` authority:
+    /// open state, clear gate, and either unassigned or assigned to the human viewer.
+    func canStart(_ detail: TodoDetail, viewerUserID: UUID) -> Bool {
+        guard canUpdate, detail.state == .open, detail.gate_clear else { return false }
+        guard let assignee = detail.assignee else { return true }
+        return assignee == TodoParty(kind: .user, id: viewerUserID)
+    }
+
+    func dismissConflictDraft() {
+        conflictDraft = nil
     }
 
     var hasUnknownPendingState: Bool { pendingState?.outcomeUnknown == true }
@@ -2521,6 +2558,11 @@ final class TodoDetailViewModel: ObservableObject {
         guard activeEditSession?.id == editSession.id,
               detail?.todo_id == editSession.todoID,
               detail?.version == editSession.baseVersion else {
+            let unsentTitle = TodoRules.cleanTitle(rawTitle)
+            let unsentNotes = TodoRules.cleanBody(rawNotes)
+            if !unsentTitle.isEmpty || !unsentNotes.isEmpty || dueOn != nil {
+                conflictDraft = TodoConflictDraft(title: unsentTitle, notes: unsentNotes, dueOn: dueOn)
+            }
             activeEditSession = nil
             actionError = "Someone else updated this to-do. Review the latest version, then tap Edit again."
             return false
@@ -2624,6 +2666,9 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
+        if case .conflict = outcome {
+            conflictDraft = TodoConflictDraft(title: title, notes: notes, dueOn: dueOn)
+        }
         let ok = await handleTodoWrite(
             outcome,
             api: api,
@@ -2634,7 +2679,10 @@ final class TodoDetailViewModel: ObservableObject {
             clearOwnedPending: { self.clearOwnedPendingUpdate(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken) },
             successMessage: { _ in "Saved." }
         )
-        if ok { activeEditSession = nil }
+        if ok {
+            conflictDraft = nil
+            activeEditSession = nil
+        }
         return ok
     }
 
@@ -2714,6 +2762,15 @@ final class TodoDetailViewModel: ObservableObject {
             resolvePendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID)
             if !comments.contains(where: { $0.comment_id == comment.comment_id }) {
                 comments.append(comment)
+            }
+            if TodoRules.commentDraftMatchesConfirmed(
+                draftText: commentDraftText,
+                draftMentions: commentDraftMentions,
+                confirmedBody: body,
+                confirmedMentions: canonical
+            ) {
+                commentDraftText = ""
+                commentDraftMentions.removeAll()
             }
             statusMessage = "Comment posted."
             return true
@@ -2841,6 +2898,7 @@ final class TodoDetailViewModel: ObservableObject {
         nextCommentOffset = nil
         access = nil
         closeWriteSurfaces()
+        conflictDraft = nil
         failure = reason == "todo_not_found" ? .notFound : .refused(reason)
         if clearPending {
             if let sid = activeSessionID {
@@ -2851,6 +2909,8 @@ final class TodoDetailViewModel: ObservableObject {
             pendingOffer = nil
             pendingUpdate = nil
             pendingComment = nil
+            commentDraftText = ""
+            commentDraftMentions.removeAll()
         }
     }
 }
