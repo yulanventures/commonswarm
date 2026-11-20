@@ -1009,13 +1009,13 @@ async function observeWaitingCount() {
       await wait(() => shown(dmScoutLink()) && shown(groupSMLink()), "Step 2b Direct messages rail rendered 1:1 DM and group DM");
       // 1. Open 1:1 DM with Scout and open Waiting on you column.
       dmScoutLink()!.click();
+      await wait(() => dmScoutLink()?.getAttribute("aria-current") === "page", "1:1 DM with Scout opened");
       control()!.click();
       const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
       const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
       const placeHeading = () => panel()?.querySelector<HTMLElement>("[data-waiting-place]")?.textContent ?? "";
-      await wait(() => shown(panel()) && shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`)),
+      await wait(() => shown(panel()) && placeHeading() === "Scout" && shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`)),
         "1:1 DM Waiting on you shows only Scout's 1:1 DM ask");
-      check(placeHeading() === "Scout", "1:1 DM heading mismatch: " + placeHeading());
       check(scope()!.options[0]!.textContent === "This conversation (1)", "1:1 DM scope option 0 mismatch: " + scope()!.options[0]!.textContent);
       check(panel()!.querySelectorAll("[data-waiting-card]").length === 1 && panel()!.querySelectorAll("[data-waiting-todo]").length === 0,
         "1:1 DM must not bleed group DM asks, other DMs, #general asks, or workspace-only to-dos");
@@ -1039,9 +1039,10 @@ async function observeWaitingCount() {
         `unexpected DM location badges in All channels: group=${groupPlaceBadge}, dm=${dmPlaceBadge}`);
       // 4. Switch back to #general and return to channel scope: label switches back to This channel (1).
       generalLink()!.click();
+      await wait(() => generalLink()?.getAttribute("aria-current") === "page", "switched back to #general");
       scope()!.value = "channel";
       scope()!.dispatchEvent(new Event("change", { bubbles: true }));
-      await wait(() => scope()!.options[0]!.textContent === "This channel (1)" &&
+      await wait(() => placeHeading() === "#general" && scope()!.options[0]!.textContent === "This channel (1)" &&
         shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.gen}"]`)) &&
         panel()!.querySelectorAll("[data-waiting-card]").length === 1,
         "#general returns to This channel (1) and excludes all DM and group DM asks");
