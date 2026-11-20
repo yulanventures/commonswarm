@@ -6758,16 +6758,18 @@ import "../../styles/kylon-image-viewer.css";
 
     const markWaitingTodoDone = async (item: WaitingTodoItem): Promise<void> => {
       const viewer = homeViewerId();
-      const authGen = waitingAuthGeneration;
-      const authAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => homeViewerId() === viewer;
       const pinned =
         !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && viewer && typeof pinAccountContext === "function"
           ? pinAccountContext({ userId: viewer })
           : null;
       if (!sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
-      if (!sampleMode && !workspaces.some(ws => ws.id === item.workspaceId)) return;
+      if (!sampleMode && typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === item.workspaceId)) return;
       const server = homeServer(pinned, { accountRouted: true });
-      const isAlive = (): boolean => Boolean(authAlive && authAlive()) && (!pinned || pinned.isCurrent());
+      const isAlive = (): boolean => Boolean(authAlive()) && (!pinned || pinned.isCurrent());
       if (!server || !viewer || !isAlive() || waitingTodoTickets.has(item.id)) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
@@ -7000,11 +7002,13 @@ import "../../styles/kylon-image-viewer.css";
 
     const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
-      const viewer = renderedAuthUserId;
-      const authGen = waitingAuthGeneration;
-      const authAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
-      if (!activeSession || sampleMode || !viewer || !authAlive || !authAlive() || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
-      if (!workspaces.some(ws => ws.id === item.workspaceId)) return;
+      const viewer = typeof renderedAuthUserId !== "undefined" ? renderedAuthUserId : activeSession?.user.id ?? "";
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => homeViewerId() === viewer;
+      if (!activeSession || sampleMode || !viewer || !authAlive() || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      if (typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === item.workspaceId)) return;
       const pinned =
         typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
           ? pinAccountContext({ userId: activeSession.user.id })
@@ -7465,11 +7469,16 @@ import "../../styles/kylon-image-viewer.css";
     };
     const refreshWaitingCounts = async (): Promise<void> => {
       // Catch up counts for itself, into the same map, and starts by clearing it.
-      if (sampleMode || !session || !renderedAuthUserId || renderedAuthUserId !== session.user.id || homeRoute.view === "catchup") return;
+      if (
+        sampleMode ||
+        !session ||
+        (typeof renderedAuthUserId !== "undefined" && (!renderedAuthUserId || renderedAuthUserId !== session.user.id)) ||
+        homeRoute.view === "catchup"
+      ) return;
       if (waitingInFlight) { waitingAgain = true; return; }
       waitingInFlight = true;
       const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
-      const generation = ++waitingGeneration, viewer = renderedAuthUserId || homeViewerId();
+      const generation = ++waitingGeneration, viewer = (typeof renderedAuthUserId !== "undefined" && renderedAuthUserId) || homeViewerId();
       const pinned =
         typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
           ? pinAccountContext({ userId: viewer })
@@ -7513,7 +7522,7 @@ import "../../styles/kylon-image-viewer.css";
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
-            waitingPanelPlainAsks.set(workspace.id, []);
+            if (typeof waitingPanelPlainAsks !== "undefined") waitingPanelPlainAsks.set(workspace.id, []);
             waitingPanelTodos.set(workspace.id, []);
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
@@ -8317,7 +8326,7 @@ import "../../styles/kylon-image-viewer.css";
     const sendCatchUpChoice = async (item: NeedsYouVM, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
       if (!activeSession || sampleMode || !item.choices || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
-      if (!workspaces.some(ws => ws.id === item.workspace.id)) return;
+      if (typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === item.workspace.id)) return;
       const pinned =
         typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
           ? pinAccountContext({ userId: activeSession.user.id })
@@ -15041,7 +15050,7 @@ import "../../styles/kylon-image-viewer.css";
       try {
         const removedAgentsRead = removedAgentNames(selected.id, openPinned);
         const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "", openPinned);
-        const claimsRead = homeWorkingOn(selected.id, openPinned);
+        const claimsRead = homeWorkingOn(selected.id);
         /* Run the initial conversations/membership read in parallel with the channel list so
            the composer vs. preview/retry bar is settled before the first feed paint (no 72px
            layout shift when opening a named channel). refreshConversations never throws;
@@ -17907,7 +17916,7 @@ import "../../styles/kylon-image-viewer.css";
       privateChannelMemberReads.set(key, token);
       if (!privateChannelAgentIds.get(key)) privateChannelAgentIds.set(key, null);
       const latest = (): boolean => privateChannelMemberReads.get(key) === token;
-      void channelAgentMemberIds(workspaceId, channelId, pinned).then(ids => {
+      void (pinned ? channelAgentMemberIds(workspaceId, channelId, pinned) : channelAgentMemberIds(workspaceId, channelId)).then(ids => {
         if (!latest()) return;
         privateChannelMemberReads.delete(key);
         if (

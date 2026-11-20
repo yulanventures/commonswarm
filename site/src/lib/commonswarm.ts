@@ -5141,25 +5141,32 @@ export async function homeWorkingOn(
   workspaceId: string,
   pinned?: PinnedAccountContext | null,
 ): Promise<Signal[]> {
-  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
+  const effectivePin = pinned ?? (
+    typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+      ? pinAccountContext()
+      : null
+  );
+  if (effectivePin && !effectivePin.isCurrent()) throw new AuthRecoveryRequired();
+  const api = effectivePin ? effectivePin.runtime.client : client();
+  if (!api) throw new NoDeployment();
   try {
     const rows: Signal[] = [];
     const cutoff = new Date().toISOString();
     const pageSize = 200;
     for (let offset = 0; ; offset += pageSize) {
-      checkCurrent();
+      if (effectivePin && !effectivePin.isCurrent()) throw new AuthRecoveryRequired();
       const { data, error } = await readWithDeadline("agent work", signal => api.schema("swarm_read")
         .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId)
         .eq("kind", "working-on").gt("until", cutoff).order("created_at", { ascending: false })
         .order("id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
-      checkCurrent();
+      if (effectivePin && !effectivePin.isCurrent()) throw new AuthRecoveryRequired();
       if (error) return []; // No read means no work claim; never guess Working.
       const page = data ?? [];
       rows.push(...page.map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
       if (page.length < pageSize) return rows;
     }
   } catch (error) {
-    if (error instanceof AuthRecoveryRequired) throw error;
+    if (typeof AuthRecoveryRequired !== "undefined" && error instanceof AuthRecoveryRequired) throw error;
     return []; // An optional status read cannot hide messages already loaded.
   }
 }
