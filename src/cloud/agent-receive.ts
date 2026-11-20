@@ -18,7 +18,31 @@ import { findGrokBotGateway } from "./agent-grok-bot-gateway.js";
 const exec = promisify(execFile);
 export const RECEIVE_HEARTBEAT_MAX_AGE_MS = 15_000;
 export const RECEIVE_HOOK_EVENTS = ["UserPromptSubmit", "SessionStart", "Stop"] as const;
+export const GEMINI_RECEIVE_HOOK_EVENTS = ["SessionStart", "BeforeAgent", "AfterAgent"] as const;
+export type ReceiveHookProvider = "claude" | "codex" | "gemini";
+export const MAX_STOP_DRAINS_PER_TURN = 1;
 const CLAUDE_CHANNEL_RECEIPT_PERMISSION = "mcp__cswarm__cswarm_received";
+
+export function isHookReceiveProvider(provider: ReceiveProvider): provider is ReceiveHookProvider {
+  return provider === "claude" || provider === "codex" || provider === "gemini";
+}
+
+export function receiveHookEventsForProvider(provider: ReceiveProvider): readonly string[] {
+  return provider === "gemini" ? GEMINI_RECEIVE_HOOK_EVENTS : RECEIVE_HOOK_EVENTS;
+}
+
+export function isTurnEndHookEvent(provider: ReceiveProvider, eventName: string): boolean {
+  return provider === "gemini"
+    ? eventName === "AfterAgent" || eventName === "Stop"
+    : eventName === "Stop";
+}
+
+export function isSupportedReceiveHookEvent(provider: ReceiveProvider, eventName: string): boolean {
+  if (provider === "gemini") {
+    return (GEMINI_RECEIVE_HOOK_EVENTS as readonly string[]).includes(eventName) || eventName === "Stop";
+  }
+  return (RECEIVE_HOOK_EVENTS as readonly string[]).includes(eventName);
+}
 
 export interface ReceiveBinding {
   version: 1;
@@ -33,6 +57,7 @@ export interface ReceiveBinding {
   turn_verified_at: string | null;
   last_turn_started_at: string | null;
   last_turn_ended_at: string | null;
+  stop_drains_in_turn?: number;
   idle: boolean;
   channel_config: string | null;
   channel_instance_id: string | null;
@@ -68,6 +93,7 @@ export async function readReceiveBinding(profile: string, hostSessionId?: string
       !RECEIVE_MODES.includes(binding.requested_mode) || !RECEIVE_PROVIDERS.includes(binding.provider) ||
       (binding.grok_bot_agent_id !== undefined && (typeof binding.grok_bot_agent_id !== "string" || !ONBOARDING_UUID.test(binding.grok_bot_agent_id))) ||
       (binding.provider === "grok-bot" && binding.requested_mode === "wake" && !binding.grok_bot_agent_id) ||
+      (binding.stop_drains_in_turn !== undefined && (!Number.isSafeInteger(binding.stop_drains_in_turn) || binding.stop_drains_in_turn < 0)) ||
       typeof binding.cwd !== "string" || typeof binding.idle !== "boolean" ||
       ![binding.turn_verified_at, binding.last_turn_started_at, binding.last_turn_ended_at, binding.channel_heartbeat_at, binding.wake_verified_at].every(nullableTime) ||
       ![binding.hook_file, binding.hook_command, binding.channel_config].every(nullableText) ||
@@ -136,19 +162,18 @@ export function mergeReceiveHooks(settings: Record<string, unknown>, command: st
     throw new AgentSetupError("hook_config_invalid", "The existing host hooks are not valid JSON settings. Repair them before installing turn checks.");
   }
   const hooks = { ...(settings.hooks as Record<string, unknown> | undefined) };
-  for (const event of RECEIVE_HOOK_EVENTS) {
+  for (const event of receiveHookEventsForProvider(provider)) {
     const raw = hooks[event];
     if (raw !== undefined && !Array.isArray(raw)) throw new AgentSetupError("hook_config_invalid", "The existing host hook event is not a list.");
-    const groups = (raw as unknown[] | undefined ?? []).flatMap(group => {
+    const groups: Record<string, unknown>[] = (raw as unknown[] | undefined ?? []).flatMap(group => {
       if (!group || typeof group !== "object" || Array.isArray(group)) throw new AgentSetupError("hook_config_invalid", "An existing host hook group is invalid.");
       const g = group as Record<string, unknown>;
       if (!Array.isArray(g.hooks)) throw new AgentSetupError("hook_config_invalid", "An existing host hook group has no hook list.");
       const remaining = g.hooks.filter(h => !h || typeof h !== "object" || ![command, previous].includes((h as Record<string, unknown>).command as string));
       return remaining.length > 0 ? [{ ...g, hooks: remaining }] : [];
     });
-    if (event !== "Stop" || wake) groups.push({ hooks: [{
-      type: "command", command, timeout: HOST_HOOK_TIMEOUT_SECONDS,
-    }] });
+    const entry = { type: "command", command, timeout: HOST_HOOK_TIMEOUT_SECONDS };
+    groups.push(provider === "gemini" ? { matcher: "*", hooks: [entry] } : { hooks: [entry] });
     if (groups.length > 0) hooks[event] = groups;
     else delete hooks[event];
   }
@@ -187,14 +212,29 @@ async function ignoreLocalHook(cwd: string, file: string): Promise<void> {
   await writeFile(exclude, `${before}${before.endsWith("\n") || !before ? "" : "\n"}/${relative.replace(/[\\*?\[\] #!]/g, "\\$&")}\n`, { mode: 0o600 });
 }
 
+function receiveHookLocation(cwd: string, provider: ReceiveHookProvider): { folder: string; file: string } {
+  if (provider === "claude") {
+    const folder = join(cwd, ".claude");
+    return { folder, file: join(folder, "settings.local.json") };
+  }
+  if (provider === "gemini") {
+    const folder = join(cwd, ".gemini");
+    return { folder, file: join(folder, "settings.json") };
+  }
+  const folder = join(cwd, ".codex");
+  return { folder, file: join(folder, "hooks.json") };
+}
+
 async function installReceiveHooks(binding: ReceiveBinding, command: string): Promise<string> {
-  const folder = join(binding.cwd, binding.provider === "claude" ? ".claude" : ".codex");
+  if (!isHookReceiveProvider(binding.provider)) {
+    throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+  }
+  const { folder, file } = receiveHookLocation(binding.cwd, binding.provider);
   try {
     const info = await lstat(folder);
     if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid())) throw new AgentSetupError("hook_directory_unsafe", "The host settings directory must be owned and must not be a symlink.");
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   await mkdir(folder, { recursive: true, mode: 0o700 });
-  const file = join(folder, binding.provider === "claude" ? "settings.local.json" : "hooks.json");
   const lock = createHash("sha256").update(file).digest("hex");
   await withFileLock(join(homedir(), ".cswarm", "hook-locks"), lock, async () => {
     const before = await ownedRegular(file) ? await readFile(file, "utf8") : "{}";
@@ -259,7 +299,7 @@ export async function configureAgentReceive(options: {
       if (existing?.grok_bot_agent_id && existing.grok_bot_agent_id !== grokAgentId) throw new AgentSetupError("receive_provider_conflict", "This session is bound to a different Bot agent UUID.");
       binding = { ...binding, grok_bot_agent_id: grokAgentId };
     }
-    if (provider === "claude" || provider === "codex") {
+    if (isHookReceiveProvider(provider)) {
       const command = [options.execution.command, ...options.execution.args, "check", "--profile", profile, "--hook", "--host-session-id", host].map(shellQuote).join(" ");
       const hookFile = await installReceiveHooks(binding, command);
       binding = { ...binding, hook_file: hookFile, hook_command: command };
@@ -286,24 +326,81 @@ export async function configureAgentReceive(options: {
   }, { timeoutMs: 2_000 });
 }
 
+export interface ReceiveHookEventResult {
+  check: boolean;
+  provider: ReceiveProvider | null;
+  stop_drain?: boolean;
+  event_name?: string;
+}
+
 /** A configured hook proves its own session via host stdin, never inherited env vars. */
-export async function receiveHookEvent(profile: string, host: string, input: unknown): Promise<{ check: boolean; provider: ReceiveProvider | null }> {
+export async function receiveHookEvent(profile: string, host: string, input: unknown): Promise<ReceiveHookEventResult> {
   const binding = await readReceiveBinding(profile, host);
-  if (!binding || (binding.provider !== "claude" && binding.provider !== "codex") || !input || typeof input !== "object" || Array.isArray(input)) return { check: false, provider: null };
+  if (!binding || !isHookReceiveProvider(binding.provider) || !input || typeof input !== "object" || Array.isArray(input)) {
+    return { check: false, provider: null };
+  }
   const event = input as Record<string, unknown>;
   let eventCwd: string | null = null;
   if (typeof event.cwd === "string") {
     try { eventCwd = await realpath(event.cwd); } catch { /* Unknown location is not a match. */ }
   }
   if (event.session_id !== binding.host_session_id || typeof event.hook_event_name !== "string" ||
-      !(RECEIVE_HOOK_EVENTS as readonly string[]).includes(event.hook_event_name) ||
-      eventCwd !== binding.cwd || event.agent_id !== undefined) return { check: false, provider: null };
+      !isSupportedReceiveHookEvent(binding.provider, event.hook_event_name) ||
+      eventCwd !== binding.cwd || event.agent_id !== undefined) {
+    return { check: false, provider: null };
+  }
   const now = new Date().toISOString();
+  const turnEnd = isTurnEndHookEvent(binding.provider, event.hook_event_name);
+  const stopHookActive = event.stop_hook_active === true || event.continuationActive === true;
+  let stopDrain = false;
+  await updateReceiveBinding(profile, host, b => {
+    if (turnEnd) {
+      stopDrain = b.requested_mode === "turn" && !stopHookActive && (b.stop_drains_in_turn ?? 0) < MAX_STOP_DRAINS_PER_TURN;
+      return { ...b, turn_verified_at: now, last_turn_ended_at: now, idle: true };
+    }
+    return { ...b, turn_verified_at: now, last_turn_started_at: now, idle: false, stop_drains_in_turn: 0 };
+  });
+  if (turnEnd) {
+    return stopDrain
+      ? { check: true, provider: binding.provider, stop_drain: true, event_name: event.hook_event_name }
+      : { check: false, provider: binding.provider, stop_drain: false, event_name: event.hook_event_name };
+  }
+  return { check: true, provider: binding.provider, stop_drain: false, event_name: event.hook_event_name };
+}
+
+/** Record that a turn-end drain actually surfaced new messages and continued the turn. */
+export async function recordStopDrainContinuation(profile: string, host: string): Promise<void> {
   await updateReceiveBinding(profile, host, b => ({
-    ...b, turn_verified_at: now,
-    ...(event.hook_event_name === "Stop" ? { last_turn_ended_at: now, idle: true } : { last_turn_started_at: now, idle: false }),
+    ...b,
+    idle: false,
+    stop_drains_in_turn: (b.stop_drains_in_turn ?? 0) + 1,
   }));
-  return { check: event.hook_event_name !== "Stop", provider: binding.provider };
+}
+
+/** Format hook output according to each host's stdout contract. */
+export function formatTurnHookOutput(options: {
+  provider: ReceiveProvider;
+  stopDrain: boolean;
+  eventName?: string;
+  text: string;
+}): string {
+  const trimmed = options.text.trimEnd();
+  if (!trimmed) return "";
+  if (options.stopDrain) {
+    if (options.provider === "gemini") {
+      return `${JSON.stringify({ decision: "deny", reason: trimmed, continue: true })}\n`;
+    }
+    return `${JSON.stringify({ decision: "block", reason: trimmed })}\n`;
+  }
+  if (options.provider === "gemini") {
+    return `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: options.eventName ?? "BeforeAgent",
+        additionalContext: trimmed,
+      },
+    })}\n`;
+  }
+  return options.text;
 }
 
 export async function requestReceiveCanary(profile: string, host: string) {
