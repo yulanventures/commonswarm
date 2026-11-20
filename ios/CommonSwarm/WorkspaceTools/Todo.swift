@@ -43,6 +43,13 @@ enum TodoFilter: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+struct TodoAccess: Equatable, Sendable {
+    let canRead: Bool
+    let canCreate: Bool
+    let canUpdate: Bool
+    let isWorkspaceAdmin: Bool
+}
+
 struct TodoParty: Codable, Hashable, Sendable {
     enum Kind: String, Codable, Hashable, Sendable {
         case user
@@ -103,6 +110,8 @@ struct TodoOfferSummary: Decodable, Hashable, Sendable {
     let to: TodoParty
     let decider_user_id: UUID
     let start: String
+    let by: TodoActor?
+    let at: String?
 }
 
 enum TodoOfferAnswer: String, Sendable {
@@ -163,6 +172,32 @@ struct TodoDetail: Decodable, Hashable, Identifiable, Sendable {
     let comment_count: Int
 
     var id: UUID { todo_id }
+}
+
+/// Stored to-do shape returned in production write receipts (`committed.value`) and conflict (`current`).
+/// `gate_clear` and `queue_position` are derived on read only and are optional here.
+struct TodoWriteRecord: Decodable, Hashable, Identifiable, Sendable {
+    let workspace_id: UUID
+    let todo_id: UUID
+    let version: Int
+    let title: String
+    let notes: String
+    let state: TodoState
+    let due_on: String?
+    let created_by: TodoActor
+    let created_at: String
+    let assignee: TodoParty?
+    let assigned_by: TodoActor?
+    let assigned_at: String?
+    let offer: TodoOfferSummary?
+    let gate: TodoGateDetail?
+    let gate_clear: Bool?
+    let queue_position: Int?
+    let state_by: TodoActor
+    let state_at: String
+    let comment_count: Int
+
+    var id: UUID { todo_id }
 
     var summary: TodoSummary {
         TodoSummary(
@@ -173,10 +208,34 @@ struct TodoDetail: Decodable, Hashable, Identifiable, Sendable {
             due_on: due_on,
             assignee: assignee,
             offer: offer,
-            gate: gate.map { TodoGateSummary(kind: $0.kind, clear: gate_clear, todo_id: $0.todo_id, at: $0.at) },
+            gate: gate.map { TodoGateSummary(kind: $0.kind, clear: gate_clear ?? true, todo_id: $0.todo_id, at: $0.at) },
             queue_position: queue_position,
             comment_count: comment_count,
             state_at: state_at
+        )
+    }
+
+    func toDetail(preserving previous: TodoDetail?) -> TodoDetail {
+        TodoDetail(
+            workspace_id: workspace_id,
+            todo_id: todo_id,
+            version: version,
+            title: title,
+            notes: notes,
+            state: state,
+            due_on: due_on,
+            created_by: created_by,
+            created_at: created_at,
+            assignee: assignee,
+            assigned_by: assigned_by,
+            assigned_at: assigned_at,
+            offer: offer,
+            gate: gate,
+            gate_clear: gate_clear ?? (previous?.gate == gate ? (previous?.gate_clear ?? true) : true),
+            queue_position: queue_position ?? (previous?.assignee == assignee && previous?.state == state ? previous?.queue_position : nil),
+            state_by: state_by,
+            state_at: state_at,
+            comment_count: comment_count
         )
     }
 }
@@ -202,8 +261,8 @@ struct TodoReadResponse: Sendable {
 }
 
 enum TodoWriteOutcome<Value: Sendable>: Sendable {
-    case committed(Value)
-    case conflict(current: TodoDetail?, message: String)
+    case committed(Value, replayed: Bool)
+    case conflict(current: TodoWriteRecord?, message: String)
     case refused(reason: String, message: String)
     case unconfirmed(message: String)
     case cancelled
@@ -303,6 +362,22 @@ enum TodoRules {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Canonical, deterministic mention list so unordered Set selections always match across unchanged retries.
+    static func canonicalMentions<S: Sequence>(_ mentions: S) -> [TodoParty] where S.Element == TodoParty {
+        var seen = Set<TodoParty>()
+        var unique: [TodoParty] = []
+        for party in mentions where seen.insert(party).inserted {
+            unique.append(party)
+        }
+        unique.sort { lhs, rhs in
+            if lhs.kind.rawValue != rhs.kind.rawValue {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+        }
+        return Array(unique.prefix(maxMentions))
+    }
+
     static func isAccessLossReason(_ reason: String) -> Bool {
         reason == "workspace_access_refused"
             || reason == "connection_access_refused"
@@ -313,19 +388,8 @@ enum TodoRules {
             || reason == "workspace_not_found"
     }
 
-    static func isPreReceiptRefusal(_ reason: String) -> Bool {
-        isAccessLossReason(reason)
-            || reason == "content_read_only"
-            || reason == "human_confirmation_required"
-            || reason == "todo_write_rate_limited"
-            || reason == "rate_limited"
-            || reason == "seat_binding_mismatch"
-            || reason == "todo_not_found"
-            || reason == "target_not_found"
-    }
-
     static func unknownOutcomeAfterRefusalMessage(action: String, refusalMessage: String) -> String {
-        "Your earlier \(action) outcome is still unknown and may already have saved; this retry was refused (\(refusalMessage)). Reload once access is restored to check."
+        "Your earlier \(action) outcome is still unknown and may already have saved; this retry was refused (\(refusalMessage)). Retry unchanged once access is restored to check."
     }
 
     static func refusalMessage(_ reason: String, fallback: String = "Couldn’t complete that action.") -> String {
@@ -435,6 +499,11 @@ enum TodoCalendarDate {
     }
 }
 
+/// Presentation identity captured when New to-do opens.
+struct TodoCreateSession: Identifiable, Equatable, Sendable {
+    let id = UUID()
+}
+
 /// Frozen snapshot captured when the user opens Edit to-do; submits strictly against `baseVersion`.
 struct TodoEditSession: Identifiable, Equatable, Sendable {
     let id = UUID()
@@ -443,6 +512,14 @@ struct TodoEditSession: Identifiable, Equatable, Sendable {
     let initialTitle: String
     let initialNotes: String
     let initialDueOn: String?
+}
+
+/// Frozen snapshot captured when the user opens Assign; submits strictly against `baseVersion`.
+struct TodoAssignSession: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let todoID: UUID
+    let baseVersion: Int
+    let currentAssignee: TodoParty?
 }
 
 enum TodoLoadFailure: Equatable, Sendable {
@@ -481,12 +558,12 @@ final class TodoListViewModel: ObservableObject {
     @Published var filter: TodoFilter = .open
     @Published private(set) var todos: [TodoSummary]?
     @Published private(set) var directory: TodoDirectory
+    @Published private(set) var access: TodoAccess?
     @Published private(set) var isLoading = false
     @Published private(set) var failure: TodoLoadFailure?
     @Published private(set) var isCreating = false
     @Published private(set) var createError: String?
-    @Published private(set) var isReadOnly = false
-    @Published var showingCreateSheet = false
+    @Published var activeCreateSession: TodoCreateSession?
 
     struct PendingCreate: Equatable, Sendable {
         let sessionID: ObjectIdentifier
@@ -497,6 +574,8 @@ final class TodoListViewModel: ObservableObject {
         let commandID: UUID
         var outcomeUnknown: Bool
     }
+
+    private let viewerUserID: UUID
     private(set) var pendingCreate: PendingCreate?
     private var loadGeneration = 0
     private var accessGeneration = 0
@@ -504,7 +583,16 @@ final class TodoListViewModel: ObservableObject {
     private var activeSessionID: ObjectIdentifier?
 
     init(viewerUserID: UUID) {
+        self.viewerUserID = viewerUserID
         self.directory = .empty(viewerUserID: viewerUserID)
+    }
+
+    var canCreate: Bool {
+        !isRetired && access?.canCreate == true
+    }
+
+    var hasUnknownPendingCreate: Bool {
+        pendingCreate?.outcomeUnknown == true
     }
 
     var orderedTodos: [TodoSummary] {
@@ -525,19 +613,28 @@ final class TodoListViewModel: ObservableObject {
         loadGeneration += 1
         accessGeneration += 1
         isLoading = false
-        showingCreateSheet = false
+        activeCreateSession = nil
     }
 
     func activate() {
         isRetired = false
     }
 
-    func openCreateSheet() {
-        guard !isReadOnly else { return }
+    @discardableResult
+    func openCreateSheet() -> TodoCreateSession? {
+        guard canCreate else { return nil }
         if pendingCreate?.outcomeUnknown != true {
             createError = nil
         }
-        showingCreateSheet = true
+        let session = TodoCreateSession()
+        activeCreateSession = session
+        return session
+    }
+
+    func dismissCreateSession(_ sessionID: UUID) {
+        if activeCreateSession?.id == sessionID {
+            activeCreateSession = nil
+        }
     }
 
     private func bindSession(_ session: HumanSession) -> Bool {
@@ -554,17 +651,18 @@ final class TodoListViewModel: ObservableObject {
     }
 
     func load(api: TodoAPI, workspaceID: UUID) async {
-        isRetired = false
+        activate()
         guard bindSession(api.session) else { return }
         loadGeneration += 1
         let generation = loadGeneration
-        let capturedAccessGen = accessGeneration
+        var capturedAccessGen = accessGeneration
         let capturedSession = api.session
         let sessionID = ObjectIdentifier(capturedSession)
         isLoading = true
         failure = nil
         let requestedScope = filter
-        let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
+
+        let accessGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             return !self.isRetired
                 && capturedSession.isActive
@@ -573,9 +671,49 @@ final class TodoListViewModel: ObservableObject {
                 && self.loadGeneration == generation
                 && self.accessGeneration == capturedAccessGen
         }
+
         do {
+            let accessStatus = try await api.access(workspace: workspaceID, canDispatch: accessGate)
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  filter == requestedScope, generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
+            switch accessStatus {
+            case .refused(let reason):
+                clearOnAccessLoss(reason: reason, clearPending: !capturedSession.isActive)
+                return
+            case .unavailable:
+                let wasCreator = access?.canCreate == true
+                access = TodoAccess(canRead: true, canCreate: false, canUpdate: false, isWorkspaceAdmin: false)
+                if wasCreator {
+                    accessGeneration += 1
+                    capturedAccessGen = accessGeneration
+                    activeCreateSession = nil
+                }
+            case .granted(let granted):
+                guard granted.canRead else {
+                    clearOnAccessLoss(reason: "workspace_access_refused", clearPending: !capturedSession.isActive)
+                    return
+                }
+                let wasCreator = access?.canCreate == true
+                access = granted
+                if wasCreator && !granted.canCreate {
+                    accessGeneration += 1
+                    capturedAccessGen = accessGeneration
+                    activeCreateSession = nil
+                }
+            }
+
+            let readAccessGen = capturedAccessGen
+            let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
+                guard let self else { return false }
+                return !self.isRetired
+                    && capturedSession.isActive
+                    && self.activeSessionID == sessionID
+                    && self.filter == requestedScope
+                    && self.loadGeneration == generation
+                    && self.accessGeneration == readAccessGen
+            }
             async let pageTask = api.listTodos(workspace: workspaceID, scope: requestedScope, canDispatch: readGate)
-            async let directoryTask = api.directory(workspace: workspaceID)
+            async let directoryTask = api.directory(workspace: workspaceID, canDispatch: readGate)
             let page = try await pageTask
             let resolvedDirectory = (try? await directoryTask) ?? directory
             try Task.checkCancellation()
@@ -583,7 +721,7 @@ final class TodoListViewModel: ObservableObject {
                   capturedSession.isActive,
                   filter == requestedScope,
                   generation == loadGeneration,
-                  capturedAccessGen == accessGeneration else { return }
+                  readAccessGen == accessGeneration else { return }
             todos = page.todos
             directory = resolvedDirectory
             isLoading = false
@@ -608,17 +746,33 @@ final class TodoListViewModel: ObservableObject {
         }
     }
 
+    func retryPendingCreate(api: TodoAPI, workspaceID: UUID) async -> TodoWriteRecord? {
+        guard let pending = pendingCreate, pending.outcomeUnknown else { return nil }
+        return await createTodo(
+            session: nil,
+            title: pending.title,
+            notes: pending.notes,
+            dueOn: pending.dueOn,
+            assignee: pending.assignee,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
+
     func createTodo(
+        session createSession: TodoCreateSession? = nil,
         title rawTitle: String,
         notes rawNotes: String,
         dueOn: String?,
         assignee: TodoParty?,
         api: TodoAPI,
         workspaceID: UUID
-    ) async -> TodoDetail? {
+    ) async -> TodoWriteRecord? {
         guard !isRetired else { return nil }
         guard bindSession(api.session) else { return nil }
-        guard !isCreating, !isReadOnly else { return nil }
+        guard !isCreating, canCreate else { return nil }
+        if let createSession, activeCreateSession?.id != createSession.id { return nil }
+
         let title = TodoRules.cleanTitle(rawTitle)
         let notes = TodoRules.cleanBody(rawNotes)
         guard !title.isEmpty, title.count <= TodoRules.maxTitleLength else {
@@ -662,7 +816,10 @@ final class TodoListViewModel: ObservableObject {
                   capturedSession.isActive,
                   self.activeSessionID == sessionID,
                   self.accessGeneration == capturedAccessGen,
-                  !self.isReadOnly else {
+                  self.canCreate else {
+                return false
+            }
+            if let createSession, self.activeCreateSession?.id != createSession.id {
                 return false
             }
             dispatchFlag.entered = true
@@ -703,9 +860,9 @@ final class TodoListViewModel: ObservableObject {
         }
 
         switch outcome {
-        case .committed(let created):
+        case .committed(let created, _):
             pendingCreate = nil
-            showingCreateSheet = false
+            activeCreateSession = nil
             await load(api: api, workspaceID: workspaceID)
             return created
         case .conflict(_, let message):
@@ -714,7 +871,7 @@ final class TodoListViewModel: ObservableObject {
             await load(api: api, workspaceID: workspaceID)
             return nil
         case .refused(let reason, let message):
-            let keepUnknown = wasAlreadyUnknown && TodoRules.isPreReceiptRefusal(reason)
+            let keepUnknown = wasAlreadyUnknown
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: "add", refusalMessage: message)
                 : message
@@ -722,9 +879,7 @@ final class TodoListViewModel: ObservableObject {
             if TodoRules.isAccessLossReason(reason) {
                 clearOnAccessLoss(reason: reason, clearPending: !capturedSession.isActive)
             } else if reason == "content_read_only" {
-                accessGeneration += 1
-                isReadOnly = true
-                showingCreateSheet = false
+                downgradeToReader()
             }
             createError = display
             return nil
@@ -742,11 +897,20 @@ final class TodoListViewModel: ObservableObject {
         accessGeneration += 1
         isLoading = false
         todos = nil
-        showingCreateSheet = false
+        directory = .empty(viewerUserID: viewerUserID)
+        access = nil
+        activeCreateSession = nil
         failure = .refused(reason)
         if clearPending {
             pendingCreate = nil
         }
+    }
+
+    private func downgradeToReader() {
+        accessGeneration += 1
+        let wasAdmin = access?.isWorkspaceAdmin ?? false
+        access = TodoAccess(canRead: true, canCreate: false, canUpdate: false, isWorkspaceAdmin: wasAdmin)
+        activeCreateSession = nil
     }
 }
 
@@ -755,27 +919,64 @@ final class TodoDetailViewModel: ObservableObject {
     @Published private(set) var detail: TodoDetail?
     @Published private(set) var comments: [TodoComment] = []
     @Published private(set) var nextCommentOffset: Int?
+    @Published private(set) var access: TodoAccess?
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingMoreComments = false
     @Published private(set) var failure: TodoLoadFailure?
     @Published private(set) var isMutating = false
     @Published private(set) var isPostingComment = false
-    @Published private(set) var isReadOnly = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var actionError: String?
     @Published var activeEditSession: TodoEditSession?
-    @Published var showingAssignSheet = false
+    @Published var activeAssignSession: TodoAssignSession?
+    @Published var showingMentionPicker = false
 
     private var loadGeneration = 0
     private var accessGeneration = 0
     private var isRetired = false
     private var activeSessionID: ObjectIdentifier?
 
-    private var pendingState: (sessionID: ObjectIdentifier, version: Int, state: TodoState, commandID: UUID, outcomeUnknown: Bool)?
-    private var pendingAssign: (sessionID: ObjectIdentifier, version: Int, to: TodoParty?, commandID: UUID, outcomeUnknown: Bool)?
-    private var pendingOffer: (sessionID: ObjectIdentifier, offerID: UUID, answer: TodoOfferAnswer, commandID: UUID, outcomeUnknown: Bool)?
-    private var pendingUpdate: (sessionID: ObjectIdentifier, version: Int, title: String, notes: String, dueOn: String?, commandID: UUID, outcomeUnknown: Bool)?
-    private var pendingComment: (sessionID: ObjectIdentifier, body: String, mentions: [TodoParty], commandID: UUID, outcomeUnknown: Bool)?
+    private(set) var pendingState: (sessionID: ObjectIdentifier, todoID: UUID, version: Int, state: TodoState, commandID: UUID, outcomeUnknown: Bool)?
+    private(set) var pendingAssign: (sessionID: ObjectIdentifier, todoID: UUID, version: Int, to: TodoParty?, commandID: UUID, outcomeUnknown: Bool)?
+    private(set) var pendingOffer: (sessionID: ObjectIdentifier, todoID: UUID, offerID: UUID, answer: TodoOfferAnswer, commandID: UUID, outcomeUnknown: Bool)?
+    private(set) var pendingUpdate: (sessionID: ObjectIdentifier, todoID: UUID, version: Int, title: String, notes: String, dueOn: String?, commandID: UUID, outcomeUnknown: Bool)?
+    private(set) var pendingComment: (sessionID: ObjectIdentifier, todoID: UUID, body: String, mentions: [TodoParty], commandID: UUID, outcomeUnknown: Bool)?
+
+    var canCreateComment: Bool {
+        !isRetired && access?.canCreate == true && detail != nil
+    }
+
+    var canUpdate: Bool {
+        !isRetired && access?.canUpdate == true && detail != nil
+    }
+
+    var hasUnknownPendingState: Bool { pendingState?.outcomeUnknown == true }
+    var hasUnknownPendingAssign: Bool { pendingAssign?.outcomeUnknown == true }
+    var hasUnknownPendingOffer: Bool { pendingOffer?.outcomeUnknown == true }
+    var hasUnknownPendingUpdate: Bool { pendingUpdate?.outcomeUnknown == true }
+    var hasUnknownPendingComment: Bool { pendingComment?.outcomeUnknown == true }
+    var hasAnyUnknownPendingWrite: Bool {
+        hasUnknownPendingState || hasUnknownPendingAssign || hasUnknownPendingOffer
+            || hasUnknownPendingUpdate || hasUnknownPendingComment
+    }
+
+    func retryUnknownPendingWrite(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        if hasUnknownPendingOffer { return await retryPendingOffer(api: api, workspaceID: workspaceID) }
+        if hasUnknownPendingState { return await retryPendingState(api: api, workspaceID: workspaceID) }
+        if hasUnknownPendingAssign { return await retryPendingAssign(api: api, workspaceID: workspaceID) }
+        if hasUnknownPendingUpdate { return await retryPendingUpdate(api: api, workspaceID: workspaceID) }
+        if hasUnknownPendingComment { return await retryPendingComment(api: api, workspaceID: workspaceID) }
+        return false
+    }
+
+    func canAcceptOrDeclineOffer(_ offer: TodoOfferSummary, viewerUserID: UUID) -> Bool {
+        canUpdate && offer.decider_user_id == viewerUserID
+    }
+
+    func canWithdrawOffer(_ offer: TodoOfferSummary, viewerUserID: UUID) -> Bool {
+        guard canUpdate else { return false }
+        return offer.by?.user_id == viewerUserID || access?.isWorkspaceAdmin == true
+    }
 
     func retire() {
         isRetired = true
@@ -783,7 +984,8 @@ final class TodoDetailViewModel: ObservableObject {
         accessGeneration += 1
         isLoading = false
         activeEditSession = nil
-        showingAssignSheet = false
+        activeAssignSession = nil
+        showingMentionPicker = false
     }
 
     func activate() {
@@ -792,7 +994,7 @@ final class TodoDetailViewModel: ObservableObject {
 
     @discardableResult
     func beginEdit() -> TodoEditSession? {
-        guard !isReadOnly, let current = detail else { return nil }
+        guard canUpdate, let current = detail else { return nil }
         let session = TodoEditSession(
             todoID: current.todo_id,
             baseVersion: current.version,
@@ -801,10 +1003,37 @@ final class TodoDetailViewModel: ObservableObject {
             initialDueOn: current.due_on
         )
         activeEditSession = session
-        if pendingUpdate?.outcomeUnknown != true {
+        if !hasUnknownPendingUpdate {
             actionError = nil
         }
         return session
+    }
+
+    @discardableResult
+    func beginAssign() -> TodoAssignSession? {
+        guard canUpdate, let current = detail else { return nil }
+        let session = TodoAssignSession(
+            todoID: current.todo_id,
+            baseVersion: current.version,
+            currentAssignee: current.assignee
+        )
+        activeAssignSession = session
+        if !hasUnknownPendingAssign {
+            actionError = nil
+        }
+        return session
+    }
+
+    func dismissAssignSession(_ sessionID: UUID) {
+        if activeAssignSession?.id == sessionID {
+            activeAssignSession = nil
+        }
+    }
+
+    func dismissEditSession(_ sessionID: UUID) {
+        if activeEditSession?.id == sessionID {
+            activeEditSession = nil
+        }
     }
 
     private func bindSession(_ session: HumanSession) -> Bool {
@@ -821,11 +1050,11 @@ final class TodoDetailViewModel: ObservableObject {
     }
 
     func load(api: TodoAPI, workspaceID: UUID, todoID: UUID, preserveNotice: Bool = false) async {
-        isRetired = false
+        activate()
         guard bindSession(api.session) else { return }
         loadGeneration += 1
         let generation = loadGeneration
-        let capturedAccessGen = accessGeneration
+        var capturedAccessGen = accessGeneration
         let capturedSession = api.session
         let sessionID = ObjectIdentifier(capturedSession)
         isLoading = true
@@ -834,7 +1063,8 @@ final class TodoDetailViewModel: ObservableObject {
             statusMessage = nil
             actionError = nil
         }
-        let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
+
+        let accessGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             return !self.isRetired
                 && capturedSession.isActive
@@ -842,16 +1072,67 @@ final class TodoDetailViewModel: ObservableObject {
                 && self.loadGeneration == generation
                 && self.accessGeneration == capturedAccessGen
         }
+
         do {
+            let accessStatus = try await api.access(workspace: workspaceID, canDispatch: accessGate)
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
+            switch accessStatus {
+            case .refused(let reason):
+                clearOnAccessLoss(reason: reason, clearPending: !capturedSession.isActive)
+                return
+            case .unavailable:
+                let hadWrite = (access?.canCreate == true) || (access?.canUpdate == true)
+                access = TodoAccess(canRead: true, canCreate: false, canUpdate: false, isWorkspaceAdmin: false)
+                if hadWrite {
+                    accessGeneration += 1
+                    capturedAccessGen = accessGeneration
+                    closeWriteSurfaces()
+                }
+            case .granted(let granted):
+                guard granted.canRead else {
+                    clearOnAccessLoss(reason: "workspace_access_refused", clearPending: !capturedSession.isActive)
+                    return
+                }
+                let lostWrite = (access?.canCreate == true && !granted.canCreate)
+                    || (access?.canUpdate == true && !granted.canUpdate)
+                access = granted
+                if lostWrite {
+                    accessGeneration += 1
+                    capturedAccessGen = accessGeneration
+                    closeWriteSurfaces()
+                } else {
+                    if !granted.canUpdate {
+                        activeEditSession = nil
+                        activeAssignSession = nil
+                    }
+                    if !granted.canCreate {
+                        showingMentionPicker = false
+                    }
+                }
+            }
+
+            let readAccessGen = capturedAccessGen
+            let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
+                guard let self else { return false }
+                return !self.isRetired
+                    && capturedSession.isActive
+                    && self.activeSessionID == sessionID
+                    && self.loadGeneration == generation
+                    && self.accessGeneration == readAccessGen
+            }
             let response = try await api.readTodo(workspace: workspaceID, todoID: todoID, canDispatch: readGate)
             try Task.checkCancellation()
-            guard !isRetired, capturedSession.isActive, generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
+            guard !isRetired, capturedSession.isActive, generation == loadGeneration, readAccessGen == accessGeneration else { return }
             detail = response.todo
             comments = response.comments
             nextCommentOffset = response.nextCommentOffset
             isLoading = false
-            if let open = activeEditSession, open.baseVersion != response.todo.version {
+            if let openEdit = activeEditSession, openEdit.baseVersion != response.todo.version {
                 activeEditSession = nil
+            }
+            if let openAssign = activeAssignSession, openAssign.baseVersion != response.todo.version {
+                activeAssignSession = nil
             }
         } catch TodoAPIError.refused(let reason) {
             if !Task.isCancelled && !isRetired && generation == loadGeneration && capturedAccessGen == accessGeneration {
@@ -882,12 +1163,14 @@ final class TodoDetailViewModel: ObservableObject {
               let offset = nextCommentOffset else { return }
         let capturedSession = api.session
         let sessionID = ObjectIdentifier(capturedSession)
+        let capturedLoadGen = loadGeneration
         let capturedAccessGen = accessGeneration
         let pageGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             return !self.isRetired
                 && capturedSession.isActive
                 && self.activeSessionID == sessionID
+                && self.loadGeneration == capturedLoadGen
                 && self.accessGeneration == capturedAccessGen
         }
         isLoadingMoreComments = true
@@ -895,7 +1178,8 @@ final class TodoDetailViewModel: ObservableObject {
         do {
             let response = try await api.readTodo(workspace: workspaceID, todoID: current.todo_id, commentOffset: offset, canDispatch: pageGate)
             try Task.checkCancellation()
-            guard !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return }
+            guard !isRetired, capturedSession.isActive,
+                  loadGeneration == capturedLoadGen, accessGeneration == capturedAccessGen else { return }
             let existingIDs = Set(comments.map(\.comment_id))
             let newItems = response.comments.filter { !existingIDs.contains($0.comment_id) }
             comments.append(contentsOf: newItems)
@@ -905,27 +1189,57 @@ final class TodoDetailViewModel: ObservableObject {
                 nextCommentOffset = nil
             }
         } catch TodoAPIError.refused(let reason) {
+            guard !Task.isCancelled, !isRetired,
+                  loadGeneration == capturedLoadGen, accessGeneration == capturedAccessGen else { return }
             if TodoRules.isAccessLossReason(reason) || reason == "todo_not_found" {
                 clearOnAccessLoss(reason: reason, clearPending: !capturedSession.isActive)
             } else {
                 actionError = TodoRules.refusalMessage(reason, fallback: "Couldn’t load earlier comments.")
             }
+        } catch is CancellationError {
+            if !capturedSession.isActive {
+                clearOnAccessLoss(reason: "unauthorized", clearPending: true)
+            }
         } catch {
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  loadGeneration == capturedLoadGen, accessGeneration == capturedAccessGen else { return }
             actionError = "Couldn’t load earlier comments."
         }
     }
 
-    func setState(_ target: TodoState, api: TodoAPI, workspaceID: UUID) async -> Bool {
+    func retryPendingState(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        guard let pending = pendingState, pending.outcomeUnknown else { return false }
+        return await executeSetState(
+            todoID: pending.todoID,
+            baseVersion: pending.version,
+            target: pending.state,
+            commandID: pending.commandID,
+            wasAlreadyUnknown: true,
+            requireCurrentMatch: false,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
+
+    func setState(
+        _ target: TodoState,
+        todoID: UUID,
+        baseVersion: Int,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
         guard !isRetired else { return false }
         guard bindSession(api.session) else { return false }
-        guard !isMutating, !isReadOnly, let current = detail else { return false }
-        let capturedSession = api.session
-        let sid = ObjectIdentifier(capturedSession)
-        let capturedAccessGen = accessGeneration
+        guard !isMutating, canUpdate else { return false }
+        guard detail?.todo_id == todoID, detail?.version == baseVersion else {
+            actionError = "This to-do changed since you loaded it. Review the latest version and try again."
+            return false
+        }
+        let sid = ObjectIdentifier(api.session)
         let commandID: UUID
         let wasAlreadyUnknown: Bool
         if let existing = pendingState, existing.sessionID == sid {
-            if existing.version == current.version && existing.state == target {
+            if existing.todoID == todoID && existing.version == baseVersion && existing.state == target {
                 commandID = existing.commandID
                 wasAlreadyUnknown = existing.outcomeUnknown
             } else if existing.outcomeUnknown {
@@ -934,19 +1248,50 @@ final class TodoDetailViewModel: ObservableObject {
             } else {
                 commandID = UUID()
                 wasAlreadyUnknown = false
-                pendingState = (sid, current.version, target, commandID, false)
+                pendingState = (sid, todoID, baseVersion, target, commandID, false)
             }
         } else {
             commandID = UUID()
             wasAlreadyUnknown = false
-            pendingState = (sid, current.version, target, commandID, false)
+            pendingState = (sid, todoID, baseVersion, target, commandID, false)
         }
+        return await executeSetState(
+            todoID: todoID,
+            baseVersion: baseVersion,
+            target: target,
+            commandID: commandID,
+            wasAlreadyUnknown: wasAlreadyUnknown,
+            requireCurrentMatch: true,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
 
+    private func executeSetState(
+        todoID: UUID,
+        baseVersion: Int,
+        target: TodoState,
+        commandID: UUID,
+        wasAlreadyUnknown: Bool,
+        requireCurrentMatch: Bool,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
+        guard !isRetired else { return false }
+        guard bindSession(api.session) else { return false }
+        guard !isMutating, canUpdate else { return false }
+        let capturedSession = api.session
+        let sid = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
         let dispatchFlag = TodoDispatchFlag()
+
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
-                  self.accessGeneration == capturedAccessGen, !self.isReadOnly else { return false }
+                  self.accessGeneration == capturedAccessGen, self.canUpdate else { return false }
+            if requireCurrentMatch {
+                guard self.detail?.todo_id == todoID, self.detail?.version == baseVersion else { return false }
+            }
             dispatchFlag.entered = true
             if self.pendingState?.commandID == commandID {
                 self.pendingState?.outcomeUnknown = true
@@ -961,8 +1306,8 @@ final class TodoDetailViewModel: ObservableObject {
 
         let outcome = await api.setTodoState(
             workspace: workspaceID,
-            todoID: current.todo_id,
-            baseVersion: current.version,
+            todoID: todoID,
+            baseVersion: baseVersion,
             state: target,
             requestID: commandID,
             canDispatch: writeGate
@@ -972,28 +1317,56 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return false }
-        return handleTodoWrite(
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else {
+            if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
+            return false
+        }
+        return await handleTodoWrite(
             outcome,
-            session: capturedSession,
+            api: api,
+            workspaceID: workspaceID,
             actionName: "state change",
             wasAlreadyUnknown: wasAlreadyUnknown,
             clearPending: { self.pendingState = nil },
-            successMessage: stateMessage(for: target)
+            successMessage: { _ in self.stateMessage(for: target) }
         )
     }
 
-    func assign(to party: TodoParty?, api: TodoAPI, workspaceID: UUID) async -> Bool {
+    func retryPendingAssign(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        guard let pending = pendingAssign, pending.outcomeUnknown else { return false }
+        return await executeAssign(
+            todoID: pending.todoID,
+            baseVersion: pending.version,
+            to: pending.to,
+            commandID: pending.commandID,
+            wasAlreadyUnknown: true,
+            boundAssignSessionID: nil,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
+
+    func assign(
+        session assignSession: TodoAssignSession,
+        to party: TodoParty?,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
         guard !isRetired else { return false }
         guard bindSession(api.session) else { return false }
-        guard !isMutating, !isReadOnly, let current = detail else { return false }
-        let capturedSession = api.session
-        let sid = ObjectIdentifier(capturedSession)
-        let capturedAccessGen = accessGeneration
+        guard !isMutating, canUpdate else { return false }
+        guard activeAssignSession?.id == assignSession.id,
+              detail?.todo_id == assignSession.todoID,
+              detail?.version == assignSession.baseVersion else {
+            activeAssignSession = nil
+            actionError = "This to-do changed since you opened assignment. Review the latest version and try again."
+            return false
+        }
+        let sid = ObjectIdentifier(api.session)
         let commandID: UUID
         let wasAlreadyUnknown: Bool
         if let existing = pendingAssign, existing.sessionID == sid {
-            if existing.version == current.version && existing.to == party {
+            if existing.todoID == assignSession.todoID && existing.version == assignSession.baseVersion && existing.to == party {
                 commandID = existing.commandID
                 wasAlreadyUnknown = existing.outcomeUnknown
             } else if existing.outcomeUnknown {
@@ -1002,19 +1375,52 @@ final class TodoDetailViewModel: ObservableObject {
             } else {
                 commandID = UUID()
                 wasAlreadyUnknown = false
-                pendingAssign = (sid, current.version, party, commandID, false)
+                pendingAssign = (sid, assignSession.todoID, assignSession.baseVersion, party, commandID, false)
             }
         } else {
             commandID = UUID()
             wasAlreadyUnknown = false
-            pendingAssign = (sid, current.version, party, commandID, false)
+            pendingAssign = (sid, assignSession.todoID, assignSession.baseVersion, party, commandID, false)
         }
+        return await executeAssign(
+            todoID: assignSession.todoID,
+            baseVersion: assignSession.baseVersion,
+            to: party,
+            commandID: commandID,
+            wasAlreadyUnknown: wasAlreadyUnknown,
+            boundAssignSessionID: assignSession.id,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
 
+    private func executeAssign(
+        todoID: UUID,
+        baseVersion: Int,
+        to party: TodoParty?,
+        commandID: UUID,
+        wasAlreadyUnknown: Bool,
+        boundAssignSessionID: UUID?,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
+        guard !isRetired else { return false }
+        guard bindSession(api.session) else { return false }
+        guard !isMutating, canUpdate else { return false }
+        let capturedSession = api.session
+        let sid = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
         let dispatchFlag = TodoDispatchFlag()
+
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
-                  self.accessGeneration == capturedAccessGen, !self.isReadOnly else { return false }
+                  self.accessGeneration == capturedAccessGen, self.canUpdate else { return false }
+            if let boundAssignSessionID {
+                guard self.activeAssignSession?.id == boundAssignSessionID,
+                      self.detail?.todo_id == todoID,
+                      self.detail?.version == baseVersion else { return false }
+            }
             dispatchFlag.entered = true
             if self.pendingAssign?.commandID == commandID {
                 self.pendingAssign?.outcomeUnknown = true
@@ -1029,8 +1435,8 @@ final class TodoDetailViewModel: ObservableObject {
 
         let outcome = await api.assignTodo(
             workspace: workspaceID,
-            todoID: current.todo_id,
-            baseVersion: current.version,
+            todoID: todoID,
+            baseVersion: baseVersion,
             to: party,
             requestID: commandID,
             canDispatch: writeGate
@@ -1040,30 +1446,73 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return false }
-        let ok = handleTodoWrite(
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else {
+            if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
+            return false
+        }
+        let ok = await handleTodoWrite(
             outcome,
-            session: capturedSession,
+            api: api,
+            workspaceID: workspaceID,
             actionName: "assignment",
             wasAlreadyUnknown: wasAlreadyUnknown,
             clearPending: { self.pendingAssign = nil },
-            successMessage: party == nil ? "Unassigned." : "Assignment updated."
+            successMessage: { receipt in
+                if receipt.offer != nil {
+                    return "Work request sent."
+                }
+                return party == nil ? "Unassigned." : "Assignment updated."
+            }
         )
-        if ok { showingAssignSheet = false }
+        if ok { activeAssignSession = nil }
         return ok
     }
 
-    func answerOffer(_ answer: TodoOfferAnswer, api: TodoAPI, workspaceID: UUID) async -> Bool {
+    func retryPendingOffer(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        guard let pending = pendingOffer, pending.outcomeUnknown else { return false }
+        return await executeAnswerOffer(
+            todoID: pending.todoID,
+            offerID: pending.offerID,
+            answer: pending.answer,
+            commandID: pending.commandID,
+            wasAlreadyUnknown: true,
+            requireDisplayedOffer: false,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
+
+    func answerOffer(
+        _ answer: TodoOfferAnswer,
+        todoID: UUID,
+        offerID: UUID,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
         guard !isRetired else { return false }
         guard bindSession(api.session) else { return false }
-        guard !isMutating, !isReadOnly, let current = detail, let offer = current.offer else { return false }
-        let capturedSession = api.session
-        let sid = ObjectIdentifier(capturedSession)
-        let capturedAccessGen = accessGeneration
+        guard !isMutating, canUpdate else { return false }
+        guard let current = detail,
+              current.todo_id == todoID,
+              let offer = current.offer,
+              offer.offer_id == offerID else {
+            actionError = "That work request changed or is no longer pending."
+            return false
+        }
+        let viewerID = api.viewerUserID
+        let permitted = answer == .withdraw
+            ? canWithdrawOffer(offer, viewerUserID: viewerID)
+            : canAcceptOrDeclineOffer(offer, viewerUserID: viewerID)
+        guard permitted else {
+            actionError = TodoRules.refusalMessage("not_decider")
+            return false
+        }
+
+        let sid = ObjectIdentifier(api.session)
         let commandID: UUID
         let wasAlreadyUnknown: Bool
         if let existing = pendingOffer, existing.sessionID == sid {
-            if existing.offerID == offer.offer_id && existing.answer == answer {
+            if existing.todoID == todoID && existing.offerID == offerID && existing.answer == answer {
                 commandID = existing.commandID
                 wasAlreadyUnknown = existing.outcomeUnknown
             } else if existing.outcomeUnknown {
@@ -1072,19 +1521,58 @@ final class TodoDetailViewModel: ObservableObject {
             } else {
                 commandID = UUID()
                 wasAlreadyUnknown = false
-                pendingOffer = (sid, offer.offer_id, answer, commandID, false)
+                pendingOffer = (sid, todoID, offerID, answer, commandID, false)
             }
         } else {
             commandID = UUID()
             wasAlreadyUnknown = false
-            pendingOffer = (sid, offer.offer_id, answer, commandID, false)
+            pendingOffer = (sid, todoID, offerID, answer, commandID, false)
         }
+        return await executeAnswerOffer(
+            todoID: todoID,
+            offerID: offerID,
+            answer: answer,
+            commandID: commandID,
+            wasAlreadyUnknown: wasAlreadyUnknown,
+            requireDisplayedOffer: true,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
 
+    private func executeAnswerOffer(
+        todoID: UUID,
+        offerID: UUID,
+        answer: TodoOfferAnswer,
+        commandID: UUID,
+        wasAlreadyUnknown: Bool,
+        requireDisplayedOffer: Bool,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
+        guard !isRetired else { return false }
+        guard bindSession(api.session) else { return false }
+        guard !isMutating, canUpdate else { return false }
+        let capturedSession = api.session
+        let sid = ObjectIdentifier(capturedSession)
+        let viewerID = api.viewerUserID
+        let capturedAccessGen = accessGeneration
         let dispatchFlag = TodoDispatchFlag()
+
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
-                  self.accessGeneration == capturedAccessGen, !self.isReadOnly else { return false }
+                  self.accessGeneration == capturedAccessGen, self.canUpdate else { return false }
+            if requireDisplayedOffer {
+                guard let current = self.detail,
+                      current.todo_id == todoID,
+                      let offer = current.offer,
+                      offer.offer_id == offerID else { return false }
+                let allowed = answer == .withdraw
+                    ? self.canWithdrawOffer(offer, viewerUserID: viewerID)
+                    : self.canAcceptOrDeclineOffer(offer, viewerUserID: viewerID)
+                guard allowed else { return false }
+            }
             dispatchFlag.entered = true
             if self.pendingOffer?.commandID == commandID {
                 self.pendingOffer?.outcomeUnknown = true
@@ -1099,8 +1587,8 @@ final class TodoDetailViewModel: ObservableObject {
 
         let outcome = await api.answerOffer(
             workspace: workspaceID,
-            todoID: current.todo_id,
-            offerID: offer.offer_id,
+            todoID: todoID,
+            offerID: offerID,
             answer: answer,
             requestID: commandID,
             canDispatch: writeGate
@@ -1110,20 +1598,40 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return false }
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else {
+            if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
+            return false
+        }
         let msg: String
         switch answer {
         case .accept: msg = "Request accepted."
         case .decline: msg = "Request declined."
         case .withdraw: msg = "Request withdrawn."
         }
-        return handleTodoWrite(
+        return await handleTodoWrite(
             outcome,
-            session: capturedSession,
+            api: api,
+            workspaceID: workspaceID,
             actionName: "request response",
             wasAlreadyUnknown: wasAlreadyUnknown,
             clearPending: { self.pendingOffer = nil },
-            successMessage: msg
+            successMessage: { _ in msg }
+        )
+    }
+
+    func retryPendingUpdate(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        guard let pending = pendingUpdate, pending.outcomeUnknown else { return false }
+        return await executeUpdate(
+            todoID: pending.todoID,
+            baseVersion: pending.version,
+            title: pending.title,
+            notes: pending.notes,
+            dueOn: pending.dueOn,
+            commandID: pending.commandID,
+            wasAlreadyUnknown: true,
+            boundEditSessionID: nil,
+            api: api,
+            workspaceID: workspaceID
         )
     }
 
@@ -1137,7 +1645,7 @@ final class TodoDetailViewModel: ObservableObject {
     ) async -> Bool {
         guard !isRetired else { return false }
         guard bindSession(api.session) else { return false }
-        guard !isMutating, !isReadOnly else { return false }
+        guard !isMutating, canUpdate else { return false }
         guard activeEditSession?.id == editSession.id,
               detail?.todo_id == editSession.todoID,
               detail?.version == editSession.baseVersion else {
@@ -1161,13 +1669,12 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
 
-        let capturedSession = api.session
-        let sid = ObjectIdentifier(capturedSession)
-        let capturedAccessGen = accessGeneration
+        let sid = ObjectIdentifier(api.session)
         let commandID: UUID
         let wasAlreadyUnknown: Bool
         if let existing = pendingUpdate, existing.sessionID == sid {
-            if existing.version == editSession.baseVersion
+            if existing.todoID == editSession.todoID
+                && existing.version == editSession.baseVersion
                 && existing.title == title
                 && existing.notes == notes
                 && existing.dueOn == dueOn {
@@ -1179,21 +1686,56 @@ final class TodoDetailViewModel: ObservableObject {
             } else {
                 commandID = UUID()
                 wasAlreadyUnknown = false
-                pendingUpdate = (sid, editSession.baseVersion, title, notes, dueOn, commandID, false)
+                pendingUpdate = (sid, editSession.todoID, editSession.baseVersion, title, notes, dueOn, commandID, false)
             }
         } else {
             commandID = UUID()
             wasAlreadyUnknown = false
-            pendingUpdate = (sid, editSession.baseVersion, title, notes, dueOn, commandID, false)
+            pendingUpdate = (sid, editSession.todoID, editSession.baseVersion, title, notes, dueOn, commandID, false)
         }
+        return await executeUpdate(
+            todoID: editSession.todoID,
+            baseVersion: editSession.baseVersion,
+            title: title,
+            notes: notes,
+            dueOn: dueOn,
+            commandID: commandID,
+            wasAlreadyUnknown: wasAlreadyUnknown,
+            boundEditSessionID: editSession.id,
+            api: api,
+            workspaceID: workspaceID
+        )
+    }
 
+    private func executeUpdate(
+        todoID: UUID,
+        baseVersion: Int,
+        title: String,
+        notes: String,
+        dueOn: String?,
+        commandID: UUID,
+        wasAlreadyUnknown: Bool,
+        boundEditSessionID: UUID?,
+        api: TodoAPI,
+        workspaceID: UUID
+    ) async -> Bool {
+        guard !isRetired else { return false }
+        guard bindSession(api.session) else { return false }
+        guard !isMutating, canUpdate else { return false }
+        let capturedSession = api.session
+        let sid = ObjectIdentifier(capturedSession)
+        let capturedAccessGen = accessGeneration
         let dispatchFlag = TodoDispatchFlag()
+
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
-                  self.accessGeneration == capturedAccessGen, !self.isReadOnly,
-                  self.activeEditSession?.id == editSession.id,
-                  self.detail?.version == editSession.baseVersion else { return false }
+                  self.accessGeneration == capturedAccessGen, self.canUpdate else { return false }
+            if let boundEditSessionID {
+                guard self.activeEditSession?.id == boundEditSessionID,
+                      self.detail?.todo_id == todoID,
+                      self.detail?.version == baseVersion else { return false }
+            }
             dispatchFlag.entered = true
             if self.pendingUpdate?.commandID == commandID {
                 self.pendingUpdate?.outcomeUnknown = true
@@ -1208,8 +1750,8 @@ final class TodoDetailViewModel: ObservableObject {
 
         let outcome = await api.updateTodo(
             workspace: workspaceID,
-            todoID: editSession.todoID,
-            baseVersion: editSession.baseVersion,
+            todoID: todoID,
+            baseVersion: baseVersion,
             title: title,
             notes: notes,
             dueOn: dueOn,
@@ -1221,17 +1763,31 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return false }
-        let ok = handleTodoWrite(
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else {
+            if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
+            return false
+        }
+        let ok = await handleTodoWrite(
             outcome,
-            session: capturedSession,
+            api: api,
+            workspaceID: workspaceID,
             actionName: "edit",
             wasAlreadyUnknown: wasAlreadyUnknown,
             clearPending: { self.pendingUpdate = nil },
-            successMessage: "Saved."
+            successMessage: { _ in "Saved." }
         )
         if ok { activeEditSession = nil }
         return ok
+    }
+
+    func retryPendingComment(api: TodoAPI, workspaceID: UUID) async -> Bool {
+        guard let pending = pendingComment, pending.outcomeUnknown else { return false }
+        return await postComment(
+            body: pending.body,
+            mentions: pending.mentions,
+            api: api,
+            workspaceID: workspaceID
+        )
     }
 
     func postComment(
@@ -1242,20 +1798,20 @@ final class TodoDetailViewModel: ObservableObject {
     ) async -> Bool {
         guard !isRetired else { return false }
         guard bindSession(api.session) else { return false }
-        guard !isPostingComment, !isReadOnly, let current = detail else { return false }
+        guard !isPostingComment, canCreateComment, let current = detail else { return false }
         let body = TodoRules.cleanBody(rawBody)
         guard !body.isEmpty, body.count <= TodoRules.maxCommentLength else {
             actionError = TodoRules.refusalMessage("comment_invalid")
             return false
         }
-        let cappedMentions = Array(mentions.prefix(TodoRules.maxMentions))
+        let canonical = TodoRules.canonicalMentions(mentions)
         let capturedSession = api.session
         let sid = ObjectIdentifier(capturedSession)
         let capturedAccessGen = accessGeneration
         let commandID: UUID
         let wasAlreadyUnknown: Bool
         if let existing = pendingComment, existing.sessionID == sid {
-            if existing.body == body && existing.mentions == cappedMentions {
+            if existing.todoID == current.todo_id && existing.body == body && existing.mentions == canonical {
                 commandID = existing.commandID
                 wasAlreadyUnknown = existing.outcomeUnknown
             } else if existing.outcomeUnknown {
@@ -1264,19 +1820,19 @@ final class TodoDetailViewModel: ObservableObject {
             } else {
                 commandID = UUID()
                 wasAlreadyUnknown = false
-                pendingComment = (sid, body, cappedMentions, commandID, false)
+                pendingComment = (sid, current.todo_id, body, canonical, commandID, false)
             }
         } else {
             commandID = UUID()
             wasAlreadyUnknown = false
-            pendingComment = (sid, body, cappedMentions, commandID, false)
+            pendingComment = (sid, current.todo_id, body, canonical, commandID, false)
         }
 
         let dispatchFlag = TodoDispatchFlag()
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
-                  self.accessGeneration == capturedAccessGen, !self.isReadOnly else { return false }
+                  self.accessGeneration == capturedAccessGen, self.canCreateComment else { return false }
             dispatchFlag.entered = true
             if self.pendingComment?.commandID == commandID {
                 self.pendingComment?.outcomeUnknown = true
@@ -1293,7 +1849,7 @@ final class TodoDetailViewModel: ObservableObject {
             workspace: workspaceID,
             todoID: current.todo_id,
             body: body,
-            mentions: cappedMentions,
+            mentions: canonical,
             requestID: commandID,
             canDispatch: writeGate
         )
@@ -1302,9 +1858,12 @@ final class TodoDetailViewModel: ObservableObject {
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else { return false }
+        guard !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration else {
+            if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
+            return false
+        }
         switch outcome {
-        case .committed(let comment):
+        case .committed(let comment, _):
             pendingComment = nil
             if !comments.contains(where: { $0.comment_id == comment.comment_id }) {
                 comments.append(comment)
@@ -1313,11 +1872,13 @@ final class TodoDetailViewModel: ObservableObject {
             return true
         case .conflict(let latest, let message):
             pendingComment = nil
-            if let latest { detail = latest }
+            if let latest, latest.version >= (detail?.version ?? 0) {
+                detail = latest.toDetail(preserving: detail)
+            }
             actionError = message
             return false
         case .refused(let reason, let message):
-            let keepUnknown = wasAlreadyUnknown && TodoRules.isPreReceiptRefusal(reason)
+            let keepUnknown = wasAlreadyUnknown
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: "comment", refusalMessage: message)
                 : message
@@ -1343,33 +1904,56 @@ final class TodoDetailViewModel: ObservableObject {
     }
 
     private func handleTodoWrite(
-        _ outcome: TodoWriteOutcome<TodoDetail>,
-        session: HumanSession,
+        _ outcome: TodoWriteOutcome<TodoWriteRecord>,
+        api: TodoAPI,
+        workspaceID: UUID,
         actionName: String,
         wasAlreadyUnknown: Bool,
         clearPending: () -> Void,
-        successMessage: String
-    ) -> Bool {
+        successMessage: (TodoWriteRecord) -> String
+    ) async -> Bool {
         switch outcome {
-        case .committed(let updated):
+        case .committed(let receipt, let replayed):
             clearPending()
-            detail = updated
-            statusMessage = successMessage
+            // Authoritative receipt never regresses displayed state if a replayed older receipt arrives after a newer refresh.
+            let regressed: Bool
+            if let existing = detail {
+                if receipt.version >= existing.version {
+                    detail = receipt.toDetail(preserving: existing)
+                    regressed = false
+                } else {
+                    regressed = true
+                }
+            } else {
+                detail = receipt.toDetail(preserving: nil)
+                regressed = false
+            }
+            statusMessage = regressed ? "Earlier \(actionName) was already applied." : successMessage(receipt)
+            // Refresh derived read fields (gate_clear, queue_position) via a follow-up read when not a stale replay.
+            if !regressed && (!replayed || (detail?.version ?? 0) <= receipt.version) {
+                await load(api: api, workspaceID: workspaceID, todoID: receipt.todo_id, preserveNotice: true)
+            }
             return true
         case .conflict(let latest, let message):
             activeEditSession = nil
-            showingAssignSheet = false
+            activeAssignSession = nil
             clearPending()
-            if let latest { detail = latest }
+            if let latest, latest.version >= (detail?.version ?? 0) {
+                detail = latest.toDetail(preserving: detail)
+            }
             actionError = message
+            if let targetID = latest?.todo_id ?? detail?.todo_id {
+                await load(api: api, workspaceID: workspaceID, todoID: targetID, preserveNotice: true)
+            }
             return false
         case .refused(let reason, let message):
-            let keepUnknown = wasAlreadyUnknown && TodoRules.isPreReceiptRefusal(reason)
+            // Conservative default: any refusal on an already-unknown write preserves command identity until receipt lookup confirms.
+            let keepUnknown = wasAlreadyUnknown
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: actionName, refusalMessage: message)
                 : message
             if !keepUnknown { clearPending() }
-            applyRefusal(reason: reason, message: display, session: session)
+            applyRefusal(reason: reason, message: display, session: api.session)
             return false
         case .unconfirmed(let message):
             actionError = message
@@ -1385,11 +1969,17 @@ final class TodoDetailViewModel: ObservableObject {
             clearOnAccessLoss(reason: reason, clearPending: !session.isActive)
         } else if reason == "content_read_only" {
             accessGeneration += 1
-            isReadOnly = true
-            activeEditSession = nil
-            showingAssignSheet = false
+            let wasAdmin = access?.isWorkspaceAdmin ?? false
+            access = TodoAccess(canRead: true, canCreate: false, canUpdate: false, isWorkspaceAdmin: wasAdmin)
+            closeWriteSurfaces()
         }
         actionError = message
+    }
+
+    private func closeWriteSurfaces() {
+        activeEditSession = nil
+        activeAssignSession = nil
+        showingMentionPicker = false
     }
 
     private func clearOnAccessLoss(reason: String, clearPending: Bool) {
@@ -1399,8 +1989,8 @@ final class TodoDetailViewModel: ObservableObject {
         detail = nil
         comments = []
         nextCommentOffset = nil
-        activeEditSession = nil
-        showingAssignSheet = false
+        access = nil
+        closeWriteSurfaces()
         failure = reason == "todo_not_found" ? .notFound : .refused(reason)
         if clearPending {
             pendingState = nil

@@ -5,14 +5,25 @@ enum TodoAPIError: Error, Sendable {
     case malformedResponse
 }
 
+enum TodoAccessStatus: Equatable, Sendable {
+    case granted(TodoAccess)
+    case refused(reason: String)
+    case unavailable
+}
+
 struct TodoAPI {
     static let localSeat = "seat_0000000000000000000000"
     let api: ConversationAPI
 
     var viewerUserID: UUID { api.session.userID }
+    var session: HumanSession { api.session }
 
     private struct Stream: Encodable {
         let kind = "workspace"
+    }
+
+    private struct HouseholdAccessCommand: Encodable {
+        let kind = "household_access"
     }
 
     private struct ToolCommand<Arguments: Encodable>: Encodable {
@@ -137,6 +148,14 @@ struct TodoAPI {
         let answer: String
     }
 
+    private struct AccessWireResponse: Decodable {
+        let status: String?
+        let reason: String?
+        let error: String?
+        let content_role: String?
+        let operations: [String]?
+    }
+
     private struct ListWireResponse: Decodable {
         let status: String
         let reason: String?
@@ -157,7 +176,8 @@ struct TodoAPI {
         let reason: String?
         let error: String?
         let value: Value?
-        let current: TodoDetail?
+        let current: TodoWriteRecord?
+        let replayed: Bool?
     }
 
     private struct RefusalProbe: Decodable {
@@ -166,7 +186,15 @@ struct TodoAPI {
         let error: String?
     }
 
-    var session: HumanSession { api.session }
+    private func gatedRows<T: Decodable>(
+        _ table: String,
+        _ query: [String: String],
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [T] {
+        var req = api.request("rest/v1/" + table, query)
+        req.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        return try await api.send(req, canDispatch: canDispatch)
+    }
 
     private func postCommand<Command: Encodable>(
         workspace: UUID,
@@ -244,7 +272,7 @@ struct TodoAPI {
             return .unconfirmed(message: unconfirmedMessage)
         }
         if wire.status == "committed", let value = wire.value {
-            return .committed(value)
+            return .committed(value, replayed: wire.replayed == true)
         }
         if wire.status == "conflict" {
             return .conflict(
@@ -257,6 +285,73 @@ struct TodoAPI {
             return .refused(reason: reason, message: TodoRules.refusalMessage(reason, fallback: fallbackRefusal))
         }
         return .unconfirmed(message: unconfirmedMessage)
+    }
+
+    func access(
+        workspace: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> TodoAccessStatus {
+        let (data, status) = try await postCommand(
+            workspace: workspace,
+            commandID: UUID(),
+            command: HouseholdAccessCommand(),
+            canDispatch: canDispatch
+        )
+        let wire = try? JSONDecoder().decode(AccessWireResponse.self, from: data)
+        if status == 401 {
+            return .refused(reason: "unauthorized")
+        }
+        if status == 404 {
+            return .refused(reason: wire?.reason ?? wire?.error ?? "not_found")
+        }
+        if status == 403 {
+            return .refused(reason: wire?.reason ?? wire?.error ?? "forbidden")
+        }
+        if status == 400 {
+            return .unavailable
+        }
+        guard status == 200, let wire else {
+            throw APIError.refused(status)
+        }
+        if wire.status == "ok", let ops = wire.operations {
+            let opSet = Set(ops)
+            let isAdmin = await fetchIsWorkspaceAdmin(workspace: workspace, canDispatch: canDispatch)
+            return .granted(
+                TodoAccess(
+                    canRead: opSet.contains("read"),
+                    canCreate: opSet.contains("read") && opSet.contains("create"),
+                    canUpdate: opSet.contains("read") && opSet.contains("update"),
+                    isWorkspaceAdmin: isAdmin
+                )
+            )
+        }
+        if wire.status == "refused" {
+            return .refused(reason: wire.reason ?? "workspace_access_refused")
+        }
+        return .unavailable
+    }
+
+    private func fetchIsWorkspaceAdmin(
+        workspace: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async -> Bool {
+        struct MembershipRow: Decodable {
+            let user_id: UUID
+            let role: String
+        }
+        let viewerID = await MainActor.run { api.session.userID }
+        guard await canDispatch() else { return false }
+        let rows: [MembershipRow] = (try? await gatedRows(
+            "memberships",
+            [
+                "select": "user_id,role",
+                "workspace_id": "eq.\(workspace.uuidString.lowercased())",
+                "user_id": "eq.\(viewerID.uuidString.lowercased())",
+            ],
+            canDispatch: canDispatch
+        )) ?? []
+        guard let role = rows.first?.role.lowercased() else { return false }
+        return role == "owner" || role == "admin"
     }
 
     func listTodos(
@@ -310,8 +405,8 @@ struct TodoAPI {
         assignee: TodoParty?,
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async -> TodoWriteOutcome<TodoDetail> {
-        let unconfirmed = "The to-do may or may not have been saved. Retry or reload to check."
+    ) async -> TodoWriteOutcome<TodoWriteRecord> {
+        let unconfirmed = "The to-do may or may not have been saved. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -345,8 +440,8 @@ struct TodoAPI {
         dueOn: String?,
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async -> TodoWriteOutcome<TodoDetail> {
-        let unconfirmed = "The to-do may or may not have been updated. Retry or reload to check."
+    ) async -> TodoWriteOutcome<TodoWriteRecord> {
+        let unconfirmed = "The to-do may or may not have been updated. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -379,8 +474,8 @@ struct TodoAPI {
         to party: TodoParty?,
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async -> TodoWriteOutcome<TodoDetail> {
-        let unconfirmed = "The assignment may or may not have changed. Retry or reload to check."
+    ) async -> TodoWriteOutcome<TodoWriteRecord> {
+        let unconfirmed = "The assignment may or may not have changed. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -411,8 +506,8 @@ struct TodoAPI {
         state: TodoState,
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async -> TodoWriteOutcome<TodoDetail> {
-        let unconfirmed = "The to-do state may or may not have changed. Retry or reload to check."
+    ) async -> TodoWriteOutcome<TodoWriteRecord> {
+        let unconfirmed = "The to-do state may or may not have changed. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -443,8 +538,8 @@ struct TodoAPI {
         answer: TodoOfferAnswer,
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async -> TodoWriteOutcome<TodoDetail> {
-        let unconfirmed = "The request may or may not have been answered. Retry or reload to check."
+    ) async -> TodoWriteOutcome<TodoWriteRecord> {
+        let unconfirmed = "The request may or may not have been answered. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -472,7 +567,7 @@ struct TodoAPI {
         requestID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoComment> {
-        let unconfirmed = "The comment may or may not have been posted. Retry or reload to check."
+        let unconfirmed = "The comment may or may not have been posted. Retry unchanged to check."
         do {
             let (data, status) = try await postCommand(
                 workspace: workspace,
@@ -496,7 +591,10 @@ struct TodoAPI {
         }
     }
 
-    func directory(workspace: UUID) async throws -> TodoDirectory {
+    func directory(
+        workspace: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> TodoDirectory {
         struct Person: Decodable {
             let user_id: UUID
             let display_name: String?
@@ -505,9 +603,10 @@ struct TodoAPI {
             let principal_id: UUID
             let name: String
         }
+        guard await canDispatch() else { throw CancellationError() }
         let filter = "eq." + workspace.uuidString.lowercased()
-        async let peopleRows: [Person] = api.rows("member_profiles", ["select": "user_id,display_name", "workspace_id": filter])
-        async let agentRows: [Agent] = api.rows("agent_principals", ["select": "principal_id,name", "workspace_id": filter, "revoked_at": "is.null"])
+        async let peopleRows: [Person] = gatedRows("member_profiles", ["select": "user_id,display_name", "workspace_id": filter], canDispatch: canDispatch)
+        async let agentRows: [Agent] = gatedRows("agent_principals", ["select": "principal_id,name", "workspace_id": filter, "revoked_at": "is.null"], canDispatch: canDispatch)
         let (people, agents) = try await (peopleRows, agentRows)
         var peopleByID: [UUID: String] = [:]
         for person in people {

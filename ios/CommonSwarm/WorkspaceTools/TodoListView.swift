@@ -126,7 +126,7 @@ struct TodoListView: View {
         .navigationTitle("To-dos")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !viewModel.isReadOnly, viewModel.todos != nil {
+            if viewModel.canCreate, viewModel.todos != nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         viewModel.openCreateSheet()
@@ -146,13 +146,19 @@ struct TodoListView: View {
                 onChanged: { await load() }
             )
         }
-        .sheet(isPresented: $viewModel.showingCreateSheet) {
+        .sheet(item: $viewModel.activeCreateSession) { createSession in
             TodoCreateSheet(
                 directory: viewModel.directory,
+                initialTitle: viewModel.hasUnknownPendingCreate ? (viewModel.pendingCreate?.title ?? "") : "",
+                initialNotes: viewModel.hasUnknownPendingCreate ? (viewModel.pendingCreate?.notes ?? "") : "",
+                initialDueOn: viewModel.hasUnknownPendingCreate ? viewModel.pendingCreate?.dueOn : nil,
+                initialAssignee: viewModel.hasUnknownPendingCreate ? viewModel.pendingCreate?.assignee : nil,
+                actionTitle: viewModel.hasUnknownPendingCreate ? "Retry" : "Add",
                 isSaving: viewModel.isCreating,
                 errorMessage: viewModel.createError
             ) { title, notes, dueOn, assignee in
                 if let created = await viewModel.createTodo(
+                    session: createSession,
                     title: title,
                     notes: notes,
                     dueOn: dueOn,
@@ -162,6 +168,9 @@ struct TodoListView: View {
                 ) {
                     createdSummary = created.summary
                 }
+            }
+            .onDisappear {
+                viewModel.dismissCreateSession(createSession.id)
             }
         }
         .task(id: viewModel.filter) {
@@ -227,17 +236,46 @@ struct TodoListView: View {
 
 private struct TodoCreateSheet: View {
     let directory: TodoDirectory
+    let actionTitle: String
     let isSaving: Bool
     let errorMessage: String?
     let onSubmit: (String, String, String?, TodoParty?) async -> Void
 
-    @State private var title = ""
-    @State private var notes = ""
-    @State private var hasDueDate = false
-    @State private var dueDate = Date()
+    @State private var title: String
+    @State private var notes: String
+    @State private var hasDueDate: Bool
+    @State private var dueDate: Date
     @State private var assignee: TodoParty?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        directory: TodoDirectory,
+        initialTitle: String = "",
+        initialNotes: String = "",
+        initialDueOn: String? = nil,
+        initialAssignee: TodoParty? = nil,
+        actionTitle: String = "Add",
+        isSaving: Bool,
+        errorMessage: String?,
+        onSubmit: @escaping (String, String, String?, TodoParty?) async -> Void
+    ) {
+        self.directory = directory
+        self.actionTitle = actionTitle
+        self.isSaving = isSaving
+        self.errorMessage = errorMessage
+        self.onSubmit = onSubmit
+        _title = State(initialValue: initialTitle)
+        _notes = State(initialValue: initialNotes)
+        if let parsed = TodoCalendarDate.parseLocal(initialDueOn) {
+            _hasDueDate = State(initialValue: true)
+            _dueDate = State(initialValue: parsed)
+        } else {
+            _hasDueDate = State(initialValue: false)
+            _dueDate = State(initialValue: Date())
+        }
+        _assignee = State(initialValue: initialAssignee)
+    }
 
     private var errorForeground: Color {
         colorScheme == .dark
@@ -305,7 +343,7 @@ private struct TodoCreateSheet: View {
                         .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "Adding…" : "Add") {
+                    Button(isSaving ? "Adding…" : actionTitle) {
                         let dueStr = hasDueDate ? TodoCalendarDate.formatLocal(dueDate) : nil
                         Task { await onSubmit(title, notes, dueStr, assignee) }
                     }

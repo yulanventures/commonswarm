@@ -10,7 +10,6 @@ struct TodoDetailView: View {
     @StateObject private var viewModel = TodoDetailViewModel()
     @State private var commentText = ""
     @State private var selectedMentions: Set<TodoParty> = []
-    @State private var showingMentionPicker = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var primaryBackground: Color {
@@ -61,7 +60,7 @@ struct TodoDetailView: View {
         .navigationTitle("To-do")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !viewModel.isReadOnly, viewModel.detail != nil {
+            if viewModel.canUpdate {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Edit") {
                         viewModel.beginEdit()
@@ -71,19 +70,25 @@ struct TodoDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $viewModel.showingAssignSheet) {
-            if let detail = viewModel.detail {
-                TodoAssignSheet(
-                    directory: directory,
-                    currentAssignee: detail.assignee,
-                    isSaving: viewModel.isMutating
-                ) { chosen in
-                    Task {
-                        if await viewModel.assign(to: chosen, api: api, workspaceID: workspaceID) {
-                            await onChanged?()
-                        }
+        .sheet(item: $viewModel.activeAssignSession) { assignSession in
+            TodoAssignSheet(
+                directory: directory,
+                currentAssignee: assignSession.currentAssignee,
+                isSaving: viewModel.isMutating
+            ) { chosen in
+                Task {
+                    if await viewModel.assign(
+                        session: assignSession,
+                        to: chosen,
+                        api: api,
+                        workspaceID: workspaceID
+                    ) {
+                        await onChanged?()
                     }
                 }
+            }
+            .onDisappear {
+                viewModel.dismissAssignSession(assignSession.id)
             }
         }
         .sheet(item: $viewModel.activeEditSession) { editSession in
@@ -105,8 +110,11 @@ struct TodoDetailView: View {
                     await onChanged?()
                 }
             }
+            .onDisappear {
+                viewModel.dismissEditSession(editSession.id)
+            }
         }
-        .sheet(isPresented: $showingMentionPicker) {
+        .sheet(isPresented: $viewModel.showingMentionPicker) {
             TodoMentionPickerSheet(
                 directory: directory,
                 selected: $selectedMentions
@@ -154,29 +162,41 @@ struct TodoDetailView: View {
                             .foregroundStyle(errorForeground)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("todo-detail-error")
+                        if viewModel.hasAnyUnknownPendingWrite && (viewModel.canUpdate || viewModel.canCreateComment) {
+                            Button("Retry check") {
+                                Task {
+                                    if await viewModel.retryUnknownPendingWrite(api: api, workspaceID: workspaceID) {
+                                        await onChanged?()
+                                    }
+                                }
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .disabled(viewModel.isMutating || viewModel.isPostingComment)
+                            .accessibilityIdentifier("todo-retry-pending-button")
+                        }
                     }
 
-                    if !viewModel.isReadOnly {
+                    if viewModel.canUpdate {
                         stateActionsBar(detail)
                     }
                 }
                 .padding(.vertical, 4)
 
                 if let offer = detail.offer {
-                    offerRow(offer)
+                    offerRow(detail: detail, offer: offer)
                 }
 
-                if viewModel.isReadOnly {
-                    assigneeRowContent(detail: detail, assigneeName: assigneeName)
-                } else {
+                if viewModel.canUpdate {
                     Button {
-                        viewModel.showingAssignSheet = true
+                        viewModel.beginAssign()
                     } label: {
                         assigneeRowContent(detail: detail, assigneeName: assigneeName)
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.isMutating)
                     .accessibilityIdentifier("todo-assign-button")
+                } else {
+                    assigneeRowContent(detail: detail, assigneeName: assigneeName)
                 }
 
                 if let dueText {
@@ -255,7 +275,7 @@ struct TodoDetailView: View {
                     .accessibilityIdentifier("todo-load-more-comments")
                 }
 
-                if !viewModel.isReadOnly {
+                if viewModel.canCreateComment {
                     commentComposer
                 }
             }
@@ -266,11 +286,14 @@ struct TodoDetailView: View {
 
     @ViewBuilder
     private func stateActionsBar(_ detail: TodoDetail) -> some View {
+        let displayedID = detail.todo_id
+        let displayedVersion = detail.version
+
         HStack(spacing: 10) {
             if detail.state.isOpen {
                 Button {
                     Task {
-                        if await viewModel.setState(.done, api: api, workspaceID: workspaceID) {
+                        if await viewModel.setState(.done, todoID: displayedID, baseVersion: displayedVersion, api: api, workspaceID: workspaceID) {
                             await onChanged?()
                         }
                     }
@@ -293,7 +316,7 @@ struct TodoDetailView: View {
                 if detail.state == .open {
                     Button {
                         Task {
-                            if await viewModel.setState(.doing, api: api, workspaceID: workspaceID) {
+                            if await viewModel.setState(.doing, todoID: displayedID, baseVersion: displayedVersion, api: api, workspaceID: workspaceID) {
                                 await onChanged?()
                             }
                         }
@@ -313,7 +336,7 @@ struct TodoDetailView: View {
                 Menu {
                     Button("Drop to-do", role: .destructive) {
                         Task {
-                            if await viewModel.setState(.dropped, api: api, workspaceID: workspaceID) {
+                            if await viewModel.setState(.dropped, todoID: displayedID, baseVersion: displayedVersion, api: api, workspaceID: workspaceID) {
                                 await onChanged?()
                             }
                         }
@@ -330,7 +353,7 @@ struct TodoDetailView: View {
             } else {
                 Button {
                     Task {
-                        if await viewModel.setState(.open, api: api, workspaceID: workspaceID) {
+                        if await viewModel.setState(.open, todoID: displayedID, baseVersion: displayedVersion, api: api, workspaceID: workspaceID) {
                             await onChanged?()
                         }
                     }
@@ -355,21 +378,24 @@ struct TodoDetailView: View {
     }
 
     @ViewBuilder
-    private func offerRow(_ offer: TodoOfferSummary) -> some View {
+    private func offerRow(detail: TodoDetail, offer: TodoOfferSummary) -> some View {
         let targetName = directory.assigneeLabel(offer.to)
-        let isDecider = offer.decider_user_id == directory.viewerUserID
+        let displayedTodoID = detail.todo_id
+        let displayedOfferID = offer.offer_id
+        let canDecide = viewModel.canAcceptOrDeclineOffer(offer, viewerUserID: directory.viewerUserID)
+        let canWithdraw = viewModel.canWithdrawOffer(offer, viewerUserID: directory.viewerUserID)
 
         VStack(alignment: .leading, spacing: 8) {
             Text(verbatim: "Work request for \(targetName)")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
 
-            if !viewModel.isReadOnly {
+            if canDecide || canWithdraw {
                 HStack(spacing: 10) {
-                    if isDecider {
+                    if canDecide {
                         Button {
                             Task {
-                                if await viewModel.answerOffer(.accept, api: api, workspaceID: workspaceID) {
+                                if await viewModel.answerOffer(.accept, todoID: displayedTodoID, offerID: displayedOfferID, api: api, workspaceID: workspaceID) {
                                     await onChanged?()
                                 }
                             }
@@ -387,7 +413,7 @@ struct TodoDetailView: View {
 
                         Button {
                             Task {
-                                if await viewModel.answerOffer(.decline, api: api, workspaceID: workspaceID) {
+                                if await viewModel.answerOffer(.decline, todoID: displayedTodoID, offerID: displayedOfferID, api: api, workspaceID: workspaceID) {
                                     await onChanged?()
                                 }
                             }
@@ -402,15 +428,17 @@ struct TodoDetailView: View {
                         .buttonStyle(.plain)
                         .disabled(viewModel.isMutating)
                         .accessibilityIdentifier("todo-offer-decline")
-                    } else {
+                    }
+
+                    if canWithdraw {
                         Button {
                             Task {
-                                if await viewModel.answerOffer(.withdraw, api: api, workspaceID: workspaceID) {
+                                if await viewModel.answerOffer(.withdraw, todoID: displayedTodoID, offerID: displayedOfferID, api: api, workspaceID: workspaceID) {
                                     await onChanged?()
                                 }
                             }
                         } label: {
-                            Text("Withdraw request")
+                            Text("Withdraw")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(secondaryForeground)
                                 .padding(.horizontal, 14)
@@ -436,7 +464,7 @@ struct TodoDetailView: View {
                 }
                 Text(verbatim: assigneeName)
                     .multilineTextAlignment(.trailing)
-                if !viewModel.isReadOnly {
+                if viewModel.canUpdate {
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -456,9 +484,8 @@ struct TodoDetailView: View {
                 .accessibilityIdentifier("todo-comment-field")
 
             if !selectedMentions.isEmpty {
-                let names = selectedMentions
+                let names = TodoRules.canonicalMentions(selectedMentions)
                     .map { directory.assigneeLabel($0) }
-                    .sorted()
                     .joined(separator: ", ")
                 Text(verbatim: "Notifies: \(names)")
                     .font(.caption)
@@ -467,7 +494,7 @@ struct TodoDetailView: View {
 
             HStack(spacing: 10) {
                 Button {
-                    showingMentionPicker = true
+                    viewModel.showingMentionPicker = true
                 } label: {
                     Label(selectedMentions.isEmpty ? "Tag" : "Tagged (\(selectedMentions.count))", systemImage: "at")
                         .font(.subheadline.weight(.semibold))
@@ -484,7 +511,7 @@ struct TodoDetailView: View {
 
                 Button {
                     let text = commentText
-                    let mentions = Array(selectedMentions)
+                    let mentions = TodoRules.canonicalMentions(selectedMentions)
                     Task {
                         if await viewModel.postComment(
                             body: text,
