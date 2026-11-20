@@ -728,6 +728,116 @@ struct VerifyTodoActions {
         let mutAfterOverlapCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
         expect(overlapCreate3Replay != nil && mutAfterOverlapCreate == mutBeforeOverlapCreate + 1, "List view 3 must replay create with EXACTLY 1 server mutation")
 
+        // 5e-3. Live held-bearer reservation replacement witness (comment):
+        //       View A holds at bearer lookup while staying LIVE; live View B replaces
+        //       the unsent reservation with a different comment. Releasing View A MUST
+        //       refuse transport (0 sends) both when View B committed and when View B's
+        //       response was lost (preserving View B's unknown retry identity).
+        let liveDetailA = await MainActor.run { TodoDetailViewModel() }
+        let liveDetailB = await MainActor.run { TodoDetailViewModel() }
+        await liveDetailA.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        await liveDetailB.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+
+        // Case A: View B replaces and commits
+        let cmdsBeforeLiveReplaceCommit = try await recordedCommands(origin).count
+        let mutBeforeLiveReplaceCommit = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        await MainActor.run { bearer.holdNext(1) }
+        let liveCommentTaskA1 = Task {
+            await liveDetailA.postComment(body: "View A superseded comment", mentions: [], api: todoAPI, workspaceID: ws.id)
+        }
+        await bearer.waitUntilHeld()
+        // Keep liveDetailA LIVE (no retire()) while liveDetailB sends a different comment
+        let liveCommentB1 = await liveDetailB.postComment(body: "View B committed replacement", mentions: [], api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterLiveB1 = try await recordedCommands(origin).count
+        let mutAfterLiveB1 = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        expect(
+            liveCommentB1 && cmdsAfterLiveB1 == cmdsBeforeLiveReplaceCommit + 1 && mutAfterLiveB1 == mutBeforeLiveReplaceCommit + 1,
+            "Live View B must commit its replacement comment"
+        )
+        await MainActor.run { bearer.release() }
+        let liveCommentA1Result = await liveCommentTaskA1.value
+        let cmdsAfterLiveA1 = try await recordedCommands(origin).count
+        let mutAfterLiveA1 = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let liveA1StateClean = await MainActor.run { !liveDetailA.hasUnknownPendingComment && !liveDetailB.hasUnknownPendingComment }
+        expect(
+            !liveCommentA1Result
+                && cmdsAfterLiveA1 == cmdsAfterLiveB1
+                && mutAfterLiveA1 == mutAfterLiveB1
+                && liveA1StateClean,
+            "Held live View A whose reservation was replaced by committed View B must refuse transport with ZERO sends"
+        )
+
+        // Case B: View B replaces and hits commit-then-503; releasing View A sends 0 and preserves View B's retry
+        let cmdsBeforeLiveReplace503 = try await recordedCommands(origin).count
+        let mutBeforeLiveReplace503 = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        await MainActor.run { bearer.holdNext(1) }
+        let liveCommentTaskA2 = Task {
+            await liveDetailA.postComment(body: "View A superseded during 503", mentions: [], api: todoAPI, workspaceID: ws.id)
+        }
+        await bearer.waitUntilHeld()
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let liveCommentB2 = await liveDetailB.postComment(body: "View B lost-response replacement", mentions: [], api: todoAPI, workspaceID: ws.id)
+        let liveB2CommandID = await MainActor.run { liveDetailB.pendingComment?.commandID }
+        let liveB2Unknown = await MainActor.run { liveDetailB.hasUnknownPendingComment }
+        let cmdsAfterLiveB2 = try await recordedCommands(origin).count
+        expect(
+            !liveCommentB2 && liveB2Unknown && liveB2CommandID != nil && cmdsAfterLiveB2 == cmdsBeforeLiveReplace503 + 1,
+            "Live View B must retain its unknown commandID after commit-then-503"
+        )
+        await MainActor.run { bearer.release() }
+        let liveCommentA2Result = await liveCommentTaskA2.value
+        let cmdsAfterLiveA2 = try await recordedCommands(origin).count
+        let liveB2Preserved = await MainActor.run {
+            liveDetailB.hasUnknownPendingComment && liveDetailB.pendingComment?.commandID == liveB2CommandID
+        }
+        expect(
+            !liveCommentA2Result && cmdsAfterLiveA2 == cmdsAfterLiveB2 && liveB2Preserved,
+            "Held live View A must send ZERO requests and preserve View B's unknown retry identity"
+        )
+        let liveB2RetryItem = await MainActor.run { liveDetailB.eligiblePendingRetries(viewerUserID: tokens.userID).first }
+        expect(liveB2RetryItem?.commandID == liveB2CommandID, "Expected View B's unknown comment retry item")
+        let liveB2ReplayOK = await liveDetailB.retryPending(liveB2RetryItem!, api: todoAPI, workspaceID: ws.id)
+        let mutAfterLiveReplace503 = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        expect(
+            liveB2ReplayOK && mutAfterLiveReplace503 == mutBeforeLiveReplace503 + 1,
+            "Retrying View B's preserved comment must resolve with EXACTLY 1 server mutation"
+        )
+
+        // 5e-4. Live held-bearer reservation replacement witness (createTodo):
+        let liveListA = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        let liveListB = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await liveListA.load(api: todoAPI, workspaceID: ws.id)
+        await liveListB.load(api: todoAPI, workspaceID: ws.id)
+        let liveCreateSessA = await MainActor.run { liveListA.openCreateSheet() }!
+        let liveCreateSessB = await MainActor.run { liveListB.openCreateSheet() }!
+        let cmdsBeforeLiveCreate = try await recordedCommands(origin).count
+        let mutBeforeLiveCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+
+        await MainActor.run { bearer.holdNext(1) }
+        let liveCreateTaskA = Task {
+            await liveListA.createTodo(session: liveCreateSessA, title: "Create A superseded", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        }
+        await bearer.waitUntilHeld()
+        let liveCreateB = await liveListB.createTodo(session: liveCreateSessB, title: "Create B committed replacement", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterLiveCreateB = try await recordedCommands(origin).count
+        let mutAfterLiveCreateB = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        expect(
+            liveCreateB != nil && cmdsAfterLiveCreateB == cmdsBeforeLiveCreate + 1 && mutAfterLiveCreateB == mutBeforeLiveCreate + 1,
+            "Live List View B must commit its replacement createTodo"
+        )
+        await MainActor.run { bearer.release() }
+        let liveCreateAResult = await liveCreateTaskA.value
+        let cmdsAfterLiveCreateA = try await recordedCommands(origin).count
+        let mutAfterLiveCreateA = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        let liveCreateClean = await MainActor.run { !liveListA.hasUnknownPendingCreate && !liveListB.hasUnknownPendingCreate }
+        expect(
+            liveCreateAResult == nil
+                && cmdsAfterLiveCreateA == cmdsAfterLiveCreateB
+                && mutAfterLiveCreateA == mutAfterLiveCreateB
+                && liveCreateClean,
+            "Held live List View A whose reservation was replaced by View B must refuse transport with ZERO sends"
+        )
+
         // =========================================================================
         // 5f. C3: HumanSession.signOut() eagerly clears TodoPendingWriteStore (no lazy retention)
         //         and account switch clears prior login's bucket immediately
