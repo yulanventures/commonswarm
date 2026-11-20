@@ -47,6 +47,7 @@ function installConversations3DFixture() {
   f.releaseAfterRefresh = null as null | (() => void);
   f.omitFromNextConversations = new Set<string>();
   f.revokeGroup = false;
+  f.pauseSeenRefresh = params.get("capture") === "hezsec-members-preflight";
 
   const opsChannel = "66666666-6666-4666-8666-666666666666";
   const generalConv = "99990000-0000-4000-8000-000000000001";
@@ -379,6 +380,9 @@ function installConversations3DFixture() {
         return Response.json({ status: "accepted", conversation_id: command.conversation_id ?? opsConv, changed: true });
       }
       if (command?.kind === "signals_seen" || command?.kind === "conversation_mark_read") {
+        if (f.pauseSeenRefresh) {
+          await new Promise<void>(() => {});
+        }
         return Response.json({ status: "accepted" });
       }
     }
@@ -853,9 +857,6 @@ async function observeConversations3D() {
       await click("[data-conversation-members-add-toggle]:visible");
       await wait("Lead candidate visible in Members add panel", () => !!shown(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]`));
       await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
-      // Let #ops's debounced syncChannelRead -> mark_channel_read -> refreshChannelUnread settle
-      // before taking the preflight conversations read baseline so it never races with the assertion.
-      await new Promise((r) => setTimeout(r, 280));
       const convReadsBeforePreflight = f.conversationsReadCount;
       const convCmdsBeforePreflight = f.convCommands.length;
       f.holdNextAuthUser = true;
