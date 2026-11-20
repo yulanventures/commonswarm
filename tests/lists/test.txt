@@ -134,6 +134,7 @@ tests/slow-command-log.test.ts
 tests/conversations-commands-parse.test.ts
 tests/conversations-read.test.ts
 tests/conversations-cli-ergonomics.test.ts
+tests/local-edge-retry.test.ts
 tests/interactive-replies-client.test.ts
 tests/api-md-contract.test.ts
 tests/mention-address.test.ts
@@ -141,5 +142,6 @@ tests/reply-placement.test.ts
 tests/channel-general.test.ts
 tests/todo-cli.test.ts
 tests/lead-system-alerts.test.ts
+tests/local-auth-users-concurrency.test.ts
 tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts

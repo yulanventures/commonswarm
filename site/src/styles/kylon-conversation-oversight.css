@@ -1,0 +1,309 @@
+/* Read-only agent oversight section on ?agent=<id> (Step 3D-3). */
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight-slot[hidden] {
+  display: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-inline-size: 0;
+  padding: 20px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 14px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__title {
+  margin: 0;
+  font: 600 18px/1.3 var(--k-shell-font);
+  color: var(--k-shell-ink);
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 999px;
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-secondary);
+  font: 600 12px/1.3 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__state {
+  margin: 0;
+  color: var(--k-shell-secondary);
+  font: 400 14px/1.5 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__error-box {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__error {
+  margin: 0;
+  color: var(--danger, var(--k-shell-ink));
+  font: 500 13px/1.4 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__body {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 16px;
+  min-inline-size: 0;
+  align-items: start;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__list-pane {
+  min-inline-size: 0;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  text-align: start;
+  cursor: pointer;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row:hover {
+  background: var(--k-shell-hover);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row[aria-current="true"] {
+  border-color: var(--k-shell-line);
+  background: var(--k-shell-selected);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__action:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__back:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__title:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-title:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row-title {
+  font: 600 14px/1.35 var(--k-shell-font);
+  color: var(--k-shell-ink);
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row-meta {
+  font: 400 12px/1.35 var(--k-shell-font);
+  color: var(--k-shell-secondary);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail {
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--k-shell-subtle);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px 12px;
+  padding-block-end: 10px;
+  border-block-end: 1px solid var(--carbon-line, var(--k-shell-line));
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-head--back-only {
+  display: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-copy {
+  min-inline-size: 0;
+  flex: 1 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-title {
+  margin: 0;
+  font: 600 15px/1.35 var(--k-shell-font);
+  color: var(--k-shell-ink);
+  overflow-wrap: anywhere;
+  border-radius: 4px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail-meta {
+  margin: 0;
+  font: 400 12px/1.4 var(--k-shell-font);
+  color: var(--k-shell-secondary);
+  overflow-wrap: anywhere;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__back {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--k-shell-control, var(--k-shell-line));
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font: 500 13px/1.3 var(--k-shell-font);
+  cursor: pointer;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--k-shell-control, var(--k-shell-line));
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font: 500 13px/1.3 var(--k-shell-font);
+  cursor: pointer;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(.cs-oversight__action, .cs-oversight__back):hover {
+  background: var(--k-shell-hover);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-block-size: 440px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-inline-end: 4px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__older {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-inline-size: 0;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message-sender {
+  font: 600 13px/1.35 var(--k-shell-font);
+  color: var(--k-shell-ink);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message-time {
+  font: 400 12px/1.35 var(--k-shell-font);
+  color: var(--k-shell-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cs-oversight__message-body {
+  margin: 0;
+  font: 400 14px/1.5 var(--k-shell-font);
+  color: var(--k-shell-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Phone single-pane master-detail: list first, Back returns from reader to list. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight {
+    padding: 16px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__detail {
+    padding: 12px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="false"] .cs-oversight__detail {
+    display: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="true"] .cs-oversight__list-pane {
+    display: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="true"] .cs-oversight__back {
+    display: inline-flex;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight[data-oversight-phone-detail="true"] .cs-oversight__detail-head--back-only {
+    display: flex;
+  }
+}
+
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight,
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__badge,
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__row[aria-current="true"],
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__action,
+  live-dashboard.dashboard[data-kylon-shell] .cs-oversight__back {
+    border-color: ButtonText;
+  }
+}

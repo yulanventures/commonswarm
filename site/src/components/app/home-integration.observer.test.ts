@@ -72,6 +72,10 @@ const MESSAGE_STATUS_STUBS = {
   clearSeatAdminReauthIntent: () => undefined,
   pendingSeatAdminReauthNotice: false,
   activeSeatAdminDialog: null,
+  // Agent oversight has its own unit and browser observer tests.
+  oversightState: null,
+  teardownAgentOversight: () => undefined,
+  syncAgentOversight: () => undefined,
 };
 
 async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {
@@ -218,6 +222,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       const resetComposer=()=>{}, syncPendingPoll=()=>{}, renderMembers=()=>{}, renderRoster=()=>{};
       // The Clean up mount is disposed at every account boundary (src/lib/cleanup-view.ts).
       let cleanupDisposals=0; const disposeCleanup=()=>{ cleanupDisposals++; };
+      let waitingRetirements=0; const retireWaitingState=()=>{ waitingRetirements++; };
     `, context);
     runInContext(await dashboardFunctions(['syncStandalonePage', 'resetHomeWorkspace', 'resetWorkspaceSessionState', 'queueAuthReload', 'runBoot']), context);
     runInContext('syncStandalonePage(); runBoot();', context);
@@ -240,6 +245,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       assert.equal(agentList.children.length, 0, 'prior account agent rows are cleared before boot');
       assert.equal(runInContext('accountAgentsGeneration', context), 1, 'old directory reads are retired');
       assert.ok(Number(runInContext('cleanupDisposals', context)) >= 1, 'the Clean up dialog is disposed on the account boundary');
+      assert.ok(Number(runInContext('waitingRetirements', context)) >= 1, 'Waiting on you state is retired on the account boundary');
       assert.equal(frame.getAttribute('data-home-standalone'), null, 'navigation is restored before the boot settles');
       assert.equal(account.parentElement, rail, 'the same account node returns to the workspace rail');
       assert.equal(account.hidden, false, 'account access is visible and can receive keyboard focus');

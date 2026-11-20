@@ -1415,7 +1415,8 @@ import "../../styles/kylon-image-viewer.css";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
-  import type { WaitingAskItem, WaitingPlace, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
+  import type { OversightListOutcome, OversightMessage, OversightPanelState, OversightScopePin } from "../../lib/conversation-oversight";
+  import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1579,6 +1580,10 @@ import "../../styles/kylon-image-viewer.css";
     channelUnread,
     ConversationsUnsupportedError,
     listConversations,
+    OversightAuthRefusedError,
+    OversightRequestRetiredError,
+    readOversightConversationsRaw,
+    readOversightConversationHistory,
     joinConversation,
     leaveConversation,
     markConversationRead,
@@ -1592,6 +1597,7 @@ import "../../styles/kylon-image-viewer.css";
     removeReaction,
     type ReactionResult,
     answerChoice,
+    answerPlainAsk,
     type ChannelUnread,
     createChannel,
     updateChannel,
@@ -5499,6 +5505,7 @@ import "../../styles/kylon-image-viewer.css";
     };
     const resetHomeWorkspace = (): void => {
       ++homeWorkspaceGeneration; ++homeWorkspaceRead; ++homeDetailGeneration;
+      if (typeof teardownAgentOversight === "function") teardownAgentOversight();
       homeTodosState = "pending"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "pending";
       homeDetailKey = ""; homeGateEditorId = null; homeTodoSave = "idle"; homeTodoReceipt = ""; homeTodoNotice = null;
       homeTodoDetails.clear(); homePolicies.clear();
@@ -5702,6 +5709,424 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (live()) { renderHomeShell(); renderHomeSide(); renderHomeObjectPane(); focusHomeView(); }
     };
+    type OversightModule = typeof import("../../lib/conversation-oversight");
+    let oversightMod: OversightModule | null = null;
+    let oversightModPromise: Promise<OversightModule> | null = null;
+    let oversightGen = 0;
+    let oversightHistoryGen = 0;
+    let oversightState: OversightPanelState | null = null;
+    let oversightAgentName = "";
+    let oversightDeniedFallbackId: string | null = null;
+
+    const loadOversightModule = (): Promise<OversightModule> => {
+      if (oversightMod) return Promise.resolve(oversightMod);
+      oversightModPromise ??= import("../../lib/conversation-oversight").then(mod => {
+        oversightMod = mod;
+        return mod;
+      });
+      return oversightModPromise;
+    };
+
+    const teardownAgentOversight = (): void => {
+      oversightGen += 1;
+      oversightHistoryGen += 1;
+      oversightState = oversightMod && oversightState
+        ? oversightMod.teardownOversightState(oversightState, oversightGen)
+        : null;
+      oversightAgentName = "";
+      oversightDeniedFallbackId = null;
+      for (const slot of all<HTMLElement>("[data-oversight-slot]")) {
+        slot.replaceChildren();
+        slot.hidden = true;
+      }
+    };
+
+    const isOversightPinLive = (pin: OversightScopePin): boolean =>
+      !!session &&
+      !sampleMode &&
+      homeRoute.view === "agent" &&
+      session.user.id.toLowerCase() === pin.viewerUserId &&
+      activeWorkspaceId.toLowerCase() === pin.workspaceId &&
+      homeRoute.agentId.toLowerCase() === pin.agentPrincipalId &&
+      !!oversightState?.pin &&
+      (oversightMod?.oversightPinMatches(oversightState.pin, pin) ?? false);
+
+    const resolveOversightMemberName = (member: { kind: "user" | "agent"; id: string }): string => {
+      const raw = member.id.trim();
+      const targetId = raw.toLowerCase();
+      if (member.kind === "user") {
+        const found = members.find(m => m.userId.toLowerCase() === targetId);
+        if (found?.name?.trim()) return found.name.trim();
+        return raw && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw) ? raw : "Member";
+      }
+      const found = agents.find(a => a.principalId.toLowerCase() === targetId);
+      if (found?.name?.trim()) return found.name.trim();
+      return raw && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw) ? raw : "Agent";
+    };
+
+    const captureOversightFocusKey = (slotEl: HTMLElement): string | null => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !slotEl.contains(active)) return null;
+      const convId = active.getAttribute("data-oversight-conv");
+      if (convId) return `conv:${convId}`;
+      if (active.hasAttribute("data-oversight-load-older")) return "load-older";
+      if (active.hasAttribute("data-oversight-detail-title")) return "detail-title";
+      if (active.hasAttribute("data-oversight-back")) return "back";
+      if (active.hasAttribute("data-oversight-retry-list")) return "retry-list";
+      if (active.hasAttribute("data-oversight-retry-history")) return "retry-history";
+      return "panel";
+    };
+
+    const restoreOversightFocusKey = (slotEl: HTMLElement, key: string | null): void => {
+      if (!key) return;
+      const isVisible = (el: HTMLElement | null): el is HTMLElement =>
+        !!el && !el.closest("[hidden]") && el.getClientRects().length > 0;
+      const pickVisible = (...selectors: string[]): HTMLElement | null => {
+        for (const selector of selectors) {
+          const el = slotEl.querySelector<HTMLElement>(selector);
+          if (isVisible(el)) return el;
+        }
+        return null;
+      };
+      let target: HTMLElement | null = null;
+      if (key.startsWith("conv:")) {
+        const id = key.slice(5);
+        target = pickVisible(
+          `[data-oversight-conv="${CSS.escape(id)}"]`,
+          "[data-oversight-conv]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "load-older") {
+        target = pickVisible(
+          "[data-oversight-load-older]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "detail-title") {
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-back]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "back") {
+        target = pickVisible(
+          "[data-oversight-back]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "retry-list") {
+        target = pickVisible(
+          "[data-oversight-retry-list]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "retry-history") {
+        target = pickVisible(
+          "[data-oversight-retry-history]",
+          "[data-oversight-detail-title]",
+          "[data-oversight-list-title]",
+        );
+      } else if (key === "list-title") {
+        target = pickVisible("[data-oversight-list-title]");
+      } else {
+        target = pickVisible(
+          "[data-oversight-detail-title]",
+          "[data-oversight-conv]",
+          "[data-oversight-list-title]",
+        );
+      }
+      target?.focus({ preventScroll: true });
+    };
+
+    const renderOversightSlot = (explicitFocusKey?: string | null): void => {
+      if (!oversightMod || !oversightState?.pin) return;
+      const pin = oversightState.pin;
+      const slotEl = one<HTMLElement>(`[data-oversight-slot="${pin.agentPrincipalId}"]`);
+      if (!slotEl) return;
+      const preservedKey = explicitFocusKey !== undefined ? explicitFocusKey : captureOversightFocusKey(slotEl);
+      oversightMod.renderOversightPanel(
+        slotEl,
+        {
+          agentId: pin.agentPrincipalId,
+          agentName: oversightAgentName || resolveOversightMemberName({ kind: "agent", id: pin.agentPrincipalId }),
+          state: oversightState,
+          formatTime: iso => {
+            try { return formatTime(iso).relative; } catch { return ""; }
+          },
+          resolveMemberName: resolveOversightMemberName,
+        },
+        {
+          onSelect: (conversationId) => {
+            if (!isOversightPinLive(pin)) return;
+            const phone = window.matchMedia("(max-width: 52rem)").matches;
+            void loadOversightHistory(pin, conversationId, null, phone, true);
+          },
+          onRetryList: () => {
+            if (!isOversightPinLive(pin)) return;
+            void loadOversightList(pin);
+          },
+          onRetryHistory: () => {
+            if (!isOversightPinLive(pin) || !oversightState?.selectedId) return;
+            void loadOversightHistory(pin, oversightState.selectedId, null, oversightState.phoneDetailOpen, false);
+          },
+          onLoadOlder: () => {
+            if (!isOversightPinLive(pin) || !oversightState?.selectedId || !oversightState.nextBefore) return;
+            void loadOversightHistory(pin, oversightState.selectedId, oversightState.nextBefore, oversightState.phoneDetailOpen, false);
+          },
+          onPhoneBack: () => {
+            if (!isOversightPinLive(pin) || !oversightState) return;
+            const prevId = oversightState.selectedId;
+            const targetId =
+              prevId && oversightState.conversations.some(c => c.conversationId === prevId)
+                ? prevId
+                : oversightDeniedFallbackId;
+            oversightDeniedFallbackId = null;
+            oversightState = { ...oversightState, phoneDetailOpen: false };
+            renderOversightSlot(targetId ? `conv:${targetId}` : "list-title");
+          },
+        },
+      );
+      restoreOversightFocusKey(slotEl, preservedKey);
+    };
+
+    const loadOversightHistory = async (
+      pin: OversightScopePin,
+      conversationId: string,
+      before: { createdAt: string; id: string } | null,
+      openPhoneDetail: boolean,
+      focusDetailTitle: boolean,
+    ): Promise<void> => {
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      const loadingOlder = before !== null;
+      if (loadingOlder) {
+        if (oversightState.loadingOlder || oversightState.selectedId !== conversationId) return;
+        oversightState = { ...oversightState, loadingOlder: true, olderError: "" };
+      } else {
+        oversightState = {
+          ...oversightState,
+          selectedId: conversationId,
+          phoneDetailOpen: openPhoneDetail,
+          historyStatus: "loading",
+          historyError: "",
+          historyConversation: null,
+          messages: [],
+          hasMore: false,
+          nextBefore: null,
+          loadingOlder: false,
+          olderError: "",
+        };
+      }
+      const myHistoryGen = ++oversightHistoryGen;
+      const isHistoryLive = (): boolean =>
+        isOversightPinLive(pin) &&
+        oversightHistoryGen === myHistoryGen &&
+        !!oversightState &&
+        oversightState.selectedId === conversationId;
+      const slotSelector = `[data-oversight-slot="${pin.agentPrincipalId}"]`;
+      const slotBefore = loadingOlder ? one<HTMLElement>(`${slotSelector} [data-oversight-transcript]`) : null;
+      const prevScrollHeight = slotBefore?.scrollHeight ?? 0;
+      const prevScrollTop = slotBefore?.scrollTop ?? 0;
+      renderOversightSlot(!loadingOlder && focusDetailTitle && openPhoneDetail ? "detail-title" : undefined);
+      let result: Awaited<ReturnType<typeof readOversightConversationHistory>>;
+      try {
+        result = await readOversightConversationHistory(
+          pin.workspaceId,
+          conversationId,
+          pin.agentPrincipalId,
+          { before, limit: 50, includeMentions: true, includeReactions: true },
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: isHistoryLive },
+        );
+      } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isHistoryLive()) teardownAgentOversight();
+          return;
+        }
+        result = { ok: false, code: "other", message: readableError(error) || "Could not load messages." };
+      }
+      if (!isHistoryLive() || !oversightMod || !oversightState) return;
+      if (!result.ok) {
+        if (result.code === "conversation_not_found") {
+          oversightHistoryGen += 1;
+          const removedIdx = oversightState.conversations.findIndex(c => c.conversationId === conversationId);
+          oversightState = oversightMod.retireRefusedOversightConversation(oversightState, conversationId);
+          oversightDeniedFallbackId =
+            removedIdx >= 0
+              ? (oversightState.conversations[Math.min(removedIdx, oversightState.conversations.length - 1)]?.conversationId ?? null)
+              : null;
+        } else if (loadingOlder) {
+          oversightState = { ...oversightState, loadingOlder: false, olderError: result.message };
+        } else {
+          oversightState = {
+            ...oversightState,
+            historyStatus: "failed",
+            historyError: result.message,
+            messages: [],
+            hasMore: false,
+            nextBefore: null,
+          };
+        }
+        renderOversightSlot();
+        return;
+      }
+      const incoming: OversightMessage[] = result.messages.map(sig => ({
+        id: sig.id,
+        from: sig.from,
+        fromKind: sig.fromKind === "agent" ? "agent" : "user",
+        body: sig.body,
+        createdAt: sig.createdAt,
+      }));
+      const merged = loadingOlder
+        ? oversightMod.mergeOversightMessages(oversightState.messages, incoming)
+        : oversightMod.mergeOversightMessages([], incoming);
+      const stalled = loadingOlder && oversightMod.cursorsEqual(before, result.nextBefore);
+      oversightState = {
+        ...oversightState,
+        historyStatus: "ready",
+        historyError: "",
+        historyConversation: result.conversation,
+        messages: merged,
+        hasMore: stalled ? false : result.hasMore,
+        nextBefore: stalled ? null : result.nextBefore,
+        loadingOlder: false,
+        olderError: "",
+      };
+      renderOversightSlot();
+      if (loadingOlder) {
+        const transcript = one<HTMLElement>(`${slotSelector} [data-oversight-transcript]`);
+        if (transcript) {
+          const delta = transcript.scrollHeight - prevScrollHeight;
+          if (delta > 0) transcript.scrollTop = prevScrollTop + delta;
+        }
+      }
+    };
+
+    const loadOversightList = async (pin: OversightScopePin): Promise<void> => {
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      oversightState = { ...oversightState, listStatus: "loading", listError: "" };
+      renderOversightSlot();
+      let outcome: OversightListOutcome;
+      try {
+        const raw = await readOversightConversationsRaw(
+          pin.workspaceId,
+          pin.agentPrincipalId,
+          { expectedViewerUserId: pin.viewerUserId, isScopeLive: () => isOversightPinLive(pin) },
+        );
+        outcome = oversightMod.parseOversightListOutcome(raw.status, raw.body);
+      } catch (error) {
+        if (error instanceof OversightRequestRetiredError) return;
+        if (
+          error instanceof SessionExpired ||
+          error instanceof AuthRecoveryRequired ||
+          error instanceof OversightAuthRefusedError
+        ) {
+          if (isOversightPinLive(pin)) teardownAgentOversight();
+          return;
+        }
+        outcome = { status: "failed", message: readableError(error) || "Could not load agent conversations." };
+      }
+      if (!isOversightPinLive(pin) || !oversightMod || !oversightState) return;
+      if (outcome.status !== "ready") {
+        oversightHistoryGen += 1;
+        oversightState = {
+          ...oversightState,
+          listStatus: outcome.status,
+          listError: outcome.status === "failed" ? outcome.message : "",
+          conversations: [],
+          selectedId: null,
+          historyStatus: "idle",
+          historyError: "",
+          historyConversation: null,
+          messages: [],
+          hasMore: false,
+          nextBefore: null,
+          loadingOlder: false,
+          olderError: "",
+        };
+        renderOversightSlot();
+        return;
+      }
+      const sorted = oversightMod.sortOversightConversations(outcome.conversations);
+      const stillSelected = oversightState.selectedId && sorted.some(c => c.conversationId === oversightState!.selectedId)
+        ? oversightState.selectedId
+        : null;
+      const isPhone = window.matchMedia("(max-width: 52rem)").matches;
+      const autoId = stillSelected ?? (!isPhone && sorted.length > 0 ? sorted[0]!.conversationId : null);
+      oversightState = {
+        ...oversightState,
+        listStatus: "ready",
+        listError: "",
+        conversations: sorted,
+        selectedId: autoId,
+      };
+      renderOversightSlot();
+      if (autoId && autoId !== stillSelected) {
+        void loadOversightHistory(pin, autoId, null, false, false);
+      }
+    };
+
+    const mountAgentOversight = (host: HTMLElement, principalId: string, agentLabel: string): void => {
+      if (!session || sampleMode) {
+        teardownAgentOversight();
+        return;
+      }
+      const lowerAgentId = principalId.toLowerCase();
+      const agent = agents.find(row => row.principalId.toLowerCase() === lowerAgentId);
+      if (!agent || agent.ownerUserId.toLowerCase() !== session.user.id.toLowerCase()) {
+        teardownAgentOversight();
+        return;
+      }
+      const page = host.querySelector<HTMLElement>(".hm-agent");
+      if (!page) return;
+      const slotEl = document.createElement("div");
+      slotEl.className = "cs-oversight-slot";
+      slotEl.dataset.oversightSlot = lowerAgentId;
+      slotEl.hidden = true;
+      page.append(slotEl);
+
+      const viewerId = session.user.id.toLowerCase();
+      const workspaceId = activeWorkspaceId.toLowerCase();
+      oversightAgentName = agentLabel || agent.name;
+      const sameScope =
+        oversightState?.pin &&
+        oversightState.pin.viewerUserId === viewerId &&
+        oversightState.pin.workspaceId === workspaceId &&
+        oversightState.pin.agentPrincipalId === lowerAgentId;
+
+      if (sameScope && oversightMod) {
+        renderOversightSlot();
+        return;
+      }
+      teardownAgentOversight();
+      oversightAgentName = agentLabel || agent.name;
+      const pin: OversightScopePin = {
+        viewerUserId: viewerId,
+        workspaceId,
+        agentPrincipalId: lowerAgentId,
+        requestGen: oversightGen,
+      };
+      void loadOversightModule().then(mod => {
+        if (!session || sampleMode || homeRoute.view !== "agent") return;
+        if (
+          session.user.id.toLowerCase() !== pin.viewerUserId ||
+          activeWorkspaceId.toLowerCase() !== pin.workspaceId ||
+          homeRoute.agentId.toLowerCase() !== pin.agentPrincipalId ||
+          oversightGen !== pin.requestGen
+        ) return;
+        oversightState = { ...mod.createInitialOversightState(), pin };
+        void loadOversightList(pin);
+      });
+    };
+
     const renderHomeObjectPane = (): void => {
       if (homeRoute.view !== "todo" && homeRoute.view !== "todos" && homeRoute.view !== "agent") return;
       const slot = one<HTMLElement>("[data-home-route-pane]"); if (!slot) return;
@@ -5717,7 +6142,7 @@ import "../../styles/kylon-image-viewer.css";
         const endDateFocus = connectionDateFocus(slot);
         const candidates = [...ctx.people.groups.flatMap(group => group.agents), ...ctx.people.other];
         const agent = candidates.find(agent => agent.id === id);
-        if (!agent) { const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
+        if (!agent) { teardownAgentOversight(); const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
           if (state === "checking") homePaneMessage("Checking agents…", ""); else if (state === "failed") homePaneMessage("Could not load agents.", "Reload to try again.");
           else replaceHomeRegion(slot, "agent-missing", [agentPage(document, { found: false, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) })]); return; }
         const detail = peopleDialogModel().agents.find(row => row.id === id);
@@ -5772,7 +6197,7 @@ import "../../styles/kylon-image-viewer.css";
             else if (action === "release") steerHomeTodo(row.todoId, { kind: "gate", gate: { kind: "none" } });
             else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
           } })]);
-        mountRenewalEndDate(slot, id); mountSeatAdminPanel(slot, id, "agent"); restoreConnectionDateFocus(slot, endDateFocus); return;
+        mountRenewalEndDate(slot, id); mountSeatAdminPanel(slot, id, "agent"); mountAgentOversight(slot, id, rosterAgent?.name || agent.nestedLabel); restoreConnectionDateFocus(slot, endDateFocus); return;
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
@@ -5865,9 +6290,15 @@ import "../../styles/kylon-image-viewer.css";
     const WAITING_HOSTS = [[".cs-org-phone-title", "cs-waiting--phone"], ["[data-home-workspace-shell] .hm-ws-header__actions", ""],
       ["[data-home-catchup]", "cs-waiting--page"]] as const;
     const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
+    let waitingAuthGeneration = 0;
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
     let waitingScope: WaitingScope = "channel";
     let waitingPanelViewer = "";
+    const waitingActionGuard = (viewer: string, authGen: number): (() => boolean) =>
+      () => waitingAuthGeneration === authGen &&
+        (sampleMode
+          ? viewer === "sample-owner"
+          : renderedAuthUserId === viewer && session?.user.id === viewer);
     let waitingPanelOverviewFailed = false;
     let waitingStatusMessage = "";
     let waitingStatusSeq = 0;
@@ -5892,6 +6323,7 @@ import "../../styles/kylon-image-viewer.css";
     };
     const showWaitingSent = (): void => showWaitingStatus("Sent");
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
+    const waitingPanelPlainAsks = new Map<string, WaitingPlainAskItem[]>();
     const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
@@ -5901,9 +6333,21 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelTickets = new Map<string, WaitingChoiceTicket>();
     const waitingPanelErrors = new Map<string, string>();
     const waitingPanelLastSubmissions = new Map<string, ChoiceSubmission>();
+    type WaitingPlainTicket = { viewer: string; workspaceId: string; signalId: string; mode: "answer" | "stale" };
+    const waitingPlainTickets = new Map<string, WaitingPlainTicket>();
+    const waitingPlainDrafts = new Map<string, string>();
+    const waitingPlainErrors = new Map<string, string>();
+    const waitingPlainLastSubmissions = new Map<string, { bodyText: string; mode: "answer" | "stale"; commandId: string }>();
     type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
     const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
     const waitingTodoErrors = new Map<string, string>();
+    // Multi-question survey session state (PR 3): drafts survive Back, Next, Skip, and closing the panel/sheet.
+    const waitingSurveyDrafts = new Map<string, SurveyDraft>();
+    const waitingSurveySkipped = new Set<string>();
+    const waitingSurveyErrors = new Map<string, string>();
+    let waitingSurvey: { active: boolean; mode: "step" | "review"; index: number; itemIds: string[]; placeKey: string; sending: boolean } = {
+      active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false,
+    };
 
     const isWaitingChannelView = (): boolean =>
       !sampleMode && !!session && workspaces.length > 0 && homeRoute.view === "chat" && activeWorkspaceView === "signals";
@@ -5965,6 +6409,27 @@ import "../../styles/kylon-image-viewer.css";
               ...(draft ? { draft } : {}),
               ...(retryable ? { retryable: true as const } : {}),
             },
+          });
+        }
+      }
+      return items;
+    };
+
+    const allWaitingPlainAskItems = (): WaitingPlainAskItem[] => {
+      const items: WaitingPlainAskItem[] = [];
+      for (const workspace of workspaces) {
+        for (const ask of waitingPanelPlainAsks.get(workspace.id) ?? []) {
+          const ticket = waitingPlainTickets.get(ask.id);
+          const error = waitingPlainErrors.get(ask.id);
+          const draftText = waitingPlainDrafts.get(ask.id);
+          const retryable = error !== undefined && waitingPlainLastSubmissions.has(ask.id);
+          items.push({
+            ...ask,
+            channelLabel: waitingChannelName(ask.workspaceId, ask.conversation),
+            ...(draftText !== undefined ? { draftText } : {}),
+            ...(ticket ? { pending: true as const, pendingMode: ticket.mode } : {}),
+            ...(error ? { error } : {}),
+            ...(retryable ? { retryable: true as const } : {}),
           });
         }
       }
@@ -6073,11 +6538,13 @@ import "../../styles/kylon-image-viewer.css";
     const markWaitingTodoDone = async (item: WaitingTodoItem): Promise<void> => {
       const server = homeServer();
       const viewer = homeViewerId();
-      if (!server || !viewer || waitingTodoTickets.has(item.id)) return;
+      const authGen = waitingAuthGeneration;
+      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      if (!server || !viewer || !isAlive || !isAlive() || waitingTodoTickets.has(item.id)) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
-        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingTodo === item.id)
         : -1;
       const ticket: WaitingTodoTicket = { viewer, workspaceId: item.workspaceId, todoId: item.id };
@@ -6102,6 +6569,7 @@ import "../../styles/kylon-image-viewer.css";
         }
         if (baseVersion === null) {
           const read = await server.readTodo(item.workspaceId, item.id);
+          if (!isAlive()) return;
           if (read.todo.state === "done" || read.todo.state === "dropped") {
             ok = true;
           } else {
@@ -6109,12 +6577,15 @@ import "../../styles/kylon-image-viewer.css";
           }
         }
         if (!ok && baseVersion !== null) {
+          if (!isAlive()) return;
           let result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: baseVersion, state: "done" }, uuid());
+          if (!isAlive()) return;
           if (result.status === "conflict") {
             const current = result.current;
             if (current.state === "done" || current.state === "dropped") {
               ok = true;
             } else {
+              if (!isAlive()) return;
               result = await server.setTodoState(item.workspaceId, { todo_id: item.id, base_version: current.version, state: "done" }, uuid());
             }
           }
@@ -6133,7 +6604,7 @@ import "../../styles/kylon-image-viewer.css";
             ? homeRefusalCopy(error.reason)
             : TODO_SAVE_FAILED;
       }
-      if (waitingTodoTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      if (!isAlive() || waitingTodoTickets.get(item.id) !== ticket) return;
       waitingTodoTickets.delete(item.id);
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
@@ -6169,6 +6640,91 @@ import "../../styles/kylon-image-viewer.css";
       const focusTargetPanel = canRestoreFocus();
       if (focusTargetPanel) {
         waitingPanelMod?.focusWaitingPanelAfterAction(focusTargetPanel, { kind: "retry-todo", todoId: item.id });
+      }
+    };
+
+    const sendWaitingSurveyAll = async (entries: Array<{ item: WaitingAskItem; submission: ChoiceSubmission }>): Promise<void> => {
+      const initialSession = session;
+      const viewer = renderedAuthUserId;
+      const authGen = waitingAuthGeneration;
+      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      if (!initialSession || sampleMode || !viewer || !isAlive || !isAlive() || waitingSurvey.sending || entries.length === 0) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      waitingSurvey.sending = true;
+      renderWaitingPanelView();
+      let sentCount = 0;
+      let failedCount = 0;
+      const succeededIds = new Set<string>();
+      for (const { item, submission } of entries) {
+        const current = session;
+        if (!current || !isAlive()) break;
+        let result: Awaited<ReturnType<typeof answerChoice>>;
+        try {
+          result = await answerChoice(current, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive });
+        } catch {
+          result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
+        }
+        if (!isAlive()) break;
+        if (result.ok) {
+          sentCount += 1;
+          succeededIds.add(item.id);
+          const key = `${item.workspaceId}:${item.id}`;
+          waitingSurveyDrafts.delete(key);
+          waitingSurveySkipped.delete(item.id);
+          waitingSurveyErrors.delete(item.id);
+          choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
+          waitingPanelErrors.delete(item.id);
+          waitingPanelLastSubmissions.delete(item.id);
+          const list = waitingPanelAsks.get(item.workspaceId);
+          if (list) waitingPanelAsks.set(item.workspaceId, list.filter(entry => entry.id !== item.id));
+          const prevCount = homeOverviewCounts.get(item.workspaceId);
+          if (typeof prevCount === "number" && prevCount > 0) homeOverviewCounts.set(item.workspaceId, prevCount - 1);
+          if (item.workspaceId === activeWorkspaceId) {
+            const existingChoice = choiceRows.get(item.id);
+            if (existingChoice) {
+              choiceRows.set(item.id, {
+                ...existingChoice,
+                answer: {
+                  optionId: result.optionIds[0] ?? "other",
+                  optionIds: result.optionIds,
+                  otherText: result.otherText,
+                  byViewer: true,
+                  actorUserId: viewer,
+                  at: null,
+                },
+              });
+            }
+          }
+        } else {
+          failedCount += 1;
+          waitingSurveyErrors.set(item.id, result.message);
+        }
+      }
+      if (!isAlive()) return;
+      waitingSurvey.sending = false;
+      waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => !succeededIds.has(id));
+      if (sentCount > 0) {
+        if (homeRoute.view === "chat" && activeWorkspaceView === "signals") renderFeed();
+        renderHomeRail();
+        scheduleWaitingRefresh(400);
+      }
+      if (failedCount === 0) {
+        waitingSurvey.active = false;
+        showWaitingStatus(sentCount === 1 ? "Sent" : `Sent ${sentCount} answers`);
+      } else {
+        waitingSurvey.mode = "review";
+        if (sentCount > 0) showWaitingStatus(sentCount === 1 ? "Sent 1 answer" : `Sent ${sentCount} answers`);
+      }
+      renderWaitingPanelView();
+      const panelNow = one<HTMLElement>("[data-waiting-panel]");
+      if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()
+        && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (failedCount === 0) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "completed-ask", prevIndex: 0 });
+        } else {
+          waitingPanelMod.focusWaitingSurvey(panelNow, "failed-review");
+        }
       }
     };
 
@@ -6216,25 +6772,28 @@ import "../../styles/kylon-image-viewer.css";
 
     const sendWaitingPanelChoice = async (item: WaitingAskItem, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
-      if (!activeSession || sampleMode || waitingPanelTickets.has(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const viewer = renderedAuthUserId;
+      const authGen = waitingAuthGeneration;
+      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      if (!activeSession || sampleMode || !viewer || !isAlive || !isAlive() || waitingPanelTickets.has(item.id)) return;
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
       const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const prevCardIndex = panelBefore
-        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-todo]"))
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
             .findIndex(el => el.dataset.waitingCard === item.id)
         : -1;
-      const ticket: WaitingChoiceTicket = { viewer: activeSession.user.id, workspaceId: item.workspaceId, signalId: item.id };
+      const ticket: WaitingChoiceTicket = { viewer, workspaceId: item.workspaceId, signalId: item.id };
       waitingPanelTickets.set(item.id, ticket);
       waitingPanelErrors.delete(item.id);
       waitingPanelLastSubmissions.set(item.id, submission);
       renderWaitingPanelView();
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission);
+        result = await answerChoice(activeSession, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive });
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
-      if (waitingPanelTickets.get(item.id) !== ticket || homeViewerId() !== ticket.viewer) return;
+      if (!isAlive() || waitingPanelTickets.get(item.id) !== ticket) return;
       waitingPanelTickets.delete(item.id);
       if (result.ok) {
         choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
@@ -6276,11 +6835,85 @@ import "../../styles/kylon-image-viewer.css";
       renderWaitingPanelView();
     };
 
+    const sendWaitingPlainAsk = async (
+      item: WaitingPlainAskItem,
+      bodyText: string,
+      mode: "answer" | "stale",
+    ): Promise<void> => {
+      const activeSession = session;
+      const viewer = renderedAuthUserId;
+      const authGen = waitingAuthGeneration;
+      const isAlive = viewer ? waitingActionGuard(viewer, authGen) : null;
+      if (!activeSession || sampleMode || !viewer || !isAlive || !isAlive() || waitingPlainTickets.has(item.id)) return;
+      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
+      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
+      const prevCardIndex = panelBefore
+        ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]"))
+            .findIndex(el => el.dataset.waitingPlainAsk === item.id)
+        : -1;
+      const prev = waitingPlainLastSubmissions.get(item.id);
+      const commandId = prev && prev.bodyText === bodyText && prev.mode === mode ? prev.commandId : uuid();
+      const ticket: WaitingPlainTicket = { viewer, workspaceId: item.workspaceId, signalId: item.id, mode };
+      waitingPlainTickets.set(item.id, ticket);
+      waitingPlainErrors.delete(item.id);
+      waitingPlainLastSubmissions.set(item.id, { bodyText, mode, commandId });
+      renderWaitingPanelView();
+      let result: Awaited<ReturnType<typeof answerPlainAsk>>;
+      try {
+        result = await answerPlainAsk(activeSession, commandId, item.workspaceId, item.id, bodyText, { isAlive });
+      } catch (error) {
+        result = { ok: false, status: 0, error: null, message: readableError(error) };
+      }
+      if (!isAlive() || waitingPlainTickets.get(item.id) !== ticket) return;
+      waitingPlainTickets.delete(item.id);
+      const canRestoreFocus = (): HTMLElement | null => {
+        if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (!panelNow) return null;
+        if (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement)) {
+          return panelNow;
+        }
+        return null;
+      };
+      if (result.ok) {
+        waitingPlainErrors.delete(item.id);
+        waitingPlainDrafts.delete(item.id);
+        waitingPlainLastSubmissions.delete(item.id);
+        const remaining = (waitingPanelPlainAsks.get(item.workspaceId) ?? []).filter(ask => ask.id !== item.id);
+        waitingPanelPlainAsks.set(item.workspaceId, remaining);
+        const currentCount = homeOverviewCounts.get(item.workspaceId);
+        if (typeof currentCount === "number" && currentCount > 0) {
+          homeOverviewCounts.set(item.workspaceId, currentCount - 1);
+          syncWaitingButtons();
+        }
+        showWaitingStatus(mode === "stale" ? "Cleared" : "Sent");
+        renderWaitingPanelView();
+        const afterPanel = canRestoreFocus();
+        if (afterPanel) {
+          waitingPanelMod!.focusWaitingPanelAfterAction(afterPanel, {
+            kind: "completed-plain",
+            prevIndex: Math.max(0, prevCardIndex),
+          });
+        }
+        renderHomeRail();
+        scheduleWaitingRefresh(400);
+        return;
+      }
+      waitingPlainErrors.set(item.id, result.message);
+      renderWaitingPanelView();
+      const afterPanel = canRestoreFocus();
+      if (afterPanel) {
+        waitingPanelMod!.focusWaitingPanelAfterAction(afterPanel, { kind: "retry-plain", signalId: item.id });
+      }
+    };
+
     const renderWaitingPanelView = (): void => {
       const container = one<HTMLElement>("[data-waiting-panel]");
       if (!container || !waitingPanelMod || !waitingSurface?.isOpen() || !isWaitingChannelView()) return;
+      if (!sampleMode && (!session || !renderedAuthUserId || renderedAuthUserId !== session.user.id)) return;
       const place = currentWaitingPlace();
       const allItems = allWaitingAskItems();
+      const allPlainAsks = allWaitingPlainAskItems();
       const allTodos = allWaitingTodoItems();
       const wsLoaded = waitingPanelLoadedWorkspaces.has(place.workspaceId);
       const wsFailed = waitingPanelFailedWorkspaces.has(place.workspaceId);
@@ -6291,36 +6924,62 @@ import "../../styles/kylon-image-viewer.css";
       const allFailed = waitingPanelOverviewFailed || anyWsFailed;
       const channelItems = waitingPanelMod.filterWaitingItems(allItems, "channel", place);
       const workspaceItems = waitingPanelMod.filterWaitingItems(allItems, "workspace", place);
+      const channelPlainAsks = waitingPanelMod.filterWaitingItems(allPlainAsks, "channel", place);
+      const workspacePlainAsks = waitingPanelMod.filterWaitingItems(allPlainAsks, "workspace", place);
       const channelTodos = waitingPanelMod.filterWaitingTodos(allTodos, "channel", place);
       const workspaceTodos = waitingPanelMod.filterWaitingTodos(allTodos, "workspace", place);
       const visibleItems = waitingScope === "channel" ? channelItems : waitingScope === "workspace" ? workspaceItems : allItems;
+      const visiblePlainAsks = waitingScope === "channel" ? channelPlainAsks : waitingScope === "workspace" ? workspacePlainAsks : allPlainAsks;
       const visibleTodos = waitingScope === "channel" ? channelTodos : waitingScope === "workspace" ? workspaceTodos : allTodos;
       const complete = waitingScope === "all" ? allLoaded : wsLoaded;
       const failed = waitingScope === "all" ? allFailed : (waitingPanelOverviewFailed || wsFailed);
       const truncated = waitingScope === "all" ? anyWsTruncated : wsTruncated;
+      const placeKey = `${place.workspaceId}:${place.kind}:${place.channelId ?? ""}:${place.dm?.id ?? ""}`;
+      if (waitingSurvey.active && !waitingSurvey.sending && waitingScope === "channel" && waitingSurvey.placeKey !== placeKey) {
+        waitingSurvey.active = false;
+      }
+      const surveyItems = waitingSurvey.active
+        ? waitingSurvey.itemIds.map(id => visibleItems.find(item => item.id === id) ?? allItems.find(item => item.id === id)).filter((x): x is WaitingAskItem => Boolean(x))
+        : [];
+      if (waitingSurvey.active && surveyItems.length === 0 && !waitingSurvey.sending) {
+        waitingSurvey.active = false;
+      }
+      const surveyVM = waitingSurvey.active ? {
+        items: surveyItems,
+        scope: waitingScope,
+        mode: waitingSurvey.mode,
+        index: Math.max(0, Math.min(waitingSurvey.index, Math.max(0, surveyItems.length - 1))),
+        drafts: waitingSurveyDrafts,
+        skipped: waitingSurveySkipped,
+        errors: waitingSurveyErrors,
+        sending: waitingSurvey.sending,
+      } : null;
       waitingPanelMod.renderWaitingPanel(
         container,
         {
           scope: waitingScope,
           place,
           items: visibleItems,
+          plainAsks: visiblePlainAsks,
           todos: visibleTodos,
           counts: {
-            channel: { min: channelItems.length + channelTodos.length, complete: wsLoaded },
-            workspace: { min: workspaceItems.length + workspaceTodos.length, complete: wsLoaded },
-            all: { min: allItems.length + allTodos.length, complete: allLoaded },
+            channel: { min: channelItems.length + channelPlainAsks.length + channelTodos.length, complete: wsLoaded },
+            workspace: { min: workspaceItems.length + workspacePlainAsks.length + workspaceTodos.length, complete: wsLoaded },
+            all: { min: allItems.length + allPlainAsks.length + allTodos.length, complete: allLoaded },
           },
           loading: waitingInFlight && !complete && !truncated,
           complete,
           failed: failed && !waitingInFlight,
           truncated,
           catchUpHref: routeHref({ view: "catchup" }),
+          survey: surveyVM,
           statusMessage: waitingStatusMessage,
           statusSeq: waitingStatusSeq,
         },
         {
           onScopeChange: (next) => {
             clearWaitingStatus();
+            waitingSurvey.active = false;
             waitingScope = next;
             renderWaitingPanelView();
             if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
@@ -6340,6 +6999,14 @@ import "../../styles/kylon-image-viewer.css";
           onDraftChoice: (item, draft) => {
             choiceDrafts.set(choiceDraftKey(item.workspaceId, item.id), draft);
           },
+          onSubmitPlainAsk: (item, bodyText, mode) => void sendWaitingPlainAsk(item, bodyText, mode),
+          onRetryPlainAsk: (item) => {
+            const last = waitingPlainLastSubmissions.get(item.id);
+            if (last) void sendWaitingPlainAsk(item, last.bodyText, last.mode);
+          },
+          onDraftPlainAsk: (item, text) => {
+            waitingPlainDrafts.set(item.id, text);
+          },
           onMarkTodoDone: (item) => void markWaitingTodoDone(item),
           onRetryTodo: (item) => void markWaitingTodoDone(item),
           onOpenTodo: (item) => {
@@ -6351,6 +7018,84 @@ import "../../styles/kylon-image-viewer.css";
             clearWaitingStatus();
             waitingSurface?.close(false);
             if (homeRoute.view !== "catchup") navigateHomeHref(href);
+          },
+          onStartSurvey: () => {
+            clearWaitingStatus();
+            waitingSurvey = {
+              active: true,
+              mode: "step",
+              index: 0,
+              itemIds: visibleItems.map(item => item.id),
+              placeKey,
+              sending: false,
+            };
+            renderWaitingPanelView();
+            waitingPanelMod?.focusWaitingSurvey(container, "step");
+          },
+          surveyHandlers: {
+            onExit: () => {
+              waitingSurvey.active = false;
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "exit");
+            },
+            onStep: (nextIndex) => {
+              if (waitingSurvey.mode === "step" && nextIndex > waitingSurvey.index) {
+                const cur = surveyItems[waitingSurvey.index];
+                if (cur && waitingPanelMod?.surveySubmissionFromDraft(waitingSurveyDrafts.get(`${cur.workspaceId}:${cur.id}`))) {
+                  waitingSurveySkipped.delete(cur.id);
+                }
+              }
+              waitingSurvey.mode = "step";
+              waitingSurvey.index = Math.max(0, Math.min(nextIndex, Math.max(0, surveyItems.length - 1)));
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "step");
+            },
+            onDraftChange: (item, draft, quiet) => {
+              const key = `${item.workspaceId}:${item.id}`;
+              const wasOtherOpen = waitingSurveyDrafts.get(key)?.otherOpen ?? false;
+              waitingSurveyDrafts.set(key, draft);
+              waitingSurveySkipped.delete(item.id);
+              waitingSurveyErrors.delete(item.id);
+              if (!quiet) {
+                renderWaitingPanelView();
+                if (!wasOtherOpen && draft.otherOpen) {
+                  waitingPanelMod?.focusWaitingSurvey(container, "other-input");
+                }
+              }
+            },
+            onSkip: (item) => {
+              waitingSurveyErrors.delete(item.id);
+              waitingSurveySkipped.add(item.id);
+              const wentToReview = waitingSurvey.index >= surveyItems.length - 1;
+              if (wentToReview) {
+                waitingSurvey.mode = "review";
+              } else {
+                waitingSurvey.index += 1;
+              }
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, wentToReview ? "review" : "step");
+            },
+            onReview: () => {
+              if (waitingSurvey.mode === "step") {
+                const cur = surveyItems[waitingSurvey.index];
+                if (cur && waitingPanelMod?.surveySubmissionFromDraft(waitingSurveyDrafts.get(`${cur.workspaceId}:${cur.id}`))) {
+                  waitingSurveySkipped.delete(cur.id);
+                }
+              }
+              waitingSurvey.mode = "review";
+              renderWaitingPanelView();
+              waitingPanelMod?.focusWaitingSurvey(container, "review");
+            },
+            onEdit: (item) => {
+              const idx = surveyItems.findIndex(entry => entry.id === item.id);
+              if (idx >= 0) {
+                waitingSurvey.mode = "step";
+                waitingSurvey.index = idx;
+                renderWaitingPanelView();
+                waitingPanelMod?.focusWaitingSurvey(container, "step");
+              }
+            },
+            onSendAll: (entries) => void sendWaitingSurveyAll(entries),
           },
         },
       );
@@ -6374,13 +7119,15 @@ import "../../styles/kylon-image-viewer.css";
           waitingSurface.close(true);
           return;
         }
+        if (!sampleMode && (!session || !renderedAuthUserId || renderedAuthUserId !== session.user.id)) return;
+        const authGen = waitingAuthGeneration;
         const epoch = ++waitingOpenEpoch;
         const place = currentWaitingPlace();
         if (!waitingPanelLoadedWorkspaces.has(place.workspaceId) || waitingPanelOverviewFailed) {
           void refreshWaitingCounts();
         }
         void loadWaitingPanelModule().then(mod => {
-          if (epoch !== waitingOpenEpoch || !isWaitingChannelView() || document.querySelector("dialog[open]") !== null) return;
+          if (epoch !== waitingOpenEpoch || authGen !== waitingAuthGeneration || !isWaitingChannelView() || document.querySelector("dialog[open]") !== null) return;
           const surface = ensureWaitingSurface(mod);
           // Opening always starts in This channel; channel switches keep the desktop column open.
           waitingScope = "channel";
@@ -6392,7 +7139,7 @@ import "../../styles/kylon-image-viewer.css";
       if (homeRoute.view !== "catchup") navigateHomeHref(href);
     };
     const syncWaitingButtons = (): void => {
-      const shown = !sampleMode && !!session && workspaces.length > 0;
+      const shown = !sampleMode && !!session && renderedAuthUserId !== "" && renderedAuthUserId === session.user.id && workspaces.length > 0;
       const total = waitingTotal(workspaces.map(workspace => workspace.id), homeOverviewCounts);
       const channelMode = isWaitingChannelView();
       const open = channelMode && (waitingSurface?.isOpen() ?? false);
@@ -6409,32 +7156,69 @@ import "../../styles/kylon-image-viewer.css";
         syncWaitingButtonToggle(link, { active: channelMode && index !== 2, expanded: open, controlsId });
       });
     };
+    const clearWaitingData = (): void => {
+      waitingPanelAsks.clear();
+      waitingPanelPlainAsks.clear();
+      waitingPanelTodos.clear();
+      waitingPanelLoadedWorkspaces.clear();
+      waitingPanelFailedWorkspaces.clear();
+      waitingPanelTruncatedWorkspaces.clear();
+      waitingPanelTickets.clear();
+      waitingPanelErrors.clear();
+      waitingPanelLastSubmissions.clear();
+      waitingPlainTickets.clear();
+      waitingPlainDrafts.clear();
+      waitingPlainErrors.clear();
+      waitingPlainLastSubmissions.clear();
+      waitingTodoTickets.clear();
+      waitingTodoErrors.clear();
+      waitingSurveyDrafts.clear();
+      waitingSurveySkipped.clear();
+      waitingSurveyErrors.clear();
+      waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
+      waitingWorkspaceChannels.clear();
+      waitingPanelOverviewFailed = false;
+    };
+    /** Synchronously retire every Waiting on you read, draft, ticket, and rendered card when login changes. */
+    const retireWaitingState = (): void => {
+      waitingAuthGeneration += 1;
+      waitingGeneration += 1;
+      waitingInFlight = false;
+      waitingAgain = false;
+      window.clearTimeout(waitingTimer);
+      waitingTimer = undefined;
+      window.clearTimeout(waitingStatusTimer);
+      waitingStatusTimer = undefined;
+      waitingStatusMessage = "";
+      waitingOpenEpoch += 1;
+      waitingPanelViewer = "";
+      waitingScope = "channel";
+      clearWaitingData();
+      choiceDrafts.clear();
+      waitingSurface?.close(false);
+      one<HTMLElement>("[data-waiting-panel]")?.replaceChildren();
+      syncWaitingButtons();
+    };
     const refreshWaitingCounts = async (): Promise<void> => {
       // Catch up counts for itself, into the same map, and starts by clearing it.
-      if (sampleMode || !session || homeRoute.view === "catchup") return;
+      if (sampleMode || !session || !renderedAuthUserId || renderedAuthUserId !== session.user.id || homeRoute.view === "catchup") return;
       if (waitingInFlight) { waitingAgain = true; return; }
       waitingInFlight = true;
-      const generation = ++waitingGeneration, viewer = homeViewerId();
+      const authGen = waitingAuthGeneration;
+      const generation = ++waitingGeneration, viewer = renderedAuthUserId;
       if (waitingPanelViewer !== viewer) {
         waitingPanelViewer = viewer;
-        waitingPanelAsks.clear();
-        waitingPanelTodos.clear();
-        waitingPanelLoadedWorkspaces.clear();
-        waitingPanelFailedWorkspaces.clear();
-        waitingPanelTruncatedWorkspaces.clear();
-        waitingPanelTickets.clear();
-        waitingPanelErrors.clear();
-        waitingPanelLastSubmissions.clear();
-        waitingTodoTickets.clear();
-        waitingTodoErrors.clear();
-        waitingWorkspaceChannels.clear();
-        waitingPanelOverviewFailed = false;
+        clearWaitingData();
       }
-      const live = (): boolean => generation === waitingGeneration && homeViewerId() === viewer && homeRoute.view !== "catchup";
+      const isAlive = waitingActionGuard(viewer, authGen);
+      const live = (): boolean =>
+        generation === waitingGeneration &&
+        isAlive() &&
+        homeRoute.view !== "catchup";
       try {
         const overview = await homeOverview();
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
-        if (!overview || !live()) return;
+        if (!overview || !live() || overview.viewer_user_id !== viewer) return;
         waitingPanelOverviewFailed = false;
         const now = Date.parse(overview.generated_at);
         const rows = new Map(overview.workspaces.map(row => [row.workspace_id, row]));
@@ -6455,6 +7239,7 @@ import "../../styles/kylon-image-viewer.css";
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
+            waitingPanelPlainAsks.set(workspace.id, []);
             waitingPanelTodos.set(workspace.id, []);
             waitingPanelLoadedWorkspaces.add(workspace.id);
             waitingPanelFailedWorkspaces.delete(workspace.id);
@@ -6466,6 +7251,7 @@ import "../../styles/kylon-image-viewer.css";
         let next = 0;
         await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
           for (;;) {
+            if (!live()) return;
             const workspace = toRead[next++]; if (!workspace) return;
             const row = rows.get(workspace.id)!;
             const hasAsks = row.needs_you.asks.length > 0;
@@ -6474,6 +7260,7 @@ import "../../styles/kylon-image-viewer.css";
             let queue: DecisionQueue | null = hasAsks
               ? await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null)
               : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
+            if (!live()) return;
             if (!queue) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
@@ -6483,6 +7270,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             const ids = queue.asks.map(ask => ask.signal_id);
             const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            if (!live()) return;
             if (choices === null) {
               // A failed choices read must never become an exact zero or an empty channel.
               counted.set(workspace.id, null);
@@ -6496,10 +7284,12 @@ import "../../styles/kylon-image-viewer.css";
             const detail = detailOf(workspace, queue, choicesMap);
 
             const askById = new Map(queue.asks.map(ask => [ask.signal_id, ask]));
-            const choiceNeeds = detail.needsYou.filter(item => item.kind === "ask" && item.choices && item.choices.options.length > 0);
+            const allAskNeeds = detail.needsYou.filter(item => item.kind === "ask");
+            const choiceNeeds = allAskNeeds.filter(item => item.choices && item.choices.options.length > 0);
+            const plainNeeds = allAskNeeds.filter(item => !item.choices || item.choices.options.length === 0);
             const locations = new Map<string, SignalLocation>();
             const missingIds: string[] = [];
-            for (const item of choiceNeeds) {
+            for (const item of allAskNeeds) {
               const liveSignal = workspace.id === activeWorkspaceId ? signals.find(s => s.id === item.id) : undefined;
               if (liveSignal) {
                 locations.set(item.id, {
@@ -6535,14 +7325,16 @@ import "../../styles/kylon-image-viewer.css";
             if (missingIds.length) {
               try {
                 const fetched = await signalLocations(workspace.id, missingIds);
+                if (!live()) return;
                 for (const [sigId, loc] of fetched) locations.set(sigId, loc);
               } catch {
+                if (!live()) return;
                 locationReadFailed = true;
               }
             }
             const classified = new Map<string, WaitingConversation>();
             let anyUnknownLocation = locationReadFailed;
-            for (const item of choiceNeeds) {
+            for (const item of allAskNeeds) {
               const loc = locations.get(item.id) ?? null;
               const rootLoc = loc?.threadRootId ? (locations.get(loc.threadRootId) ?? null) : null;
               const conv = classifyAskConversation(loc, rootLoc);
@@ -6557,8 +7349,10 @@ import "../../styles/kylon-image-viewer.css";
             if (hasTodos) {
               try {
                 todosQueue = await homeServer()?.waitingTodos(workspace.id) ?? null;
+                if (!live()) return;
                 if (!todosQueue) todosReadFailed = true;
               } catch (err) {
+                if (!live()) return;
                 if (err instanceof HomeToolsUnavailable) {
                   todosFallback = true;
                 } else {
@@ -6571,6 +7365,7 @@ import "../../styles/kylon-image-viewer.css";
             const hasNamedTodoChannel = Boolean(todosQueue?.todos.some(todo => todo.placement === "channel" && todo.channel_id));
             if ((hasNamedAskChannel || hasNamedTodoChannel) && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
               const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+              if (!live()) return;
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
             const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
@@ -6595,6 +7390,26 @@ import "../../styles/kylon-image-viewer.css";
                 choices: { options: item.choices.options, multi: item.choices.multi },
               }];
             });
+            const panelPlainItems: WaitingPlainAskItem[] = plainNeeds.flatMap(item => {
+              const raw = askById.get(item.id);
+              if (!raw) return [];
+              const conversation = classified.get(item.id) ?? { kind: "unknown" as const };
+              const question = raw.body.trim() || item.what;
+              return [{
+                id: item.id,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                conversation,
+                channelLabel: waitingChannelName(workspace.id, conversation),
+                from: item.from,
+                fromKind: raw.from.kind,
+                fromId: raw.from.id,
+                what: question,
+                when: item.when,
+                createdAt: raw.created_at,
+                until: raw.until,
+              }];
+            });
             let panelTodos: WaitingTodoItem[] = [];
             let todosTruncated = false;
             if (!hasTodos) {
@@ -6609,6 +7424,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             if (!live()) return;
             waitingPanelAsks.set(workspace.id, panelItems);
+            waitingPanelPlainAsks.set(workspace.id, panelPlainItems);
             if (!todosReadFailed) waitingPanelTodos.set(workspace.id, panelTodos);
             const queueTruncated = queue.truncated || queue.asks.length < queue.total;
             const anyTruncated = queueTruncated || todosTruncated;
@@ -6642,11 +7458,14 @@ import "../../styles/kylon-image-viewer.css";
         renderWaitingPanelView();
       } catch {
         // A failed overview changes nothing: what was counted stays, and what was not stays uncounted.
+        if (!live()) return;
         waitingPanelOverviewFailed = true;
         renderWaitingPanelView();
       } finally {
-        waitingInFlight = false;
-        if (waitingAgain) { waitingAgain = false; void refreshWaitingCounts(); }
+        if (generation === waitingGeneration) {
+          waitingInFlight = false;
+          if (waitingAgain && authGen === waitingAuthGeneration) { waitingAgain = false; void refreshWaitingCounts(); }
+        }
       }
     };
     /** Soon, once: after an answer, an arrival or a return to the tab. */
@@ -7336,6 +8155,7 @@ import "../../styles/kylon-image-viewer.css";
       if (catchUp) catchUp.hidden = !home;
       if (routePane) routePane.hidden = true;
       if (homeRoute.view !== "people") parkPeopleHosts();
+      if (homeRoute.view !== "agent") teardownAgentOversight();
       if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos" || homeRoute.view === "people";
       syncListsChrome();
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
@@ -7392,6 +8212,14 @@ import "../../styles/kylon-image-viewer.css";
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      if (
+        route.view !== "agent" ||
+        (oversightState?.pin &&
+          (route.workspaceId.toLowerCase() !== oversightState.pin.workspaceId ||
+            route.agentId.toLowerCase() !== oversightState.pin.agentPrincipalId))
+      ) {
+        teardownAgentOversight();
+      }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;
@@ -12618,6 +13446,7 @@ import "../../styles/kylon-image-viewer.css";
       homeRailKey = "";
       homeCatchUpKey = "";
       homeOverviewCounts.clear();
+      retireWaitingState();
       forgetPrivateChannelMembers();
       // The People page's hosts may sit in the route pane: park them before it is cleared.
       parkPeopleHosts();
@@ -16842,10 +17671,14 @@ import "../../styles/kylon-image-viewer.css";
       try {
         const verified = await currentSession();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
+        const previousAuthUserId = renderedAuthUserId;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
         renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
         renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
+        if (previousAuthUserId && renderedAuthUserId !== previousAuthUserId) {
+          resetWorkspaceSessionState();
+        }
         if (isMultiAccountEnabled()) renderAccountSwitcher();
         if (!session) {
           pendingSwitchFocusReturn = false;
@@ -20419,8 +21252,8 @@ import "../../styles/kylon-image-viewer.css";
           renderedAuthLoginId = nextLoginId;
           renderedAuthViewGen = nextViewGen;
         }
-        resetWorkspaceSessionState();
         renderedAuthUserId = nextUserId;
+        resetWorkspaceSessionState();
         requestVersion += 1;
         authRecoveryActive = false;
       }

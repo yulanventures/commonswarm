@@ -921,6 +921,133 @@
     ]
   },
   {
+    "id": "app.chat.waiting-panel.survey",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-review-start]:not([hidden])"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "dialog#cs-waiting-sheet[open] [data-waiting-review-start]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-review-start]:not([hidden])"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": "#cs-waiting-panel:not([hidden]) [data-waiting-review-start]"
+      },
+      {
+        "waitFor": "[data-waiting-survey=\"step\"] [data-survey-option]"
+      },
+      {
+        "click": "[data-waiting-survey=\"step\"] [data-survey-option]:first-child"
+      }
+    ],
+    "ready": "[data-waiting-survey=\"step\"] [data-survey-option][aria-pressed=\"true\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-survey=\"step\"] [data-waiting-survey-progress]",
+      "[data-waiting-survey=\"step\"] [data-waiting-survey-next]"
+    ]
+  },
+  {
+    "id": "app.chat.waiting-panel.survey-review",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-waiting-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-waiting-sheet[open] [data-waiting-review-start]:not([hidden])"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "dialog#cs-waiting-sheet[open] [data-waiting-review-start]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-waiting-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "#cs-waiting-panel:not([hidden]) [data-waiting-review-start]:not([hidden])"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": "#cs-waiting-panel:not([hidden]) [data-waiting-review-start]"
+      },
+      {
+        "waitFor": "[data-waiting-survey=\"step\"] [data-survey-option]"
+      },
+      {
+        "click": "[data-waiting-survey=\"step\"] [data-survey-option]:first-child"
+      },
+      {
+        "click": "[data-waiting-survey=\"step\"] [data-waiting-survey-next]"
+      },
+      {
+        "click": "[data-waiting-survey=\"step\"] [data-waiting-survey-skip]"
+      },
+      {
+        "click": "[data-waiting-survey=\"step\"] [data-waiting-survey-skip]"
+      }
+    ],
+    "ready": "[data-waiting-survey=\"review\"] [data-waiting-survey-send]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-waiting-survey=\"review\"] [data-waiting-survey-progress]",
+      "[data-waiting-survey=\"review\"] [data-waiting-survey-send]"
+    ]
+  },
+  {
     "id": "app.chat.waiting-panel.empty",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.long}",

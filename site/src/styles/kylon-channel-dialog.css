@@ -24,8 +24,17 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-grou
 }
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) :is([data-channel-dialog-error], [data-group-leave-error]) {
   margin-block: 8px;
+  color: #b91c1c;
   font-size: 13px;
   line-height: 20px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) :is([data-channel-dialog-error], [data-group-leave-error]) {
+    color: #fca5a5;
+  }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) :is([data-channel-dialog-error], [data-group-leave-error]) {
+  color: #fca5a5;
 }
 /* Do not set display on forms: sample and Manage gates retain their hidden state. */
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) .dashboard__channel-form {
@@ -61,17 +70,23 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-grou
   color: var(--k-shell-ink);
   font: 400 14px/22px var(--k-shell-font);
 }
-/* Discrete controls only; preserve the existing action and warning colour pairs. */
+/* Discrete controls only; restore visible Carbon control borders where --border is transparent. */
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) .dashboard__channel-form .dashboard__button {
   min-inline-size: 44px;
   max-inline-size: 100%;
   min-block-size: 44px;
   padding: 10px 12px;
+  color: var(--k-shell-ink);
+  background: transparent;
+  border: 1px solid var(--k-shell-control);
   border-radius: var(--k-shell-radius);
   font: 500 13px/20px var(--k-shell-font);
   white-space: normal;
   overflow-wrap: anywhere;
   text-align: center;
+}
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) .dashboard__channel-form .dashboard__button--secondary:hover:not(:disabled) {
+  background: var(--k-shell-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-group-leave-dialog]) .dashboard__channel-form .dashboard__button:not(:focus-visible) {
   box-shadow: none;

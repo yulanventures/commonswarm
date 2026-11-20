@@ -152,6 +152,13 @@ function installStep3BA11yFixture() {
         }
         return Response.json({ conversations: f.conversations });
       }
+      if (body?.resource === "conversation_history") {
+        const matched = f.conversations.find((c: any) => c.conversation_id === body.conversation_id);
+        if (!matched) {
+          return Response.json({ error: "conversation_not_found", message: "This conversation isn't available in this workspace." }, { status: 404 });
+        }
+        return Response.json({ conversation: matched, messages: [], has_more: false, next_before: null, next_after: null });
+      }
     }
     if (url.pathname === "/functions/v1/command" && request.method === "POST") {
       const body = await request.clone().json().catch(() => null);
@@ -260,14 +267,51 @@ async function observeStep3BA11y() {
       const triggerSel = `[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`;
       await click(triggerSel);
       await wait("rail context menu open", () => visible(one(".cs-context-menu")));
+      // Witness detached-anchor focus return: replace the rail trigger while the menu is open
+      // (simulating a background renderHomeRail() refresh), then press Escape -> focus must land
+      // on the re-rendered trigger, never <body>.
+      const originalTrigger = shown<HTMLButtonElement>(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]`)!;
+      const clonedTrigger = originalTrigger.cloneNode(true) as HTMLButtonElement;
+      originalTrigger.replaceWith(clonedTrigger);
       await key("Escape");
       await wait("rail context menu closed", () => !one(".cs-context-menu"));
       const activeAttr = document.activeElement?.getAttribute("data-rail-conversation-menu");
+      const focusedReplacement =
+        document.activeElement !== document.body &&
+        document.activeElement !== originalTrigger &&
+        activeAttr === f.ids.dmGroupConv;
+      // Also witness opening the context menu directly from the DM link (`data-rail-conversation`)
+      // and channel link (`data-rail-channel`), redrawing the link, and dismissing with Escape/Tab.
+      let linkReturnOk = focusedReplacement;
+      let linkError = focusedReplacement ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`;
+      if (linkReturnOk) {
+        for (const [attr, selector, dismissKey] of [
+          ["data-rail-conversation", `[data-rail-conversation="${f.ids.dmGroupConv}"]`, "Escape"],
+          ["data-rail-channel", `[data-rail-channel="${f.ids.opsChannel}"]`, "Tab"],
+        ] as const) {
+          const origLink = shown<HTMLElement>(selector);
+          if (!origLink) { linkReturnOk = false; linkError = `missing link ${selector}`; break; }
+          origLink.focus();
+          origLink.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+          await wait(`link context menu open (${attr})`, () => visible(one(".cs-context-menu")));
+          const clonedLink = origLink.cloneNode(true) as HTMLElement;
+          origLink.replaceWith(clonedLink);
+          await key(dismissKey);
+          await wait(`link context menu closed (${attr})`, () => !one(".cs-context-menu"));
+          const landed = document.activeElement;
+          const expectedId = attr === "data-rail-conversation" ? f.ids.dmGroupConv : f.ids.opsChannel;
+          if (!landed || landed === document.body || landed === origLink || landed.getAttribute(attr) !== expectedId) {
+            linkReturnOk = false;
+            linkError = `${dismissKey} from ${attr} link left focus on ${landed?.outerHTML.slice(0, 160)}`;
+            break;
+          }
+        }
+      }
       document.documentElement.dataset.step3bA11y = JSON.stringify({
-        ok: activeAttr === f.ids.dmGroupConv,
+        ok: linkReturnOk,
         scene: f.scene,
         returnedTo: document.activeElement?.outerHTML.slice(0, 180) ?? null,
-        error: activeAttr === f.ids.dmGroupConv ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`,
+        error: linkError,
       });
       return;
     }

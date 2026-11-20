@@ -1,4 +1,4 @@
-// Loopback simulator fixture for iPhone Waiting on you (PR 1: questions with in-card answers).
+// Loopback simulator fixture for iPhone Waiting on you (PR 1 asks + PR 2 assigned & waiting to-dos).
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -20,6 +20,11 @@ const sigMobileChoice = "30000000-0000-4000-8000-000000000002";
 const sigDmChoice = "30000000-0000-4000-8000-000000000003";
 const sigSecondWsChoice = "30000000-0000-4000-8000-000000000004";
 
+const todoGeneralAssigned = "50000000-0000-4000-8000-000000000001";
+const todoMobileRequest = "50000000-0000-4000-8000-000000000002";
+const todoWorkspaceAssigned = "50000000-0000-4000-8000-000000000003";
+const todoSecondWsHold = "50000000-0000-4000-8000-000000000004";
+
 const workspaces = [
   { workspace_id: wsMain, name: "Simulator workspace" },
   { workspace_id: wsSecond, name: "Second workspace" },
@@ -35,7 +40,16 @@ const channelsByWorkspace = new Map([
 
 const answered = new Map();
 const receivedCommands = [];
+const receivedTodoCommands = [];
 let failNextOnce = false;
+let failNextTodoOnce = false;
+let conflictNextTodoOnce = false;
+let conflictDropNextTodoOnce = false;
+let hideWaitingTodosRpc = false;
+let failWaitingTodosRpcStatus = null;
+let capHomeOverviewAssigned = false;
+let forceTodosPageSize = null;
+let forceCommentsPageSize = null;
 let omitLocationSignalIds = new Set();
 let failDecisionQueueWs = null;
 
@@ -100,6 +114,104 @@ const asksByWorkspace = new Map([
   ]],
 ]);
 
+const todosByWorkspace = new Map([
+  [wsMain, [
+    {
+      todo_id: todoGeneralAssigned,
+      title: "Approve App Store release notes for iOS 1.0",
+      state: "doing",
+      version: 3,
+      due_on: "2026-11-24",
+      reason: "assigned",
+      agent_id: null,
+      state_at: "2026-11-19T15:20:00.000Z",
+      placement: "general",
+      channel_id: null,
+      assignee: { kind: "user", id: me },
+      notes: "Verify screenshots, privacy labels, and TestFlight release summary before submission.",
+      comments: [
+        {
+          comment_id: "60000000-0000-4000-8000-000000000001",
+          author: { user_id: maya, principal_id: null },
+          body: "Drafted the final bullet points for dark mode and Waiting on you.",
+          created_at: "2026-11-19T13:10:00.000Z",
+        },
+        {
+          comment_id: "60000000-0000-4000-8000-000000000002",
+          author: { user_id: me, principal_id: atlas },
+          body: "All release checks passed on iPhone SE and iPhone 17 Pro.",
+          created_at: "2026-11-19T14:05:00.000Z",
+        },
+        {
+          comment_id: "60000000-0000-4000-8000-000000000004",
+          author: { user_id: me, principal_id: null },
+          body: "Looks good, ready for final sign-off.",
+          created_at: "2026-11-19T14:30:00.000Z",
+        },
+      ],
+    },
+    {
+      todo_id: todoMobileRequest,
+      title: "Review dark mode token audit for iPhone SE",
+      state: "open",
+      version: 2,
+      due_on: "2026-11-26",
+      reason: "request",
+      agent_id: atlas,
+      state_at: "2026-11-19T15:10:00.000Z",
+      placement: "channel",
+      channel_id: chMobile,
+      assignee: { kind: "agent", id: atlas },
+      notes: "Confirm all small badges reach 4.5:1 contrast in both light and dark appearance.",
+      comments: [
+        {
+          comment_id: "60000000-0000-4000-8000-000000000003",
+          author: { user_id: me, principal_id: atlas },
+          body: "Ready for review once the contrast update lands.",
+          created_at: "2026-11-19T14:20:00.000Z",
+        },
+      ],
+    },
+    {
+      todo_id: todoWorkspaceAssigned,
+      title: "Confirm production backup retention policy",
+      state: "open",
+      version: 1,
+      due_on: null,
+      reason: "assigned",
+      agent_id: null,
+      state_at: "2026-11-19T15:00:00.000Z",
+      placement: "workspace",
+      channel_id: null,
+      assignee: { kind: "user", id: me },
+      notes: "Double-check nightly snapshot retention on the primary cluster.",
+      comments: [],
+    },
+  ]],
+  [wsSecond, [
+    {
+      todo_id: todoSecondWsHold,
+      title: "Unpause nightly staging sync job",
+      state: "open",
+      version: 1,
+      due_on: "2026-12-01",
+      reason: "hold",
+      agent_id: atlas,
+      state_at: "2026-11-19T14:55:00.000Z",
+      placement: "workspace",
+      channel_id: null,
+      assignee: { kind: "agent", id: atlas },
+      notes: "Paused while rotating staging credentials.",
+      comments: [],
+    },
+  ]],
+]);
+
+function findTodo(wsId, todoId) {
+  const list = todosByWorkspace.get(wsId) ?? [];
+  return list.find((t) => t.todo_id === todoId) ?? null;
+}
+
 let emailCodePending = false;
 const sessions = new Set();
 const refreshTokens = new Set();
@@ -117,6 +229,56 @@ const server = createServer(async (req, res) => {
       failNextOnce = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-next-todo") {
+      failNextTodoOnce = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/conflict-next-todo") {
+      conflictNextTodoOnce = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/conflict-drop-next-todo") {
+      conflictDropNextTodoOnce = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/drop-todo") {
+      const wsId = (url.searchParams.get("ws") || wsMain).toLowerCase();
+      const id = (url.searchParams.get("id") || "").toLowerCase();
+      const todo = findTodo(wsId, id);
+      if (todo) {
+        todo.state = "dropped";
+        todo.version += 1;
+      }
+      return reply(200, { ok: Boolean(todo) });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/comments-page-size") {
+      const n = url.searchParams.get("n");
+      forceCommentsPageSize = n ? Number(n) : null;
+      return reply(200, { ok: true, pageSize: forceCommentsPageSize });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hide-waiting-todos-rpc") {
+      hideWaitingTodosRpc = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/show-waiting-todos-rpc") {
+      hideWaitingTodosRpc = false;
+      failWaitingTodosRpcStatus = null;
+      capHomeOverviewAssigned = false;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-waiting-todos-rpc") {
+      const code = url.searchParams.get("status");
+      failWaitingTodosRpcStatus = code ? Number(code) : null;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/cap-home-overview") {
+      capHomeOverviewAssigned = url.searchParams.get("on") === "1";
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/todos-page-size") {
+      forceTodosPageSize = Number(url.searchParams.get("n") || "1");
+      return reply(200, { ok: true, pageSize: forceTodosPageSize });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/omit-location") {
       const id = (url.searchParams.get("id") || sigGeneralChoice).toLowerCase();
       omitLocationSignalIds.add(id);
@@ -132,6 +294,9 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/fixture/commands") {
       return reply(200, receivedCommands);
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/todo-commands") {
+      return reply(200, receivedTodoCommands);
     }
 
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
@@ -307,6 +472,106 @@ const server = createServer(async (req, res) => {
           },
         });
       }
+      if (cmd?.kind === "household_tool") {
+        const wsId = String(body.workspace_id ?? "").toLowerCase();
+        const args = cmd.arguments ?? {};
+        if (args.seat !== "seat_0000000000000000000000") {
+          return reply(400, { status: "refused", reason: "invalid_seat" });
+        }
+        if (cmd.tool === "todo_read") {
+          const todo = findTodo(wsId, String(args.todo_id ?? "").toLowerCase());
+          if (!todo) return reply(200, { status: "refused", reason: "todo_not_found" });
+          const offset = Number.isInteger(args.comment_offset) && args.comment_offset >= 0 ? args.comment_offset : 0;
+          const pageSize = forceCommentsPageSize ?? 20;
+          const slice = todo.comments.slice(offset, offset + pageSize);
+          const nextOffset = offset + slice.length < todo.comments.length ? offset + slice.length : null;
+          return reply(200, {
+            status: "ok",
+            todo: {
+              todo_id: todo.todo_id,
+              title: todo.title,
+              state: todo.state,
+              version: todo.version,
+              notes: todo.notes,
+              due_on: todo.due_on,
+              assignee: todo.assignee,
+            },
+            comments: slice,
+            next_comment_offset: nextOffset,
+          });
+        }
+        if (cmd.tool === "todo_set_state") {
+          receivedTodoCommands.push({ command_id: body.command_id, workspace_id: wsId, tool: cmd.tool, arguments: args });
+          if (failNextTodoOnce) {
+            failNextTodoOnce = false;
+            return reply(503, { error: "unavailable" });
+          }
+          const todo = findTodo(wsId, String(args.todo_id ?? "").toLowerCase());
+          if (!todo) return reply(200, { status: "refused", reason: "todo_not_found" });
+          if (conflictDropNextTodoOnce) {
+            conflictDropNextTodoOnce = false;
+            todo.state = "dropped";
+            todo.version += 1;
+            return reply(409, {
+              status: "conflict",
+              current: {
+                todo_id: todo.todo_id,
+                title: todo.title,
+                state: todo.state,
+                version: todo.version,
+                notes: todo.notes,
+                due_on: todo.due_on,
+                assignee: todo.assignee,
+              },
+            });
+          }
+          if (conflictNextTodoOnce) {
+            conflictNextTodoOnce = false;
+            todo.version += 1;
+            return reply(409, {
+              status: "conflict",
+              current: {
+                todo_id: todo.todo_id,
+                title: todo.title,
+                state: todo.state,
+                version: todo.version,
+                notes: todo.notes,
+                due_on: todo.due_on,
+                assignee: todo.assignee,
+              },
+            });
+          }
+          if (args.base_version !== todo.version) {
+            return reply(409, {
+              status: "conflict",
+              current: {
+                todo_id: todo.todo_id,
+                title: todo.title,
+                state: todo.state,
+                version: todo.version,
+                notes: todo.notes,
+                due_on: todo.due_on,
+                assignee: todo.assignee,
+              },
+            });
+          }
+          todo.state = args.state;
+          todo.version += 1;
+          return reply(200, {
+            status: "committed",
+            value: {
+              todo_id: todo.todo_id,
+              title: todo.title,
+              state: todo.state,
+              version: todo.version,
+              notes: todo.notes,
+              due_on: todo.due_on,
+              assignee: todo.assignee,
+            },
+            notices: [],
+          });
+        }
+      }
       return reply(400, { error: "invalid_request" });
     }
 
@@ -323,6 +588,76 @@ const server = createServer(async (req, res) => {
         truncated: false,
         asks: all.map(({ placement, multi, options, ...ask }) => ask),
       });
+    }
+
+    if (req.method === "POST" && url.pathname === "/rest/v1/rpc/waiting_todos_page") {
+      if (failWaitingTodosRpcStatus) {
+        return reply(failWaitingTodosRpcStatus, { message: "waiting_todos_page failed" });
+      }
+      if (hideWaitingTodosRpc) {
+        return reply(404, { code: "PGRST202", message: "Could not find the function swarm_read.waiting_todos_page" });
+      }
+      const wsId = String(body.p_workspace_id ?? "").toLowerCase();
+      const active = (todosByWorkspace.get(wsId) ?? [])
+        .filter((t) => t.state === "open" || t.state === "doing")
+        .sort((a, b) => {
+          if (a.state_at !== b.state_at) return b.state_at.localeCompare(a.state_at);
+          return a.todo_id.localeCompare(b.todo_id);
+        });
+      let filtered = active;
+      if (body.p_after_state_at && body.p_after_todo_id) {
+        const afterAt = String(body.p_after_state_at);
+        const afterId = String(body.p_after_todo_id).toLowerCase();
+        filtered = active.filter((t) => t.state_at < afterAt || (t.state_at === afterAt && t.todo_id > afterId));
+      }
+      const limit = forceTodosPageSize ?? Math.max(1, Math.min(Number(body.p_limit || 50), 100));
+      const slice = filtered.slice(0, limit);
+      return reply(200, {
+        workspace_id: wsId,
+        generated_at: new Date().toISOString(),
+        total: active.length,
+        truncated: filtered.length > limit,
+        todos: slice.map((t) => ({
+          todo_id: t.todo_id,
+          title: t.title,
+          state: t.state,
+          due_on: t.due_on,
+          reason: t.reason,
+          agent_id: t.agent_id,
+          state_at: t.state_at,
+          placement: t.placement,
+          channel_id: t.channel_id,
+        })),
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/rest/v1/rpc/home_overview") {
+      const now = new Date().toISOString();
+      const rows = workspaces.map((w) => {
+        const active = (todosByWorkspace.get(w.workspace_id) ?? []).filter((t) => t.state === "open" || t.state === "doing");
+        const assigned = active
+          .filter((t) => t.reason === "assigned" || t.reason === "request")
+          .map((t) => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }));
+        if (capHomeOverviewAssigned && w.workspace_id === wsMain) {
+          for (let i = assigned.length; i < 20; i += 1) {
+            const hex = String(i + 1).padStart(12, "0");
+            assigned.push({
+              todo_id: `70000000-0000-4000-8000-${hex}`,
+              title: `Capped overview todo ${i + 1}`,
+              state: "open",
+              due_on: null,
+            });
+          }
+        }
+        const waiting = active
+          .filter((t) => t.reason !== "assigned")
+          .map((t) => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on, reason: t.reason, agent_id: t.agent_id }));
+        return {
+          workspace_id: w.workspace_id,
+          needs_you: { assigned, waiting },
+        };
+      });
+      return reply(200, { generated_at: now, workspaces: rows });
     }
 
     if (req.method === "POST" && url.pathname === "/rest/v1/rpc/ask_choices") {
