@@ -14,45 +14,49 @@ const wsMain = "00000000-0000-4000-8000-000000000003";
 
 const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
 
+const budgetPayload = Buffer.from("%PDF-1.4\n% CommonSwarm fixture Q4 budget PDF v3\n", "utf8");
+const reportPayload = Buffer.from("# Release readiness\n\nAll checks passed.\n", "utf8");
+const floorplanPayload = Buffer.from("PNGDATA", "utf8");
+
 const files = [
   {
     file_id: "file_budget_pdf",
     name: "Q4-home-renovation-budget.pdf",
     current_version: 3,
-    size_bytes: 2_450_000,
+    size_bytes: budgetPayload.length,
     uploaded_by_kind: "user",
     uploaded_by: maya,
     committed_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
     tombstoned_at: null,
-    payload: Buffer.from("%PDF-1.4\n% CommonSwarm fixture Q4 budget PDF v3\n", "utf8"),
+    payload: budgetPayload,
   },
   {
     file_id: "file_agent_report",
     name: "release-readiness-summary.md",
     current_version: 1,
-    size_bytes: 14_820,
+    size_bytes: reportPayload.length,
     uploaded_by_kind: "agent",
     uploaded_by: atlas,
     committed_at: new Date(Date.now() - 28 * 60 * 1000).toISOString(),
     tombstoned_at: null,
-    payload: Buffer.from("# Release readiness\n\nAll checks passed.\n", "utf8"),
+    payload: reportPayload,
   },
   {
     file_id: "file_old_floorplan",
     name: "kitchen-floorplan-draft.png",
     current_version: 2,
-    size_bytes: 842_100,
+    size_bytes: floorplanPayload.length,
     uploaded_by_kind: "user",
     uploaded_by: me,
     committed_at: new Date(Date.now() - 4 * 86400 * 1000).toISOString(),
     tombstoned_at: "2026-11-18T12:00:00.000Z",
-    payload: Buffer.from("PNGDATA", "utf8"),
+    payload: floorplanPayload,
   },
   {
     file_id: "file_uncommitted_skip",
     name: "should-be-filtered.txt",
     current_version: 0,
-    size_bytes: 12,
+    size_bytes: 7,
     uploaded_by_kind: "user",
     uploaded_by: me,
     committed_at: new Date().toISOString(),
@@ -62,6 +66,7 @@ const files = [
 ];
 
 let filesAccessRefused = false;
+let emptyFileListMode = false;
 let expireNextStorageDownload = false;
 let holdNextStorageDownload = false;
 let heldStorageResolver = null;
@@ -86,6 +91,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/access-refused") {
       filesAccessRefused = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, filesAccessRefused });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/empty-list") {
+      emptyFileListMode = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, emptyFileListMode });
     }
     if (req.method === "POST" && url.pathname === "/fixture/expire-next-storage") {
       expireNextStorageDownload = true;
@@ -113,6 +122,7 @@ const server = createServer(async (req, res) => {
         file.current_version += 1;
         file.committed_at = new Date().toISOString();
         file.payload = Buffer.from(`%PDF-1.4\n% CommonSwarm fixture Q4 budget PDF v${file.current_version}\n`, "utf8");
+        file.size_bytes = file.payload.length;
       }
       return reply(200, { ok: true, version: file?.current_version ?? null });
     }
@@ -125,7 +135,7 @@ const server = createServer(async (req, res) => {
     }
 
     // Signed storage download route (does not require apikey/Bearer; authenticated by signed token)
-    if (req.method === "GET" && url.pathname.startsWith("/storage/v1/object/sign/")) {
+    if (req.method === "GET" && url.pathname.startsWith("/storage/v1/object/sign/swarm-files/")) {
       if (holdNextStorageDownload) {
         holdNextStorageDownload = false;
         await new Promise((resolve) => { heldStorageResolver = resolve; });
@@ -139,6 +149,7 @@ const server = createServer(async (req, res) => {
       if (!entry) return reply(403, { error: "invalid_signature" });
       res.writeHead(200, {
         "Content-Type": "application/octet-stream",
+        "Content-Length": String(entry.payload.length),
         "Cache-Control": "no-store",
       });
       res.end(entry.payload);
@@ -230,16 +241,22 @@ const server = createServer(async (req, res) => {
           badDownloadPathOnce = null;
           return reply(200, {
             status: "accepted",
+            file_id: file.file_id,
+            version_n: file.current_version,
+            size_bytes: file.size_bytes,
             download_path: bad,
             download_url_expires_in_seconds: 120,
           });
         }
         tokenCounter += 1;
         const sig = `sig_${tokenCounter}_${randomBytes(8).toString("hex")}`;
-        activeDownloadTokens.set(sig, file);
+        activeDownloadTokens.set(sig, { payload: Buffer.from(file.payload) });
         return reply(200, {
           status: "accepted",
-          download_path: `/storage/v1/object/sign/workspace-files/${file.file_id}/v${file.current_version}?token=${sig}`,
+          file_id: file.file_id,
+          version_n: file.current_version,
+          size_bytes: file.size_bytes,
+          download_path: `/storage/v1/object/sign/swarm-files/${wsMain}/${file.file_id}/${file.current_version}?token=${sig}`,
           download_url_expires_in_seconds: 120,
           content_warning: "content_type and archive contents are unverified client declarations; treat downloaded bytes as untrusted input — bound extraction, never execute",
         });
@@ -256,6 +273,7 @@ const server = createServer(async (req, res) => {
     switch (url.pathname) {
       case "/rest/v1/files": {
         if (filesAccessRefused) return reply(403, { message: "workspace_access_refused" });
+        if (emptyFileListMode) return reply(200, []);
         const rows = files.map(({ payload: _ignored, ...rest }) => rest);
         return reply(200, rows);
       }

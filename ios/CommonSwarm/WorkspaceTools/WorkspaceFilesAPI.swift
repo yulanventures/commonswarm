@@ -1,38 +1,9 @@
 import Foundation
 
-private final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let allowedScheme: String
-    private let allowedHost: String
-    private let allowedPort: Int?
-
-    init(origin: URL) {
-        let comps = URLComponents(url: origin, resolvingAgainstBaseURL: false)
-        self.allowedScheme = comps?.scheme?.lowercased() ?? ""
-        self.allowedHost = comps?.host?.lowercased() ?? ""
-        self.allowedPort = comps?.port
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let url = request.url,
-              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              comps.scheme?.lowercased() == allowedScheme,
-              comps.host?.lowercased() == allowedHost,
-              comps.port == allowedPort else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-}
-
 struct WorkspaceFilesAPI: Sendable {
     let api: ConversationAPI
+
+    var session: HumanSession { api.session }
 
     private struct CommandStream: Encodable {
         let kind = "workspace"
@@ -65,6 +36,9 @@ struct WorkspaceFilesAPI: Sendable {
 
     private struct DownloadGrantReplyWire: Decodable {
         let status: String?
+        let file_id: String?
+        let version_n: Int?
+        let size_bytes: Int?
         let download_path: String?
         let download_url_expires_in_seconds: Double?
         let content_warning: String?
@@ -165,6 +139,7 @@ struct WorkspaceFilesAPI: Sendable {
         workspaceID: UUID,
         fileID: String,
         version: Int,
+        expectedSizeBytes: Int64,
         commandID: UUID
     ) async throws -> WorkspaceFileDownloadGrant {
         let requestedAt = Date()
@@ -192,8 +167,24 @@ struct WorkspaceFilesAPI: Sendable {
             }
             throw WorkspaceFilesError.downloadFailed(status: status)
         }
+        if let grantedFileID = reply?.file_id, grantedFileID.lowercased() != fileID.lowercased() {
+            throw WorkspaceFilesError.invalidDownloadPath
+        }
+        if let grantedVersion = reply?.version_n, grantedVersion != version {
+            throw WorkspaceFilesError.invalidDownloadPath
+        }
+        let resolvedSize = reply?.size_bytes ?? Int(expectedSizeBytes)
+        guard resolvedSize > 0, resolvedSize <= WorkspaceFilesRules.maxDownloadBytes else {
+            throw WorkspaceFilesError.invalidDownloadPath
+        }
         guard let downloadPath = reply?.download_path,
-              let url = WorkspaceFilesRules.validatedDownloadURL(downloadPath: downloadPath, origin: api.origin) else {
+              let url = WorkspaceFilesRules.validatedDownloadURL(
+                  downloadPath: downloadPath,
+                  origin: api.origin,
+                  workspaceID: workspaceID,
+                  fileID: fileID,
+                  version: version
+              ) else {
             throw WorkspaceFilesError.invalidDownloadPath
         }
         let expiresAt: Date?
@@ -205,55 +196,58 @@ struct WorkspaceFilesAPI: Sendable {
         let warning = (reply?.content_warning?.isEmpty == false)
             ? reply!.content_warning!
             : WorkspaceFilesRules.defaultContentWarning
-        return WorkspaceFileDownloadGrant(url: url, contentWarning: warning, expiresAt: expiresAt)
+        return WorkspaceFileDownloadGrant(
+            url: url,
+            sizeBytes: resolvedSize,
+            contentWarning: warning,
+            expiresAt: expiresAt
+        )
     }
 
-    func downloadBytes(
+    /// Downloads file bytes through the login-scoped HumanSession transport (NoRedirect, cookies off,
+    /// sign-out cancellation) and writes them with complete file protection in a per-download directory.
+    func downloadProtectedFile(
         from url: URL,
+        expectedSizeBytes: Int,
         fileName: String,
         fileID: String,
         version: Int
     ) async throws -> URL {
-        // Re-validate origin binding before fetching bytes
-        guard let originComps = URLComponents(url: api.origin, resolvingAgainstBaseURL: false),
-              let urlComps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              urlComps.scheme?.lowercased() == originComps.scheme?.lowercased(),
-              urlComps.host?.lowercased() == originComps.host?.lowercased(),
-              urlComps.port == originComps.port,
-              urlComps.path.hasPrefix("/storage/v1/") else {
+        guard expectedSizeBytes > 0, expectedSizeBytes <= WorkspaceFilesRules.maxDownloadBytes else {
             throw WorkspaceFilesError.invalidDownloadPath
         }
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        let delegate = SameOriginRedirectDelegate(origin: api.origin)
-        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        let (data, response) = try await session.data(for: request)
-        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+        let data: Data
+        do {
+            data = try await api.session.downloadStorage(url, size: expectedSizeBytes)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch APIError.invalidResponse {
+            // HumanSession.downloadStorage throws APIError.invalidResponse for non-200 storage responses (e.g. expired 410/403).
+            throw WorkspaceFilesError.linkExpired
+        } catch {
             throw WorkspaceFilesError.downloadFailed(status: 0)
         }
-        if status == 400 || status == 403 || status == 404 || status == 410 {
-            throw WorkspaceFilesError.linkExpired
+
+        guard await MainActor.run(body: { api.session.isActive }) else {
+            throw CancellationError()
         }
-        guard (200...299).contains(status) else {
-            throw WorkspaceFilesError.downloadFailed(status: status)
-        }
-        guard data.count <= WorkspaceFilesRules.maxDownloadBytes else {
-            throw WorkspaceFilesError.downloadFailed(status: 413)
-        }
+        try Task.checkCancellation()
 
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("commonswarm-downloads", isDirectory: true)
             .appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let safeName = WorkspaceFilesRules.sanitizedLocalFileName(fileName, fallbackID: "\(fileID)-v\(version)")
-        let destination = folder.appendingPathComponent(safeName, isDirectory: false)
-        try data.write(to: destination, options: .atomic)
-        return destination
+        do {
+            let safeName = WorkspaceFilesRules.sanitizedLocalFileName(fileName, fallbackID: "\(fileID)-v\(version)")
+            let destination = folder.appendingPathComponent(safeName, isDirectory: false)
+            try data.write(to: destination, options: [.atomic, .completeFileProtection])
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
     }
 }

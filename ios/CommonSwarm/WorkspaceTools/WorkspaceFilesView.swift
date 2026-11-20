@@ -126,11 +126,17 @@ struct WorkspaceFilesView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Files")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $store.activeShareItem) { item in
+        .sheet(
+            item: $store.activeShareItem,
+            onDismiss: { store.dismissActiveShare() }
+        ) { item in
             FileActivityShareSheet(fileURL: item.fileURL)
         }
         .task {
             await store.load(api: filesAPI)
+        }
+        .onDisappear {
+            store.retire()
         }
     }
 
@@ -212,7 +218,7 @@ struct WorkspaceFilesView: View {
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(errorForeground)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if case .ready = state {
+            } else if isCompleted(state) {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption)
@@ -230,7 +236,7 @@ struct WorkspaceFilesView: View {
             if !file.isRemoved {
                 HStack(spacing: 10) {
                     Button {
-                        Task { await store.download(file, api: filesAPI) }
+                        store.startDownload(file, api: filesAPI)
                     } label: {
                         HStack(spacing: 8) {
                             if case .preparing = state {
@@ -264,9 +270,9 @@ struct WorkspaceFilesView: View {
                     )
                     .accessibilityIdentifier("workspace-file-download-\(file.fileID)")
 
-                    if case .ready = state {
+                    if isCompleted(state) {
                         Button {
-                            store.openReadyDownload(for: file)
+                            store.startShareOrSave(file, api: filesAPI)
                         } label: {
                             Text("Share / Save")
                                 .font(.subheadline.weight(.semibold))
@@ -276,6 +282,7 @@ struct WorkspaceFilesView: View {
                                 .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .disabled(isPreparing(state))
                         .accessibilityLabel("Share or save \(file.name), version \(file.currentVersion)")
                         .accessibilityIdentifier("workspace-file-share-\(file.fileID)")
                     }
@@ -292,6 +299,13 @@ struct WorkspaceFilesView: View {
     private func isPreparing(_ state: WorkspaceFileDownloadState) -> Bool {
         if case .preparing = state { return true }
         return false
+    }
+
+    private func isCompleted(_ state: WorkspaceFileDownloadState) -> Bool {
+        switch state {
+        case .ready, .downloaded: true
+        default: false
+        }
     }
 }
 
