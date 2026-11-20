@@ -1016,3 +1016,81 @@ test("rollback injection leaves neither cursor nor batch", async () => {
   const positive = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(positive.status, 200, "positive control: normal transaction persists");
 });
+
+test("C2 hosted check coarse presence: DM-only check & ack do not advance workspace-visible presence or outsider activity; public mention control does", async () => {
+  const fixture = await seedFixture();
+  const outsider = randomUUID();
+  await sql`INSERT INTO auth.users (id, aud, role, email) VALUES (${outsider}::uuid, 'authenticated', 'authenticated', ${`outsider-${outsider}@example.test`})`;
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${outsider}::uuid, 'Outsider')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${fixture.workspace}::uuid, ${outsider}::uuid, 'member')`;
+
+  const readPresenceRow = async () => {
+    const [row] = await sql<{ last_command_at: Date | null; turn_at: Date | null; watcher_at: Date | null; channel_at: Date | null; listener_at: Date | null }[]>`
+      SELECT last_command_at, turn_at, watcher_at, channel_at, listener_at
+      FROM swarm.agent_presence
+      WHERE workspace_id = ${fixture.workspace}::uuid AND principal_id = ${fixture.principalA}::uuid
+    `;
+    return row ?? null;
+  };
+  const outsiderRosterSeat = async () => await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: outsider, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ roster: { agents: Array<{ principal_id: string; last_activity_at: string | null; messages_waiting: { count: number; since: string | null } }> } }[]>`
+      SELECT swarm_read.workspace_roster(${fixture.workspace}::uuid) AS roster`;
+    return row!.roster.agents.find((a) => a.principal_id === fixture.principalA)!;
+  });
+  const outsiderHomeSeat = async () => await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: outsider, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ overview: { workspaces: Array<{ workspace_id: string; people: Array<{ agents: Array<{ principal_id: string; status: { facts: { last_activity_at: string | null; messages_waiting_count: number; messages_waiting_since: string | null } } }> }> }> } }[]>`
+      SELECT swarm_read.home_overview() AS overview`;
+    return row!.overview.workspaces.find((w) => w.workspace_id === fixture.workspace)!.people.flatMap((p) => p.agents)
+      .find((a) => a.principal_id === fixture.principalA)!.status.facts;
+  });
+
+  // 1. DM-only witness: owner sends a channel-less DM to principalA.
+  const dm = await postSignal(fixture, fixture.principalA);
+  assert.ok(dm.id);
+  assert.deepEqual((await outsiderRosterSeat()).messages_waiting, { count: 0, since: null }, "DM-only unseen count hidden from outsider in roster");
+  assert.equal((await outsiderHomeSeat()).messages_waiting_count, 0, "DM-only unseen count hidden from outsider in home_overview");
+
+  const dmOpen = await runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(dmOpen.status, 200);
+  assert.equal((dmOpen.body.signals as Array<{ id: string }>).length, 1);
+  assert.equal(await readPresenceRow(), null, "DM-only hosted check open must NOT write workspace-visible agent_presence");
+  assert.equal((await outsiderRosterSeat()).last_activity_at, null, "DM-only hosted check batch must NOT advance outsider roster last_activity_at");
+  assert.equal((await outsiderHomeSeat()).last_activity_at, null, "DM-only hosted check batch must NOT advance outsider home_overview last_activity_at");
+
+  const dmAck = await runHarness<HarnessResult>(fixture, { operation: "single", ack: dmOpen.body.batch_id });
+  assert.equal(dmAck.status, 200);
+  assert.equal(await readPresenceRow(), null, "DM-only hosted check ack must NOT write workspace-visible agent_presence");
+  assert.equal((await outsiderRosterSeat()).last_activity_at, null, "DM-only hosted check ack must NOT advance outsider roster last_activity_at");
+  assert.equal((await outsiderHomeSeat()).last_activity_at, null, "DM-only hosted check ack must NOT advance outsider home_overview last_activity_at");
+
+  // 2. Public control: owner posts an unaddressed #general @mention of principalA.
+  const [mentionPosted] = await runHarness<HarnessResult[]>(fixture, {
+    operation: "post-signals",
+    ownerJwt: fixture.ownerJwt,
+    count: 1,
+    recipientPrincipal: fixture.principalA,
+    untilMs: 10 * 60 * 1000,
+    mention: true,
+  });
+  assert.equal(mentionPosted?.status, 200, JSON.stringify(mentionPosted));
+  const publicMentionId = (mentionPosted?.body.signal as { id?: string } | undefined)?.id;
+  assert.ok(publicMentionId);
+  assert.equal((await outsiderRosterSeat()).messages_waiting.count, 1, "public control: outsider sees public #general mention unseen count in roster");
+  assert.equal((await outsiderHomeSeat()).messages_waiting_count, 1, "public control: outsider sees public #general mention unseen count in home_overview");
+
+  const publicOpen = await runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(publicOpen.status, 200);
+  assert.equal((publicOpen.body.signals as Array<{ id: string }>).length, 1);
+  const presenceAfterPublic = await readPresenceRow();
+  assert.ok(presenceAfterPublic?.last_command_at instanceof Date, "public control: public mention check writes last_command_at");
+  assert.ok(presenceAfterPublic?.turn_at instanceof Date, "public control: public mention check writes turn_at");
+  assert.equal(presenceAfterPublic?.watcher_at, null, "hosted check never sets push watcher_at");
+  assert.equal(presenceAfterPublic?.channel_at, null, "hosted check never sets push channel_at");
+  assert.equal(presenceAfterPublic?.listener_at, null, "hosted check never sets push listener_at");
+  assert.ok((await outsiderRosterSeat()).last_activity_at !== null, "public control: outsider sees roster last_activity_at advance");
+  assert.ok((await outsiderHomeSeat()).last_activity_at !== null, "public control: outsider sees home_overview last_activity_at advance");
+});

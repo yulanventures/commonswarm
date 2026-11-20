@@ -6742,10 +6742,10 @@ function presenceRowFromWake(wake) {
     current_client_build: null
   };
 }
-function wakeReferenceTimestamp(presence, wake, now) {
+function pushLeaseTimestamp(presence, wake, now) {
   const source = presence ?? wake;
   if (!source) return null;
-  const candidates = [source.watcher_at, source.channel_at, source.listener_at, source.turn_at].map((value) => ({ iso: value ?? null, ms: parseTimestamp(value) })).filter((entry) => entry.iso !== null && entry.ms !== null && entry.ms <= now).sort((left, right) => right.ms - left.ms);
+  const candidates = [source.watcher_at, source.channel_at, source.listener_at].map((value) => ({ iso: value ?? null, ms: parseTimestamp(value) })).filter((entry) => entry.iso !== null && entry.ms !== null && entry.ms <= now).sort((left, right) => right.ms - left.ms);
   return candidates[0]?.iso ?? null;
 }
 function classifySeatStatus(input, now = Date.now()) {
@@ -6775,10 +6775,11 @@ function classifySeatStatus(input, now = Date.now()) {
   const workText = workingActive ? sanitizeSeatWorkText(input.workingOn, input.viewerInPrivateAudience === true) : null;
   const waitingSinceMs = parseTimestamp(input.waitingSince);
   const effectiveUnseenCount = typeof input.unseenCount === "number" && Number.isSafeInteger(input.unseenCount) && input.unseenCount >= 0 ? input.unseenCount : null;
+  const hasKnownUnseenCount = effectiveUnseenCount !== null && effectiveUnseenCount > 0;
   const hasWaitingRow = waitingSinceMs !== null && waitingSinceMs <= now && (effectiveUnseenCount === null || effectiveUnseenCount > 0);
   const waitingAgeMs = hasWaitingRow ? Math.max(0, now - waitingSinceMs) : null;
   const staleWaiting = waitingAgeMs !== null && waitingAgeMs >= SEAT_WAITING_STALE_MS;
-  const reportedUnseenCount = hasWaitingRow ? effectiveUnseenCount ?? 1 : 0;
+  const reportedUnseenCount = hasKnownUnseenCount ? effectiveUnseenCount : hasWaitingRow ? 1 : 0;
   const build = (kind, line2, indicator, attention, since, ageMs2) => ({
     kind,
     line: line2,
@@ -6811,22 +6812,37 @@ function classifySeatStatus(input, now = Date.now()) {
   if (input.serverWork === "disconnected") {
     return build("connection_off", "Needs reconnecting", "diamond", true, lastActivityIso, lastActivityAgeMs);
   }
+  if (input.statusUnavailable === true) {
+    return build("unknown", "Status unavailable", "ring", false, lastActivityIso, lastActivityAgeMs);
+  }
   const recentActivity = lastActivityAgeMs !== null && lastActivityAgeMs <= SEAT_WORK_RECENT_MS;
   const hasWorkClaim = Boolean(input.doingTodo || workingActive);
   const isWorking = input.serverWork === "working" || input.serverWork !== "idle" && hasWorkClaim && recentActivity;
-  const showWaiting = hasWaitingRow && (staleWaiting || !isWorking && !hasLiveListener);
-  if (showWaiting && input.waitingSince && waitingAgeMs !== null) {
-    const clock = formatSeatClock(input.waitingSince, now, input);
-    const unseenSuffix = effectiveUnseenCount !== null && effectiveUnseenCount > 0 ? ` \xB7 ${effectiveUnseenCount} unseen` : "";
-    const line2 = `Waiting since ${clock}${unseenSuffix}`;
-    return build(
-      "waiting",
-      line2,
-      staleWaiting ? "diamond" : "ring",
-      staleWaiting && !isTurnSeat,
-      input.waitingSince,
-      waitingAgeMs
-    );
+  const showWaiting = hasKnownUnseenCount || hasWaitingRow && (staleWaiting || !isWorking && !hasLiveListener);
+  if (showWaiting) {
+    if (hasWaitingRow && input.waitingSince && waitingAgeMs !== null) {
+      const clock = formatSeatClock(input.waitingSince, now, input);
+      const unseenSuffix = hasKnownUnseenCount ? ` \xB7 ${effectiveUnseenCount} unseen` : "";
+      const line2 = `Waiting since ${clock}${unseenSuffix}`;
+      return build(
+        "waiting",
+        line2,
+        staleWaiting || hasKnownUnseenCount ? "diamond" : "ring",
+        staleWaiting && !isTurnSeat,
+        input.waitingSince,
+        waitingAgeMs
+      );
+    }
+    if (hasKnownUnseenCount) {
+      return build(
+        "waiting",
+        `Waiting \xB7 ${effectiveUnseenCount} unseen`,
+        "diamond",
+        false,
+        null,
+        null
+      );
+    }
   }
   if (isWorking) {
     const doingMs = parseTimestamp(doingSinceIso);
@@ -6834,31 +6850,25 @@ function classifySeatStatus(input, now = Date.now()) {
     const refIso = doingMs !== null && doingMs <= now ? doingSinceIso : workMs !== null && workMs <= now ? workingSinceIso : lastActivityIso;
     const refMs = parseTimestamp(refIso);
     const workAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : lastActivityAgeMs;
-    const line2 = workAgeMs !== null ? `Working \xB7 ${formatSeatElapsed(workAgeMs)}` : "Working";
-    return build("working", line2, "dot", false, refIso, workAgeMs);
+    const line2 = workAgeMs !== null ? hasLiveListener ? `Working \xB7 ${formatSeatElapsed(workAgeMs)}` : `Working \xB7 ${formatSeatAgo(workAgeMs)}` : "Working";
+    return build("working", line2, hasLiveListener ? "dot" : "ring", false, refIso, workAgeMs);
+  }
+  if (!presenceProvided) {
+    return build("unknown", "Status unavailable", "ring", false, lastActivityIso, lastActivityAgeMs);
   }
   if (isTurnSeat) {
     const line2 = lastActivityAgeMs !== null ? `Turn-only, checks when opened \xB7 ${formatSeatAgo(lastActivityAgeMs)}` : "Turn-only, checks when opened";
     return build("turn_only", line2, "ring", false, lastActivityIso, lastActivityAgeMs);
   }
   if (hasLiveListener) {
-    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
-    const refIso = lastActivityIso ?? wakeIso;
-    const refMs = parseTimestamp(refIso);
-    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : classifiedPresence?.wake.age_ms ?? null;
-    const line2 = refAgeMs !== null ? `Listening \xB7 ${formatSeatAgo(refAgeMs)}` : "Listening";
-    return build("listening", line2, "dot", false, refIso, refAgeMs);
+    const leaseIso = pushLeaseTimestamp(input.presence, input.wake, now);
+    const leaseMs = parseTimestamp(leaseIso);
+    const leaseAgeMs = leaseMs !== null && leaseMs <= now ? Math.max(0, now - leaseMs) : classifiedPresence?.wake.age_ms ?? null;
+    const line2 = leaseAgeMs !== null ? `Listening \xB7 verified ${formatSeatAgo(leaseAgeMs)}` : "Listening";
+    return build("listening", line2, "dot", false, leaseIso, leaseAgeMs);
   }
-  if (presenceProvided) {
-    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
-    const refIso = lastActivityIso ?? wakeIso;
-    const refMs = parseTimestamp(refIso);
-    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : null;
-    const line2 = refAgeMs !== null ? `Not listening \xB7 ${formatSeatAgo(refAgeMs)}` : "Not listening";
-    return build("not_listening", line2, "ring", false, refIso, refAgeMs);
-  }
-  const line = lastActivityAgeMs !== null ? `Last active ${formatSeatAgo(lastActivityAgeMs)}` : "Connected";
-  return build("unknown", line, "ring", false, lastActivityIso, lastActivityAgeMs);
+  const line = lastActivityAgeMs !== null ? `Not listening \xB7 last active ${formatSeatAgo(lastActivityAgeMs)}` : "Not listening";
+  return build("not_listening", line, "ring", false, lastActivityIso, lastActivityAgeMs);
 }
 function classifyRosterSeatStatus(row, now = Date.now(), options = {}) {
   return classifySeatStatus({

@@ -9837,12 +9837,13 @@ import "../../styles/kylon-image-viewer.css";
             .sort((left, right) => Date.parse(right) - Date.parse(left));
           const latestActivityAt = activityTimes[0] ?? null;
           const status = peopleAgentStatus({ transport: agent.transport, turnOnly: agent.turnOnly,
-            presence: agent.presence, wake: agent.work?.facts.wake ?? null,
+            presence: agent.presence, wake: agent.work?.facts.wake,
             oldestUnobservedAt: waitingSince, unseenCount: waitingCount,
             lastActivityAt: latestActivityAt,
             workingOn: agent.work?.facts.working_on ? { at: agent.work.facts.working_on.at, until: agent.work.facts.working_on.until } : null,
             doingTodo: agent.work?.facts.doing ? { since: agent.work.facts.doing.since } : null,
             serverWork: agent.work?.work,
+            statusUnavailable: agent.presence === undefined && !agent.work,
             ownerName, own, mayManage, sample: sampleMode,
             connection: agent.work?.facts.connection,
             ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),

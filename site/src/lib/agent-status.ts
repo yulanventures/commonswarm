@@ -132,6 +132,7 @@ export interface PeopleAgentStatusInput extends AgentStatusInput {
   doingTodo?: { since?: string | null; startedAt?: string | null } | null;
   wake?: SeatWakeInput | null;
   serverWork?: "working" | "idle" | "disconnected";
+  statusUnavailable?: boolean;
   locale?: string;
   timeZone?: string;
   app?: string | null;
@@ -179,6 +180,7 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
     serverWork: input.serverWork,
     waitingSince: input.oldestUnobservedAt,
     unseenCount: input.unseenCount,
+    statusUnavailable: input.statusUnavailable,
     locale: input.locale,
     timeZone: input.timeZone,
   }, now);

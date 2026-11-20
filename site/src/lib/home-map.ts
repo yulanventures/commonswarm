@@ -112,7 +112,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     const facts: HomeAgentStatusInput = { own: yours, ownerName: owner?.name ?? null, ownerFirstName: names.get(row.ownerUserId) ?? null,
       mayManage: !!me && (elevated || yours), sample: input.sample, transport: work?.facts.transport ?? row.transport,
       turnOnly: work?.facts.turn_only ?? row.turnOnly, presence: row.presence,
-      wake: work?.facts.wake ?? null,
+      wake: work?.facts.wake,
       oldestUnobservedAt: work?.facts.messages_waiting_since ?? row.oldestUnobservedAt,
       unseenCount: work?.facts.messages_waiting_count ?? row.unseenCount ?? null,
       revoked: work?.facts.connection === "removed",
