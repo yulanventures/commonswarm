@@ -12133,17 +12133,17 @@ async function runPhaseCSerializedRace(
     assert.equal(ackAtRow.length, 1, "one exact ACK request is blocked");
     const ackRequestPid = ackAtRow[0]!.pid;
     claimPromise = issueDelivery(f, agent.token, claimCommand, sharedCommandId);
-    const claimAtOwner = await waitForBlockedBackends({
-      queryPattern: /FROM swarm\.users/,
+    const claimAtPrincipal = await waitForBlockedBackends({
+      queryPattern: /FROM swarm\.agent_principals/,
       blockerPids: [ackRequestPid],
       minCount: 1,
-      label: `Phase C ${mode}: claim queues at the canonical owner lock`,
+      label: `Phase C ${mode}: claim queues at the canonical per-agent principal lock`,
       mustRemainPending: [ackPromise, claimPromise],
     });
-    assert.equal(claimAtOwner.length, 1, "one exact claim request is queued");
-    assert.notEqual(claimAtOwner[0]!.pid, ackRequestPid, "requests use distinct backends");
-    assert.deepEqual(claimAtOwner[0]!.blockingPids, [ackRequestPid], "only the ACK blocks the claim");
-    assert.match(claimAtOwner[0]!.query, /FOR NO KEY UPDATE/, "claim waits on canonical owner authority");
+    assert.equal(claimAtPrincipal.length, 1, "one exact claim request is queued");
+    assert.notEqual(claimAtPrincipal[0]!.pid, ackRequestPid, "requests use distinct backends");
+    assert.deepEqual(claimAtPrincipal[0]!.blockingPids, [ackRequestPid], "only the ACK blocks the claim");
+    assert.match(claimAtPrincipal[0]!.query, /FOR NO KEY UPDATE/, "claim waits on canonical per-agent principal authority");
     const [queuedBucket] = await sql<{ count: number }[]>`
       SELECT count::int AS count FROM swarm.rate_buckets
       WHERE bucket_key = ${claimBucketKey} AND window_start = ${windowStart}::timestamptz
@@ -12211,7 +12211,7 @@ async function runPhaseCSerializedRace(
     const result: PhaseCRaceResult = {
       mode,
       windowStart,
-      serializedObserved: claimAtOwner[0]!.blockingPids.includes(ackRequestPid),
+      serializedObserved: claimAtPrincipal[0]!.blockingPids.includes(ackRequestPid),
       ack,
       claim,
       ackCountAfterWinner,
