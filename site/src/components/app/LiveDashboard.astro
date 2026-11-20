@@ -17316,7 +17316,13 @@ import "../../styles/kylon-image-viewer.css";
     let channelDialogPending = false;
     let channelDialogEpoch = 0;
     let channelArchiveBackToSettings = false;
-    type ChannelFocusReturn = { selector: string | null; element: HTMLElement | null; drawer: boolean; directory?: boolean };
+    type ChannelFocusReturn = {
+      selector: string | null;
+      element: HTMLElement | null;
+      drawer: boolean;
+      directory?: boolean;
+      drawerHeadingSelectors?: string[];
+    };
     let channelDialogReturn: ChannelFocusReturn | null = null;
     let channelDialogSucceeded = false;
     let channelDirectoryReturn: ChannelFocusReturn | null = null;
@@ -17346,6 +17352,12 @@ import "../../styles/kylon-image-viewer.css";
       const element = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
       const selector = element?.dataset.railChannelMenu !== undefined
         ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
+        : element?.dataset.railConversationMenu !== undefined
+        ? `[data-rail-conversation-menu="${CSS.escape(element.dataset.railConversationMenu)}"]`
+        : element?.dataset.railConversation !== undefined
+        ? `[data-rail-conversation="${CSS.escape(element.dataset.railConversation)}"]`
+        : element?.dataset.railChannel !== undefined
+        ? `[data-rail-channel="${CSS.escape(element.dataset.railChannel)}"]`
         : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
         : element?.hasAttribute("data-conversation-members-open") ? "[data-conversation-members-open]"
         : element?.classList.contains("hm-menu__trigger") ? ".hm-menu__trigger"
@@ -17355,14 +17367,49 @@ import "../../styles/kylon-image-viewer.css";
         : element?.hasAttribute("data-home-new-dm") ? "[data-home-new-dm]"
         : element?.hasAttribute("data-home-all-channels") ? "[data-home-all-channels]"
         : element?.id ? `#${CSS.escape(element.id)}` : null;
-      return { selector, element, drawer: layout.navigationOpen() };
+      const isConversationOpener =
+        element?.dataset.railConversationMenu !== undefined ||
+        element?.dataset.railConversation !== undefined ||
+        element?.hasAttribute("data-home-new-dm") ||
+        !!element?.closest("[data-home-dms]");
+      const isChannelOpener =
+        element?.dataset.railChannelMenu !== undefined ||
+        element?.dataset.railChannel !== undefined ||
+        element?.hasAttribute("data-home-new-channel") ||
+        element?.hasAttribute("data-home-all-channels") ||
+        !!element?.closest("[data-home-channels]");
+      const drawerHeadingSelectors = [
+        ...(element?.closest("[data-home-starred]") ? ["[data-home-starred] h2"] : []),
+        ...(isConversationOpener ? ["[data-home-dms] h2", "#hm-rail-dms-title"] : []),
+        ...(isChannelOpener ? ["[data-home-channels] h2", "#hm-rail-channels-title"] : []),
+        "[data-home-rail] h2",
+        ".hm-rail h2",
+        "h1",
+        "h2",
+      ];
+      return { selector, element, drawer: layout.navigationOpen(), drawerHeadingSelectors };
     };
     const restoreChannelFocus = (back: ChannelFocusReturn | null): boolean => {
       if (!back) return false;
       if (back.drawer) layout.openNavigation();
       const visible = (el: HTMLElement | null): el is HTMLElement => !!el?.isConnected && !!el.getClientRects().length && !el.closest("[hidden], [inert]");
-      const target = (back.selector ? all<HTMLElement>(back.selector).find(visible) : null) ?? back.element;
+      const target = visible(back.element)
+        ? back.element
+        : (back.selector ? all<HTMLElement>(back.selector).find(visible) ?? null : null);
       if (visible(target)) { target.focus({ preventScroll: true }); return true; }
+      if (back.drawer && layout.navigationOpen()) {
+        const drawer = one<HTMLElement>("dialog.cs-org-drawer[open]") ?? one<HTMLElement>("dialog[open]");
+        if (drawer) {
+          for (const headingSelector of back.drawerHeadingSelectors ?? ["[data-home-rail] h2", ".hm-rail h2", "h1", "h2"]) {
+            const heading = Array.from(drawer.querySelectorAll<HTMLElement>(headingSelector)).find(visible);
+            if (heading) {
+              if (heading.tabIndex < 0 && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+              heading.focus({ preventScroll: true });
+              return true;
+            }
+          }
+        }
+      }
       return false;
     };
 
