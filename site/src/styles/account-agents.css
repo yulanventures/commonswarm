@@ -37,7 +37,7 @@ live-dashboard [data-account-agents-dialog] :is(button, a):focus-visible {
 .account-agents__name { margin: 0; font-size: 14px; font-weight: 600; }
 .account-agents__model, .account-agents__empty, .account-agents__lead { margin: 4px 0 12px; color: var(--k-shell-secondary, var(--text-muted)); }
 .account-agents__reconnect { padding-inline: 10px; min-block-size: 32px; font-size: 12px; }
-.account-agents__reconnect-panel { margin-block-start: 10px; padding: 10px 12px; border: 1px solid var(--k-shell-line, var(--border)); border-radius: 8px; }
+.account-agents__reconnect-panel { margin-block-start: 10px; padding: 10px 12px; border: 1px solid var(--k-shell-control, var(--border)); border-radius: 8px; background: var(--k-shell-subtle, transparent); }
 .account-agents__reconnect-note { margin: 0 0 8px; color: var(--k-shell-secondary, var(--text-muted)); }
 .account-agents__reconnect-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .account-agents__reconnect-code { font-family: var(--font-mono, monospace); font-weight: 600; }

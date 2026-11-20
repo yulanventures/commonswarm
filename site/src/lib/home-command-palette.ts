@@ -369,6 +369,7 @@ export function renderCommandPaletteList(
       heading.className = "cp-group__title";
       heading.textContent = group;
       heading.id = `cp-group-${groups++}`;
+      heading.setAttribute("role", "presentation");
       section.setAttribute("role", "group");
       section.setAttribute("aria-labelledby", heading.id);
       currentGroupList = doc.createElement("ul");
