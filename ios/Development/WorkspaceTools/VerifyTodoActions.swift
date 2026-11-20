@@ -134,14 +134,29 @@ struct VerifyTodoActions {
         expect(commentCmds.count == 2 && commentCmds[0].command_id == commentCmds[1].command_id, "comment retry must reuse command_id")
         expect(await MainActor.run { detailVM.comments.count == 3 && detailVM.comments.last?.body == "Order confirmed!" }, "Posted comment must append")
 
-        // 7. Create todo with 503 retry reusing command_id
+        // 7. Lifecycle witness: retired listVM refuses to dispatch createTodo (0 network sends); activate() restores createTodo cleanly; 503 retry reuses command_id
+        let cmdsBeforeRetiredCreate = try await recordedCommands(origin).count
+        await MainActor.run { listVM.retire() }
+        let retiredCreate = await listVM.createTodo(title: "Should not send", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterRetiredCreate = try await recordedCommands(origin).count
+        expect(retiredCreate == nil && cmdsBeforeRetiredCreate == cmdsAfterRetiredCreate, "Retired listVM must refuse createTodo with ZERO network requests")
+
+        await MainActor.run { listVM.activate() }
         try await postFixture(origin.appending(path: "fixture/fail-next-write"))
         let unconfirmedCreate = await listVM.createTodo(title: "Schedule electrician", notes: "Morning slot", dueOn: "2026-11-28", assignee: atlasParty, api: todoAPI, workspaceID: ws.id)
         expect(unconfirmedCreate == nil, "503 create must remain unconfirmed")
         let created = await listVM.createTodo(title: "Schedule electrician", notes: "Morning slot", dueOn: "2026-11-28", assignee: atlasParty, api: todoAPI, workspaceID: ws.id)
-        expect(created != nil && created?.title == "Schedule electrician" && created?.assignee == atlasParty, "Retry create must succeed")
+        expect(created != nil && created?.title == "Schedule electrician" && created?.assignee == atlasParty, "Activated listVM retry create must succeed")
         let createCmds = try await recordedCommands(origin).filter { $0.kind == "todo_create" }
         expect(createCmds.count == 2 && createCmds[0].command_id == createCmds[1].command_id, "create retry must reuse command_id")
+
+        // Retired detailVM also refuses to dispatch writes with ZERO network requests until activate()
+        let cmdsBeforeRetiredDetail = try await recordedCommands(origin).count
+        await MainActor.run { detailVM.retire() }
+        let retiredState = await detailVM.setState(.doing, api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterRetiredDetail = try await recordedCommands(origin).count
+        expect(!retiredState && cmdsBeforeRetiredDetail == cmdsAfterRetiredDetail, "Retired detailVM must refuse writes with ZERO network requests")
+        await MainActor.run { detailVM.activate() }
 
         // 8. content_read_only downgrades cleanly & closes editors; production-shaped 403 {"error":"forbidden"} clears detail & list fail-closed
         _ = await MainActor.run { detailVM.beginEdit() }

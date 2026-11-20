@@ -171,7 +171,8 @@ struct TodoAPI {
     private func postCommand<Command: Encodable>(
         workspace: UUID,
         commandID: UUID,
-        command: Command
+        command: Command,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async throws -> (Data, Int) {
         var request = api.request("functions/v1/command")
         request.httpMethod = "POST"
@@ -182,7 +183,7 @@ struct TodoAPI {
             command: command
         )
         request.httpBody = try JSONEncoder().encode(envelope)
-        let (data, response) = try await api.session.data(for: request)
+        let (data, response) = try await api.session.data(for: request, canDispatch: canDispatch)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return (data, status)
     }
@@ -190,12 +191,14 @@ struct TodoAPI {
     private func sendTool<Arguments: Encodable, Response: Decodable>(
         workspace: UUID,
         tool: String,
-        arguments: Arguments
+        arguments: Arguments,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async throws -> Response {
         let (data, status) = try await postCommand(
             workspace: workspace,
             commandID: UUID(),
-            command: ToolCommand(tool: tool, arguments: arguments)
+            command: ToolCommand(tool: tool, arguments: arguments),
+            canDispatch: canDispatch
         )
         guard status != 0 else { throw APIError.invalidResponse }
         if status == 401 {
@@ -256,11 +259,18 @@ struct TodoAPI {
         return .unconfirmed(message: unconfirmedMessage)
     }
 
-    func listTodos(workspace: UUID, scope: TodoFilter, offset: Int = 0, limit: Int = 50) async throws -> TodoListPage {
+    func listTodos(
+        workspace: UUID,
+        scope: TodoFilter,
+        offset: Int = 0,
+        limit: Int = 50,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> TodoListPage {
         let wire: ListWireResponse = try await sendTool(
             workspace: workspace,
             tool: "todo_list",
-            arguments: ListArguments(scope: scope.rawValue, offset: offset, limit: min(max(limit, 1), 50))
+            arguments: ListArguments(scope: scope.rawValue, offset: offset, limit: min(max(limit, 1), 50)),
+            canDispatch: canDispatch
         )
         if wire.status == "refused" {
             throw TodoAPIError.refused(wire.reason ?? "unknown")
@@ -271,11 +281,17 @@ struct TodoAPI {
         return TodoListPage(todos: todos, nextOffset: wire.next_offset)
     }
 
-    func readTodo(workspace: UUID, todoID: UUID, commentOffset: Int = 0) async throws -> TodoReadResponse {
+    func readTodo(
+        workspace: UUID,
+        todoID: UUID,
+        commentOffset: Int = 0,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> TodoReadResponse {
         let wire: ReadWireResponse = try await sendTool(
             workspace: workspace,
             tool: "todo_read",
-            arguments: ReadArguments(todo_id: todoID.uuidString.lowercased(), comment_offset: max(commentOffset, 0))
+            arguments: ReadArguments(todo_id: todoID.uuidString.lowercased(), comment_offset: max(commentOffset, 0)),
+            canDispatch: canDispatch
         )
         if wire.status == "refused" {
             throw TodoAPIError.refused(wire.reason ?? "unknown")
@@ -292,7 +308,8 @@ struct TodoAPI {
         notes: String?,
         dueOn: String?,
         assignee: TodoParty?,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoDetail> {
         let unconfirmed = "The to-do may or may not have been saved. Retry or reload to check."
         do {
@@ -308,9 +325,12 @@ struct TodoAPI {
                         due_on: dueOn,
                         assign: assignee.map { CreateAssignWire(to: $0) }
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t add to-do.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }
@@ -323,7 +343,8 @@ struct TodoAPI {
         title: String,
         notes: String,
         dueOn: String?,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoDetail> {
         let unconfirmed = "The to-do may or may not have been updated. Retry or reload to check."
         do {
@@ -340,9 +361,12 @@ struct TodoAPI {
                         notes: notes,
                         due_on: dueOn
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t save changes.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }
@@ -353,7 +377,8 @@ struct TodoAPI {
         todoID: UUID,
         baseVersion: Int,
         to party: TodoParty?,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoDetail> {
         let unconfirmed = "The assignment may or may not have changed. Retry or reload to check."
         do {
@@ -368,9 +393,12 @@ struct TodoAPI {
                         base_version: baseVersion,
                         to: party
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t update assignment.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }
@@ -381,7 +409,8 @@ struct TodoAPI {
         todoID: UUID,
         baseVersion: Int,
         state: TodoState,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoDetail> {
         let unconfirmed = "The to-do state may or may not have changed. Retry or reload to check."
         do {
@@ -396,9 +425,12 @@ struct TodoAPI {
                         base_version: baseVersion,
                         state: state.rawValue
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t update to-do state.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }
@@ -409,7 +441,8 @@ struct TodoAPI {
         todoID: UUID,
         offerID: UUID,
         answer: TodoOfferAnswer,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoDetail> {
         let unconfirmed = "The request may or may not have been answered. Retry or reload to check."
         do {
@@ -420,9 +453,12 @@ struct TodoAPI {
                     todo_id: todoID.uuidString.lowercased(),
                     offer_id: offerID.uuidString.lowercased(),
                     answer: answer.rawValue
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t answer work request.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }
@@ -433,7 +469,8 @@ struct TodoAPI {
         todoID: UUID,
         body: String,
         mentions: [TodoParty],
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> TodoWriteOutcome<TodoComment> {
         let unconfirmed = "The comment may or may not have been posted. Retry or reload to check."
         do {
@@ -448,9 +485,12 @@ struct TodoAPI {
                         body: body,
                         mentions: mentions.isEmpty ? nil : mentions
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWrite(data: data, status: status, unconfirmedMessage: unconfirmed, fallbackRefusal: "Couldn’t post comment.")
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: unconfirmed)
         }

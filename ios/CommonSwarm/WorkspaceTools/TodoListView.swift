@@ -167,6 +167,9 @@ struct TodoListView: View {
         .task(id: viewModel.filter) {
             await load()
         }
+        .onAppear {
+            viewModel.activate()
+        }
         .onDisappear {
             viewModel.retire()
         }

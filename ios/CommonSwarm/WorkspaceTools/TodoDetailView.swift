@@ -113,6 +113,7 @@ struct TodoDetailView: View {
             )
         }
         .task { await load() }
+        .onAppear { viewModel.activate() }
         .onDisappear { viewModel.retire() }
     }
 
