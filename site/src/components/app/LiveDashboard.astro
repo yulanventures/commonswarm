@@ -2112,6 +2112,20 @@ import "../../styles/kylon-image-viewer.css";
     const modernConversationsConfirmed = new Set<string>();
     /** Reading-position anchor captured before Retry/Load older so the visible message never shifts pixels. */
     let pendingLoadOlderAnchor: { signalId: string; topInScroller: number } | null = null;
+    let loadOlderGeneration = 0;
+    const resetLoadOlderState = (clearError: boolean): void => {
+      loadOlderGeneration += 1;
+      pendingLoadOlderAnchor = null;
+      const more = one<HTMLElement>("[data-feed-more]");
+      if (more) more.style.minBlockSize = "";
+      if (clearError) {
+        const inlineError = one<HTMLElement>("[data-load-older-error]");
+        if (inlineError) {
+          inlineError.textContent = "";
+          inlineError.hidden = true;
+        }
+      }
+    };
     /** A `?dm=<id>` that returned 404 conversation_not_found or lost access (uniform unavailable state). */
     let unavailableDmConversationId: string | null = null;
     let mountedPreviewKey = "";
@@ -12392,7 +12406,7 @@ import "../../styles/kylon-image-viewer.css";
       // Restore controls already in the rebuilt DOM before the next event; defer only controls added on the next frame (Show more).
       queueMicrotask(() => restore(true));
     };
-    const renderFeed = (change: "history" | "latest" = "history"): void => {
+    const renderFeed = (change: "history" | "latest" | "older" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
       if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return;
@@ -13120,17 +13134,17 @@ import "../../styles/kylon-image-viewer.css";
        *
        * showChannelView must run first: the view is `hidden` until then, and a hidden element
        * has no scroll geometry to read or set. */
-      if (more && typeof pendingLoadOlderAnchor !== "undefined" && pendingLoadOlderAnchor !== null && change === "history") {
+      const applyingLoadOlder = change === "older" && typeof pendingLoadOlderAnchor !== "undefined" && pendingLoadOlderAnchor !== null;
+      if (more && applyingLoadOlder) {
         more.style.minBlockSize = "";
       }
-      if (wasAtBottom) {
-        if (typeof pendingLoadOlderAnchor !== "undefined") pendingLoadOlderAnchor = null;
+      if (wasAtBottom && !applyingLoadOlder) {
         scrollToNewest();
       } else {
         const el = feedScroller();
         const anchor = typeof pendingLoadOlderAnchor !== "undefined" ? pendingLoadOlderAnchor : null;
-        if (el && anchor !== null && change === "history") {
-          pendingLoadOlderAnchor = null;
+        if (el && anchor !== null) {
+          if (change === "older") pendingLoadOlderAnchor = null;
           const anchoredRow = all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
             .find((row) => row.dataset.signalId === anchor.signalId) ?? null;
           if (anchoredRow) {
@@ -13315,6 +13329,7 @@ import "../../styles/kylon-image-viewer.css";
             ? conversationHistory.nextBefore
             : signalCursor;
         if (reset) {
+          if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
           conversationSessionEpoch += 1;
           signalCursor = null;
           signalCutoff = new Date().toISOString();
@@ -13389,7 +13404,7 @@ import "../../styles/kylon-image-viewer.css";
         renderHomeRail();
         renderHomeShell();
         renderChannelBlocked();
-        renderFeed("history");
+        renderFeed(reset ? "history" : "older");
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
@@ -13402,6 +13417,7 @@ import "../../styles/kylon-image-viewer.css";
       const pinnedLegacyUserId = session?.user.id ?? "";
       const pinnedLegacyDmConvId = typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null;
       if (reset) {
+        if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
         if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
         signalCursor = null;
         signalCutoff = new Date().toISOString();
@@ -13458,7 +13474,7 @@ import "../../styles/kylon-image-viewer.css";
       const last = pageRows.at(-1);
       signalCursor = last ? { createdAt: last.createdAt, id: last.id } : cursor;
       signalHasMore = page.hasMore;
-      renderFeed();
+      renderFeed(reset ? "history" : "older");
       // An open Direct Message rereads its own history with the page it sits beside.
       if (reset && typeof activeDm !== "undefined" && activeDm && activeDmConversationId === null) void loadDirectHistory();
       void refreshDeliveryReceipts(workspaceId, version);
@@ -21727,6 +21743,7 @@ import "../../styles/kylon-image-viewer.css";
       if (!activeWorkspaceId || !signalHasMore || !button || button.disabled) return;
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
+      const myLoadOlderGen = ++loadOlderGeneration;
       const more = one<HTMLElement>("[data-feed-more]");
       const inlineError = one<HTMLElement>("[data-load-older-error]");
       const scroller = feedScroller();
@@ -21737,7 +21754,7 @@ import "../../styles/kylon-image-viewer.css";
       };
       document.addEventListener("focusin", trackFocusMove, true);
       // Capture the first visible message at the reading position before hiding the error notice
-      // or prepending older rows, and reserve `.dashboard__feed-more`'s height while pending.
+      // or prepending older rows, and reserve `.dashboard__feed-more`'s height across every pending redraw.
       let anchor: { signalId: string; topInScroller: number } | null = null;
       if (scroller) {
         const scrollerRect = scroller.getBoundingClientRect();
@@ -21767,7 +21784,7 @@ import "../../styles/kylon-image-viewer.css";
       try {
         await loadSignals(workspaceId, false, version);
       } catch (error) {
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        if (myLoadOlderGen !== loadOlderGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         pendingLoadOlderAnchor = null;
         if (inlineError) {
           inlineError.textContent = `${readableError(error)} The loaded updates are still here.`;
@@ -21776,8 +21793,10 @@ import "../../styles/kylon-image-viewer.css";
         if (more) more.style.minBlockSize = "";
       } finally {
         document.removeEventListener("focusin", trackFocusMove, true);
-        if (more && !inlineError?.hidden) more.style.minBlockSize = "";
-        else if (more && signalHasMore === false) more.style.minBlockSize = "";
+        if (myLoadOlderGen === loadOlderGeneration) {
+          pendingLoadOlderAnchor = null;
+          if (more) more.style.minBlockSize = "";
+        }
         button.disabled = false;
         button.textContent = "Load older updates";
         if (version === requestVersion && workspaceId === activeWorkspaceId) {
@@ -24833,7 +24852,7 @@ import "../../styles/kylon-image-viewer.css";
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: var(--s-3);
     padding: 0 clamp(var(--s-5), 4vw, var(--s-8)) var(--s-10);
   }

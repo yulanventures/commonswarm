@@ -26,7 +26,10 @@ function installConversations3DFixture() {
   f.failConversations = params.get("fail_conversations") ?? "";
   f.unjoinedOps = params.get("unjoined_ops") === "1";
   f.holdNextOlder = false;
+  f.failHeldOlder = false;
   f.releaseOlder = null as null | (() => void);
+  f.holdNextReactions = params.get("hold_reactions") === "1";
+  f.releaseReactions = null as null | (() => void);
   f.holdNextPost = false;
   f.failHeldPost = false;
   f.releasePost = null as null | (() => void);
@@ -215,6 +218,24 @@ function installConversations3DFixture() {
         ...historyByConv[notesConv].newest.map(stripConv),
       ]);
     }
+    if (url.pathname === "/rest/v1/signal_reactions") {
+      if (f.holdNextReactions) {
+        f.holdNextReactions = false;
+        await new Promise<void>((resolve) => { f.releaseReactions = resolve; });
+        f.releaseReactions = null;
+        return Response.json([
+          {
+            reaction_id: "77777777-7777-4777-8777-000000000001",
+            signal_id: groupNewest[0].id,
+            kind: "user",
+            id: peerAlex,
+            emoji: "👍",
+            created_at: "2026-11-19T16:21:00Z",
+          },
+        ]);
+      }
+      return Response.json([]);
+    }
     if (url.pathname === "/rest/v1/rpc/channel_unread") {
       return Response.json({
         workspace_id: f.workspace, generated_at: new Date().toISOString(),
@@ -281,6 +302,11 @@ function installConversations3DFixture() {
           if (f.holdNextOlder) {
             f.holdNextOlder = false;
             await new Promise<void>((resolve) => { f.releaseOlder = resolve; });
+            f.releaseOlder = null;
+            if (f.failHeldOlder) {
+              f.failHeldOlder = false;
+              return Response.json({ error: "service_unavailable", message: "History read failed." }, { status: 503 });
+            }
           }
           return Response.json({
             conversation: conv,
@@ -401,30 +427,74 @@ async function observeConversations3D() {
         await click("[data-load-older]:visible");
       }
       await wait("older 503 error visible", () => visible(one("[data-load-older-error]")));
+      const errorEl = one<HTMLElement>("[data-load-older-error]")!;
+      const errorHeight = errorEl.getBoundingClientRect().height;
+      if (window.innerWidth <= 400) {
+        check(errorHeight >= 30, `Expected wrapped 2-line phone error on 360px, got height ${errorHeight.toFixed(1)}px`);
+      }
+      const findMsg6 = () =>
+        [...document.querySelectorAll<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")]
+          .find((row) => (row.textContent ?? "").includes("Group DM message #6"))!;
       const loadBtn = one<HTMLButtonElement>("[data-load-older]")!;
       loadBtn.focus();
       check(document.activeElement === loadBtn, "Load older button must be focused before Retry");
-      const msg6 = [...document.querySelectorAll<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")]
-        .find((row) => (row.textContent ?? "").includes("Group DM message #6"))!;
+      const msg6 = findMsg6();
       check(!!msg6, "Group DM message #6 must be rendered");
       const topBefore = msg6.getBoundingClientRect().top;
 
+      let feedRebuildCount = 0;
+      const feedList = one<HTMLElement>("[data-feed-list]")!;
+      const rebuildObserver = new MutationObserver(() => { feedRebuildCount += 1; });
+      rebuildObserver.observe(feedList, { childList: true });
+
+      // Retry #1: held in flight, interrupted by a real background renderFeed() redraw (reactions), then fails 503.
       f.failOlderSticky = false;
       f.holdNextOlder = true;
+      f.failHeldOlder = true;
       await press("Enter");
-      await wait("retry request held in flight", () => typeof f.releaseOlder === "function");
-      const topWhilePending = msg6.getBoundingClientRect().top;
+      await wait("retry #1 request held in flight", () => typeof f.releaseOlder === "function");
+      const topWhilePending1 = findMsg6().getBoundingClientRect().top;
+      check(
+        Math.abs(topWhilePending1 - topBefore) <= 1.0,
+        `Designer #1: message #6 moved while Retry #1 pending (${topBefore.toFixed(1)} -> ${topWhilePending1.toFixed(1)})`,
+      );
+      let topWhilePendingAfterRedraw = topWhilePending1;
+      if (typeof f.releaseReactions === "function") {
+        const beforeRedraws = feedRebuildCount;
+        f.releaseReactions();
+        await wait("background renderFeed rebuilt feed while Retry #1 held", () => feedRebuildCount > beforeRedraws);
+        topWhilePendingAfterRedraw = findMsg6().getBoundingClientRect().top;
+        check(
+          Math.abs(topWhilePendingAfterRedraw - topBefore) <= 1.0,
+          `Designer #1: message #6 moved after background redraw during Retry #1 (${topBefore.toFixed(1)} -> ${topWhilePendingAfterRedraw.toFixed(1)})`,
+        );
+      }
+      f.releaseOlder();
+      await wait("retry #1 failed and restored error", () => visible(one("[data-load-older-error]")) && !one<HTMLButtonElement>("[data-load-older]")?.disabled);
+      const topAfterRetry1Fail = findMsg6().getBoundingClientRect().top;
+      check(
+        Math.abs(topAfterRetry1Fail - topBefore) <= 1.0,
+        `Designer #1: message #6 moved after Retry #1 error restored (${topBefore.toFixed(1)} -> ${topAfterRetry1Fail.toFixed(1)})`,
+      );
+      check(document.activeElement === loadBtn, "Focus must stay on Load older button after Retry #1 fails");
+
+      // Retry #2 (repeated retry): held in flight, then succeeds and prepends older page cleanly.
+      f.holdNextOlder = true;
+      f.failHeldOlder = false;
+      await press("Enter");
+      await wait("retry #2 request held in flight", () => typeof f.releaseOlder === "function");
+      const topWhilePending = findMsg6().getBoundingClientRect().top;
       check(
         Math.abs(topWhilePending - topBefore) <= 1.0,
-        `Designer #1: message #6 moved while pending (${topBefore.toFixed(1)} -> ${topWhilePending.toFixed(1)})`,
+        `Designer #1: message #6 moved while Retry #2 pending (${topBefore.toFixed(1)} -> ${topWhilePending.toFixed(1)})`,
       );
       if (f.capture === "designer-retry-tab-away") {
         one<HTMLTextAreaElement>("[data-composer-input]")?.focus();
       }
       f.releaseOlder();
       await wait("older final page prepended", () => (one("[data-feed-list]")?.textContent ?? "").includes("Older group DM history #1") && !visible(one("[data-load-older]")));
-      const msg6After = [...document.querySelectorAll<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")]
-        .find((row) => (row.textContent ?? "").includes("Group DM message #6"))!;
+      rebuildObserver.disconnect();
+      const msg6After = findMsg6();
       const topAfter = msg6After.getBoundingClientRect().top;
       check(
         Math.abs(topAfter - topBefore) <= 1.5,
@@ -443,7 +513,7 @@ async function observeConversations3D() {
         );
       }
       document.documentElement.dataset.step3dObservation = JSON.stringify({
-        ok: true, capture: f.capture, topBefore, topWhilePending, topAfter,
+        ok: true, capture: f.capture, errorHeight, topBefore, topWhilePending1, topWhilePendingAfterRedraw, topAfterRetry1Fail, topWhilePending, topAfter,
       });
       return;
     }
@@ -1011,8 +1081,8 @@ test("Step 3D-1 signed-in dashboard wires conversation_history cursors, post_sig
     const unknownConv = "deadbeef-dead-4eef-8eef-deadbeef0000";
     const cases: { name: string; width: number; height: number; query: string; screenshot?: boolean }[] = [
       { name: "flow-1024-light", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=flow&fail_older=1` },
-      { name: "designer-retry-360", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1` },
-      { name: "designer-retry-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1` },
+      { name: "designer-retry-360", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1&hold_reactions=1` },
+      { name: "designer-retry-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1&hold_reactions=1` },
       { name: "designer-retry-tab-away-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-tab-away&fail_older_sticky=1` },
       { name: "hezsec-drafts-and-audience-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-drafts-and-audience` },
       { name: "hezsec-held-omission-and-fences-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-held-omission-and-fences&hold_first_history=${groupConv}` },
