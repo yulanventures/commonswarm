@@ -69,6 +69,8 @@ export interface AgentWorkFacts {
   connection: 'live' | 'removed' | 'connection_off' | 'key_off' | 'key_ended' | 'paused';
   last_activity_at: IsoTime | null;            // latest server-recorded action by this agent
   messages_waiting_since: IsoTime | null;
+  messages_waiting_count?: number;
+  wake?: { watcher_at?: IsoTime | null; channel_at?: IsoTime | null; listener_at?: IsoTime | null; turn_at?: IsoTime | null } | null;
   doing: { todo_id: Uuid; title: string | null; since: IsoTime } | null; // title null without content access
   working_on: { signal_id: Uuid; at: IsoTime; until: IsoTime } | null;
 }

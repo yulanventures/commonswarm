@@ -58,7 +58,7 @@ test("revoked and suspended outrank activity; no presence row claims nothing", (
 
 import { peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "./agent-status.ts";
 const key = (overrides = {}) => ({ kind: "standing", horizonExpiresAt: null, boundDeviceId: "computer", lastUsedAt: at(60_000), issuedAt: at(30 * 86400000), newHostAt: null, suspendedAt: null, revokedAt: null, ...overrides });
-const input = (overrides = {}) => ({ transport: "local", ownerName: "Mei Langridge", own: true, mayManage: true, sample: false, presence: row({ last_command_at: at(1000) }), ...overrides });
+const input = (overrides = {}) => ({ transport: "local", ownerName: "Mei Langridge", own: true, mayManage: true, sample: false, presence: row({ last_command_at: at(1000), watcher_at: at(1000) }), timeZone: "UTC", ...overrides });
 
 test("dialog status precedence preserves terminal, security, delivery and activity facts", () => {
   const collision = key({ suspendedAt: at(1000), newHostAt: at(1000), revokedAt: at(1000) });
@@ -67,19 +67,29 @@ test("dialog status precedence preserves terminal, security, delivery and activi
     ["key-off", "Key turned off", { grant: collision, oldestUnobservedAt }],
     ["key-ended", "Connection ended", { grant: key({ connectionExpiresAt: at(1), connectionExpiredAt: null, newHostAt: at(1000) }), oldestUnobservedAt }],
     ["paused", "Access suspended", { grant: key({ suspendedAt: at(1000), newHostAt: at(1000) }), oldestUnobservedAt }],
-    ["stale-messages", "Hasn’t picked up messages for 3+ min", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt }],
+    ["stale-messages", "Waiting since 11:55 · 2 unseen", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt, unseenCount: 2 }],
+    ["stale-messages", "Waiting since 11:55", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt }],
     ["new-computer", "Used from a new computer", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
     ["new-computer", "Used from a new computer", { grant: key({ newHostAt: at(1000) }) }],
-    ["inactive", "Not active for 15 days", { presence: row({ last_command_at: at(15 * 86400000) }) }],
-    ["inactive", "Not active for 90 days", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
-    ["idle", "Not active yet", { presence: null }],
+    ["inactive", "Not listening · 15 d ago", { presence: row({ last_command_at: at(15 * 86400000) }) }],
+    ["inactive", "Not listening · 90 d ago", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
+    ["idle", "Not listening", { presence: null }],
     ["connected", "Connected", { presence: undefined }],
-    ["active", "Active now", {}],
-    ["active", "Active 2 hours ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
-    ["active", "Active 10 hours ago", { presence: row({ last_command_at: at(10 * 3600000) }) }],
-    ["active", "Active 3 hours ago", { presence: row({ last_command_at: at(3 * 3600000) }) }],
+    ["active", "Listening · just now", {}],
+    ["active", "Working · 3 min", { workingOn: { at: at(3 * 60000), until: at(-30 * 60000) } }],
+    ["idle", "Turn-only, checks when opened · 5 min ago", { transport: "hosted_mcp", turnOnly: true, presence: row({ last_command_at: at(5 * 60000), turn_at: at(5 * 60000) }) }],
+    ["idle", "Not listening · 2 h ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
+    ["active", "Listening · 2 h ago", { presence: row({ last_command_at: at(2 * 3600000), watcher_at: at(30000) }) }],
   ];
-  for (const [kind, label, facts] of cases) { const status = peopleAgentStatus(input(facts), NOW); assert.equal(status.kind, kind); assert.equal(status.label, label); assert.equal(status.attention, ["key-off", "key-ended", "paused", "stale-messages", "key-ends-soon", "new-computer"].includes(kind)); }
+  for (const [kind, label, facts] of cases) {
+    const status = peopleAgentStatus(input(facts), NOW);
+    assert.equal(status.kind, kind);
+    assert.equal(status.label, label);
+    assert.equal(status.attention, ["key-off", "key-ended", "paused", "stale-messages", "key-ends-soon", "new-computer"].includes(kind));
+    if (kind === "active") assert.equal(status.indicator, "dot", `${label} is verified live`);
+    else if (status.attention) assert.equal(status.indicator, "diamond", `${label} needs attention`);
+    else assert.equal(status.indicator, "ring", `${label} must never fake a live dot`);
+  }
   assert.equal(peopleAgentStatus(input({ grant: key({ kind: "timeboxed", horizonExpiresAt: at(-4 * 86400000) }) }), NOW).kind, "active");
 });
 
@@ -149,7 +159,8 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   const facts = input({ presence: row({ last_command_at: at(15 * 86400000) }), grant: key({ suspendedAt: at(1) }) });
   assert.equal(peopleAgentStatus(facts, NOW).kind, "paused");
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
-  assert.equal(resumed.label, "Not active for 15 days"); assert.equal(resumed.attention, false);
+  assert.equal(resumed.label, "Not listening · 15 d ago"); assert.equal(resumed.attention, false);
+  assert.equal(resumed.indicator, "ring");
   assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
   assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet.");
 });
@@ -204,7 +215,7 @@ test("home disconnect and local message guidance reuse the dialog fixes", () => 
   const waiting = new Date(2026, 9, 5, 10, 5).toISOString();
   const local = homeAgentState(input({ oldestUnobservedAt: waiting, hasWakePath: true }), clock);
   assert.equal(local.word, "Not picking up"); assert.equal(local.detail, "A message has waited since 10:05 am"); assert.equal(local.fix.action, "guide-local");
-  const noPath = homeAgentState(input({ oldestUnobservedAt: waiting }), clock);
+  const noPath = homeAgentState(input({ oldestUnobservedAt: waiting, presence: row({ last_command_at: at(1000) }) }), clock);
   assert.equal(noPath.word, "Idle"); assert.equal(noPath.attention, false);
 });
 
@@ -310,4 +321,39 @@ test("unknown policy with an old technical horizon does not invent a new-key rem
   const result = peopleAgentStatus(input({ grant: key({ kind: "timeboxed", horizonExpiresAt: at(1) }) }), NOW);
   assert.equal(result.fix.action, null);
   assert.notEqual(result.label, "Key ended");
+});
+
+test("C2 People & agents status matches shared classifier, never fakes a live dot, and omits private titles", () => {
+  const working = peopleAgentStatus(input({
+    workingOn: { at: at(3 * 60_000), until: at(-30 * 60_000) },
+    lastActivityAt: at(60_000),
+  }), NOW);
+  assert.equal(working.label, "Working · 3 min");
+  assert.equal(working.indicator, "dot");
+  assert.equal(working.seatStatus.work_text, null, "People & agents never exposes private titles in seat status");
+
+  const waiting = peopleAgentStatus(input({
+    oldestUnobservedAt: at(5 * 60_000),
+    unseenCount: 2,
+  }), NOW);
+  assert.equal(waiting.label, "Waiting since 11:55 · 2 unseen");
+  assert.equal(waiting.indicator, "diamond");
+  assert.equal(waiting.seatStatus.unseen_count, 2);
+
+  const hosted = peopleAgentStatus(input({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    presence: null,
+    lastActivityAt: at(5 * 60_000),
+  }), NOW);
+  assert.equal(hosted.label, "Turn-only, checks when opened · 5 min ago");
+  assert.equal(hosted.indicator, "ring");
+  assert.equal(hosted.kind, "idle");
+
+  const notListening = peopleAgentStatus(input({
+    presence: row({ last_command_at: at(2 * 3_600_000), watcher_at: at(10 * 60_000) }),
+  }), NOW);
+  assert.equal(notListening.label, "Not listening · 2 h ago");
+  assert.equal(notListening.indicator, "ring");
+  assert.equal(notListening.kind, "idle");
 });

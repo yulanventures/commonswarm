@@ -6424,6 +6424,460 @@ function choiceAnswerBody(labels, otherText) {
   if (otherText !== null) lines.push(`Other: ${otherText}`);
   return lines.join("\n");
 }
+
+// src/host/types.ts
+var AcpHostError = class extends Error {
+  code;
+  constructor(code2, message) {
+    super(message);
+    this.name = "AcpHostError";
+    this.code = code2;
+  }
+};
+var AcpVersionError = class extends AcpHostError {
+  constructor(message, code2 = "version_refused") {
+    super(code2, message);
+    this.name = "AcpVersionError";
+  }
+};
+var AcpVersionParseError = class extends AcpVersionError {
+  constructor(message) {
+    super(message, "version_unparseable");
+    this.name = "AcpVersionParseError";
+  }
+};
+
+// src/host/version.ts
+var CORE_IDENTIFIER = "(?:0|[1-9]\\d*)";
+var PRERELEASE_IDENTIFIER = "(?:0|[1-9]\\d*|[A-Za-z-][0-9A-Za-z-]*)";
+var BUILD_IDENTIFIER = "[0-9A-Za-z-]+";
+var SEMVER_SOURCE = `${CORE_IDENTIFIER}\\.${CORE_IDENTIFIER}\\.${CORE_IDENTIFIER}(?:-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*)?(?:\\+${BUILD_IDENTIFIER}(?:\\.${BUILD_IDENTIFIER})*)?`;
+var SEMVER_RE = new RegExp(`^${SEMVER_SOURCE}$`);
+function parseSemVer(value) {
+  if (!SEMVER_RE.test(value)) return null;
+  const withoutBuild = value.split("+", 1)[0];
+  const dash = withoutBuild.indexOf("-");
+  const coreText = dash === -1 ? withoutBuild : withoutBuild.slice(0, dash);
+  const prereleaseText = dash === -1 ? null : withoutBuild.slice(dash + 1);
+  const coreParts = coreText.split(".");
+  if (coreParts.length !== 3) return null;
+  return {
+    core: [BigInt(coreParts[0]), BigInt(coreParts[1]), BigInt(coreParts[2])],
+    prerelease: prereleaseText === null ? null : prereleaseText.split(".")
+  };
+}
+function compareSemVer(left, right) {
+  const a = parseSemVer(left);
+  const b = parseSemVer(right);
+  if (!a || !b) {
+    throw new AcpVersionParseError(
+      `cannot compare invalid semantic versions: ${JSON.stringify(left)} and ${JSON.stringify(right)}`
+    );
+  }
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] < b.core[index]) return -1;
+    if (a.core[index] > b.core[index]) return 1;
+  }
+  if (a.prerelease === null && b.prerelease === null) return 0;
+  if (a.prerelease === null) return 1;
+  if (b.prerelease === null) return -1;
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = a.prerelease[index];
+    const rightPart = b.prerelease[index];
+    if (leftPart === void 0) return -1;
+    if (rightPart === void 0) return 1;
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/.test(leftPart);
+    const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) {
+      return BigInt(leftPart) < BigInt(rightPart) ? -1 : 1;
+    }
+    if (leftNumeric) return -1;
+    if (rightNumeric) return 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+// src/cloud/wake-lease-constants.ts
+function printedCommand(prose, command) {
+  return `${prose}
+${command}`;
+}
+var WAKE_LEASE_RENEW_MS = 6e4;
+var WAKE_LEASE_STALE_MS = 3 * WAKE_LEASE_RENEW_MS;
+var ATTENDED_CANARY_WATCHER_WAIT_MS = WAKE_LEASE_RENEW_MS + 3e4;
+var WAKE_LEASE_STALE_LABEL = `${WAKE_LEASE_STALE_MS / 6e4} minutes`;
+var proofRemedy = (sessionContextPath, remedyCommand, contextSource, fallback) => `${sessionContextPath ? `${contextSource === "profile" ? "the profile's host session context" : "the operator's --session-context path"} ${sessionContextPath} was refused; ` : ""}` + (remedyCommand ? printedCommand("run this watcher with the verified context.", remedyCommand) : fallback ?? "inspect this seat's resume output for a verified live context on this host, then retry from that host session");
+function sanitizeWakeHostLabel(host) {
+  return host.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 120);
+}
+var holder = (surface, host) => surface === "h0_poll" ? "an H0 poll" : `a watcher on ${host === null ? "another host" : sanitizeWakeHostLabel(host)}`;
+var supersessionStep = "stop this watcher and use the surface that holds the lease";
+var NOTIFY_LEASE_RULES = {
+  notify_held_elsewhere: { exit: 76, sentence: (surface, host, command) => `${holder(surface, host)} holds this seat's wake surface; ${surface === "h0_poll" ? command === null ? "finish the poll there before starting it again" : printedCommand("finish the poll there before starting it again.", command) : command === null ? "stop it there or start the watcher again the same way it was started, with the agent token on stdin, adding --take-over" : printedCommand("stop it there or run the watcher with --take-over.", command.includes("--take-over") ? command : `${command} --take-over`)}` },
+  wake_lease_superseded: { exit: 76, sentence: (surface, host, command) => `${holder(surface, host)} took over this seat's wake surface; ${supersessionStep}` },
+  session_conflict: { exit: 76, sentence: () => "Another live session owns this seat and its session moved elsewhere; stop this watcher" },
+  session_expired: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's host session ended; ${proofRemedy(path, remedy, source, fallback)}` },
+  session_retired: { exit: 76, sentence: () => "This seat's host session was retired; start a new live session before starting its watcher" },
+  session_proof_missing: {
+    start: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `A managed seat's watcher needs a live session proof (or the profile's host session); ${proofRemedy(path, remedy, source, fallback)}` },
+    renew: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's session proof became missing during renewal; ${proofRemedy(path, remedy, source, fallback)}` }
+  },
+  session_proof_invalid: {
+    start: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `A managed seat's watcher needs a valid session proof (or the profile's host session); ${proofRemedy(path, remedy, source, fallback)}` },
+    renew: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's session proof became invalid during renewal; ${proofRemedy(path, remedy, source, fallback)}` }
+  }
+};
+function wakeLeaseRule(code2, phase) {
+  const rule = NOTIFY_LEASE_RULES[code2];
+  return "exit" in rule ? rule : rule[phase];
+}
+var NOTIFY_LEASE_EXITS = Object.fromEntries(
+  Object.keys(NOTIFY_LEASE_RULES).map((code2) => [code2, wakeLeaseRule(code2, "renew").exit])
+);
+var EXIT_NOTIFY_LEASE_LOST = NOTIFY_LEASE_EXITS.notify_held_elsewhere;
+
+// src/cloud/agent-presence.ts
+var AGENT_PRESENCE_LABELS = Object.freeze({
+  wake: Object.freeze({
+    live: "live",
+    stale: "stale",
+    turn: "turn",
+    none: "none"
+  }),
+  lastCall: "last call",
+  lastAck: "last ACK",
+  client: Object.freeze({
+    current: "current",
+    updateAvailable: "update available",
+    unknown: "unknown"
+  })
+});
+function ageMs(value, now) {
+  if (value === null) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : null;
+}
+function clientKind(row) {
+  if (row?.current_client_build === null || row === null) return "unknown";
+  if (row.last_command_at === null) return "unknown";
+  if (row.client_build === null) {
+    return "update available";
+  }
+  try {
+    return compareSemVer(row.client_build, row.current_client_build) < 0 ? "update available" : "current";
+  } catch {
+    return "unknown";
+  }
+}
+function classifyAgentPresence(row, now) {
+  const client = clientKind(row);
+  if (row === null) {
+    return {
+      wake: { kind: "none", route: null, age_ms: null, label: AGENT_PRESENCE_LABELS.wake.none },
+      last_call: null,
+      last_ack: null,
+      client: { kind: client, label: AGENT_PRESENCE_LABELS.client.unknown }
+    };
+  }
+  const push = ["watcher", "channel", "listener"].map((route) => ({ route, age: ageMs(row[`${route}_at`], now) })).filter((entry) => entry.age !== null).sort((left, right) => left.age - right.age)[0];
+  let wake;
+  if (push) {
+    const state = push.age <= WAKE_LEASE_STALE_MS ? "live" : "stale";
+    const kind = `${state} ${push.route}`;
+    wake = {
+      kind,
+      route: push.route,
+      age_ms: push.age,
+      label: `${AGENT_PRESENCE_LABELS.wake[state]} ${push.route}`
+    };
+  } else {
+    const turnAge = ageMs(row.turn_at, now);
+    wake = turnAge === null ? { kind: "none", route: null, age_ms: null, label: AGENT_PRESENCE_LABELS.wake.none } : { kind: "turn", route: "turn", age_ms: turnAge, label: AGENT_PRESENCE_LABELS.wake.turn };
+  }
+  const callAge = ageMs(row.last_command_at, now);
+  const ackAge = ageMs(row.last_ack_at, now);
+  const clientLabel = client === "update available" ? AGENT_PRESENCE_LABELS.client.updateAvailable : AGENT_PRESENCE_LABELS.client[client];
+  return {
+    wake,
+    last_call: callAge === null ? null : { age_ms: callAge, label: AGENT_PRESENCE_LABELS.lastCall },
+    last_ack: ackAge === null ? null : {
+      route: row.last_ack_via,
+      age_ms: ackAge,
+      label: AGENT_PRESENCE_LABELS.lastAck
+    },
+    client: { kind: client, label: clientLabel }
+  };
+}
+
+// src/cloud/idle-poll.ts
+var IDLE_POLL_DEFAULT_MS = 15e3;
+var IDLE_POLL_MAX_MS = 6e4;
+var IDLE_POLL_MIN_MS = 1e3;
+var WAKE_STALE_MULTIPLE = 3;
+var WAKE_STALE_MS = IDLE_POLL_MAX_MS * WAKE_STALE_MULTIPLE;
+var WAKE_STALE_LABEL = formatIdlePollDuration(WAKE_STALE_MS);
+function formatIdlePollDuration(ms) {
+  if (!Number.isSafeInteger(ms) || ms <= 0) {
+    throw new Error("idle poll duration must be a positive number of milliseconds");
+  }
+  if (ms % 6e4 === 0) return `${ms / 6e4}m`;
+  if (ms % 1e3 === 0) return `${ms / 1e3}s`;
+  throw new Error("idle poll duration must be a whole number of seconds");
+}
+var IDLE_POLL_MIN_LABEL = formatIdlePollDuration(IDLE_POLL_MIN_MS);
+var IDLE_POLL_DEFAULT_LABEL = formatIdlePollDuration(IDLE_POLL_DEFAULT_MS);
+var IDLE_POLL_MAX_LABEL = formatIdlePollDuration(IDLE_POLL_MAX_MS);
+function idlePollDurationExamples() {
+  const midMs = Math.min(IDLE_POLL_MAX_MS, IDLE_POLL_DEFAULT_MS * 2);
+  const labels = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const ms of [IDLE_POLL_DEFAULT_MS, midMs, IDLE_POLL_MAX_MS]) {
+    const label = formatIdlePollDuration(ms);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    labels.push(label);
+  }
+  return labels;
+}
+var IDLE_POLL_DURATION_EXAMPLES = idlePollDurationExamples();
+
+// src/protocol/seat-status.ts
+var SEAT_WORK_RECENT_MS = 30 * 6e4;
+var SEAT_WAITING_STALE_MS = WAKE_STALE_MS;
+var SEAT_WAKE_LEASE_STALE_MS = WAKE_LEASE_STALE_MS;
+function parseTimestamp(value) {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function formatSeatElapsed(ageMs2) {
+  const clamped = Math.max(0, ageMs2);
+  const minutes = Math.floor(clamped / 6e4);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h`;
+  return `${Math.floor(hours / 24)} d`;
+}
+function formatSeatAgo(ageMs2) {
+  const clamped = Math.max(0, ageMs2);
+  const minutes = Math.floor(clamped / 6e4);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+function calendarDayKey(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    ...timeZone ? { timeZone } : {}
+  }).formatToParts(date);
+  let year = date.getFullYear();
+  let month = date.getMonth() + 1;
+  let day = date.getDate();
+  for (const part of parts) {
+    if (part.type === "year") year = Number(part.value);
+    else if (part.type === "month") month = Number(part.value);
+    else if (part.type === "day") day = Number(part.value);
+  }
+  return { year, month, day };
+}
+function formatSeatClock(iso, now, options = {}) {
+  const ms = parseTimestamp(iso);
+  if (ms === null || !Number.isFinite(now)) return "recently";
+  const date = new Date(ms);
+  const clock = new Date(now);
+  const locale = options.locale ?? "en-US";
+  const timeZone = options.utcClock ? "UTC" : options.timeZone;
+  const suffix = options.utcClock ? " UTC" : "";
+  const timeParts = new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    ...timeZone ? { timeZone } : {}
+  }).formatToParts(date);
+  const hour = timeParts.find((p) => p.type === "hour")?.value ?? "00";
+  const minute = timeParts.find((p) => p.type === "minute")?.value ?? "00";
+  const hhmm = `${hour === "24" ? "00" : hour}:${minute}`;
+  const dDay = calendarDayKey(date, timeZone);
+  const cDay = calendarDayKey(clock, timeZone);
+  const dayDiff = Math.round(
+    (Date.UTC(cDay.year, cDay.month - 1, cDay.day) - Date.UTC(dDay.year, dDay.month - 1, dDay.day)) / 864e5
+  );
+  if (dayDiff === 0) return `${hhmm}${suffix}`;
+  if (dayDiff === 1) return `Yesterday ${hhmm}${suffix}`;
+  const datePrefix = new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "numeric",
+    ...dDay.year !== cDay.year ? { year: "numeric" } : {},
+    ...timeZone ? { timeZone } : {}
+  }).format(date);
+  return `${datePrefix}, ${hhmm}${suffix}`;
+}
+function sanitizeSeatWorkText(work, viewerInPrivateAudience = false) {
+  if (!work || typeof work.text !== "string") return null;
+  const scope = work.scope ?? "unknown";
+  const allowed = scope === "workspace" || scope === "public_channel" || scope === "private_channel" && viewerInPrivateAudience === true;
+  if (!allowed) return null;
+  const cleaned = work.text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+  return cleaned.length > 0 ? cleaned : null;
+}
+function presenceRowFromWake(wake) {
+  if (!wake) return null;
+  return {
+    last_command_at: null,
+    client_build: null,
+    watcher_at: wake.watcher_at ?? null,
+    channel_at: wake.channel_at ?? null,
+    listener_at: wake.listener_at ?? null,
+    turn_at: wake.turn_at ?? null,
+    last_ack_via: null,
+    last_ack_at: null,
+    current_client_build: null
+  };
+}
+function wakeReferenceTimestamp(presence, wake, now) {
+  const source = presence ?? wake;
+  if (!source) return null;
+  const candidates = [source.watcher_at, source.channel_at, source.listener_at, source.turn_at].map((value) => ({ iso: value ?? null, ms: parseTimestamp(value) })).filter((entry) => entry.iso !== null && entry.ms !== null && entry.ms <= now).sort((left, right) => right.ms - left.ms);
+  return candidates[0]?.iso ?? null;
+}
+function classifySeatStatus(input, now = Date.now()) {
+  const hosted = input.transport === "hosted_mcp";
+  const isTurnOnly = hosted || input.turnOnly === true;
+  const presenceProvided = input.presence !== void 0 || input.wake !== void 0;
+  const effectivePresence = input.presence !== void 0 ? input.presence : presenceRowFromWake(input.wake);
+  const classifiedPresence = presenceProvided ? classifyAgentPresence(effectivePresence, now) : null;
+  const wakeKind = hosted ? "turn" : classifiedPresence ? classifiedPresence.wake.kind : isTurnOnly ? "turn" : "none";
+  const hasLiveListener = !hosted && wakeKind.startsWith("live ");
+  const isTurnSeat = isTurnOnly || !hasLiveListener && wakeKind === "turn";
+  const workingSinceIso = input.workingOn?.since ?? input.workingOn?.at ?? input.workingOn?.createdAt ?? null;
+  const workingUntilMs = parseTimestamp(input.workingOn?.until);
+  const workingActive = Boolean(
+    input.workingOn && (input.workingOn.until === void 0 || input.workingOn.until === null || workingUntilMs !== null && workingUntilMs > now)
+  );
+  const doingSinceIso = input.doingTodo?.since ?? input.doingTodo?.startedAt ?? null;
+  const activityCandidates = [
+    input.lastActivityAt,
+    input.presence?.last_command_at,
+    workingActive ? workingSinceIso : null,
+    doingSinceIso
+  ].map((iso) => ({ iso: iso ?? null, ms: parseTimestamp(iso) })).filter((entry) => entry.iso !== null && entry.ms !== null && entry.ms <= now).sort((left, right) => right.ms - left.ms);
+  const lastActivityIso = activityCandidates[0]?.iso ?? null;
+  const lastActivityMs = activityCandidates[0]?.ms ?? null;
+  const lastActivityAgeMs = lastActivityMs !== null ? Math.max(0, now - lastActivityMs) : null;
+  const workText = workingActive ? sanitizeSeatWorkText(input.workingOn, input.viewerInPrivateAudience === true) : null;
+  const waitingSinceMs = parseTimestamp(input.waitingSince);
+  const effectiveUnseenCount = typeof input.unseenCount === "number" && Number.isSafeInteger(input.unseenCount) && input.unseenCount >= 0 ? input.unseenCount : null;
+  const hasWaitingRow = waitingSinceMs !== null && waitingSinceMs <= now && (effectiveUnseenCount === null || effectiveUnseenCount > 0);
+  const waitingAgeMs = hasWaitingRow ? Math.max(0, now - waitingSinceMs) : null;
+  const staleWaiting = waitingAgeMs !== null && waitingAgeMs >= SEAT_WAITING_STALE_MS;
+  const reportedUnseenCount = hasWaitingRow ? effectiveUnseenCount ?? 1 : 0;
+  const build = (kind, line2, indicator, attention, since, ageMs2) => ({
+    kind,
+    line: line2,
+    indicator,
+    attention,
+    stale_waiting: staleWaiting,
+    wake_kind: wakeKind,
+    since,
+    age_ms: ageMs2,
+    last_activity_at: lastActivityIso,
+    last_activity_age_ms: lastActivityAgeMs,
+    unseen_count: reportedUnseenCount,
+    work_text: kind === "working" ? workText : null
+  });
+  if (input.revoked || input.connection === "removed") {
+    return build("removed", "Removed", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  if (input.connection === "connection_off") {
+    return build("connection_off", "Connection turned off", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  if (input.connection === "key_off") {
+    return build("key_off", "Key turned off", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  if (input.connection === "paused" || input.suspended) {
+    return build("paused", input.suspended && input.connection !== "paused" ? "Needs reconnecting" : "Access suspended", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  if (input.connection === "key_ended") {
+    return build("key_ended", "Key ended", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  if (input.serverWork === "disconnected") {
+    return build("connection_off", "Needs reconnecting", "diamond", true, lastActivityIso, lastActivityAgeMs);
+  }
+  const recentActivity = lastActivityAgeMs !== null && lastActivityAgeMs <= SEAT_WORK_RECENT_MS;
+  const hasWorkClaim = Boolean(input.doingTodo || workingActive);
+  const isWorking = input.serverWork === "working" || input.serverWork !== "idle" && hasWorkClaim && recentActivity;
+  const showWaiting = hasWaitingRow && (staleWaiting || !isWorking && !hasLiveListener);
+  if (showWaiting && input.waitingSince && waitingAgeMs !== null) {
+    const clock = formatSeatClock(input.waitingSince, now, input);
+    const unseenSuffix = effectiveUnseenCount !== null && effectiveUnseenCount > 0 ? ` \xB7 ${effectiveUnseenCount} unseen` : "";
+    const line2 = `Waiting since ${clock}${unseenSuffix}`;
+    return build(
+      "waiting",
+      line2,
+      staleWaiting ? "diamond" : "ring",
+      staleWaiting && !isTurnSeat,
+      input.waitingSince,
+      waitingAgeMs
+    );
+  }
+  if (isWorking) {
+    const doingMs = parseTimestamp(doingSinceIso);
+    const workMs = workingActive ? parseTimestamp(workingSinceIso) : null;
+    const refIso = doingMs !== null && doingMs <= now ? doingSinceIso : workMs !== null && workMs <= now ? workingSinceIso : lastActivityIso;
+    const refMs = parseTimestamp(refIso);
+    const workAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : lastActivityAgeMs;
+    const line2 = workAgeMs !== null ? `Working \xB7 ${formatSeatElapsed(workAgeMs)}` : "Working";
+    return build("working", line2, "dot", false, refIso, workAgeMs);
+  }
+  if (isTurnSeat) {
+    const line2 = lastActivityAgeMs !== null ? `Turn-only, checks when opened \xB7 ${formatSeatAgo(lastActivityAgeMs)}` : "Turn-only, checks when opened";
+    return build("turn_only", line2, "ring", false, lastActivityIso, lastActivityAgeMs);
+  }
+  if (hasLiveListener) {
+    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
+    const refIso = lastActivityIso ?? wakeIso;
+    const refMs = parseTimestamp(refIso);
+    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : classifiedPresence?.wake.age_ms ?? null;
+    const line2 = refAgeMs !== null ? `Listening \xB7 ${formatSeatAgo(refAgeMs)}` : "Listening";
+    return build("listening", line2, "dot", false, refIso, refAgeMs);
+  }
+  if (presenceProvided) {
+    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
+    const refIso = lastActivityIso ?? wakeIso;
+    const refMs = parseTimestamp(refIso);
+    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : null;
+    const line2 = refAgeMs !== null ? `Not listening \xB7 ${formatSeatAgo(refAgeMs)}` : "Not listening";
+    return build("not_listening", line2, "ring", false, refIso, refAgeMs);
+  }
+  const line = lastActivityAgeMs !== null ? `Last active ${formatSeatAgo(lastActivityAgeMs)}` : "Connected";
+  return build("unknown", line, "ring", false, lastActivityIso, lastActivityAgeMs);
+}
+function classifyRosterSeatStatus(row, now = Date.now(), options = {}) {
+  return classifySeatStatus({
+    transport: row.transport,
+    turnOnly: row.turn_only,
+    connection: row.connection,
+    wake: row.wake ?? null,
+    lastActivityAt: row.last_activity_at,
+    workingOn: row.open_work ? {
+      since: row.open_work.since,
+      text: row.open_work.text,
+      // workspace_roster only returns open_work.text for workspace-wide or open-channel unaddressed work.
+      scope: row.open_work.text !== null ? "public_channel" : "private_channel"
+    } : null,
+    waitingSince: row.messages_waiting?.since ?? null,
+    unseenCount: row.messages_waiting?.count ?? null,
+    ...options
+  }, now);
+}
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -6537,6 +6991,9 @@ export {
   SEAT_ADMIN_ROLE_COPY,
   SEAT_ADMIN_SCOPED_SCOPES,
   SEAT_ADMIN_SEATS_PER_GRANT,
+  SEAT_WAITING_STALE_MS,
+  SEAT_WAKE_LEASE_STALE_MS,
+  SEAT_WORK_RECENT_MS,
   SIGNAL_REACTION_EMOJI_RULE,
   SIGNAL_REACTION_MAX_BYTES,
   SIGNAL_REACTION_MAX_PER_ACTOR,
@@ -6602,6 +7059,8 @@ export {
   choiceOptions,
   choiceOtherText,
   choiceTextUnsafe,
+  classifyRosterSeatStatus,
+  classifySeatStatus,
   compareHostedCheckCursor,
   decide,
   decideAdminAuthority,
@@ -6624,6 +7083,9 @@ export {
   evaluateGate,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
+  formatSeatAgo,
+  formatSeatClock,
+  formatSeatElapsed,
   formatWorkspaceSkillSuggestion,
   formatWorkspaceSkillSummary,
   formatWorkspaceSkillView,
@@ -6677,6 +7139,7 @@ export {
   reduceWorkspaceStream,
   registerUpcaster,
   requestHash,
+  sanitizeSeatWorkText,
   saveWorkspaceSkill,
   seatAdminCapability,
   seatAdminGrantPrecheck,

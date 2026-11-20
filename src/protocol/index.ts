@@ -26,3 +26,4 @@ export * from './workspace-skills.js';
 export * from './seat-admin.js';
 export * from './signal-reactions.js';
 export * from './choice-asks.js';
+export * from './seat-status.js';

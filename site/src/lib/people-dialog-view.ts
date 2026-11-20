@@ -296,11 +296,11 @@ function link(doc: Document, text: string, href: string, className: string, navi
 function hue(face: HTMLElement, person: PeopleDialogPerson) {
   const tint = personTint(person.id, person.own); if (tint !== null) face.dataset.hue = String(tint); return face;
 }
-/** The measured status as a pill with a shape: active is the working dot, needs attention the offline diamond, the rest a hollow ring. */
+/** The measured status as a pill with a shape: verified working/listening gets the live dot, attention/fault the diamond, the rest a hollow ring (never fake a live dot). */
 function chip(doc: Document, status: PeopleAgentStatus) {
   const element = node(doc, "span", "pd-status");
   const shape = node(doc, "span", "pd-status-shape"); shape.setAttribute("aria-hidden", "true");
-  shape.dataset.shape = status.attention ? "diamond" : status.kind === "active" ? "dot" : "ring";
+  shape.dataset.shape = status.indicator ?? (status.attention ? "diamond" : status.kind === "active" ? "dot" : "ring");
   element.append(shape, node(doc, "span", "", status.label));
   element.dataset.agentStatus = status.kind; element.dataset.attention = String(status.attention); return element;
 }
@@ -540,6 +540,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const details = node(doc, "span", "pd-agent-app pd-ellipsis");
     const word = node(doc, "span", "pd-agent-status", agent.status.label);
     word.dataset.agentStatus = agent.status.kind; word.dataset.attention = String(agent.status.attention);
+    if (agent.status.indicator) word.dataset.indicator = agent.status.indicator;
     const where = [agent.app, secondary].filter(Boolean).join(" · ");
     details.append(word, doc.createTextNode(` · ${where}`)); details.title = `${agent.status.label} · ${where}`;
     // What the row does not show stays in its accessible name: what to do about it, and Lists & docs access.

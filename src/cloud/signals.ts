@@ -37,6 +37,7 @@ import { CHAIN_MAX_HOPS } from "./ask-chain-constants.js";
 import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
 import type { ReplyTarget } from "../protocol/reply-placement.js";
 import type { MentionRosterEntry } from "../protocol/mention-address.js";
+import type { SeatWakeInput } from "../protocol/seat-status.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1633,8 +1634,12 @@ export interface RosterEntry {
   status: RosterStatus;
   connection: string;
   last_activity_at: string | null;
-  /** text is set only for a workspace-wide working-on; it is agent-written, untrusted data. */
+  /** text is set only for a workspace-wide or open-channel working-on; it is agent-written, untrusted data. */
   open_work: { since: string; text: string | null } | null;
+  /** Unacked visible directed messages waiting for this agent: count and oldest time, never their content. */
+  messages_waiting?: { count: number; since: string | null };
+  /** Coarse wake route timestamps from agent_presence (null when absent). */
+  wake?: SeatWakeInput | null;
   /** Open asks from this agent to people: a count and the oldest time, never their content. */
   waiting_on_people: { count: number; since: string | null };
   platform: string | null;
@@ -1670,6 +1675,33 @@ function parseRosterEntry(value: unknown): RosterEntry {
     (work !== null && (typeof work !== "object" || typeof work.since !== "string"))) {
     throw new SignalMalformedError("roster read returned a malformed agent");
   }
+  const messagesWaiting = row.messages_waiting as Record<string, unknown> | null | undefined;
+  let parsedMessagesWaiting: { count: number; since: string | null } | undefined;
+  if (messagesWaiting !== undefined && messagesWaiting !== null) {
+    if (typeof messagesWaiting !== "object" || Array.isArray(messagesWaiting)
+      || !Number.isSafeInteger(messagesWaiting.count) || (messagesWaiting.count as number) < 0) {
+      throw new SignalMalformedError("roster read returned malformed messages_waiting");
+    }
+    parsedMessagesWaiting = {
+      count: messagesWaiting.count as number,
+      since: nullableText(messagesWaiting.since, "messages_waiting since"),
+    };
+  }
+  const wake = row.wake as Record<string, unknown> | null | undefined;
+  let parsedWake: SeatWakeInput | null | undefined;
+  if (wake === null) {
+    parsedWake = null;
+  } else if (wake !== undefined) {
+    if (typeof wake !== "object" || Array.isArray(wake)) {
+      throw new SignalMalformedError("roster read returned malformed wake");
+    }
+    parsedWake = {
+      watcher_at: nullableText(wake.watcher_at, "wake watcher_at"),
+      channel_at: nullableText(wake.channel_at, "wake channel_at"),
+      listener_at: nullableText(wake.listener_at, "wake listener_at"),
+      turn_at: nullableText(wake.turn_at, "wake turn_at"),
+    };
+  }
   return {
     principal_id: checkedUuid(row.principal_id, "roster principal_id"),
     name: row.name,
@@ -1680,6 +1712,8 @@ function parseRosterEntry(value: unknown): RosterEntry {
     connection: row.connection,
     last_activity_at: nullableText(row.last_activity_at, "last_activity_at"),
     open_work: work === null ? null : { since: work.since as string, text: nullableText(work.text, "open_work text") },
+    ...(parsedMessagesWaiting !== undefined ? { messages_waiting: parsedMessagesWaiting } : {}),
+    ...(parsedWake !== undefined ? { wake: parsedWake } : {}),
     waiting_on_people: { count: waiting.count as number, since: nullableText(waiting.since, "waiting since") },
     platform: nullableText(row.platform, "platform"),
     job: nullableText(row.job, "job"),

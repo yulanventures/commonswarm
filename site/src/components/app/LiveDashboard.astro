@@ -1916,6 +1916,7 @@ import "../../styles/kylon-image-viewer.css";
     turnOnly?: boolean;
     ownerUserId: string;
     oldestUnobservedAt?: string | null;
+    unseenCount?: number | null;
     presence?: AgentPresenceRow | null;
     joinedAt?: string | null;
   }
@@ -3423,11 +3424,19 @@ import "../../styles/kylon-image-viewer.css";
               }
             }
           };
-          const [wakeRead, presenceRead] = await Promise.all([
-            api.schema("swarm_read")
+          const readWakePath = async () => {
+            const withCount = await api.schema("swarm_read")
+              .from("agent_wake_path")
+              .select("principal_id,oldest_unobserved_at,unseen_count")
+              .eq("workspace_id", workspaceId);
+            if (!withCount.error) return withCount;
+            return await api.schema("swarm_read")
               .from("agent_wake_path")
               .select("principal_id,oldest_unobserved_at")
-              .eq("workspace_id", workspaceId),
+              .eq("workspace_id", workspaceId);
+          };
+          const [wakeRead, presenceRead] = await Promise.all([
+            readWakePath(),
             readPresence(),
           ]);
           let enriched = result;
@@ -3436,9 +3445,16 @@ import "../../styles/kylon-image-viewer.css";
               row.principal_id,
               row.oldest_unobserved_at,
             ]));
+            const unseen = new Map((wakeRead.data ?? []).map(row => [
+              row.principal_id,
+              typeof (row as { unseen_count?: unknown }).unseen_count === "number"
+                ? (row as { unseen_count: number }).unseen_count
+                : null,
+            ]));
             enriched = enriched.map(agent => ({
               ...agent,
               oldestUnobservedAt: oldest.get(agent.principalId) ?? null,
+              unseenCount: unseen.get(agent.principalId) ?? null,
             }));
           }
           if (presenceRead.available) {
@@ -9809,8 +9825,20 @@ import "../../styles/kylon-image-viewer.css";
           const approval = own && householdConnectionsReadState === "succeeded"
             ? householdConnections.filter((connection) => connection.principal_id === agent.principalId)
               .map(connectionApproval).find((value) => value !== null) ?? null : null;
+          const waitingSince = agent.oldestUnobservedAt ?? agent.work?.facts.messages_waiting_since ?? null;
+          const waitingCount = agent.unseenCount ?? agent.work?.facts.messages_waiting_count ?? null;
+          const activityTimes = [agent.presence?.last_command_at, agent.work?.facts.last_activity_at]
+            .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
+            .sort((left, right) => Date.parse(right) - Date.parse(left));
+          const latestActivityAt = activityTimes[0] ?? null;
           const status = peopleAgentStatus({ transport: agent.transport, turnOnly: agent.turnOnly,
-            presence: agent.presence, oldestUnobservedAt: agent.oldestUnobservedAt, ownerName, own, mayManage, sample: sampleMode,
+            presence: agent.presence, wake: agent.work?.facts.wake ?? null,
+            oldestUnobservedAt: waitingSince, unseenCount: waitingCount,
+            lastActivityAt: latestActivityAt,
+            workingOn: agent.work?.facts.working_on ? { at: agent.work.facts.working_on.at, until: agent.work.facts.working_on.until } : null,
+            doingTodo: agent.work?.facts.doing ? { since: agent.work.facts.doing.since } : null,
+            serverWork: agent.work?.work,
+            ownerName, own, mayManage, sample: sampleMode,
             connection: agent.work?.facts.connection,
             ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),
             grant: grant ? { ...grant, kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
@@ -9820,7 +9848,7 @@ import "../../styles/kylon-image-viewer.css";
           const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence, own, ownerFirstName: ownerName?.trim().split(/\s+/)[0] ?? null }).receive;
           const technical = [`Agent ID: ${agent.principalId}`, `Connection: ${agent.transport === "hosted_mcp" ? "Hosted MCP · OAuth connector" : agent.transport === "local" ? "Local" : "Not reported"}`];
           const presenceLine = agentPresenceLine(agent.presence); if (presenceLine) technical.push(presenceLine);
-          const wakeMark = wakePathMark(agent.oldestUnobservedAt); if (wakeMark) technical.push(wakeMark);
+          const wakeMark = wakePathMark(waitingSince); if (wakeMark) technical.push(wakeMark);
           let grantRisk: string | null = null;
           if (grant) {
             if (tokenMatches) technical.push(`Key ID: ${grant.tokenId}`);
@@ -9833,7 +9861,7 @@ import "../../styles/kylon-image-viewer.css";
           }
           return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames), rawName: agent.name,
             ownerId: agent.ownerUserId, ownerName, model: agent.model, app: null, hosted: agent.transport === "hosted_mcp", status, receive,
-            lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? peopleAgentActivityTime(agent.presence.last_command_at, now) : "Not active yet",
+            lastActive: latestActivityAt ? peopleAgentActivityTime(latestActivityAt, now) : agent.presence === undefined && !agent.work ? "Not reported" : "Not active yet",
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
             key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
             accessReadState: householdConnectionsReadState,
