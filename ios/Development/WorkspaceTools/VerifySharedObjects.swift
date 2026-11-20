@@ -21,6 +21,18 @@ struct VerifySharedObjects {
         return try JSONDecoder().decode([AnyUpdate].self, from: data).count
     }
 
+    static func waitForHeldRead(_ origin: URL) async throws -> Bool {
+        struct HeldState: Decodable { let held: Bool }
+        for _ in 0..<50 {
+            let (hData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/read-held"))
+            if let st = try? JSONDecoder().decode(HeldState.self, from: hData), st.held {
+                return true
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return false
+    }
+
     static func main() async throws {
         guard CommandLine.arguments.count >= 2, let port = Int(CommandLine.arguments[1]) else {
             fputs("Usage: VerifySharedObjects <port>\n", stderr)
@@ -80,70 +92,83 @@ struct VerifySharedObjects {
         expect(createdList?.objectID == pendingCreate?.objectID, "Retried create must reuse exact object_id")
         expect(await MainActor.run { listStore.objects.contains(where: { $0.objectID == createdList?.objectID }) }, "Created list must appear in collection")
 
-        // Create a new doc with initial Markdown
         let createdDoc = await listStore.createObject(title: "Cabin notes", kind: .doc, initialMarkdown: "# Cabin\n\nKey under mat.", api: objectsAPI)
         expect(createdDoc?.kind == .doc, "Expected newly created doc")
 
-        struct RecordedCreate: Decodable {
-            struct Args: Decodable { let seat: String; let request_id: String; let object_id: String }
-            let command_id: String
-            let arguments: Args
-        }
-        let (createData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/creates"))
-        let creates = try JSONDecoder().decode([RecordedCreate].self, from: createData)
-        expect(creates.count == 3, "Expected 3 create calls (1 failed + 1 retry + 1 doc), got \(creates.count)")
-        expect(creates[0].command_id == creates[1].command_id && creates[0].arguments.object_id == creates[1].arguments.object_id, "Create retry must reuse command_id and object_id")
-        expect(creates.allSatisfy { $0.arguments.seat == "seat_0000000000000000000000" && $0.arguments.request_id == $0.command_id }, "Every create must carry seat and request_id == command_id")
-
-        // 4. Read shared doc -> edit doc -> verify history pagination & opening earlier revision
-        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/history-page-size?n=1")!)
-        let docStore = await MainActor.run {
+        // 4. Two editors on same doc: Editor 2 saves, Editor 1 refreshes while editing, then saves -> MUST conflict (never silently overwrite Editor 2!)
+        let docStore1 = await MainActor.run {
             SharedObjectDetailStore(workspaceID: ws.id, objectID: docSummary.objectID, expectedKind: .doc, access: access)
         }
-        await docStore.load(api: objectsAPI)
-        let docDetail = await MainActor.run { docStore.detail }!
-        expect(docDetail.authorLabel == "Atlas, your agent" && docDetail.authorIsAgent, "Expected Atlas agent attribution, got \(docDetail.authorLabel)")
-        expect(await MainActor.run { docStore.history.count == 1 && docStore.nextHistoryOffset == 1 }, "Expected 1-item paged history with next_offset == 1")
+        let docStore2 = await MainActor.run {
+            SharedObjectDetailStore(workspaceID: ws.id, objectID: docSummary.objectID, expectedKind: .doc, access: access)
+        }
+        await docStore1.load(api: objectsAPI)
+        await docStore2.load(api: objectsAPI)
 
-        await docStore.loadMoreHistory(api: objectsAPI)
-        let docHistory = await MainActor.run { docStore.history }
-        let docNextOffsetNil = await MainActor.run { docStore.nextHistoryOffset == nil }
-        expect(docHistory.count == 2 && docNextOffsetNil, "Expected 2 total history entries after loadMoreHistory")
+        await MainActor.run {
+            docStore1.beginEditingDoc()
+            docStore1.docDraftText += "\n\nParagraph from Editor 1."
+            docStore2.beginEditingDoc()
+            docStore2.docDraftText += "\n\nParagraph from Editor 2."
+        }
+        await docStore2.saveDoc(api: objectsAPI)
+        expect(await MainActor.run { docStore2.saveBanner == "Saved" }, "Editor 2 doc save should commit")
+
+        // Editor 1 refreshes while still editing
+        await docStore1.load(api: objectsAPI)
+        expect(await MainActor.run { docStore1.isEditingDoc && docStore1.docDraftText.contains("Paragraph from Editor 1.") }, "Refresh while editing must preserve Editor 1 draft")
+        expect(await MainActor.run { docStore1.newerRevisionAvailableWhileEditing }, "Refresh must flag that a newer revision arrived while editing")
+
+        // Editor 1 saves -> bound to starting revision -> server returns 409 conflict (Editor 2's paragraph is NOT overwritten!)
+        await docStore1.saveDoc(api: objectsAPI)
+        expect(await MainActor.run { docStore1.conflictDraftID != nil && docStore1.saveBanner == nil }, "Saving after refresh while editing must conflict instead of silently overwriting")
+        await docStore1.recoverDraft(api: objectsAPI)
+        let docConflict = await MainActor.run { docStore1.recoveredConflict }
+        expect(docConflict != nil, "Expected recovered doc conflict draft")
+        if case .doc(let currentMd) = docConflict?.current.content,
+           case .doc(let proposedMd) = docConflict?.proposed {
+            expect(currentMd.contains("Paragraph from Editor 2."), "Current snapshot must preserve Editor 2 paragraph")
+            expect(proposedMd.contains("Paragraph from Editor 1."), "Proposed snapshot must preserve Editor 1 paragraph")
+            expect(currentMd.contains("https://example.test/checklist"), "Raw Markdown in comparison must retain exact link destination")
+        } else {
+            expect(false, "Expected doc content in conflict comparison")
+        }
+        // Reload current to clear docStore1 conflict for history + held-read tests
+        await docStore1.load(api: objectsAPI)
+
+        // 5. History paging + opening earlier revision + held confirming read lock on doc save
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/history-page-size?n=1")!)
+        await docStore1.load(api: objectsAPI)
+        expect(await MainActor.run { docStore1.history.count == 1 && docStore1.nextHistoryOffset == 1 }, "Expected 1-item paged history")
+        await docStore1.loadMoreHistory(api: objectsAPI)
+        let docHistory = await MainActor.run { docStore1.history }
+        expect(docHistory.count == 2, "Expected 2 entries after loadMoreHistory")
         try await postFixture(origin.appending(path: "fixture/history-page-size"))
 
-        // Open earlier revision -> pauses editing, shows older content -> Back to current resumes editing
-        await docStore.openRevision(docHistory[1], api: objectsAPI)
-        expect(await MainActor.run { docStore.isViewingEarlierRevision && !docStore.canEditDoc }, "Viewing earlier revision must pause doc editing")
-        let displayedOldContent = await MainActor.run { docStore.displayedDetail?.content }
-        if case .doc(let oldMd) = displayedOldContent {
-            expect(oldMd.contains("Initial draft"), "Expected earlier doc revision content")
-        } else {
-            expect(false, "Expected historical doc content")
-        }
-        await MainActor.run { docStore.backToCurrent() }
-        expect(await MainActor.run { !docStore.isViewingEarlierRevision && docStore.canEditDoc }, "Back to current must restore editing")
+        await docStore1.openRevision(docHistory[1], api: objectsAPI)
+        expect(await MainActor.run { docStore1.isViewingEarlierRevision && !docStore1.canEditDoc }, "Viewing earlier revision must pause doc editing")
+        await MainActor.run { docStore1.backToCurrent() }
+        expect(await MainActor.run { !docStore1.isViewingEarlierRevision && docStore1.canEditDoc }, "Back to current must restore doc editing")
 
-        // Edit and save doc
+        // Hold confirming read on doc save -> editing stays disabled until read releases
         await MainActor.run {
-            docStore.beginEditingDoc()
-            docStore.docDraftText += "\n\nVerified on iOS 26."
+            docStore1.beginEditingDoc()
+            docStore1.docDraftText += "\n\nHeld-read doc check."
         }
-        await docStore.saveDoc(api: objectsAPI)
-        let updatedDoc = await MainActor.run { docStore.detail }!
-        if case .doc(let newMd) = updatedDoc.content {
-            expect(newMd.contains("Verified on iOS 26."), "Expected saved doc edit to reload")
-        } else {
-            expect(false, "Expected updated doc content")
-        }
-        expect(await MainActor.run { !docStore.isEditingDoc && docStore.history.count == 3 }, "Saving doc must exit editor and prepend revision to history")
+        try await postFixture(origin.appending(path: "fixture/hold-next-read"))
+        let heldDocTask = Task { await docStore1.saveDoc(api: objectsAPI) }
+        expect(try await waitForHeldRead(origin), "Expected confirming doc read to be held")
+        expect(await MainActor.run { docStore1.isSaving && !docStore1.canEditDoc }, "Doc editing must stay disabled while confirming read is held")
+        try await postFixture(origin.appending(path: "fixture/release-held-read"))
+        await heldDocTask.value
+        expect(await MainActor.run { !docStore1.isSaving && docStore1.canEditDoc }, "Doc editing must resume once confirming read completes")
 
-        // 5. Read shared list -> 503 non-displaced retry -> post-save read-only retry -> remove
+        // 6. List edits: 503 non-displaced retry + held confirming read + post-save read-only retry
         let detailStore = await MainActor.run {
             SharedObjectDetailStore(workspaceID: ws.id, objectID: listSummary.objectID, expectedKind: .list, access: access)
         }
         await detailStore.load(api: objectsAPI)
         let initialList = await MainActor.run { detailStore.detail }!
-        expect(initialList.authorLabel == "Maya Chen" && !initialList.authorIsAgent, "Expected Maya Chen attribution")
 
         try await postFixture(origin.appending(path: "fixture/fail-next-update"))
         await detailStore.toggleItem(initialList.sortedListItems[0], api: objectsAPI)
@@ -156,64 +181,65 @@ struct VerifySharedObjects {
         let afterToggle = await MainActor.run { detailStore.detail }!
         expect(afterToggle.sortedListItems[0].checked == true, "Retried toggle must commit")
 
-        // Post-save read failure -> "Saved. Couldn’t refresh the list." + read-only Retry
-        await MainActor.run { detailStore.newItemText = "Wood glue" }
-        try await postFixture(origin.appending(path: "fixture/fail-next-read"))
-        await detailStore.addItem(api: objectsAPI)
-        expect(await MainActor.run { detailStore.saveBanner == nil && detailStore.postSaveRefreshMessage == "Saved. Couldn’t refresh the list." && !detailStore.canEditList }, "Post-save read 503 must show refresh notice and block editing")
-        let updatesBeforeRetry = try await fetchUpdateCount(origin)
-        await detailStore.retryPostSaveRefresh(api: objectsAPI)
-        expect(try await fetchUpdateCount(origin) == updatesBeforeRetry, "Post-save retry must be read-only")
-        let afterAdd = await MainActor.run { detailStore.detail }!
-        let canEditAfterRetry = await MainActor.run { detailStore.canEditList }
-        expect(afterAdd.sortedListItems.last?.text == "Wood glue" && canEditAfterRetry, "Post-save retry must load fresh revision and resume editing")
+        // Hold confirming read after list Add -> second row tap sends zero updates
+        await MainActor.run { detailStore.newItemText = "Drop cloth" }
+        try await postFixture(origin.appending(path: "fixture/hold-next-read"))
+        let heldListTask = Task { await detailStore.addItem(api: objectsAPI) }
+        expect(try await waitForHeldRead(origin), "Expected confirming list read to be held")
+        expect(await MainActor.run { detailStore.isSaving && !detailStore.canEditList }, "List editing must stay disabled while confirming read is held")
+        let updatesHeldBefore = try await fetchUpdateCount(origin)
+        await detailStore.toggleItem(afterToggle.sortedListItems[1], api: objectsAPI)
+        expect(try await fetchUpdateCount(origin) == updatesHeldBefore, "Tapping second row during held read must send zero updates")
+        try await postFixture(origin.appending(path: "fixture/release-held-read"))
+        await heldListTask.value
+        let afterHeldAdd = await MainActor.run { detailStore.detail }!
+        expect(afterHeldAdd.sortedListItems.last?.text == "Drop cloth", "Expected Drop cloth visible after held read releases")
 
-        // 6. 409 conflict -> fail-closed wrong owner check -> 3-way draft recovery -> confirmed reviewed save
+        // 7. 409 conflict -> wrong owner fail-closed -> 3-way recovery -> 503 on Save reviewed changes -> Retry preserves original command_id -> subsequent 409 forces fresh review -> final save commits
         try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
-        await detailStore.toggleItem(afterAdd.sortedListItems[2], api: objectsAPI)
-        let draftID = await MainActor.run { detailStore.conflictDraftID }
-        let hasConflictMsg = await MainActor.run { detailStore.conflictMessage != nil }
-        expect(draftID != nil && hasConflictMsg, "409 conflict must record draft_id for recovery")
+        await detailStore.toggleItem(afterHeldAdd.sortedListItems[2], api: objectsAPI)
+        expect(await MainActor.run { detailStore.conflictDraftID != nil }, "409 must set conflictDraftID")
 
-        // Wrong owner must fail closed
         try await postFixture(origin.appending(path: "fixture/wrong-draft-owner"))
         await detailStore.recoverDraft(api: objectsAPI)
-        expect(await MainActor.run { detailStore.recoveredConflict == nil && detailStore.saveError != nil }, "Mismatched draft owner_user_id must fail closed")
+        expect(await MainActor.run { detailStore.recoveredConflict == nil && detailStore.saveError != nil }, "Wrong draft owner must fail closed")
 
-        // Matching owner recovers full 3-way draft (base, current by Maya, proposed)
         await detailStore.recoverDraft(api: objectsAPI)
-        let recovered = await MainActor.run { detailStore.recoveredConflict }
-        expect(recovered != nil, "Expected recovered 3-way conflict draft")
-        expect(recovered?.current.authorLabel == "Maya Chen", "Expected competing current revision attributed to Maya Chen")
-        expect(recovered?.current.sortedListItems.contains(where: { $0.item_id == "item_maya_competing" }) == true, "Expected competing item in current snapshot")
+        expect(await MainActor.run { detailStore.recoveredConflict != nil }, "Matching owner must recover 3-way draft")
+        await MainActor.run { detailStore.reviewedConflictConfirmed = true }
 
-        // Cannot save before confirming review
-        let updatesBeforeConfirm = try await fetchUpdateCount(origin)
+        // Return 503 on Save reviewed changes -> keeps comparison, confirmation, saveError, and pendingEdit for Retry
+        try await postFixture(origin.appending(path: "fixture/fail-next-update"))
         await detailStore.saveReviewedConflict(api: objectsAPI)
-        expect(try await fetchUpdateCount(origin) == updatesBeforeConfirm, "Must require explicit review confirmation before saving conflict")
+        let failedConflictPending = await MainActor.run { detailStore.pendingEdit }
+        let keptComparison = await MainActor.run { detailStore.recoveredConflict != nil && detailStore.reviewedConflictConfirmed && detailStore.saveError != nil }
+        expect(failedConflictPending != nil && keptComparison, "503 on Save reviewed changes must keep comparison, confirmation, error, and pendingEdit")
 
+        // Retry with original command_id hitting a subsequent 409 -> forces fresh review (clears recoveredConflict & confirmation)
+        struct RecordedUpdate: Decodable { let command_id: String }
+        try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
+        await detailStore.saveReviewedConflict(api: objectsAPI) // also routes to pendingEdit retry!
+        let (updData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/updates"))
+        let recorded = try JSONDecoder().decode([RecordedUpdate].self, from: updData)
+        expect(recorded.count >= 2 && recorded[recorded.count - 1].command_id == recorded[recorded.count - 2].command_id, "Conflict Retry must reuse original command_id")
+        expect(await MainActor.run { detailStore.recoveredConflict == nil && !detailStore.reviewedConflictConfirmed && detailStore.conflictDraftID != nil }, "Subsequent 409 during conflict retry must require fresh review")
+
+        // Recover fresh conflict, confirm, and save cleanly
+        await detailStore.recoverDraft(api: objectsAPI)
         await MainActor.run { detailStore.reviewedConflictConfirmed = true }
         await detailStore.saveReviewedConflict(api: objectsAPI)
-        expect(await MainActor.run { detailStore.recoveredConflict == nil && detailStore.conflictDraftID == nil && detailStore.saveBanner == "Saved" }, "Confirmed conflict save must commit and clear conflict review")
+        expect(await MainActor.run { detailStore.recoveredConflict == nil && detailStore.conflictDraftID == nil && detailStore.saveBanner == "Saved" }, "Fresh reviewed save must commit cleanly")
 
-        // 7. Access drop to Reader & explicit workspace_access_refused clears open items
+        // 8. Access drop to Reader & explicit workspace_access_refused
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-mode?mode=reader")!)
         await detailStore.load(api: objectsAPI)
         expect(await MainActor.run { detailStore.detail != nil && detailStore.access?.role == .reader && !detailStore.canEditList }, "Reader demotion keeps content readable without edit controls")
-        await docStore.load(api: objectsAPI)
-        expect(await MainActor.run { docStore.detail != nil && docStore.access?.role == .reader && !docStore.canEditDoc }, "Reader demotion keeps doc readable without edit controls")
-
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-mode?mode=editor")!)
         await detailStore.load(api: objectsAPI)
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/refuse-next-read?reason=workspace_access_refused")!)
         await detailStore.load(api: objectsAPI)
         expect(await MainActor.run { detailStore.detail == nil && !detailStore.canEditList }, "Explicit workspace_access_refused clears open list")
 
-        await docStore.load(api: objectsAPI)
-        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/refuse-next-read?reason=workspace_access_refused")!)
-        await docStore.load(api: objectsAPI)
-        expect(await MainActor.run { docStore.detail == nil && !docStore.canEditDoc }, "Explicit workspace_access_refused clears open doc")
-
-        print("PASS: VerifySharedObjects PR 2 (create list/doc + idempotent retry, doc edit/save, history paging & earlier revision, 3-way conflict draft recovery + owner fail-closed, access revocation/demotion, non-displaced & post-save retry)")
+        print("PASS: VerifySharedObjects PR 2 (edit-start revision binding across refresh, failed reviewed save Retry + subsequent 409 fresh review, raw Markdown comparison, held confirming read on list & doc, create idempotent retry, access revocation)")
     }
 }

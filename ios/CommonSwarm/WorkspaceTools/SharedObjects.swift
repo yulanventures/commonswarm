@@ -665,6 +665,8 @@ final class SharedObjectDetailStore: ObservableObject {
     @Published var newItemText = ""
     @Published var isEditingDoc = false
     @Published var docDraftText = ""
+    @Published private(set) var docEditBaseRevision: SharedRevisionRef?
+    @Published private(set) var docEditBaseMarkdown: String?
 
     let workspaceID: UUID
     let objectID: String
@@ -689,6 +691,11 @@ final class SharedObjectDetailStore: ObservableObject {
 
     var needsRefreshAfterSave: Bool {
         postSaveRefreshMessage != nil
+    }
+
+    var newerRevisionAvailableWhileEditing: Bool {
+        guard isEditingDoc, let base = docEditBaseRevision, let current = detail?.revision else { return false }
+        return base != current
     }
 
     var canEditList: Bool {
@@ -734,6 +741,8 @@ final class SharedObjectDetailStore: ObservableObject {
         showOriginalInConflict = false
         reviewedConflictConfirmed = false
         isEditingDoc = false
+        docEditBaseRevision = nil
+        docEditBaseMarkdown = nil
         saveError = nil
         postSaveRefreshMessage = nil
         saveBanner = nil
@@ -771,6 +780,8 @@ final class SharedObjectDetailStore: ObservableObject {
                 if !freshAccess.canUpdate {
                     pendingEdit = nil
                     isEditingDoc = false
+                    docEditBaseRevision = nil
+                    docEditBaseMarkdown = nil
                     recoveredConflict = nil
                     conflictDraftID = nil
                 }
@@ -886,7 +897,9 @@ final class SharedObjectDetailStore: ObservableObject {
     }
 
     func beginEditingDoc() {
-        guard canEditDoc, case .doc(let md) = detail?.content else { return }
+        guard canEditDoc, let current = detail, case .doc(let md) = current.content else { return }
+        docEditBaseRevision = current.revision
+        docEditBaseMarkdown = md
         docDraftText = md
         isEditingDoc = true
         saveError = nil
@@ -894,6 +907,8 @@ final class SharedObjectDetailStore: ObservableObject {
 
     func cancelEditingDoc() {
         isEditingDoc = false
+        docEditBaseRevision = nil
+        docEditBaseMarkdown = nil
         if case .doc(let md) = detail?.content {
             docDraftText = md
         }
@@ -902,10 +917,12 @@ final class SharedObjectDetailStore: ObservableObject {
     }
 
     func saveDoc(api: SharedObjectsAPI) async {
-        guard canEditDoc, let current = detail, case .doc(let baseMarkdown) = current.content else { return }
+        guard canEditDoc, let current = detail, case .doc(let currentMarkdown) = current.content else { return }
+        let baseRevision = docEditBaseRevision ?? current.revision
+        let baseMarkdown = docEditBaseMarkdown ?? currentMarkdown
         let patch = SharedPatch.doc([SharedDocSplice(start: 0, before: baseMarkdown, after: docDraftText)])
         await applyPatch(
-            SharedPendingEdit(commandID: UUID(), base: current.revision, patch: patch, pendingNewItemText: nil),
+            SharedPendingEdit(commandID: UUID(), base: baseRevision, patch: patch, pendingNewItemText: nil),
             api: api
         )
     }
@@ -996,11 +1013,16 @@ final class SharedObjectDetailStore: ObservableObject {
     func saveReviewedConflict(api: SharedObjectsAPI) async {
         guard access?.canUpdate == true,
               !isSaving,
-              pendingEdit == nil,
               !needsRefreshAfterSave,
               reviewedConflictConfirmed,
-              let conflict = recoveredConflict,
-              let patch = SharedObjectsRules.buildPatch(from: conflict.current.content, to: conflict.proposed) else {
+              let conflict = recoveredConflict else {
+            return
+        }
+        if let pendingEdit {
+            await applyPatch(pendingEdit, api: api)
+            return
+        }
+        guard let patch = SharedObjectsRules.buildPatch(from: conflict.current.content, to: conflict.proposed) else {
             return
         }
         await applyPatch(
@@ -1032,6 +1054,7 @@ final class SharedObjectDetailStore: ObservableObject {
 
     private func applyPatch(_ edit: SharedPendingEdit, api: SharedObjectsAPI) async {
         isSaving = true
+        defer { isSaving = false }
         saveError = nil
         conflictMessage = nil
         pendingEdit = edit
@@ -1043,7 +1066,6 @@ final class SharedObjectDetailStore: ObservableObject {
             patch: edit.patch,
             requestID: edit.commandID
         )
-        isSaving = false
 
         switch outcome {
         case .committed:
@@ -1052,12 +1074,17 @@ final class SharedObjectDetailStore: ObservableObject {
             recoveredConflict = nil
             reviewedConflictConfirmed = false
             isEditingDoc = false
+            docEditBaseRevision = nil
+            docEditBaseMarkdown = nil
             if edit.pendingNewItemText != nil {
                 newItemText = ""
             }
             await refreshAfterCommittedSave(api: api)
         case .conflict(_, let draftID):
             pendingEdit = nil
+            isEditingDoc = false
+            docEditBaseRevision = nil
+            docEditBaseMarkdown = nil
             conflictDraftID = draftID
             recoveredConflict = nil
             reviewedConflictConfirmed = false
@@ -1074,6 +1101,8 @@ final class SharedObjectDetailStore: ObservableObject {
                 accessStatus = .granted(reader)
                 pendingEdit = nil
                 isEditingDoc = false
+                docEditBaseRevision = nil
+                docEditBaseMarkdown = nil
                 recoveredConflict = nil
                 conflictDraftID = nil
                 saveError = message

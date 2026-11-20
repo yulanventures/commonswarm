@@ -18,6 +18,8 @@ let accessMode = "editor"; // editor | reader | consent | refused
 let failNextUpdate = false;
 let failNextCreate = false;
 let failNextReadStatus = null; // e.g. 503
+let holdNextRead = false;
+let heldReadResolver = null;
 let refuseNextReadReason = null; // e.g. "workspace_access_refused"
 let conflictNextUpdate = false;
 let wrongDraftOwnerOnce = false;
@@ -277,6 +279,21 @@ const server = createServer(async (req, res) => {
       failNextReadStatus = Number(url.searchParams.get("status") || 503);
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-next-read") {
+      holdNextRead = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/read-held") {
+      return reply(200, { held: heldReadResolver !== null });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-held-read") {
+      if (heldReadResolver) {
+        const resolve = heldReadResolver;
+        heldReadResolver = null;
+        resolve();
+      }
+      return reply(200, { ok: true });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/refuse-next-read") {
       refuseNextReadReason = url.searchParams.get("reason") || "workspace_access_refused";
       return reply(200, { ok: true });
@@ -458,6 +475,10 @@ const server = createServer(async (req, res) => {
         }
         if (cmd.tool === "object_read") {
           readCount += 1;
+          if (holdNextRead) {
+            holdNextRead = false;
+            await new Promise((resolve) => { heldReadResolver = resolve; });
+          }
           if (failNextReadStatus !== null) {
             const code = failNextReadStatus;
             failNextReadStatus = null;

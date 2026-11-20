@@ -79,8 +79,11 @@ final class SharedObjectsUITests: XCTestCase {
         XCTAssertTrue(bodyField.waitForExistence(timeout: 5))
         bodyField.tap()
         bodyField.typeText("# Notes\n\nCheck tire pressure.")
+        let createSubmit = app.buttons["shared-create-submit-button"].firstMatch
+        XCTAssertTrue(createSubmit.waitForExistence(timeout: 5), "Expected Create button in navigation bar")
+        XCTAssertTrue(createSubmit.isHittable, "Create button must stay visible and tappable with the keyboard open")
         capture("objects-create-sheet")
-        try tapButton("shared-create-submit-button")
+        createSubmit.tap()
 
         XCTAssertTrue(app.staticTexts["Weekend notes"].firstMatch.waitForExistence(timeout: 8), "Expected newly created doc to open")
         let createdNavBar = app.navigationBars["Doc"].firstMatch
@@ -134,7 +137,12 @@ final class SharedObjectsUITests: XCTestCase {
 
         try tapButton("Recover my draft", timeout: 8)
         XCTAssertTrue(app.staticTexts["Review conflicting changes"].firstMatch.waitForExistence(timeout: 8), "Expected 3-way conflict review card")
-        XCTAssertTrue(app.staticTexts["Sourdough loaf (added by Maya)"].firstMatch.waitForExistence(timeout: 5), "Expected competing current revision item")
+        let checkedRow = app.staticTexts["Oat milk and espresso beans"].firstMatch
+        XCTAssertTrue(checkedRow.waitForExistence(timeout: 5), "Expected checked comparison row")
+        XCTAssertEqual(checkedRow.value as? String, "Checked", "Comparison row must expose Checked accessibility value")
+        let uncheckedCompeting = app.staticTexts["Sourdough loaf (added by Maya)"].firstMatch
+        XCTAssertTrue(uncheckedCompeting.waitForExistence(timeout: 5), "Expected competing current revision item")
+        XCTAssertEqual(uncheckedCompeting.value as? String, "Not checked", "Comparison row must expose Not checked accessibility value")
         capture("objects-conflict-review")
 
         let confirmBox = app.buttons["shared-conflict-confirm"].firstMatch

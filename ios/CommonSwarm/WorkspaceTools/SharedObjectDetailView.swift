@@ -452,6 +452,12 @@ struct SharedObjectDetailView: View {
         let blocks = SharedObjectsRules.parseInertMarkdown(markdown)
         return VStack(alignment: .leading, spacing: 12) {
             if store.isEditingDoc {
+                if store.newerRevisionAvailableWhileEditing {
+                    Text("Someone saved a newer revision while you were editing. Saving will open a comparison so you can review both versions.")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(errorForeground)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 TextEditor(text: $store.docDraftText)
                     .font(.body)
                     .frame(minHeight: 180)

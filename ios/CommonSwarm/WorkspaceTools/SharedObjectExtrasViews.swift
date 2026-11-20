@@ -88,7 +88,22 @@ struct CreateSharedObjectSheet: View {
                             .foregroundStyle(errorForeground)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-
+                }
+                .padding()
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("New list or doc")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        store.resetCreateState()
+                        dismiss()
+                    }
+                    .frame(minHeight: 44)
+                }
+                ToolbarItem(placement: .confirmationAction) {
                     Button {
                         Task {
                             if let created = await store.createObject(
@@ -102,39 +117,16 @@ struct CreateSharedObjectSheet: View {
                             }
                         }
                     } label: {
-                        HStack {
-                            Spacer()
-                            if store.isCreating {
-                                ProgressView().tint(.white)
-                            } else {
-                                Text(store.pendingCreate != nil ? "Retry" : "Create")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                            }
-                            Spacer()
+                        if store.isCreating {
+                            ProgressView()
+                        } else {
+                            Text(store.pendingCreate != nil ? "Retry" : "Create")
+                                .font(.subheadline.weight(.semibold))
                         }
-                        .frame(minHeight: 44)
-                        .background(
-                            primaryBackground.opacity(trimmedTitle.isEmpty || store.isCreating ? 0.45 : 1),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(trimmedTitle.isEmpty || store.isCreating)
-                    .accessibilityIdentifier("shared-create-submit-button")
-                }
-                .padding()
-            }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("New list or doc")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        store.resetCreateState()
-                        dismiss()
                     }
                     .frame(minHeight: 44)
+                    .disabled(trimmedTitle.isEmpty || store.isCreating)
+                    .accessibilityIdentifier("shared-create-submit-button")
                 }
             }
         }
@@ -270,20 +262,36 @@ struct SharedConflictReviewCard: View {
                 .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
+            .disabled(store.isSaving || store.pendingEdit != nil)
             .accessibilityAddTraits(store.reviewedConflictConfirmed ? .isSelected : [])
             .accessibilityValue(store.reviewedConflictConfirmed ? "Checked" : "Not checked")
             .accessibilityIdentifier("shared-conflict-confirm")
 
+            if let error = store.saveError {
+                Text(error)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(errorForeground)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("shared-conflict-error")
+            }
+
             HStack(spacing: 10) {
+                let hasPendingRetry = store.pendingEdit != nil
                 Button {
-                    Task { await store.saveReviewedConflict(api: api) }
+                    Task {
+                        if hasPendingRetry {
+                            await store.retryPendingEdit(api: api)
+                        } else {
+                            await store.saveReviewedConflict(api: api)
+                        }
+                    }
                 } label: {
                     if store.isSaving {
                         ProgressView()
                             .tint(.white)
                             .frame(maxWidth: .infinity, minHeight: 44)
                     } else {
-                        Text("Save reviewed changes")
+                        Text(hasPendingRetry ? "Retry" : "Save reviewed changes")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
@@ -291,12 +299,12 @@ struct SharedConflictReviewCard: View {
                     }
                 }
                 .background(
-                    primaryBackground.opacity(store.reviewedConflictConfirmed && !store.isSaving ? 1 : 0.45),
+                    primaryBackground.opacity((hasPendingRetry || store.reviewedConflictConfirmed) && !store.isSaving ? 1 : 0.45),
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                 )
                 .buttonStyle(.plain)
-                .disabled(!store.reviewedConflictConfirmed || store.isSaving)
-                .accessibilityIdentifier("shared-conflict-save")
+                .disabled((!hasPendingRetry && !store.reviewedConflictConfirmed) || store.isSaving)
+                .accessibilityIdentifier(hasPendingRetry ? "shared-conflict-retry" : "shared-conflict-save")
 
                 Button {
                     Task { await store.load(api: api) }
@@ -356,29 +364,24 @@ struct SharedConflictReviewCard: View {
                                 .foregroundStyle(item.checked ? mutedForeground : Color.primary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(item.text)
+                        .accessibilityValue(item.checked ? "Checked" : "Not checked")
+                        .accessibilityAddTraits(item.checked ? .isSelected : [])
                     }
                 }
             case .doc(let markdown):
-                let blocks = SharedObjectsRules.parseInertMarkdown(markdown)
-                if blocks.isEmpty {
+                if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Empty document")
                         .font(.footnote)
                         .foregroundStyle(mutedForeground)
                 } else {
-                    ForEach(blocks) { block in
-                        switch block {
-                        case .heading(_, _, let text):
-                            Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                        case .bullet(_, let text):
-                            Text("• \(text)").font(.footnote).foregroundStyle(.primary)
-                        case .numbered(_, let number, let text):
-                            Text("\(number) \(text)").font(.footnote).foregroundStyle(.primary)
-                        case .codeBlock(_, let text):
-                            Text(text).font(.caption.monospaced()).foregroundStyle(.primary)
-                        case .paragraph(_, let text):
-                            Text(text).font(.footnote).foregroundStyle(.primary)
-                        }
-                    }
+                    // Exact raw Markdown as inert plain text so link destinations and syntax changes stay visible without execution or clickable links
+                    Text(verbatim: markdown)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
         }
