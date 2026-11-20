@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   CONVERSATION_COMMAND_KINDS,
@@ -51,4 +52,11 @@ test("malformed conversation commands are refused at the wire", () => {
     assert.equal(parsed.ok, false, JSON.stringify(bad));
   }
   assert.equal(parseConversationCommand({ kind: "conversation_open", members: nine }).ok, true, "nine members parse");
+});
+
+test("the iPhone conversation requests are accepted by the command parser", () => {
+  const commands = JSON.parse(readFileSync("ios/Development/conversation-commands.json", "utf8")) as Record<string, unknown>[];
+  assert.deepEqual(commands.map(cmd => cmd.kind).sort(),
+    ["conversation_invite", "conversation_join", "conversation_open", "conversation_remove"]);
+  for (const cmd of commands) assert.equal(parseConversationCommand(cmd).ok, true, String(cmd.kind));
 });

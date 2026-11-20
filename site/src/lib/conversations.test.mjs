@@ -24,8 +24,12 @@ import {
   CONVERSATION_INVITE_MAX,
   CONVERSATION_MEMBER_MAX,
   CONVERSATION_NOTIFY_LEVELS,
+  CONVERSATION_UNAVAILABLE_TEXT,
   conversationTitle,
   conversationUnreadBadge,
+  disambiguateMemberLabels,
+  DM_ATTACHMENTS_REFUSAL_TEXT,
+  DM_READONLY_SEND_REFUSAL_TEXT,
   NOTES_TO_SELF_LABEL,
   parseConversationActionResponse,
   parseConversationHistoryResponse,
@@ -33,6 +37,7 @@ import {
   parseConversationsListOutcome,
   parseConversationsListResponse,
   parseOversightHistoryResponse,
+  trueDmSendRefusal,
   parseOversightListResponse,
   sortDirectConversations,
 } from "./conversations.ts";
@@ -401,4 +406,77 @@ test("empty or malformed 200 conversations read fails closed (Retry); only expli
   // Valid 200 array selects ready.
   const ready = parseConversationsListOutcome(200, { conversations: [] });
   assert.deepEqual(ready, { status: "ready", conversations: [] });
+});
+
+test("trueDmSendRefusal blocks group DMs, Notes to self, stale DMs, and DM attachments (C1)", () => {
+  const alex = { kind: "user", id: "22222222-2222-4222-8222-222222222222", name: "Alex", leftAt: null };
+  const owner = { kind: "user", id: "11111111-1111-4111-8111-111111111111", name: "Owner", leftAt: null };
+  const dmConv = {
+    conversationId: "aaaa0000-0000-4000-8000-000000000001", kind: "dm", channelId: null, slug: null,
+    description: null, archivedAt: null, joined: true, members: [owner, alex],
+    notifyLevel: "everything", starred: false, starRank: null, unreadCount: 0, mentionCount: 0,
+    lastMessageAt: null, lastMessageId: null,
+  };
+  const groupConv = { ...dmConv, conversationId: "aaaa0000-0000-4000-8000-000000000002", kind: "group_dm" };
+  const notesConv = { ...dmConv, conversationId: "aaaa0000-0000-4000-8000-000000000003", members: [owner] };
+  const list = [dmConv, groupConv, notesConv];
+
+  // Group DM and Notes to self refuse submission and never fall back to public broadcast.
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: groupConv.conversationId, activeDm: null, workspaceConversations: list, hasAttachments: false }),
+    DM_READONLY_SEND_REFUSAL_TEXT,
+  );
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: notesConv.conversationId, activeDm: null, workspaceConversations: list, hasAttachments: false }),
+    DM_READONLY_SEND_REFUSAL_TEXT,
+  );
+  // Missing / stale / unjoined conversation refuses submission.
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: "missing-id", activeDm: { kind: "person", id: alex.id }, workspaceConversations: list, hasAttachments: false }),
+    CONVERSATION_UNAVAILABLE_TEXT,
+  );
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: dmConv.conversationId, activeDm: { kind: "person", id: "99999999-9999-4999-8999-999999999999" }, workspaceConversations: list, hasAttachments: false }),
+    CONVERSATION_UNAVAILABLE_TEXT,
+  );
+  // Attachments are refused on every true DM (both Step 2b 1:1 and legacy 1:1).
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: dmConv.conversationId, activeDm: { kind: "person", id: alex.id }, workspaceConversations: list, hasAttachments: true }),
+    DM_ATTACHMENTS_REFUSAL_TEXT,
+  );
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: null, activeDm: { kind: "person", id: alex.id }, workspaceConversations: list, hasAttachments: true }),
+    DM_ATTACHMENTS_REFUSAL_TEXT,
+  );
+  // Live 1:1 DM without attachments and public channels are allowed.
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: dmConv.conversationId, activeDm: { kind: "person", id: alex.id }, workspaceConversations: list, hasAttachments: false }),
+    null,
+  );
+  assert.equal(
+    trueDmSendRefusal({ activeDmConversationId: null, activeDm: null, workspaceConversations: list, hasAttachments: true }),
+    null,
+  );
+});
+
+test("disambiguateMemberLabels distinguishes same-kind duplicate names with stable short IDs", () => {
+  const labels = disambiguateMemberLabels([
+    { kind: "user", id: "aaaa1111-1111-4111-8111-111111111111", name: "Alex" },
+    { kind: "user", id: "bbbb2222-2222-4222-8222-222222222222", name: "alex" },
+    { kind: "agent", id: "cccc3333-3333-4333-8333-333333333333", name: "Alex" },
+    { kind: "user", id: "dddd4444-4444-4444-8444-444444444444", name: "Sam" },
+  ]);
+  assert.equal(labels.get("user:aaaa1111-1111-4111-8111-111111111111"), "Alex · aaaa11");
+  assert.equal(labels.get("user:bbbb2222-2222-4222-8222-222222222222"), "alex · bbbb22");
+  // Different kind ("agent") does not collide with "user".
+  assert.equal(labels.get("agent:cccc3333-3333-4333-8333-333333333333"), "Alex");
+  assert.equal(labels.get("user:dddd4444-4444-4444-8444-444444444444"), "Sam");
+
+  // Colliding 6-char prefixes extend until every same-name entry is distinct.
+  const deep = disambiguateMemberLabels([
+    { kind: "user", id: "aaaaaa11-1111-4111-8111-111111111111", name: "Jordan Lee" },
+    { kind: "user", id: "aaaaaa22-2222-4222-8222-222222222222", name: "Jordan Lee" },
+  ]);
+  assert.equal(deep.get("user:aaaaaa11-1111-4111-8111-111111111111"), "Jordan Lee · aaaaaa11");
+  assert.equal(deep.get("user:aaaaaa22-2222-4222-8222-222222222222"), "Jordan Lee · aaaaaa22");
 });

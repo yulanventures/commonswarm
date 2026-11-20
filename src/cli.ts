@@ -145,6 +145,12 @@ import {
   resolveSystemAlertCommand,
 } from "./cloud/system-alerts.js";
 import {
+  listConversations,
+  postConversationCommand,
+  readConversationHistory,
+  type ConversationMemberRef,
+} from "./cloud/conversations.js";
+import {
   getMemoryAsAgent,
   MEMORY_KINDS,
   MEMORY_QUERY_MAX,
@@ -762,6 +768,8 @@ export const BOOLEAN_FLAGS = new Set([
   "all",
   "resolved",
   "escalated",
+  "archived",
+  "new-group",
 ]);
 
 const UUID_RE =
@@ -4959,6 +4967,45 @@ export const RUN_ALERT_RESOLVE_ACCEPTED_FLAGS = [
   ...SESSION_CONTEXT_FLAGS,
 ] as const;
 
+export const RUN_CONVERSATIONS_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "archived",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_CONVERSATION_READ_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "limit",
+  "before-created-at",
+  "before-id",
+  "after-created-at",
+  "after-id",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "new-group",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
 async function runAlerts(args: Arguments): Promise<void> {
   args.assertShape(RUN_ALERTS_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
@@ -5012,6 +5059,187 @@ async function runAlertResolve(args: Arguments): Promise<void> {
     return;
   }
   process.stdout.write(`Resolved alert ${command.alert_id}.\n`);
+}
+
+export const RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "through",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+async function runConversationsList(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CONVERSATIONS_ACCEPTED_FLAGS, 1);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const data = await listConversations(cloud, selected.bearer, selected.selectedWorkspace, {
+    includeArchived: args.has("archived"),
+    fetcher: selected.fetcher,
+  });
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    return;
+  }
+  if (data.conversations.length === 0) {
+    process.stdout.write("No conversations.\n");
+    return;
+  }
+  for (const c of data.conversations) {
+    const label = c.kind === "general"
+      ? "#general"
+      : c.slug
+      ? `#${c.slug}`
+      : c.members.filter((m) => !m.left_at).map((m) => sanitizeDisplayLabel(m.name ?? m.id, m.kind)).join(", ");
+    const badges: string[] = [];
+    if (!c.joined && c.kind === "public_channel") badges.push("not joined");
+    if (c.unread_count > 0) badges.push(`${c.unread_count} unread`);
+    if (c.mention_count > 0) badges.push(`${c.mention_count} mentions`);
+    if (c.archived_at) badges.push("archived");
+    const suffix = badges.length > 0 ? ` (${badges.join(", ")})` : "";
+    process.stdout.write(`${c.conversation_id} · ${c.kind} · ${label}${suffix}\n`);
+  }
+}
+
+async function runConversationRead(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CONVERSATION_READ_ACCEPTED_FLAGS, 3);
+  const conversationId = args.positionals[2];
+  if (!conversationId || !UUID_RE.test(conversationId)) {
+    throw new UsageError("cswarm conversation read requires <conversation-id> (UUID)");
+  }
+  const beforeCreatedAt = args.optional("before-created-at");
+  const beforeId = args.optional("before-id");
+  const afterCreatedAt = args.optional("after-created-at");
+  const afterId = args.optional("after-id");
+  if ((beforeCreatedAt !== undefined) !== (beforeId !== undefined)) {
+    throw new UsageError("--before-created-at and --before-id must be given together");
+  }
+  if ((afterCreatedAt !== undefined) !== (afterId !== undefined)) {
+    throw new UsageError("--after-created-at and --after-id must be given together");
+  }
+  if (beforeCreatedAt !== undefined && afterCreatedAt !== undefined) {
+    throw new UsageError("Use --before-* or --after-*, not both");
+  }
+  const rawLimit = args.optional("limit");
+  const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new UsageError("--limit must be an integer between 1 and 100");
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const res = await readConversationHistory(
+    cloud, selected.bearer, selected.selectedWorkspace, conversationId,
+    {
+      ...(beforeCreatedAt && beforeId ? { before: { created_at: beforeCreatedAt, id: beforeId } } : {}),
+      ...(afterCreatedAt && afterId ? { after: { created_at: afterCreatedAt, id: afterId } } : {}),
+      limit,
+      includeMentions: true,
+      includeReactions: true,
+    },
+    { fetcher: selected.fetcher },
+  );
+  if (!res.ok) {
+    throw new Error(res.message);
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(res.data, null, 2)}\n`);
+    return;
+  }
+  if (res.data.messages.length === 0) {
+    process.stdout.write("No messages in this conversation.\n");
+    return;
+  }
+  for (const m of res.data.messages) {
+    process.stdout.write(`${String(m.created_at ?? "")} · ${String(m.id ?? "")} · ${String(m.from_kind ?? "")}:${String(m.from ?? "")} · ${String(m.body ?? "")}\n`);
+  }
+}
+
+async function runConversationOpen(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS, 11);
+  const rawMembers = args.positionals.slice(2);
+  if (rawMembers.length < 1 || rawMembers.length > 9) {
+    throw new UsageError("cswarm conversation open requires 1 to 9 <user|agent>:<uuid> members");
+  }
+  const members: ConversationMemberRef[] = rawMembers.map((raw) => {
+    const idx = raw.indexOf(":");
+    const kind = idx > 0 ? raw.slice(0, idx) : "";
+    const id = idx > 0 ? raw.slice(idx + 1) : "";
+    if ((kind !== "user" && kind !== "agent") || !UUID_RE.test(id)) {
+      throw new UsageError(`Invalid member "${raw}": use user:<uuid> or agent:<uuid>`);
+    }
+    return { kind, id: id.toLowerCase() };
+  });
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    { kind: "conversation_open", members, ...(args.has("new-group") ? { new_group: true } : {}) },
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_open failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
+    return;
+  }
+  const conv = res.body.conversation as Record<string, unknown> | undefined;
+  process.stdout.write(`Opened ${String(conv?.kind ?? "conversation")} ${String(conv?.conversation_id ?? "")}.\n`);
+}
+
+async function runConversationMembershipAction(args: Arguments, action: "conversation_join" | "conversation_leave"): Promise<void> {
+  args.assertShape(RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS, 3);
+  const conversationId = args.positionals[2];
+  if (!conversationId || !UUID_RE.test(conversationId)) {
+    throw new UsageError(`cswarm conversation ${action === "conversation_join" ? "join" : "leave"} requires <conversation-id> (UUID)`);
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    { kind: action, conversation_id: conversationId.toLowerCase() },
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `${action} failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${action === "conversation_join" ? "Joined" : "Left"} conversation ${conversationId.toLowerCase()}.\n`);
+}
+
+async function runConversationMarkRead(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS, 3);
+  const conversationId = args.positionals[2];
+  if (!conversationId || !UUID_RE.test(conversationId)) {
+    throw new UsageError("cswarm conversation mark-read requires <conversation-id> (UUID)");
+  }
+  const through = args.optional("through");
+  if (through !== undefined && !UUID_RE.test(through)) {
+    throw new UsageError("--through must be a signal UUID");
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    {
+      kind: "conversation_mark_read",
+      conversation_id: conversationId.toLowerCase(),
+      ...(through ? { through_signal_id: through.toLowerCase() } : {}),
+    },
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_mark_read failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Marked conversation ${conversationId.toLowerCase()} read.\n`);
 }
 
 async function runMembers(args: Arguments): Promise<void> {
@@ -11623,6 +11851,18 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 29,
     refusalTrace: "runAlert",
   }),
+  conversations: commandEntry({ ...noTool("local MCP exposes conversations_list"), handler: traced("runConversationsList", runConversationsList), description: "List conversations (#general, channels, DMs, and group DMs) with unread and mention counts.", mutates: false, flags: [...agentFlags, "archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 30, visible: true, help: ["cswarm conversations [--archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  conversation: group({
+    read: commandEntry({ ...noTool("local MCP exposes conversation_read"), handler: traced("runConversationRead", runConversationRead), description: "Read paged history for one conversation.", mutates: false, flags: [...agentFlags, "limit", "before-created-at", "before-id", "after-created-at", "after-id"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation read <conversation-id> [--limit <1-100>] [--before-created-at <iso> --before-id <uuid> | --after-created-at <iso> --after-id <uuid>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    open: commandEntry({ ...noTool("local MCP exposes conversation_open"), handler: traced("runConversationOpen", runConversationOpen), description: "Find or open a 1:1 DM or group DM.", mutates: true, flags: [...agentFlags, "new-group"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation open <user|agent>:<uuid>... [--new-group] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    join: commandEntry({ ...noTool("local MCP exposes conversation_join"), handler: traced("runConversationJoin", (args) => runConversationMembershipAction(args, "conversation_join")), description: "Join a public channel conversation.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation join <conversation-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    leave: commandEntry({ ...noTool("local MCP exposes conversation_leave"), handler: traced("runConversationLeave", (args) => runConversationMembershipAction(args, "conversation_leave")), description: "Leave a public channel or group DM.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation leave <conversation-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    "mark-read": commandEntry({ ...noTool("local MCP exposes conversation_mark_read"), handler: traced("runConversationMarkRead", runConversationMarkRead), description: "Advance read position in a conversation.", mutates: true, flags: [...agentFlags, "through"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation mark-read <conversation-id> [--through <signal-id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm conversation takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 31,
+    refusalTrace: "runConversation",
+  }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
@@ -11751,6 +11991,12 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   reraise: RUN_RERAISE_ACCEPTED_FLAGS,
   alerts: RUN_ALERTS_ACCEPTED_FLAGS,
   "alert.resolve": RUN_ALERT_RESOLVE_ACCEPTED_FLAGS,
+  conversations: RUN_CONVERSATIONS_ACCEPTED_FLAGS,
+  "conversation.read": RUN_CONVERSATION_READ_ACCEPTED_FLAGS,
+  "conversation.open": RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS,
+  "conversation.join": RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS,
+  "conversation.leave": RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS,
+  "conversation.mark-read": RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS,
   react: RUN_REACT_ACCEPTED_FLAGS,
   unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,

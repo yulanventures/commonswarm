@@ -31,6 +31,15 @@ import { optionalWake } from "../_shared/wake.ts";
 import { channelPageDeliverable, fitChannelPage } from "../mcp/channel-page.ts";
 import { replyTargetAnswer, type ReplyTargetRow } from "./reply-target.ts";
 import {
+  CONVERSATION_NOT_FOUND_BODY,
+  executeConversationRead,
+  isConversationOversightResource,
+  isConversationReadRequest,
+  isConversationReadResource,
+  parseConversationReadRequest,
+  type ConversationReadRequest,
+} from "./conversations.ts";
+import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
   resolveHostedConnectionContext,
@@ -459,7 +468,7 @@ function parseBody(
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | SystemAlertsReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
-  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
+  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | ConversationReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -505,6 +514,7 @@ function parseBody(
   }
   if (body.resource === "channel_messages") return parseChannelMessages(body);
   if (body.resource === "memory_search" || body.resource === "memory_get") return parseMemoryRead(body);
+  if (isConversationReadResource(body.resource)) return parseConversationReadRequest(body);
   if (
     body.resource === "channels" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -847,9 +857,14 @@ async function handle(
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);
   const adminRecovery = isAdminRecoveryRequest(body);
-  if (adminRecovery && agentCredential) return json(403, { error: "credential_kind_forbidden" });
+  const conversationRead = isConversationReadResource(body.resource);
+  const conversationOversight = isConversationOversightResource(body.resource);
+  if ((adminRecovery || conversationOversight) && agentCredential) {
+    return json(403, { error: "credential_kind_forbidden" });
+  }
   if (!agentCredential && body.resource !== "renewal_grants" &&
-    body.resource !== "pending_access" && body.resource !== "system_alerts" && !adminRecovery) {
+    body.resource !== "pending_access" && body.resource !== "system_alerts" &&
+    !adminRecovery && !conversationRead) {
     return json(401, { error: "unauthenticated" });
   }
   let humanUserId: string | null = null;
@@ -857,6 +872,9 @@ async function handle(
     const { data, error } = await authClient.auth.getUser(token);
     if (error || !data.user || !UUID_RE.test(data.user.id)) {
       return json(401, { error: "unauthenticated" });
+    }
+    if (conversationOversight && (data.user.email_confirmed_at === undefined || data.user.email_confirmed_at === null)) {
+      return json(403, { error: "human_sign_in_required" });
     }
     humanUserId = data.user.id.toLowerCase();
   }
@@ -893,6 +911,11 @@ async function handle(
         setPhase("query");
         const page = await readAdminRecovery(tx, body);
         return json(page.error === "forbidden" ? 403 : 200, page);
+      }
+      if (isConversationReadRequest(body)) {
+        setPhase("query");
+        const result = await executeConversationRead(tx, body);
+        return json(result.status, result.body);
       }
       if (body.resource === "pending_access") {
         const pending = await tx<Record<string, unknown>[]>`
@@ -1037,6 +1060,12 @@ async function handle(
       if (body.resource === "channel_messages") {
         return json(200, { workspace_id: body.workspace_id, channel: body.channel, archived: false, messages: [], next: null });
       }
+      if (body.resource === "conversations") {
+        return json(200, { conversations: [] });
+      }
+      if (body.resource === "conversation_history") {
+        return json(404, { ...CONVERSATION_NOT_FOUND_BODY });
+      }
       if (body.resource === "agent_wake_lease") return json(200, { lease: null });
       return json(200, {
         signals: [],
@@ -1171,6 +1200,10 @@ async function handle(
         LIMIT 100
       `;
       return json(200, { alerts });
+    }
+    if (isConversationReadRequest(body)) {
+      const result = await executeConversationRead(tx, body);
+      return json(result.status, result.body);
     }
     if (body.resource === "channels") {
       /* Same eight columns and the same slug order the human REST read takes,
