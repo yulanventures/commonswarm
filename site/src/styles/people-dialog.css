@@ -536,6 +536,25 @@ live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close] 
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close]:hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__body { flex: 1; min-block-size: 0; overflow: hidden; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__body[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 16px 20px 28px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent > .dashboard__connect-view {
+  padding: 0;
+  margin-inline: auto;
+  max-inline-size: 680px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent > .dashboard__connect-view .hm-ahp {
+  padding: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent > .dashboard__connect-view[hidden] { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] { box-sizing: border-box; inline-size: 100%; max-inline-size: none; block-size: 100%; min-block-size: 0;
   display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; padding: 0;
   border: 0; border-radius: 0; background: transparent; box-shadow: none; }
@@ -559,6 +578,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-people-modal :is(button,a,input,s
     margin: auto 0 0; border-radius: 16px 16px 0 0; border-block-end: 0;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__head { padding: 8px 12px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__add-agent { padding: 12px 16px 28px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-context] { padding: 12px 16px 24px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page].has-detail { grid-template-columns: minmax(0, 1fr); }
   live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .has-detail > [data-people-context] { display: none; }

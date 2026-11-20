@@ -456,6 +456,7 @@ import "../../styles/kylon-image-viewer.css";
                 Terminal agent and Grok Bot mint a one-time prompt through AgentConnect below.
                 Inviting a person is the panel's footer link (data-agent-owner-teammate). The
                 one way back is the panel's own breadcrumb, which sends agent-host-home. */}
+            <div data-add-agent-home-anchor hidden></div>
             <section class="dashboard__connect-view dashboard__choice-view dashboard__host-view" data-channel-view="agent-choice" hidden>
               <AgentHostPicker class="dashboard__host-picker" />
             </section>
@@ -514,7 +515,7 @@ import "../../styles/kylon-image-viewer.css";
             <section class="dashboard__connect-view" data-channel-view="connect" hidden>
               <button class="dashboard__back-button" type="button" data-close-connect>
                 <span aria-hidden="true">←</span>
-                Back to the channel
+                <span data-close-connect-label>Back to the channel</span>
               </button>
               <p
                 class="dashboard__form-error dashboard__connect-exit-status"
@@ -1375,6 +1376,7 @@ import "../../styles/kylon-image-viewer.css";
       <button class="dashboard__icon-button" type="button" data-roster-close aria-label="Close People &amp; agents">×</button>
     </header>
     <div class="cs-people-modal__body" data-dialog-agent-list></div>
+    <div class="cs-people-modal__add-agent" data-roster-add-agent hidden></div>
     <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
     <p class="pd-sr-only" role="status" aria-live="polite" data-people-receipt></p>
     <dialog class="pd-confirm" data-people-confirm role="alertdialog" aria-labelledby="pd-confirm-title" aria-describedby="pd-confirm-description"></dialog>
@@ -2811,6 +2813,7 @@ import "../../styles/kylon-image-viewer.css";
         disarmLiveFeed();
       }
       for (const section of all<HTMLElement>("[data-channel-view]")) {
+        if (typeof section.closest === "function" && section.closest("[data-roster-add-agent]")) continue;
         section.hidden = section.dataset.channelView !== name;
       }
       const composer = one<HTMLFormElement>("[data-composer]");
@@ -9966,6 +9969,42 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const peopleDialogOpen = (): boolean => one<HTMLDialogElement>("[data-roster-dialog]")?.open === true;
+    let rosterDialogAddAgent: "choice" | "connect" | null = null;
+    let rosterAddAgentGeneration = 0;
+    const rosterAddAgentOpen = (): boolean => peopleDialogOpen() && rosterDialogAddAgent !== null;
+    const parkAddAgentViewsHome = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const host = one<HTMLElement>("[data-roster-add-agent]");
+      const anchor = one<HTMLElement>("[data-add-agent-home-anchor]");
+      const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
+      const connect = one<HTMLElement>('[data-channel-view="connect"]');
+      const list = one<HTMLElement>("[data-dialog-agent-list]");
+      rosterDialogAddAgent = null;
+      if (dialog) delete dialog.dataset.rosterMode;
+      if (host) host.hidden = true;
+      if (list) list.hidden = false;
+      const backLabel = one<HTMLElement>("[data-ahp-home-back-label]");
+      if (backLabel) backLabel.textContent = "Home";
+      const connectBackLabel = one<HTMLElement>("[data-close-connect-label]");
+      if (connectBackLabel) connectBackLabel.textContent = "Back to the channel";
+      if (anchor?.parentElement) {
+        if (connect && connect.parentElement !== anchor.parentElement) anchor.after(connect);
+        if (choice && choice.parentElement !== anchor.parentElement) anchor.after(choice);
+      }
+      const activeView = app.dataset.channelView ?? "";
+      if (choice) choice.hidden = activeView !== "agent-choice";
+      if (connect) connect.hidden = activeView !== "connect";
+    };
+    const teardownRosterDialogAddAgent = (): void => {
+      rosterAddAgentGeneration += 1;
+      if (typeof stopHostJoinWatch === "function") stopHostJoinWatch();
+      one<SecretHoldingAgentConnect>("agent-connect")?.retirePending();
+      panelKeyMint = null;
+      existingAgentChoiceIsCurrent = undefined;
+      connectFocusObserver?.disconnect();
+      connectFocusObserver = null;
+      parkAddAgentViewsHome();
+    };
     const syncPeopleDialogLayout = (): void => {
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       const pushed = !!peopleDialogState.selected && matchMedia("(width <= 52rem)").matches;
@@ -9991,7 +10030,7 @@ import "../../styles/kylon-image-viewer.css";
     const renderDialogRoster = (): void => {
       const list = one<HTMLElement>("[data-dialog-agent-list]");
       const workspace = workspaces.find((row) => row.id === activeWorkspaceId);
-      if (!list || !workspace || !peopleDialogOpen()) return;
+      if (!list || !workspace || !peopleDialogOpen() || rosterAddAgentOpen()) return;
       const detail = peopleDetailHost();
       const endDateFocus = connectionDateFocus(detail);
       settlePeopleDialogInvite();
@@ -10079,6 +10118,7 @@ import "../../styles/kylon-image-viewer.css";
         }, page: {
           homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => closeRosterDialog(true),
           workspacesHref: routeHref({ view: "catchup" }),
+          addAgent: sampleMode ? undefined : () => openRosterDialogAddAgent(),
           addAgentHref: routeHref({ view: "add-agent", workspaceId: workspace.id }),
           agentHref: (agentId) => routeHref({ view: "agent", workspaceId: workspace.id, agentId }),
           navigate: (href) => navigateHomeHref(href),
@@ -10635,6 +10675,10 @@ import "../../styles/kylon-image-viewer.css";
       if (activeWorkspaceId !== workspaceId) await navigateHome({ view: "chat", workspaceId }, "replace");
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       if (!dialog || activeWorkspaceId !== workspaceId) return;
+      if (typeof rosterDialogAddAgent !== "undefined" && rosterDialogAddAgent !== null) {
+        if (dialog.open && typeof keepConnectCredentialVisible === "function" && keepConnectCredentialVisible()) return;
+        if (typeof teardownRosterDialogAddAgent === "function") teardownRosterDialogAddAgent();
+      }
       if (!dialog.open) {
         layout.closeNavigation(false);
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
@@ -10665,6 +10709,10 @@ import "../../styles/kylon-image-viewer.css";
       window.requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) focus(); });
     };
     const closeRosterDialog = (restoreFocus = false): void => {
+      if (typeof rosterDialogAddAgent !== "undefined" && rosterDialogAddAgent !== null) {
+        if (restoreFocus && typeof peopleDialogOpen === "function" && peopleDialogOpen() && typeof keepConnectCredentialVisible === "function" && keepConnectCredentialVisible()) return;
+        if (typeof teardownRosterDialogAddAgent === "function") teardownRosterDialogAddAgent();
+      }
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       const returned = peopleDialogReturn; peopleDialogReturn = null;
       dialog?.querySelectorAll<HTMLDialogElement>("dialog[open]").forEach(child => child.close());
@@ -15233,8 +15281,13 @@ import "../../styles/kylon-image-viewer.css";
       existingAgentChoiceIsCurrent = undefined;
       if (!session || !section || !host || !workspace || sampleMode) return;
       const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
+      const inDialog = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen();
+      const addGen = typeof rosterAddAgentGeneration === "number" ? rosterAddAgentGeneration : 0;
       const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
-        version === requestVersion && navigation === homeNavigation && homeRoute.view === "add-agent";
+        version === requestVersion && navigation === homeNavigation &&
+        (inDialog
+          ? (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen() && (typeof rosterAddAgentGeneration !== "number" || addGen === rosterAddAgentGeneration))
+          : homeRoute.view === "add-agent");
       existingAgentChoiceIsCurrent = current;
       mountWorkspaceAgentPicker(host, {
         session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
@@ -15253,8 +15306,81 @@ import "../../styles/kylon-image-viewer.css";
         },
       });
     };
+    const showRosterDialogAddAgentChoice = (): void => {
+      if (!peopleDialogOpen()) return;
+      const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
+      const connect = one<HTMLElement>('[data-channel-view="connect"]');
+      const picker = one<AddAgentPanel>("agent-host-picker");
+      rosterDialogAddAgent = "choice";
+      if (choice) choice.hidden = false;
+      if (connect) connect.hidden = true;
+      if (picker?.watchable) startHostJoinWatch();
+      one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
+    };
+
+    const openRosterDialogAddAgent = (): void => {
+      if (sampleMode || !peopleDialogOpen() || !activeWorkspaceId) return;
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const host = one<HTMLElement>("[data-roster-add-agent]");
+      const list = one<HTMLElement>("[data-dialog-agent-list]");
+      const detail = one<HTMLElement>("[data-people-detail]");
+      const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
+      const connect = one<HTMLElement>('[data-channel-view="connect"]');
+      const picker = one<AddAgentPanel>("agent-host-picker");
+      const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+      if (!dialog || !host || !choice || !picker) return;
+      peopleDialogState.selected = null;
+      disposeSeatAdminDialog();
+      if (list) list.hidden = true;
+      if (detail) detail.hidden = true;
+      if (choice.parentElement !== host) host.append(choice);
+      if (connect && connect.parentElement !== host) host.append(connect);
+      host.hidden = false;
+      dialog.dataset.rosterMode = "add-agent";
+      rosterDialogAddAgent = "choice";
+      rosterAddAgentGeneration += 1;
+      const backLabel = one<HTMLElement>("[data-ahp-home-back-label]");
+      if (backLabel) backLabel.textContent = "People & agents";
+      choice.hidden = false;
+      if (connect) connect.hidden = true;
+      picker.setContext?.({
+        workspaceName: selected?.name ?? "",
+        accountEmail: session?.user.email ?? (session ? accountName(session) : ""),
+        viewerId: session?.user.id ?? "",
+      });
+      refreshAddAgentPanel(picker, activeWorkspaceId);
+      stopHostJoinWatch();
+      picker.reset?.();
+      mountAlreadyYours();
+      one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
+    };
+
+    const exitRosterDialogAddAgent = (restoreRosterFocus = true, selectAgentId?: string): void => {
+      if (!rosterAddAgentOpen()) return;
+      if (keepConnectCredentialVisible()) return;
+      teardownRosterDialogAddAgent();
+      peopleDialogState.tab = "agents";
+      peopleDialogState.selected = selectAgentId ? { type: "agent", id: selectAgentId } : null;
+      peopleDialogFocus = selectAgentId ? { kind: "agent", id: selectAgentId } : undefined;
+      peopleDialogState.focusApplied = null;
+      renderDialogRoster();
+      if (!restoreRosterFocus) return;
+      const focusBack = (): void => {
+        if (!peopleDialogOpen() || rosterAddAgentOpen()) return;
+        const target = selectAgentId
+          ? one<HTMLElement>("#pd-detail-title") ?? one<HTMLElement>(`#pd-agent-${selectAgentId}`)
+          : one<HTMLElement>("[data-people-page-add-agent]") ?? one<HTMLElement>("#dashboard-roster-title");
+        target?.focus({ preventScroll: true });
+      };
+      focusBack();
+      window.requestAnimationFrame(() => {
+        if (!document.activeElement || document.activeElement === document.body) focusBack();
+      });
+    };
+
     const openAgentChoice = (): void => {
       if (sampleMode) return;
+      if (typeof parkAddAgentViewsHome === "function") parkAddAgentViewsHome();
       if (homeRoute.view !== "add-agent" && activeWorkspaceId) {
         void navigateHome({ view: "add-agent", workspaceId: activeWorkspaceId }, "push");
         return;
@@ -15382,7 +15508,17 @@ import "../../styles/kylon-image-viewer.css";
       syncConnectWorkspace(selected);
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) exitStatus.hidden = true;
-      showChannelView("connect");
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        rosterDialogAddAgent = "connect";
+        const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
+        const connectView = one<HTMLElement>('[data-channel-view="connect"]');
+        const connectBackLabel = one<HTMLElement>("[data-close-connect-label]");
+        if (connectBackLabel) connectBackLabel.textContent = "Back to Add an agent";
+        if (choice) choice.hidden = true;
+        if (connectView) connectView.hidden = false;
+      } else {
+        showChannelView("connect");
+      }
       connectFocusObserver?.disconnect();
       /* Focus follows the element to where it settles: the prompt's Copy button, the reason it
          stopped, or the invite button when that is all the ready view holds. */
@@ -15416,7 +15552,15 @@ import "../../styles/kylon-image-viewer.css";
       const connectState = connect?.dataset.state ?? "";
       const mintBusy = connect?.hasAttribute("data-mint-busy") ?? false;
       if (!mintBusy && connectState !== "working") return false;
-      showChannelView("connect");
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        rosterDialogAddAgent = "connect";
+        const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
+        const connectView = one<HTMLElement>('[data-channel-view="connect"]');
+        if (choice) choice.hidden = true;
+        if (connectView) connectView.hidden = false;
+      } else {
+        showChannelView("connect");
+      }
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) {
         exitStatus.textContent =
@@ -16148,7 +16292,9 @@ import "../../styles/kylon-image-viewer.css";
         version === requestVersion &&
         workspaceId === activeWorkspaceId &&
         session?.user.id === me &&
-        app.dataset.channelView === "agent-choice";
+        (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()
+          ? rosterDialogAddAgent === "choice"
+          : app.dataset.channelView === "agent-choice");
       hostJoinTimer = window.setInterval(() => {
         if (!live() || Date.now() - hostJoinStartedAt > 15 * 60_000) {
           if (watch === hostJoinGeneration) stopHostJoinWatch();
@@ -18390,6 +18536,10 @@ import "../../styles/kylon-image-viewer.css";
       }
       // Leaving before the prompt exists abandons the request that would have made it.
       connect?.retirePending();
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        showRosterDialogAddAgentChoice();
+        return;
+      }
       returnToChannel();
     };
 
@@ -21955,11 +22105,19 @@ import "../../styles/kylon-image-viewer.css";
        rail keeps no management doors (operator ruling 2026-08-19, header-roster test). */
     one<HTMLButtonElement>("[data-add-agent-objects]")?.addEventListener("click", openAgentChoice);
     const leaveAddAgentForHome = (): void => {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        exitRosterDialogAddAgent(true);
+        return;
+      }
       stopHostJoinWatch();
       one<SecretHoldingAgentConnect>("agent-connect")?.retirePending();
       homeBack();
     };
     const finishJoinedAgent = (agentId: string): void => {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        exitRosterDialogAddAgent(true, agentId || undefined);
+        return;
+      }
       stopHostJoinWatch();
       if (!agentId || !activeWorkspaceId) return;
       void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId }, "push");
@@ -21995,7 +22153,10 @@ import "../../styles/kylon-image-viewer.css";
       const { principalId, button, status } = detail ?? {};
       if (!workspaceId || !principalId || !button || !status) return;
       void allowAgentFromPeople(workspaceId, principalId, button, status).then((outcome) => {
-        if (outcome === "setup" && activeWorkspaceId === workspaceId) void navigateHome({ view: "lists", workspaceId }, "push", true);
+        if (outcome === "setup" && activeWorkspaceId === workspaceId) {
+          if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) closeRosterDialog(false);
+          void navigateHome({ view: "lists", workspaceId }, "push", true);
+        }
       }).catch((error: unknown) => { status.textContent = readableError(error); button.disabled = false; });
     });
     hostPicker?.addEventListener("agent-host-done", (event: Event) => {
@@ -22305,14 +22466,25 @@ import "../../styles/kylon-image-viewer.css";
     const rosterDialog = one<HTMLDialogElement>("[data-roster-dialog]");
     one<HTMLButtonElement>("[data-roster-close]")?.addEventListener("click", () => closeRosterDialog(true));
     rosterDialog?.addEventListener("cancel", event => { if (event.target !== rosterDialog) return; event.preventDefault(); closeRosterDialog(true); });
-    rosterDialog?.addEventListener("close", event => { if (event.target === rosterDialog && !rosterDialog.open && peopleDialogReturn) closeRosterDialog(true); });
+    rosterDialog?.addEventListener("close", event => { if (event.target === rosterDialog && !rosterDialog.open && (peopleDialogReturn || rosterDialogAddAgent !== null)) closeRosterDialog(true); });
     window.addEventListener("resize", syncPeopleDialogLayout);
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);
     }
     one<HTMLButtonElement>("[data-agent-owner-teammate]")?.addEventListener(
       "click",
-      () => openInvite("agent-choice"),
+      () => {
+        if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+          exitRosterDialogAddAgent(false);
+          peopleDialogState.tab = "invites";
+          renderDialogRoster();
+          window.requestAnimationFrame(() => {
+            one<HTMLElement>('[data-roster-dialog] [data-pd-focus="tab-invites"]')?.focus({ preventScroll: true });
+          });
+          return;
+        }
+        openInvite("agent-choice");
+      },
     );
     one<HTMLButtonElement>("[data-close-invite]")?.addEventListener("click", () => {
       if (inviteReturnView === "channel") returnToChannel();
@@ -22517,7 +22689,7 @@ import "../../styles/kylon-image-viewer.css";
         livePromptPrincipalId = detail.principalId;
       }
       // A new agent named in the panel; a new key for an agent that exists is not one.
-      panelKeyMint = detail?.named === true && homeRoute.view === "add-agent" && session
+      panelKeyMint = detail?.named === true && (homeRoute.view === "add-agent" || (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen())) && session
         && typeof detail.principalId === "string" && typeof detail.name === "string"
         ? { workspaceId, userId: session.user.id, principalId: detail.principalId, name: detail.name }
         : null;
@@ -22558,11 +22730,14 @@ import "../../styles/kylon-image-viewer.css";
     const finishPanelKeyMint = (reason: unknown): boolean => {
       const mint = panelKeyMint;
       panelKeyMint = null;
+      const inDialogConnect = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen() && rosterDialogAddAgent === "connect";
+      const inPageConnect = homeRoute.view === "add-agent" && app.dataset.channelView === "connect";
       if (reason !== "consumed" || !mint || mint.workspaceId !== activeWorkspaceId || mint.userId !== session?.user.id
-        || homeRoute.view !== "add-agent" || app.dataset.channelView !== "connect" || pendingWorkspaceId || pendingWorkspaceCreate) return false;
+        || (!inDialogConnect && !inPageConnect) || pendingWorkspaceId || pendingWorkspaceCreate) return false;
       const picker = one<AddAgentPanel>("agent-host-picker");
       if (!picker) return false;
-      showChannelView("agent-choice");
+      if (inDialogConnect) showRosterDialogAddAgentChoice();
+      else showChannelView("agent-choice");
       refreshAddAgentPanel(picker, mint.workspaceId);
       // A minted agent of the person's is usually allowed already (approveMintedOwnAgent); offer Allow only when it is not.
       const allowed = householdConnections.some((entry) =>
@@ -22584,10 +22759,12 @@ import "../../styles/kylon-image-viewer.css";
     app.addEventListener("commonswarm:agent-prompt-failed", (event) => {
       const detail = (event as CustomEvent<{ message?: unknown; named?: unknown }>).detail;
       const picker = one<AddAgentPanel>("agent-host-picker");
-      if (detail?.named !== true || typeof detail.message !== "string" || homeRoute.view !== "add-agent" || !picker) return;
+      const inDialogAddAgent = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen();
+      if (detail?.named !== true || typeof detail.message !== "string" || (!inDialogAddAgent && homeRoute.view !== "add-agent") || !picker) return;
       connectFocusObserver?.disconnect();
       connectFocusObserver = null;
-      showChannelView("agent-choice");
+      if (inDialogAddAgent) showRosterDialogAddAgentChoice();
+      else showChannelView("agent-choice");
       picker.mintFailed(detail.message);
     });
 
@@ -22611,6 +22788,10 @@ import "../../styles/kylon-image-viewer.css";
       const connect = one<SecretHoldingAgentConnect>("agent-connect");
       if (!selected || !connect) return;
       syncConnectWorkspace(selected);
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
+        showRosterDialogAddAgentChoice();
+        return;
+      }
       returnToChannel();
       const receipt = one<HTMLElement>("[data-channel-receipt]");
       if (receipt && detail?.reason === "consumed") {
