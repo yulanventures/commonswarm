@@ -768,13 +768,13 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   // Create an open channel (#ops) and a private channel (#vault).
   const openCh = randomUUID();
   const privCh = randomUUID();
-  await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_kind, created_by_id)
+  await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_kind, created_by_principal)
     VALUES (${openCh}::uuid, ${ws}::uuid, 'ops', 'open', 'user', ${owner}::uuid),
            (${privCh}::uuid, ${ws}::uuid, 'vault', 'private', 'user', ${owner}::uuid)`;
-  await sql`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id)
-    VALUES (${ws}::uuid, ${privCh}::uuid, 'user', ${owner}::uuid)`;
-  await sql`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, agent_principal_id)
-    VALUES (${ws}::uuid, ${privCh}::uuid, 'agent', ${secretWorker}::uuid)`;
+  await sql`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, added_by_kind, added_by_principal)
+    VALUES (${ws}::uuid, ${privCh}::uuid, 'user', ${owner}::uuid, 'user', ${owner}::uuid)`;
+  await sql`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, agent_principal_id, added_by_kind, added_by_principal)
+    VALUES (${ws}::uuid, ${privCh}::uuid, 'agent', ${secretWorker}::uuid, 'user', ${owner}::uuid)`;
 
   // Open-channel unaddressed working-on exposes its text; private-channel working-on keeps text null for members and hides open_work from outsiders.
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
@@ -790,20 +790,23 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   const groupDmWorker = await agent(ws, owner, "GroupDmWorker");
   const groupDmSignal = await signal(ws, { kind: "agent", id: groupDmWorker }, "working-on", "SECRET-GROUP-DM-WORKING", { recipients: [owner, outsider], ago: "2 minutes" });
   assert.ok(groupDmSignal);
-  const pubAsk1 = await signal(ws, { kind: "user", id: owner }, "ask", "first public ask", { toAgent: worker, ago: "6 minutes" });
-  const pubAsk2 = await signal(ws, { kind: "user", id: owner }, "ask", "second public ask", { toAgent: worker, ago: "4 minutes" });
-  const queuedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "queued-only public ask", { toAgent: worker, ago: "5 minutes" });
-  const observedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "already observed ask", { toAgent: worker, ago: "7 minutes" });
+  const pubAsk1 = await signal(ws, { kind: "user", id: owner }, "ask", "first public ask", { toAgent: worker, ago: "6 seconds" });
+  const pubAsk2 = await signal(ws, { kind: "user", id: owner }, "ask", "second public ask", { toAgent: worker, ago: "4 seconds" });
+  const queuedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "queued-only public ask", { toAgent: worker, ago: "5 seconds" });
+  const observedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "already observed ask", { toAgent: worker, ago: "7 seconds" });
   const privAsk = randomUUID();
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at, channel_id)
     VALUES (${privAsk}::uuid, ${ws}::uuid, ${owner}::uuid, 'user', ${secretWorker}::uuid, 'ask', 'SECRET-VAULT-ASK',
-            statement_timestamp() + interval '1 hour', statement_timestamp() - interval '5 minutes', ${privCh}::uuid)`;
-  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
-    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '6 minutes', NULL, NULL),
-           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 minutes', NULL, NULL),
-           (${ws}::uuid, ${queuedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 minutes', statement_timestamp() - interval '4 minutes', 'queued'),
-           (${ws}::uuid, ${observedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '7 minutes', statement_timestamp() - interval '6 minutes', 'observed'),
-           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 minutes', NULL, NULL)`;
+            statement_timestamp() + interval '1 hour', statement_timestamp() - interval '5 seconds', ${privCh}::uuid)`;
+  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome)
+    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '6 seconds', NULL, NULL, NULL, NULL),
+           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 seconds', NULL, NULL, NULL, NULL),
+           (${ws}::uuid, ${queuedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '4 seconds', NULL, statement_timestamp() - interval '4 seconds', 'queued'),
+           (${ws}::uuid, ${observedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '7 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', 'observed'),
+           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 seconds', NULL, NULL, NULL, NULL)
+    ON CONFLICT (signal_id, recipient_agent_principal_id) DO UPDATE SET
+      enqueued_at = EXCLUDED.enqueued_at, delivered_at = EXCLUDED.delivered_at,
+      surfaced_at = EXCLUDED.surfaced_at, acked_at = EXCLUDED.acked_at, ack_outcome = EXCLUDED.ack_outcome`;
   await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at, watcher_at)
     VALUES (${ws}::uuid, ${worker}::uuid, statement_timestamp() - interval '1 minute', statement_timestamp() - interval '10 seconds')`;
 
@@ -843,9 +846,12 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   assert.equal(outsiderHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 0);
 
   // agent_wake_path exposes unseen_count for the 2 unclaimed deliveries once the seat has an observed baseline.
-  const baseline = await signal(ws, { kind: "user", id: owner }, "note", "baseline", { toAgent: worker, ago: "10 minutes" });
-  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
-    VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 minutes', statement_timestamp() - interval '9 minutes', 'observed')`;
+  const baseline = await signal(ws, { kind: "user", id: owner }, "note", "baseline", { toAgent: worker, ago: "10 seconds" });
+  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome)
+    VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed')
+    ON CONFLICT (signal_id, recipient_agent_principal_id) DO UPDATE SET
+      enqueued_at = EXCLUDED.enqueued_at, delivered_at = EXCLUDED.delivered_at,
+      surfaced_at = EXCLUDED.surfaced_at, acked_at = EXCLUDED.acked_at, ack_outcome = EXCLUDED.ack_outcome`;
   const wakeRows = await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE authenticated`;
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
