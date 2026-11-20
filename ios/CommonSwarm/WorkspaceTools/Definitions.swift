@@ -30,6 +30,78 @@ struct DefinitionFields: Equatable, Hashable, Sendable {
     let source: String
 }
 
+enum DefinitionFieldKey: String, Hashable, CaseIterable, Sendable {
+    case term
+    case meaning
+    case source
+
+    var label: String {
+        switch self {
+        case .term: "Term"
+        case .meaning: "Meaning"
+        case .source: "Source"
+        }
+    }
+}
+
+struct DefinitionConflictMergeResult: Equatable, Sendable {
+    let fields: DefinitionFields
+    let appliedFields: Set<DefinitionFieldKey>
+    let conflictingFields: Set<DefinitionFieldKey>
+}
+
+/// Preserves both the version the author opened (`baseFields`) and their unsent edits (`editedFields`)
+/// so conflict recovery restores ONLY fields the author changed and never overwrites a teammate's
+/// changes to other fields (or silently clobbers a field both people edited).
+struct DefinitionConflictDraft: Equatable, Hashable, Sendable {
+    let baseFields: DefinitionFields
+    let editedFields: DefinitionFields
+
+    var editedKeys: Set<DefinitionFieldKey> {
+        var keys: Set<DefinitionFieldKey> = []
+        if editedFields.term != baseFields.term { keys.insert(.term) }
+        if editedFields.meaning != baseFields.meaning { keys.insert(.meaning) }
+        if editedFields.source != baseFields.source { keys.insert(.source) }
+        return keys
+    }
+
+    func value(for key: DefinitionFieldKey) -> String {
+        switch key {
+        case .term: editedFields.term
+        case .meaning: editedFields.meaning
+        case .source: editedFields.source
+        }
+    }
+
+    func merge(onto latest: DefinitionFields) -> DefinitionConflictMergeResult {
+        var applied: Set<DefinitionFieldKey> = []
+        var conflicts: Set<DefinitionFieldKey> = []
+
+        func resolve(_ key: DefinitionFieldKey, base: String, edited: String, current: String) -> String {
+            guard edited != base else {
+                // Author did not edit this field: always keep teammate's latest value.
+                return current
+            }
+            if current == base || current == edited {
+                // Only author edited this field (or teammate made the identical edit): safe to restore.
+                applied.insert(key)
+                return edited
+            }
+            // Both author and teammate edited this same field differently: keep teammate's value
+            // in the field and keep the author's wording visible alongside for review.
+            conflicts.insert(key)
+            return current
+        }
+
+        let merged = DefinitionFields(
+            term: resolve(.term, base: baseFields.term, edited: editedFields.term, current: latest.term),
+            meaning: resolve(.meaning, base: baseFields.meaning, edited: editedFields.meaning, current: latest.meaning),
+            source: resolve(.source, base: baseFields.source, edited: editedFields.source, current: latest.source)
+        )
+        return DefinitionConflictMergeResult(fields: merged, appliedFields: applied, conflictingFields: conflicts)
+    }
+}
+
 /// Presentation identity captured when the New definition sheet opens.
 /// Dismissing or replacing the sheet retires its session synchronously so a held-bearer submit cannot send.
 struct DefinitionCreateSession: Identifiable, Equatable, Sendable {
@@ -692,7 +764,7 @@ final class DefinitionDetailStore: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var errorMessage: String?
-    @Published private(set) var conflictDraft: DefinitionFields?
+    @Published private(set) var conflictDraft: DefinitionConflictDraft?
     @Published var activeEditSession: DefinitionEditSession?
 
     let workspaceID: UUID
@@ -1047,8 +1119,8 @@ final class DefinitionDetailStore: ObservableObject {
                 meaning: DefinitionsRules.normalizeBody(rawMeaning),
                 source: DefinitionsRules.normalizeBody(rawSource)
             )
-            if !unsent.term.isEmpty || !unsent.meaning.isEmpty || !unsent.source.isEmpty {
-                conflictDraft = unsent
+            if unsent != editSession.beforeFields {
+                conflictDraft = DefinitionConflictDraft(baseFields: editSession.beforeFields, editedFields: unsent)
             }
             activeEditSession = nil
             errorMessage = "A newer version was loaded. Review it, then tap Edit to start from the latest version."
@@ -1177,8 +1249,8 @@ final class DefinitionDetailStore: ObservableObject {
             return true
         case .conflict(let message):
             // Conflict reached the reducer past receipt lookup -> definite non-commit; retire stale editor
-            // while preserving the author's unsent wording alongside the refreshed server version.
-            conflictDraft = record.afterFields
+            // while preserving both base and edited fields so recovery never overwrites a teammate's fields.
+            conflictDraft = DefinitionConflictDraft(baseFields: record.beforeFields, editedFields: record.afterFields)
             activeEditSession = nil
             pendingUpdate = nil
             errorMessage = message

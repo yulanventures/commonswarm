@@ -460,46 +460,92 @@ struct VerifyDefinitions {
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/unsupported?on=0")!)
 
         // 8. Designer Witnesses:
-        //    8a. Edit conflict preserves unsent wording alongside the refreshed latest server version
-        //        so reopening Edit never loses the author's addition, and committing clears conflictDraft.
+        //    8a-1. Disjoint field conflict recovery: author edits ONLY Meaning while a teammate changes
+        //          Source to `teammate.corrected.source`. Applying conflictDraft.merge(onto:) and saving
+        //          restores ONLY the author's Meaning while preserving `teammate.corrected.source` on server!
         let conflictDetail = await MainActor.run { DefinitionDetailStore(workspaceID: ws.id, objectID: "def-arr") }
         await conflictDetail.load(api: fastDefsAPI)
-        let beforeConflictRev = await MainActor.run { conflictDetail.detail!.current.revision.token }
-        let conflictEditSess = await MainActor.run { conflictDetail.beginEdit() }!
-        let unsentMeaning = "Annualized recurring subscription revenue. Include renewals."
-        try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
-        let conflictSaveOK = await conflictDetail.update(
-            session: conflictEditSess,
-            term: "ARR",
-            meaning: unsentMeaning,
-            source: "stripe.subscriptions",
+        let disjointEditSess = await MainActor.run { conflictDetail.beginEdit() }!
+        let originalSource = disjointEditSess.beforeFields.source
+        let authorMeaning = "\(disjointEditSess.beforeFields.meaning) Include renewals."
+        try await postFixture(
+            URL(string: "\(origin.absoluteString)/fixture/teammate-edit?object_id=def-arr&source=teammate.corrected.source")!
+        )
+        let disjointConflictOK = await conflictDetail.update(
+            session: disjointEditSess,
+            term: disjointEditSess.beforeFields.term,
+            meaning: authorMeaning,
+            source: originalSource,
             api: fastDefsAPI
         )
-        let conflictRecoveredOK = await MainActor.run {
-            !conflictSaveOK
+        let disjointDraftOK = await MainActor.run {
+            !disjointConflictOK
                 && conflictDetail.activeEditSession == nil
-                && conflictDetail.errorMessage != nil
-                && conflictDetail.detail?.current.revision.token != beforeConflictRev
-                && conflictDetail.conflictDraft?.meaning == unsentMeaning
+                && conflictDetail.detail?.current.source == "teammate.corrected.source"
+                && conflictDetail.conflictDraft?.editedKeys == [.meaning]
+                && conflictDetail.conflictDraft?.editedFields.meaning == authorMeaning
         }
-        expect(conflictRecoveredOK, "Edit conflict must reload server version while preserving unsent wording in conflictDraft")
-        let reopenedEditSess = await MainActor.run { conflictDetail.beginEdit() }!
-        let stillHasUnsentInReopenedEdit = await MainActor.run {
-            reopenedEditSess.baseRevision.token == conflictDetail.detail?.current.revision.token
-                && conflictDetail.conflictDraft?.meaning == unsentMeaning
+        expect(disjointDraftOK, "Disjoint edit conflict must reload teammate's Source and record ONLY Meaning as author-edited")
+
+        let reopenedDisjointSess = await MainActor.run { conflictDetail.beginEdit() }!
+        let disjointMerge = await MainActor.run {
+            conflictDetail.conflictDraft!.merge(onto: reopenedDisjointSess.beforeFields)
         }
-        expect(stillHasUnsentInReopenedEdit, "Reopening Edit after conflict must bind to fresh baseRevision while keeping unsent wording available")
-        let mergedSaveOK = await conflictDetail.update(
-            session: reopenedEditSess,
-            term: "ARR",
-            meaning: "\(reopenedEditSess.beforeFields.meaning) Include renewals.",
-            source: reopenedEditSess.beforeFields.source,
+        expect(
+            disjointMerge.appliedFields == [.meaning]
+                && disjointMerge.conflictingFields.isEmpty
+                && disjointMerge.fields.meaning == authorMeaning
+                && disjointMerge.fields.source == "teammate.corrected.source",
+            "Merging unsent wording must restore author's Meaning while keeping teammate's newer Source"
+        )
+        let disjointSavedOK = await conflictDetail.update(
+            session: reopenedDisjointSess,
+            term: disjointMerge.fields.term,
+            meaning: disjointMerge.fields.meaning,
+            source: disjointMerge.fields.source,
             api: fastDefsAPI
         )
-        let clearedAfterMerge = await MainActor.run {
-            mergedSaveOK && conflictDetail.conflictDraft == nil && (conflictDetail.detail?.current.meaning.contains("Include renewals.") == true)
+        let savedRecordReadBack = await MainActor.run {
+            disjointSavedOK
+                && conflictDetail.conflictDraft == nil
+                && conflictDetail.detail?.current.meaning == authorMeaning
+                && conflictDetail.detail?.current.source == "teammate.corrected.source"
         }
-        expect(clearedAfterMerge, "Saving merged definition after conflict must clear conflictDraft")
+        expect(savedRecordReadBack, "Saved definition after recovery must preserve teammate's Source AND author's Meaning")
+
+        //    8a-2. Same-field conflict: BOTH author and teammate edit Meaning differently ->
+        //          merge keeps teammate's newer Meaning in the form field AND flags .meaning in conflictingFields
+        //          with the author's unsent Meaning preserved alongside for review.
+        let sameFieldSess = await MainActor.run { conflictDetail.beginEdit() }!
+        let authorCompetingMeaning = "Author competing meaning with renewals."
+        try await postFixture(origin.appending(path: "fixture/conflict-next-update"))
+        let sameFieldConflictOK = await conflictDetail.update(
+            session: sameFieldSess,
+            term: sameFieldSess.beforeFields.term,
+            meaning: authorCompetingMeaning,
+            source: sameFieldSess.beforeFields.source,
+            api: fastDefsAPI
+        )
+        let sameFieldReopened = await MainActor.run { conflictDetail.beginEdit() }!
+        let sameFieldMerge = await MainActor.run {
+            conflictDetail.conflictDraft!.merge(onto: sameFieldReopened.beforeFields)
+        }
+        let sameFieldChecked = await MainActor.run {
+            !sameFieldConflictOK
+                && sameFieldMerge.conflictingFields == [.meaning]
+                && sameFieldMerge.fields.meaning == sameFieldReopened.beforeFields.meaning
+                && conflictDetail.conflictDraft?.editedFields.meaning == authorCompetingMeaning
+        }
+        expect(sameFieldChecked, "Same-field conflict must keep teammate's newer Meaning in form while keeping author's competing Meaning available for review")
+        let resolvedSameFieldOK = await conflictDetail.update(
+            session: sameFieldReopened,
+            term: sameFieldReopened.beforeFields.term,
+            meaning: "\(sameFieldReopened.beforeFields.meaning) + renewals",
+            source: sameFieldReopened.beforeFields.source,
+            api: fastDefsAPI
+        )
+        let sameFieldDraftCleared = await MainActor.run { conflictDetail.conflictDraft == nil }
+        expect(resolvedSameFieldOK && sameFieldDraftCleared, "Saving reviewed same-field merge must clear conflictDraft")
 
         //    8b. Empty list keeps pending Retry visible AND surfaces refused create-retry explanation on the list
         //        even when the New definition form is closed and definitions.isEmpty.

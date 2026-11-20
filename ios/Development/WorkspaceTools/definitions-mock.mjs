@@ -167,6 +167,24 @@ const server = createServer(async (req, res) => {
       conflictNextUpdate = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/teammate-edit") {
+      const targetId = url.searchParams.get("object_id") || "def-arr";
+      const entry = definitions.get(targetId);
+      if (entry) {
+        entry.seq += 1;
+        const nextRev = makeRev(entry.object_id, entry.seq);
+        entry.current = {
+          ...entry.current,
+          revision: nextRev,
+          term: url.searchParams.get("term") ?? entry.current.term,
+          meaning: url.searchParams.get("meaning") ?? entry.current.meaning,
+          source: url.searchParams.get("source") ?? entry.current.source,
+          author: { user_id: maya, principal_id: null },
+          occurred_at_server: Date.now(),
+        };
+      }
+      return reply(200, { ok: true, seq: entry?.seq ?? null });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/stale-next-certify") {
       staleNextCertify = true;
       return reply(200, { ok: true });
@@ -488,7 +506,7 @@ const server = createServer(async (req, res) => {
           }
           const entry = definitions.get(args.object_id);
           if (!entry) return reply(404, { status: "refused", reason: "revision_not_found" });
-          if (conflictNextUpdate || args.base?.token !== entry.current.revision.token) {
+          if (conflictNextUpdate) {
             conflictNextUpdate = false;
             // Advance server revision so reload reflects another editor's saved version
             entry.seq += 1;
@@ -499,6 +517,9 @@ const server = createServer(async (req, res) => {
               meaning: `${entry.current.meaning} (concurrent server edit)`,
               occurred_at_server: Date.now(),
             };
+            return reply(409, { status: "conflict", object_id: entry.object_id, current: entry.current.revision });
+          }
+          if (args.base?.token !== entry.current.revision.token) {
             return reply(409, { status: "conflict", object_id: entry.object_id, current: entry.current.revision });
           }
           entry.seq += 1;

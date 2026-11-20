@@ -570,41 +570,19 @@ struct DefinitionDetailView: View {
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    private func unsentDraftCard(_ draft: DefinitionFields, palette: DefinitionBadgePalette) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func unsentDraftCard(_ draft: DefinitionConflictDraft, palette: DefinitionBadgePalette) -> some View {
+        let keys = DefinitionFieldKey.allCases.filter { draft.editedKeys.contains($0) }
+        return VStack(alignment: .leading, spacing: 10) {
             Text("Your unsent changes")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
-            if !draft.term.isEmpty {
+            ForEach(keys, id: \.self) { key in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Term")
+                    Text(key.label)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(palette.mutedForeground)
-                    Text(verbatim: draft.term)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
-            }
-            if !draft.meaning.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Meaning")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(palette.mutedForeground)
-                    Text(verbatim: draft.meaning)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
-            }
-            if !draft.source.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Source")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(palette.mutedForeground)
-                    Text(verbatim: draft.source)
+                    let value = draft.value(for: key)
+                    Text(verbatim: value.isEmpty ? "(Cleared)" : value)
                         .font(.body)
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -681,7 +659,7 @@ struct DefinitionDetailView: View {
 private struct DefinitionEditorSheet: View {
     let title: String
     let actionTitle: String
-    let unsentDraft: DefinitionFields?
+    let unsentDraft: DefinitionConflictDraft?
     let isSaving: Bool
     let errorMessage: String?
     let onSubmit: (String, String, String) async -> Void
@@ -689,6 +667,7 @@ private struct DefinitionEditorSheet: View {
     @State private var term: String
     @State private var meaning: String
     @State private var source: String
+    @State private var mergeNotice: String?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -698,7 +677,7 @@ private struct DefinitionEditorSheet: View {
         initialTerm: String,
         initialMeaning: String,
         initialSource: String,
-        unsentDraft: DefinitionFields? = nil,
+        unsentDraft: DefinitionConflictDraft? = nil,
         isSaving: Bool,
         errorMessage: String?,
         onSubmit: @escaping (String, String, String) async -> Void
@@ -733,39 +712,56 @@ private struct DefinitionEditorSheet: View {
                             .accessibilityIdentifier("definition-editor-error")
                     }
                 }
-                if let unsentDraft {
+                if let unsentDraft, !unsentDraft.editedKeys.isEmpty {
+                    let preview = unsentDraft.merge(
+                        onto: DefinitionFields(term: term, meaning: meaning, source: source)
+                    )
+                    let editedKeys = DefinitionFieldKey.allCases.filter { unsentDraft.editedKeys.contains($0) }
                     Section("Your unsent wording") {
                         VStack(alignment: .leading, spacing: 6) {
-                            if !unsentDraft.term.isEmpty {
-                                Text(verbatim: "Term: \(unsentDraft.term)")
-                                    .font(.footnote)
-                                    .foregroundStyle(.primary)
-                                    .textSelection(.enabled)
+                            ForEach(editedKeys, id: \.self) { key in
+                                let val = unsentDraft.value(for: key)
+                                let bothEdited = preview.conflictingFields.contains(key)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(verbatim: bothEdited ? "\(key.label) (both edited — review below):" : "\(key.label):")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(bothEdited ? palette.errorForeground : palette.mutedForeground)
+                                    Text(verbatim: val.isEmpty ? "(Cleared)" : val)
+                                        .font(.footnote)
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                }
                             }
-                            if !unsentDraft.meaning.isEmpty {
-                                Text(verbatim: "Meaning: \(unsentDraft.meaning)")
-                                    .font(.footnote)
-                                    .foregroundStyle(.primary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                            if !unsentDraft.source.isEmpty {
-                                Text(verbatim: "Source: \(unsentDraft.source)")
-                                    .font(.footnote)
-                                    .foregroundStyle(.primary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
+                            if let mergeNotice {
+                                Text(verbatim: mergeNotice)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(palette.mutedForeground)
                             }
                         }
                         .accessibilityIdentifier("definition-editor-unsent-draft")
 
-                        Button("Use my unsent wording") {
-                            term = unsentDraft.term
-                            meaning = unsentDraft.meaning
-                            source = unsentDraft.source
+                        if !preview.appliedFields.isEmpty {
+                            Button("Use my unsent wording") {
+                                let result = unsentDraft.merge(
+                                    onto: DefinitionFields(term: term, meaning: meaning, source: source)
+                                )
+                                term = result.fields.term
+                                meaning = result.fields.meaning
+                                source = result.fields.source
+                                if !result.conflictingFields.isEmpty {
+                                    let names = DefinitionFieldKey.allCases
+                                        .filter { result.conflictingFields.contains($0) }
+                                        .map(\.label)
+                                        .joined(separator: ", ")
+                                    mergeNotice = "Kept teammate’s newer \(names) in the form for review."
+                                } else {
+                                    mergeNotice = nil
+                                }
+                            }
+                            .disabled(isSaving)
+                            .accessibilityIdentifier("definition-editor-apply-unsent")
                         }
-                        .disabled(isSaving)
-                        .accessibilityIdentifier("definition-editor-apply-unsent")
                     }
                 }
                 Section("Term") {
