@@ -705,13 +705,12 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
         INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
         VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout', 'hosted_mcp', true)
       `;
-      await tx`
-        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
-        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid)
-      `;
       const unseatedAgentId = randomUUID();
       const revokedSeatAgentId = randomUUID();
       const seatedNonMemberAgentId = randomUUID();
+      // agent_principals_sync_workspace_membership automatically creates live seats for all inserted
+      // principals (scoutAgentId, seatedNonMemberAgentId, etc.); remove unseatedAgentId's seat row
+      // (matching join-credential registrar state) and revoke revokedSeatAgentId's seat.
       await tx`
         INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
         VALUES
@@ -720,10 +719,13 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
           (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'SeatedNonMember', 'hosted_mcp', true)
       `;
       await tx`
-        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by, revoked_at)
-        VALUES
-          (${revokedSeatAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid, now()),
-          (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid, NULL)
+        DELETE FROM swarm.agent_workspace_memberships
+        WHERE principal_id = ${unseatedAgentId}::uuid AND workspace_id = ${wsId}::uuid
+      `;
+      await tx`
+        UPDATE swarm.agent_workspace_memberships
+        SET revoked_at = now()
+        WHERE principal_id = ${revokedSeatAgentId}::uuid AND workspace_id = ${wsId}::uuid
       `;
       await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
