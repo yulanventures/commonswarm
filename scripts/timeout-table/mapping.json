@@ -4297,6 +4297,74 @@
             "removes": [],
             "reason": "Use of NOTIFY_TAKEOVER_TIMEOUT_MS."
           }
+        },
+        "src/cli/wait.ts:WAIT_DEFAULT_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cli/wait.ts:19,207",
+          "detail": "Default whole-operation wait duration (5m) for cswarm wait when --timeout is omitted.",
+          "operation": {
+            "name": "cli-wait-default",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Blocking long-poll wait loop bounded by user-supplied --timeout (default 5m); covered by tests/cli-wait.test.ts and tests/p1-cli/cli-wait.test.ts.",
+            "proxy_operation": "channel-ls"
+          }
+        },
+        "src/cli/wait.ts:WAIT_MAX_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cli/wait.ts:20,224",
+          "detail": "Hard upper bound (30m) enforced on cswarm wait --timeout.",
+          "operation": {
+            "name": "cli-wait-max",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Maximum caller-requested blocking wait duration (30m); covered by tests/cli-wait.test.ts.",
+            "proxy_operation": "channel-ls"
+          }
+        },
+        "src/cli/wait.ts:WAIT_REQUEST_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cli/wait.ts:21,490-515",
+          "detail": "Per-request abort bound (30s, clamped to remaining wait deadline) for cswarm wait Step 2b read calls.",
+          "operation": {
+            "name": "cli-wait-request",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Per-request Step 2b read bound inside blocking cswarm wait; covered by tests/cli-wait.test.ts and tests/p1-cli/cli-wait.test.ts.",
+            "proxy_operation": "channel-ls"
+          }
+        },
+        "src/cli/wait.ts:requestTimeoutCapMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cli/wait.ts:714",
+          "detail": "Default of the per-request wait abort cap: deps.requestTimeoutMs ?? WAIT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "cli-wait-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of WAIT_REQUEST_TIMEOUT_MS.",
+            "proxy_operation": "channel-ls"
+          }
         }
       }
     }
