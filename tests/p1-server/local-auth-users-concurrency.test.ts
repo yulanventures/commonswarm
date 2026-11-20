@@ -100,7 +100,7 @@ async function sendActivity(token: string, sequence: number): Promise<{ status: 
       workspace_id: workspace,
       stream_id: randomUUID(),
       sequence,
-      phase: "prompting",
+      phase: "idle",
       signal_id: null,
       tool_title: null,
       elapsed_ms: 0,
@@ -157,7 +157,6 @@ interface HeldLock {
 async function holdRowLock(
   lockFn: (tx: postgres.TransactionSql) => Promise<void>,
 ): Promise<HeldLock> {
-  const conn = postgres(local.DB_URL, { prepare: false, max: 1 });
   let release!: () => void;
   const released = new Promise<void>((resolve) => { release = resolve; });
   let acquiredResolve!: (pid: number) => void;
@@ -168,7 +167,7 @@ async function holdRowLock(
   });
   const done = (async () => {
     try {
-      await conn.begin(async (tx) => {
+      await sql.begin(async (tx) => {
         await tx`SET LOCAL lock_timeout = '5s'`;
         const [row] = await tx<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
         await lockFn(tx);
@@ -178,8 +177,6 @@ async function holdRowLock(
     } catch (error) {
       acquiredReject(error);
       throw error;
-    } finally {
-      await conn.end({ timeout: 5 });
     }
   })();
   const pid = await acquired;
