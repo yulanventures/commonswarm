@@ -6,15 +6,17 @@ import {
   classifyAskConversation,
   conversationParticipantKey,
   createWaitingSurface,
+  filterWaitingArchived,
   filterWaitingItems,
   filterWaitingTodos,
   focusWaitingPanelAfterAction,
   indexDirectConversations,
+  mapWaitingArchivedEntry,
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
 import { answerChoice, answerPlainAsk, plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
-import { parseDecisionQueue, parseWaitingTodosQueue } from "./home/client.ts";
+import { parseDecisionQueue, parseWaitingArchivedPage, parseWaitingTodosQueue } from "./home/client.ts";
 
 class FakeNode {
   tagName;
@@ -1385,4 +1387,209 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     globalThis.document = prevDocument;
     globalThis.fetch = prevFetch;
   }
+});
+
+test("Waiting on you Archived view: decoder validation, scope/redaction isolation, tabs, cards, Load older, and PGRST202 unavailable fallback", () => {
+  const page = parseWaitingArchivedPage({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-20T12:00:00Z",
+    untrusted_content: true,
+    total: 4,
+    truncated: true,
+    items: [
+      {
+        item_key: "ask:11111111-1111-4111-8111-111111111111",
+        kind: "ask",
+        id: "11111111-1111-4111-8111-111111111111",
+        todo_id: null,
+        ask_kind: "choice",
+        title: "Context line\n\nApprove <boiler> quote?",
+        from: { kind: "agent", id: "ag-1", name: "Scout" },
+        outcome_kind: "answered",
+        outcome_text: "Approve quote · Check warranty",
+        archived_at: "2026-11-20T11:55:00Z",
+        answered_by: { kind: "user", id: "u-viewer", name: "Owner", by_viewer: true },
+        placement: "group_dm",
+        channel_id: null,
+        conversation_id: "CONV-GEN1",
+        conversation_kind: "group_dm",
+      },
+      {
+        item_key: "todo:22222222-2222-4222-8222-222222222222",
+        kind: "todo",
+        id: "22222222-2222-4222-8222-222222222222",
+        todo_id: "22222222-2222-4222-8222-222222222222",
+        ask_kind: null,
+        title: "Book plumber",
+        from: { kind: "user", id: "u-viewer", name: "Owner" },
+        outcome_kind: "done",
+        outcome_text: "Done",
+        archived_at: "2026-11-20T11:50:00Z",
+        answered_by: { kind: "user", id: "u-viewer", name: "Owner", by_viewer: true },
+        placement: "group_dm",
+        channel_id: null,
+        conversation_id: "CONV-GEN1",
+        conversation_kind: "group_dm",
+      },
+      {
+        item_key: "review:33333333-3333-4333-8333-333333333333",
+        kind: "review",
+        id: "33333333-3333-4333-8333-333333333333",
+        todo_id: "44444444-4444-4444-8444-444444444444",
+        ask_kind: null,
+        title: "Review proposal",
+        from: { kind: "user", id: "u-maya", name: "Maya" },
+        outcome_kind: "accepted",
+        outcome_text: "Accepted",
+        archived_at: "2026-11-20T11:45:00Z",
+        answered_by: { kind: "user", id: "u-viewer", name: "Owner", by_viewer: true },
+        placement: "channel",
+        channel_id: "CH-BOILER",
+        conversation_id: null,
+        conversation_kind: null,
+      },
+      {
+        item_key: "ask:55555555-5555-4555-8555-555555555555",
+        kind: "ask",
+        id: "55555555-5555-4555-8555-555555555555",
+        todo_id: null,
+        ask_kind: "plain",
+        title: "Left group question?",
+        from: { kind: "agent", id: "ag-1", name: "Scout" },
+        outcome_kind: "cleared_stale",
+        outcome_text: "Cleared as stale",
+        archived_at: "2026-11-20T11:40:00Z",
+        answered_by: { kind: "user", id: "u-viewer", name: "Owner", by_viewer: true },
+        placement: "redacted",
+        channel_id: null,
+        conversation_id: null,
+        conversation_kind: null,
+      },
+    ],
+  }, "ws-1");
+  assert.ok(page);
+  assert.equal(page.total, 4);
+  assert.equal(page.truncated, true);
+  assert.equal(page.items[0].conversation_id, "conv-gen1");
+  assert.equal(page.items[2].channel_id, "ch-boiler");
+  assert.equal(parseWaitingArchivedPage(null, "ws-1"), null);
+  assert.throws(() => parseWaitingArchivedPage({
+    workspace_id: "ws-1", generated_at: "2026-11-20T12:00:00Z", total: 1, truncated: false,
+    items: [{
+      item_key: "ask:1", kind: "ask", id: "1", todo_id: null, ask_kind: "plain", title: "Bad",
+      from: null, outcome_kind: "answered", outcome_text: "ok", archived_at: "2026-11-20T11:55:00Z",
+      answered_by: null, placement: "group_dm", channel_id: null, conversation_id: null, conversation_kind: null,
+    }],
+  }, "ws-1"), /home_waiting_archived_malformed/);
+
+  const mapped = page.items.map(entry => mapWaitingArchivedEntry(entry, {
+    workspaceId: "ws-1",
+    workspaceName: "Rivera",
+    channelLabel: entry.placement === "group_dm" ? "Scout and Maya" : entry.placement === "channel" ? "#boiler-quotes" : "",
+    href: entry.todo_id
+      ? `/app?w=ws-1&todo=${entry.todo_id}`
+      : entry.placement === "group_dm" && entry.conversation_id
+        ? `/app?w=ws-1&dm=${entry.conversation_id}&m=${entry.id}`
+        : null,
+    viewerId: "u-viewer",
+    now: Date.parse("2026-11-20T12:00:00Z"),
+  }));
+  assert.equal(mapped[0].title, "Approve <boiler> quote?", "choice prompt strips preamble cleanly");
+
+  const placeGen1 = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Scout and Maya", conversationId: "conv-gen1" };
+  const placeGen2 = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Scout and Maya", conversationId: "conv-gen2" };
+  const placeBoiler = { workspaceId: "ws-1", workspaceName: "Rivera", kind: "channel", channelId: "ch-boiler", label: "#boiler-quotes" };
+
+  assert.deepEqual(filterWaitingArchived(mapped, "channel", placeGen1).map(i => i.kind), ["ask", "todo"]);
+  assert.deepEqual(filterWaitingArchived(mapped, "channel", placeGen2).map(i => i.kind), [], "restarted Gen 2 must have zero bleed from Gen 1 or redacted asks");
+  assert.deepEqual(filterWaitingArchived(mapped, "channel", placeBoiler).map(i => i.kind), ["review"]);
+  assert.equal(filterWaitingArchived(mapped, "workspace", placeGen2).length, 4, "All channels includes redacted left-group item");
+
+  // Render Waiting | Archived tabs, switch to Archived, check cards + Load older + Open + PGRST202 unavailable.
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const tabsPicked = [];
+  const opened = [];
+  let loadMoreCount = 0;
+  const handlers = {
+    onTabChange: (t) => tabsPicked.push(t),
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onLoadMoreArchived: () => { loadMoreCount += 1; },
+    onOpenArchivedTodo: (item) => opened.push(item.itemKey),
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+  };
+
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "workspace",
+    place: placeGen1,
+    items: [],
+    archived: {
+      items: mapped,
+      counts: {
+        channel: { min: 2, complete: false },
+        workspace: { min: 4, complete: true },
+        all: { min: 4, complete: true },
+      },
+      loading: false,
+      loadingMore: false,
+      complete: true,
+      failed: false,
+      hasMore: true,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, handlers);
+
+  const tabActive = host.querySelector('[data-waiting-tab="active"]');
+  const tabArchived = host.querySelector('[data-waiting-tab="archived"]');
+  assert.equal(tabActive.getAttribute("aria-selected"), "false");
+  assert.equal(tabArchived.getAttribute("aria-selected"), "true");
+  tabActive.click();
+  assert.deepEqual(tabsPicked, ["active"]);
+
+  const askCard = host.querySelector('[data-waiting-archived-item="ask:11111111-1111-4111-8111-111111111111"]');
+  assert.ok(askCard);
+  assert.equal(askCard.querySelector(".cs-waiting-card__question").textContent, "Approve <boiler> quote?");
+  assert.equal(askCard.querySelector(".cs-waiting-archived__answer").textContent, "Approve quote · Check warranty");
+  assert.equal(askCard.querySelector(".cs-waiting-archived__meta").dateTime, "2026-11-20T11:55:00Z");
+  assert.equal(askCard.querySelector(".cs-waiting-card__place").textContent, "Scout and Maya");
+  const openAsk = askCard.querySelector('[data-waiting-archived-open="ask:11111111-1111-4111-8111-111111111111"]');
+  assert.ok(openAsk, "visible archived ask renders an Open source link");
+  assert.equal(openAsk.href, "/app?w=ws-1&dm=conv-gen1&m=11111111-1111-4111-8111-111111111111");
+  const redactedAskCard = host.querySelector('[data-waiting-archived-item="ask:55555555-5555-4555-8555-555555555555"]');
+  assert.ok(redactedAskCard);
+  assert.equal(redactedAskCard.querySelector("[data-waiting-archived-open]"), null, "redacted ask omits source link");
+
+  const openReview = host.querySelector('[data-waiting-archived-open="review:33333333-3333-4333-8333-333333333333"]');
+  assert.ok(openReview);
+  openReview.click();
+  assert.deepEqual(opened, ["review:33333333-3333-4333-8333-333333333333"]);
+
+  const loadMoreBtn = host.querySelector("[data-waiting-archived-more]");
+  assert.ok(loadMoreBtn);
+  assert.equal(loadMoreBtn.textContent, "Load older");
+  loadMoreBtn.click();
+  assert.equal(loadMoreCount, 1);
+
+  // PGRST202 unavailable fallback renders cleanly without crashing.
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "workspace",
+    place: placeGen1,
+    items: [],
+    archived: {
+      items: [],
+      counts: { channel: { min: 0, complete: false }, workspace: { min: 0, complete: false }, all: { min: 0, complete: false } },
+      loading: false, loadingMore: false, complete: true, failed: false, unavailable: true, hasMore: false,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, handlers);
+  assert.equal(host.querySelector('[data-waiting-archived-state="unavailable"]').textContent, "Archived history is unavailable on this server.");
 });

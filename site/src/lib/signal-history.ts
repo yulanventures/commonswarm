@@ -20,6 +20,16 @@
 /** Kinds that are conversation. A row of any other kind ends with its `until`. */
 export const SIGNAL_HISTORY_KINDS = ["note", "ask"] as const;
 
+/** Permanent signals (C6) store a far-future ISO timestamp (`9999-12-31T23:59:59.000Z`). */
+export const SIGNAL_PERMANENT_UNTIL_THRESHOLD_MS = Date.UTC(9000, 0, 1);
+
+/** True when a signal's `until` is the permanent sentinel and does not lapse. */
+export const isPermanentSignalUntil = (until: string | null | undefined): boolean => {
+  if (typeof until !== "string" || until.length === 0) return false;
+  const parsed = Date.parse(until);
+  return Number.isFinite(parsed) && parsed >= SIGNAL_PERMANENT_UNTIL_THRESHOLD_MS;
+};
+
 /** The fields of a loaded row the rule reads. */
 export interface HistorySignal {
   from: string;
@@ -70,7 +80,7 @@ export const nextFeedChangeAt = (
 ): number | null => {
   let soonest: number | null = null;
   for (const signal of signals) {
-    if (signal.until === null) continue;
+    if (signal.until === null || isPermanentSignalUntil(signal.until)) continue;
     const until = new Date(signal.until).getTime();
     if (!Number.isFinite(until) || until <= now) continue;
     if (soonest === null || until < soonest) soonest = until;
@@ -84,7 +94,7 @@ export const nextFeedChangeAt = (
  * is not treated as passed.
  */
 export const signalHasEnded = (signal: Pick<HistorySignal, "until">, now: number): boolean => {
-  if (signal.until === null) return false;
+  if (signal.until === null || isPermanentSignalUntil(signal.until)) return false;
   const until = new Date(signal.until).getTime();
   return Number.isFinite(until) && until <= now;
 };

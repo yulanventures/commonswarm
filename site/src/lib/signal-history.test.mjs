@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  nextFeedChangeAt, signalEndsWithUntil, signalHasEnded, signalHistoryFilter, signalIsReadable, signalLeavesAt,
+  isPermanentSignalUntil, nextFeedChangeAt, signalEndsWithUntil, signalHasEnded, signalHistoryFilter, signalIsReadable, signalLeavesAt,
 } from "./signal-history.ts";
 import { isOpenAskToViewer } from "./home-stream.ts";
 
@@ -82,4 +82,18 @@ test("the feed repaints at the soonest until still ahead, including a note that 
   assert.equal(nextFeedChangeAt([row(), row({ until: null }), row({ until: "not a date" })], NOW), null);
   assert.equal(nextFeedChangeAt([row({ until: new Date(NOW).toISOString() })], NOW), null, "the boundary itself is already past");
   assert.equal(nextFeedChangeAt([], NOW), null);
+});
+
+test("C6 permanent sentinel until never lapses and schedules no feed expiry timer", () => {
+  const PERMANENT = "9999-12-31T23:59:59.000Z";
+  assert.equal(isPermanentSignalUntil(PERMANENT), true);
+  assert.equal(isPermanentSignalUntil(FUTURE), false);
+  assert.equal(isPermanentSignalUntil(null), false);
+  assert.equal(signalHasEnded({ until: PERMANENT }, NOW), false);
+  assert.equal(nextFeedChangeAt([row({ kind: "ask", until: PERMANENT }), row({ kind: "note", until: PERMANENT })], NOW), null);
+  assert.equal(
+    nextFeedChangeAt([row({ kind: "ask", until: PERMANENT }), row({ kind: "working-on", until: FUTURE })], NOW),
+    Date.parse(FUTURE),
+    "working-on still schedules its own expiry timer alongside permanent asks",
+  );
 });

@@ -7,7 +7,9 @@
  * descriptions, Something else text) enters only through textContent.
  */
 import { buildChoiceCard } from "./choice-card";
-import { cleanOtherText, OTHER_TEXT_MAX, STALE_ASK_CLOSE_BODY, type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
+import { cleanOtherText, OTHER_TEXT_MAX, splitChoicePrompt, STALE_ASK_CLOSE_BODY, type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
+import { formatWhen, initials, personFirstName, personTint } from "./home-names";
+import type { WaitingArchivedEntry } from "./home/contract";
 import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
 import {
@@ -107,6 +109,43 @@ export interface WaitingPlainAskItem {
 
 export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "agent_removed";
 export type WaitingTodoPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace";
+export type WaitingPanelTab = "active" | "archived";
+export type WaitingArchivedPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace" | "redacted";
+export type WaitingArchivedOutcomeKind = "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined";
+
+export interface WaitingArchivedItem {
+  itemKey: string;
+  kind: "ask" | "todo" | "review";
+  id: string;
+  todoId?: string | null;
+  askKind?: "choice" | "plain" | null;
+  workspaceId: string;
+  workspaceName: string;
+  title: string;
+  from: PersonVM | AgentVM | null;
+  outcomeKind: WaitingArchivedOutcomeKind;
+  outcomeText: string;
+  archivedAt: string;
+  when: string;
+  answeredByName?: string | null;
+  answeredByViewer?: boolean;
+  placement: WaitingArchivedPlacement;
+  channelId?: string | null;
+  conversationId?: string | null;
+  channelLabel?: string;
+  href?: string | null;
+}
+
+export interface WaitingArchivedVM {
+  items: WaitingArchivedItem[];
+  counts: WaitingPanelCounts;
+  loading: boolean;
+  loadingMore: boolean;
+  complete: boolean;
+  failed: boolean;
+  unavailable?: boolean;
+  hasMore: boolean;
+}
 
 export interface WaitingTodoItem {
   id: string;
@@ -139,11 +178,13 @@ export interface WaitingPanelCounts {
 }
 
 export interface WaitingPanelVM {
+  tab?: WaitingPanelTab;
   scope: WaitingScope;
   place: WaitingPlace;
   items: WaitingAskItem[];
   plainAsks?: WaitingPlainAskItem[];
   todos?: WaitingTodoItem[];
+  archived?: WaitingArchivedVM | null;
   counts: WaitingPanelCounts;
   loading: boolean;
   complete: boolean;
@@ -156,9 +197,13 @@ export interface WaitingPanelVM {
 }
 
 export interface WaitingPanelHandlers {
+  onTabChange?: (tab: WaitingPanelTab) => void;
   onScopeChange: (scope: WaitingScope) => void;
   onClose: () => void;
   onRetryLoad: () => void;
+  onRetryArchived?: () => void;
+  onLoadMoreArchived?: () => void;
+  onOpenArchivedTodo?: (item: WaitingArchivedItem) => void;
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
@@ -251,6 +296,108 @@ export function filterWaitingTodos(
     }
     return false;
   });
+}
+
+/** Filters archived Waiting on you items by scope using exact channel/conversation isolation.
+ *  Workspace-only and redacted (left-group/private) items stay out of This channel / This conversation
+ *  and remain visible in All channels, All workspaces, and All messages. */
+export function filterWaitingArchived(
+  items: readonly WaitingArchivedItem[],
+  scope: WaitingScope,
+  place: WaitingPlace,
+): WaitingArchivedItem[] {
+  if (scope === "all") return [...items];
+  if (scope === "workspace") return items.filter(item => item.workspaceId === place.workspaceId);
+  if (place.kind === "all") return items.filter(item => item.workspaceId === place.workspaceId);
+  return items.filter(item => {
+    if (item.workspaceId !== place.workspaceId) return false;
+    if (place.kind === "channel") {
+      return item.placement === "channel" && item.channelId === place.channelId;
+    }
+    if (place.kind === "general") {
+      return item.placement === "general";
+    }
+    if (place.kind === "dm" || place.kind === "group_dm") {
+      const placeConvId = place.conversationId?.trim().toLowerCase() || null;
+      const itemConvId = item.conversationId?.trim().toLowerCase() || null;
+      return (item.placement === "dm" || item.placement === "group_dm") && Boolean(placeConvId && itemConvId && itemConvId === placeConvId);
+    }
+    return false;
+  });
+}
+
+/** Converts one server WaitingArchivedEntry row into a renderable WaitingArchivedItem (lives in the lazy panel chunk). */
+export function mapWaitingArchivedEntry(
+  entry: WaitingArchivedEntry,
+  ctx: {
+    workspaceId: string;
+    workspaceName: string;
+    channelLabel: string;
+    href: string | null;
+    viewerId?: string | null;
+    now?: number;
+  },
+): WaitingArchivedItem {
+  const name = entry.from?.name?.trim() || (entry.from?.kind === "agent" ? "Agent" : "Member");
+  let from: PersonVM | AgentVM | null = null;
+  if (entry.from) {
+    if (entry.from.kind === "agent") {
+      from = {
+        id: entry.from.id,
+        name,
+        label: name,
+        nestedLabel: name,
+        ownerId: null,
+        ownerFirstName: null,
+        ownerInitial: "",
+        yours: false,
+        tint: personTint(entry.from.id),
+        hosted: false,
+        state: {
+          kind: "idle",
+          word: "Idle",
+          detail: "",
+          attention: false,
+          fix: { action: null, allowed: false, askWho: null, sentence: "" },
+        },
+      };
+    } else {
+      from = {
+        id: entry.from.id,
+        name,
+        firstName: personFirstName(name) || name,
+        initials: initials(name),
+        you: Boolean(ctx.viewerId && entry.from.id === ctx.viewerId),
+        role: "member",
+      };
+    }
+  }
+  const title =
+    entry.kind === "ask" && entry.ask_kind === "choice"
+      ? ((splitChoicePrompt(entry.title).question ?? entry.title).trim() || entry.title)
+      : entry.title.trim();
+  return {
+    itemKey: entry.item_key,
+    kind: entry.kind,
+    id: entry.id,
+    todoId: entry.todo_id,
+    askKind: entry.ask_kind,
+    workspaceId: ctx.workspaceId,
+    workspaceName: ctx.workspaceName,
+    title,
+    from,
+    outcomeKind: entry.outcome_kind,
+    outcomeText: entry.outcome_text,
+    archivedAt: entry.archived_at,
+    when: formatWhen(entry.archived_at, ctx.now ?? Date.now()),
+    answeredByName: entry.answered_by?.name ?? null,
+    answeredByViewer: entry.answered_by?.by_viewer,
+    placement: entry.placement,
+    channelId: entry.channel_id,
+    conversationId: entry.conversation_id,
+    channelLabel: ctx.channelLabel,
+    href: ctx.href,
+  };
 }
 
 function todoReasonLabel(reason: WaitingTodoReason): string {
@@ -601,6 +748,262 @@ function buildAskCard(
   return card;
 }
 
+function archivedCardSignature(item: WaitingArchivedItem, scope: WaitingScope): string {
+  return JSON.stringify([
+    scope,
+    item.itemKey,
+    item.kind,
+    item.workspaceName,
+    item.channelLabel ?? "",
+    item.from ? item.from.name : "",
+    item.title,
+    item.outcomeKind,
+    item.outcomeText,
+    item.archivedAt,
+    item.when,
+    item.answeredByName ?? "",
+    item.answeredByViewer ?? null,
+    item.href ?? "",
+  ]);
+}
+
+function archivedMetaText(item: WaitingArchivedItem): string {
+  const when = item.when || formatWhen(item.archivedAt, Date.now());
+  const who = item.answeredByViewer === false && item.answeredByName ? item.answeredByName : "";
+  if (item.outcomeKind === "answered") {
+    return who ? `Answered by ${who} · ${when}` : `Answered · ${when}`;
+  }
+  return who ? `${who} · ${when}` : when;
+}
+
+function buildArchivedCard(
+  doc: Document,
+  item: WaitingArchivedItem,
+  scope: WaitingScope,
+  handlers: WaitingPanelHandlers,
+): HTMLElement {
+  const card = node(doc, "article", "cs-waiting-card cs-waiting-card--archived");
+  card.dataset.waitingArchivedItem = item.itemKey;
+  card.dataset.waitingArchivedKind = item.kind;
+  card.dataset.waitingWorkspace = item.workspaceId;
+  card.dataset.waitingCardSig = archivedCardSignature(item, scope);
+
+  const head = node(doc, "div", "cs-waiting-card__head");
+  if (item.from) {
+    head.append(isAgent(item.from) ? agentOrb(doc, item.from, true) : personAvatar(doc, item.from));
+  }
+  const meta = node(doc, "div", "cs-waiting-card__meta");
+  const byline = node(doc, "div", "cs-waiting-card__byline");
+  const whoLabel = item.from
+    ? item.from.name
+    : item.kind === "review"
+      ? "Review"
+      : "To-do";
+  byline.append(node(doc, "span", "cs-waiting-card__sender", whoLabel));
+  const kindTag = item.kind === "review" ? "Review" : item.kind === "todo" ? "To-do" : null;
+  if (kindTag && item.from) {
+    byline.append(node(doc, "span", "cs-waiting-archived__kind", kindTag));
+  }
+  meta.append(byline);
+
+  const placeText =
+    scope === "all"
+      ? [item.workspaceName, item.channelLabel].filter(Boolean).join(" · ")
+      : scope === "workspace"
+        ? (item.channelLabel ?? "")
+        : "";
+  if (placeText) {
+    meta.append(node(doc, "span", "cs-waiting-card__place", placeText));
+  }
+  head.append(meta);
+
+  const title = node(doc, "p", "cs-waiting-card__question", item.title);
+
+  const tone =
+    item.outcomeKind === "cleared_stale" || item.outcomeKind === "dropped" || item.outcomeKind === "declined"
+      ? "muted"
+      : "positive";
+  const outcome = node(doc, "div", "cs-waiting-archived__outcome");
+  outcome.dataset.waitingArchivedOutcome = item.outcomeKind;
+  outcome.dataset.outcomeTone = tone;
+  outcome.append(node(doc, "p", "cs-waiting-archived__answer", item.outcomeText));
+  const time = node(doc, "time", "cs-waiting-archived__meta", archivedMetaText(item));
+  time.dateTime = item.archivedAt;
+  time.title = item.archivedAt;
+  outcome.append(time);
+
+  card.append(head, title, outcome);
+
+  if (item.href) {
+    const actions = node(doc, "div", "cs-waiting-todo__actions");
+    const open = node(doc, "a", "cs-waiting-todo__open", "Open");
+    open.href = item.href;
+    open.dataset.waitingArchivedOpen = item.itemKey;
+    open.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!handlers.onOpenArchivedTodo) return;
+      event.preventDefault();
+      handlers.onOpenArchivedTodo(item);
+    });
+    actions.append(open);
+    card.append(actions);
+  }
+  return card;
+}
+
+function renderWaitingArchivedBody(
+  doc: Document,
+  body: HTMLElement,
+  vm: WaitingPanelVM,
+  handlers: WaitingPanelHandlers,
+): void {
+  const archived = vm.archived;
+  const items = archived?.items ?? [];
+  if (!archived || items.length === 0) {
+    const emptyState = archived?.unavailable
+      ? "unavailable"
+      : archived?.failed
+        ? "failed"
+        : !archived || archived.loading || !archived.complete
+          ? "loading"
+          : "empty";
+    const counts = archived?.counts ?? {
+      channel: { min: 0, complete: false },
+      workspace: { min: 0, complete: false },
+      all: { min: 0, complete: false },
+    };
+    const wsNum = formatScopeCount(counts.workspace);
+    const allNum = formatScopeCount(counts.all);
+    const emptyKey = JSON.stringify([
+      "archived",
+      emptyState,
+      vm.scope,
+      vm.place.label,
+      vm.place.workspaceName,
+      wsNum,
+      allNum,
+      counts.workspace.min,
+      counts.all.min,
+    ]);
+    if (body.dataset.waitingArchivedEmptyKey === emptyKey) return;
+    body.dataset.waitingArchivedEmptyKey = emptyKey;
+
+    const wrap = node(doc, "div", "cs-waiting-panel__state");
+    wrap.dataset.waitingArchivedState = emptyState;
+    if (emptyState === "unavailable") {
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", "Archived history is unavailable on this server."));
+    } else if (emptyState === "failed") {
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", "Could not load archived items."));
+      const retry = node(doc, "button", "cs-waiting-panel__action", "Retry");
+      retry.type = "button";
+      retry.dataset.waitingArchivedRetry = "";
+      retry.addEventListener("click", () => (handlers.onRetryArchived ?? handlers.onRetryLoad)());
+      wrap.append(retry);
+    } else if (emptyState === "loading") {
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", "Loading…"));
+    } else {
+      const emptyCopy =
+        vm.scope === "channel"
+          ? `No archived items in ${vm.place.label}.`
+          : vm.scope === "workspace"
+            ? `No archived items in ${vm.place.workspaceName}.`
+            : "No archived items yet.";
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", emptyCopy));
+      if (vm.scope === "channel" && counts.workspace.min > 0) {
+        const showWs = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          wsNum ? `Show all channels (${wsNum})` : "Show all channels",
+        );
+        showWs.type = "button";
+        showWs.dataset.waitingSwitchScope = "workspace";
+        showWs.addEventListener("click", () => handlers.onScopeChange("workspace"));
+        wrap.append(showWs);
+      } else if (vm.scope !== "all" && counts.all.min > 0) {
+        const showAll = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          allNum ? `Show all workspaces (${allNum})` : "Show all workspaces",
+        );
+        showAll.type = "button";
+        showAll.dataset.waitingSwitchScope = "all";
+        showAll.addEventListener("click", () => handlers.onScopeChange("all"));
+        wrap.append(showAll);
+      }
+    }
+    body.replaceChildren(wrap);
+    return;
+  }
+
+  delete body.dataset.waitingArchivedEmptyKey;
+  let list = body.querySelector<HTMLElement>("[data-waiting-archived-list]");
+  if (!list) {
+    list = node(doc, "div", "cs-waiting-panel__list");
+    list.dataset.waitingArchivedList = "";
+    body.replaceChildren(list);
+  }
+
+  const existing = new Map<string, HTMLElement>();
+  for (const child of Array.from(list.children)) {
+    const el = child as HTMLElement;
+    if (el.dataset.waitingArchivedItem) existing.set(el.dataset.waitingArchivedItem, el);
+  }
+  const keepKeys = new Set(items.map(i => i.itemKey));
+  for (const [key, el] of existing) {
+    if (!keepKeys.has(key)) el.remove();
+  }
+
+  let cursor: ChildNode | null = list.firstChild;
+  for (const item of items) {
+    const sig = archivedCardSignature(item, vm.scope);
+    let card = existing.get(item.itemKey);
+    if (!card || card.dataset.waitingCardSig !== sig) {
+      const built = buildArchivedCard(doc, item, vm.scope, handlers);
+      if (card) {
+        if (cursor === card) cursor = built;
+        card.replaceWith(built);
+      } else {
+        list.insertBefore(built, cursor);
+      }
+      card = built;
+    }
+    if (card !== cursor) list.insertBefore(card, cursor);
+    else cursor = cursor.nextSibling;
+  }
+
+  const existingMore = body.querySelector<HTMLButtonElement>("[data-waiting-archived-more]");
+  if (archived.hasMore && handlers.onLoadMoreArchived) {
+    const btn = existingMore ?? node(doc, "button", "cs-waiting-panel__action cs-waiting-panel__more");
+    btn.type = "button";
+    btn.dataset.waitingArchivedMore = "";
+    btn.disabled = archived.loadingMore;
+    btn.textContent = archived.loadingMore ? "Loading…" : "Load older";
+    btn.onclick = () => handlers.onLoadMoreArchived?.();
+    if (!existingMore) body.append(btn);
+  } else {
+    existingMore?.remove();
+  }
+
+  const existingNotice = body.querySelector<HTMLElement>("[data-waiting-archived-incomplete]");
+  if (archived.failed) {
+    if (!existingNotice) {
+      const notice = node(doc, "div", "cs-waiting-panel__incomplete");
+      notice.dataset.waitingArchivedIncomplete = "";
+      notice.append(node(doc, "p", "cs-waiting-panel__state-text", "Some archived items could not be loaded."));
+      const retry = node(doc, "button", "cs-waiting-panel__action", "Retry");
+      retry.type = "button";
+      retry.dataset.waitingArchivedRetry = "";
+      retry.addEventListener("click", () => (handlers.onRetryArchived ?? handlers.onRetryLoad)());
+      notice.append(retry);
+      body.append(notice);
+    }
+  } else {
+    existingNotice?.remove();
+  }
+}
+
 /**
  * Renders or incrementally updates the Waiting on you panel inside `container`.
  * Unchanged cards keep their DOM nodes, typed drafts, and keyboard focus across refreshes.
@@ -630,6 +1033,22 @@ export function renderWaitingPanel(
     closeBtn.setAttribute("aria-label", "Close Waiting on you");
     header.append(headingGroup, closeBtn);
 
+    const tabs = node(doc, "div", "cs-waiting-panel__tabs");
+    tabs.dataset.waitingTabs = "";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Waiting view");
+    tabs.hidden = true;
+    for (const [tabVal, tabLabel] of [["active", "Waiting"], ["archived", "Archived"]] as const) {
+      const btn = node(doc, "button", "cs-waiting-panel__tab", tabLabel);
+      btn.id = `${WAITING_PANEL_ID}-tab-${tabVal}`;
+      btn.type = "button";
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", String(tabVal === "active"));
+      btn.setAttribute("aria-controls", `${WAITING_PANEL_ID}-body`);
+      btn.dataset.waitingTab = tabVal;
+      tabs.append(btn);
+    }
+
     const controls = node(doc, "div", "cs-waiting-panel__controls");
     controls.dataset.waitingControls = "";
     const scope = node(doc, "select", "cs-waiting-panel__scope");
@@ -654,25 +1073,53 @@ export function renderWaitingPanel(
     status.hidden = true;
 
     const body = node(doc, "div", "cs-waiting-panel__body");
+    body.id = `${WAITING_PANEL_ID}-body`;
     body.dataset.waitingBody = "";
 
-    root.append(header, controls, status, body);
+    root.append(header, tabs, controls, status, body);
     container.replaceChildren(root);
   }
 
   const closeBtn = root.querySelector<HTMLButtonElement>("[data-waiting-close]");
   if (closeBtn) closeBtn.onclick = () => handlers.onClose();
 
+  const activeTab: WaitingPanelTab = vm.tab === "archived" ? "archived" : "active";
+  const showTabs = !vm.survey && (vm.archived !== undefined || Boolean(handlers.onTabChange));
+  const tabsEl = root.querySelector<HTMLElement>("[data-waiting-tabs]");
+  if (tabsEl) {
+    tabsEl.hidden = !showTabs;
+    const tabButtons = Array.from(tabsEl.querySelectorAll<HTMLButtonElement>("[data-waiting-tab]"));
+    for (const btn of tabButtons) {
+      const val = btn.dataset.waitingTab as WaitingPanelTab;
+      const selected = val === activeTab;
+      btn.setAttribute("aria-selected", String(selected));
+      btn.tabIndex = selected ? 0 : -1;
+      btn.onclick = () => {
+        if (val !== activeTab) handlers.onTabChange?.(val);
+      };
+      btn.onkeydown = (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") return;
+        event.preventDefault();
+        const nextVal: WaitingPanelTab =
+          event.key === "Home" ? "active" : event.key === "End" ? "archived" : val === "active" ? "archived" : "active";
+        const target = tabButtons.find(b => b.dataset.waitingTab === nextVal);
+        target?.focus();
+        if (nextVal !== activeTab) handlers.onTabChange?.(nextVal);
+      };
+    }
+  }
+
   const placeEl = root.querySelector<HTMLElement>("[data-waiting-place]");
   if (placeEl) placeEl.textContent = placeHeadingText(vm);
 
+  const activeCounts = activeTab === "archived" && vm.archived ? vm.archived.counts : vm.counts;
   const scopeEl = root.querySelector<HTMLSelectElement>("[data-waiting-scope]");
   if (scopeEl) {
     const isDirectPlace = vm.place.kind === "dm" || vm.place.kind === "group_dm";
     const labels: Record<WaitingScope, string> = {
-      channel: scopeOptionText(isDirectPlace ? "This conversation" : "This channel", vm.counts.channel),
-      workspace: scopeOptionText("All channels", vm.counts.workspace),
-      all: scopeOptionText("All workspaces", vm.counts.all),
+      channel: scopeOptionText(isDirectPlace ? "This conversation" : "This channel", activeCounts.channel),
+      workspace: scopeOptionText("All channels", activeCounts.workspace),
+      all: scopeOptionText("All workspaces", activeCounts.all),
     };
     for (const opt of scopeEl.options) {
       const value = opt.value as WaitingScope;
@@ -690,7 +1137,7 @@ export function renderWaitingPanel(
 
   const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
   if (reviewBtn) {
-    const showReview = !vm.survey && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
+    const showReview = !vm.survey && activeTab === "active" && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
     reviewBtn.hidden = !showReview;
     if (showReview) {
       reviewBtn.textContent = "Review questions";
@@ -700,7 +1147,7 @@ export function renderWaitingPanel(
 
   const statusEl = root.querySelector<HTMLElement>("[data-waiting-status]");
   if (statusEl) {
-    const hasStatus = vm.statusMessage.trim() !== "";
+    const hasStatus = activeTab === "active" && vm.statusMessage.trim() !== "";
     statusEl.hidden = !hasStatus;
     if (statusEl.dataset.waitingStatusSeq !== String(vm.statusSeq) || statusEl.textContent !== vm.statusMessage) {
       statusEl.dataset.waitingStatusSeq = String(vm.statusSeq);
@@ -710,14 +1157,29 @@ export function renderWaitingPanel(
 
   const body = root.querySelector<HTMLElement>("[data-waiting-body]");
   if (!body) return;
+  if (showTabs) {
+    body.setAttribute("role", "tabpanel");
+    body.setAttribute("aria-labelledby", `${WAITING_PANEL_ID}-tab-${activeTab}`);
+  } else {
+    body.removeAttribute?.("role");
+    body.removeAttribute?.("aria-labelledby");
+  }
 
   if (vm.survey && handlers.surveyHandlers) {
     delete body.dataset.waitingEmptyKey;
+    delete body.dataset.waitingArchivedEmptyKey;
     renderWaitingSurvey(body, vm.survey, handlers.surveyHandlers);
     return;
   }
   delete body.dataset.waitingSurveySig;
   delete body.dataset.waitingSurveyTypingSig;
+
+  if (activeTab === "archived") {
+    delete body.dataset.waitingEmptyKey;
+    renderWaitingArchivedBody(doc, body, vm, handlers);
+    return;
+  }
+  delete body.dataset.waitingArchivedEmptyKey;
 
   const buildCatchUpLink = (): HTMLAnchorElement | null => {
     if (!vm.catchUpHref) return null;

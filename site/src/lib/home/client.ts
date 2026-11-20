@@ -21,6 +21,11 @@ import type {
   QueueSection,
   TodoState,
   Uuid,
+  WaitingArchivedEntry,
+  WaitingArchivedKind,
+  WaitingArchivedOutcomeKind,
+  WaitingArchivedPage,
+  WaitingArchivedPlacement,
   WaitingTodoEntry,
   WaitingTodoPlacement,
   WaitingTodosQueue,
@@ -310,6 +315,92 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
   };
 }
 
+const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
+const WAITING_ARCHIVED_OUTCOMES = new Set<WaitingArchivedOutcomeKind>(['answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined']);
+const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
+
+function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
+  if (!record(value)
+    || typeof value.item_key !== 'string' || !value.item_key
+    || typeof value.kind !== 'string' || !WAITING_ARCHIVED_KINDS.has(value.kind as WaitingArchivedKind)
+    || typeof value.id !== 'string'
+    || (value.todo_id !== null && typeof value.todo_id !== 'string')
+    || (value.ask_kind !== null && value.ask_kind !== 'choice' && value.ask_kind !== 'plain')
+    || typeof value.title !== 'string'
+    || typeof value.outcome_kind !== 'string' || !WAITING_ARCHIVED_OUTCOMES.has(value.outcome_kind as WaitingArchivedOutcomeKind)
+    || typeof value.outcome_text !== 'string'
+    || !isoTime(value.archived_at)
+    || typeof value.placement !== 'string' || !WAITING_ARCHIVED_PLACEMENTS.has(value.placement as WaitingArchivedPlacement)
+    || (value.channel_id !== null && typeof value.channel_id !== 'string')
+    || (value.conversation_id !== null && typeof value.conversation_id !== 'string')
+    || (value.conversation_kind !== null && (typeof value.conversation_kind !== 'string' || !DECISION_CONVERSATION_KINDS.has(value.conversation_kind)))) {
+    throw new Error('home_waiting_archived_malformed');
+  }
+  let from: WaitingArchivedEntry['from'] = null;
+  if (value.from !== null) {
+    if (!record(value.from) || (value.from.kind !== 'agent' && value.from.kind !== 'user')
+      || typeof value.from.id !== 'string' || (value.from.name !== null && typeof value.from.name !== 'string')) {
+      throw new Error('home_waiting_archived_malformed');
+    }
+    from = { kind: value.from.kind, id: value.from.id, name: value.from.name };
+  }
+  let answeredBy: WaitingArchivedEntry['answered_by'] = null;
+  if (value.answered_by !== null) {
+    if (!record(value.answered_by) || (value.answered_by.kind !== 'agent' && value.answered_by.kind !== 'user')
+      || typeof value.answered_by.id !== 'string'
+      || (value.answered_by.name !== null && typeof value.answered_by.name !== 'string')
+      || (value.answered_by.by_viewer !== undefined && typeof value.answered_by.by_viewer !== 'boolean')) {
+      throw new Error('home_waiting_archived_malformed');
+    }
+    answeredBy = {
+      kind: value.answered_by.kind,
+      id: value.answered_by.id,
+      name: value.answered_by.name,
+      ...(value.answered_by.by_viewer !== undefined ? { by_viewer: value.answered_by.by_viewer } : {}),
+    };
+  }
+  const placement = value.placement as WaitingArchivedPlacement;
+  const channelId = typeof value.channel_id === 'string' && value.channel_id.trim() ? value.channel_id.trim().toLowerCase() : null;
+  const conversationId = typeof value.conversation_id === 'string' && value.conversation_id.trim() ? value.conversation_id.trim().toLowerCase() : null;
+  if (placement === 'channel' && !channelId) throw new Error('home_waiting_archived_malformed');
+  if ((placement === 'dm' || placement === 'group_dm') && (!conversationId || channelId !== null)) {
+    throw new Error('home_waiting_archived_malformed');
+  }
+  return {
+    item_key: value.item_key.toLowerCase(),
+    kind: value.kind as WaitingArchivedKind,
+    id: value.id,
+    todo_id: value.todo_id,
+    ask_kind: value.ask_kind,
+    title: value.title,
+    from,
+    outcome_kind: value.outcome_kind as WaitingArchivedOutcomeKind,
+    outcome_text: value.outcome_text,
+    archived_at: value.archived_at,
+    answered_by: answeredBy,
+    placement,
+    channel_id: placement === 'channel' ? channelId : null,
+    conversation_id: placement === 'workspace' || placement === 'redacted' ? null : conversationId,
+    conversation_kind: placement === 'workspace' || placement === 'redacted' ? null : value.conversation_kind as WaitingArchivedEntry['conversation_kind'],
+  };
+}
+
+/** Validates swarm_read.waiting_archived_page. NULL (not a member) stays null; malformed throws. */
+export function parseWaitingArchivedPage(data: unknown, workspaceId: Uuid): WaitingArchivedPage | null {
+  if (data === null) return null;
+  if (!record(data) || data.workspace_id !== workspaceId || !isoTime(data.generated_at) || !count(data.total)
+    || typeof data.truncated !== 'boolean' || !Array.isArray(data.items) || data.items.length > data.total) {
+    throw new Error('home_waiting_archived_malformed');
+  }
+  return {
+    workspace_id: workspaceId,
+    generated_at: data.generated_at,
+    total: data.total,
+    truncated: data.truncated,
+    items: data.items.map(waitingArchivedEntry),
+  };
+}
+
 export class HomeToolsUnavailable extends Error {
   constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
 }
@@ -483,6 +574,21 @@ export function createHomeServer(
         truncated,
         todos,
       };
+    },
+
+    async waitingArchived(workspaceId, options = {}): Promise<WaitingArchivedPage | null> {
+      const { c, pinned } = resolvePinnedClient();
+      const limit = Math.max(1, Math.min(options.limit ?? 30, 100));
+      const params: Record<string, unknown> = { p_workspace_id: workspaceId, p_limit: limit };
+      if (options.after) {
+        params.p_after_archived_at = options.after.archived_at;
+        params.p_after_item_key = options.after.item_key;
+      }
+      const { data, error } = await c.schema('swarm_read').rpc('waiting_archived_page', params);
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+      if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
+      if (error) throw new Error('home_waiting_archived_failed');
+      return parseWaitingArchivedPage(data, workspaceId);
     },
 
     async activity(workspaceId, since, limit): Promise<ActivityItem[]> {
@@ -717,6 +823,12 @@ export function createFixtureHomeServer(fixtures: HomeFixtures): HomeServer {
       }
       const todos = order.map(id => byId.get(id)!).filter(Boolean);
       return { workspace_id: workspaceId, generated_at: fixtures.overview.generated_at, total: todos.length, truncated: false, todos };
+    },
+
+    async waitingArchived(workspaceId) {
+      const row = fixtures.overview.workspaces.find((workspace) => workspace.workspace_id === workspaceId);
+      if (!row) return null;
+      return { workspace_id: workspaceId, generated_at: fixtures.overview.generated_at, total: 0, truncated: false, items: [] };
     },
 
     async activity(workspaceId, since, limit) {

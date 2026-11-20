@@ -57,8 +57,16 @@ function installWaitingFixture() {
   const askPeerB = askIdAt(99);
   const askWs2A = askIdAt(98);
   const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
-  const dmConvCase = scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-");
+  const dmConvCase = scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("archived-");
   const dmAmbiguousCase = scenario.startsWith("dm-ambiguous-incomplete-");
+  const archivedCase = scenario.startsWith("archived-");
+  const archivedAfterReload = scenario.startsWith("archived-after-reload-");
+  const archivedUnavailable = scenario.startsWith("archived-unavailable-");
+  const archivedBucket = archivedUnavailable ? "unavailable" : scenario.endsWith("-phone") ? "phone" : "desktop";
+  const reviewOfferId = "99999999-9999-4999-8999-000000000001";
+  const reviewTodoId = todoIdAt(91);
+  const olderArchivedAskId = askIdAt(77);
+  const redactedArchivedAskId = askIdAt(78);
   const plainCleanupCase = scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-");
   const plain401RetireCase = scenario.startsWith("plain-401-retire-");
   const plain401ControlCase = scenario.startsWith("plain-401-refresh-control-");
@@ -86,11 +94,12 @@ function installWaitingFixture() {
   let releaseWs9ChannelsA: (() => void) | null = null;
   let releaseWs2QueueA: (() => void) | null = null;
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
-    todoId, todoGroupId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
+    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
     convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     ambiguousResolved: false,
+    archivedPages: 0,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -128,7 +137,33 @@ function installWaitingFixture() {
     }));
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
+  const archivedSyncState = async (action?: Record<string, unknown>) => {
+    const res = await net("/__archived-state?bucket=" + encodeURIComponent(archivedBucket), action
+      ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) }
+      : undefined);
+    return await res.json();
+  };
   const ws1Asks = () => {
+    if (archivedCase) {
+      const baseMs = Date.now() - 600_000;
+      const rows = [
+        { signal_id: dmAsks.groupSM, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Group question with Scout and Maya?", offset: 0, conversation_id: convGroupSM, conversation_kind: "group_dm" as const },
+        { signal_id: dmAsks.dmScout, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Direct question from Scout?", offset: 1, conversation_id: convDmScout, conversation_kind: "dm" as const },
+        { signal_id: plainAsks[0]!, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Should we schedule Tuesday?", offset: 2, conversation_id: convGeneral, conversation_kind: "general" as const },
+      ];
+      return rows
+        .filter(r => !f.answeredIds.includes(r.signal_id))
+        .map(r => ({
+          signal_id: r.signal_id,
+          from: r.from,
+          body: r.body,
+          created_at: new Date(baseMs + r.offset * 1000).toISOString(),
+          until,
+          conversation_id: r.conversation_id,
+          conversation_kind: r.conversation_kind,
+          reraised: null,
+        }));
+    }
     if (dmConvCase) {
       const baseMs = Date.now() - 600_000;
       const rows = dmAmbiguousCase
@@ -263,6 +298,11 @@ function installWaitingFixture() {
         });
       }
       f.overviewReads++; f.log.push("overview");
+      if (archivedCase) {
+        const persisted = await archivedSyncState();
+        f.answeredIds = Array.isArray(persisted.answeredIds) ? [...persisted.answeredIds] : [];
+        f.todoDone = Boolean(persisted.todoDone);
+      }
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
           const asks = id === ids[0] && (multiBatch || surveyCase || dmConvCase || plainCleanupCase)
@@ -272,6 +312,8 @@ function installWaitingFixture() {
               : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
             ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
+            : id === ids[0] && archivedCase
+              ? (f.todoDone ? [] : [{ todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23" }])
             : id === ids[0] && dmConvCase && !dmAmbiguousCase
               ? [
                   { todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23" },
@@ -355,6 +397,13 @@ function installWaitingFixture() {
           todos: page,
         });
       }
+      if (id === ids[0] && archivedCase) {
+        const list = f.todoDone ? [] : [{
+          todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23",
+          reason: "assigned", agent_id: null, state_at: recent, placement: "group_dm", channel_id: null, conversation_id: convGroupSM,
+        }];
+        return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: list.length, truncated: false, todos: list });
+      }
       if (id === ids[0] && dmConvCase && !dmAmbiguousCase) {
         const list = [
           {
@@ -377,11 +426,46 @@ function installWaitingFixture() {
       }
       return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: 0, truncated: false, todos: [] });
     }
+    if (url.pathname === "/rest/v1/rpc/waiting_archived_page") {
+      const id = body?.p_workspace_id;
+      f.log.push("archived:" + number(id));
+      if (archivedUnavailable) {
+        return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
+      }
+      if (id === ids[0] && archivedCase) {
+        f.archivedPages += 1;
+        const persisted = await archivedSyncState();
+        const all: any[] = Array.isArray(persisted.archivedItems) ? [...persisted.archivedItems] : [];
+        all.sort((a, b) => Date.parse(b.archived_at) - Date.parse(a.archived_at) || a.item_key.localeCompare(b.item_key));
+        const afterAt = typeof body?.p_after_archived_at === "string" ? body.p_after_archived_at : null;
+        const afterKey = typeof body?.p_after_item_key === "string" ? body.p_after_item_key.toLowerCase() : null;
+        const rest = afterAt && afterKey
+          ? all.filter(item => Date.parse(item.archived_at) < Date.parse(afterAt) || (Date.parse(item.archived_at) === Date.parse(afterAt) && item.item_key > afterKey))
+          : all;
+        const pageSize = 5;
+        const page = rest.slice(0, pageSize);
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: all.length,
+          truncated: rest.length > pageSize,
+          items: page,
+        });
+      }
+      return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), untrusted_content: true, total: 0, truncated: false, items: [] });
+    }
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
       if (body?.p_workspace_id === ids[0] && plainCleanupCase) {
         return Response.json({ asks: [] });
+      }
+      if (body?.p_workspace_id === ids[0] && archivedCase) {
+        const choiceOnly = reqIds.filter(sigId => sigId === dmAsks.groupSM || sigId === dmAsks.dmScout);
+        return Response.json({ asks: choiceOnly.map(sigId => ({ signal_id: sigId, multi: false,
+          options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
+          answer: f.answeredIds.includes(sigId) ? { option_id: "yes", by_viewer: true } : null })) });
       }
       if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase || dmConvCase)) {
         f.choiceBatchSizes.push(reqIds.length);
@@ -442,10 +526,12 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_read") {
       f.log.push("todo_read");
+      const targetTodoId = body?.command?.arguments?.todo_id ?? todoId;
+      const targetTitle = targetTodoId === todoGroupId ? "Confirm group walkthrough" : "Confirm boiler visit time";
       return Response.json({
         status: "ok",
         todo: {
-          workspace_id: ids[0], todo_id: todoId, version: 3, title: "Confirm boiler visit time", notes: "",
+          workspace_id: ids[0], todo_id: targetTodoId, version: 3, title: targetTitle, notes: "",
           state: f.todoDone ? "done" : "open", due_on: "2026-11-22",
           created_by: { user_id: owner, principal_id: null }, created_at: recent,
           assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
@@ -464,10 +550,21 @@ function installWaitingFixture() {
         return Response.json({ status: "refused", reason: "not_permitted" });
       }
       f.todoDone = true;
+      const targetTodoId = body?.command?.arguments?.todo_id ?? todoId;
+      const targetTitle = targetTodoId === todoGroupId ? "Confirm group walkthrough" : "Confirm boiler visit time";
+      if (archivedCase) {
+        await archivedSyncState({
+          type: "todo_done",
+          todo_id: targetTodoId,
+          title: targetTitle,
+          conversation_id: convGroupSM,
+          archived_at: new Date().toISOString(),
+        });
+      }
       return Response.json({
         status: "committed",
         value: {
-          workspace_id: ids[0], todo_id: todoId, version: 4, title: "Confirm boiler visit time", notes: "",
+          workspace_id: ids[0], todo_id: targetTodoId, version: 4, title: targetTitle, notes: "",
           state: "done", due_on: "2026-11-22",
           created_by: { user_id: owner, principal_id: null }, created_at: recent,
           assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
@@ -496,6 +593,15 @@ function installWaitingFixture() {
       }
       f.plainReplies.push(body);
       f.answeredIds.push(replyTarget);
+      if (archivedCase) {
+        await archivedSyncState({
+          type: "plain_answer",
+          signal_id: replyTarget,
+          title: "Should we schedule Tuesday?",
+          outcome_text: String(body.command.body ?? ""),
+          archived_at: new Date().toISOString(),
+        });
+      }
       f.log.push("plain-reply");
       return Response.json({
         status: "accepted",
@@ -519,6 +625,18 @@ function installWaitingFixture() {
       // From here on the answered ask is no longer waiting.
       f.answers.push(body); f.answered = true;
       if (typeof body.command.signal_id === "string") f.answeredIds.push(body.command.signal_id);
+      if (archivedCase && typeof body.command.signal_id === "string") {
+        const isScoutDm = body.command.signal_id === dmAsks.dmScout;
+        await archivedSyncState({
+          type: "choice_answer",
+          signal_id: body.command.signal_id,
+          title: isScoutDm ? "Direct question from Scout?" : "Group question with Scout and Maya?",
+          outcome_text: body.command.option_id === "yes" ? "Approve" : "Hold",
+          placement: isScoutDm ? "dm" : "group_dm",
+          conversation_id: isScoutDm ? convDmScout : convGroupSM,
+          archived_at: new Date().toISOString(),
+        });
+      }
       f.log.push("answer");
       return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id, other_text: body.command.other_text ?? null } });
     }
@@ -1047,6 +1165,121 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("archived-unavailable-")) {
+      await wait(() => shown(control()) && count() === "4", "4 active items counted before checking unavailable Archived");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "Waiting panel and Archived tab rendered");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => shown(panel()?.querySelector('[data-waiting-archived-state="unavailable"]')), "PGRST202 unavailable fallback rendered");
+      check(panel()!.querySelector('[data-waiting-archived-state="unavailable"]')!.textContent === "Archived history is unavailable on this server.",
+        "unexpected unavailable copy: " + panel()!.querySelector('[data-waiting-archived-state="unavailable"]')!.textContent);
+      // Switching back to Waiting keeps the active queue working cleanly.
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="active"]')!.click();
+      await wait(() => shown(panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)), "Waiting tab still works after PGRST202");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-after-reload-")) {
+      await wait(() => shown(control()) && count() === "0", "reloaded browser still shows 0 active Waiting items");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "reloaded panel opened");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "scope control ready in Archived tab");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`ask:${f.dmAsks.dmScout}`)) &&
+        shown(card(`ask:${f.plainAsks[0]}`)) && shown(card(`todo:${f.todoGroupId}`)) && shown(card(`review:${f.reviewOfferId}`)),
+        "all survey-answered asks, plain ask, completed to-do, and answered review persisted across full browser reload");
+      check(card(`ask:${f.dmAsks.groupSM}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Approve", "group choice answer outcome mismatch after reload");
+      check(card(`ask:${f.dmAsks.dmScout}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Hold", "DM survey answer outcome mismatch after reload");
+      check(card(`ask:${f.plainAsks[0]}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Tuesday 9am", "plain answer outcome mismatch after reload");
+      check(card(`todo:${f.todoGroupId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Done", "todo outcome mismatch after reload");
+      check(card(`review:${f.reviewOfferId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Accepted", "review outcome mismatch after reload");
+      const openGroupAsk = card(`ask:${f.dmAsks.groupSM}`)!.querySelector<HTMLAnchorElement>(`[data-waiting-archived-open="ask:${f.dmAsks.groupSM}"]`);
+      check(Boolean(openGroupAsk) && openGroupAsk!.getAttribute("href")!.includes(`dm=${f.convGroupSM}`) && openGroupAsk!.getAttribute("href")!.includes(`m=${f.dmAsks.groupSM}`),
+        "visible archived ask missing source link: " + openGroupAsk?.getAttribute("href"));
+      for (const k of [`ask:${f.dmAsks.groupSM}`, `ask:${f.dmAsks.dmScout}`, `ask:${f.plainAsks[0]}`, `todo:${f.todoGroupId}`, `review:${f.reviewOfferId}`]) {
+        const dt = card(k)!.querySelector<HTMLTimeElement>(".cs-waiting-archived__meta")?.dateTime ?? "";
+        check(Number.isFinite(Date.parse(dt)), `missing archived_at datetime on ${k}: ${dt}`);
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-reload-")) {
+      await wait(() => shown(control()) && count() === "4", "4 active items counted before answering");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)), "panel opened on #general showing plain ask");
+      // 1. Answer plain-text ask in #general.
+      const plainCard = panel()!.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)!;
+      const plainInput = plainCard.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      plainInput.value = "Tuesday 9am";
+      plainInput.dispatchEvent(new Event("input", { bubbles: true }));
+      plainCard.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`), "plain ask left active Waiting column");
+      // 2. Switch scope to All channels and submit both choice asks through survey review (Review questions).
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(panel()?.querySelector("[data-waiting-review-start]")) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`)) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`)) &&
+        shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`)), "both choice asks, Review questions, and group to-do visible in All channels");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-review-start]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 1 of 2", "survey review opened on Q1");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 2", "survey review stepped to Q2");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="no"]')!.click();
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-waiting-survey-send]")) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 2 answers", "survey review ready to send 2 answers");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`) &&
+        !panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`) &&
+        shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`)), "submitted survey answers removed both choice asks from active Waiting");
+      // 3. Mark group to-do done -> top bar reaches 0.
+      panel()!.querySelector<HTMLButtonElement>(`[data-waiting-todo-done="${f.todoGroupId}"]`)!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`) && count() === "0", "completed to-do left active Waiting column and top bar reached 0");
+      // 4. Switch to Archived tab: verify outcomes, timestamps, source links, Load older pagination, and desktop Gen 1 vs Gen 2 scoping.
+      const archTab = panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!;
+      check(archTab.getBoundingClientRect().height >= 44, "Archived tab must meet 44px touch target");
+      archTab.click();
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`ask:${f.dmAsks.dmScout}`)) &&
+        shown(card(`ask:${f.plainAsks[0]}`)) && shown(card(`todo:${f.todoGroupId}`)) && shown(card(`review:${f.reviewOfferId}`)),
+        "Archived page 1 rendered both survey-answered asks, plain ask, completed to-do, and answered review");
+      // Load older page 2 via keyset cursor (redacted left-group ask + earlier page-2 question).
+      await wait(() => shown(panel()?.querySelector("[data-waiting-archived-more]")), "Load older button shown for truncated archive");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => shown(card(`ask:${f.redactedArchivedAskId}`)) && shown(card(`ask:${f.olderArchivedAskId}`)) &&
+        !panel()?.querySelector("[data-waiting-archived-more]"),
+        "Load older keyset-paged remaining items cleanly");
+      check(!card(`ask:${f.redactedArchivedAskId}`)!.querySelector("[data-waiting-archived-open]"), "redacted archived ask must not render an Open source link");
+      if (!f.phone) {
+        // Desktop conversation isolation: Gen 1 shows only its 2 archived items; restarted Gen 2 shows 0 (zero bleed!).
+        const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
+        const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
+        await wait(() => shown(groupSMLink()) && shown(groupSM2Link()), "group DM generations rendered in rail");
+        scope()!.value = "channel";
+        scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+        groupSMLink()!.click();
+        await wait(() => groupSMLink()?.getAttribute("aria-current") === "page" &&
+          shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`todo:${f.todoGroupId}`)) &&
+          !card(`ask:${f.dmAsks.dmScout}`) && !card(`ask:${f.plainAsks[0]}`) && !card(`ask:${f.redactedArchivedAskId}`),
+          "Gen 1 Archived scopes strictly to Gen 1 items");
+        groupSM2Link()!.click();
+        await wait(() => groupSM2Link()?.getAttribute("aria-current") === "page" &&
+          shown(panel()?.querySelector('[data-waiting-archived-state="empty"]')),
+          "restarted Gen 2 Archived shows empty with zero Gen 1 or redacted bleed");
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario.startsWith("dm-ambiguous-incomplete-")) {
       const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
       const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
@@ -1293,7 +1526,139 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixture("installWaitingFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixture("observeWaitingCount") + "</script></body></html>";
+  const makeArchivedBucket = () => {
+    const baseMs = Date.now() - 3600_000;
+    const owner = "22222222-2222-4222-8222-222222222222";
+    const agent = "33333333-3333-4333-8333-333333333333";
+    const maya = "44444444-4444-4444-8444-444444444444";
+    const reviewOfferId = "99999999-9999-4999-8999-000000000001";
+    const reviewTodoId = "dddddddd-dddd-4ddd-8ddd-000000000091";
+    const olderArchivedAskId = "11111111-1111-4111-8111-000000000077";
+    const redactedArchivedAskId = "11111111-1111-4111-8111-000000000078";
+    const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
+    return {
+      answeredIds: [] as string[],
+      todoDone: false,
+      archivedItems: [
+        {
+          item_key: `review:${reviewOfferId}`,
+          kind: "review",
+          id: reviewOfferId,
+          todo_id: reviewTodoId,
+          ask_kind: null,
+          title: "Review draft proposal",
+          from: { kind: "user", id: maya, name: "Maya" },
+          outcome_kind: "accepted",
+          outcome_text: "Accepted",
+          archived_at: new Date(baseMs + 300_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        },
+        {
+          item_key: `ask:${redactedArchivedAskId}`,
+          kind: "ask",
+          id: redactedArchivedAskId,
+          todo_id: null,
+          ask_kind: "plain",
+          title: "Left group historical ask?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "cleared_stale",
+          outcome_text: "Cleared as stale",
+          archived_at: new Date(baseMs + 200_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "redacted",
+          channel_id: null,
+          conversation_id: null,
+          conversation_kind: null,
+        },
+        {
+          item_key: `ask:${olderArchivedAskId}`,
+          kind: "ask",
+          id: olderArchivedAskId,
+          todo_id: null,
+          ask_kind: "choice",
+          title: "Earlier page-2 archived question?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "answered",
+          outcome_text: "Ship it",
+          archived_at: new Date(baseMs + 100_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        },
+      ] as any[],
+    };
+  };
+  const archivedStore = new Map<string, ReturnType<typeof makeArchivedBucket>>();
+  const getArchivedBucket = (name: string) => {
+    let b = archivedStore.get(name);
+    if (!b) { b = makeArchivedBucket(); archivedStore.set(name, b); }
+    return b;
+  };
   const server = createServer((request, response) => {
+    if (request.url?.startsWith("/__archived-state")) {
+      const u = new URL(request.url, "http://127.0.0.1");
+      const bucket = getArchivedBucket(u.searchParams.get("bucket") || "desktop");
+      if (request.method === "POST") {
+        let raw = "";
+        request.on("data", chunk => { raw += String(chunk); });
+        request.on("end", () => {
+          const ev = JSON.parse(raw || "{}");
+          const owner = "22222222-2222-4222-8222-222222222222";
+          const agent = "33333333-3333-4333-8333-333333333333";
+          const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
+          if (ev.type === "choice_answer" && ev.signal_id) {
+            if (!bucket.answeredIds.includes(ev.signal_id)) bucket.answeredIds.push(ev.signal_id);
+            const key = `ask:${ev.signal_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              const placement = ev.placement === "dm" ? "dm" : "group_dm";
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "ask", id: ev.signal_id, todo_id: null, ask_kind: "choice",
+                title: ev.title, from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered", outcome_text: ev.outcome_text, archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement, channel_id: null, conversation_id: ev.conversation_id, conversation_kind: placement,
+              });
+            }
+          } else if (ev.type === "plain_answer" && ev.signal_id) {
+            if (!bucket.answeredIds.includes(ev.signal_id)) bucket.answeredIds.push(ev.signal_id);
+            const key = `ask:${ev.signal_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "ask", id: ev.signal_id, todo_id: null, ask_kind: "plain",
+                title: ev.title, from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered", outcome_text: ev.outcome_text, archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "general", channel_id: null, conversation_id: convGeneral, conversation_kind: "general",
+              });
+            }
+          } else if (ev.type === "todo_done" && ev.todo_id) {
+            bucket.todoDone = true;
+            const key = `todo:${ev.todo_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "todo", id: ev.todo_id, todo_id: ev.todo_id, ask_kind: null,
+                title: ev.title, from: { kind: "user", id: owner, name: "Synthetic owner" },
+                outcome_kind: "done", outcome_text: "Done", archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "group_dm", channel_id: null, conversation_id: ev.conversation_id, conversation_kind: "group_dm",
+              });
+            }
+          }
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify(bucket));
+        });
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(bucket));
+      return;
+    }
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
     if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
     if (request.url === "/peer-switch") { response.writeHead(200, { "Content-Type": "text/html" }); response.end(peerSwitchPage); return; }
@@ -1310,7 +1675,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("archived-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -1365,5 +1730,16 @@ test("Waiting on you: Check F historical plain-text asks answer inline or clear 
 
 test("Waiting on you: retires survey batch, background reads, and historical 401 retry immediately when login changes, while preserving unchanged-login token refresh", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["survey-auth-retire-desktop", "waiting-read-retire-desktop", "plain-401-retire-desktop", "plain-401-refresh-control-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: Archived view shows answered asks, completed to-dos, and answered reviews with outcomes & timestamps across reload, pagination, and PGRST202 fallback", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios([
+    "archived-reload-desktop",
+    "archived-after-reload-desktop",
+    "archived-reload-phone",
+    "archived-after-reload-phone",
+    "archived-unavailable-desktop",
+  ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

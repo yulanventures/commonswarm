@@ -2357,7 +2357,10 @@ export function renderSignals(
           ? " — you"
           : ""
       }`;
-    const expired = Date.parse(signal.until) <= now ? " (expired)" : "";
+    const parsedUntil = Date.parse(signal.until);
+    const permanentUntil = Number.isFinite(parsedUntil) && parsedUntil >= Date.UTC(9000, 0, 1);
+    const expired = !permanentUntil && parsedUntil <= now ? " (expired)" : "";
+    const expirySegment = permanentUntil ? "" : ` — ${relativeExpiry(signal.until, now)}${expired}`;
     const aboutClipped = signal.about !== null &&
       signal.about.length > SIGNAL_ABOUT_DISPLAY_MAX;
     const displayedAbout = aboutClipped
@@ -2401,7 +2404,7 @@ export function renderSignals(
     lines.push(
       `- [${tag}]${replyStatus} ${author} — ${
         relativeAge(signal.created_at, now)
-      } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}${chainHop}: ${
+      }${expirySegment}${about}${replyTo}${chainHop}: ${
         JSON.stringify(displayedBody)
       }${reactionSummary(signal.reactions)}${idHint}`,
     );

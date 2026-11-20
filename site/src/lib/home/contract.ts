@@ -120,6 +120,43 @@ export interface WaitingTodoEntry {
 export interface WaitingTodosQueue {
   workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; todos: WaitingTodoEntry[];
 }
+export type WaitingArchivedKind = 'ask' | 'todo' | 'review';
+export type WaitingArchivedOutcomeKind = 'answered' | 'cleared_stale' | 'done' | 'dropped' | 'accepted' | 'declined';
+export type WaitingArchivedPlacement = 'channel' | 'general' | 'dm' | 'group_dm' | 'workspace' | 'redacted';
+export interface WaitingArchivedActor {
+  kind: 'agent' | 'user';
+  id: Uuid;
+  name: string | null;
+  by_viewer?: boolean;
+}
+export interface WaitingArchivedEntry {
+  item_key: string;
+  kind: WaitingArchivedKind;
+  id: Uuid;
+  todo_id: Uuid | null;
+  ask_kind: 'choice' | 'plain' | null;
+  title: string;
+  from: { kind: 'agent' | 'user'; id: Uuid; name: string | null } | null;
+  outcome_kind: WaitingArchivedOutcomeKind;
+  outcome_text: string;
+  archived_at: IsoTime;
+  answered_by: WaitingArchivedActor | null;
+  placement: WaitingArchivedPlacement;
+  channel_id: Uuid | null;
+  conversation_id: Uuid | null;
+  conversation_kind: DecisionConversationKind | null;
+}
+export interface WaitingArchivedCursor {
+  archived_at: IsoTime;
+  item_key: string;
+}
+export interface WaitingArchivedPage {
+  workspace_id: Uuid;
+  generated_at: IsoTime;
+  total: number;
+  truncated: boolean;
+  items: WaitingArchivedEntry[];
+}
 
 export type ActivityEvent = 'created' | 'updated' | 'assigned' | 'requested' | 'accepted' | 'declined'
   | 'started' | 'done' | 'dropped' | 'reopened' | 'commented';
@@ -136,6 +173,7 @@ export interface HomeServer {
   overview(): Promise<HomeOverview>;                                   // rpc swarm_read.home_overview
   decisionQueue(workspaceId: Uuid): Promise<DecisionQueue | null>;    // rpc swarm_read.decision_queue; null for a non-member
   waitingTodos(workspaceId: Uuid): Promise<WaitingTodosQueue | null>; // rpc swarm_read.waiting_todos_page; null if missing/non-member
+  waitingArchived(workspaceId: Uuid, options?: { limit?: number; after?: WaitingArchivedCursor | null }): Promise<WaitingArchivedPage | null>; // rpc swarm_read.waiting_archived_page
   activity(workspaceId: Uuid, since: IsoTime, limit: number): Promise<ActivityItem[]>; // newest first
   listTodos(workspaceId: Uuid, q: { scope: 'open' | 'all'; assignee?: Party; offset: number; limit: number /* <= 50 */ }):
     Promise<{ todos: TodoSummary[]; next_offset: number | null }>;

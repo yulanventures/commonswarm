@@ -1007,10 +1007,18 @@ const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MODEL_DECLARE_RATE_LIMIT_PER_HOUR = 10;
 const FEEDBACK_RATE_LIMIT_PER_HOUR = 10;
 const SIGNAL_MAX_UNTIL_MS = 30 * 24 * 60 * 60 * 1000;
-const SIGNAL_DEFAULT_UNTIL_MS: Record<SignalKind, number> = {
+/**
+ * C6 ("Nothing lapses"): notes and asks are permanent by default so older
+ * threads never lock and unanswered asks never silently drop out of Waiting on
+ * you. Stored as a finite far-future ISO timestamp so every existing SQL reader,
+ * CLI, listener and iOS client keeps working with NOT NULL timestamptz.
+ * Only `working-on` keeps an automatic expiry (24h).
+ */
+const SIGNAL_PERMANENT_UNTIL_ISO = "9999-12-31T23:59:59.000Z";
+const SIGNAL_DEFAULT_UNTIL_MS: Record<SignalKind, number | null> = {
   "working-on": 24 * 60 * 60 * 1000,
-  ask: 7 * 24 * 60 * 60 * 1000,
-  note: 30 * 24 * 60 * 60 * 1000,
+  ask: null,
+  note: null,
 };
 const SIGNAL_CREDENTIAL_LIMIT = 120;
 const SIGNAL_WORKSPACE_LIMIT = 1000;
@@ -12937,7 +12945,8 @@ interface SignalPlacement {
   channelId: string | null;
   threadRootId: string | null;
   broadcastToChannel: boolean;
-  untilMs: number;
+  /** Milliseconds from created_at, or `null` for a permanent default (notes and asks). */
+  untilMs: number | null;
   /**
    * A thread reply may not outlive its root. Applied in SQL against the same
    * statement_timestamp() the row is created at, so no clock but Postgres's
@@ -13009,6 +13018,8 @@ async function postSignal(
   const signalCredentialKind: SignalCredentialKind =
     auth.credentialKind === "user" ? "user" : "agent";
   const untilMs = placement.untilMs;
+  const untilMsParam = untilMs ?? 0;
+  const untilIsPermanentDefault = !placement.untilExplicit && untilMs === null;
   const signalId = crypto.randomUUID();
   const parentSignalId = command.parent_signal_id ?? null;
   const isChainAsk = command.signal_kind === "ask" && placement.threadRootId === null;
@@ -13085,13 +13096,22 @@ async function postSignal(
        * outlives its root: it is refused instead. statement_timestamp() is
        * stable within a statement, so the CTE and the WHERE agree. */
       SELECT GREATEST(
-        CASE WHEN ${placement.untilExplicit}
-          THEN statement_timestamp() + ${untilMs} * interval '1 millisecond'
+        CASE
+          WHEN ${placement.untilExplicit}
+            THEN statement_timestamp() + ${untilMsParam} * interval '1 millisecond'
+          WHEN ${untilIsPermanentDefault}
+            THEN LEAST(
+              ${SIGNAL_PERMANENT_UNTIL_ISO}::timestamptz,
+              COALESCE(
+                ${placement.untilCeiling}::timestamptz,
+                ${SIGNAL_PERMANENT_UNTIL_ISO}::timestamptz
+              )
+            )
           ELSE LEAST(
-            statement_timestamp() + ${untilMs} * interval '1 millisecond',
+            statement_timestamp() + ${untilMsParam} * interval '1 millisecond',
             COALESCE(
               ${placement.untilCeiling}::timestamptz,
-              statement_timestamp() + ${untilMs} * interval '1 millisecond'
+              statement_timestamp() + ${untilMsParam} * interval '1 millisecond'
             )
           )
         END,

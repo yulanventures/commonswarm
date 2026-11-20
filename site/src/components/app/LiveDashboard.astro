@@ -1418,10 +1418,10 @@ import "../../styles/kylon-image-viewer.css";
   import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
-  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue } from "../../lib/home/contract";
+  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue, WaitingArchivedEntry } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, conversationParticipantKey, indexDirectConversations, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
   import type { OversightListOutcome, OversightMessage, OversightPanelState, OversightScopePin } from "../../lib/conversation-oversight";
-  import type { SurveyDraft, WaitingAskItem, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
+  import type { SurveyDraft, WaitingArchivedItem, WaitingAskItem, WaitingPanelTab, WaitingPlace, WaitingPlainAskItem, WaitingScope, WaitingSurface, WaitingTodoItem } from "../../lib/waiting-panel";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -1681,7 +1681,7 @@ import "../../styles/kylon-image-viewer.css";
     type DirectHistoryState,
     type SignalFilter,
   } from "../../lib/signal-feed";
-  import { nextFeedChangeAt, signalHasEnded, signalHistoryFilter, signalIsReadable } from "../../lib/signal-history";
+  import { isPermanentSignalUntil, nextFeedChangeAt, signalHasEnded, signalHistoryFilter, signalIsReadable } from "../../lib/signal-history";
   import {
     canStartThread,
     THREAD_REPLY_CONTROL_LABEL,
@@ -5836,6 +5836,7 @@ import "../../styles/kylon-image-viewer.css";
             homeTodoReceipt = `Who can give it work: ${policy.accepts_from === "owner" ? "only you" : `anyone in ${workspaces.find(row => row.id === workspaceId)?.name ?? "this workspace"}`}. Saved.`;
           }
           homeDetailKey = "";
+          if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
           await loadHomeWorkspace();
         }
       } catch (error) {
@@ -6549,6 +6550,19 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelAsks = new Map<string, WaitingAskItem[]>();
     const waitingPanelPlainAsks = new Map<string, WaitingPlainAskItem[]>();
     const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
+    let waitingTab: WaitingPanelTab = "active";
+    type WaitingArchivedWorkspaceState = {
+      entries: WaitingArchivedEntry[];
+      total: number;
+      hasMore: boolean;
+      loaded: boolean;
+      loading: boolean;
+      loadingMore: boolean;
+      failed: boolean;
+      unavailable: boolean;
+      stale: boolean;
+    };
+    const waitingArchivedByWorkspace = new Map<string, WaitingArchivedWorkspaceState>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
     const waitingPanelTruncatedWorkspaces = new Set<string>();
@@ -6791,6 +6805,170 @@ import "../../styles/kylon-image-viewer.css";
       return items;
     };
 
+    const waitingArchivedChannelLabel = (
+      workspaceId: string,
+      entry: Pick<WaitingArchivedEntry, "placement" | "channel_id" | "conversation_id">,
+    ): string => {
+      if (entry.placement === "redacted" || entry.placement === "workspace") return "";
+      return waitingTodoChannelLabel(workspaceId, entry.placement, entry.channel_id, entry.conversation_id);
+    };
+
+    const waitingArchivedHref = (workspaceId: string, entry: WaitingArchivedEntry): string | null => {
+      if (entry.todo_id) return routeHref({ view: "todo", workspaceId, todoId: entry.todo_id });
+      if (entry.kind !== "ask") return null;
+      if (entry.placement === "channel" && entry.channel_id) {
+        return routeHref({ view: "chat", workspaceId, channelId: entry.channel_id, messageId: entry.id });
+      }
+      if ((entry.placement === "dm" || entry.placement === "group_dm") && entry.conversation_id) {
+        return routeHref({ view: "chat", workspaceId, dmId: entry.conversation_id, messageId: entry.id });
+      }
+      if (entry.placement === "general") {
+        return routeHref({ view: "chat", workspaceId, messageId: entry.id });
+      }
+      return null;
+    };
+
+    const allWaitingArchivedItems = (): WaitingArchivedItem[] => {
+      if (!waitingPanelMod) return [];
+      const items: WaitingArchivedItem[] = [];
+      const viewerId = homeViewerId();
+      const now = Date.now();
+      for (const workspace of workspaces) {
+        const state = waitingArchivedByWorkspace.get(workspace.id);
+        if (!state) continue;
+        for (const entry of state.entries) {
+          items.push(waitingPanelMod.mapWaitingArchivedEntry(entry, {
+            workspaceId: workspace.id,
+            workspaceName: workspace.name,
+            channelLabel: waitingArchivedChannelLabel(workspace.id, entry),
+            href: waitingArchivedHref(workspace.id, entry),
+            viewerId,
+            now,
+          }));
+        }
+      }
+      items.sort((a, b) => Date.parse(b.archivedAt) - Date.parse(a.archivedAt) || a.itemKey.localeCompare(b.itemKey));
+      return items;
+    };
+
+    const getArchivedWorkspaceState = (workspaceId: string): WaitingArchivedWorkspaceState => {
+      let state = waitingArchivedByWorkspace.get(workspaceId);
+      if (!state) {
+        state = { entries: [], total: 0, hasMore: false, loaded: false, loading: false, loadingMore: false, failed: false, unavailable: false, stale: false };
+        waitingArchivedByWorkspace.set(workspaceId, state);
+      }
+      return state;
+    };
+
+    const loadWaitingArchivedWorkspace = async (workspace: Workspace, mode: "initial" | "more"): Promise<void> => {
+      if (sampleMode || !session) return;
+      const server = homeServer();
+      if (!server) return;
+      const state = getArchivedWorkspaceState(workspace.id);
+      if (state.unavailable) return;
+      if (mode === "initial" && state.loading) return;
+      if (mode === "more" && (state.loading || state.loadingMore || !state.hasMore)) return;
+      const viewer = session.user.id;
+      const authGen = waitingAuthGeneration;
+      const isAlive = waitingActionGuard(viewer, authGen);
+      const last = mode === "more" ? state.entries[state.entries.length - 1] ?? null : null;
+      if (mode === "more" && !last) return;
+      if (mode === "initial") {
+        state.loading = true;
+        state.failed = false;
+      } else {
+        state.loadingMore = true;
+        state.failed = false;
+      }
+      renderWaitingPanelView();
+      try {
+        const page = await server.waitingArchived(workspace.id, {
+          limit: 30,
+          ...(last ? { after: { archived_at: last.archived_at, item_key: last.item_key } } : {}),
+        });
+        if (!isAlive()) return;
+        if (!page) {
+          state.failed = true;
+          return;
+        }
+        const hasNamedChannel = page.items.some(entry => entry.placement === "channel" && entry.channel_id);
+        if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
+          const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+          if (!isAlive()) return;
+          waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
+        }
+        if (mode === "initial") {
+          state.entries = page.items;
+        } else {
+          const seen = new Set(state.entries.map(e => e.item_key));
+          for (const entry of page.items) {
+            if (!seen.has(entry.item_key)) {
+              seen.add(entry.item_key);
+              state.entries.push(entry);
+            }
+          }
+        }
+        state.total = Math.max(page.total, state.entries.length);
+        state.hasMore = page.truncated;
+        state.loaded = true;
+        state.stale = false;
+        state.failed = false;
+      } catch (err) {
+        if (!isAlive()) return;
+        if (err instanceof HomeToolsUnavailable) {
+          state.unavailable = true;
+          state.loaded = true;
+          state.hasMore = false;
+          state.failed = false;
+        } else {
+          state.failed = true;
+        }
+      } finally {
+        if (!isAlive()) return;
+        state.loading = false;
+        state.loadingMore = false;
+        renderWaitingPanelView();
+      }
+    };
+
+    const ensureWaitingArchivedLoaded = (force = false): void => {
+      if (sampleMode || !session || workspaces.length === 0) return;
+      const targets = waitingScope === "all"
+        ? workspaces
+        : workspaces.filter(ws => ws.id === (activeWorkspaceId || workspaces[0]?.id));
+      for (const ws of targets) {
+        const state = getArchivedWorkspaceState(ws.id);
+        if (state.unavailable) continue;
+        if (force || !state.loaded || state.stale) {
+          void loadWaitingArchivedWorkspace(ws, "initial");
+        }
+      }
+    };
+
+    const invalidateWaitingArchived = (workspaceId?: string): void => {
+      if (workspaceId) {
+        const state = waitingArchivedByWorkspace.get(workspaceId);
+        if (state) state.stale = true;
+      } else {
+        for (const state of waitingArchivedByWorkspace.values()) state.stale = true;
+      }
+      if (waitingTab === "archived" && waitingSurface?.isOpen()) {
+        ensureWaitingArchivedLoaded(true);
+      }
+    };
+
+    const loadMoreWaitingArchived = (): void => {
+      const targets = waitingScope === "all"
+        ? workspaces
+        : workspaces.filter(ws => ws.id === (activeWorkspaceId || workspaces[0]?.id));
+      for (const ws of targets) {
+        const state = waitingArchivedByWorkspace.get(ws.id);
+        if (state && state.hasMore && !state.loading && !state.loadingMore && !state.unavailable) {
+          void loadWaitingArchivedWorkspace(ws, "more");
+        }
+      }
+    };
+
     const waitingTodoChannelLabel = (
       workspaceId: string,
       placement: "channel" | "general" | "workspace" | "dm" | "group_dm",
@@ -6988,6 +7166,7 @@ import "../../styles/kylon-image-viewer.css";
           homeTodoRows = homeTodoRows.map(row => row.todo_id === item.id ? { ...row, state: "done" } : row);
           if (homeRoute.view === "todos" || homeRoute.view === "todo") renderHomeObjectPane();
         }
+        invalidateWaitingArchived(item.workspaceId);
         scheduleWaitingRefresh(400);
         return;
       }
@@ -7063,6 +7242,7 @@ import "../../styles/kylon-image-viewer.css";
       if (sentCount > 0) {
         if (homeRoute.view === "chat" && activeWorkspaceView === "signals") renderFeed();
         renderHomeRail();
+        invalidateWaitingArchived();
         scheduleWaitingRefresh(400);
       }
       if (failedCount === 0) {
@@ -7201,6 +7381,7 @@ import "../../styles/kylon-image-viewer.css";
             renderFeed();
           }
         }
+        invalidateWaitingArchived(item.workspaceId);
         scheduleWaitingRefresh(400);
         return;
       }
@@ -7269,6 +7450,7 @@ import "../../styles/kylon-image-viewer.css";
           });
         }
         renderHomeRail();
+        invalidateWaitingArchived(item.workspaceId);
         scheduleWaitingRefresh(400);
         return;
       }
@@ -7333,14 +7515,60 @@ import "../../styles/kylon-image-viewer.css";
         errors: waitingSurveyErrors,
         sending: waitingSurvey.sending,
       } : null;
+      let archivedVM = null;
+      if (waitingTab === "archived") {
+        const allArchived = allWaitingArchivedItems();
+        const channelArchived = waitingPanelMod.filterWaitingArchived(allArchived, "channel", place);
+        const workspaceArchived = waitingPanelMod.filterWaitingArchived(allArchived, "workspace", place);
+        const visibleArchived = waitingScope === "channel" ? channelArchived : waitingScope === "workspace" ? workspaceArchived : allArchived;
+        const activeArchState = waitingArchivedByWorkspace.get(place.workspaceId);
+        const targetStates = waitingScope === "all"
+          ? workspaces.map(ws => waitingArchivedByWorkspace.get(ws.id))
+          : [activeArchState];
+        const wsArchLoaded = Boolean(activeArchState?.loaded && !activeArchState.failed && !activeArchState.hasMore);
+        const allArchLoaded = workspaces.length > 0 && workspaces.every(ws => {
+          const st = waitingArchivedByWorkspace.get(ws.id);
+          return Boolean(st?.loaded && !st.failed && !st.hasMore);
+        });
+        const anyArchLoading = targetStates.some(st => Boolean(st?.loading));
+        const anyArchLoadingMore = targetStates.some(st => Boolean(st?.loadingMore));
+        const anyArchFailed = targetStates.some(st => Boolean(st?.failed));
+        const allArchUnavailable = targetStates.length > 0 && targetStates.every(st => Boolean(st?.unavailable));
+        const anyArchHasMore = targetStates.some(st => Boolean(st?.hasMore && !st.unavailable));
+        const targetLoaded = targetStates.length > 0 && targetStates.every(st => Boolean(st?.loaded));
+        if (targetStates.some(st => !st || (!st.loaded && !st.loading && !st.failed && !st.unavailable) || (st.stale && !st.loading && !st.unavailable))) {
+          queueMicrotask(() => { if (waitingTab === "archived" && waitingSurface?.isOpen()) ensureWaitingArchivedLoaded(); });
+        }
+        const wsArchTotal = activeArchState?.loaded ? Math.max(activeArchState.total, workspaceArchived.length) : workspaceArchived.length;
+        const allArchTotal = workspaces.reduce((sum, ws) => {
+          const st = waitingArchivedByWorkspace.get(ws.id);
+          return sum + (st?.loaded ? Math.max(st.total, st.entries.length) : 0);
+        }, 0);
+        archivedVM = {
+          items: visibleArchived,
+          counts: {
+            channel: { min: channelArchived.length, complete: wsArchLoaded },
+            workspace: { min: wsArchTotal, complete: Boolean(activeArchState?.loaded && !activeArchState.failed) },
+            all: { min: Math.max(allArchTotal, allArchived.length), complete: workspaces.length > 0 && workspaces.every(ws => { const st = waitingArchivedByWorkspace.get(ws.id); return Boolean(st?.loaded && !st.failed); }) },
+          },
+          loading: anyArchLoading && visibleArchived.length === 0,
+          loadingMore: anyArchLoadingMore,
+          complete: targetLoaded && !anyArchFailed,
+          failed: anyArchFailed && !anyArchLoading,
+          unavailable: allArchUnavailable,
+          hasMore: anyArchHasMore,
+        };
+      }
       waitingPanelMod.renderWaitingPanel(
         container,
         {
+          tab: waitingTab,
           scope: waitingScope,
           place,
           items: visibleItems,
           plainAsks: visiblePlainAsks,
           todos: visibleTodos,
+          archived: archivedVM,
           counts: {
             channel: { min: channelItems.length + channelPlainAsks.length + channelTodos.length, complete: wsLoaded },
             workspace: { min: workspaceItems.length + workspacePlainAsks.length + workspaceTodos.length, complete: wsLoaded },
@@ -7356,12 +7584,20 @@ import "../../styles/kylon-image-viewer.css";
           statusSeq: waitingStatusSeq,
         },
         {
+          onTabChange: (next) => {
+            clearWaitingStatus();
+            waitingSurvey.active = false;
+            waitingTab = next;
+            renderWaitingPanelView();
+            if (next === "archived") ensureWaitingArchivedLoaded();
+          },
           onScopeChange: (next) => {
             clearWaitingStatus();
             waitingSurvey.active = false;
             waitingScope = next;
             renderWaitingPanelView();
-            if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
+            if (waitingTab === "archived") ensureWaitingArchivedLoaded();
+            else if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
           },
           onClose: () => { clearWaitingStatus(); waitingSurface?.close(true); },
           onRetryLoad: () => {
@@ -7369,6 +7605,18 @@ import "../../styles/kylon-image-viewer.css";
             waitingPanelFailedWorkspaces.clear();
             renderWaitingPanelView();
             void refreshWaitingCounts();
+          },
+          onRetryArchived: () => {
+            for (const st of waitingArchivedByWorkspace.values()) st.failed = false;
+            renderWaitingPanelView();
+            ensureWaitingArchivedLoaded(true);
+          },
+          onLoadMoreArchived: () => loadMoreWaitingArchived(),
+          onOpenArchivedTodo: (item) => {
+            if (!item.href) return;
+            clearWaitingStatus();
+            if (waitingSurface?.isPhone()) waitingSurface.close(false);
+            navigateHomeHref(item.href);
           },
           onSubmitChoice: (item, submission) => void sendWaitingPanelChoice(item, submission),
           onRetryChoice: (item) => {
@@ -7555,6 +7803,7 @@ import "../../styles/kylon-image-viewer.css";
       waitingSurveySkipped.clear();
       waitingSurveyErrors.clear();
       waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
+      waitingArchivedByWorkspace.clear();
       waitingWorkspaceChannels.clear();
       waitingPanelOverviewFailed = false;
     };
@@ -7573,6 +7822,7 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (typeof waitingStatusMessage !== "undefined") waitingStatusMessage = "";
       waitingPanelViewer = "";
+      if (typeof waitingTab !== "undefined") waitingTab = "active";
       if (typeof waitingScope !== "undefined") waitingScope = "channel";
       waitingPanelOverviewFailed = false;
       waitingPanelAsks.clear();
@@ -7581,6 +7831,7 @@ import "../../styles/kylon-image-viewer.css";
       if (typeof clearWaitingData === "function") {
         clearWaitingData();
       } else {
+        if (typeof waitingArchivedByWorkspace !== "undefined") waitingArchivedByWorkspace.clear();
         waitingPanelLoadedWorkspaces.clear();
         waitingPanelFailedWorkspaces.clear();
         waitingPanelTruncatedWorkspaces.clear();
@@ -11418,6 +11669,7 @@ import "../../styles/kylon-image-viewer.css";
         if (typeof waitingPanelAsks !== "undefined") {
           const list = waitingPanelAsks.get(workspaceId);
           if (list) waitingPanelAsks.set(workspaceId, list.filter(entry => entry.id !== signalId));
+          if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
           if (typeof renderWaitingPanelView === "function") renderWaitingPanelView();
         }
         if (typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
@@ -17597,7 +17849,7 @@ import "../../styles/kylon-image-viewer.css";
              the requirement exists to prevent. A root with no expiry produces no sentence, so
              the line collapses rather than saying "never". */
           windowText.textContent = threadReplyWindowText(
-            threadReplyRoot.until === null
+            threadReplyRoot.until === null || isPermanentSignalUntil(threadReplyRoot.until)
               ? null
               : formatTime(threadReplyRoot.until).relative,
             block,
