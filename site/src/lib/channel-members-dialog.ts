@@ -558,10 +558,9 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     clearPendingAdd();
     clearPendingRemove();
     suppressRestoreOnClose = !restoreFocus;
+    activeOptions?.onRetire?.();
     if (dialog.open) {
       dialog.close();
-    } else {
-      activeOptions?.onRetire?.();
     }
   };
 
@@ -574,6 +573,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
     }
     generation += 1;
     suppressRestoreOnClose = false;
+    activeOptions?.onRetire?.();
   });
 
   dialog.addEventListener("close", () => {

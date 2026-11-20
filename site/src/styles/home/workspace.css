@@ -176,6 +176,7 @@
 .hm-frame .dashboard__feed-view > * { flex: none; }
 .hm-frame .dashboard__feed-view > .dashboard__feed,
 .hm-frame .dashboard__feed-view > .dashboard__feed-more:not([hidden]) { margin-block-start: auto; }
+.hm-frame .dashboard__feed-view > .dashboard__feed:has(> .dashboard__channel-unavailable) { margin-block: auto; }
 .hm-frame .dashboard__feed-view > .dashboard__feed-more:not([hidden]) + .dashboard__feed { margin-block-start: 0; }
 .hm-frame .dashboard__feed > .dashboard__message:last-child { padding-block-end: 12px; }
 .hm-frame .dashboard__feed-fix { padding: 12px 24px 6px; list-style: none; }

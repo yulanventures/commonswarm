@@ -391,17 +391,21 @@ test("empty or malformed 200 conversations read fails closed (Retry); only expli
     "failed",
   );
 
-  // Transient and unlabelled errors also fail (Retry).
+  // Transient, bare 404, generic not_found, generic invalid_request, and unlabelled errors all fail closed (Retry, read-only).
   assert.equal(parseConversationsListOutcome(503, { error: "service_unavailable" }).status, "failed");
   assert.equal(parseConversationsListOutcome(500, {}).status, "failed");
   assert.equal(parseConversationsListOutcome(400, {}).status, "failed");
+  assert.equal(parseConversationsListOutcome(400, { error: "invalid_request" }).status, "failed");
   assert.equal(parseConversationsListOutcome(403, { error: "forbidden" }).status, "failed");
+  assert.equal(parseConversationsListOutcome(404, {}).status, "failed");
+  assert.equal(parseConversationsListOutcome(404, { error: "not_found" }).status, "failed");
+  assert.equal(parseConversationsListOutcome(404, { error: "invalid_request" }).status, "failed");
+  assert.equal(parseConversationsListOutcome(404, { error: "conversation_not_found" }).status, "failed");
 
-  // Only explicit pre-Step-2b not-supported signals select unsupported.
-  assert.equal(parseConversationsListOutcome(400, { error: "invalid_request" }).status, "unsupported");
+  // Only explicit unsupported-resource signals select unsupported.
   assert.equal(parseConversationsListOutcome(400, { error: "invalid_resource" }).status, "unsupported");
   assert.equal(parseConversationsListOutcome(400, { error: "unsupported_resource" }).status, "unsupported");
-  assert.equal(parseConversationsListOutcome(404, {}).status, "unsupported");
+  assert.equal(parseConversationsListOutcome(400, { error: "unknown_resource" }).status, "unsupported");
 
   // Valid 200 array selects ready.
   const ready = parseConversationsListOutcome(200, { conversations: [] });

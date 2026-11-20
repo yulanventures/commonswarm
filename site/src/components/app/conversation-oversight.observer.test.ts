@@ -274,6 +274,34 @@ function installOversightFixture() {
           ],
         });
       }
+      if (body?.resource === "conversation_history") {
+        if (f.holdNextSignals) {
+          f.holdNextSignals = false;
+          f.signalsHeld = true;
+          await new Promise<void>(resolve => { f.releaseSignals = resolve; });
+        }
+        const convId = String(body.conversation_id ?? "");
+        const conv = convId === personalDmAlex
+          ? {
+              conversation_id: personalDmAlex, kind: "dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1, lead_mode: null, lead_agent_principal_id: null,
+              members: [
+                { kind: "user", id: f.owner, name: "Synthetic owner", left_at: null },
+                { kind: "user", id: peerAlex, name: "Alex", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null,
+              read_through_at: null, read_through_id: null, unread_count: 3, mention_count: 1,
+              last_message_at: "2026-11-19T15:00:00Z", last_message_id: null,
+            }
+          : {
+              conversation_id: personalGeneral, kind: "general", channel_id: null, slug: "general", description: null,
+              archived_at: null, joined: true, generation: 0, lead_mode: "workspace", lead_agent_principal_id: null,
+              members: [], notify_level: "everything", starred: false, star_rank: null,
+              read_through_at: null, read_through_id: null, unread_count: 0, mention_count: 0,
+              last_message_at: "2026-11-19T14:00:00Z", last_message_id: null,
+            };
+        return Response.json({ conversation: conv, messages: [], has_more: false, next_before: null, next_after: null });
+      }
       if (body?.resource === "conversation_oversight") {
         f.oversightReads.push(body);
         if (f.oversightMode === "404") {

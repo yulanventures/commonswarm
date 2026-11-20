@@ -1579,11 +1579,15 @@ import "../../styles/kylon-image-viewer.css";
     type SignalLocation,
     channelUnread,
     ConversationsUnsupportedError,
+    ConversationUnavailableError,
+    SendRetiredError,
+    SessionIdentityMismatch,
     listConversations,
     OversightAuthRefusedError,
     OversightRequestRetiredError,
     readOversightConversationsRaw,
     readOversightConversationHistory,
+    readConversationHistory,
     joinConversation,
     leaveConversation,
     markConversationRead,
@@ -1736,16 +1740,34 @@ import "../../styles/kylon-image-viewer.css";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
   import { renderChannelMembershipRetryBar, renderChannelPreviewBar } from "../../lib/channel-preview-bar";
   import {
+    CONVERSATION_UNAVAILABLE_TEXT,
     DM_ATTACHMENTS_REFUSAL_TEXT,
     GROUP_LEAVE_CONFIRM_BODY,
+    NOTES_TO_SELF_LABEL,
     canLeaveConversation,
     conversationTitle,
+    isDirectKind,
     sortDirectConversations,
-    trueDmSendRefusal,
     type ConversationMemberRef,
     type ConversationNotifyLevel,
     type ConversationSummary,
   } from "../../lib/conversations";
+  import {
+    applyConversationHistoryInitial,
+    applyConversationHistoryOlder,
+    applyConversationHistoryRefresh,
+    clearConversationDraftStorage,
+    channelMembershipSendRefusal,
+    conversationDraftStorageKey,
+    createConversationHistoryState,
+    directConversationAudienceSentence,
+    directConversationSendRefusal,
+    excludeDirectConversationRows,
+    isDirectConversationRow,
+    resolveActiveConversationHistoryTarget,
+    unavailableConversationHistoryState,
+    type ConversationHistoryState,
+  } from "../../lib/conversation-history";
   import { CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
     type ChannelLead } from "../../lib/channel-lead";
   import {
@@ -2080,6 +2102,50 @@ import "../../styles/kylon-image-viewer.css";
     let conversationsGeneration = 0;
     let conversationsReadAt = 0;
     let activeDmConversationId: string | null = null;
+    /** Step 3D-1: active `conversation_history` session state, cursor pair, epoch (bumped on switch/evict/reset), and request generation. */
+    let conversationHistory: ConversationHistoryState<Signal> | null = null;
+    let conversationHistoryGeneration = 0;
+    let conversationSessionEpoch = 0;
+    /** Conversations evicted in this session (`${workspaceId}:${conversationId}`) so held sends cannot restore them. */
+    const evictedConversationIds = new Set<string>();
+    /** Sticky Step 2b capability per (`${userId}:${workspaceId}`): once confirmed, never downgrade to legacy. */
+    const modernConversationsConfirmed = new Set<string>();
+    /** Reading-position anchor captured before Retry/Load older so the visible message never shifts pixels. */
+    let pendingLoadOlderAnchor: { signalId: string; topInScroller: number; scrollTop: number } | null = null;
+    let loadOlderGeneration = 0;
+    let restoringLoadOlderScroll = false;
+    const captureLoadOlderAnchor = (
+      scroller: HTMLElement | null,
+    ): { signalId: string; topInScroller: number; scrollTop: number } | null => {
+      if (!scroller) return null;
+      const scrollerRect = scroller.getBoundingClientRect();
+      const visibleRow = all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
+        .find((row) => {
+          const r = row.getBoundingClientRect();
+          return r.height > 0 && r.bottom > scrollerRect.top + 1 && r.top < scrollerRect.bottom;
+        }) ?? null;
+      if (!visibleRow || !visibleRow.dataset.signalId) return null;
+      return {
+        signalId: visibleRow.dataset.signalId,
+        topInScroller: visibleRow.getBoundingClientRect().top - scrollerRect.top,
+        scrollTop: scroller.scrollTop,
+      };
+    };
+    const resetLoadOlderState = (clearError: boolean): void => {
+      loadOlderGeneration += 1;
+      pendingLoadOlderAnchor = null;
+      const more = one<HTMLElement>("[data-feed-more]");
+      if (more) more.style.minBlockSize = "";
+      if (clearError) {
+        const inlineError = one<HTMLElement>("[data-load-older-error]");
+        if (inlineError) {
+          inlineError.textContent = "";
+          inlineError.hidden = true;
+        }
+      }
+    };
+    /** A `?dm=<id>` that returned 404 conversation_not_found or lost access (uniform unavailable state). */
+    let unavailableDmConversationId: string | null = null;
     let mountedPreviewKey = "";
     const channelJoinPending = new Set<string>();
     let groupLeaveTarget: { conversationId: string; title: string; workspaceId: string } | null = null;
@@ -2181,10 +2247,21 @@ import "../../styles/kylon-image-viewer.css";
      * same question the query on screen asks. The composer's landing rule and the reset page's
      * merge are the same question and must not be two answers.
      */
-    const rowShowsOnScreen = (row: Signal): boolean =>
-      unknownChannelId === null &&
-      (activeChannelId === null ||
-        row.channelId === (activeChannelId === GENERAL_CHANNEL_ID ? null : activeChannelId));
+    const rowShowsOnScreen = (row: Signal): boolean => {
+      if (unknownChannelId !== null) return false;
+      if (typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) return false;
+      if (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable") return false;
+      if (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) {
+        return !row.conversationId || row.conversationId === activeDmConversationId;
+      }
+      const legacyUnsupported = typeof conversationsReadState !== "undefined" && conversationsReadState === "unsupported";
+      if (typeof isDirectConversationRow === "function" &&
+        isDirectConversationRow(row, typeof workspaceConversations !== "undefined" ? workspaceConversations : null, { legacyUnsupported })) {
+        return false;
+      }
+      return activeChannelId === null ||
+        row.channelId === (activeChannelId === GENERAL_CHANNEL_ID ? null : activeChannelId);
+    };
     /**
      * One generation per channel READ, because a channel command does not bump requestVersion
      * (it is not a workspace change). Archive and Create are different buttons and each only
@@ -2388,16 +2465,8 @@ import "../../styles/kylon-image-viewer.css";
        * moment of sending.
        */
       placementChannelId: string | null;
-      /**
-       * AND WHICH THREAD, when the message is a reply. `null` is a top-level message.
-       *
-       * A reply's address is its THREAD, not the channel on screen: a reply to a message in
-       * #mobile is written from all-signals as readily as from #mobile, and its
-       * `placementChannelId` is its root's either way. Comparing only the channel would have
-       * called every such reply "addressed somewhere else" and refused a valid Retry. The two
-       * fields are read together by `composerAddressStillPromised`, which is the one place
-       * that decides whether an unfinished send may still be replayed.
-       */
+      /** Step 3D-1: canonical Step 2b conversation id pinned to this command's idempotency key. */
+      placementConversationId?: string | null;
       placementThreadRootId: string | null;
       /**
        * AND WHETHER THE REPLY ALSO GOES TO ITS CHANNEL. Part of the message's identity, because
@@ -4623,6 +4692,10 @@ import "../../styles/kylon-image-viewer.css";
       if (!workspaceId) return null;
       const owner = session?.user.id ?? (sampleMode ? "sample-owner" : "");
       if (!owner) return null;
+      if (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null &&
+        typeof conversationDraftStorageKey === "function") {
+        return conversationDraftStorageKey(owner, workspaceId, activeDmConversationId);
+      }
       return `commonswarm:composer-draft:${owner}:${workspaceId}:${COMPOSER_DRAFT_SCOPE}`;
     };
 
@@ -4672,7 +4745,7 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
-    const persistComposerDraft = (): void => {
+    const persistComposerDraft = (explicitKey?: string | null): void => {
       cancelComposerDraftTimer();
       /* THE STORED DRAFT IS FROZEN FOR THE WHOLE POST, exactly as the pair is.
        *
@@ -4689,7 +4762,7 @@ import "../../styles/kylon-image-viewer.css";
        * then; `clearComposerDraft` is a removal rather than a write and is not gated here,
        * because a landed post must clear its draft whatever else is in flight. */
       if (composerSending) return;
-      const key = composerDraftKey();
+      const key = explicitKey !== undefined ? explicitKey : composerDraftKey();
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       if (!key || !input) return;
       const body = input.value.slice(0, COMPOSER_DRAFT_STORAGE_MAX);
@@ -4796,16 +4869,46 @@ import "../../styles/kylon-image-viewer.css";
        has not changed since its last write has nothing to flush, and must not touch a draft
        another tab may have saved since. An edit always arms the timer, so a pending timer is
        exactly "there is something unwritten". */
-    const flushComposerDraft = (): void => {
-      if (!composerDraftTimer) return;
-      persistComposerDraft();
+    const flushComposerDraft = (explicitKey?: string | null): void => {
+      if (!composerDraftTimer && explicitKey === undefined) return;
+      persistComposerDraft(explicitKey);
     };
     const scheduleComposerDraft = (): void => {
       cancelComposerDraftTimer();
+      const pinnedKey = composerDraftKey();
+      const pinnedUserId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
+      const pinnedWorkspaceId = activeWorkspaceId;
       composerDraftTimer = window.setTimeout(() => {
         composerDraftTimer = 0;
-        persistComposerDraft();
+        if (
+          !pinnedKey ||
+          activeWorkspaceId !== pinnedWorkspaceId ||
+          (session?.user.id ?? (sampleMode ? "sample-owner" : "")) !== pinnedUserId ||
+          composerDraftKey() !== pinnedKey
+        ) return;
+        persistComposerDraft(pinnedKey);
       }, COMPOSER_DRAFT_DEBOUNCE_MS);
+    };
+    /** Swap the shared textarea cleanly whenever the draft scope changes (DM <-> DM or DM <-> channel). */
+    const swapComposerDraftForScopeChange = (outgoingKey: string | null): void => {
+      cancelComposerDraftTimer();
+      const incomingKey = composerDraftKey();
+      if (outgoingKey === incomingKey) return;
+      const input = one<HTMLTextAreaElement>("[data-composer-input]");
+      if (!input) return;
+      composerIntent = null;
+      const retryControl = one<HTMLButtonElement>("[data-composer-retry]");
+      if (retryControl) retryControl.hidden = true;
+      const incoming = incomingKey ? readComposerDraft(incomingKey) : null;
+      restoredComposerKey = incomingKey;
+      composerDraftHeldKey = incoming && incomingKey ? incomingKey : null;
+      input.value = incoming?.body ?? "";
+      composerCaretKnown = false;
+      const warning = one<HTMLElement>("[data-composer-reload-warning]");
+      composerAttachmentsMissingAfterReload = incoming?.hadAttachments === true;
+      if (warning) warning.hidden = !composerAttachmentsMissingAfterReload;
+      resizeComposerInput(input, true);
+      syncComposerControls();
     };
 
     const resizeComposerInput = (input: HTMLTextAreaElement, immediate = false): void => {
@@ -7739,7 +7842,11 @@ import "../../styles/kylon-image-viewer.css";
       const pinnedUserId = session?.user.id ?? "";
       const pinnedVersion = requestVersion;
       if (isAlive && !isAlive()) return;
+      const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
+      if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
+      if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
       if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
       rememberPaletteVisit(`teammate:${entity.kind}:${entity.id}`);
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: pinnedWorkspaceId }, "push");
@@ -7859,14 +7966,17 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
-      const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null ? activeChannel() : null;
-      const headerConv = typeof activeConversationSummary === "function" && homeRoute.view === "chat" && unknownChannelId === null
+      const dmUnavailable = (typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+        (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable");
+      const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null && !dmUnavailable ? activeChannel() : null;
+      const headerConv = typeof activeConversationSummary === "function" && homeRoute.view === "chat" && unknownChannelId === null && !dmUnavailable
         ? activeConversationSummary()
         : null;
-      const headerDmConv = typeof activeDmConversationId !== "undefined" && activeDmConversationId && workspaceConversations
-        ? workspaceConversations.find(c => c.conversationId === activeDmConversationId) ?? null
+      const headerDmConv = !dmUnavailable && typeof activeDmConversationId !== "undefined" && activeDmConversationId
+        ? (workspaceConversations?.find(c => c.conversationId === activeDmConversationId) ??
+          (conversationHistory?.conversationId === activeDmConversationId ? conversationHistory.conversation : null))
         : null;
-      const headerPlace = activePlace();
+      const headerPlace = dmUnavailable ? null : activePlace();
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
@@ -7883,7 +7993,8 @@ import "../../styles/kylon-image-viewer.css";
         place: headerPlace ? { slug: headerPlace.slug, starred: headerPlace.starred, involvement: headerPlace.involvement } : undefined,
         /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
            agent it is with. The workspace stays in the picker. */
-        channelTitle: typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
+        channelTitle: dmUnavailable ? "Conversation unavailable"
+          : typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
           : headerDmConv ? conversationTitle(headerDmConv, homeViewerId(), lookupConversationMemberName)
           : !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
@@ -8221,9 +8332,15 @@ import "../../styles/kylon-image-viewer.css";
         teardownAgentOversight();
       }
       if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
-      /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
+      /* Any navigation leaves a Direct Message and any active thread reply; flush outgoing draft
+         and clear threadReplyRoot BEFORE changing scope so popstate/Back never bleeds a draft
+         or leaves a public channel thread root underneath a private DM marker. */
+      const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
+      if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
+      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -8258,9 +8375,15 @@ import "../../styles/kylon-image-viewer.css";
         else await openWorkspace(route.workspaceId);
       } else if (route.view === "chat") {
         applyChannelFromUrl(route.workspaceId);
+        if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
+        if (typeof syncComposerPlacement === "function") syncComposerPlacement();
+        if (typeof syncComposerAddress === "function") syncComposerAddress();
+        if (typeof renderComposerAudience === "function") renderComposerAudience();
         if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
         syncChannelUrl();
         if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
+      } else {
+        if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
       }
       if (navigation !== homeNavigation) return;
       /* Back from New workspace to the workspace still open behind it reopens nothing, so the panel turns here. */
@@ -11591,7 +11714,8 @@ import "../../styles/kylon-image-viewer.css";
      * People only: never in the sample. */
     const channelReadViewId = (): string | null =>
       !sampleMode && session && activeWorkspaceId && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        activeDm === null && unknownChannelId === null && activeChannelId !== null ? activeChannelId : null;
+        activeDm === null && (typeof activeDmConversationId === "undefined" || activeDmConversationId === null) &&
+        unknownChannelId === null && activeChannelId !== null ? activeChannelId : null;
     const channelReadVisitKey = (): string => {
       const viewId = channelReadViewId();
       return viewId === null ? "" : `${activeWorkspaceId}\u0000${viewId}`;
@@ -12209,7 +12333,7 @@ import "../../styles/kylon-image-viewer.css";
      * It lives outside renderFeed so renderFeed's own reader-scroll order — measure, then
      * replaceChildren — is not interrupted by a branch that empties the list first.
      */
-    const renderUnknownChannel = (): void => {
+    const renderUnknownChannel = (unavailableTitle = CHANNEL_UNAVAILABLE_TITLE): void => {
       const count = one<HTMLElement>("[data-update-count]");
       const more = one<HTMLElement>("[data-feed-more]");
       if (count) count.hidden = true;
@@ -12224,7 +12348,7 @@ import "../../styles/kylon-image-viewer.css";
         row.className = "dashboard__filter-empty dashboard__channel-unavailable";
         row.dataset.channelUnavailable = "";
         const title = document.createElement("strong");
-        title.textContent = CHANNEL_UNAVAILABLE_TITLE;
+        title.textContent = unavailableTitle;
         const open = document.createElement("button");
         open.type = "button";
         open.className = "dashboard__button dashboard__button--secondary";
@@ -12232,7 +12356,7 @@ import "../../styles/kylon-image-viewer.css";
         open.textContent = GO_TO_GENERAL_LABEL;
         open.addEventListener("click", () => selectChannel(GENERAL_CHANNEL_ID));
         row.append(title, open);
-        if (channelListFailed) {
+        if (channelListFailed && unavailableTitle === CHANNEL_UNAVAILABLE_TITLE) {
           const retry = document.createElement("button");
           retry.type = "button";
           retry.className = "dashboard__button dashboard__button--secondary";
@@ -12301,13 +12425,18 @@ import "../../styles/kylon-image-viewer.css";
       // Restore controls already in the rebuilt DOM before the next event; defer only controls added on the next frame (Show more).
       queueMicrotask(() => restore(true));
     };
-    const renderFeed = (change: "history" | "latest" = "history"): void => {
+    const renderFeed = (change: "history" | "latest" | "older" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
       if (homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return;
       if (addAgentViewOpen()) return;
       if (unknownChannelId !== null) {
         renderUnknownChannel();
+        return;
+      }
+      if ((typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+        (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable")) {
+        renderUnknownChannel(CONVERSATION_UNAVAILABLE_TEXT);
         return;
       }
       const now = Date.now();
@@ -12340,6 +12469,16 @@ import "../../styles/kylon-image-viewer.css";
       const scrollerBefore = feedScroller();
       const heightBefore = scrollerBefore?.scrollHeight ?? 0;
       const topBefore = scrollerBefore?.scrollTop ?? 0;
+      if (
+        scrollerBefore &&
+        typeof pendingLoadOlderAnchor !== "undefined" &&
+        pendingLoadOlderAnchor !== null &&
+        Math.abs(topBefore - pendingLoadOlderAnchor.scrollTop) > 0.5 &&
+        typeof captureLoadOlderAnchor === "function"
+      ) {
+        const scrolledAnchor = captureLoadOlderAnchor(scrollerBefore);
+        if (scrolledAnchor) pendingLoadOlderAnchor = scrolledAnchor;
+      }
       const list = one<HTMLOListElement>("[data-feed-list]");
       const count = one<HTMLElement>("[data-update-count]");
       const more = one<HTMLElement>("[data-feed-more]");
@@ -12376,20 +12515,28 @@ import "../../styles/kylon-image-viewer.css";
       }
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
       const dm = typeof activeDm === "undefined" ? null : activeDm;
+      const step2bDmActive = typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null;
+      const step2bHistoryReady = step2bDmActive && typeof conversationHistory !== "undefined" &&
+        conversationHistory !== null && conversationHistory.conversationId === activeDmConversationId &&
+        conversationHistory.status === "ready";
       /* A Direct Message shows its own history beside the newest page, so it does not end where that page does. Rows
          already in `signals` win: they carry this browser's posted and live state. Its empty, loading and failed lines
          come from its own read below, never from the workspace page being empty. */
-      const dmRead = dm && directHistory && directHistory.workspaceId === activeWorkspaceId && directHistory.viewerId === viewerId &&
+      const dmRead = dm && !step2bHistoryReady && directHistory && directHistory.workspaceId === activeWorkspaceId && directHistory.viewerId === viewerId &&
         directHistory.partner.kind === dm.kind && directHistory.partner.id === dm.id ? directHistory : null;
-      const dmState: DirectHistoryState = sampleMode ? "ready" : dmRead?.state ?? "pending";
-      if (signals.length === 0 && !dm) {
+      const dmState: DirectHistoryState = sampleMode || step2bHistoryReady ? "ready" : dmRead?.state ?? "pending";
+      if (signals.length === 0 && (!dm || step2bDmActive)) {
         humanSeenReporter.resetVisible();
         humanSeenObserver?.disconnect();
         const emptyTitle = one<HTMLElement>("[data-feed-empty-title]");
         const emptyDetail = one<HTMLElement>("[data-feed-empty-detail]");
         const channel = activeChannel();
         if (emptyTitle) {
-          emptyTitle.textContent = channel !== null
+          emptyTitle.textContent = step2bDmActive
+            ? (typeof conversationHistory !== "undefined" && conversationHistory?.status === "loading"
+              ? "Loading conversation…"
+              : "No messages yet.")
+            : channel !== null
             ? `Nothing in ${channelLabel(channel.slug)} yet.`
             : agents.length === 1
             ? `Waiting for ${agents[0]!.name}’s first message.`
@@ -12398,23 +12545,53 @@ import "../../styles/kylon-image-viewer.css";
         if (emptyDetail) {
           /* An empty channel (#general included) is its header, this line and a usable composer:
              no introductory paragraph. All messages keeps its first-run sentence. */
-          emptyDetail.textContent = activeChannelId !== null
+          emptyDetail.textContent = step2bDmActive || activeChannelId !== null
             ? ""
             : "When a person or an agent posts a note, a question or what they are working on, it shows up here. Agents in chat apps post when you chat with them.";
         }
         previousSignalIds.clear();
         feedWasEmpty = true;
-        if (fixes.length) { const empty = document.createElement("li"); empty.textContent = "No messages yet."; list.append(empty); }
-        showChannelView(fixes.length ? "feed" : "feed-empty");
+        if (fixes.length && !step2bDmActive) { const empty = document.createElement("li"); empty.textContent = "No messages yet."; list.append(empty); }
+        showChannelView(fixes.length && !step2bDmActive ? "feed" : "feed-empty");
         focusComposerOnEntry();
         return;
       }
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
-      const visibleSignals = dm
+      const legacyUnsupported = typeof conversationsReadState !== "undefined" && conversationsReadState === "unsupported";
+      const nonDmPool = !dm && !step2bDmActive && typeof excludeDirectConversationRows === "function"
+        ? excludeDirectConversationRows(
+          signals,
+          typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+          activeChannelId,
+          { legacyUnsupported },
+        )
+        : signals;
+      const step2bDmRows = step2bDmActive
+        ? (() => {
+          const hist = typeof conversationHistory !== "undefined" ? conversationHistory : null;
+          const pinnedRows = hist &&
+            hist.workspaceId === activeWorkspaceId &&
+            hist.viewerId === viewerId &&
+            hist.conversationId === activeDmConversationId &&
+            hist.status === "ready"
+            ? hist.rows
+            : [];
+          const pinnedIds = new Set(pinnedRows.map((r) => r.id));
+          const optimisticDm = signals.filter((s) =>
+            s.id.startsWith("composer-pending-") &&
+            s.conversationId === activeDmConversationId &&
+            !pinnedIds.has(s.id),
+          );
+          return [...optimisticDm, ...pinnedRows].filter((s) => signalIsReadable(s, now));
+        })()
+        : [];
+      const visibleSignals = step2bDmActive
+        ? step2bDmRows
+        : dm
         ? directConversation(signals, dmRead?.rows ?? [], viewerId, dm, signal => signalIsReadable(signal, now))
-        : filterSignals(signals, signalFilter, viewerId);
+        : filterSignals(nonDmPool, signalFilter, viewerId);
       const filterRow = one<HTMLElement>(".dashboard__feed-filters");
-      if (filterRow) filterRow.hidden = !!dm;
+      if (filterRow) filterRow.hidden = !!dm || step2bDmActive;
       const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
       for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
         const active = button.dataset.feedFilter === signalFilter;
@@ -12986,11 +13163,33 @@ import "../../styles/kylon-image-viewer.css";
        *
        * showChannelView must run first: the view is `hidden` until then, and a hidden element
        * has no scroll geometry to read or set. */
-      if (wasAtBottom) {
+      const applyingLoadOlder = change === "older" && typeof pendingLoadOlderAnchor !== "undefined" && pendingLoadOlderAnchor !== null;
+      if (more && applyingLoadOlder) {
+        more.style.minBlockSize = "";
+      }
+      if (wasAtBottom && !applyingLoadOlder) {
         scrollToNewest();
       } else {
         const el = feedScroller();
-        if (el && change === "latest") {
+        const anchor = typeof pendingLoadOlderAnchor !== "undefined" ? pendingLoadOlderAnchor : null;
+        if (el && anchor !== null) {
+          if (change === "older") pendingLoadOlderAnchor = null;
+          const anchoredRow = all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
+            .find((row) => row.dataset.signalId === anchor.signalId) ?? null;
+          if (anchoredRow) {
+            const scrollerRect = el.getBoundingClientRect();
+            const afterTopInScroller = anchoredRow.getBoundingClientRect().top - scrollerRect.top;
+            if (typeof restoringLoadOlderScroll !== "undefined") restoringLoadOlderScroll = true;
+            try {
+              el.scrollTop += afterTopInScroller - anchor.topInScroller;
+              if (pendingLoadOlderAnchor !== null) pendingLoadOlderAnchor.scrollTop = el.scrollTop;
+            } finally {
+              if (typeof restoringLoadOlderScroll !== "undefined") restoringLoadOlderScroll = false;
+            }
+          } else if (heightBefore > 0) {
+            el.scrollTop = topBefore + (el.scrollHeight - heightBefore);
+          }
+        } else if (el && change === "latest") {
           el.scrollTop = topBefore;
         } else if (el && heightBefore > 0) {
           el.scrollTop = topBefore + (el.scrollHeight - heightBefore);
@@ -13128,50 +13327,168 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
+    const activeConversationHistoryTarget = () =>
+      typeof resolveActiveConversationHistoryTarget === "function"
+        ? resolveActiveConversationHistoryTarget({
+            workspaceConversations: typeof workspaceConversations === "undefined" ? null : workspaceConversations,
+            activeDmConversationId: typeof activeDmConversationId === "undefined" ? null : activeDmConversationId,
+            activeDm: typeof activeDm === "undefined" ? null : activeDm,
+            activeChannelId,
+            unknownChannelId,
+            viewerUserId: session?.user.id ?? null,
+          })
+        : { mode: "legacy" as const };
+
+    const optimisticRowsForConversation = (conversationId: string): Signal[] => {
+      prunePostedRows();
+      return [...postedSinceReset.values()]
+        .map((entry) => entry.row)
+        .filter((row) => row.conversationId === conversationId);
+    };
+
     const loadSignals = async (
       workspaceId: string,
       reset: boolean,
       version: number,
     ): Promise<void> => {
+      const convTarget = !sampleMode && session && typeof activeConversationHistoryTarget === "function"
+        ? activeConversationHistoryTarget()
+        : { mode: "legacy" as const };
+      if (convTarget.mode === "conversation" && typeof readConversationHistory === "function") {
+        const pinnedUserId = session?.user.id ?? "";
+        const convId = convTarget.conversationId;
+        const histGen = ++conversationHistoryGeneration;
+        const beforeCursor = reset
+          ? null
+          : conversationHistory && conversationHistory.conversationId === convId
+            ? conversationHistory.nextBefore
+            : signalCursor;
+        if (reset) {
+          if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
+          conversationSessionEpoch += 1;
+          signalCursor = null;
+          signalCutoff = new Date().toISOString();
+          unavailableDmConversationId = null;
+          if (!conversationHistory || conversationHistory.conversationId !== convId || conversationHistory.workspaceId !== workspaceId || conversationHistory.viewerId !== pinnedUserId) {
+            conversationHistory = createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+          }
+        }
+        const pinnedSessionEpoch = conversationSessionEpoch;
+        const stillMatches = () => {
+          if (
+            pinnedSessionEpoch !== conversationSessionEpoch ||
+            version !== requestVersion ||
+            workspaceId !== activeWorkspaceId ||
+            (session?.user.id ?? "") !== pinnedUserId
+          ) {
+            return false;
+          }
+          const nowTarget = activeConversationHistoryTarget();
+          return nowTarget.mode === "conversation" && nowTarget.conversationId === convId;
+        };
+        const readStillAlive = () => (!reset || histGen === conversationHistoryGeneration) && stillMatches();
+        if (!readStillAlive()) return;
+        let result;
+        try {
+          result = await readConversationHistory(workspaceId, convId, {
+            ...(beforeCursor ? { before: beforeCursor } : {}),
+            limit: 50,
+            includeMentions: true,
+            includeReactions: true,
+            expectedUserId: pinnedUserId,
+            isAlive: readStillAlive,
+          });
+        } catch (error) {
+          if (error instanceof SessionIdentityMismatch) return;
+          throw error;
+        }
+        if (!readStillAlive()) return;
+        const liveState = conversationHistory && conversationHistory.conversationId === convId
+          ? conversationHistory
+          : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+        if (!reset && liveState.status === "unavailable") return;
+        const next = reset
+          ? applyConversationHistoryInitial(liveState, result, optimisticRowsForConversation(convId))
+          : applyConversationHistoryOlder(liveState, result);
+        conversationHistory = next;
+        if (next.status === "unavailable") {
+          if (typeof evictConversationLocalState === "function") {
+            evictConversationLocalState(workspaceId, convId, true);
+          }
+          return;
+        }
+        if (!reset && next.olderError) {
+          throw new Error(next.olderError);
+        }
+        if (reset && next.status === "error") {
+          throw new Error(next.errorMessage || "CommonSwarm could not load this conversation.");
+        }
+        forgetFetchedPostedIds(next.rows);
+        signals = next.rows;
+        signalCursor = next.nextBefore;
+        signalHasMore = next.hasMore;
+        unavailableDmConversationId = null;
+        if (next.conversation && workspaceConversations) {
+          const exists = workspaceConversations.some((c) => c.conversationId === next.conversation!.conversationId);
+          if (exists) {
+            workspaceConversations = workspaceConversations.map((c) =>
+              c.conversationId === next.conversation!.conversationId ? next.conversation! : c,
+            );
+          }
+        }
+        renderHomeRail();
+        renderHomeShell();
+        renderChannelBlocked();
+        renderFeed(reset ? "history" : "older");
+        void refreshDeliveryReceipts(workspaceId, version);
+        void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
+        void refreshSignalMentions(workspaceId, version);
+        void refreshSignalReactions(workspaceId, version);
+        return;
+      }
+
       const cursor = reset ? null : signalCursor;
+      const pinnedLegacyUserId = session?.user.id ?? "";
+      const pinnedLegacyDmConvId = typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null;
       if (reset) {
+        if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
+        if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
         signalCursor = null;
         signalCutoff = new Date().toISOString();
       }
+      const pinnedLegacyEpoch = typeof conversationSessionEpoch !== "undefined" ? conversationSessionEpoch : 0;
       /* The channel is captured with the request and checked again when it lands, the same
-         way the workspace is. Without it a page fetched for #mobile could be applied after
-         the reader moved to all-signals, and the feed would silently be a channel's rows
-         under the whole feed's name. */
+         way the workspace is. Without it a page fetched for #mobile or All messages could be
+         applied after the reader moved to a DM or another channel. */
       const channelId = activeChannelId;
+      if (
+        version !== requestVersion || workspaceId !== activeWorkspaceId ||
+        channelId !== activeChannelId || (session?.user.id ?? "") !== pinnedLegacyUserId ||
+        (typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null) !== pinnedLegacyDmConvId
+      ) return;
       const page = await signalPage(workspaceId, cursor, signalCutoff, channelId);
       if (
         version !== requestVersion || workspaceId !== activeWorkspaceId ||
-        channelId !== activeChannelId
+        channelId !== activeChannelId || (session?.user.id ?? "") !== pinnedLegacyUserId ||
+        (typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null) !== pinnedLegacyDmConvId ||
+        (typeof conversationSessionEpoch !== "undefined" && pinnedLegacyEpoch !== conversationSessionEpoch)
       ) return;
+      const legacyUnsupported = typeof conversationsReadState !== "undefined" && conversationsReadState === "unsupported";
+      const pageRows = (convTarget.mode === "all-signals" || channelId === null || channelId === GENERAL_CHANNEL_ID) &&
+        !(typeof activeDm !== "undefined" && activeDm) &&
+        typeof excludeDirectConversationRows === "function"
+        ? excludeDirectConversationRows(
+          page.rows,
+          typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+          channelId,
+          { legacyUnsupported },
+        )
+        : page.rows;
       if (reset) {
-        const fetched = new Set(page.rows.map((row) => row.id));
-        /* ~~cleared as the request went out~~: that dropped a row posted BEFORE the request
-           and not yet visible to the read replica, which is the case this set exists for. The
-           set is not cleared here at all; what keeps a row from another channel out is the
-           same question the screen asks, and `signals` was emptied by the move in any case.
-           Found by a review arm. */
+        const fetched = new Set(pageRows.map((row) => row.id));
         prunePostedRows();
-        /* AND WITHIN THE PAGE'S WINDOW. The grace bounds how long a row may stand in; it does
-           not say WHERE the row belongs, and the two cases share every other bit. Replica lag
-           is a row this browser wrote that the page does not carry YET. A page roll is a row
-           the replica does have, below the newest 25. The boundary between them is the page's
-           OLDEST row, not its newest: ~~`row.createdAt >= page.rows[0].createdAt`~~ dropped a
-           row that still belongs whenever one message newer than it had already replicated,
-           which in all-signals is any other member's next post. A review arm found that, on
-           the fix from the round before, and an observer control had already pinned the wrong
-           comparison. When the page is the whole history nothing has rolled off, so every
-           stand-in belongs. A rolled-off row is not lost: it is in history, where Load older
-           fetches it. */
-        /* The floor is the WHOLE key the query orders by, `created_at DESC, id DESC`, and not
-           the timestamp alone: a row sharing the floor row's timestamp with a smaller id sorts
-           BELOW it and has rolled off, and `createdAt >= floor` kept it, so the page held
-           twenty-six rows against a bound of twenty-five. A review arm found it. */
-        const pageFloor = page.hasMore ? page.rows.at(-1) ?? null : null;
+        const pageFloor = page.hasMore ? pageRows.at(-1) ?? null : null;
         const onThisPage = (row: Signal): boolean =>
           pageFloor === null ||
           row.createdAt > pageFloor.createdAt ||
@@ -13180,24 +13497,21 @@ import "../../styles/kylon-image-viewer.css";
           .map((entry) => entry.row)
           .filter((row) =>
             !fetched.has(row.id) && rowShowsOnScreen(row) && onThisPage(row));
-        forgetFetchedPostedIds(page.rows);
-        /* Merged by time, not prepended. A stand-in is not always the newest row: it can be
-           the second newest, and putting it on top painted it above a message that is newer
-           than it. The comparator is the query's own order, `created_at DESC, id DESC`. */
-        signals = [...arrivedWhileFetching, ...page.rows].sort((a, b) =>
+        forgetFetchedPostedIds(pageRows);
+        signals = [...arrivedWhileFetching, ...pageRows].sort((a, b) =>
           b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
       } else {
-        forgetFetchedPostedIds(page.rows);
+        forgetFetchedPostedIds(pageRows);
         const known = new Set(signals.map((signal) => signal.id));
-        const additions = page.rows.filter((signal) => !known.has(signal.id));
+        const additions = pageRows.filter((signal) => !known.has(signal.id));
         signals = [...signals, ...additions];
       }
-      const last = page.rows.at(-1);
+      const last = pageRows.at(-1);
       signalCursor = last ? { createdAt: last.createdAt, id: last.id } : cursor;
       signalHasMore = page.hasMore;
-      renderFeed();
+      renderFeed(reset ? "history" : "older");
       // An open Direct Message rereads its own history with the page it sits beside.
-      if (reset && typeof activeDm !== "undefined" && activeDm) void loadDirectHistory();
+      if (reset && typeof activeDm !== "undefined" && activeDm && activeDmConversationId === null) void loadDirectHistory();
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
       void refreshChoices(workspaceId, version);
@@ -13208,6 +13522,7 @@ import "../../styles/kylon-image-viewer.css";
     const refreshLatestSignals = async (): Promise<void> => {
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
+      const pinnedUserId = session?.user.id ?? "";
       if (
         sampleMode ||
         !workspaceId ||
@@ -13220,18 +13535,122 @@ import "../../styles/kylon-image-viewer.css";
       }
       liveFeedInFlight = true;
       try {
+        const convTarget = session && typeof activeConversationHistoryTarget === "function"
+          ? activeConversationHistoryTarget()
+          : { mode: "legacy" as const };
+        if (convTarget.mode === "conversation" && typeof readConversationHistory === "function") {
+          const convId = convTarget.conversationId;
+          const histGen = ++conversationHistoryGeneration;
+          const pinnedSessionEpoch = conversationSessionEpoch;
+          const afterCursor = conversationHistory && conversationHistory.conversationId === convId &&
+            conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
+            ? conversationHistory.nextAfter
+            : null;
+          const refreshStillAlive = () => {
+            const nowTarget = activeConversationHistoryTarget();
+            return (
+              pinnedSessionEpoch === conversationSessionEpoch &&
+              histGen === conversationHistoryGeneration &&
+              version === requestVersion &&
+              workspaceId === activeWorkspaceId &&
+              (session?.user.id ?? "") === pinnedUserId &&
+              nowTarget.mode === "conversation" &&
+              nowTarget.conversationId === convId
+            );
+          };
+          if (!refreshStillAlive()) return;
+          let result;
+          try {
+            result = await readConversationHistory(workspaceId, convId, {
+              ...(afterCursor ? { after: afterCursor } : {}),
+              limit: 50,
+              includeMentions: true,
+              includeReactions: true,
+              expectedUserId: pinnedUserId,
+              isAlive: refreshStillAlive,
+            });
+          } catch (error) {
+            if (error instanceof SessionIdentityMismatch) return;
+            throw error;
+          }
+          if (!refreshStillAlive()) return;
+          const liveState = conversationHistory && conversationHistory.conversationId === convId &&
+            conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
+            ? conversationHistory
+            : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
+          if (liveState.status === "unavailable") return;
+          const refreshed = applyConversationHistoryRefresh(
+            liveState,
+            result,
+            optimisticRowsForConversation(convId),
+          );
+          conversationHistory = refreshed.state;
+          if (refreshed.lostAccess) {
+            if (typeof evictConversationLocalState === "function") {
+              evictConversationLocalState(workspaceId, convId, true);
+            }
+            return;
+          }
+          if (refreshed.state.status === "ready") {
+            forgetFetchedPostedIds(refreshed.state.rows);
+            const knownAgents = new Set(agents.map((agent) => agent.principalId));
+            for (const signal of refreshed.state.rows) {
+              if (
+                signal.fromKind === "agent" &&
+                !knownAgents.has(signal.from) &&
+                !settledUnknownAgents.has(signal.from)
+              ) {
+                unknownAgentCandidates.add(signal.from);
+              }
+            }
+            if (unknownAgentCandidates.size > 0) {
+              void refreshRosterForUnknownAgents(workspaceId, version);
+            }
+            if (refreshed.changed) {
+              signals = refreshed.state.rows;
+              signalHasMore = refreshed.state.hasMore;
+              signalCursor = refreshed.state.nextBefore;
+              renderFeed("latest");
+            }
+            void refreshDeliveryReceipts(workspaceId, version);
+            void refreshMessageStatus(workspaceId, version);
+            void refreshChoices(workspaceId, version);
+            void refreshSignalMentions(workspaceId, version);
+            void refreshSignalReactions(workspaceId, version);
+            void refreshPendingAccess(workspaceId, version);
+            void refreshBrainTopics(false);
+            void refreshConversations(workspaceId, refreshed.changed);
+          }
+          return;
+        }
         const channelId = activeChannelId;
+        const pinnedLegacyDmConvId = typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null;
+        const pinnedLegacyEpoch = typeof conversationSessionEpoch !== "undefined" ? conversationSessionEpoch : 0;
+        if (
+          version !== requestVersion || workspaceId !== activeWorkspaceId ||
+          channelId !== activeChannelId || (session?.user.id ?? "") !== pinnedUserId ||
+          (typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null) !== pinnedLegacyDmConvId
+        ) return;
         const page = await signalPage(workspaceId, null, new Date().toISOString(), channelId);
         if (
           version !== requestVersion || workspaceId !== activeWorkspaceId ||
-          channelId !== activeChannelId
+          channelId !== activeChannelId || (session?.user.id ?? "") !== pinnedUserId ||
+          (typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null) !== pinnedLegacyDmConvId ||
+          (typeof conversationSessionEpoch !== "undefined" && pinnedLegacyEpoch !== conversationSessionEpoch)
         ) return;
-        /* A signal from a principal the roster does not know is how a join first shows
-           up here: queue it for one bounded catch-up. Settled principals (confirmed
-           revoked/historical by a previous successful fetch) never re-queue, so their
-           immutable old signals cannot keep the queue alive forever. */
+        const legacyUnsupported = typeof conversationsReadState !== "undefined" && conversationsReadState === "unsupported";
+        const pageRows = (convTarget.mode === "all-signals" || channelId === null || channelId === GENERAL_CHANNEL_ID) &&
+          !(typeof activeDm !== "undefined" && activeDm) &&
+          typeof excludeDirectConversationRows === "function"
+          ? excludeDirectConversationRows(
+            page.rows,
+            typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+            channelId,
+            { legacyUnsupported },
+          )
+          : page.rows;
         const knownAgents = new Set(agents.map((agent) => agent.principalId));
-        for (const signal of page.rows) {
+        for (const signal of pageRows) {
           if (
             signal.fromKind === "agent" &&
             !knownAgents.has(signal.from) &&
@@ -13243,9 +13662,9 @@ import "../../styles/kylon-image-viewer.css";
         if (unknownAgentCandidates.size > 0) {
           void refreshRosterForUnknownAgents(workspaceId, version);
         }
-        forgetFetchedPostedIds(page.rows);
-        const known = new Set(page.rows.map((signal) => signal.id));
-        const next = [...page.rows, ...signals.filter((signal) => !known.has(signal.id))];
+        forgetFetchedPostedIds(pageRows);
+        const known = new Set(pageRows.map((signal) => signal.id));
+        const next = [...pageRows, ...signals.filter((signal) => !known.has(signal.id))];
         const changed =
           next.length !== signals.length ||
           next.some((signal, index) => signal.id !== signals[index]?.id);
@@ -14759,6 +15178,12 @@ import "../../styles/kylon-image-viewer.css";
       else if (agents.length === 0) {
         showChannelView("no-agents");
         renderSetupChecklist();
+      } else if (
+        unknownChannelId !== null ||
+        (typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+        (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable")
+      ) {
+        renderFeed();
       } else if (signals.length === 0) {
         const workspaceId = activeWorkspaceId;
         const version = requestVersion;
@@ -15608,6 +16033,10 @@ import "../../styles/kylon-image-viewer.css";
       conversationsGeneration += 1;
       conversationsReadAt = 0;
       activeDmConversationId = null;
+      conversationHistory = null;
+      conversationHistoryGeneration += 1;
+      conversationSessionEpoch += 1;
+      unavailableDmConversationId = null;
       mountedPreviewKey = "";
       channelJoinPending.clear();
       groupLeaveTarget = null;
@@ -15620,6 +16049,132 @@ import "../../styles/kylon-image-viewer.css";
       openMembersSheetState = null;
       conversationDialogsBridge?.closeAll();
       one<HTMLElement>("[data-channel-preview]")?.replaceChildren();
+    };
+    /** Immediately wipe client-held rows, cursors, optimistic rows, and local draft for a left or revoked conversation. */
+    const evictConversationLocalState = (workspaceId: string, conversationId: string, markUnavailable: boolean): void => {
+      const pinnedUserId = session?.user.id ?? "";
+      evictedConversationIds.add(`${workspaceId}:${conversationId}`);
+      cancelComposerDraftTimer();
+      conversationsGeneration += 1;
+      if (typeof clearConversationDraftStorage === "function" && pinnedUserId) {
+        clearConversationDraftStorage(window.localStorage, pinnedUserId, workspaceId, conversationId);
+      }
+      for (const [id, entry] of postedSinceReset.entries()) {
+        if (entry.row.conversationId === conversationId) postedSinceReset.delete(id);
+      }
+      if (workspaceConversations) {
+        workspaceConversations = workspaceConversations.filter((c) => c.conversationId !== conversationId);
+      }
+      const viewingEvicted =
+        activeDmConversationId === conversationId ||
+        (conversationHistory !== null && conversationHistory.conversationId === conversationId);
+      if (viewingEvicted) {
+        conversationHistoryGeneration += 1;
+        conversationSessionEpoch += 1;
+        composerSendToken += 1;
+        setComposerSending(false);
+        signals = [];
+        signalCursor = null;
+        signalHasMore = false;
+        one<HTMLOListElement>("[data-feed-list]")?.replaceChildren();
+        directHistory = null;
+        directHistoryTicket += 1;
+        composerIntent = null;
+        composerDraftHeldKey = null;
+        restoredComposerKey = null;
+        clearComposerDraft(composerDraftKey(workspaceId));
+        const input = one<HTMLTextAreaElement>("[data-composer-input]");
+        if (input) {
+          input.value = "";
+          input.style.blockSize = "auto";
+        }
+        for (const attachment of stagedAttachments) {
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        }
+        stagedAttachments = [];
+        renderStagedAttachments();
+        syncComposerControls();
+        if (markUnavailable) {
+          conversationHistory = unavailableConversationHistoryState<Signal>(workspaceId, pinnedUserId, conversationId);
+          if (activeDmConversationId === conversationId) {
+            unavailableDmConversationId = conversationId;
+            activeDm = null;
+          } else if (activeChannelId !== null) {
+            unknownChannelId = activeChannelId;
+          }
+          if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
+          renderHomeRail();
+          renderHomeShell();
+          renderChannelBlocked();
+          renderFeed();
+        } else {
+          conversationHistory = null;
+          unavailableDmConversationId = null;
+        }
+      }
+    };
+    /** Single shared commit path for `resource: "conversations"` (sidebar refresh + Members preflight). */
+    const commitWorkspaceConversations = (
+      workspaceId: string,
+      pinnedUserId: string,
+      rows: ConversationSummary[],
+      render: boolean,
+    ): boolean => {
+      const prevList = workspaceConversations;
+      const nextIds = new Set(rows.map((r) => r.conversationId));
+      for (const r of rows) {
+        if (r.joined) evictedConversationIds.delete(`${workspaceId}:${r.conversationId}`);
+      }
+      if (prevList) {
+        for (const prev of prevList) {
+          if (!nextIds.has(prev.conversationId) && (prev.kind === "private_channel" || isDirectKind(prev.kind))) {
+            evictedConversationIds.add(`${workspaceId}:${prev.conversationId}`);
+            if (typeof clearConversationDraftStorage === "function" && pinnedUserId) {
+              clearConversationDraftStorage(window.localStorage, pinnedUserId, workspaceId, prev.conversationId);
+            }
+            for (const [id, entry] of postedSinceReset.entries()) {
+              if (entry.row.conversationId === prev.conversationId) postedSinceReset.delete(id);
+            }
+          }
+        }
+      }
+      workspaceConversations = rows;
+      conversationsReadState = "ready";
+      conversationsReadError = "";
+      if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
+      // Reconcile authoritative omission even while the active conversation's first history page is still loading.
+      const requestedDmId = activeDmConversationId ??
+        (conversationHistory && conversationHistory.conversation?.kind && isDirectKind(conversationHistory.conversation.kind)
+          ? conversationHistory.conversationId
+          : null);
+      if (requestedDmId !== null) {
+        const freshDm = rows.find((r) => r.conversationId === requestedDmId);
+        if (!freshDm || !freshDm.joined) {
+          evictConversationLocalState(workspaceId, requestedDmId, true);
+          return true;
+        }
+      }
+      if (activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID) {
+        const openPrivateConvId =
+          conversationHistory?.conversation?.kind === "private_channel"
+            ? conversationHistory.conversationId
+            : prevList?.find((c) => c.channelId === activeChannelId && c.kind === "private_channel")?.conversationId ?? null;
+        if (openPrivateConvId !== null) {
+          const freshPrivate = rows.find((r) => r.conversationId === openPrivateConvId);
+          if (!freshPrivate || !freshPrivate.joined) {
+            evictConversationLocalState(workspaceId, openPrivateConvId, true);
+            return true;
+          }
+        }
+      }
+      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
+      if (render) {
+        renderHomeRail();
+        renderHomeShell();
+        renderChannelBlocked();
+        renderChannelDirectoryDialog();
+      }
+      return false;
     };
     /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
     const conversationForChannel = (channelId: string | null): ConversationSummary | null => {
@@ -15677,40 +16232,47 @@ import "../../styles/kylon-image-viewer.css";
         (!isAlive || isAlive());
       const viewerId = homeViewerId();
       const others = conv.members.filter(m => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
-      if (conv.kind === "dm" && others.length === 1) {
-        const other = others[0]!;
-        await openDirectMessage(
-          { kind: other.kind === "agent" ? "agent" : "person", id: other.id } as EntityRef,
-          [{ kind: other.kind === "agent" ? "agent" : "person", id: other.id }],
-          stillAlive,
-        );
-        if (!stillAlive()) return;
-        activeDmConversationId = conversationId;
-        reconcileOpenMembersSheet();
-        renderHomeRail();
-        renderHomeShell();
-        renderChannelBlocked();
-        return;
-      }
-      activeDm = null;
-      closeEntityPanel(false);
+      const oneToOnePartner: EntityRef | null = conv.kind === "dm" && others.length === 1
+        ? ({ kind: others[0]!.kind === "agent" ? "agent" : "person", id: others[0]!.id } as EntityRef)
+        : null;
+      const outgoingDraftKey = composerDraftKey(workspaceId);
+      if (outgoingDraftKey) persistComposerDraft(outgoingDraftKey);
       if (threadReplyRoot !== null) setThreadReplyRoot(null);
       activeChannelId = null;
       unknownChannelId = null;
+      unavailableDmConversationId = null;
+      evictedConversationIds.delete(`${workspaceId}:${conversationId}`);
+      conversationHistory = createConversationHistoryState<Signal>(workspaceId, pinnedUserId, conversationId);
+      conversationHistoryGeneration += 1;
+      conversationSessionEpoch += 1;
+      signals = [];
+      signalCursor = null;
+      signalHasMore = false;
+      directHistory = null;
       if (homeRoute.view !== "chat") {
         await navigateHome({ view: "chat", workspaceId, dmId: conversationId }, "push");
         if (!stillAlive()) return;
       } else {
         window.history.pushState(window.history.state, "", routeHref({ view: "chat", workspaceId, dmId: conversationId }));
       }
+      activeDm = oneToOnePartner;
       activeDmConversationId = conversationId;
-      /* Group DMs and Notes to self stay read-only until Step 3D posts by exact conversation_id (C1). */
-      syncComposerAddress([]);
-      reconcileOpenMembersSheet();
-      renderFeed();
+      swapComposerDraftForScopeChange(outgoingDraftKey);
+      closeEntityPanel(false);
+      syncComposerAddress(oneToOnePartner ? [{ kind: oneToOnePartner.kind, id: oneToOnePartner.id }] : []);
+      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
       renderHomeRail();
       renderHomeShell();
       renderChannelBlocked();
+      renderFeed();
+      if (oneToOnePartner) {
+        const keepWaitingColumn = typeof waitingSurface !== "undefined" && (waitingSurface?.isOpen() ?? false) && !waitingSurface!.isPhone();
+        const anchor = one<HTMLElement>(`[data-rail-${oneToOnePartner.kind === "agent" ? "agent" : "person"}="${CSS.escape(oneToOnePartner.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
+        if (anchor && !keepWaitingColumn) openEntityPanel(oneToOnePartner, anchor);
+      }
+      if (!sampleMode) {
+        void loadSignals(workspaceId, true, requestVersion).catch(() => {});
+      }
     };
     /** Row ⋯ menu for a Step 2b DM / group DM: Mark as read, Star, Notifications, and Leave (group DMs only). */
     const openConversationRowMenu = (conversationId: string, event: MouseEvent, button: HTMLElement): void => {
@@ -15834,11 +16396,9 @@ import "../../styles/kylon-image-viewer.css";
         one<HTMLButtonElement>("[data-group-leave-cancel]")?.focus({ preventScroll: true });
         return;
       }
-      if (workspaceConversations) {
-        workspaceConversations = workspaceConversations.filter(c => c.conversationId !== target.conversationId);
-      }
-      if (activeDmConversationId === target.conversationId) {
-        signals = [];
+      const wasViewingLeftGroup = activeDmConversationId === target.conversationId;
+      evictConversationLocalState(target.workspaceId, target.conversationId, false);
+      if (wasViewingLeftGroup) {
         // Keep activeDmConversationId set until selectChannel runs so leavingDm clears group recipients.
         selectChannel(GENERAL_CHANNEL_ID);
         activeDmConversationId = null;
@@ -16062,13 +16622,8 @@ import "../../styles/kylon-image-viewer.css";
           if (readGen !== conversationsGeneration || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) {
             return false;
           }
-          workspaceConversations = rows;
-          conversationsReadState = "ready";
-          conversationsReadError = "";
-          renderHomeRail();
-          renderHomeShell();
-          renderChannelBlocked();
-          return true;
+          const evicted = commitWorkspaceConversations(workspaceId, pinnedUserId, rows, true);
+          return !evicted;
         },
         onOpenedSnapshot: (snapshot) => {
           openMembersSheetState = { ...snapshot, workspaceId, userId: pinnedUserId };
@@ -16239,10 +16794,24 @@ import "../../styles/kylon-image-viewer.css";
       const marker = one<HTMLElement>("[data-composer-audience]");
       if (!marker) return;
       const place = composerPlaceNow();
-      const audience = composerAudience(
+      const dmConv = typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null
+        ? workspaceConversations?.find((c) => c.conversationId === activeDmConversationId) ?? conversationHistory?.conversation ?? null
+        : null;
+      let audience = composerAudience(
         composerIsPublic() ? [] : composerRecipients().map(composerRecipientName),
         place,
       );
+      if (dmConv && isDirectKind(dmConv.kind)) {
+        const viewerId = homeViewerId();
+        const title = conversationTitle(dmConv, viewerId, lookupConversationMemberName);
+        audience = {
+          kind: "private",
+          name: title,
+          sentence: typeof directConversationAudienceSentence === "function"
+            ? directConversationAudienceSentence(dmConv, viewerId, title)
+            : `Direct message with ${title}.`,
+        };
+      }
       marker.dataset.audience = audience.kind;
       /* A place this page cannot name is not given a channel's hash. */
       marker.toggleAttribute("data-audience-unnamed", audience.kind === "public" && !place.named);
@@ -16324,6 +16893,13 @@ import "../../styles/kylon-image-viewer.css";
         input.setAttribute("aria-label", `Message ${partnerName}`);
         return;
       }
+      if (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) {
+        const dmConv = workspaceConversations?.find((c) => c.conversationId === activeDmConversationId) ?? conversationHistory?.conversation ?? null;
+        const dmTitle = dmConv ? conversationTitle(dmConv, homeViewerId(), lookupConversationMemberName) : NOTES_TO_SELF_LABEL;
+        input.placeholder = `Message ${dmTitle}`;
+        input.setAttribute("aria-label", `Message ${dmTitle}`);
+        return;
+      }
       /* One short line: where the message goes. Who leads is in the header, not here. A message written in
          All messages is posted to #general, so that box says #general too. The #general view is guarded so the
          fixture that runs this function without the channel state still reads the All-messages branch. */
@@ -16361,6 +16937,12 @@ import "../../styles/kylon-image-viewer.css";
     ): boolean =>
       intent.placementThreadRootId !== null || threadReplyRoot !== null
         ? intent.placementThreadRootId === (threadReplyRoot?.id ?? null)
+        : (intent.placementConversationId ?? null) !== null || (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null)
+        ? (intent.placementConversationId ?? null) === (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null
+          ? activeDmConversationId
+          : (typeof activeConversationHistoryTarget === "function"
+            ? (() => { const t = activeConversationHistoryTarget(); return t.mode === "conversation" ? t.conversationId : null; })()
+            : null))
         : intent.placementChannelId === (activeChannel()?.channelId ?? null);
 
     /**
@@ -16505,10 +17087,15 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       const composer = one<HTMLFormElement>("[data-composer]");
-      const dmReadOnly = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null &&
-        !(typeof activeDm !== "undefined" && activeDm);
-      const blocked = archived || membershipFailed || membershipPending || unjoined !== null || dmReadOnly;
+      const dmUnavailable = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        ((typeof unavailableDmConversationId !== "undefined" && unavailableDmConversationId !== null) ||
+          (typeof conversationHistory !== "undefined" && conversationHistory?.status === "unavailable") ||
+          (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null &&
+            (() => {
+              const conv = workspaceConversations?.find((c) => c.conversationId === activeDmConversationId) ?? conversationHistory?.conversation ?? null;
+              return !conv || !isDirectKind(conv.kind) || !conv.joined || conv.archivedAt !== null;
+            })()));
+      const blocked = archived || membershipFailed || membershipPending || unjoined !== null || dmUnavailable;
       if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") {
         composer.hidden = blocked || unknownChannelId !== null;
       }
@@ -16552,8 +17139,14 @@ import "../../styles/kylon-image-viewer.css";
          into the unfiltered feed on the next reload, which is the failure this state
          exists to prevent: the reader would think they were looking at the channel. */
       const channelId = unknownChannelId ?? activeChannelId;
-      if (channelId === null) url.searchParams.delete("c");
-      else url.searchParams.set("c", channelId);
+      if (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) {
+        url.searchParams.delete("c");
+        url.searchParams.set("dm", activeDmConversationId);
+      } else {
+        url.searchParams.delete("dm");
+        if (channelId === null) url.searchParams.delete("c");
+        else url.searchParams.set("c", channelId);
+      }
       window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
     };
 
@@ -16571,11 +17164,40 @@ import "../../styles/kylon-image-viewer.css";
     const applyChannelFromUrl = (workspaceId: string): void => {
       const params = new URL(window.location.href).searchParams;
       const requested = params.get("c");
+      const requestedDm = params.get("dm");
       const forWorkspace = params.get("w");
-      if (
-        requested === null || requested === "" ||
-        (forWorkspace !== null && forWorkspace !== workspaceId)
-      ) {
+      if (forWorkspace !== null && forWorkspace !== workspaceId) {
+        activeChannelId = null;
+        unknownChannelId = null;
+        if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+        if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
+        return;
+      }
+      if ((requested === null || requested === "") && requestedDm !== null && requestedDm !== "") {
+        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
+        activeChannelId = null;
+        unknownChannelId = null;
+        if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
+        if (typeof activeDmConversationId !== "undefined") activeDmConversationId = requestedDm;
+        const matched = typeof workspaceConversations !== "undefined"
+          ? workspaceConversations?.find((c) => c.conversationId === requestedDm) ?? null
+          : null;
+        if (matched && matched.kind === "dm") {
+          const viewerId = typeof homeViewerId === "function" ? homeViewerId() : "";
+          const others = matched.members.filter((m) => !m.leftAt && !(m.kind === "user" && m.id === viewerId));
+          if (others.length === 1 && typeof activeDm !== "undefined") {
+            activeDm = { kind: others[0]!.kind === "agent" ? "agent" : "person", id: others[0]!.id } as EntityRef;
+          } else if (typeof activeDm !== "undefined") {
+            activeDm = null;
+          }
+        } else if (typeof activeDm !== "undefined") {
+          activeDm = null;
+        }
+        return;
+      }
+      if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
+      if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
+      if (requested === null || requested === "") {
         activeChannelId = null;
         unknownChannelId = null;
         return;
@@ -16594,14 +17216,24 @@ import "../../styles/kylon-image-viewer.css";
       if (channelId !== null && next === null) return;
       rememberPaletteVisit(next === null ? "channel:__all__" : next === GENERAL_CHANNEL_ID ? "channel:general" : `channel:${channelById(channels, next)?.slug ?? ""}`);
       /* A channel row leaves a Direct Message: the feed and the composer go back to the channel. */
-      const leavingDm = !!activeDm || activeDmConversationId !== null;
+      const leavingDm = !!activeDm || activeDmConversationId !== null || unavailableDmConversationId !== null;
+      const outgoingDraftKey = leavingDm && typeof composerDraftKey === "function" ? composerDraftKey() : null;
+      if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
       if (leavingDm) {
         activeDm = null;
         activeDmConversationId = null;
+        unavailableDmConversationId = null;
+        conversationHistory = null;
+        conversationHistoryGeneration += 1;
+        conversationSessionEpoch += 1;
+        if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
         syncComposerAddress([]);
         closeEntityPanel(false);
       }
-      const changed = next !== activeChannelId || unknownChannelId !== null;
+      const changed = next !== activeChannelId || unknownChannelId !== null || leavingDm;
+      if (changed && !leavingDm && typeof conversationSessionEpoch !== "undefined") {
+        conversationSessionEpoch += 1;
+      }
       /* `changed` is also true when only the unresolved state clears. The RETIREMENT below
          needs the narrower question — did the address actually move — because clicking the
          place you are already in is not a move, and retiring there killed a valid Retry,
@@ -16652,6 +17284,7 @@ import "../../styles/kylon-image-viewer.css";
         signals = [];
         signalCursor = null;
         signalHasMore = false;
+        one<HTMLOListElement>("[data-feed-list]")?.replaceChildren();
         signalCutoff = "";
         channelLoadError = "";
         previousSignalIds.clear();
@@ -17150,6 +17783,7 @@ import "../../styles/kylon-image-viewer.css";
      */
     const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
       if (sampleMode || !session || !workspaceId || conversationsReadState === "unsupported") return;
+      const pinnedUserId = session.user.id;
       const now = Date.now();
       if (!force && now - conversationsReadAt < 15_000) return;
       conversationsReadAt = now;
@@ -17158,35 +17792,32 @@ import "../../styles/kylon-image-viewer.css";
         conversationsReadState = "pending";
         if (render) renderChannelBlocked();
       }
+      const listStillAlive = (): boolean =>
+        generation === conversationsGeneration &&
+        workspaceId === activeWorkspaceId &&
+        (session?.user.id ?? "") === pinnedUserId;
       let rows: ConversationSummary[];
       try {
-        rows = await listConversations(workspaceId, true);
+        rows = await listConversations(workspaceId, true, pinnedUserId, listStillAlive);
       } catch (error) {
-        if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
-        if (error instanceof ConversationsUnsupportedError) {
+        if (error instanceof SessionIdentityMismatch) return;
+        if (!listStillAlive()) return;
+        const confirmedModern = modernConversationsConfirmed.has(`${pinnedUserId}:${workspaceId}`);
+        if (error instanceof ConversationsUnsupportedError && !confirmedModern) {
           conversationsReadState = "unsupported";
           conversationsReadError = "";
           if (render) renderChannelBlocked();
           return;
         }
-        if (workspaceConversations === null && conversationsReadState !== "unsupported") {
-          conversationsReadState = "failed";
+        if ((workspaceConversations === null && conversationsReadState !== "unsupported") || confirmedModern) {
+          conversationsReadState = workspaceConversations === null ? "failed" : conversationsReadState;
           conversationsReadError = readableError(error) || "Couldn't check channel membership.";
           if (render) renderChannelBlocked();
         }
         return;
       }
-      if (generation !== conversationsGeneration || workspaceId !== activeWorkspaceId) return;
-      workspaceConversations = rows;
-      conversationsReadState = "ready";
-      conversationsReadError = "";
-      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
-      if (render) {
-        renderHomeRail();
-        renderHomeShell();
-        renderChannelBlocked();
-        renderChannelDirectoryDialog();
-      }
+      if (!listStillAlive()) return;
+      commitWorkspaceConversations(workspaceId, pinnedUserId, rows, render);
     };
 
     /**
@@ -19864,17 +20495,28 @@ import "../../styles/kylon-image-viewer.css";
         );
         return;
       }
-      /* Fail-closed submit guard for true DMs (Step 3C C1): group DMs and Notes to self stay
-         read-only until Step 3D posts by conversation_id, stale/unavailable true DMs refuse
-         immediately, and workspace-readable attachments are refused on every DM before upload. */
-      const dmSendProblem = sampleMode ? null : trueDmSendRefusal({
+      /* Fail-closed submit guard for true DMs (Step 3D-1): 1:1 DMs, Notes to self, and group DMs
+         post by exact conversation_id; stale/unavailable/archived/unjoined DMs refuse immediately,
+         and workspace-readable attachments are refused on every DM before upload. */
+      const activeDmConv = typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null
+        ? workspaceConversations?.find((c) => c.conversationId === activeDmConversationId) ?? conversationHistory?.conversation ?? null
+        : null;
+      const dmSendProblem = sampleMode ? null : directConversationSendRefusal({
         activeDmConversationId: typeof activeDmConversationId === "undefined" ? null : activeDmConversationId,
         activeDm: typeof activeDm === "undefined" ? null : activeDm,
-        workspaceConversations,
+        conversation: activeDmConv,
+        historyStatus: typeof conversationHistory !== "undefined" && conversationHistory?.conversationId === activeDmConversationId
+          ? conversationHistory.status
+          : "idle",
         hasAttachments: stagedAttachments.length > 0,
       });
       if (dmSendProblem !== null) {
         setComposerStatus(dmSendProblem, "error");
+        return;
+      }
+      const isStep2bDmPost = !sampleMode && typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null;
+      if (isStep2bDmPost && threadReplyRoot !== null) {
+        setComposerStatus("Close the thread reply before sending in a direct message.", "error");
         return;
       }
       /* A TAG TYPED IN THE LAST 150ms IS STILL A RECIPIENT. The tag-to-chip pass is
@@ -19887,14 +20529,16 @@ import "../../styles/kylon-image-viewer.css";
          written privately has no destination chosen yet, a thread reply is open under a
          Direct Message) nothing is sent and the reason is shown. Enter and the button both
          come through here. */
-      const sendPlan = composerSendPlan({
-        addressCommitted,
-        directPartner: activeDm,
-        replying: composerIsReplying(),
-        privateDraftWritten: composerPrivateDraft.written,
-        to: composerTo,
-        tagged: composerRecipientsFrom(rawBody),
-      });
+      const sendPlan = isStep2bDmPost
+        ? ({ send: true as const, audience: "private" as const, recipients: [] as BrowserSignalAudience })
+        : composerSendPlan({
+            addressCommitted,
+            directPartner: activeDm,
+            replying: composerIsReplying(),
+            privateDraftWritten: composerPrivateDraft.written,
+            to: composerTo,
+            tagged: composerRecipientsFrom(rawBody),
+          });
       if (!sendPlan.send) {
         setComposerStatus(sendPlan.reason, "error");
         return;
@@ -19963,8 +20607,37 @@ import "../../styles/kylon-image-viewer.css";
         setComposerStatus(`${CHANNEL_UNAVAILABLE_TITLE}. ${GO_TO_GENERAL_LABEL} to post.`, "error");
         return;
       }
-      const freshPlacementChannelId = destination.channelId;
-      const freshPlacementThreadRootId = replyRoot?.id ?? null;
+      const freshConvTarget = !sampleMode && session && replyRoot === null && typeof activeConversationHistoryTarget === "function"
+        ? activeConversationHistoryTarget()
+        : { mode: "legacy" as const };
+      // Lead #1: non-DM channels use conversation_id ONLY for public posts (recipients.length === 0),
+      // because the server rejects !direct && to !== undefined with 400 conversation_address.
+      const freshPlacementConversationId = isStep2bDmPost
+        ? activeDmConversationId
+        : freshConvTarget.mode === "conversation" && sendPlan.audience === "public"
+          ? freshConvTarget.conversationId
+          : null;
+      const freshPlacementConversationKind = isStep2bDmPost
+        ? (activeDmConv?.kind ?? null)
+        : freshConvTarget.mode === "conversation" && sendPlan.audience === "public"
+          ? freshConvTarget.kind
+          : null;
+      const freshPlacementChannelId = isStep2bDmPost ? null : destination.channelId;
+      const freshPlacementThreadRootId = isStep2bDmPost ? null : (replyRoot?.id ?? null);
+      // HezSec #5: gate BOTH top-level sends and thread replies against channel membership
+      // (including pending/failed membership reads) before any attachment upload or post.
+      if (!sampleMode && !isStep2bDmPost && typeof channelMembershipSendRefusal === "function") {
+        const membershipRefusal = channelMembershipSendRefusal({
+          channelId: freshPlacementChannelId,
+          generalId: GENERAL_CHANNEL_ID,
+          conversations: typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+          conversationsReadState: typeof conversationsReadState !== "undefined" ? conversationsReadState : "unsupported",
+        });
+        if (membershipRefusal) {
+          setComposerStatus(membershipRefusal, "error");
+          return;
+        }
+      }
       /* NOTHING IS UPLOADED FOR A SEND THE SERVER WILL REFUSE. Files staged somewhere open stay staged when the
          place changes (another channel, a thread under a private root), so the check is here, where the send
          starts, and it reads the same placement the message will carry. The draft and its files are untouched. */
@@ -20009,6 +20682,7 @@ import "../../styles/kylon-image-viewer.css";
            replay the untucked command and be told it succeeded. Changing either half mints a
            new id, which is the only way to send a different message. */
         intent.placementThreadRootId !== freshPlacementThreadRootId ||
+        (intent.placementConversationId ?? null) !== freshPlacementConversationId ||
         intent.broadcastToChannel !== freshBroadcastToChannel
       ) {
         intent = {
@@ -20019,16 +20693,15 @@ import "../../styles/kylon-image-viewer.css";
           attachmentKey,
           signalKind,
           placementChannelId: freshPlacementChannelId,
+          placementConversationId: freshPlacementConversationId,
           placementThreadRootId: freshPlacementThreadRootId,
           broadcastToChannel: freshBroadcastToChannel,
         };
         composerIntent = intent;
       }
       const commandId = intent.commandId;
-      /* A REPLAY KEEPS ITS OWN ADDRESS. The command id is the server's idempotency key, so a
-       * retry of an unchanged message replays the same command at the same address rather
-       * than minting a second one. */
       const placementChannelId = intent.placementChannelId;
+      const placementConversationId = intent.placementConversationId ?? null;
       const placementThreadRootId = intent.placementThreadRootId;
       const broadcastToChannel = intent.broadcastToChannel;
       const placementChannel = placementChannelId === null
@@ -20108,17 +20781,21 @@ import "../../styles/kylon-image-viewer.css";
          it does not take a channel of its own"). `broadcast_to_channel` is sent only when it
          is true, which is the shape `cswarm reply --thread --broadcast-to-channel` sends and
          keeps the key set the smallest thing that says what was asked. */
-      const placement: BrowserSignalPlacement = placementThreadRootId !== null
+      const placement: BrowserSignalPlacement = isStep2bDmPost && placementConversationId !== null
+        ? { conversationId: placementConversationId }
+        : placementThreadRootId !== null
         ? {
           threadRootId: placementThreadRootId,
           ...(broadcastToChannel ? { broadcastToChannel: true } : {}),
         }
+        : placementConversationId !== null
+        ? { conversationId: placementConversationId }
         : placementChannel === null
         ? {}
         : { channel: placementChannel.slug };
       /* A public message always carries the key, empty when nobody is tagged: it is the public
          intent, and a deployment with mentions switched off refuses it rather than quietly
-         re-addressing the post to the workspace lead. */
+         re-addressing the post to the workspace lead. DMs posted by conversation_id carry no mentions. */
       if (sendPlan.audience === "public") placement.mentions = mentions;
       /** The chips a pending or posted row shows: the whole To: set, which is the address. */
       const rowMentions: EntityRef[] = recipients.map((recipient) => ({
@@ -20154,6 +20831,8 @@ import "../../styles/kylon-image-viewer.css";
         channelId: placementChannelId,
         threadRootId: placementThreadRootId,
         broadcastToChannel,
+        ...(placementConversationId !== null ? { conversationId: placementConversationId } : {}),
+        ...(freshPlacementConversationKind !== null ? { conversationKind: freshPlacementConversationKind } : {}),
       };
       const retry = one<HTMLButtonElement>("[data-composer-retry]");
       if (retry) retry.hidden = true;
@@ -20161,9 +20840,11 @@ import "../../styles/kylon-image-viewer.css";
       /* THIS SEND NOW OWNS THE FLAG, and its own settle is the only thing that may lower it.
          See `composerSendToken` where it is declared for what went wrong when the screen's
          generation was asked that question instead. */
+      const sendSession = session;
+      const sendUserId = sendSession?.user.id ?? "";
+      const sendSessionEpoch = typeof conversationSessionEpoch !== "undefined" ? conversationSessionEpoch : 0;
       const sendToken = ++composerSendToken;
       // C1: Capture initiating session & login/workspace/viewGen pin SYNCHRONOUSLY at Send!
-      const sendSession = session;
       const sendMulti = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
       const sendPinned = sendMulti && sendSession
         ? pinAccountContext({ userId: sendSession.user.id, workspaceId })
@@ -20174,6 +20855,19 @@ import "../../styles/kylon-image-viewer.css";
         setComposerStatus("Your active account or workspace changed. Confirm again before sending.", "error");
         return;
       }
+      const sendStillAuthorized = (requireSameScope = false): boolean =>
+        composerSendToken === sendToken &&
+        workspaceId === activeWorkspaceId &&
+        (sampleMode || (session?.user.id ?? "") === sendUserId) &&
+        (!requireSameScope || (typeof conversationSessionEpoch === "undefined" || sendSessionEpoch === conversationSessionEpoch)) &&
+        (placementConversationId === null || !evictedConversationIds.has(`${workspaceId}:${placementConversationId}`)) &&
+        (sampleMode || isStep2bDmPost || typeof channelMembershipSendRefusal !== "function" ||
+          channelMembershipSendRefusal({
+            channelId: placementChannelId,
+            generalId: GENERAL_CHANNEL_ID,
+            conversations: typeof workspaceConversations !== "undefined" ? workspaceConversations : null,
+            conversationsReadState: typeof conversationsReadState !== "undefined" ? conversationsReadState : "unsupported",
+          }) === null);
       setComposerSending(true);
       visualMentions.set(pendingId, rowMentions);
       /* The pending row draws its mentions at once, from what this send is about to store. */
@@ -20201,7 +20895,15 @@ import "../../styles/kylon-image-viewer.css";
             }))
           : [];
         if (!sampleMode) {
-          if (attachmentSnapshot.length > 0 && ((typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
+          if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
+            throw new AuthRecoveryRequired();
+          }
+          const uploadStillAlive = () => sendStillAuthorized(true);
+          if (!sendSession || !sendStillAuthorized(attachmentSnapshot.length > 0)) {
+            throw new SendRetiredError();
+          }
+          if (attachmentSnapshot.length > 0 && (isStep2bDmPost ||
+            (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
             (typeof activeDm !== "undefined" && activeDm !== null))) {
             throw new AttachmentsRefused(DM_ATTACHMENTS_REFUSAL_TEXT);
           }
@@ -20217,15 +20919,21 @@ import "../../styles/kylon-image-viewer.css";
               if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
                 throw new AuthRecoveryRequired();
               }
+              if (!uploadStillAlive()) {
+                throw new SendRetiredError();
+              }
               setComposerStatus(
                 `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
                 "posting",
               );
-              return uploadBrowserAttachment(sendSession!, workspaceId, attachment.intent, sendPinned);
+              return uploadBrowserAttachment(sendSession, workspaceId, attachment.intent, sendPinned, { isAlive: uploadStillAlive });
             },
           }));
           if (sendPinned && !sendPinned.isCurrent(workspaceId)) {
             throw new AuthRecoveryRequired();
+          }
+          if (!sendStillAuthorized(attachmentSnapshot.length > 0)) {
+            throw new SendRetiredError();
           }
         }
         setComposerStatus("Posting message…", "posting");
@@ -20257,6 +20965,7 @@ import "../../styles/kylon-image-viewer.css";
               attachmentRefs,
               placement,
               sendPinned,
+              { isAlive: () => sendStillAuthorized(attachmentSnapshot.length > 0) },
             );
         /* THE SEND'S OWN STORAGE IS FINISHED FIRST, before the guard below, because it is not
            about the screen. The guard exists so a send that outlived its workspace cannot
@@ -20325,6 +21034,13 @@ import "../../styles/kylon-image-viewer.css";
         /* The pending row always goes, in every case: it is this send's placeholder and the
            send is over. The posted row joins the list when the list on screen would show it,
            and a row is removed from the list ONLY when it is about to be put back. */
+        if (placementConversationId !== null) {
+          posted = {
+            ...posted,
+            conversationId: posted.conversationId ?? placementConversationId,
+            ...(freshPlacementConversationKind !== null ? { conversationKind: posted.conversationKind ?? freshPlacementConversationKind } : {}),
+          };
+        }
         const visible = showsOnScreen(posted) ? [posted] : [];
         const visibleIds = new Set(visible.map((signal) => signal.id));
         for (const row of visible) {
@@ -20334,6 +21050,9 @@ import "../../styles/kylon-image-viewer.css";
           (entry) => entry.id !== pendingId && !visibleIds.has(entry.id),
         );
         signals = [...visible, ...kept];
+        if (conversationHistory && placementConversationId !== null && conversationHistory.conversationId === placementConversationId) {
+          conversationHistory = { ...conversationHistory, rows: signals };
+        }
         visualMentions.delete(pendingId);
         signalMentionRows.delete(pendingId);
         if (mentions.length > 0) signalMentionRows.set(posted.id, mentionRowsFor(posted.id));
@@ -20393,43 +21112,47 @@ import "../../styles/kylon-image-viewer.css";
            two facts are kept in different places, so both are asked rather than one inferred
            from the other. `requestVersion` is deliberately NOT among them: a reopen of the
            current workspace bumps it and leaves this composer exactly where it was. */
+        const wasEvicted = placementConversationId !== null && evictedConversationIds.has(`${workspaceId}:${placementConversationId}`);
+        const sameLogin = sampleMode || (session?.user.id ?? "") === sendUserId;
         const boxIsStillThisSends =
-          composerSendToken === sendToken && workspaceId === activeWorkspaceId;
-        if (!boxIsStillThisSends) {
-          /* THE READER IS SOMEWHERE ELSE, so nothing may be written into the box in front of
-             them, and NOTHING NEEDS TO BE. An unsent message is already saved: the stored
-             draft is frozen for the whole post, so the workspace switch that tore this
-             composer down flushed nothing over it and the body and the To: set the pass wrote
-             before the send are still under this send's own key. Writing them again here
-             would be a second writer of the draft, which is the class this lane removes. The
-             previews are this send's to release, and the early return used to leak them. */
+          composerSendToken === sendToken && workspaceId === activeWorkspaceId && sameLogin && !wasEvicted;
+        if (!landed && caught instanceof SendRetiredError) {
+          if (wasEvicted && sendDraftKey) clearComposerDraft(sendDraftKey);
+          signals = signals.filter((signal) => signal.id !== pendingId);
+          visualMentions.delete(pendingId);
+          signalMentionRows.delete(pendingId);
+          deliveryReceiptCache.delete(pendingId);
           for (const attachment of attachmentSnapshot) {
             if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
           }
           return;
         }
-        /* ONE POST, so there is no partial send to describe any more. Either the command
-         * was rejected and nothing is on the server, or it landed and this throw came from
-         * the render after it. The message goes back in the box in the first case only, and
-         * the intent keeps its command id so a retry replays the same command rather than
-         * minting a second one. That id is the server's idempotency key, which is the same
-         * property the unknown-outcome path relies on.
-         *
-         * RETIRED with the fan-out: "Sent to N of M", "All N went out", and the per-hop
-         * bookkeeping under them. A reader may still meet those sentences in an older
-         * screenshot; they described a message split across several signals, which no
-         * longer happens. */
+        if (!boxIsStillThisSends) {
+          if (wasEvicted && sendDraftKey) clearComposerDraft(sendDraftKey);
+          signals = signals.filter((signal) => signal.id !== pendingId);
+          visualMentions.delete(pendingId);
+          signalMentionRows.delete(pendingId);
+          deliveryReceiptCache.delete(pendingId);
+          for (const attachment of attachmentSnapshot) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          return;
+        }
+        if (!landed && placementConversationId !== null &&
+          (caught instanceof ConversationUnavailableError || readableError(caught) === CONVERSATION_UNAVAILABLE_TEXT) &&
+          typeof evictConversationLocalState === "function") {
+          for (const attachment of attachmentSnapshot) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          evictConversationLocalState(workspaceId, placementConversationId, true);
+          return;
+        }
+        const sameDraftScope = sendDraftKey === composerDraftKey(workspaceId);
         const visibleOnFailure = posted !== null && showsOnScreen(posted) ? [posted] : [];
         const visibleFailureIds = new Set(visibleOnFailure.map((signal) => signal.id));
-        /* A row that DID land is a record too. Only the success path was writing them, so a
-           failure during a channel click lost the row that posted when the reset page
-           arrived without it. Found by a review arm. */
         for (const row of visibleOnFailure) {
           postedSinceReset.set(row.id, { row, workspaceId, at: Date.now() });
         }
-        /* Drop the posted id as well as the pending one. The success path rewrites `signals`
-         * BEFORE it renders, so a throw in that render reaches here with the row already in
-         * the list; prepending it again would show it twice. */
         const keptOnFailure = signals.filter((signal) =>
           signal.id !== pendingId && !visibleFailureIds.has(signal.id));
         signals = [...visibleOnFailure, ...keptOnFailure];
@@ -20441,56 +21164,45 @@ import "../../styles/kylon-image-viewer.css";
           visualMentions.set(posted.id, rowMentions);
           deliveryReceiptCache.set(posted.id, { result: null, checkedAt: 0, phase: "accepted" });
         }
-        /* Only when nothing landed. A throw AFTER the post is a render fault, not a rejected
-         * command: putting the message back in the box and lighting Retry would invite a
-         * duplicate the reader never asked for. */
         const unsent = !landed;
-        /* AND THE ADDRESS MUST STILL BE THIS ONE. selectChannel retires an unfinished send
-           when the reader moves, because the composer is about to promise the new channel.
-           The catch then wrote the intent back with the OLD placement, undoing that: Retry
-           reused the old command id and the old address, and the row landed in a channel the
-           reader had left, filtered off their screen. Both arms found it. */
         const addressStillActive = composerAddressStillPromised(intent);
-        /* WHERE IT WAS GOING, said in the words that place is named by. A reply's address is
-           its THREAD, so naming the channel would answer a question the reader did not ask and
-           would be the same channel they are very likely still looking at. */
         const addressLabel = placementThreadRootId !== null
           ? "the thread it was written in"
           : channelLabel(
             channelById(channels, placementChannelId)?.slug ?? ALL_SIGNALS_SLUG,
           );
-        const resumable = unsent && addressStillActive;
+        const resumable = unsent && addressStillActive && sameDraftScope;
+        if (unsent && !sameDraftScope) {
+          // Reader navigated to another conversation (e.g. DM -> #general) while this send failed:
+          // keep the unsent text ONLY in its source conversation's storage key; never overwrite the active box.
+          if (sendDraftKey) {
+            try {
+              window.localStorage.setItem(sendDraftKey, JSON.stringify({ body: rawBody }));
+            } catch { /* storage is optional */ }
+          }
+          for (const attachment of attachmentSnapshot) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          composerIntent = null;
+          renderFeed("latest");
+          return;
+        }
         if (unsent) {
           input.value = rawBody;
           stagedAttachments = attachmentSnapshot;
           renderStagedAttachments();
           resizeComposerInput(input);
-          /* THE RESTORED BODY IS WRITTEN DOWN BY THE SETTLE, not here. A `persistComposerDraft`
-             call at this point is dead: the send flag is still up, so the write returns at its
-             own guard. The settle in the `finally` runs after the flag drops, against the same
-             restored body, and this block is already past the changed-workspace return, so
-             there is no failure it reaches that the settle does not. A review arm found the
-             dead call, and a test that matched it was defending a line that did nothing. */
         }
         composerIntent = resumable
-          /* WITH THE ADDRESS. Rewriting the intent without it made every retry after a
-             failure post UNFILED: the replay reads `intent.placement`, and `postBrowserSignal`
-             defaults a missing one to `{}`. No channel switch was needed to reach it. Both
-             arms found it. */
           ? {
             commandId,
             body: rawBody,
             audienceKey,
-            /* And who it mentions, or the retry would be told the message changed and mint a
-               second command id for one the server may already hold. */
             mentionKey,
             attachmentKey,
             signalKind,
             placementChannelId,
-            /* WITH THE THREAD TOO, for the same reason the channel is here. Rewriting the
-               intent without its placement made every retry after a failure post unfiled; a
-               rewrite without the thread would make every retry of a failed reply a new
-               top-level note, in a channel the reader is not necessarily even reading. */
+            placementConversationId,
             placementThreadRootId,
             broadcastToChannel,
           }
@@ -21107,13 +21819,39 @@ import "../../styles/kylon-image-viewer.css";
     });
 
     /** One older page, as Load older updates and Jump to first unread ask for it: the button carries the busy state
-     *  and the inline error either way. */
+     *  and the inline error either way, while preserving both the visible reading position and keyboard focus. */
     const loadOlderSignals = async (): Promise<void> => {
       const button = one<HTMLButtonElement>("[data-load-older]");
       if (!activeWorkspaceId || !signalHasMore || !button || button.disabled) return;
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
+      const myLoadOlderGen = ++loadOlderGeneration;
+      const more = one<HTMLElement>("[data-feed-more]");
       const inlineError = one<HTMLElement>("[data-load-older-error]");
+      const scroller = feedScroller();
+      const startedWithFocus = document.activeElement === button;
+      let readerMovedFocus = false;
+      const trackFocusMove = (event: FocusEvent): void => {
+        if (event.target !== button) readerMovedFocus = true;
+      };
+      document.addEventListener("focusin", trackFocusMove, true);
+      // Capture the first visible message at the reading position before hiding the error notice
+      // or prepending older rows, and reserve `.dashboard__feed-more`'s height across every pending redraw.
+      let anchor = captureLoadOlderAnchor(scroller);
+      if (anchor) pendingLoadOlderAnchor = anchor;
+      const trackReaderScroll = (): void => {
+        if (restoringLoadOlderScroll || myLoadOlderGen !== loadOlderGeneration || pendingLoadOlderAnchor === null || !scroller) return;
+        const nextAnchor = captureLoadOlderAnchor(scroller);
+        if (nextAnchor) {
+          anchor = nextAnchor;
+          pendingLoadOlderAnchor = nextAnchor;
+        }
+      };
+      scroller?.addEventListener("scroll", trackReaderScroll, { passive: true });
+      if (more) {
+        const currentMoreHeight = more.getBoundingClientRect().height;
+        if (currentMoreHeight > 0) more.style.minBlockSize = `${currentMoreHeight}px`;
+      }
       if (inlineError) {
         inlineError.textContent = "";
         inlineError.hidden = true;
@@ -21123,14 +21861,43 @@ import "../../styles/kylon-image-viewer.css";
       try {
         await loadSignals(workspaceId, false, version);
       } catch (error) {
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        if (myLoadOlderGen !== loadOlderGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        pendingLoadOlderAnchor = null;
         if (inlineError) {
           inlineError.textContent = `${readableError(error)} The loaded updates are still here.`;
           inlineError.hidden = false;
         }
+        if (more) more.style.minBlockSize = "";
       } finally {
+        document.removeEventListener("focusin", trackFocusMove, true);
+        scroller?.removeEventListener("scroll", trackReaderScroll);
+        if (myLoadOlderGen === loadOlderGeneration) {
+          pendingLoadOlderAnchor = null;
+          if (more) more.style.minBlockSize = "";
+        }
         button.disabled = false;
         button.textContent = "Load older updates";
+        if (version === requestVersion && workspaceId === activeWorkspaceId) {
+          const focusStillOwned =
+            document.activeElement === button ||
+            (startedWithFocus && !readerMovedFocus && (document.activeElement === document.body || document.activeElement === null));
+          if (!signalHasMore && focusStillOwned) {
+            const targetRow = (anchor
+              ? all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
+                .find((row) => row.dataset.signalId === anchor!.signalId) ?? null
+              : null) ??
+              (scroller
+                ? all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]").find((row) => {
+                    const scrollerRect = scroller.getBoundingClientRect();
+                    const r = row.getBoundingClientRect();
+                    return r.height > 0 && r.bottom > scrollerRect.top + 1 && r.top < scrollerRect.bottom;
+                  }) ?? null
+                : null);
+            targetRow?.focus({ preventScroll: true });
+          } else if (signalHasMore && focusStillOwned && document.activeElement !== button) {
+            button.focus({ preventScroll: true });
+          }
+        }
       }
     };
     one<HTMLButtonElement>("[data-load-older]")?.addEventListener("click", () => { void loadOlderSignals(); });
@@ -24163,7 +24930,7 @@ import "../../styles/kylon-image-viewer.css";
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: var(--s-3);
     padding: 0 clamp(var(--s-5), 4vw, var(--s-8)) var(--s-10);
   }

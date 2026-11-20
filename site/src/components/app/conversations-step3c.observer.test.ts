@@ -195,6 +195,13 @@ function installConversations3CFixture() {
         }
         return Response.json({ conversations: f.conversations });
       }
+      if (body?.resource === "conversation_history") {
+        const matched = f.conversations.find((c: any) => c.conversation_id === body.conversation_id);
+        if (!matched) {
+          return Response.json({ error: "conversation_not_found", message: "This conversation isn't available in this workspace." }, { status: 404 });
+        }
+        return Response.json({ conversation: matched, messages: [], has_more: false, next_before: null, next_after: null });
+      }
     }
     if (url.pathname === "/functions/v1/command" && request.method === "POST") {
       const body = await request.clone().json().catch(() => null);
@@ -370,35 +377,42 @@ async function observeConversations3C() {
 
     // C1 security witness: Group DM, Notes to self, ordinary 1:1 DM, and public #general through real composer.
     if (f.capture === "c1-dm-safety") {
-      // 1. Group DM via rail: composer stays hidden (read-only); Enter + form submit emit ZERO signals and ZERO uploads.
+      // 1. Group DM via rail: posts strictly via post_signal({ conversation_id }), NEVER workspace broadcast, and attaches disabled.
       await openDrawerIfPhone();
       await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
-      await wait("group dm open", () => location.search.includes(`dm=${f.ids.dmGroupConv}`));
-      check(!visible(one("[data-composer]")), "C1: group DM composer must stay hidden/read-only");
+      await wait("group dm open", () => location.search.includes(`dm=${f.ids.dmGroupConv}`) && visible(one("[data-composer]")));
+      check(one<HTMLButtonElement>("[data-composer-attach]")?.disabled === true, "C1: attach button must be disabled in group DM");
       const input = one<HTMLTextAreaElement>("[data-composer-input]")!;
-      const form = one<HTMLFormElement>("[data-composer]")!;
       input.value = "Group DM secret";
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await new Promise(r => setTimeout(r, 80));
-      check(f.signalCommands.length === 0, "C1: group DM must emit 0 post_signal commands, got " + f.signalCommands.length);
+      await click("[data-composer-send]:visible");
+      await wait("group dm send landed", () => f.signalCommands.length === 1);
+      check(
+        f.signalCommands[0].conversation_id === f.ids.dmGroupConv &&
+          !("channel" in f.signalCommands[0]) &&
+          !("mentions" in f.signalCommands[0]),
+        "C1: group DM must post by exact conversation_id without public broadcast: " + JSON.stringify(f.signalCommands[0]),
+      );
       check(f.uploadCalls.length === 0, "C1: group DM must emit 0 upload calls");
 
-      // 2. Notes to self via New message picker (selecting only self): composer stays hidden; Enter + submit emit ZERO signals.
+      // 2. Notes to self via New message picker (selecting only self): posts strictly via post_signal({ conversation_id: notesConv }).
       await openDrawerIfPhone();
       await click("[data-home-new-dm]:visible");
       await wait("picker open for notes", () => one<HTMLDialogElement>("[data-conversation-picker-dialog]")?.open === true);
       await click(`[data-conversation-picker-option="user:${f.owner}"]:visible`);
       await click("[data-conversation-picker-submit]:visible");
-      await wait("notes to self open", () => location.search.includes(`dm=${f.ids.notesConv}`));
-      check(!visible(one("[data-composer]")), "C1: Notes to self composer must stay hidden/read-only");
+      await wait("notes to self open", () => location.search.includes(`dm=${f.ids.notesConv}`) && visible(one("[data-composer]")));
+      check(one<HTMLButtonElement>("[data-composer-attach]")?.disabled === true, "C1: attach button must be disabled in Notes to self");
       input.value = "Private self note";
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await new Promise(r => setTimeout(r, 80));
-      check(f.signalCommands.length === 0, "C1: Notes to self must emit 0 post_signal commands");
+      await click("[data-composer-send]:visible");
+      await wait("notes to self send landed", () => f.signalCommands.length === 2);
+      check(
+        f.signalCommands[1].conversation_id === f.ids.notesConv &&
+          !("channel" in f.signalCommands[1]) &&
+          !("mentions" in f.signalCommands[1]),
+        "C1: Notes to self must post by exact conversation_id without public broadcast: " + JSON.stringify(f.signalCommands[1]),
+      );
       check(f.uploadCalls.length === 0, "C1: Notes to self must emit 0 upload calls");
 
       // 3. Stage a file in #general, switch into ordinary 1:1 DM with Alex -> upload refused on Enter & Send button.
@@ -426,20 +440,20 @@ async function observeConversations3C() {
       await click("[data-composer-send]:visible");
       await new Promise(r => setTimeout(r, 80));
       check(f.uploadCalls.length === 0, "C1: 1:1 DM must upload 0 files even when staged elsewhere");
-      check(f.signalCommands.length === 0, "C1: 1:1 DM with staged file must send 0 signals");
+      check(f.signalCommands.length === 2, "C1: 1:1 DM with staged file must send 0 new signals");
 
-      // Remove staged file, send plain 1:1 DM -> directed (has to/recipients, never public broadcast).
+      // Remove staged file, send plain 1:1 DM -> exact conversation_id, never public broadcast.
       await click("[data-composer-attachments] button:visible");
       await wait("staged file removed", () => !one("[data-composer-attachments] button"));
       input.value = "Hello Alex privately";
       input.dispatchEvent(new Event("input", { bubbles: true }));
       await click("[data-composer-send]:visible");
-      await wait("1:1 directed send landed", () => f.signalCommands.length === 1);
+      await wait("1:1 directed send landed", () => f.signalCommands.length === 3);
       check(
-        Array.isArray(f.signalCommands[0].to) &&
-          f.signalCommands[0].to.some((r: any) => r.id === f.ids.peerAlex) &&
-          !("mentions" in f.signalCommands[0]),
-        "C1: 1:1 DM must be addressed to Alex, not public broadcast: " + JSON.stringify(f.signalCommands[0]),
+        f.signalCommands[2].conversation_id === f.ids.dmAlexConv &&
+          !("mentions" in f.signalCommands[2]) &&
+          !("channel" in f.signalCommands[2]),
+        "C1: 1:1 DM must post by exact conversation_id, not public broadcast: " + JSON.stringify(f.signalCommands[2]),
       );
 
       // Public #general control: sends normally with no refusal.
@@ -449,7 +463,7 @@ async function observeConversations3C() {
       input.value = "Public #general control";
       input.dispatchEvent(new Event("input", { bubbles: true }));
       await click("[data-composer-send]:visible");
-      await wait("public control landed", () => f.signalCommands.length === 2);
+      await wait("public control landed", () => f.signalCommands.length === 4);
 
       document.documentElement.dataset.step3cObservation = JSON.stringify({ ok: true, capture: f.capture, signals: f.signalCommands.length, uploads: f.uploadCalls.length });
       return;
@@ -645,7 +659,7 @@ async function observeConversations3C() {
     await click("[data-conversation-picker-restart]:visible");
     await wait("new group opened", () => one<HTMLDialogElement>("[data-conversation-picker-dialog]")?.open === false && location.search.includes(`dm=${f.ids.newGroupConv}`));
     check(f.convCommands.some((c: any) => c.kind === "conversation_open" && c.new_group === true), "Start new group must send new_group: true");
-    check(!visible(one("[data-composer]")), "group DM must keep composer hidden/read-only");
+    check(visible(one("[data-composer]")), "group DM must expose composer now that Step 3D posts by conversation_id");
 
     await openMembersSheet();
     check(!visible(one("[data-conversation-members-add-toggle]")), "DM Members must be read-only (no Add)");

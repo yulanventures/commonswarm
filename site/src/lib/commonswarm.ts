@@ -2554,6 +2554,7 @@ export async function uploadBrowserAttachment(
   workspaceId: string,
   intent: BrowserAttachmentUploadIntent,
   pinned?: PinnedAccountContext | null,
+  options?: { isAlive?: () => boolean },
 ): Promise<BrowserSignalAttachmentRef> {
   const assertPinned = (): void => {
     if (pinned && !pinned.isCurrent(workspaceId)) {
@@ -2562,6 +2563,11 @@ export async function uploadBrowserAttachment(
   };
   assertPinned();
   if (intent.committed) return intent.committed;
+  const isAlive = options?.isAlive;
+  const assertAlive = (): void => {
+    if (isAlive && !isAlive()) throw new SendRetiredError();
+  };
+  assertAlive();
   if (!intent.created) {
     const created = await postCommand(
       session,
@@ -2577,8 +2583,13 @@ export async function uploadBrowserAttachment(
       { workspace_id: workspaceId, stream: { kind: "workspace" } },
       `CommonSwarm lost the upload-slot result for ${intent.name}. Retry this message to check the same request.`,
       pinned,
+      isAlive ? { isAlive } : undefined,
     );
     assertPinned();
+    assertAlive();
+    if (created.status === 0 && created.body.error === "operation_retired") {
+      throw new SendRetiredError();
+    }
     if (created.status !== 200 || created.body.status !== "accepted") {
       throw browserFileRefusal(created.status, created.body, `CommonSwarm did not start ${intent.name}.`);
     }
@@ -2599,6 +2610,7 @@ export async function uploadBrowserAttachment(
   assertPinned();
   const d = pinned ? pinned.runtime.deployment : deployment();
   if (!d) throw new NoDeployment();
+  assertAlive();
   if (!intent.uploaded) {
     let putResponse: Response;
     try {
@@ -2618,8 +2630,10 @@ export async function uploadBrowserAttachment(
   }
 
   assertPinned();
+  assertAlive();
   const sha256 = await browserSha256(intent.file);
   assertPinned();
+  assertAlive();
   const committed = await postCommand(
     session,
     intent.commitCommandId,
@@ -2632,8 +2646,13 @@ export async function uploadBrowserAttachment(
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     `CommonSwarm lost the commit result for ${intent.name}. Retry this message to check the same request.`,
     pinned,
+    isAlive ? { isAlive } : undefined,
   );
   assertPinned();
+  assertAlive();
+  if (committed.status === 0 && committed.body.error === "operation_retired") {
+    throw new SendRetiredError();
+  }
   if (committed.status !== 200 || committed.body.status !== "accepted") {
     throw browserFileRefusal(committed.status, committed.body, `CommonSwarm did not commit ${intent.name}.`);
   }
@@ -2819,6 +2838,10 @@ export interface Signal {
   inReplyTo?: string | null;
   /** A thread reply the author also sent to the channel. Always false on a root. */
   broadcastToChannel: boolean;
+  /** Step 2b canonical conversation id when returned by conversation_history or post_signal. */
+  conversationId?: string | null;
+  /** Step 2b conversation kind stamped by conversation_history for strict DM exclusion. */
+  conversationKind?: ConversationKind | null;
 }
 
 /** Optional and additive: legacy rows become empty, and newer metadata fields are ignored. */
@@ -3595,6 +3618,8 @@ export function browserAcceptedDeliveryIndicator(
  * did before. Never send a key here as `null` to mean "no": send nothing.
  */
 export interface BrowserSignalPlacement {
+  /** Step 2a/2b conversation id: replaces channel/expected_channel_id on top-level posts. */
+  conversationId?: string | null;
   /** Channel slug. Omitted or null means unfiled, which reads in all-signals. */
   channel?: string | null;
   /** The message a thread reply belongs to. A reply inherits its root's channel. */
@@ -3632,6 +3657,9 @@ export function browserSignalCommand(
   if (mentions !== undefined && recipients.length > 0) {
     throw new Error("A message is either addressed or it mentions; it cannot do both.");
   }
+  const conversationId = typeof placement.conversationId === "string" && placement.conversationId !== ""
+    ? placement.conversationId
+    : null;
   return {
     kind: "post_signal",
     signal_kind: signalKind,
@@ -3649,16 +3677,34 @@ export function browserSignalCommand(
        key. An addressed message never carries it. */
     ...(mentions === undefined ? {} : { mentions: toWireRecipients(mentions) }),
     ...(attachments.length === 0 ? {} : { attachments }),
-    ...(placement.channel === undefined || placement.channel === null
-      ? {}
-      : { channel: placement.channel }),
-    ...(placement.threadRootId === undefined || placement.threadRootId === null
-      ? {}
-      : { thread_root_id: placement.threadRootId }),
-    ...(placement.broadcastToChannel === undefined
-      ? {}
-      : { broadcast_to_channel: placement.broadcastToChannel }),
+    ...(conversationId !== null
+      ? { conversation_id: conversationId }
+      : {
+        ...(placement.channel === undefined || placement.channel === null
+          ? {}
+          : { channel: placement.channel }),
+        ...(placement.threadRootId === undefined || placement.threadRootId === null
+          ? {}
+          : { thread_root_id: placement.threadRootId }),
+        ...(placement.broadcastToChannel === undefined
+          ? {}
+          : { broadcast_to_channel: placement.broadcastToChannel }),
+      }),
   };
+}
+
+export class ConversationUnavailableError extends Error {
+  constructor(message = "This conversation isn't available in this workspace.") {
+    super(message);
+    this.name = "ConversationUnavailableError";
+  }
+}
+
+export class SendRetiredError extends Error {
+  constructor() {
+    super("Message send retired after destination or session change.");
+    this.name = "SendRetiredError";
+  }
 }
 
 /** Posts ONE browser-authored signal to the whole To: set, or to the workspace when it is empty. */
@@ -3672,6 +3718,7 @@ export async function postBrowserSignal(
   attachments: readonly BrowserSignalAttachmentRef[] = [],
   placement: BrowserSignalPlacement = {},
   pinned?: PinnedAccountContext | null,
+  options?: { isAlive?: () => boolean },
 ): Promise<Signal> {
   if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
   const { status, body } = await postCommand(
@@ -3681,9 +3728,18 @@ export async function postBrowserSignal(
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the signal result. Refresh the feed before posting it again.",
     pinned,
+    options?.isAlive ? { isAlive: options.isAlive } : undefined,
   );
   if (pinned && !pinned.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
+  if (status === 0 && body.error === "operation_retired") {
+    throw new SendRetiredError();
+  }
   if (status !== 200 || body.status !== "accepted") {
+    if (status === 404 && body.error === "conversation_not_found") {
+      throw new ConversationUnavailableError(
+        typeof body.message === "string" && body.message ? body.message : undefined,
+      );
+    }
     throw new Error(
       status === 403
         ? "That person or agent is no longer available here. Nothing was posted."
@@ -3810,6 +3866,9 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
     threadRootId: text(row.thread_root_id),
     inReplyTo: text(row.in_reply_to),
     broadcastToChannel: row.broadcast_to_channel === true,
+    ...(typeof row.conversation_id === "string" && row.conversation_id !== ""
+      ? { conversationId: row.conversation_id }
+      : {}),
   };
 }
 
@@ -5228,13 +5287,30 @@ export class OversightAuthRefusedError extends Error {
   }
 }
 
+/** Raised when a pinned read resolves a different signed-in account before dispatching fetch. */
+export class SessionIdentityMismatch extends Error {
+  constructor() {
+    super("Signed-in account changed before the read started.");
+    this.name = "SessionIdentityMismatch";
+  }
+}
+
 async function postConversationRead(
   payload: Record<string, unknown>,
   label: string,
-  guard?: OversightDispatchGuard,
+  guardOrExpectedUserId?: OversightDispatchGuard | string,
+  isAlive?: () => boolean,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  const guard = typeof guardOrExpectedUserId === "object" && guardOrExpectedUserId !== null
+    ? guardOrExpectedUserId
+    : undefined;
+  const expectedUserId = typeof guardOrExpectedUserId === "string"
+    ? guardOrExpectedUserId
+    : undefined;
   const d = deployment();
   if (!d) throw new NoDeployment();
+  if (guard && !guard.isScopeLive()) throw new OversightRequestRetiredError();
+  if (isAlive && !isAlive()) throw new SessionIdentityMismatch();
   const session = await currentSession();
   if (!session) throw new SessionExpired();
   if (guard) {
@@ -5242,6 +5318,9 @@ async function postConversationRead(
     if (liveViewer !== guard.expectedViewerUserId.toLowerCase() || !guard.isScopeLive()) {
       throw new OversightRequestRetiredError();
     }
+  }
+  if ((expectedUserId && session.user.id !== expectedUserId) || (isAlive && !isAlive())) {
+    throw new SessionIdentityMismatch();
   }
   const deadline = requestDeadline();
   try {
@@ -5260,7 +5339,14 @@ async function postConversationRead(
     const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
     return { status: response.status, body };
   } catch (error) {
-    if (error instanceof SessionExpired || error instanceof NoDeployment || error instanceof OversightRequestRetiredError) throw error;
+    if (
+      error instanceof SessionExpired ||
+      error instanceof NoDeployment ||
+      error instanceof OversightRequestRetiredError ||
+      error instanceof SessionIdentityMismatch
+    ) {
+      throw error;
+    }
     if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
     throw error;
   } finally {
@@ -5280,17 +5366,19 @@ export class ConversationsUnsupportedError extends Error {
 export async function listConversations(
   workspaceId: string,
   includeArchived = false,
+  expectedUserId?: string,
+  isAlive?: () => boolean,
 ): Promise<ConversationSummary[]> {
   const request = buildListConversationsRequest(workspaceId, includeArchived);
   let result: { status: number; body: Record<string, unknown> };
   try {
-    result = await postConversationRead(request, "conversations");
+    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
   } catch (error) {
     // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
     // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
-    // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
+    // re-entering postConversationRead so currentSession(), isAlive(), and requestDeadline() are rechecked fresh.
     if (!(error instanceof TypeError)) throw error;
-    result = await postConversationRead(request, "conversations");
+    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
   }
   const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
@@ -5302,11 +5390,14 @@ export async function listConversations(
 export async function readConversationHistory(
   workspaceId: string,
   conversationId: string,
-  options: ConversationHistoryOptions = {},
+  options: ConversationHistoryOptions & { expectedUserId?: string; isAlive?: () => boolean } = {},
 ): Promise<ConversationHistoryResult<Signal>> {
+  const { expectedUserId, isAlive, ...reqOptions } = options;
   const { status, body } = await postConversationRead(
-    buildConversationHistoryRequest(workspaceId, conversationId, options),
+    buildConversationHistoryRequest(workspaceId, conversationId, reqOptions),
     "conversation history",
+    expectedUserId,
+    isAlive,
   );
   return parseConversationHistoryResponse(status, body, browserSignalFromRow);
 }

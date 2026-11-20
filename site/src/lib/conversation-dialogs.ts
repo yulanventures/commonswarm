@@ -292,8 +292,9 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
         const readGen = args.beginConversationsRead();
         let freshRows: ConversationSummary[];
         try {
-          freshRows = await listConversations(args.workspaceId, true);
+          freshRows = await listConversations(args.workspaceId, true, args.pinnedUserId, lifetime.isAlive);
         } catch {
+          if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
           return { ok: false, message: "Couldn't verify channel access. Try again." };
         }
         if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
