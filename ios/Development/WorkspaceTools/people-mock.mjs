@@ -31,6 +31,12 @@ let nonOwnerGrants = false;
 let duplicateRows = false;
 let omitMaya = false;
 let viewerRole = "owner";
+let holdGrantsResponseOnce = false;
+let grantsResponseHeld = false;
+let releaseGrantsResponse = null;
+let holdMembersRequestOnce = false;
+let membersRequestHeld = false;
+let releaseMembersRequest = null;
 let readRequestCount = 0;
 
 let emailCodePending = false;
@@ -108,6 +114,29 @@ const server = createServer(async (req, res) => {
         viewerRole = role;
       }
       return reply(200, { ok: true, viewerRole });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-parallel-demotion") {
+      holdGrantsResponseOnce = true;
+      grantsResponseHeld = false;
+      releaseGrantsResponse = null;
+      holdMembersRequestOnce = true;
+      membersRequestHeld = false;
+      releaseMembersRequest = null;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/parallel-demotion-held") {
+      return reply(200, { held: grantsResponseHeld && membersRequestHeld });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-parallel-demotion") {
+      const releaseGrants = releaseGrantsResponse;
+      const releaseMembers = releaseMembersRequest;
+      releaseGrantsResponse = null;
+      releaseMembersRequest = null;
+      grantsResponseHeld = false;
+      membersRequestHeld = false;
+      if (releaseMembers) releaseMembers();
+      if (releaseGrants) releaseGrants();
+      return reply(200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/fixture/requests") {
       return reply(200, { reads: readRequestCount });
@@ -190,7 +219,7 @@ const server = createServer(async (req, res) => {
       if (failAdminGrants) return reply(503, { error: "unavailable" });
       if ((body?.p_workspace_id ?? "").toLowerCase() !== wsMain) return reply(200, null);
       if (nonOwnerGrants) return reply(200, null);
-      return reply(200, {
+      const ownerPayload = {
         grants: [
           {
             grant_id: "grant_atlas_1",
@@ -204,7 +233,15 @@ const server = createServer(async (req, res) => {
             may_end: true,
           },
         ],
-      });
+      };
+      if (holdGrantsResponseOnce) {
+        holdGrantsResponseOnce = false;
+        grantsResponseHeld = true;
+        await new Promise((resolve) => {
+          releaseGrantsResponse = resolve;
+        });
+      }
+      return reply(200, ownerPayload);
     }
 
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
@@ -221,6 +258,13 @@ const server = createServer(async (req, res) => {
 
     switch (url.pathname) {
       case "/rest/v1/member_profiles": {
+        if (holdMembersRequestOnce) {
+          holdMembersRequestOnce = false;
+          membersRequestHeld = true;
+          await new Promise((resolve) => {
+            releaseMembersRequest = resolve;
+          });
+        }
         if (failMembers) return reply(503, { error: "unavailable" });
         if (emptyMembers) return reply(200, []);
         const rows = [

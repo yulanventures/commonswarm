@@ -363,6 +363,11 @@ final class PeopleDirectoryStore: ObservableObject {
         people.filter { $0.role.isManager }
     }
 
+    var visibleAdminGrants: [WorkspaceAgentAdminGrant] {
+        guard !accessUnavailable, viewerIsOwner else { return [] }
+        return adminGrants
+    }
+
     var tabs: [PeopleTabSummary] {
         PeopleDirectoryRules.tabSummaries(
             selected: selectedTab,
@@ -370,7 +375,7 @@ final class PeopleDirectoryStore: ObservableObject {
             agentsCount: agents.count,
             invitesCount: invites.count,
             managersCount: managers.count,
-            adminGrantsCount: adminGrants.count,
+            adminGrantsCount: visibleAdminGrants.count,
             coreReady: coreReady,
             invitesReady: invitesReady,
             adminGrantsReady: adminGrantsReady
@@ -414,10 +419,10 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     var filteredAdminGrants: [WorkspaceAgentAdminGrant] {
-        guard !accessUnavailable, viewerIsOwner else { return [] }
+        let grants = visibleAdminGrants
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return adminGrants }
-        return adminGrants.filter {
+        guard !needle.isEmpty else { return grants }
+        return grants.filter {
             $0.agentName.lowercased().contains(needle)
                 || $0.levelLabel.lowercased().contains(needle)
                 || ($0.ownerDisplay?.lowercased().contains(needle) ?? false)
@@ -465,7 +470,7 @@ final class PeopleDirectoryStore: ObservableObject {
                 people = snapshot.people
                 agents = snapshot.agents
                 invites = snapshot.invites
-                adminGrants = snapshot.adminGrants
+                adminGrants = viewerIsOwner ? snapshot.adminGrants : []
                 coreReady = true
                 invitesReady = snapshot.invitesLoaded
                 invitesFailed = !snapshot.invitesLoaded
@@ -487,15 +492,15 @@ final class PeopleDirectoryStore: ObservableObject {
                     invitesReady = false
                     invitesFailed = true
                 }
-                if let updatedAdminGrants = partial.adminGrants {
+                if partial.people != nil && !viewerIsOwner {
+                    // Fresh non-owner roster overrides both a failed grant RPC and any
+                    // stale pre-demotion owner grant snapshot returned in parallel.
+                    adminGrants = []
+                    adminGrantsReady = partial.adminGrants != nil
+                } else if let updatedAdminGrants = partial.adminGrants {
                     adminGrants = updatedAdminGrants
                     adminGrantsReady = true
                 } else {
-                    // Owner-only grants must clear immediately when a fresh roster shows
-                    // the viewer is no longer a workspace owner, even if the grant RPC failed.
-                    if partial.people != nil && !viewerIsOwner {
-                        adminGrants = []
-                    }
                     adminGrantsReady = false
                 }
                 loadFailed = true

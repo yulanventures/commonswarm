@@ -65,6 +65,21 @@ struct VerifyPeopleDirectory {
         let reads: Int
     }
 
+    struct HeldStatus: Decodable {
+        let held: Bool
+    }
+
+    static func waitUntilParallelDemotionHeld(_ origin: URL) async throws {
+        for _ in 0..<200 {
+            let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/parallel-demotion-held"))
+            if try JSONDecoder().decode(HeldStatus.self, from: data).held {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        expect(false, "Timed out waiting for parallel owner-RPC + members hold")
+    }
+
     static func readCount(_ origin: URL) async throws -> Int {
         let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/requests"))
         return try JSONDecoder().decode(RequestCount.self, from: data).reads
@@ -358,6 +373,73 @@ struct VerifyPeopleDirectory {
         try await postFixture("\(base)/fixture/viewer-role?role=owner")
         try await postFixture("\(base)/fixture/fail-agents?on=0")
         try await postFixture("\(base)/fixture/fail-admin-grants?on=0")
+
+        // 9e. Parallel mixed-snapshot race: successful pre-demotion owner grant RPC (HTTP 200 { grants: [...] })
+        //     paired with a fresh demoted member_profiles response (admin or member) must clear cached grants
+        //     AND exclude owner-only grant counts from the Admins tab badge & accessibility label
+        //     in BOTH complete and partial (.coreFailed) settlement.
+        // 9e-i. Complete settlement (agents 200): held successful owner RPC + fresh demoted member roster
+        await store.load(api: directoryAPI)
+        let ownerReadyBefore9e = await MainActor.run {
+            store.viewerIsOwner
+                && store.adminGrants.count == 1
+                && store.tabs.first(where: { $0.tab == .admins })?.count == 3
+        }
+        expect(ownerReadyBefore9e, "Expected live owner with Admins count 3 before 9e parallel mixed-snapshot witness")
+
+        try await postFixture("\(base)/fixture/hold-parallel-demotion")
+        let raceCompleteTask = Task { await store.load(api: directoryAPI) }
+        try await waitUntilParallelDemotionHeld(origin)
+        // Demote viewer mid-flight after owner RPC already captured its pre-demotion { grants: [Atlas] } snapshot!
+        try await postFixture("\(base)/fixture/viewer-role?role=member")
+        try await postFixture("\(base)/fixture/release-parallel-demotion")
+        await raceCompleteTask.value
+        let raceCompleteCleared = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.accessUnavailable
+                && !store.loadFailed
+                && store.viewerRole == .member
+                && !store.viewerIsOwner
+                && store.adminGrants.isEmpty
+                && store.visibleAdminGrants.isEmpty
+                && store.filteredAdminGrants.isEmpty
+                && store.managers.count == 1
+                && adminsTab?.count == 1
+                && adminsTab?.accessibilityLabel == "Admins, 1"
+        }
+        expect(raceCompleteCleared, "Parallel pre-demotion owner grant RPC + fresh demoted member roster (complete) must clear cached grants and report Admins count == 1 (managers only)")
+
+        // 9e-ii. Partial settlement (agents 503): held successful owner RPC + fresh demoted admin roster
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        await store.load(api: directoryAPI)
+        let ownerReadyBefore9ePartial = await MainActor.run {
+            store.viewerIsOwner && store.adminGrants.count == 1 && store.tabs.first(where: { $0.tab == .admins })?.count == 3
+        }
+        expect(ownerReadyBefore9ePartial, "Expected reloaded live owner before 9e partial mixed-snapshot witness")
+
+        try await postFixture("\(base)/fixture/fail-agents?on=1")
+        try await postFixture("\(base)/fixture/hold-parallel-demotion")
+        let racePartialTask = Task { await store.load(api: directoryAPI) }
+        try await waitUntilParallelDemotionHeld(origin)
+        try await postFixture("\(base)/fixture/viewer-role?role=admin")
+        try await postFixture("\(base)/fixture/release-parallel-demotion")
+        await racePartialTask.value
+        let racePartialCleared = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.accessUnavailable
+                && store.loadFailed
+                && store.viewerRole == .admin
+                && !store.viewerIsOwner
+                && store.adminGrants.isEmpty
+                && store.visibleAdminGrants.isEmpty
+                && store.filteredAdminGrants.isEmpty
+                && store.managers.count == 2
+                && adminsTab?.count == 2
+                && adminsTab?.accessibilityLabel == "Admins, 2"
+        }
+        expect(racePartialCleared, "Parallel pre-demotion owner grant RPC + fresh demoted admin roster (partial) must clear cached grants and report Admins count == 2 (managers only)")
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/fail-agents?on=0")
 
         // 10. Detail routes bound to authorized directory IDs:
         //     live-member control, omission clearing, and opening detail across a held refusal.
