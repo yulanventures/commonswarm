@@ -138,7 +138,7 @@ function installWaitingFixture() {
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const archivedSyncState = async (action?: Record<string, unknown>) => {
-    const res = await net("/__archived-state?bucket=" + encodeURIComponent(archivedBucket), action
+    const res = await network("/__archived-state?bucket=" + encodeURIComponent(archivedBucket), action
       ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) }
       : undefined);
     return await res.json();

@@ -180,6 +180,10 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout')
       `;
       await tx`
+        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid)
+      `;
+      await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
         VALUES (${wsId}::uuid, 'shared')
       `;
@@ -262,14 +266,14 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
         VALUES
-          (${choiceAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Which boiler options?', ${chBoiler}::uuid, now() + interval '1 day', ${ts(-300)}::timestamptz),
-          (${plainAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Should we schedule Tuesday?', NULL, now() + interval '1 day', ${ts(-290)}::timestamptz),
-          (${staleAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Old quote question?', ${chBoiler}::uuid, now() + interval '1 day', ${ts(-280)}::timestamptz),
-          (${openAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Still open question?', ${chBoiler}::uuid, now() + interval '1 day', ${ts(-270)}::timestamptz),
-          (${privAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Private vault ask?', ${chPriv}::uuid, now() + interval '1 day', ${ts(-260)}::timestamptz),
-          (${gen1MayaAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered before leave?', NULL, now() + interval '1 day', ${ts(-250)}::timestamptz),
-          (${gen1PostLeaveAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered after leave?', NULL, now() + interval '1 day', ${ts(-240)}::timestamptz),
-          (${noConsentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${noConsentId}::uuid, 'ask', 'No-consent ask?', ${chBoiler}::uuid, now() + interval '1 day', ${ts(-230)}::timestamptz)
+          (${choiceAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Which boiler options?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-300)}::timestamptz),
+          (${plainAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Should we schedule Tuesday?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-290)}::timestamptz),
+          (${staleAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Old quote question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-280)}::timestamptz),
+          (${openAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Still open question?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-270)}::timestamptz),
+          (${privAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Private vault ask?', ${chPriv}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-260)}::timestamptz),
+          (${gen1MayaAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered before leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-250)}::timestamptz),
+          (${gen1PostLeaveAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Gen 1 ask answered after leave?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-240)}::timestamptz),
+          (${noConsentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${noConsentId}::uuid, 'ask', 'No-consent ask?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-230)}::timestamptz)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
@@ -299,13 +303,13 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, channel_id, in_reply_to, until, created_at)
         VALUES
-          (${choiceReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Approve quote, Book install', ${chBoiler}::uuid, ${choiceAskId}::uuid, now() + interval '1 day', ${ts(100)}::timestamptz),
-          (${plainReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Yes, Tuesday at 9am works.', NULL, ${plainAskId}::uuid, now() + interval '1 day', ${ts(90)}::timestamptz),
-          (${staleReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Closed as stale. Re-ask with choices if still needed.', ${chBoiler}::uuid, ${staleAskId}::uuid, now() + interval '1 day', ${ts(80)}::timestamptz),
-          (${privReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Vault secret confirmed', ${chPriv}::uuid, ${privAskId}::uuid, now() + interval '1 day', ${ts(70)}::timestamptz),
-          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Maya answered before leaving', NULL, ${gen1MayaAskId}::uuid, now() + interval '1 day', ${ts(60)}::timestamptz),
-          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Viewer secret post-leave answer', NULL, ${gen1PostLeaveAskId}::uuid, now() + interval '1 day', ${ts(120)}::timestamptz),
-          (${noConsentReplyId}::uuid, ${wsId}::uuid, ${noConsentId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Got it', ${chBoiler}::uuid, ${noConsentAskId}::uuid, now() + interval '1 day', ${ts(50)}::timestamptz)
+          (${choiceReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Approve quote, Book install', ${chBoiler}::uuid, ${choiceAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(100)}::timestamptz),
+          (${plainReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Yes, Tuesday at 9am works.', NULL, ${plainAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(90)}::timestamptz),
+          (${staleReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Closed as stale. Re-ask with choices if still needed.', ${chBoiler}::uuid, ${staleAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(80)}::timestamptz),
+          (${privReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Vault secret confirmed', ${chPriv}::uuid, ${privAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(70)}::timestamptz),
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Maya answered before leaving', NULL, ${gen1MayaAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(60)}::timestamptz),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Viewer secret post-leave answer', NULL, ${gen1PostLeaveAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(120)}::timestamptz),
+          (${noConsentReplyId}::uuid, ${wsId}::uuid, ${noConsentId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Got it', ${chBoiler}::uuid, ${noConsentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(50)}::timestamptz)
       `;
       await tx`
         INSERT INTO swarm.ui_actions (
@@ -421,6 +425,12 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`RESET ROLE`;
 
       // Maya leaves Group DM Gen 1 at ts(95) — AFTER gen1MayaReplyId (ts(60)), BEFORE gen1PostLeaveReplyId (ts(120))!
+      // Pin joined_at to ts(-600) so left_at >= joined_at (conversation_members_check1) holds regardless of wall-clock time.
+      await tx`
+        UPDATE swarm.conversation_members
+        SET joined_at = ${ts(-600)}::timestamptz
+        WHERE conversation_id = ${convGroupGen1}::uuid
+      `;
       await tx`
         UPDATE swarm.conversation_members
         SET left_at = ${ts(95)}::timestamptz
