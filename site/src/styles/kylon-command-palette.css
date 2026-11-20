@@ -49,6 +49,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(
   border-radius: 12px;
   background: var(--k-shell-surface);
   color: var(--k-shell-ink);
+  color-scheme: var(--k-shell-scheme);
   box-shadow: var(--k-shell-shadow);
   overflow: hidden;
 }
@@ -81,6 +82,11 @@ live-dashboard.dashboard[data-kylon-shell] .cp-input {
   color: var(--k-shell-ink);
   font: inherit;
   font-size: 14px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-input::placeholder {
+  color: var(--k-shell-secondary);
+  opacity: 1;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .cp-input:focus-visible {

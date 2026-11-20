@@ -155,6 +155,25 @@ async function observeCarbonDialogs() {
     const border = getComputedStyle(el).borderTopColor;
     return !!border && border !== "rgba(0, 0, 0, 0)" && border !== "transparent";
   };
+  const parseRgb = (css: string): [number, number, number] | null => {
+    const m = css.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const contrastRatio = (fgCss: string, bgCss: string): number => {
+    const fg = parseRgb(fgCss);
+    const bg = parseRgb(bgCss);
+    if (!fg || !bg) return 0;
+    const lum = (rgb: [number, number, number]) => {
+      const [r, g, b] = rgb.map((v) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const l1 = lum(fg);
+    const l2 = lum(bg);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
 
   try {
     await import("/app.js");
@@ -196,17 +215,27 @@ async function observeCarbonDialogs() {
       await key("Control+k");
       await wait("command palette open", () => one<HTMLDialogElement>("dialog.dashboard__command-palette")?.open === true);
       await wait("command palette items rendered", () => document.querySelectorAll("dialog.dashboard__command-palette .cp-item__button").length > 0);
-      const input = one<HTMLInputElement>("dialog.dashboard__command-palette .cp-input");
+      const input = one<HTMLInputElement>("dialog.dashboard__command-palette .cp-input")!;
       const badge = one<HTMLElement>("dialog.dashboard__command-palette .cp-item__badge");
       const inputBorderOk = hasVisibleBorder(input);
       const badgeBorderOk = !badge || hasVisibleBorder(badge);
+      const placeholderStyle = getComputedStyle(input, "::placeholder");
+      const inputBg = getComputedStyle(input).backgroundColor;
+      const placeholderContrast = Math.round(contrastRatio(placeholderStyle.color, inputBg) * 100) / 100;
+      const placeholderOk = input.value === "" && Number(placeholderStyle.opacity) === 1 && placeholderContrast >= 4.5;
       document.documentElement.dataset.carbonDialogs = JSON.stringify({
-        ok: inputBorderOk && badgeBorderOk,
+        ok: inputBorderOk && badgeBorderOk && placeholderOk,
         scene: f.scene,
         axeRoot: "dialog.dashboard__command-palette[open]",
         inputBorderOk,
         badgeBorderOk,
-        error: inputBorderOk && badgeBorderOk ? undefined : `Transparent border in command palette (input=${inputBorderOk}, badge=${badgeBorderOk})`,
+        placeholderColor: placeholderStyle.color,
+        inputBg,
+        placeholderContrast,
+        placeholderOk,
+        error: inputBorderOk && badgeBorderOk && placeholderOk
+          ? undefined
+          : `Command palette check failed (inputBorder=${inputBorderOk}, badgeBorder=${badgeBorderOk}, placeholderContrast=${placeholderContrast})`,
       });
       return;
     }
