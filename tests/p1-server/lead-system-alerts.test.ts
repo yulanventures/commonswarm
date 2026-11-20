@@ -1943,9 +1943,14 @@ test("C1a audience isolation: DM, private channel, mixed audiences, and public-t
     .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
   assert.equal(leadAfterRollover.length, 0, "wsLead must see ZERO alerts after public rollover while private/DM remain");
 
-  const ownerAfterRollover = (await alertsViewAs(owner.id, workspace, undefined, "authenticated"))
-    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
-  assert.equal(ownerAfterRollover.length, 0, "non-member owner must see ZERO alerts after public rollover");
+  const ownerOpenAfterRollover = (await alertsViewAs(owner.id, workspace, undefined, "authenticated"))
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen" && a.resolved_at === null);
+  assert.equal(ownerOpenAfterRollover.length, 0, "non-member owner must see ZERO open alerts after public rollover");
+  const ownerInboxAfterRollover = await ownerAlertInboxAs(owner.id, workspace, undefined, "authenticated");
+  const ownerInboxIdsAfterRollover = ((ownerInboxAfterRollover?.alerts ?? []) as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(ownerInboxIdsAfterRollover, [], "non-member owner alert inbox must be empty after public rollover");
 
   // Private and DM alerts remain open strictly for their own authorized senders until observed.
   const dmStillOpen = ((await readResource(dmMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
@@ -1970,7 +1975,7 @@ test("C1a audience isolation: DM, private channel, mixed audiences, and public-t
   const addrAskPost = await send(dmMember.jwt, {
     kind: "post_signal",
     signal_kind: "ask",
-    conversation_id: openCh.id,
+    channel: openCh.slug,
     body: "Private addressed ask inside public channel",
     to_user_id: null,
     to_agent_principal_id: unseenSeat.principal,
