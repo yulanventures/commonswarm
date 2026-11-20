@@ -37,7 +37,9 @@ import {
   isConversationReadRequest,
   isConversationReadResource,
   parseConversationReadRequest,
+  type ConversationHistoryReadRequest,
   type ConversationReadRequest,
+  type ConversationsListReadRequest,
 } from "./conversations.ts";
 import {
   executeReviewCheckRead,
@@ -1950,6 +1952,8 @@ export type HostedReadInput =
   | { resource: "reply_target"; workspace_id: string; signal_id: string }
   | { resource: "channel_members"; workspace_id: string; channel_id: string }
   | (Omit<ChannelMessagesReadRequest, "max_bytes"> & { fit_bytes?: number })
+  | ConversationsListReadRequest
+  | ConversationHistoryReadRequest
   | MemorySearchReadRequest
   | MemoryGetReadRequest
   | {
@@ -1997,6 +2001,9 @@ function hostedReadInputValid(input: HostedReadInput): boolean {
   if (input.resource === "channel_members") return UUID_RE.test(input.channel_id);
   if (input.resource === "reply_target") return UUID_RE.test(input.signal_id);
   if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
+  if (input.resource === "conversations" || input.resource === "conversation_history") {
+    return parseConversationReadRequest({ ...input }) !== null;
+  }
   if (input.resource === "channel_messages" && input.fit_bytes !== undefined) {
     return Number.isSafeInteger(input.fit_bytes) && input.fit_bytes >= CHANNEL_PAGE_MIN_BYTES;
   }
@@ -2040,6 +2047,8 @@ export async function handleHostedRead(
       (input.resource === "channels" && tool !== "channel_ls") ||
       (input.resource === "channel_members" && tool !== "channel_members") ||
       (input.resource === "channel_messages" && tool !== "channel_read") ||
+      (input.resource === "conversations" && tool !== "conversations") ||
+      (input.resource === "conversation_history" && tool !== "conversation_read") ||
       (input.resource === "reply_target" && tool !== "channel_read") ||
       (input.resource === "memory_search" && tool !== "memory_search") ||
       (input.resource === "memory_get" && tool !== "memory_get") ||
@@ -2174,6 +2183,11 @@ export async function handleHostedRead(
           context,
         },
       };
+    }
+    if (input.resource === "conversations" || input.resource === "conversation_history") {
+      const result = await executeConversationRead(tx, input);
+      if (result.status !== 200) return result;
+      return { status: 200, body: { ...result.body, context } };
     }
     if (input.resource === "channel_messages") {
       const page = await channelMessages(tx, seat.workspace_id, { ...input, max_bytes: null });
