@@ -203,7 +203,6 @@ struct PeopleDirectoryAPI: Sendable {
 
     func loadDirectory(
         workspaceID: UUID,
-        organizationID: UUID? = nil,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true },
         onOwnerGrantsDenied: @escaping @MainActor @Sendable () -> Void = {}
     ) async throws -> PeopleDirectoryLoadResult {
@@ -447,12 +446,14 @@ struct PeopleDirectoryAPI: Sendable {
             effectiveAdminGrantsAll = false
             do {
                 let myRows = try await fetchMyAdminGrantsRPC(canDispatch: canDispatch)
-                var resolvedOrgID = organizationID
+                // Always read the workspace's live org_id fresh when matching organization-wide grants;
+                // never rely on a cached Workspace.org_id that could be stale after a workspace moves orgs.
                 let hasActiveOrgGrant = myRows.contains {
                     $0.state?.lowercased() == "active"
                         && $0.level?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "organization"
                 }
-                if resolvedOrgID == nil && hasActiveOrgGrant {
+                var freshOrgID: UUID? = nil
+                if hasActiveOrgGrant {
                     let wsRows: [WorkspaceOrgWire] = try await fetchView(
                         "workspaces",
                         query: [
@@ -462,10 +463,10 @@ struct PeopleDirectoryAPI: Sendable {
                         ],
                         canDispatch: canDispatch
                     )
-                    resolvedOrgID = wsRows.first(where: { $0.workspace_id == workspaceID })?.org_id
+                    freshOrgID = wsRows.first(where: { $0.workspace_id == workspaceID })?.org_id
                 }
                 let targetWorkspace = workspaceID.uuidString.lowercased()
-                let targetOrganization = resolvedOrgID?.uuidString.lowercased()
+                let targetOrganization = freshOrgID?.uuidString.lowercased()
                 let now = Date()
                 effectiveAdminGrants = myRows.compactMap { row in
                     guard let grantID = row.grant_id, !grantID.isEmpty,

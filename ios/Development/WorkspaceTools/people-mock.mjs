@@ -18,7 +18,7 @@ const orgMain = "00000000-0000-4000-8000-000000000010";
 const orgOther = "00000000-0000-4000-8000-000000000020";
 const goneAgent = "00000000-0000-4000-8000-000000000088";
 
-const workspaces = [{ workspace_id: wsMain, org_id: orgMain, name: "Simulator workspace" }];
+let workspaceOrg = orgMain;
 
 let accessRefused = false;
 let edge401 = false;
@@ -120,6 +120,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/own-admin-grants") {
       ownAdminGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, ownAdminGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/workspace-org") {
+      const target = url.searchParams.get("org");
+      if (target === "other") workspaceOrg = orgOther;
+      else if (target === "none") workspaceOrg = null;
+      else workspaceOrg = orgMain;
+      return reply(200, { ok: true, workspaceOrg });
     }
     if (req.method === "POST" && url.pathname === "/fixture/duplicate-rows") {
       duplicateRows = url.searchParams.get("on") !== "0";
@@ -389,7 +396,17 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
-    if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
+    if (url.pathname === "/rest/v1/workspaces") {
+      const wsFilter = url.searchParams.get("workspace_id")?.toLowerCase();
+      if (wsFilter) {
+        readRequestCount += 1;
+        if (edge401) return reply(401, {});
+        if (edge404) return reply(404, { error: "workspace_not_found" });
+        if (accessRefused) return reply(403, { message: "workspace_access_refused" });
+        if (wsFilter !== `eq.${wsMain}`) return reply(200, []);
+      }
+      return reply(200, [{ workspace_id: wsMain, org_id: workspaceOrg, name: "Simulator workspace" }]);
+    }
 
     readRequestCount += 1;
     if (edge401) return reply(401, {});

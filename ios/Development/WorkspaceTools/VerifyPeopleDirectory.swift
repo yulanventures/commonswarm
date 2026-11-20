@@ -134,7 +134,7 @@ struct VerifyPeopleDirectory {
         let directoryAPI = PeopleDirectoryAPI(api: convAPI)
 
         // 1. Full load via production POST rest/v1/rpc/workspace_seat_admin_grants (owner shape: { grants: [...] })
-        let store = await MainActor.run { PeopleDirectoryStore(workspaceID: ws.id, organizationID: ws.org_id) }
+        let store = await MainActor.run { PeopleDirectoryStore(workspaceID: ws.id) }
         let defaultTabIsAgents = await MainActor.run { store.selectedTab == .agents }
         expect(defaultTabIsAgents, "Default tab must be Agents")
         await store.load(api: directoryAPI)
@@ -677,6 +677,36 @@ struct VerifyPeopleDirectory {
                 && adminsTab?.count == 3
         }
         expect(settledOwnGrantsAfterRelease, "Releasing held my_seat_admin_grants must deliver the demoted caller's active scoped and matching-org grants")
+
+        // 11e. HezSec witness: workspace moves to another organization (orgMain -> orgOther) while the
+        //      same PeopleDirectoryStore stays open. Fresh workspaces org_id read drops the old orgMain
+        //      grant immediately and matches only the new orgOther grant (never using cached org_id).
+        try await postFixture("\(base)/fixture/workspace-org?org=other")
+        await store.load(api: directoryAPI)
+        let movedOrgGrantsOK = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            let grantIDs = Set(store.visibleAdminGrants.map(\.grantID))
+            return !store.accessUnavailable
+                && !store.viewerIsOwner
+                && !store.adminGrantsAll
+                && store.adminGrantsReady
+                && !store.adminGrantsFailed
+                && grantIDs == ["my_grant_atlas_active", "my_grant_atlas_org_other"]
+                && !grantIDs.contains("my_grant_atlas_org_here")
+                && adminsTab?.count == 3
+        }
+        expect(movedOrgGrantsOK, "After workspace moves organizations, fresh org_id read must drop old org-wide grant and match only the new organization")
+
+        // If workspace has no org_id, NO org-wide grants may match (fail-closed)
+        try await postFixture("\(base)/fixture/workspace-org?org=none")
+        await store.load(api: directoryAPI)
+        let nullOrgDropsAllOrgGrants = await MainActor.run {
+            let grantIDs = Set(store.visibleAdminGrants.map(\.grantID))
+            return store.adminGrantsReady && !store.adminGrantsFailed && grantIDs == ["my_grant_atlas_active"]
+        }
+        expect(nullOrgDropsAllOrgGrants, "Unknown/null live workspace org_id must exclude all org-wide grants fail-closed")
+
+        try await postFixture("\(base)/fixture/workspace-org?org=main")
         try await postFixture("\(base)/fixture/viewer-role?role=owner")
         try await postFixture("\(base)/fixture/non-owner-grants?on=0")
         try await postFixture("\(base)/fixture/own-admin-grants?on=0")

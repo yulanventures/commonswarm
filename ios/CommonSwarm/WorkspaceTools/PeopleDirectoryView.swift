@@ -12,7 +12,7 @@ struct PeopleDirectoryView: View {
     init(api: ConversationAPI, workspace: Workspace) {
         self.api = api
         self.workspace = workspace
-        _store = StateObject(wrappedValue: PeopleDirectoryStore(workspaceID: workspace.id, organizationID: workspace.org_id))
+        _store = StateObject(wrappedValue: PeopleDirectoryStore(workspaceID: workspace.id))
     }
 
     private var directoryAPI: PeopleDirectoryAPI { PeopleDirectoryAPI(api: api) }
