@@ -23,6 +23,7 @@
  */
 import "../../styles/home/onboarding.css";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
+import { AGENT_START_PROMPT } from "../../lib/install";
 import {
   AGENT_CONNECTOR_ADDRESS,
   AGENT_HOST_STATUS_LABELS,
@@ -254,6 +255,25 @@ const notesOf = (host: AgentHost): string[] => [
         <span data-ahp-waiting-text></span>
       </p>
     </div>
+
+    <section class="hm-ahp__section hm-ahp__playbook" data-ahp-playbook aria-labelledby="ahp-playbook-title">
+      <div class="hm-ahp__prompt-head">
+        <h2 class="hm-ahp__step-title" id="ahp-playbook-title">Or paste this into any agent</h2>
+        <a class="hm-ahp__link hm-ahp__playbook-link" href="/start-agent.md" target="_blank" rel="noopener noreferrer">
+          Read start-agent.md
+        </a>
+      </div>
+      <div class="hm-ahp__copyable hm-ahp__copyable--playbook">
+        <p class="hm-ahp__value" data-ahp-playbook-prompt>{AGENT_START_PROMPT}</p>
+        <button
+          class="hm-ahp__copy"
+          type="button"
+          data-ahp-copy={AGENT_START_PROMPT}
+          data-ahp-copy-playbook
+          aria-label="Copy the agent onboarding prompt"
+        >Copy</button>
+      </div>
+    </section>
   </div>
 
   <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby="ahp-joined-title" hidden>
@@ -711,12 +731,20 @@ const notesOf = (host: AgentHost): string[] => [
         }
       }
       window.clearTimeout(this.#copyTimer);
-      for (const other of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy], [data-ahp-copy-sentence]")) other.textContent = "Copy";
-      button.textContent = copied ? "Copied" : "Selected";
+      for (const other of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy], [data-ahp-copy-sentence]")) {
+        other.textContent = "Copy";
+        if (other.dataset.ahpCopyLabel) other.setAttribute("aria-label", other.dataset.ahpCopyLabel);
+      }
+      const idleLabel = button.dataset.ahpCopyLabel ?? button.getAttribute("aria-label") ?? "";
+      if (idleLabel && !button.dataset.ahpCopyLabel) button.dataset.ahpCopyLabel = idleLabel;
+      const nextWord = copied ? "Copied" : "Selected";
+      button.textContent = nextWord;
+      if (idleLabel) button.setAttribute("aria-label", idleLabel.replace(/^Copy\b/i, nextWord));
       const status = this.querySelector<HTMLElement>("[data-ahp-status]");
       if (status) status.textContent = copied ? "Copied." : "Copy is blocked here. The text is selected; press Command or Control and C.";
       this.#copyTimer = window.setTimeout(() => {
         button.textContent = "Copy";
+        if (button.dataset.ahpCopyLabel) button.setAttribute("aria-label", button.dataset.ahpCopyLabel);
       }, 2_000);
     }
   }

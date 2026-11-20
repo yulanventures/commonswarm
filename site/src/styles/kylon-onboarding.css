@@ -266,7 +266,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__compos
   min-inline-size: 0;
 }
 
-live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp :is(.hm-ahp__field, .hm-ahp__prompt, .hm-ahp__mint):not([hidden]) {
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp :is(.hm-ahp__field, .hm-ahp__prompt, .hm-ahp__playbook, .hm-ahp__mint):not([hidden]) {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -274,7 +274,12 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp :is(.hm
   min-inline-size: 0;
 }
 
-live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__prompt > .hm-ahp__copyable { align-self: stretch; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view :is(.hm-ahp__prompt, .hm-ahp__playbook) > .hm-ahp__copyable { align-self: stretch; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__playbook > .hm-ahp__prompt-head {
+  align-self: stretch;
+  align-items: center;
+  justify-content: space-between;
+}
 
 live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__prompt-head {
   display: flex;

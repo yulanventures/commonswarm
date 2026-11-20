@@ -32,13 +32,14 @@
 
 import "../../styles/ui.css";
 import Button from "../ui/Button.astro";
+import CodeBlock from "../ui/CodeBlock.astro";
 
 interface Props {
   /** The exact install command. Displayed and copied from this one string. */
   cmd: string;
 }
 
-import { INSTALL_HOST } from "../../lib/install.ts";
+import { AGENT_START_PROMPT, INSTALL_HOST } from "../../lib/install.ts";
 
 const { cmd } = Astro.props;
 
@@ -302,6 +303,14 @@ const PLATFORMS = [
           }
         </div>
       </div>
+    </div>
+
+    <div class="dl-agent" data-dl-agent-prompt aria-labelledby="dl-agent-title">
+      <div class="dl-agent__head">
+        <h2 class="dl-agent__title" id="dl-agent-title">Or paste this into your agent</h2>
+        <a class="dl-agent__link" href="/start-agent.md">Read start-agent.md</a>
+      </div>
+      <CodeBlock code={AGENT_START_PROMPT} label="agent prompt" wrap chrome={false} class="dl-agent__code" />
     </div>
   </div>
 </section>
@@ -784,10 +793,62 @@ const PLATFORMS = [
     padding: 1px 4px;
   }
 
+  /* --------------------------------------------------- agent playbook --- */
+  .dl-agent {
+    width: 100%;
+    max-width: 46rem;
+    margin-top: var(--s-5);
+    padding: var(--pad-card-lg);
+    text-align: start;
+    background: var(--bg-raised);
+    border-radius: var(--radius-xl);
+  }
+
+  .dl-agent__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-2) var(--s-4);
+    margin-bottom: var(--s-4);
+  }
+
+  .dl-agent__title {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--t-lg);
+    line-height: var(--lh-lg);
+    letter-spacing: var(--track-head);
+    font-weight: var(--weight-head);
+  }
+
+  .dl-agent__link {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--dur-2) var(--ease-standard);
+  }
+
+  .dl-agent__link:hover {
+    text-decoration-color: currentColor;
+  }
+
+  .dl-agent :global(.ui-code__copy) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+
   /* ------------------------------------------------------- responsive ---- */
   @media (max-width: 40rem) {
     .dl-card__body,
-    .dl-plat {
+    .dl-plat,
+    .dl-agent {
       padding: var(--s-5);
     }
 

@@ -695,7 +695,8 @@
   border-radius: 14px;
 }
 
-.hm-ahp__prompt > .hm-ahp__copyable { margin-block-start: 8px; }
+.hm-ahp__prompt > .hm-ahp__copyable,
+.hm-ahp__playbook > .hm-ahp__copyable { margin-block-start: 8px; }
 
 .hm-ahp__value {
   flex: 1 1 320px;
@@ -1007,9 +1008,11 @@
 .hm-ahp__open-row[hidden],
 .hm-ahp__open-dest[hidden] { display: none; }
 
-.hm-ahp__open-row > .hm-ahp__link {
+.hm-ahp__open-row > .hm-ahp__link,
+.hm-ahp__prompt-head > .hm-ahp__playbook-link {
   display: inline-flex;
   align-items: center;
+  min-block-size: 44px;
   padding-inline: 0;
 }
 
