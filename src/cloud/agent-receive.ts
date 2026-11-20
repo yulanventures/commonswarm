@@ -285,8 +285,16 @@ export async function configureAgentReceive(options: {
   const host = checkedHostSessionId(options.hostSessionId);
   if (provider !== "instructions" && host === "manual") throw new AgentSetupError("host_session_required", "A host hook needs this session's ID. Supply --host-session-id, or use --provider instructions for prompt-based turn checks.");
   if (options.mode === "wake" && !(RECEIVE_WAKE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("wake_host_unsupported", `Wake supports --provider ${RECEIVE_WAKE_PROVIDERS.join(" or ")}. Use --mode turn on this host.`);
-  if (provider === "codex" && options.mode === "wake" && !ONBOARDING_UUID.test(host)) {
-    throw new AgentSetupError("codex_thread_id_required", "Codex wake requires this session's $CODEX_THREAD_ID UUID as --host-session-id.");
+  if (provider === "codex" && options.mode === "wake") {
+    if (!ONBOARDING_UUID.test(host)) {
+      throw new AgentSetupError("codex_thread_id_required", "Codex wake requires this session's $CODEX_THREAD_ID UUID as --host-session-id.");
+    }
+    if (openedProfile.host_session_id === undefined || openedProfile.host_session_id !== host) {
+      throw new AgentSetupError(
+        "profile_not_host_bound",
+        "Codex wake requires a host-bound profile matching $CODEX_THREAD_ID. Bind this seat's profile with cswarm setup --host-session-id \"$CODEX_THREAD_ID\" first.",
+      );
+    }
   }
   const grokAgentId = options.grokBotAgentId ?? (ONBOARDING_UUID.test(host) ? host : undefined);
   if (provider === "grok-bot" && options.mode === "wake") {

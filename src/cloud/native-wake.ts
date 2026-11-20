@@ -1,21 +1,29 @@
 /**
- * Shared native-wake bridge for interactive agent sessions (Codex, Claude Code, Antigravity).
+ * Shared native-wake bridge (fixed text only, bound session only, shared cost controls).
  *
  * Security & cost invariants:
- *   1. Fixed text ONLY: "New CommonSwarm messages (batch N): run cswarm check". Never include
- *      message body, sender, or subject (queued text can arrive with user trust).
- *   2. Wake only the seat's bound session ID; never start a new session or headless worker.
- *   3. Cost controls: wake only on fresh arrival, 5 s debounce, >= 2 min per-seat floor,
- *      at most 1 pending wake per seat until `cswarm check` clears it, and at most 1 retry
- *      after 15 minutes before marking `wake_failed_at` and stopping (C1a raises the alert).
+ *   - Fixed text ONLY: "New CommonSwarm messages (batch N): run cswarm check".
+ *     Message bodies, senders, subjects, and channel names must NEVER enter the wake prompt.
+ *   - Bound session ONLY: live verification against the private host-bound profile and its
+ *     opted-in receive binding happens inside the shared file lock immediately before dispatch.
+ *   - Shared cross-entry-point reservation: `cswarm listen` and `cswarm receive serve` share one
+ *     file-locked state file, charge attempts & rate slots BEFORE subprocess execution, and keep
+ *     the budget spent on refused or ambiguous subprocess results so loops cannot spin.
+ *   - Cost controls:
+ *       * wake only when something arrives;
+ *       * 5 s debounce coalescing bursts;
+ *       * at most 1 wake every 2 minutes per seat;
+ *       * 1 pending wake per seat until `cswarm check` acknowledges;
+ *       * 1 retry after 15 minutes, then `wake_failed` (C1a `agent_unseen` surfaces to lead/sender).
  */
 import { dirname, join } from "node:path";
-import { readdir } from "node:fs/promises";
 import {
   AgentSetupError,
+  ONBOARDING_UUID,
   privatePath,
   profileScopeKey,
   readAgentProfile,
+  type AgentProfile,
 } from "./agent-profile.js";
 import {
   checkedHostSessionId,
@@ -23,11 +31,13 @@ import {
   updateReceiveBinding,
   type ReceiveBinding,
 } from "./agent-receive.js";
-import {
-  readSecureJsonFileIfPresent,
-  withFileLock,
-  writeSecureJsonFile,
-} from "./storage.js";
+
+type ReceiveProvider = ReceiveBinding["provider"];
+import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
+
+export const NATIVE_WAKE_DEBOUNCE_MS = 5_000;
+export const NATIVE_WAKE_MIN_INTERVAL_MS = 2 * 60_000;
+export const NATIVE_WAKE_RETRY_AFTER_MS = 15 * 60_000;
 
 export const NATIVE_WAKE_ROUTES = [
   "codex-queue",
@@ -38,34 +48,31 @@ export const NATIVE_WAKE_ROUTES = [
 ] as const;
 export type NativeWakeRoute = (typeof NATIVE_WAKE_ROUTES)[number];
 
-export const NATIVE_WAKE_DEBOUNCE_MS = 5_000;
-export const NATIVE_WAKE_MIN_INTERVAL_MS = 2 * 60_000;
-export const NATIVE_WAKE_RETRY_AFTER_MS = 15 * 60_000;
+const FIXED_NATIVE_WAKE_PROMPT_RE = /^New CommonSwarm messages \(batch ([1-9][0-9]*)\): run cswarm check$/;
 
-/** Fixed prompt pattern enforced both when generating and right before invoking any host adapter. */
-export const NATIVE_WAKE_PROMPT_RE =
-  /^New CommonSwarm messages \(batch ([1-9]\d*)\): run cswarm check$/;
-
+/** Build the ONLY wake prompt text allowed across every native wake adapter. */
 export function formatNativeWakePrompt(batch: number): string {
   if (!Number.isSafeInteger(batch) || batch < 1) {
-    throw new AgentSetupError("wake_batch_invalid", "Wake batch counter must be a positive integer.");
+    throw new Error("wake batch must be a positive integer");
   }
   return `New CommonSwarm messages (batch ${batch}): run cswarm check`;
 }
 
-export function assertFixedNativeWakePrompt(prompt: string): void {
-  if (!NATIVE_WAKE_PROMPT_RE.test(prompt)) {
-    throw new AgentSetupError(
-      "wake_prompt_unsafe",
-      "Native wake prompts must be fixed text with a batch counter and never include message content.",
-    );
+/** Hard invariant check immediately before any wake adapter submits a prompt to a host session. */
+export function assertFixedNativeWakePrompt(prompt: string): number {
+  const match = FIXED_NATIVE_WAKE_PROMPT_RE.exec(prompt);
+  if (!match) {
+    throw new Error("refusing non-fixed native wake prompt");
   }
+  return Number.parseInt(match[1]!, 10);
 }
 
+/** Map a local receive binding to its public wake route label (`whoami` and `receive status`). */
 export function wakeRouteForBinding(binding: ReceiveBinding | null): NativeWakeRoute {
   if (!binding || binding.requested_mode !== "wake") return "none";
   if (binding.provider === "codex") return "codex-queue";
-  if (binding.provider === "claude" || binding.provider === "grok-bot") return "channel";
+  if (binding.provider === "claude") return "channel";
+  if (binding.provider === "grok-bot") return "channel";
   return "none";
 }
 
@@ -94,6 +101,15 @@ export interface NativeWakeAdapter {
     signal?: AbortSignal;
   }): Promise<{ ok: true } | { ok: false; code: string; detail: string }>;
 }
+
+export interface WakeSeatExpectation {
+  workspaceId: string;
+  principalId: string;
+}
+
+export type AuthorizedWakeBindingResult =
+  | { ok: true; profile: AgentProfile; binding: ReceiveBinding }
+  | { ok: false; code: string; detail: string };
 
 export function nativeWakeStatePath(profilePath: string, hostSessionId: string): string {
   const profile = privatePath(profilePath);
@@ -191,50 +207,141 @@ async function updateNativeWakeState(
 }
 
 /**
- * Find any receive binding for this profile when --host-session-id was not passed explicitly.
- * Used by `cswarm whoami` and `cswarm check` (whose fixed wake prompt runs `cswarm check`).
+ * Look up the exact receive binding for this profile and host session.
+ * Never scans the profile directory for sibling bindings.
  */
 export async function findProfileReceiveBinding(
   profilePath: string,
   hostSessionId?: string,
 ): Promise<ReceiveBinding | null> {
   const profile = privatePath(profilePath);
-  if (hostSessionId !== undefined) {
-    return await readReceiveBinding(profile, hostSessionId).catch(() => null);
-  }
-  const opened = await readAgentProfile(profile).catch(() => null);
-  if (opened?.host_session_id) {
-    const direct = await readReceiveBinding(profile, opened.host_session_id).catch(() => null);
-    if (direct !== null) return direct;
-  }
-  const dir = dirname(profile);
-  let entries: string[];
+  let opened: AgentProfile;
   try {
-    entries = await readdir(dir);
+    opened = await readAgentProfile(profile, hostSessionId);
   } catch {
     return null;
   }
-  let best: ReceiveBinding | null = null;
-  for (const name of entries) {
-    if (!name.startsWith("receive-") || !name.endsWith(".json")) continue;
-    const raw = await readSecureJsonFileIfPresent(join(dir, name), 32 * 1024).catch(() => null);
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw) as Partial<ReceiveBinding>;
-      if (parsed.profile !== profile || typeof parsed.host_session_id !== "string") continue;
-      const verified = await readReceiveBinding(profile, parsed.host_session_id).catch(() => null);
-      if (!verified) continue;
-      if (best === null || (verified.requested_mode === "wake" && best.requested_mode !== "wake")) {
-        best = verified;
-      }
-    } catch { /* ignore damaged sibling */ }
+  const targetHost = opened.host_session_id ?? hostSessionId;
+  if (targetHost === undefined) return null;
+  if (hostSessionId !== undefined && opened.host_session_id !== undefined && hostSessionId !== opened.host_session_id) {
+    return null;
   }
-  return best;
+  const binding = await readReceiveBinding(profile, targetHost).catch(() => null);
+  if (!binding || binding.profile !== profile || binding.host_session_id !== targetHost) {
+    return null;
+  }
+  return binding;
+}
+
+/**
+ * Live authorization check for native wake dispatch.
+ * Requires an existing private host-bound profile matching this exact seat/profile/session tuple
+ * and a receive binding for the expected provider that is still opted into `wake` mode.
+ */
+export async function resolveAuthorizedWakeBinding(options: {
+  profilePath: string;
+  hostSessionId?: string;
+  expectedProvider: ReceiveProvider;
+  expectedSeat?: WakeSeatExpectation;
+}): Promise<AuthorizedWakeBindingResult> {
+  let profile: string;
+  try {
+    profile = privatePath(options.profilePath);
+  } catch (error) {
+    return {
+      ok: false,
+      code: error instanceof AgentSetupError ? error.code : "profile_path_invalid",
+      detail: error instanceof Error ? error.message : "Invalid profile path.",
+    };
+  }
+  if (options.hostSessionId === undefined) {
+    return {
+      ok: false,
+      code: "host_session_required",
+      detail: "Native wake requires an explicit bound --host-session-id.",
+    };
+  }
+  let host: string;
+  try {
+    host = checkedHostSessionId(options.hostSessionId);
+  } catch (error) {
+    return {
+      ok: false,
+      code: error instanceof AgentSetupError ? error.code : "host_session_invalid",
+      detail: error instanceof Error ? error.message : "Invalid host session ID.",
+    };
+  }
+  let opened: AgentProfile;
+  try {
+    opened = await readAgentProfile(profile, host);
+  } catch (error) {
+    return {
+      ok: false,
+      code: error instanceof AgentSetupError ? error.code : "profile_unreadable",
+      detail: error instanceof Error ? error.message : "Profile could not be verified.",
+    };
+  }
+  if (opened.host_session_id === undefined || opened.host_session_id !== host) {
+    return {
+      ok: false,
+      code: "profile_not_host_bound",
+      detail: "Native wake requires a private host-bound profile matching this session.",
+    };
+  }
+  if (
+    options.expectedSeat !== undefined &&
+    (opened.workspace_id !== options.expectedSeat.workspaceId ||
+      opened.principal_id !== options.expectedSeat.principalId)
+  ) {
+    return {
+      ok: false,
+      code: "wake_seat_mismatch",
+      detail: "Wake profile workspace or principal does not match this listener seat.",
+    };
+  }
+  if (options.expectedProvider === "codex" && !ONBOARDING_UUID.test(host)) {
+    return {
+      ok: false,
+      code: "codex_thread_id_required",
+      detail: "Codex native wake requires a bound $CODEX_THREAD_ID UUID.",
+    };
+  }
+  const binding = await readReceiveBinding(profile, host).catch(() => null);
+  if (!binding) {
+    return {
+      ok: false,
+      code: "receive_binding_missing",
+      detail: "No receive binding exists for this profile and host session.",
+    };
+  }
+  if (binding.profile !== profile || binding.host_session_id !== host) {
+    return {
+      ok: false,
+      code: "receive_binding_mismatch",
+      detail: "Receive binding does not match this profile and host session.",
+    };
+  }
+  if (binding.provider !== options.expectedProvider) {
+    return {
+      ok: false,
+      code: "receive_provider_mismatch",
+      detail: `Receive binding belongs to provider ${binding.provider}, not ${options.expectedProvider}.`,
+    };
+  }
+  if (binding.requested_mode !== "wake") {
+    return {
+      ok: false,
+      code: "wake_opted_out",
+      detail: "This seat is no longer opted into wake mode.",
+    };
+  }
+  return { ok: true, profile: opened, binding };
 }
 
 /**
  * Called by `cswarm check` once this seat checks its inbox:
- *   1. Clears pending_batch / retry_sent_at / wake_failed_at so future arrivals can wake again.
+ *   1. Clears pending_batch / retry_sent_at / wake_failed_at so future arrivals can wake again
+ *      (preserving `last_wake_at` so the 2-minute rate floor remains enforced).
  *   2. For a codex-queue binding with an idle-emitted canary whose signal was surfaced by this
  *      check, marks wake_verified_at so `receive status` and `whoami` report wake_verified: true.
  */
@@ -248,32 +355,29 @@ export async function acknowledgeNativeWakeOnCheck(options: {
   const nowIso = new Date(nowMs).toISOString();
   const profile = privatePath(options.profilePath);
   const binding = await findProfileReceiveBinding(profile, options.hostSessionId);
-  const targetHosts = new Set<string>();
-  if (options.hostSessionId && options.hostSessionId !== "manual") {
-    targetHosts.add(checkedHostSessionId(options.hostSessionId));
-  }
-  if (binding?.host_session_id && binding.host_session_id !== "manual") {
-    targetHosts.add(binding.host_session_id);
-  }
+  const targetHost = binding?.host_session_id ??
+    (options.hostSessionId && options.hostSessionId !== "manual"
+      ? checkedHostSessionId(options.hostSessionId)
+      : null);
+  if (targetHost === null || targetHost === "manual") return;
+
   const route = wakeRouteForBinding(binding);
-  for (const host of targetHosts) {
-    const existing = await readNativeWakeState(profile, host).catch(() => null);
-    if (existing !== null) {
-      await updateNativeWakeState(profile, host, existing.route, (state) => ({
-        ...state,
-        pending_batch: null,
-        pending_sent_at: null,
-        retry_sent_at: null,
-        wake_failed_at: null,
-        last_ack_at: nowIso,
-        last_error: null,
-      })).catch(() => undefined);
-    } else if (route !== "none") {
-      await updateNativeWakeState(profile, host, route, (state) => ({
-        ...state,
-        last_ack_at: nowIso,
-      })).catch(() => undefined);
-    }
+  const existing = await readNativeWakeState(profile, targetHost).catch(() => null);
+  if (existing !== null) {
+    await updateNativeWakeState(profile, targetHost, existing.route, (state) => ({
+      ...state,
+      pending_batch: null,
+      pending_sent_at: null,
+      retry_sent_at: null,
+      wake_failed_at: null,
+      last_ack_at: nowIso,
+      last_error: null,
+    })).catch(() => undefined);
+  } else if (route !== "none") {
+    await updateNativeWakeState(profile, targetHost, route, (state) => ({
+      ...state,
+      last_ack_at: nowIso,
+    })).catch(() => undefined);
   }
 
   if (
@@ -311,6 +415,7 @@ export type NativeWakeDecision =
   | { action: "rate_limited"; dueAtMs: number }
   | { action: "pending"; batch: number }
   | { action: "wake_failed"; batch: number }
+  | { action: "binding_inactive"; code: string; detail: string }
   | { action: "error"; code: string; detail: string }
   | { action: "idle" };
 
@@ -319,21 +424,35 @@ export interface NativeWakeBridgeOptions {
   hostSessionId: string;
   cwd: string;
   adapter: NativeWakeAdapter;
+  expectedProvider?: ReceiveProvider;
+  expectedSeat?: WakeSeatExpectation;
   debounceMs?: number;
   minIntervalMs?: number;
   retryAfterMs?: number;
   now?: () => number;
 }
 
+function defaultProviderForRoute(route: Exclude<NativeWakeRoute, "none">): ReceiveProvider {
+  if (route === "codex-queue") return "codex";
+  return "claude";
+}
+
+type ReservationOutcome =
+  | { kind: "decision"; decision: NativeWakeDecision }
+  | { kind: "dispatch"; batch: number; isRetry: boolean; cwd: string };
+
 /**
- * Per-seat stateful wake scheduler enforcing debounce, rate floor, single pending wake,
- * and single 15-minute retry before failing closed to `wake_failed`.
+ * Per-seat stateful wake scheduler enforcing live binding verification, cross-process atomic
+ * reservation before dispatch, 5 s debounce, 2-minute rate floor, single pending wake, and
+ * single 15-minute retry before failing closed to `wake_failed`.
  */
 export class NativeWakeBridge {
   private readonly profilePath: string;
   private readonly hostSessionId: string;
   private readonly cwd: string;
   private readonly adapter: NativeWakeAdapter;
+  private readonly expectedProvider: ReceiveProvider;
+  private readonly expectedSeat: WakeSeatExpectation | undefined;
   private readonly debounceMs: number;
   private readonly minIntervalMs: number;
   private readonly retryAfterMs: number;
@@ -346,6 +465,8 @@ export class NativeWakeBridge {
     this.hostSessionId = checkedHostSessionId(options.hostSessionId);
     this.cwd = options.cwd;
     this.adapter = options.adapter;
+    this.expectedProvider = options.expectedProvider ?? defaultProviderForRoute(options.adapter.route);
+    this.expectedSeat = options.expectedSeat;
     this.debounceMs = options.debounceMs ?? NATIVE_WAKE_DEBOUNCE_MS;
     this.minIntervalMs = options.minIntervalMs ?? NATIVE_WAKE_MIN_INTERVAL_MS;
     this.retryAfterMs = options.retryAfterMs ?? NATIVE_WAKE_RETRY_AFTER_MS;
@@ -360,120 +481,160 @@ export class NativeWakeBridge {
     }
   }
 
-  /** Inspect state and send at most one fixed-text wake if eligible (or handle 15-min retry / failure). */
+  /**
+   * Atomically verify the live binding, reserve at most one wake slot under the shared file lock,
+   * and dispatch the fixed-text wake subprocess if reserved.
+   */
   async tick(signal?: AbortSignal): Promise<NativeWakeDecision> {
     if (this.inFlight) return { action: "idle" };
     this.inFlight = true;
     try {
-      const nowMs = this.now();
-      const nowIso = new Date(nowMs).toISOString();
-      const state =
-        (await readNativeWakeState(this.profilePath, this.hostSessionId)) ??
-        emptyNativeWakeState(this.profilePath, this.hostSessionId, this.adapter.route);
-
-      // 1. Existing unacked pending wake: enforce 1 pending wake + 1 retry after 15 min -> wake_failed.
-      if (state.pending_batch !== null && state.pending_sent_at !== null) {
-        this.arrivalQueuedAtMs = null; // Pending wake already covers fresh arrivals until cswarm check runs.
-        if (state.wake_failed_at !== null) {
-          return { action: "wake_failed", batch: state.pending_batch };
-        }
-        const sentAtMs = Date.parse(state.pending_sent_at);
-        if (state.retry_sent_at === null) {
-          if (nowMs - sentAtMs < this.retryAfterMs) {
-            return { action: "pending", batch: state.pending_batch };
+      const statePath = nativeWakeStatePath(this.profilePath, this.hostSessionId);
+      const lockName = `wake-state-${profileScopeKey(this.hostSessionId)}`;
+      const reservation = await withFileLock<ReservationOutcome>(
+        dirname(statePath),
+        lockName,
+        async () => {
+          const auth = await resolveAuthorizedWakeBinding({
+            profilePath: this.profilePath,
+            hostSessionId: this.hostSessionId,
+            expectedProvider: this.expectedProvider,
+            ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
+          });
+          if (!auth.ok) {
+            this.arrivalQueuedAtMs = null;
+            return {
+              kind: "decision",
+              decision: { action: "binding_inactive", code: auth.code, detail: auth.detail },
+            };
           }
-          return await this.dispatchWake(state, true, nowMs, nowIso, signal);
-        }
-        const retryAtMs = Date.parse(state.retry_sent_at);
-        if (nowMs - retryAtMs >= this.retryAfterMs) {
-          await updateNativeWakeState(
-            this.profilePath,
-            this.hostSessionId,
-            this.adapter.route,
-            (cur) => ({
-              ...cur,
-              wake_failed_at: cur.wake_failed_at ?? nowIso,
-            }),
-          );
-          return { action: "wake_failed", batch: state.pending_batch };
-        }
-        return { action: "pending", batch: state.pending_batch };
+
+          const nowMs = this.now();
+          const nowIso = new Date(nowMs).toISOString();
+          const raw = await readSecureJsonFileIfPresent(statePath, 16 * 1024);
+          const state =
+            (raw !== null ? parseNativeWakeState(raw, this.profilePath, this.hostSessionId) : null) ??
+            emptyNativeWakeState(this.profilePath, this.hostSessionId, this.adapter.route);
+
+          // 1. Existing unacked pending wake: enforce 1 pending wake + 1 retry after 15 min -> wake_failed.
+          if (state.pending_batch !== null && state.pending_sent_at !== null) {
+            this.arrivalQueuedAtMs = null;
+            if (state.wake_failed_at !== null) {
+              return { kind: "decision", decision: { action: "wake_failed", batch: state.pending_batch } };
+            }
+            const sentAtMs = Date.parse(state.pending_sent_at);
+            if (state.retry_sent_at === null) {
+              if (nowMs - sentAtMs < this.retryAfterMs) {
+                return { kind: "decision", decision: { action: "pending", batch: state.pending_batch } };
+              }
+              // Reserve the single retry slot BEFORE releasing the lock / running the subprocess.
+              const nextBatch = state.batch + 1;
+              const reserved: NativeWakeState = {
+                ...state,
+                route: this.adapter.route,
+                batch: nextBatch,
+                pending_batch: nextBatch,
+                pending_sent_at: state.pending_sent_at,
+                retry_sent_at: nowIso,
+                last_wake_at: nowIso,
+                wake_failed_at: null,
+                last_error: null,
+              };
+              await writeSecureJsonFile(statePath, JSON.stringify(reserved));
+              return { kind: "dispatch", batch: nextBatch, isRetry: true, cwd: auth.binding.cwd };
+            }
+            const retryAtMs = Date.parse(state.retry_sent_at);
+            if (nowMs - retryAtMs >= this.retryAfterMs) {
+              const failed: NativeWakeState = {
+                ...state,
+                wake_failed_at: state.wake_failed_at ?? nowIso,
+              };
+              await writeSecureJsonFile(statePath, JSON.stringify(failed));
+              return { kind: "decision", decision: { action: "wake_failed", batch: state.pending_batch } };
+            }
+            return { kind: "decision", decision: { action: "pending", batch: state.pending_batch } };
+          }
+
+          // 2. No pending wake: only wake when something actually arrived.
+          if (this.arrivalQueuedAtMs === null) {
+            return { kind: "decision", decision: { action: "idle" } };
+          }
+
+          // 3. 5 s debounce coalescing bursts into one wake.
+          const debounceDue = this.arrivalQueuedAtMs + this.debounceMs;
+          if (nowMs < debounceDue) {
+            return { kind: "decision", decision: { action: "debouncing", dueAtMs: debounceDue } };
+          }
+
+          // 4. Per-seat floor: at most one wake every 2 minutes.
+          if (state.last_wake_at !== null) {
+            const lastWakeMs = Date.parse(state.last_wake_at);
+            const rateDue = lastWakeMs + this.minIntervalMs;
+            if (Number.isFinite(lastWakeMs) && nowMs < rateDue) {
+              return { kind: "decision", decision: { action: "rate_limited", dueAtMs: rateDue } };
+            }
+          }
+
+          // Reserve the initial wake slot and charge the rate floor BEFORE subprocess execution.
+          const nextBatch = state.batch + 1;
+          this.arrivalQueuedAtMs = null;
+          const reserved: NativeWakeState = {
+            ...state,
+            route: this.adapter.route,
+            batch: nextBatch,
+            pending_batch: nextBatch,
+            pending_sent_at: nowIso,
+            retry_sent_at: null,
+            last_wake_at: nowIso,
+            wake_failed_at: null,
+            last_error: null,
+          };
+          await writeSecureJsonFile(statePath, JSON.stringify(reserved));
+          return { kind: "dispatch", batch: nextBatch, isRetry: false, cwd: auth.binding.cwd };
+        },
+        { timeoutMs: 2_000 },
+      );
+
+      if (reservation.kind === "decision") {
+        return reservation.decision;
       }
 
-      // 2. No pending wake: only wake when something actually arrived.
-      if (this.arrivalQueuedAtMs === null) {
-        return { action: "idle" };
+      const prompt = formatNativeWakePrompt(reservation.batch);
+      assertFixedNativeWakePrompt(prompt);
+      let outcome: { ok: true } | { ok: false; code: string; detail: string };
+      try {
+        outcome = await this.adapter.sendWake({
+          hostSessionId: this.hostSessionId,
+          prompt,
+          batch: reservation.batch,
+          cwd: reservation.cwd || this.cwd,
+          ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        outcome = {
+          ok: false,
+          code: "wake_dispatch_ambiguous",
+          detail: error instanceof Error ? error.message : "Wake adapter threw unexpectedly.",
+        };
       }
-
-      // 3. 5 s debounce coalescing bursts into one wake.
-      const debounceDue = this.arrivalQueuedAtMs + this.debounceMs;
-      if (nowMs < debounceDue) {
-        return { action: "debouncing", dueAtMs: debounceDue };
+      if (!outcome.ok) {
+        // Keep the charged reservation (pending_batch, retry_sent_at, last_wake_at) intact so
+        // refused or ambiguous subprocess results cannot bypass the rate floor or single-retry cap.
+        await updateNativeWakeState(
+          this.profilePath,
+          this.hostSessionId,
+          this.adapter.route,
+          (cur) => ({
+            ...cur,
+            route: this.adapter.route,
+            last_error: `${outcome.code}: ${outcome.detail}`.slice(0, 240),
+          }),
+        );
+        return { action: "error", code: outcome.code, detail: outcome.detail };
       }
-
-      // 4. Per-seat floor: at most one wake every 2 minutes.
-      if (state.last_wake_at !== null) {
-        const lastWakeMs = Date.parse(state.last_wake_at);
-        const rateDue = lastWakeMs + this.minIntervalMs;
-        if (Number.isFinite(lastWakeMs) && nowMs < rateDue) {
-          return { action: "rate_limited", dueAtMs: rateDue };
-        }
-      }
-
-      return await this.dispatchWake(state, false, nowMs, nowIso, signal);
+      return { action: "sent", batch: reservation.batch, retry: reservation.isRetry };
     } finally {
       this.inFlight = false;
     }
-  }
-
-  private async dispatchWake(
-    state: NativeWakeState,
-    isRetry: boolean,
-    nowMs: number,
-    nowIso: string,
-    signal?: AbortSignal,
-  ): Promise<NativeWakeDecision> {
-    const nextBatch = state.batch + 1;
-    const prompt = formatNativeWakePrompt(nextBatch);
-    assertFixedNativeWakePrompt(prompt);
-    const outcome = await this.adapter.sendWake({
-      hostSessionId: this.hostSessionId,
-      prompt,
-      batch: nextBatch,
-      cwd: this.cwd,
-      ...(signal ? { signal } : {}),
-    });
-    if (!outcome.ok) {
-      await updateNativeWakeState(
-        this.profilePath,
-        this.hostSessionId,
-        this.adapter.route,
-        (cur) => ({
-          ...cur,
-          route: this.adapter.route,
-          last_error: `${outcome.code}: ${outcome.detail}`.slice(0, 240),
-        }),
-      );
-      return { action: "error", code: outcome.code, detail: outcome.detail };
-    }
-    this.arrivalQueuedAtMs = null;
-    const sentIso = new Date(Math.max(nowMs, this.now())).toISOString();
-    await updateNativeWakeState(
-      this.profilePath,
-      this.hostSessionId,
-      this.adapter.route,
-      (cur) => ({
-        ...cur,
-        route: this.adapter.route,
-        batch: nextBatch,
-        pending_batch: nextBatch,
-        pending_sent_at: isRetry ? (cur.pending_sent_at ?? sentIso) : sentIso,
-        retry_sent_at: isRetry ? sentIso : null,
-        last_wake_at: sentIso,
-        wake_failed_at: null,
-        last_error: null,
-      }),
-    );
-    return { action: "sent", batch: nextBatch, retry: isRetry };
   }
 }

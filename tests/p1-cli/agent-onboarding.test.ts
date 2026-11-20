@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
-import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
+import { AgentSetupError, parseAgentConnection, readAgentProfile, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { AGENT_CHECK_ACK_RETRY_BASE_MS, AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_DIRECT_TIMEOUT_MS, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, formatTurnHookOutput, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus, recordStopDrainContinuation } from "../../src/cloud/agent-receive.js";
@@ -541,14 +541,18 @@ test("Claude hook verifies only the configured session; turn-mode Stop drains on
   assert.equal((await readReceiveBinding(profilePath, "session-one"))!.idle, true);
 });
 
-test("Claude and Codex wake setup; Codex requires a thread UUID and instructions cannot claim wake", async () => {
+test("Claude and Codex wake setup; Codex requires a host-bound thread UUID and instructions cannot claim wake", async () => {
   const { profilePath } = await setup();
   const cwd = await mkdtemp(join(root, "claude-default-wake-"));
   const common = { profilePath, mode: "wake", hostSessionId: "session-one", cwd, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
   await assert.rejects(configureAgentReceive({ ...common, provider: "instructions" }), { code: "wake_host_unsupported" });
   await assert.rejects(configureAgentReceive({ ...common, provider: "codex" }), { code: "codex_thread_id_required" });
   const codexThread = "11111111-2222-4333-8444-555555555555";
-  const codex = await configureAgentReceive({ ...common, hostSessionId: codexThread, provider: "codex" });
+  // Unbound profile must be refused for Codex wake even with a valid UUID.
+  await assert.rejects(configureAgentReceive({ ...common, hostSessionId: codexThread, provider: "codex" }), { code: "profile_not_host_bound" });
+  const boundCodexProfile = join(await mkdtemp(join(root, "codex-bound-profile-")), "profile.json");
+  await saveAgentProfile(boundCodexProfile, parseAgentConnection(JSON.stringify(connection())), "TestWS", codexThread);
+  const codex = await configureAgentReceive({ ...common, profilePath: boundCodexProfile, hostSessionId: codexThread, provider: "codex" });
   assert.equal(codex.wake_route, "codex-queue");
   assert.equal(codex.wake_verified, false);
   assert.match(String(codex.host_step), /cswarm receive serve/);

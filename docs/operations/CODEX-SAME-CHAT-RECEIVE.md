@@ -25,9 +25,15 @@ codex queue --thread <CODEX_THREAD_ID> --message "New CommonSwarm messages (batc
 1. **Fixed text only:** queued text arrives in Codex with user trust, so the bridge ONLY sends
    `New CommonSwarm messages (batch <n>): run cswarm check` (enforced by regex right before
    `execFile`). Message bodies, senders, and subjects are never included in the queued prompt.
-2. **Bound session only:** `--host-session-id` must be the seat's `$CODEX_THREAD_ID` UUID recorded
-   at `cswarm receive configure` time. The bridge never starts a new session or headless worker.
-3. **Cost controls (`src/cloud/native-wake.ts`):**
+2. **Bound session only:** the profile must be host-bound to this seat's `$CODEX_THREAD_ID` UUID
+   (`cswarm setup --host-session-id "$CODEX_THREAD_ID"`), and every wake dispatch re-verifies the
+   live private profile, seat tuple, and opted-in `wake` mode under the shared wake-state lock
+   immediately before calling `codex queue`. Switching to `--mode turn` stops waking immediately.
+   The bridge never starts a new session or headless worker.
+3. **Cost controls & shared reservation (`src/cloud/native-wake.ts`):**
+   - `cswarm listen` and `cswarm receive serve` share one file-locked reservation (`wake-state-<scope>.json`),
+     charging attempts and the 2-minute rate floor BEFORE running `codex queue` so concurrent
+     paths cannot double-wake and refused/ambiguous results cannot spin.
    - Wakes only when a fresh arrival is detected (never on a timer).
    - 5-second debounce coalescing bursts into one wake.
    - At most one wake every 2 minutes per seat.
@@ -40,9 +46,10 @@ codex queue --thread <CODEX_THREAD_ID> --message "New CommonSwarm messages (batc
 
 ## Setup & verification
 
-1. Inside the interactive Codex session, bind receive wake mode to `$CODEX_THREAD_ID`:
+1. Inside the interactive Codex session, bind the seat profile and receive wake mode to `$CODEX_THREAD_ID`:
 
    ```sh
+   cswarm setup --connection-file /path/to/connection.json --profile /path/to/profile.json --host-session-id "$CODEX_THREAD_ID"
    cswarm receive configure --profile /path/to/profile.json --mode wake --provider codex --host-session-id "$CODEX_THREAD_ID"
    ```
 

@@ -90,6 +90,7 @@ import { spawnSync } from "node:child_process";
 import {
   findProfileReceiveBinding,
   NativeWakeBridge,
+  resolveAuthorizedWakeBinding,
   wakeRouteForBinding,
   type NativeWakeRoute,
 } from "./cloud/native-wake.js";
@@ -8439,16 +8440,28 @@ async function runConfiguredListener(options: {
   const deferOverChars = options.deferOverChars ?? null;
   const pendingMainQueue = new FilePendingMainQueue(paths.instanceDirectory);
   let codexWakeBridge: NativeWakeBridge | null = null;
-  if (options.provider === "codex" && options.profilePath !== undefined) {
-    const wakeBinding = await findProfileReceiveBinding(
-      options.profilePath,
-      options.hostSessionId,
-    ).catch(() => null);
-    if (wakeBinding?.provider === "codex" && wakeBinding.requested_mode === "wake") {
+  if (
+    options.provider === "codex" &&
+    options.profilePath !== undefined &&
+    options.hostSessionId !== undefined
+  ) {
+    const expectedSeat = {
+      workspaceId: options.workspaceId,
+      principalId: options.principalId,
+    };
+    const auth = await resolveAuthorizedWakeBinding({
+      profilePath: options.profilePath,
+      hostSessionId: options.hostSessionId,
+      expectedProvider: "codex",
+      expectedSeat,
+    });
+    if (auth.ok) {
       codexWakeBridge = new NativeWakeBridge({
         profilePath: options.profilePath,
-        hostSessionId: wakeBinding.host_session_id,
-        cwd: wakeBinding.cwd,
+        hostSessionId: auth.binding.host_session_id,
+        cwd: auth.binding.cwd,
+        expectedProvider: "codex",
+        expectedSeat,
         adapter: new CodexQueueAdapter({
           ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
         }),
@@ -8741,7 +8754,9 @@ async function runListenStart(args: Arguments): Promise<void> {
         : {}),
       ...(stateDirectory ? { stateDirectory } : {}),
       ...(args.expandedProfilePath ? { profilePath: args.expandedProfilePath } : {}),
-      ...(args.optional("host-session-id") ? { hostSessionId: args.optional("host-session-id") } : {}),
+      ...((args.expandedProfileHostSessionId ?? args.optional("host-session-id"))
+        ? { hostSessionId: args.expandedProfileHostSessionId ?? args.optional("host-session-id") }
+        : {}),
     });
   } else {
     const entrypoint = process.argv[1];

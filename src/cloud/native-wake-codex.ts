@@ -23,7 +23,6 @@ import {
   profileScopeKey,
   profileSessionContext,
   profileTarget,
-  readAgentProfile,
 } from "./agent-profile.js";
 import {
   readReceiveBinding,
@@ -34,6 +33,7 @@ import { ThinCommandClient } from "./command-client.js";
 import {
   assertFixedNativeWakePrompt,
   NativeWakeBridge,
+  resolveAuthorizedWakeBinding,
   type NativeWakeAdapter,
 } from "./native-wake.js";
 import {
@@ -190,7 +190,6 @@ export interface ServeCodexWakeBridgeOptions {
  */
 export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions): Promise<void> {
   const profilePath = privatePath(options.profilePath);
-  const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const host = options.hostSessionId;
   if (!ONBOARDING_UUID.test(host)) {
     throw new AgentSetupError(
@@ -198,13 +197,16 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
       "Codex wake requires this session's $CODEX_THREAD_ID UUID as --host-session-id.",
     );
   }
-  const initial = await readReceiveBinding(profilePath, host);
-  if (!initial || initial.provider !== "codex" || initial.requested_mode !== "wake") {
-    throw new AgentSetupError(
-      "channel_not_configured",
-      "Configure Codex wake mode for this session first.",
-    );
+  const initialAuth = await resolveAuthorizedWakeBinding({
+    profilePath,
+    hostSessionId: host,
+    expectedProvider: "codex",
+  });
+  if (!initialAuth.ok) {
+    throw new AgentSetupError(initialAuth.code, initialAuth.detail);
   }
+  const profile = initialAuth.profile;
+  const initial = initialAuth.binding;
   if (receiveStatus(initial).channel_running) {
     throw new AgentSetupError(
       "channel_already_running",
@@ -266,6 +268,11 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
     hostSessionId: host,
     cwd: initial.cwd,
     adapter,
+    expectedProvider: "codex",
+    expectedSeat: {
+      workspaceId: profile.workspace_id,
+      principalId: profile.principal_id,
+    },
     ...(options.debounceMs !== undefined ? { debounceMs: options.debounceMs } : {}),
     ...(options.minIntervalMs !== undefined ? { minIntervalMs: options.minIntervalMs } : {}),
     ...(options.retryAfterMs !== undefined ? { retryAfterMs: options.retryAfterMs } : {}),
@@ -352,10 +359,19 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
           "The managed session stopped. Renew or restart that same session before enabling wake again.",
         );
       }
-      const binding = await readReceiveBinding(profilePath, host);
-      if (!binding || binding.requested_mode !== "wake" || binding.channel_instance_id !== runtimeId) {
+      const liveAuth = await resolveAuthorizedWakeBinding({
+        profilePath,
+        hostSessionId: host,
+        expectedProvider: "codex",
+        expectedSeat: {
+          workspaceId: profile.workspace_id,
+          principalId: profile.principal_id,
+        },
+      });
+      if (!liveAuth.ok || liveAuth.binding.channel_instance_id !== runtimeId) {
         break;
       }
+      const binding = liveAuth.binding;
 
       try {
         const token = await credential.bearer();
@@ -435,6 +451,9 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
         }
 
         const decision = await bridge.tick(abort.signal);
+        if (decision.action === "binding_inactive") {
+          break;
+        }
         if (decision.action === "error" && decision.code !== lastErrorCode) {
           process.stderr.write(`CommonSwarm codex wake: ${decision.code}: ${decision.detail}\n`);
           lastErrorCode = decision.code;
