@@ -565,13 +565,45 @@ test("C1e: @Agent mentions typed in a group-DM body route into recipients withou
 
   // 8) Two live agents sharing a name inside the SAME group DM refuse with 400 mention_ambiguous
   //    naming only those two in-group IDs; explicit `to` disambiguates cleanly.
+  //    An outside workspace admin/owner reading swarm_read.audit_log sees only a general audit reason
+  //    (never mention_ambiguous or any group-private name/ID).
   const dupGroup = await opened(annBot.token, [agent(inGroupShared), agent(outGroupShared)], { new_group: true });
   const dupGroupId = String(dupGroup.conversation_id);
+  const [{ mark: auditBefore }] = await sql<{ mark: string }[]>`
+    SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`;
   const ambiguous = await send(annBot.token, note({ conversation_id: dupGroupId, body: `Ping @${sharedName}` }));
   assert.equal(ambiguous.status, 400);
   assert.equal(ambiguous.body.error, "mention_ambiguous");
   assert.ok(String(ambiguous.body.message).includes(inGroupShared.id));
   assert.ok(String(ambiguous.body.message).includes(outGroupShared.id));
+  for (const outsideAuditor of [
+    { label: "outside admin (dee)", id: dee.id },
+    { label: "outside owner (ann)", id: ann.id },
+  ]) {
+    const auditRows = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: outsideAuditor.id, role: "authenticated" })}, true)`;
+      await tx.unsafe("SET LOCAL ROLE authenticated");
+      return await tx<{ outcome: string; reason: string | null; detail: string | null }[]>`
+        SELECT outcome, reason, detail FROM swarm_read.audit_log
+        WHERE workspace_id = ${workspace}::uuid
+          AND command_kind = 'post_signal'
+          AND actor_agent_principal = ${annBot.id}::uuid
+          AND audit_id > ${auditBefore}::bigint
+        ORDER BY audit_id`;
+    });
+    assert.equal(auditRows.length, 1, `${outsideAuditor.label} sees one refusal audit row`);
+    assert.deepEqual(
+      { outcome: auditRows[0]!.outcome, reason: auditRows[0]!.reason, detail: auditRows[0]!.detail },
+      { outcome: "domain", reason: "invalid_request", detail: null },
+      `${outsideAuditor.label} sees only general audit reason without group-ambiguity disclosure`,
+    );
+    const serialized = JSON.stringify(auditRows);
+    assert.ok(!serialized.includes("mention_ambiguous"));
+    assert.ok(!serialized.includes(sharedName));
+    assert.ok(!serialized.includes(dupGroupId));
+    assert.ok(!serialized.includes(inGroupShared.id));
+    assert.ok(!serialized.includes(outGroupShared.id));
+  }
   const byExplicitTo = await posted(annBot.token, {
     conversation_id: dupGroupId,
     to: [agent(outGroupShared)],

@@ -399,12 +399,14 @@ export async function routeConversationPost(
           explicitTo: named,
         });
         if (!resolved.ok) {
+          // Keep the detailed mention_ambiguous error for the posting member only; write a general
+          // audit reason so owners/admins outside a private group cannot infer same-name peer structure.
           return {
             ok: false,
             status: 400,
             error: resolved.error,
             message: resolved.message,
-            reason: resolved.error,
+            reason: "invalid_request",
           };
         }
         if (resolved.agents.length > 0) {
