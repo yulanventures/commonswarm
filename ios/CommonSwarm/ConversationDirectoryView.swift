@@ -200,13 +200,12 @@ struct DirectoryView: View {
             Button("Mark as read") { start(.markRead(through: through), row) }
         }
         Button(row.starred == true ? "Unstar" : "Star") { start(.star(row.starred != true), row) }
-        Menu("Notifications") {
-            ForEach(["everything", "mentions", "muted"], id: \.self) { level in
-                Button { start(.notify(level), row) } label: {
-                    let name = level == "muted" ? "Mute" : level == "mentions" ? "Mentions only" : "All messages"
-                    if (row.notify_level ?? "everything") == level { Label(name, systemImage: "checkmark") }
-                    else { Text(name) }
-                }
+        let muted = row.notify_level == "muted"
+        Button(muted ? "Unmute" : "Mute") { start(.notify(muted ? "everything" : "muted"), row) }
+        if !muted {
+            let mentionsOnly = row.notify_level == "mentions"
+            Button(mentionsOnly ? "Notify for all messages" : "Notify for mentions only") {
+                start(.notify(mentionsOnly ? "everything" : "mentions"), row)
             }
         }
         if row.kind.canLeave {
