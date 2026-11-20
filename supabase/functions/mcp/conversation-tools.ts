@@ -279,9 +279,6 @@ export function buildDmPostCommand(
     to_agent_principal_id: null,
     about: null,
     in_reply_to: null,
-    channel_id: null,
-    thread_root_id: null,
-    broadcast_to_channel: false,
   };
 }
 
@@ -305,8 +302,6 @@ export function buildThreadPostCommand(
     to_agent_principal_id: null,
     about: null,
     in_reply_to: null,
-    channel_id: null,
-    broadcast_to_channel: false,
     ...(mentions.length > 0 ? { mentions } : {}),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   };

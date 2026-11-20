@@ -505,9 +505,6 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             to_agent_principal_id: null,
             about: null,
             in_reply_to: null,
-            channel_id: null,
-            thread_root_id: null,
-            broadcast_to_channel: false,
           },
           { fetcher: auth.fetcher, signal: extra.signal, commandId: args.request_id },
         );
@@ -598,8 +595,6 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             to_agent_principal_id: null,
             about: null,
             in_reply_to: null,
-            channel_id: null,
-            broadcast_to_channel: false,
             ...(resolvedMentions.length > 0 ? { mentions: resolvedMentions } : {}),
           },
           { fetcher: auth.fetcher, signal: extra.signal, commandId: args.request_id },

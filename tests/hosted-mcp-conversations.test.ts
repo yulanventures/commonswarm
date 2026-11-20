@@ -226,13 +226,18 @@ test("stdio conversation fitters respect MCP_RESULT_MAX_BYTES and dmOpenCommandI
   }
   assert.equal(dmOpenCommandId(longReq), dmOpenStdioCommandId(longReq));
 
-  // Command builders + stable error copy.
+  // Command builders + stable error copy (must omit forbidden conversation_id keys like channel_id/broadcast_to_channel).
   const dmCmd = buildDmPostCommand(CONV, { body: "Hi", kind: "ask" });
   assert.equal(dmCmd.conversation_id, CONV);
   assert.equal(dmCmd.signal_kind, "ask");
+  assert.equal(Object.hasOwn(dmCmd, "broadcast_to_channel"), false);
+  assert.equal(Object.hasOwn(dmCmd, "channel_id"), false);
+  assert.equal(Object.hasOwn(dmCmd, "thread_root_id"), false);
   const threadCmd = buildThreadPostCommand({ conversation_id: CONV, thread_root_id: ROOT, body: "Done" });
   assert.equal(threadCmd.conversation_id, CONV);
   assert.equal(threadCmd.thread_root_id, ROOT);
+  assert.equal(Object.hasOwn(threadCmd, "broadcast_to_channel"), false);
+  assert.equal(Object.hasOwn(threadCmd, "channel_id"), false);
 
   const err404 = hostedToolError(new HostedToolFailure("conversation_not_found"), "conversation_read");
   assert.equal(err404.error, "conversation_not_found");

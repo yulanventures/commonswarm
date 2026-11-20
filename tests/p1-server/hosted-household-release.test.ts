@@ -110,7 +110,7 @@ async function rpc(base: string, token: string, secret: string, method: string, 
 }
 function output(json: Rpc, secret: string): Record<string, unknown> {
   const text = json.result?.content?.[0]?.text ?? "";
-  assert.equal(text.indexOf(secret), -1); assert.notEqual(json.result?.isError, true);
+  assert.equal(text.indexOf(secret), -1); assert.notEqual(json.result?.isError, true, text);
   return JSON.parse(text) as Record<string, unknown>;
 }
 
