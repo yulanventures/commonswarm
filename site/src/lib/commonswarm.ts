@@ -1511,10 +1511,15 @@ function requestDeadline(): RequestDeadline {
 async function readWithDeadline<T>(
   operation: string,
   request: (signal: AbortSignal) => PromiseLike<T>,
+  callerSignal?: AbortSignal,
 ): Promise<T> {
+  if (callerSignal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
   const deadline = requestDeadline();
+  const signal = callerSignal ? AbortSignal.any([deadline.controller.signal, callerSignal]) : deadline.controller.signal;
   try {
-    const result = await request(deadline.controller.signal);
+    const result = await request(signal);
     if (deadline.controller.signal.aborted) {
       throw new BrowserReadTimedOut(operation);
     }
@@ -1527,6 +1532,34 @@ async function readWithDeadline<T>(
   } finally {
     deadline.clear();
   }
+}
+
+function resolvePinnedReadClient(
+  pinned?: PinnedAccountContext | null,
+  workspaceId?: string,
+  requireWorkspaceMatch = false,
+): { api: SupabaseClient; ctx: PinnedAccountContext | null; checkCurrent: () => void } {
+  const isCurrent = (ctx: PinnedAccountContext): boolean =>
+    requireWorkspaceMatch && workspaceId ? ctx.isCurrent(workspaceId) : ctx.isCurrent();
+  if (pinned) {
+    const checkCurrent = (): void => {
+      if (!isCurrent(pinned)) throw new AuthRecoveryRequired();
+    };
+    checkCurrent();
+    return { api: pinned.runtime.client, ctx: pinned, checkCurrent };
+  }
+  if (isMultiAccountEnabled()) {
+    const ctx = pinAccountContext(requireWorkspaceMatch && workspaceId ? { workspaceId } : undefined);
+    if (!ctx) throw new AuthRecoveryRequired();
+    const checkCurrent = (): void => {
+      if (!isCurrent(ctx)) throw new AuthRecoveryRequired();
+    };
+    checkCurrent();
+    return { api: ctx.runtime.client, ctx, checkCurrent };
+  }
+  const api = client();
+  if (!api) throw new NoDeployment();
+  return { api, ctx: null, checkCurrent: () => {} };
 }
 
 /**
@@ -1544,8 +1577,16 @@ export async function postCommand(
   command: Record<string, unknown>,
   extra: Record<string, unknown> = {},
   unknownOutcome?: string,
-  pinnedOrOptions?: PinnedAccountContext | { pinned?: PinnedAccountContext | null; isAlive?: () => boolean; accountWideWorkspace?: boolean } | null,
-  options?: { accountWideWorkspace?: boolean; isAlive?: () => boolean },
+  pinnedOrOptions?:
+    | PinnedAccountContext
+    | {
+        pinned?: PinnedAccountContext | null;
+        isAlive?: () => boolean;
+        signal?: AbortSignal;
+        accountWideWorkspace?: boolean;
+      }
+    | null,
+  options?: { accountWideWorkspace?: boolean; isAlive?: () => boolean; signal?: AbortSignal },
 ): Promise<CommandResult> {
   const d = deployment();
   if (!d) throw new NoDeployment();
@@ -1554,11 +1595,19 @@ export async function postCommand(
   const isAlive =
     options?.isAlive ??
     (pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.isAlive : undefined);
+  const signal =
+    options?.signal ??
+    (pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.signal : undefined);
   const accountWideWorkspace =
     options?.accountWideWorkspace ??
     (pinnedOrOptions && !("runtime" in pinnedOrOptions) ? pinnedOrOptions.accountWideWorkspace : undefined);
-  if (isAlive && !isAlive()) {
-    return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+  const isCancelled = (): boolean => Boolean((isAlive && !isAlive()) || signal?.aborted);
+  const retiredResult = (): CommandResult => ({
+    status: 0,
+    body: { error: "operation_retired", message: "Action cancelled." },
+  });
+  if (isCancelled()) {
+    return retiredResult();
   }
 
   if (isMultiAccountEnabled()) {
@@ -1591,8 +1640,11 @@ export async function postCommand(
         expectedDeployment: d,
         clientVersion: WEB_CLIENT_VERSION,
         extra,
+        isAlive,
+        signal,
       });
     } catch (error) {
+      if (isCancelled()) return retiredResult();
       if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
       if (
         error instanceof MultiAccountAuthRecoveryRequired ||
@@ -1614,10 +1666,11 @@ export async function postCommand(
   });
   let credential = session;
   const deadline = requestDeadline();
+  const fetchSignal = signal ? AbortSignal.any([deadline.controller.signal, signal]) : deadline.controller.signal;
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (isAlive && !isAlive()) {
-        return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+      if (isCancelled()) {
+        return retiredResult();
       }
       const response = await fetch(`${d.url}/functions/v1/command`, {
         method: "POST",
@@ -1627,9 +1680,12 @@ export async function postCommand(
           "content-type": "application/json",
         },
         body: wireBody,
-        signal: deadline.controller.signal,
+        signal: fetchSignal,
       });
       const text = await response.text();
+      if (isCancelled()) {
+        return retiredResult();
+      }
       let body: Record<string, unknown> = {};
       try {
         body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
@@ -1637,14 +1693,14 @@ export async function postCommand(
         body = { error: "unreadable_response" };
       }
       if (response.status === 401 && body.error === "unauthenticated") {
-        if (isAlive && !isAlive()) {
-          return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+        if (isCancelled()) {
+          return retiredResult();
         }
         const c = client();
         if (!c || attempt !== 0) throw new AuthRecoveryRequired();
         const recovered = await boundedAuth(c.auth.getSession());
-        if (isAlive && !isAlive()) {
-          return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+        if (isCancelled()) {
+          return retiredResult();
         }
         if (recovered.error) {
           if (isAuthSessionMissingError(recovered.error) || terminalRefreshCodes.has(recovered.error.code ?? "")) {
@@ -1661,8 +1717,8 @@ export async function postCommand(
           // refreshSession() reads the CURRENT token under the SDK lock; never
           // pass the rejected caller's possibly superseded refresh token.
           const refreshed = await boundedAuth(c.auth.refreshSession());
-          if (isAlive && !isAlive()) {
-            return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+          if (isCancelled()) {
+            return retiredResult();
           }
           if (refreshed.error) {
             if (isAuthSessionMissingError(refreshed.error) ||
@@ -1685,6 +1741,7 @@ export async function postCommand(
     }
     throw new AuthRecoveryRequired();
   } catch (error) {
+    if (isCancelled()) return retiredResult();
     if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
     if (unknownOutcome) throw new CommandOutcomeUnknown(unknownOutcome);
     // Only create_workspace may say a workspace might have been created. Every other command gets
@@ -3931,15 +3988,16 @@ export interface SignalLocation {
 export async function signalLocations(
   workspaceId: string,
   signalIds: readonly string[],
+  pinned?: PinnedAccountContext | null,
 ): Promise<Map<string, SignalLocation>> {
   const unique = [...new Set(signalIds.filter(Boolean))];
   const out = new Map<string, SignalLocation>();
   if (!unique.length) return out;
-  const c = client();
-  if (!c) throw new NoDeployment();
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
   const readBatch = async (ids: readonly string[]) => {
     const rows: Array<Record<string, unknown>> = [];
     for (let offset = 0; offset < ids.length; offset += 50) {
+      checkCurrent();
       const chunk = ids.slice(offset, offset + 50);
       const { data, error } = await readWithDeadline(
         "signal locations",
@@ -3952,6 +4010,7 @@ export async function signalLocations(
             .in("id", chunk)
             .abortSignal(signal),
       );
+      checkCurrent();
       if (error) throw new Error(error.message);
       rows.push(...((data ?? []) as Array<Record<string, unknown>>));
     }
@@ -3997,11 +4056,11 @@ export async function directMessages(
   viewerId: string,
   partner: DirectPartner,
   limit = 50,
+  pinned?: PinnedAccountContext | null,
 ): Promise<Signal[]> {
   const conversation = directConversationFilter(viewerId, partner);
   if (conversation === null) return [];
-  const c = client();
-  if (!c) throw new NoDeployment();
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const { data, error } = await readWithDeadline(
     "direct messages",
     (signal) =>
@@ -4017,6 +4076,7 @@ export async function directMessages(
         .limit(limit)
         .abortSignal(signal),
   );
+  checkCurrent();
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => browserSignalFromRow(row as unknown as Record<string, unknown>));
 }
@@ -4032,9 +4092,9 @@ export async function directMessages(
  */
 export async function workspaceChannels(
   workspaceId: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<WorkspaceChannel[]> {
-  const c = client();
-  if (!c) throw new NoDeployment();
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
   const { data, error } = await readWithDeadline(
     "workspace channels",
     (signal) =>
@@ -4048,6 +4108,7 @@ export async function workspaceChannels(
         .order("slug", { ascending: true })
         .abortSignal(signal),
   );
+  checkCurrent();
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => browserChannelFromRow(row as unknown as Record<string, unknown>));
 }
@@ -4251,12 +4312,15 @@ export async function setWorkspaceChannelPolicy(session: Session, commandId: str
 }
 
 /** One workspace's channel creation policy, read again. `undefined` when the workspace is not readable. */
-export async function workspaceChannelPolicy(workspaceId: string): Promise<ChannelCreationPolicy | null | undefined> {
-  const c = client();
-  if (!c) throw new NoDeployment();
+export async function workspaceChannelPolicy(
+  workspaceId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<ChannelCreationPolicy | null | undefined> {
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
   const { data, error } = await readWithDeadline("the workspace", signal => c
     .schema("swarm_read").from("workspaces").select("*")
     .eq("workspace_id", workspaceId).limit(1).abortSignal(signal));
+  checkCurrent();
   if (error) throw new Error(error.message);
   const row = (data ?? [])[0];
   return row ? parseChannelCreationPolicy(row.channel_creation_policy) : undefined;
@@ -4296,13 +4360,17 @@ export async function setChannelLead(
  * The agents admitted to one private channel, read now. Members of the workspace read its private
  * channels' members only when they can read the channel.
  */
-export async function channelAgentMemberIds(workspaceId: string, channelId: string): Promise<string[]> {
-  const c = client();
-  if (!c) throw new NoDeployment();
+export async function channelAgentMemberIds(
+  workspaceId: string,
+  channelId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<string[]> {
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const { data, error } = await readWithDeadline("the channel's members", signal => c
     .schema("swarm_read").from("channel_members").select("kind,id")
     .eq("workspace_id", workspaceId).eq("channel_id", channelId).eq("kind", "agent")
     .limit(1000).abortSignal(signal));
+  checkCurrent();
   if (error) throw new Error(error.message);
   return (data ?? []).flatMap(row => typeof row.id === "string" && row.id ? [row.id] : []);
 }
@@ -4322,9 +4390,9 @@ export async function unarchiveChannel(
 export async function browserDeliveryReceipts(
   workspaceId: string,
   signalId: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<BrowserDeliveryReceiptResult> {
-  const c = client();
-  if (!c) throw new NoDeployment();
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const { data, error } = await readWithDeadline(
     "message delivery receipts",
     (signal) =>
@@ -4336,6 +4404,7 @@ export async function browserDeliveryReceipts(
         })
         .abortSignal(signal),
   );
+  checkCurrent();
   if (error) throw new Error(error.message);
   if (data === null) return { addressed: null, receipts: [] };
   if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -4527,11 +4596,11 @@ export interface Organization {
   name: string;
   role: "owner" | "admin" | "member" | "guest";
 }
-export async function myOrganizations(): Promise<Organization[]> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+export async function myOrganizations(pinned?: PinnedAccountContext | null): Promise<Organization[]> {
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, undefined, false);
   const organizations: Organization[] = [];
   for (let offset = 0;; offset += 50) {
+    checkCurrent();
     const { data, error } = await readWithDeadline(
       "your organizations",
       (signal) =>
@@ -4539,6 +4608,7 @@ export async function myOrganizations(): Promise<Organization[]> {
           .select("id,display_name,role").order("display_name").order("id")
           .range(offset, offset + 49).abortSignal(signal),
     );
+    checkCurrent();
     if (error) throw new Error(error.message);
     const page = data ?? [];
     organizations.push(
@@ -4601,16 +4671,17 @@ export async function mintAgentReconnectCode(
 }
 
 /** Owner-filtered account directory; no agent credentials or workspace selection required. */
-export async function myAccountAgents(): Promise<AccountAgent[]> {
-  const c = client();
-  if (!c) throw new NoDeployment();
+export async function myAccountAgents(pinned?: PinnedAccountContext | null): Promise<AccountAgent[]> {
+  const { api: c, checkCurrent } = resolvePinnedReadClient(pinned, undefined, false);
   const agents: AccountAgent[] = [];
   const pageSize = 50;
   for (let offset = 0; ; offset += pageSize) {
+    checkCurrent();
     const { data, error } = await readWithDeadline("your agents", signal => c
       .schema("swarm_read").from("account_agents")
       .select("principal_id,name,model,transport,revoked_at,workspaces")
       .order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1).abortSignal(signal));
+    checkCurrent();
     if (error) throw new Error(error.message);
     const page = data ?? [];
     agents.push(...page.map(row => ({
@@ -4726,26 +4797,33 @@ export function parseChannelUnread(data: unknown): ChannelUnread[] | null {
 }
 
 /** Unknown for every channel when the read is unavailable or malformed: never fabricated as read. */
-export async function channelUnread(workspaceId: string): Promise<ChannelUnread[] | null> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+export async function channelUnread(
+  workspaceId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<ChannelUnread[] | null> {
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const result = await readWithDeadline("Channel unread", signal =>
     api.schema("swarm_read").rpc("channel_unread", { p_workspace_id: workspaceId }).abortSignal(signal));
+  checkCurrent();
   if (result.error) return null;
   return parseChannelUnread(result.data);
 }
 
 /** Message status for the signed-in person's own messages to agents (at most 50 ids). `null` when
  * the read is unavailable or malformed: the line then shows nothing rather than a guess. */
-export async function messageStatus(workspaceId: string, signalIds: readonly string[]): Promise<MessageStatus[] | null> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+export async function messageStatus(
+  workspaceId: string,
+  signalIds: readonly string[],
+  pinned?: PinnedAccountContext | null,
+): Promise<MessageStatus[] | null> {
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   if (signalIds.length === 0) return [];
   const result = await readWithDeadline("Message status", signal =>
     api.schema("swarm_read").rpc("message_status", {
       p_workspace_id: workspaceId,
       p_signal_ids: signalIds.slice(0, MESSAGE_STATUS_BATCH),
     }).abortSignal(signal));
+  checkCurrent();
   if (result.error) return null;
   return parseMessageStatus(result.data);
 }
@@ -4788,14 +4866,19 @@ export function signalMentionsFromRows(rows: unknown): SignalMention[] {
  * `null` when the read is unavailable. A message with no mention is simply not in the result.
  * The view shows a member the mentions of their own workspace and nothing else.
  */
-export async function signalMentions(workspaceId: string, signalIds: readonly string[]): Promise<SignalMention[] | null> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+export async function signalMentions(
+  workspaceId: string,
+  signalIds: readonly string[],
+  pinned?: PinnedAccountContext | null,
+): Promise<SignalMention[] | null> {
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const rows: SignalMention[] = [];
   for (let offset = 0; offset < signalIds.length; offset += SIGNAL_MENTIONS_BATCH) {
+    checkCurrent();
     const { data, error } = await readWithDeadline("Mentions", signal => api.schema("swarm_read")
       .from("signal_mentions").select("signal_id,position,kind,id,source").eq("workspace_id", workspaceId)
       .in("signal_id", signalIds.slice(offset, offset + SIGNAL_MENTIONS_BATCH)).abortSignal(signal));
+    checkCurrent();
     if (error) return null;
     rows.push(...signalMentionsFromRows(data));
   }
@@ -4853,15 +4936,17 @@ export async function signalReactions(
   workspaceId: string,
   signalIds: readonly string[],
   viewerId: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<Map<string, ReactionGroup[]> | null> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, true);
   const rows: unknown[] = [];
   for (let offset = 0; offset < signalIds.length; offset += SIGNAL_REACTIONS_BATCH) {
+    checkCurrent();
     const { data, error } = await readWithDeadline("Reactions", signal => api.schema("swarm_read")
       .from("signal_reactions").select("reaction_id,signal_id,kind,id,emoji,created_at").eq("workspace_id", workspaceId)
       .in("signal_id", signalIds.slice(offset, offset + SIGNAL_REACTIONS_BATCH))
       .order("created_at", { ascending: true }).order("reaction_id", { ascending: true }).abortSignal(signal));
+    checkCurrent();
     if (error || !Array.isArray(data)) return null;
     rows.push(...data);
   }
@@ -5019,15 +5104,20 @@ export async function answerPlainAsk(
 }
 
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */
-export async function homeOverviewAsks(workspaceId: string, ids: readonly string[]): Promise<Signal[]> {
-  const api = client();
-  if (!api) throw new NoDeployment();
+export async function homeOverviewAsks(
+  workspaceId: string,
+  ids: readonly string[],
+  pinned?: PinnedAccountContext | null,
+): Promise<Signal[]> {
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
   if (!ids.length) return [];
   const rows: Signal[] = [];
   for (let offset = 0; offset < ids.length; offset += 50) {
+    checkCurrent();
     const { data, error } = await readWithDeadline("Catch up messages", signal => api.schema("swarm_read")
       .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId).eq("kind", "ask")
       .in("id", ids.slice(offset, offset + 50)).abortSignal(signal));
+    checkCurrent();
     if (error) throw new Error("Catch up messages could not be checked.");
     rows.push(...(data ?? []).map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
   }
@@ -5039,26 +5129,41 @@ export async function homeWorkingOn(
   workspaceId: string,
   pinned?: PinnedAccountContext | null,
 ): Promise<Signal[]> {
-  if (pinned && !pinned.isCurrent()) throw new AuthRecoveryRequired();
-  const api = pinned ? pinned.runtime.client : client();
-  if (!api) throw new NoDeployment();
+  const { api, checkCurrent } = resolvePinnedReadClient(pinned, workspaceId, false);
   try {
     const rows: Signal[] = [];
     const cutoff = new Date().toISOString();
     const pageSize = 200;
     for (let offset = 0; ; offset += pageSize) {
+      checkCurrent();
       const { data, error } = await readWithDeadline("agent work", signal => api.schema("swarm_read")
         .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId)
         .eq("kind", "working-on").gt("until", cutoff).order("created_at", { ascending: false })
         .order("id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
+      checkCurrent();
       if (error) return []; // No read means no work claim; never guess Working.
       const page = data ?? [];
       rows.push(...page.map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
       if (page.length < pageSize) return rows;
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthRecoveryRequired) throw error;
     return []; // An optional status read cannot hide messages already loaded.
   }
+}
+
+export interface ConversationCommandOptions {
+  isAlive?: () => boolean;
+  signal?: AbortSignal;
+  pinned?: PinnedAccountContext | null;
+}
+
+export interface ConversationReadOptions {
+  pinned?: PinnedAccountContext | null;
+  signal?: AbortSignal;
+  expectedUserId?: string;
+  isAlive?: () => boolean;
+  guard?: OversightDispatchGuard;
 }
 
 /** Open or find a 1:1 DM or group DM (Step 2a `conversation_open`). */
@@ -5068,7 +5173,7 @@ export async function openConversation(
   workspaceId: string,
   members: readonly ConversationMemberRef[],
   newGroup = false,
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationOpenResult> {
   const { status, body } = await postCommand(
     session,
@@ -5087,7 +5192,7 @@ async function conversationAction(
   workspaceId: string,
   command: Record<string, unknown>,
   fallbackMessage: string,
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   const { status, body } = await postCommand(
     session,
@@ -5105,6 +5210,7 @@ export async function joinConversation(
   commandId: string,
   workspaceId: string,
   conversationId: string,
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5112,6 +5218,7 @@ export async function joinConversation(
     workspaceId,
     buildJoinConversationCommand(conversationId),
     "CommonSwarm could not join that channel.",
+    options,
   );
 }
 
@@ -5120,6 +5227,7 @@ export async function leaveConversation(
   commandId: string,
   workspaceId: string,
   conversationId: string,
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5127,6 +5235,7 @@ export async function leaveConversation(
     workspaceId,
     buildLeaveConversationCommand(conversationId),
     "CommonSwarm could not leave that conversation.",
+    options,
   );
 }
 
@@ -5136,7 +5245,7 @@ export async function inviteToConversation(
   workspaceId: string,
   conversationId: string,
   members: readonly ConversationMemberRef[],
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5154,7 +5263,7 @@ export async function removeFromConversation(
   workspaceId: string,
   conversationId: string,
   member: ConversationMemberRef,
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5173,7 +5282,7 @@ export async function addChannelMembers(
   workspaceId: string,
   channelId: string,
   members: readonly ConversationMemberRef[],
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   const { status, body } = await postCommand(
     session,
@@ -5201,7 +5310,7 @@ export async function removeChannelMember(
   workspaceId: string,
   channelId: string,
   member: ConversationMemberRef,
-  options?: { isAlive?: () => boolean },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   const { status, body } = await postCommand(
     session,
@@ -5227,22 +5336,41 @@ export async function isPromotedPrivateChannelManager(
   workspaceId: string,
   channelId: string,
   userId: string,
+  options?: ConversationReadOptions,
 ): Promise<boolean> {
-  const api = client();
-  if (!api || !workspaceId || !channelId || !userId) return false;
+  if (!workspaceId || !channelId || !userId || options?.signal?.aborted) return false;
+  let api: SupabaseClient | null = null;
+  let ctx: PinnedAccountContext | null = null;
+  if (options?.pinned) {
+    ctx = options.pinned;
+    if (!ctx.isCurrent(workspaceId) || ctx.userId.toLowerCase() !== userId.toLowerCase()) return false;
+    api = ctx.runtime.client;
+  } else if (isMultiAccountEnabled()) {
+    ctx = pinAccountContext({ userId, workspaceId });
+    if (!ctx || !ctx.isCurrent(workspaceId)) return false;
+    api = ctx.runtime.client;
+  } else {
+    api = client();
+  }
+  if (!api) return false;
   try {
-    const { data, error } = await readWithDeadline("channel managers", (signal) =>
-      api.schema("swarm_read")
-        .from("channel_members")
-        .select("is_manager")
-        .eq("workspace_id", workspaceId)
-        .eq("channel_id", channelId)
-        .eq("kind", "user")
-        .eq("id", userId)
-        .eq("is_manager", true)
-        .limit(1)
-        .abortSignal(signal),
+    const { data, error } = await readWithDeadline(
+      "channel managers",
+      (signal) =>
+        api.schema("swarm_read")
+          .from("channel_members")
+          .select("is_manager")
+          .eq("workspace_id", workspaceId)
+          .eq("channel_id", channelId)
+          .eq("kind", "user")
+          .eq("id", userId)
+          .eq("is_manager", true)
+          .limit(1)
+          .abortSignal(signal),
+      options?.signal,
     );
+    if (options?.signal?.aborted) return false;
+    if (ctx && !ctx.isCurrent(workspaceId)) return false;
     if (error || !Array.isArray(data)) return false;
     return data.some((row) => (row as { is_manager?: unknown }).is_manager === true);
   } catch {
@@ -5256,6 +5384,7 @@ export async function markConversationRead(
   workspaceId: string,
   conversationId: string,
   throughSignalId: string | null = null,
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5263,6 +5392,7 @@ export async function markConversationRead(
     workspaceId,
     buildMarkConversationReadCommand(conversationId, throughSignalId),
     "CommonSwarm could not mark that conversation read.",
+    options,
   );
 }
 
@@ -5272,6 +5402,7 @@ export async function setConversationNotify(
   workspaceId: string,
   conversationId: string,
   change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean; starRank?: number | null },
+  options?: ConversationCommandOptions,
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -5279,6 +5410,7 @@ export async function setConversationNotify(
     workspaceId,
     buildSetConversationNotifyCommand(conversationId, change),
     "CommonSwarm could not save those notification settings.",
+    options,
   );
 }
 
@@ -5315,21 +5447,56 @@ export class SessionIdentityMismatch extends Error {
 async function postConversationRead(
   payload: Record<string, unknown>,
   label: string,
-  guardOrExpectedUserId?: OversightDispatchGuard | string,
-  isAlive?: () => boolean,
+  options?: ConversationReadOptions & { workspaceId?: string },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const guard = typeof guardOrExpectedUserId === "object" && guardOrExpectedUserId !== null
-    ? guardOrExpectedUserId
-    : undefined;
-  const expectedUserId = typeof guardOrExpectedUserId === "string"
-    ? guardOrExpectedUserId
-    : undefined;
-  const d = deployment();
-  if (!d) throw new NoDeployment();
+  const guard = options?.guard;
+  const expectedUserId = options?.expectedUserId;
+  const isAlive = options?.isAlive;
+  if (options?.signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
   if (guard && !guard.isScopeLive()) throw new OversightRequestRetiredError();
   if (isAlive && !isAlive()) throw new SessionIdentityMismatch();
-  const session = await currentSession();
-  if (!session) throw new SessionExpired();
+  const workspaceId = options?.workspaceId ?? (typeof payload.workspace_id === "string" ? payload.workspace_id : undefined);
+  let targetUrl: string;
+  let targetAnonKey: string;
+  let session: Session | null;
+  let ctx: PinnedAccountContext | null = null;
+  const checkPinned = (): void => {
+    if (!ctx) return;
+    const ok = workspaceId && ctx.workspaceId ? ctx.isCurrent(workspaceId) : ctx.isCurrent();
+    if (!ok) throw new AuthRecoveryRequired();
+  };
+
+  if (options?.pinned || isMultiAccountEnabled()) {
+    ctx = options?.pinned ?? pinAccountContext(workspaceId ? { workspaceId } : undefined);
+    if (!ctx) throw new AuthRecoveryRequired();
+    checkPinned();
+    targetUrl = ctx.runtime.deployment.url.replace(/\/+$/, "");
+    targetAnonKey = ctx.runtime.deployment.anonKey;
+    try {
+      session = await ctx.runtime.verifySession();
+    } catch (error) {
+      if (error instanceof MultiAccountSessionExpired) throw new SessionExpired();
+      if (error instanceof MultiAccountAuthRecoveryRequired) throw new AuthRecoveryRequired();
+      throw error;
+    }
+    if (options?.signal?.aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    checkPinned();
+    if (!session || session.user.id !== ctx.userId) throw new AuthRecoveryRequired();
+  } else {
+    const d = deployment();
+    if (!d) throw new NoDeployment();
+    targetUrl = d.url.replace(/\/+$/, "");
+    targetAnonKey = d.anonKey;
+    session = await currentSession();
+    if (options?.signal?.aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    if (!session) throw new SessionExpired();
+  }
   if (guard) {
     const liveViewer = session.user?.id?.toLowerCase() ?? "";
     if (liveViewer !== guard.expectedViewerUserId.toLowerCase() || !guard.isScopeLive()) {
@@ -5339,32 +5506,40 @@ async function postConversationRead(
   if ((expectedUserId && session.user.id !== expectedUserId) || (isAlive && !isAlive())) {
     throw new SessionIdentityMismatch();
   }
+
   const deadline = requestDeadline();
+  const fetchSignal = options?.signal
+    ? AbortSignal.any([deadline.controller.signal, options.signal])
+    : deadline.controller.signal;
   try {
-    const response = await fetch(`${d.url}/functions/v1/read`, {
+    checkPinned();
+    const response = await fetch(`${targetUrl}/functions/v1/read`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${session.access_token}`,
-        apikey: d.anonKey,
+        apikey: targetAnonKey,
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: deadline.controller.signal,
+      signal: fetchSignal,
     });
+    checkPinned();
     if (response.status === 401) throw new SessionExpired();
     const raw = await response.json().catch(() => ({}));
+    checkPinned();
     const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
     return { status: response.status, body };
   } catch (error) {
     if (
       error instanceof SessionExpired ||
+      error instanceof AuthRecoveryRequired ||
       error instanceof NoDeployment ||
       error instanceof OversightRequestRetiredError ||
       error instanceof SessionIdentityMismatch
     ) {
       throw error;
     }
-    if (deadline.timedOut()) throw new Error(`Checking ${label} took too long.`);
+    if (deadline.controller.signal.aborted) throw new Error(`Checking ${label} took too long.`);
     throw error;
   } finally {
     deadline.clear();
@@ -5383,19 +5558,31 @@ export class ConversationsUnsupportedError extends Error {
 export async function listConversations(
   workspaceId: string,
   includeArchived = false,
-  expectedUserId?: string,
+  optionsOrExpectedUserId?: ConversationReadOptions | string,
   isAlive?: () => boolean,
 ): Promise<ConversationSummary[]> {
+  const options: ConversationReadOptions =
+    typeof optionsOrExpectedUserId === "string"
+      ? { expectedUserId: optionsOrExpectedUserId, isAlive }
+      : (optionsOrExpectedUserId ?? {});
   const request = buildListConversationsRequest(workspaceId, includeArchived);
   let result: { status: number; body: Record<string, unknown> };
   try {
-    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
+    result = await postConversationRead(request, "conversations", { ...options, workspaceId });
   } catch (error) {
     // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
-    // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
-    // re-entering postConversationRead so currentSession(), isAlive(), and requestDeadline() are rechecked fresh.
-    if (!(error instanceof TypeError)) throw error;
-    result = await postConversationRead(request, "conversations", expectedUserId, isAlive);
+    // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, aborts,
+    // retired callers, or timeouts), re-entering postConversationRead so session, pin, isAlive, and
+    // deadline are rechecked fresh.
+    if (
+      !(error instanceof TypeError) ||
+      options.signal?.aborted ||
+      (options.pinned && !options.pinned.isCurrent(workspaceId)) ||
+      (options.isAlive && !options.isAlive())
+    ) {
+      throw error;
+    }
+    result = await postConversationRead(request, "conversations", { ...options, workspaceId });
   }
   const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
@@ -5407,14 +5594,13 @@ export async function listConversations(
 export async function readConversationHistory(
   workspaceId: string,
   conversationId: string,
-  options: ConversationHistoryOptions & { expectedUserId?: string; isAlive?: () => boolean } = {},
+  options: ConversationHistoryOptions & ConversationReadOptions = {},
 ): Promise<ConversationHistoryResult<Signal>> {
-  const { expectedUserId, isAlive, ...reqOptions } = options;
+  const { pinned, signal, expectedUserId, isAlive, guard, ...historyOptions } = options;
   const { status, body } = await postConversationRead(
-    buildConversationHistoryRequest(workspaceId, conversationId, reqOptions),
+    buildConversationHistoryRequest(workspaceId, conversationId, historyOptions),
     "conversation history",
-    expectedUserId,
-    isAlive,
+    { pinned, signal, expectedUserId, isAlive, guard, workspaceId },
   );
   return parseConversationHistoryResponse(status, body, browserSignalFromRow);
 }
@@ -5423,12 +5609,16 @@ export async function readConversationHistory(
 export async function listOversightConversations(
   workspaceId: string,
   agentPrincipalId: string,
-  guard?: OversightDispatchGuard,
+  optionsOrGuard?: ConversationReadOptions | OversightDispatchGuard,
 ): Promise<OversightConversationSummary[]> {
+  const options: ConversationReadOptions =
+    optionsOrGuard && "expectedViewerUserId" in optionsOrGuard
+      ? { guard: optionsOrGuard }
+      : (optionsOrGuard ?? {});
   const { status, body } = await postConversationRead(
     buildOversightListRequest(workspaceId, agentPrincipalId),
     "agent conversations",
-    guard,
+    { ...options, workspaceId },
   );
   if (status === 404) return [];
   if (status !== 200) {
@@ -5441,12 +5631,16 @@ export async function listOversightConversations(
 export async function readOversightConversationsRaw(
   workspaceId: string,
   agentPrincipalId: string,
-  guard?: OversightDispatchGuard,
+  optionsOrGuard?: ConversationReadOptions | OversightDispatchGuard,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  const options: ConversationReadOptions =
+    optionsOrGuard && "expectedViewerUserId" in optionsOrGuard
+      ? { guard: optionsOrGuard }
+      : (optionsOrGuard ?? {});
   const res = await postConversationRead(
     buildOversightListRequest(workspaceId, agentPrincipalId),
     "agent conversations",
-    guard,
+    { ...options, workspaceId },
   );
   if (res.status === 403 && res.body.error === "human_sign_in_required") {
     throw new OversightAuthRefusedError(
@@ -5461,13 +5655,14 @@ export async function readOversightConversationHistory(
   workspaceId: string,
   conversationId: string,
   agentPrincipalId: string,
-  options: ConversationHistoryOptions = {},
+  options: ConversationHistoryOptions & ConversationReadOptions = {},
   guard?: OversightDispatchGuard,
 ): Promise<OversightHistoryResult<Signal>> {
+  const { pinned, signal, expectedUserId, isAlive, guard: optGuard, ...historyOptions } = options;
   const { status, body } = await postConversationRead(
-    buildOversightHistoryRequest(workspaceId, conversationId, agentPrincipalId, options),
+    buildOversightHistoryRequest(workspaceId, conversationId, agentPrincipalId, historyOptions),
     "agent conversation history",
-    guard,
+    { pinned, signal, expectedUserId, isAlive, guard: guard ?? optGuard, workspaceId },
   );
   if (status === 403 && body.error === "human_sign_in_required") {
     throw new OversightAuthRefusedError(

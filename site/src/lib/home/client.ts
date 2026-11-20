@@ -372,14 +372,14 @@ export function createHomeServer(
     },
 
     async waitingTodos(workspaceId): Promise<WaitingTodosQueue | null> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const PAGE_LIMIT = 50;
       const MAX_PAGES = 20;
       const { data, error } = await c.schema('swarm_read').rpc('waiting_todos_page', {
         p_workspace_id: workspaceId,
         p_limit: PAGE_LIMIT,
       });
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_waiting_todos_failed');
       const first = parseWaitingTodosQueue(data, workspaceId);
@@ -390,8 +390,10 @@ export function createHomeServer(
       let truncated = true;
       let pages = 1;
       while (truncated && pages < MAX_PAGES && page.todos.length > 0) {
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.todos[page.todos.length - 1]!;
         let next: WaitingTodosQueue | null = null;
+        let pageFailed = false;
         try {
           const paged = await c.schema('swarm_read').rpc('waiting_todos_page', {
             p_workspace_id: workspaceId,
@@ -399,12 +401,15 @@ export function createHomeServer(
             p_after_state_at: last.state_at,
             p_after_todo_id: last.todo_id,
           });
-          if (paged.error) break;
-          next = parseWaitingTodosQueue(paged.data, workspaceId);
+          if (paged.error) pageFailed = true;
+          else next = parseWaitingTodosQueue(paged.data, workspaceId);
         } catch {
-          break;
+          pageFailed = true;
         }
-        if (!next) break;
+        // C2: Guard after every page OUTSIDE the partial-queue catch so a view change
+        // throws and drops prior-account rows instead of returning a stale partial queue.
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+        if (pageFailed || !next) break;
         let added = 0;
         for (const todo of next.todos) {
           if (seen.has(todo.todo_id)) continue;
@@ -420,6 +425,7 @@ export function createHomeServer(
         }
         if (added === 0) break;
       }
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       return {
         workspace_id: workspaceId,
         generated_at: page.generated_at,

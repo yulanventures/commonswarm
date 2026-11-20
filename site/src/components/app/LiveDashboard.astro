@@ -3336,15 +3336,22 @@ import "../../styles/kylon-image-viewer.css";
       return (await myWorkspaces()).map(workspace => ({ ...workspace, archived: false }));
     };
 
-    const readRemovedAgentOwners = async (workspaceId: string, viewerId: string): Promise<Map<string, string>> => {
+    const readRemovedAgentOwners = async (
+      workspaceId: string,
+      viewerId: string,
+      pinned?: PinnedAccountContext | null,
+    ): Promise<Map<string, string>> => {
       const owners = new Map<string, string>();
-      const api = client(); if (!api || sampleMode || !viewerId) return owners;
+      if (pinned && !pinned.isCurrent(workspaceId)) return owners;
+      const api = pinned ? pinned.runtime.client : client(); if (!api || sampleMode || !viewerId) return owners;
       try {
         const pageSize = 100;
         for (let offset = 0; ; offset += pageSize) {
+          if (pinned && !pinned.isCurrent(workspaceId)) return new Map();
           const { data, error } = await api.schema("swarm_read").from("agent_principals")
             .select("principal_id").eq("workspace_id", workspaceId).eq("owner_user_id", viewerId)
             .not("revoked_at", "is", null).order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1);
+          if (pinned && !pinned.isCurrent(workspaceId)) return new Map();
           if (error) return new Map();
           const page = data ?? [];
           for (const row of page) if (typeof row.principal_id === "string") owners.set(row.principal_id, viewerId);
@@ -3353,17 +3360,23 @@ import "../../styles/kylon-image-viewer.css";
       } catch { return new Map(); }
     };
 
-    const removedAgentNames = async (workspaceId: string): Promise<Map<string, string>> => {
+    const removedAgentNames = async (
+      workspaceId: string,
+      pinned?: PinnedAccountContext | null,
+    ): Promise<Map<string, string>> => {
       const result = new Map<string, string>();
-      const api = client();
+      if (pinned && !pinned.isCurrent(workspaceId)) return result;
+      const api = pinned ? pinned.runtime.client : client();
       if (!api || sampleMode) return result;
       try {
         const pageSize = 100;
         for (let offset = 0; offset < 200; offset += pageSize) {
+          if (pinned && !pinned.isCurrent(workspaceId)) return new Map();
           const { data, error } = await api.schema("swarm_read").from("agent_principals")
             .select("principal_id,name").eq("workspace_id", workspaceId)
             .not("revoked_at", "is", null)
             .order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1);
+          if (pinned && !pinned.isCurrent(workspaceId)) return new Map();
           if (error) return new Map();
           const page = data ?? [];
           for (const row of page) {
@@ -3640,8 +3653,15 @@ import "../../styles/kylon-image-viewer.css";
       cursor: SignalCursor | null,
       cutoff: string,
       channelId: string | null,
+      pinned?: PinnedAccountContext | null,
     ): Promise<{ rows: Signal[]; hasMore: boolean }> => {
-      const api = client();
+      const effectivePin = pinned ?? (
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ workspaceId })
+          : null
+      );
+      if (effectivePin && !effectivePin.isCurrent(workspaceId)) throw new AuthRecoveryRequired();
+      const api = effectivePin ? effectivePin.runtime.client : client();
       if (!api) throw new NoDeployment();
       let query = api
         .schema("swarm_read")
@@ -5647,6 +5667,8 @@ import "../../styles/kylon-image-viewer.css";
       agents = [];
       members = [];
       people = new Map();
+      if (typeof removedAgents !== "undefined") removedAgents = new Map();
+      if (typeof removedAgentOwners !== "undefined") removedAgentOwners = new Map();
       signals = [];
       if (!reopen) sampleSignals = [];
       channels = [];
@@ -7376,43 +7398,74 @@ import "../../styles/kylon-image-viewer.css";
       waitingPanelOverviewFailed = false;
     };
     /** Synchronously retire every Waiting on you read, draft, ticket, and rendered card when login changes. */
-    const retireWaitingState = (): void => {
-      waitingAuthGeneration += 1;
+    const resetWaitingPanelState = (): void => {
+      if (typeof waitingAuthGeneration !== "undefined") waitingAuthGeneration += 1;
       waitingGeneration += 1;
+      waitingOpenEpoch += 1;
       waitingInFlight = false;
       waitingAgain = false;
       window.clearTimeout(waitingTimer);
       waitingTimer = undefined;
-      window.clearTimeout(waitingStatusTimer);
-      waitingStatusTimer = undefined;
-      waitingStatusMessage = "";
-      waitingOpenEpoch += 1;
+      if (typeof waitingStatusTimer !== "undefined") {
+        window.clearTimeout(waitingStatusTimer);
+        waitingStatusTimer = undefined;
+      }
+      if (typeof waitingStatusMessage !== "undefined") waitingStatusMessage = "";
       waitingPanelViewer = "";
-      waitingScope = "channel";
-      clearWaitingData();
-      choiceDrafts.clear();
+      if (typeof waitingScope !== "undefined") waitingScope = "channel";
+      waitingPanelOverviewFailed = false;
+      waitingPanelAsks.clear();
+      waitingPanelTodos.clear();
+      waitingWorkspaceChannels.clear();
+      if (typeof clearWaitingData === "function") {
+        clearWaitingData();
+      } else {
+        waitingPanelLoadedWorkspaces.clear();
+        waitingPanelFailedWorkspaces.clear();
+        waitingPanelTruncatedWorkspaces.clear();
+        waitingPanelTickets.clear();
+        waitingPanelErrors.clear();
+        waitingPanelLastSubmissions.clear();
+        waitingTodoTickets.clear();
+        waitingTodoErrors.clear();
+      }
+      if (typeof choiceDrafts !== "undefined") choiceDrafts.clear();
       waitingSurface?.close(false);
+      waitingSurface?.setEnabled(false);
       one<HTMLElement>("[data-waiting-panel]")?.replaceChildren();
-      syncWaitingButtons();
+      if (typeof syncWaitingButtons === "function") syncWaitingButtons();
+    };
+    const retireWaitingState = (): void => {
+      resetWaitingPanelState();
     };
     const refreshWaitingCounts = async (): Promise<void> => {
       // Catch up counts for itself, into the same map, and starts by clearing it.
       if (sampleMode || !session || !renderedAuthUserId || renderedAuthUserId !== session.user.id || homeRoute.view === "catchup") return;
       if (waitingInFlight) { waitingAgain = true; return; }
       waitingInFlight = true;
-      const authGen = waitingAuthGeneration;
-      const generation = ++waitingGeneration, viewer = renderedAuthUserId;
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const generation = ++waitingGeneration, viewer = renderedAuthUserId || homeViewerId();
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewer })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) {
+        waitingInFlight = false;
+        return;
+      }
       if (waitingPanelViewer !== viewer) {
         waitingPanelViewer = viewer;
-        clearWaitingData();
+        if (typeof clearWaitingData === "function") clearWaitingData();
       }
-      const isAlive = waitingActionGuard(viewer, authGen);
+      const isAlive = typeof waitingActionGuard === "function" ? waitingActionGuard(viewer, authGen) : () => homeViewerId() === viewer;
       const live = (): boolean =>
         generation === waitingGeneration &&
         isAlive() &&
-        homeRoute.view !== "catchup";
+        homeViewerId() === viewer &&
+        homeRoute.view !== "catchup" &&
+        (!pinned || pinned.isCurrent());
       try {
-        const overview = await homeOverview();
+        const overview = await homeOverview(pinned?.runtime ?? null);
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
         if (!overview || !live() || overview.viewer_user_id !== viewer) return;
         waitingPanelOverviewFailed = false;
@@ -7454,7 +7507,7 @@ import "../../styles/kylon-image-viewer.css";
             const hasTodos = row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0;
 
             let queue: DecisionQueue | null = hasAsks
-              ? await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null)
+              ? await Promise.resolve().then(() => homeServer(pinned)?.decisionQueue(workspace.id) ?? null).catch(() => null)
               : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
             if (!live()) return;
             if (!queue) {
@@ -7465,7 +7518,7 @@ import "../../styles/kylon-image-viewer.css";
               continue;
             }
             const ids = queue.asks.map(ask => ask.signal_id);
-            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            const choices = ids.length ? await askChoices(workspace.id, ids, pinned).catch(() => null) : [];
             if (!live()) return;
             if (choices === null) {
               // A failed choices read must never become an exact zero or an empty channel.
@@ -7520,7 +7573,7 @@ import "../../styles/kylon-image-viewer.css";
             let locationReadFailed = false;
             if (missingIds.length) {
               try {
-                const fetched = await signalLocations(workspace.id, missingIds);
+                const fetched = await signalLocations(workspace.id, missingIds, pinned);
                 if (!live()) return;
                 for (const [sigId, loc] of fetched) locations.set(sigId, loc);
               } catch {
@@ -7544,7 +7597,7 @@ import "../../styles/kylon-image-viewer.css";
             let todosReadFailed = false;
             if (hasTodos) {
               try {
-                todosQueue = await homeServer()?.waitingTodos(workspace.id) ?? null;
+                todosQueue = await homeServer(pinned)?.waitingTodos(workspace.id) ?? null;
                 if (!live()) return;
                 if (!todosQueue) todosReadFailed = true;
               } catch (err) {
@@ -7560,7 +7613,7 @@ import "../../styles/kylon-image-viewer.css";
             const hasNamedAskChannel = [...classified.values()].some(conv => conv.kind === "channel");
             const hasNamedTodoChannel = Boolean(todosQueue?.todos.some(todo => todo.placement === "channel" && todo.channel_id));
             if ((hasNamedAskChannel || hasNamedTodoChannel) && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
-              const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+              const wsChannels = await workspaceChannels(workspace.id, pinned).catch(() => []);
               if (!live()) return;
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
@@ -7660,7 +7713,12 @@ import "../../styles/kylon-image-viewer.css";
       } finally {
         if (generation === waitingGeneration) {
           waitingInFlight = false;
-          if (waitingAgain && authGen === waitingAuthGeneration) { waitingAgain = false; void refreshWaitingCounts(); }
+          if (waitingAgain && (typeof waitingAuthGeneration === "undefined" || authGen === waitingAuthGeneration) && live()) {
+            waitingAgain = false;
+            void refreshWaitingCounts();
+          } else {
+            waitingAgain = false;
+          }
         }
       }
     };
@@ -7889,15 +7947,26 @@ import "../../styles/kylon-image-viewer.css";
       const viewerId = session?.user.id ?? "";
       const version = requestVersion;
       if (!partner || !workspaceId || !viewerId || sampleMode) return;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewerId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const same = directHistory !== null && directHistory.workspaceId === workspaceId && directHistory.viewerId === viewerId &&
         directHistory.partner.kind === partner.kind && directHistory.partner.id === partner.id;
       // A reread keeps the rows already on screen while it waits, and keeps them if it fails.
       const shown = same ? directHistory!.rows : [];
       directHistory = { workspaceId, viewerId, partner, state: "pending", rows: shown };
-      const current = (): boolean => ticket === directHistoryTicket && version === requestVersion && workspaceId === activeWorkspaceId &&
-        session?.user.id === viewerId && activeDm?.kind === partner.kind && activeDm?.id === partner.id;
+      const current = (): boolean =>
+        ticket === directHistoryTicket &&
+        version === requestVersion &&
+        workspaceId === activeWorkspaceId &&
+        session?.user.id === viewerId &&
+        activeDm?.kind === partner.kind &&
+        activeDm?.id === partner.id &&
+        (!pinned || pinned.isCurrent(workspaceId));
       let rows: Signal[];
-      try { rows = await directMessages(workspaceId, viewerId, partner); } catch {
+      try { rows = await directMessages(workspaceId, viewerId, partner, 50, pinned); } catch {
         if (!current()) return;
         directHistory = { workspaceId, viewerId, partner, state: "failed", rows: shown };
         renderFeed();
@@ -14045,6 +14114,8 @@ import "../../styles/kylon-image-viewer.css";
       pendingAgentsLoadFailed = false;
       renderedPendingAccessKey = "";
       people = new Map();
+      if (typeof removedAgents !== "undefined") removedAgents = new Map();
+      if (typeof removedAgentOwners !== "undefined") removedAgentOwners = new Map();
       signals = [];
       sampleSignals = [];
       /* Channel state belongs to the workspace being left, and the rail is re-rendered so the
@@ -14852,6 +14923,8 @@ import "../../styles/kylon-image-viewer.css";
          guarded live identity, and a failed initial load remains retryable. */
       syncPendingPoll();
       people = new Map();
+      if (typeof removedAgents !== "undefined") removedAgents = new Map();
+      if (typeof removedAgentOwners !== "undefined") removedAgentOwners = new Map();
       signals = [];
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
@@ -14909,17 +14982,21 @@ import "../../styles/kylon-image-viewer.css";
          did not have, and the head said "Channel not found" for a channel that does. Found by
          a review arm. */
       const channelGeneration = ++channelReadGeneration;
+      const openPinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: session.user.id, workspaceId: selected.id })
+          : null;
       try {
-        const removedAgentsRead = removedAgentNames(selected.id);
-        const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
-        const claimsRead = homeWorkingOn(selected.id);
+        const removedAgentsRead = removedAgentNames(selected.id, openPinned);
+        const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "", openPinned);
+        const claimsRead = homeWorkingOn(selected.id, openPinned);
         /* Run the initial conversations/membership read in parallel with the channel list so
            the composer vs. preview/retry bar is settled before the first feed paint (no 72px
            layout shift when opening a named channel). refreshConversations never throws;
            render=false avoids painting a half-loaded rail before channels arrive. Guarded for
            script-extracted unit tests that stub openWorkspace without conversations state. */
         const conversationsRead = typeof refreshConversations === "function"
-          ? refreshConversations(selected.id, true, false)
+          ? refreshConversations(selected.id, true, false, openPinned)
           : Promise.resolve();
         const [
           [rosterSettled, memberRosterSettled, invitesSettled, accessStatusesSettled],
@@ -14928,8 +15005,8 @@ import "../../styles/kylon-image-viewer.css";
           nextChannels,
         ] = await Promise.all([
           Promise.allSettled([
-            roster(selected.id),
-            memberRoster(selected.id),
+            roster(selected.id, openPinned),
+            memberRoster(selected.id, openPinned),
             pendingMemberInvites(selected.id),
             agentAccessStatuses(selected.id),
           ]),
@@ -14944,7 +15021,7 @@ import "../../styles/kylon-image-viewer.css";
           /* Soft-fails like the file list does. A workspace whose channel list did not load
              still reads all-signals, which holds every message either way, so this must not
              take the feed down with it. */
-          workspaceChannels(selected.id).then(
+          workspaceChannels(selected.id, openPinned).then(
             (value) => ({ value, failed: false }),
             () => ({ value: [] as WorkspaceChannel[], failed: true }),
           ),
@@ -14952,7 +15029,7 @@ import "../../styles/kylon-image-viewer.css";
         ]);
         const nextRemovedAgents = await removedAgentsRead;
         const nextRemovedOwners = await removedOwnersRead;
-        if (version !== requestVersion) return;
+        if (version !== requestVersion || (openPinned && !openPinned.isCurrent(selected.id))) return;
         removedAgents = nextRemovedAgents;
         removedAgentOwners = nextRemovedOwners;
         if (rosterSettled.status === "fulfilled") {
@@ -16152,12 +16229,23 @@ import "../../styles/kylon-image-viewer.css";
       } catch { /* storage unavailable: the rail stays as the reader left it this session */ }
     };
 
+    let conversationsAbortController: AbortController | null = null;
+    let groupLeaveAbortController: AbortController | null = null;
+    const currentConversationsSignal = (): AbortSignal =>
+      (conversationsAbortController ??= new AbortController()).signal;
     const resetConversationsState = (): void => {
+      conversationsAbortController?.abort();
+      conversationsAbortController = null;
+      groupLeaveAbortController?.abort();
+      groupLeaveAbortController = null;
       workspaceConversations = null;
       conversationsReadState = "idle";
       conversationsReadError = "";
       conversationsGeneration += 1;
       conversationsReadAt = 0;
+      if (typeof activeDm !== "undefined") activeDm = null;
+      if (typeof directHistory !== "undefined") directHistory = null;
+      if (typeof directHistoryTicket !== "undefined") directHistoryTicket += 1;
       activeDmConversationId = null;
       conversationHistory = null;
       conversationHistoryGeneration += 1;
@@ -16165,12 +16253,30 @@ import "../../styles/kylon-image-viewer.css";
       unavailableDmConversationId = null;
       mountedPreviewKey = "";
       channelJoinPending.clear();
+      if (typeof channelDirectoryErrors !== "undefined") channelDirectoryErrors.clear();
+      if (typeof channelUnarchivePending !== "undefined") channelUnarchivePending.clear();
+      if (typeof channelDirectoryKey !== "undefined") channelDirectoryKey = "";
+      if (typeof channelDirectoryEpoch !== "undefined") channelDirectoryEpoch += 1;
+      if (typeof channelDirectoryReturn !== "undefined") channelDirectoryReturn = null;
+      if (typeof channelDialogEpoch !== "undefined") channelDialogEpoch += 1;
+      if (typeof channelDialogReturn !== "undefined") channelDialogReturn = null;
+      if (typeof managedChannelId !== "undefined") managedChannelId = null;
+      if (typeof channelDialogOriginal !== "undefined") channelDialogOriginal = null;
+      if (typeof channelDialogPending !== "undefined") channelDialogPending = false;
+      if (typeof membersReconcileGeneration !== "undefined") membersReconcileGeneration += 1;
       groupLeaveTarget = null;
       groupLeavePending = false;
       groupLeaveSucceeded = false;
       groupLeaveReturn = null;
       const leaveDialog = one<HTMLDialogElement>("[data-group-leave-dialog]");
       if (leaveDialog?.open) leaveDialog.close();
+      const channelDirectoryDialog = one<HTMLDialogElement>("[data-channel-directory]");
+      if (channelDirectoryDialog?.open) {
+        if (typeof channelDirectoryRestore !== "undefined") channelDirectoryRestore = false;
+        channelDirectoryDialog.close();
+      }
+      const channelDialog = one<HTMLDialogElement>("[data-channel-dialog]");
+      if (channelDialog?.open) channelDialog.close();
       conversationDialogsEpoch += 1;
       openMembersSheetState = null;
       conversationDialogsBridge?.closeAll();
@@ -16409,12 +16515,21 @@ import "../../styles/kylon-image-viewer.css";
       const workspaceId = activeWorkspaceId;
       if (!conv || !session || !workspaceId || sampleMode) return;
       const pinnedUserId = session.user.id;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+          : null;
+      const signal = currentConversationsSignal();
       const title = conversationTitle(conv, homeViewerId(), lookupConversationMemberName);
       const runNotify = (change: { notifyLevel?: ConversationNotifyLevel; starred?: boolean }): void => {
-        if (!session || session.user.id !== pinnedUserId) return;
-        void setConversationNotify(session, uuid(), workspaceId, conversationId, change).then(res => {
-          if (res.ok && workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId) {
-            void refreshConversations(workspaceId, true);
+        if (!session || session.user.id !== pinnedUserId || (pinned && !pinned.isCurrent(workspaceId))) return;
+        void setConversationNotify(session, uuid(), workspaceId, conversationId, change, {
+          pinned,
+          signal,
+          isAlive: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId && (!pinned || pinned.isCurrent(workspaceId)),
+        }).then(res => {
+          if (res.ok && workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId && (!pinned || pinned.isCurrent(workspaceId))) {
+            void refreshConversations(workspaceId, true, true, pinned);
           }
         }).catch(() => {});
       };
@@ -16423,16 +16538,20 @@ import "../../styles/kylon-image-viewer.css";
         items.push({
           label: MARK_AS_READ_LABEL,
           run: () => {
-            if (!session || session.user.id !== pinnedUserId) return;
-            void markConversationRead(session, uuid(), workspaceId, conversationId, conv.lastMessageId).then(res => {
-              if (!res.ok || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+            if (!session || session.user.id !== pinnedUserId || (pinned && !pinned.isCurrent(workspaceId))) return;
+            void markConversationRead(session, uuid(), workspaceId, conversationId, conv.lastMessageId, {
+              pinned,
+              signal,
+              isAlive: () => workspaceId === activeWorkspaceId && session?.user.id === pinnedUserId && (!pinned || pinned.isCurrent(workspaceId)),
+            }).then(res => {
+              if (!res.ok || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId || (pinned && !pinned.isCurrent(workspaceId))) return;
               if (workspaceConversations) {
                 workspaceConversations = workspaceConversations.map(c =>
                   c.conversationId === conversationId ? { ...c, unreadCount: 0, mentionCount: 0 } : c,
                 );
                 renderHomeRail();
               }
-              void refreshConversations(workspaceId, true);
+              void refreshConversations(workspaceId, true, true, pinned);
             }).catch(() => {});
           },
         });
@@ -16490,6 +16609,8 @@ import "../../styles/kylon-image-viewer.css";
     };
     const groupLeaveDialogClosed = (): void => {
       if (one<HTMLDialogElement>("[data-group-leave-dialog]")?.open) return;
+      groupLeaveAbortController?.abort();
+      groupLeaveAbortController = null;
       const back = groupLeaveReturn;
       const succeeded = groupLeaveSucceeded;
       groupLeaveReturn = null;
@@ -16506,19 +16627,38 @@ import "../../styles/kylon-image-viewer.css";
       const target = groupLeaveTarget;
       if (!target || !session || sampleMode || groupLeavePending || target.workspaceId !== activeWorkspaceId) return;
       const pinnedUserId = session.user.id;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId: target.workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      groupLeaveAbortController?.abort();
+      const abortCtrl = new AbortController();
+      groupLeaveAbortController = abortCtrl;
+      const isAlive = (): boolean =>
+        !abortCtrl.signal.aborted &&
+        target.workspaceId === activeWorkspaceId &&
+        session?.user.id === pinnedUserId &&
+        groupLeaveTarget === target &&
+        (!pinned || pinned.isCurrent(target.workspaceId));
       groupLeavePending = true;
       const errorEl = one<HTMLElement>("[data-group-leave-error]");
       if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
       syncGroupLeaveDialogControls();
       let problem = "";
       try {
-        const res = await leaveConversation(session, uuid(), target.workspaceId, target.conversationId);
+        const res = await leaveConversation(session, uuid(), target.workspaceId, target.conversationId, {
+          isAlive,
+          signal: abortCtrl.signal,
+          pinned,
+        });
         if (!res.ok) problem = res.message;
       } catch (error) {
         problem = readableError(error);
       }
+      if (groupLeaveAbortController === abortCtrl) groupLeaveAbortController = null;
       groupLeavePending = false;
-      if (target.workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId || groupLeaveTarget !== target) return;
+      if (!isAlive()) return;
       if (problem) {
         syncGroupLeaveDialogControls();
         if (errorEl) { errorEl.textContent = problem; errorEl.hidden = false; }
@@ -16537,7 +16677,7 @@ import "../../styles/kylon-image-viewer.css";
       groupLeaveSucceeded = true;
       syncGroupLeaveDialogControls();
       one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
-      void refreshConversations(target.workspaceId, true);
+      void refreshConversations(target.workspaceId, true, true, pinned);
     };
 
     type ConversationDialogsBridge = import("../../lib/conversation-dialogs").ConversationDialogsBridge;
@@ -16637,8 +16777,19 @@ import "../../styles/kylon-image-viewer.css";
         if (live.kind === "private_channel" && live.channelId && snap.promotedPrivateManager && (!basePerms.canAdd || !basePerms.canRemove)) {
           const checkGen = ++membersReconcileGeneration;
           const bridge = conversationDialogsBridge;
-          void bridge.checkPromotedPrivateManager(snap.workspaceId, live.channelId, snap.userId).then((stillPromoted) => {
-            if (checkGen !== membersReconcileGeneration || openMembersSheetState !== snap) return;
+          const pinned =
+            typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+              ? pinAccountContext({ userId: snap.userId, workspaceId: snap.workspaceId })
+              : null;
+          void bridge.checkPromotedPrivateManager(snap.workspaceId, live.channelId, snap.userId, {
+            pinned,
+            signal: currentConversationsSignal(),
+          }).then((stillPromoted) => {
+            if (
+              checkGen !== membersReconcileGeneration ||
+              openMembersSheetState !== snap ||
+              (pinned && !pinned.isCurrent(snap.workspaceId))
+            ) return;
             const latest = activeConversationSummary();
             if (!latest || latest.conversationId !== snap.conversationId || latest.kind !== snap.kind || latest.archivedAt !== snap.archivedAt || !latest.joined) {
               closeStale();
@@ -16674,12 +16825,18 @@ import "../../styles/kylon-image-viewer.css";
       const workspaceId = activeWorkspaceId;
       const pinnedUserId = session.user.id;
       const pinnedVersion = requestVersion;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const epoch = ++conversationDialogsEpoch;
       const isHostAlive = (): boolean =>
         epoch === conversationDialogsEpoch &&
         workspaceId === activeWorkspaceId &&
         session?.user.id === pinnedUserId &&
-        pinnedVersion === requestVersion;
+        pinnedVersion === requestVersion &&
+        (!pinned || pinned.isCurrent(workspaceId));
       const back = channelFocusReturn(opener);
       if (back.drawer) layout.closeNavigation(false);
       let bridge: ConversationDialogsBridge;
@@ -16693,6 +16850,7 @@ import "../../styles/kylon-image-viewer.css";
         dialog,
         workspaceId,
         pinnedUserId,
+        pinned,
         roster: { viewerUserId: pinnedUserId, members, people, agents },
         lookupName: lookupConversationMemberName,
         getSession: () => session,
@@ -16704,7 +16862,7 @@ import "../../styles/kylon-image-viewer.css";
             workspaceConversations = [summary, ...workspaceConversations];
           }
           void openDirectConversation(summary.conversationId, isAlive);
-          void refreshConversations(workspaceId, true);
+          void refreshConversations(workspaceId, true, true, pinned);
         },
         restoreFocus: () => { if (!restoreChannelFocus(back)) focusConversationHeading(); },
       });
@@ -16719,12 +16877,18 @@ import "../../styles/kylon-image-viewer.css";
       const pinnedUserId = session.user.id;
       const pinnedVersion = requestVersion;
       const requestedConvId = initialConv.conversationId;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const epoch = ++conversationDialogsEpoch;
       const isHostAlive = (): boolean =>
         epoch === conversationDialogsEpoch &&
         workspaceId === activeWorkspaceId &&
         session?.user.id === pinnedUserId &&
-        pinnedVersion === requestVersion;
+        pinnedVersion === requestVersion &&
+        (!pinned || pinned.isCurrent(workspaceId));
       const back = channelFocusReturn(opener);
       if (back.drawer) layout.closeNavigation(false);
       let bridge: ConversationDialogsBridge;
@@ -16738,6 +16902,7 @@ import "../../styles/kylon-image-viewer.css";
         dialog,
         workspaceId,
         pinnedUserId,
+        pinned,
         requestedConvId,
         resolveActiveConversation: activeConversationSummary,
         resolveManageContext: (chId) => resolveChannelManageContext(chId, pinnedUserId),
@@ -16748,7 +16913,12 @@ import "../../styles/kylon-image-viewer.css";
         uuid,
         beginConversationsRead: () => ++conversationsGeneration,
         commitConversationsRead: (readGen, rows) => {
-          if (readGen !== conversationsGeneration || workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) {
+          if (
+            readGen !== conversationsGeneration ||
+            workspaceId !== activeWorkspaceId ||
+            session?.user.id !== pinnedUserId ||
+            (pinned && !pinned.isCurrent(workspaceId))
+          ) {
             return false;
           }
           const evicted = commitWorkspaceConversations(workspaceId, pinnedUserId, rows, true);
@@ -16773,7 +16943,7 @@ import "../../styles/kylon-image-viewer.css";
           }
           renderHomeShell();
           renderHomeRail();
-          void refreshConversations(workspaceId, true);
+          void refreshConversations(workspaceId, true, true, pinned);
         },
         restoreFocus: () => { if (!restoreChannelFocus(back)) focusConversationHeading(); },
       });
@@ -17235,23 +17405,36 @@ import "../../styles/kylon-image-viewer.css";
             mountedPreviewKey = key;
             const workspaceId = activeWorkspaceId;
             const pinnedUserId = session?.user.id ?? "";
+            const pinned =
+              typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && pinnedUserId && typeof pinAccountContext === "function"
+                ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+                : null;
             const convId = unjoined.conversationId;
             const slug = unjoined.slug ?? activeChannel()?.slug ?? "channel";
             renderChannelPreviewBar(previewHost, {
               slug,
               onJoin: async () => {
-                if (!session || !workspaceId || session.user.id !== pinnedUserId) {
+                if (!session || !workspaceId || session.user.id !== pinnedUserId || (pinned && !pinned.isCurrent(workspaceId))) {
                   return { ok: false, message: "Sign in to join this channel." };
                 }
+                const signal = currentConversationsSignal();
                 try {
-                  const res = await joinConversation(session, uuid(), workspaceId, convId);
+                  const res = await joinConversation(session, uuid(), workspaceId, convId, {
+                    pinned,
+                    signal,
+                    isAlive: () =>
+                      !signal.aborted &&
+                      workspaceId === activeWorkspaceId &&
+                      session?.user.id === pinnedUserId &&
+                      (!pinned || pinned.isCurrent(workspaceId)),
+                  });
                   return res.ok ? { ok: true } : { ok: false, message: res.message };
                 } catch (error) {
                   return { ok: false, message: readableError(error) };
                 }
               },
               onJoined: () => {
-                if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId) return;
+                if (workspaceId !== activeWorkspaceId || session?.user.id !== pinnedUserId || (pinned && !pinned.isCurrent(workspaceId))) return;
                 markConversationJoinedLocally(convId);
                 if (mountedPreviewKey === key) {
                   mountedPreviewKey = "";
@@ -17260,7 +17443,7 @@ import "../../styles/kylon-image-viewer.css";
                 }
                 renderHomeRail();
                 renderChannelDirectoryDialog();
-                void refreshConversations(workspaceId, true);
+                void refreshConversations(workspaceId, true, true, pinned);
               },
             });
           }
@@ -17663,14 +17846,24 @@ import "../../styles/kylon-image-viewer.css";
       const key = privateMembersKey(channel.channelId);
       if (!key || !session || !activeWorkspaceId || sampleMode || channel.visibility !== "private") return;
       const workspaceId = activeWorkspaceId, userId = session.user.id, channelId = channel.channelId, version = requestVersion;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const token = {};
       privateChannelMemberReads.set(key, token);
       if (!privateChannelAgentIds.get(key)) privateChannelAgentIds.set(key, null);
       const latest = (): boolean => privateChannelMemberReads.get(key) === token;
-      void channelAgentMemberIds(workspaceId, channelId).then(ids => {
+      void channelAgentMemberIds(workspaceId, channelId, pinned).then(ids => {
         if (!latest()) return;
         privateChannelMemberReads.delete(key);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId || session?.user.id !== userId) {
+        if (
+          version !== requestVersion ||
+          workspaceId !== activeWorkspaceId ||
+          session?.user.id !== userId ||
+          (pinned && !pinned.isCurrent(workspaceId))
+        ) {
           // The page moved on without a reset: drop the answer, and let the next ask read again.
           if (privateChannelAgentIds.get(key) === null) privateChannelAgentIds.delete(key);
           return;
@@ -17759,6 +17952,18 @@ import "../../styles/kylon-image-viewer.css";
       const workspaceId = activeWorkspaceId;
       const conv = conversationForChannel(channelId);
       if (!session || !workspaceId || !conv || channelJoinPending.has(channelId)) return;
+      const pinnedUserId = session.user.id;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      const signal = currentConversationsSignal();
+      const isAlive = (): boolean =>
+        !signal.aborted &&
+        workspaceId === activeWorkspaceId &&
+        session?.user.id === pinnedUserId &&
+        (!pinned || pinned.isCurrent(workspaceId));
       channelJoinPending.add(channelId);
       channelDirectoryErrors.delete(channelId);
       if (button && document.activeElement === button) {
@@ -17767,13 +17972,17 @@ import "../../styles/kylon-image-viewer.css";
       renderChannelDirectoryDialog();
       let errorMessage = "";
       try {
-        const res = await joinConversation(session, uuid(), workspaceId, conv.conversationId);
+        const res = await joinConversation(session, uuid(), workspaceId, conv.conversationId, {
+          isAlive,
+          signal,
+          pinned,
+        });
         if (!res.ok) errorMessage = res.message;
       } catch (error) {
         errorMessage = readableError(error);
       }
       channelJoinPending.delete(channelId);
-      if (workspaceId !== activeWorkspaceId) return;
+      if (!isAlive()) return;
       if (errorMessage) {
         channelDirectoryErrors.set(channelId, errorMessage);
         renderChannelDirectoryDialog();
@@ -17783,7 +17992,7 @@ import "../../styles/kylon-image-viewer.css";
       renderChannelDirectoryDialog();
       renderHomeRail();
       renderChannelBlocked();
-      void refreshConversations(workspaceId, true);
+      void refreshConversations(workspaceId, true, true, pinned);
     };
     const renderChannelDirectoryDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-directory]");
@@ -17974,27 +18183,46 @@ import "../../styles/kylon-image-viewer.css";
      * Distinguishes a pre-Step-2b server (`ConversationsUnsupportedError` -> `"unsupported"`, legacy fallback)
      * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
      */
-    const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
+    const refreshConversations = async (
+      workspaceId: string,
+      force: boolean,
+      render = true,
+      pinnedOverride?: PinnedAccountContext | null,
+    ): Promise<void> => {
       if (sampleMode || !session || !workspaceId || conversationsReadState === "unsupported") return;
       const pinnedUserId = session.user.id;
+      const pinned = pinnedOverride ?? (
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: pinnedUserId, workspaceId })
+          : null
+      );
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
       const now = Date.now();
       if (!force && now - conversationsReadAt < 15_000) return;
       conversationsReadAt = now;
       const generation = ++conversationsGeneration;
+      const signal = currentConversationsSignal();
+      const stillCurrent = (): boolean =>
+        !signal.aborted &&
+        generation === conversationsGeneration &&
+        workspaceId === activeWorkspaceId &&
+        (session?.user.id ?? "") === pinnedUserId &&
+        (!pinned || pinned.isCurrent(workspaceId));
       if (workspaceConversations === null && conversationsReadState === "idle") {
         conversationsReadState = "pending";
         if (render) renderChannelBlocked();
       }
-      const listStillAlive = (): boolean =>
-        generation === conversationsGeneration &&
-        workspaceId === activeWorkspaceId &&
-        (session?.user.id ?? "") === pinnedUserId;
       let rows: ConversationSummary[];
       try {
-        rows = await listConversations(workspaceId, true, pinnedUserId, listStillAlive);
+        rows = await listConversations(workspaceId, true, {
+          pinned,
+          signal,
+          expectedUserId: pinnedUserId,
+          isAlive: stillCurrent,
+        });
       } catch (error) {
         if (error instanceof SessionIdentityMismatch) return;
-        if (!listStillAlive()) return;
+        if (!stillCurrent()) return;
         const confirmedModern = modernConversationsConfirmed.has(`${pinnedUserId}:${workspaceId}`);
         if (error instanceof ConversationsUnsupportedError && !confirmedModern) {
           conversationsReadState = "unsupported";
@@ -18009,7 +18237,7 @@ import "../../styles/kylon-image-viewer.css";
         }
         return;
       }
-      if (!listStillAlive()) return;
+      if (!stillCurrent()) return;
       commitWorkspaceConversations(workspaceId, pinnedUserId, rows, render);
     };
 
@@ -19041,13 +19269,15 @@ import "../../styles/kylon-image-viewer.css";
             key.startsWith(`commonswarm:palette-recent:${userId}:`) ||
             key.startsWith(`commonswarm:household-purpose:${userId}:`) ||
             key.startsWith(`commonswarm:channel-rail-expanded:${userId}:`) ||
-            key.startsWith(`commonswarm:household-setup-needed:v1:${userId}:`)
+            key.startsWith(`commonswarm:household-setup-needed:v1:${userId}:`) ||
+            key === `commonswarm:app-create-intent:v1:${userId}`
           ) {
             toRemove.push(key);
           }
         }
         for (const key of toRemove) window.localStorage.removeItem(key);
       } catch { /* storage unavailable */ }
+      try { forgetAddAgent(addAgentStore(), userId); } catch { /* storage unavailable */ }
     };
 
     const dropUnscopedLegacyConvenienceKeys = (): void => {
@@ -19140,6 +19370,7 @@ import "../../styles/kylon-image-viewer.css";
       lastAccountDialogTrigger = null;
       householdDashboard?.clear();
       homeOverviewCounts.clear();
+      if (typeof resetWaitingPanelState === "function") resetWaitingPanelState();
       renderedAuthUserId = "";
       renderedAuthLoginId = "";
       renderedAuthViewGen = -1;
