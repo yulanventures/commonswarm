@@ -1668,6 +1668,8 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   await sql`
     INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
     VALUES (${workspace}::uuid, ${plainNoteId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '20 minutes')
+    ON CONFLICT (signal_id, recipient_agent_principal_id)
+    DO UPDATE SET enqueued_at = EXCLUDED.enqueued_at
   `;
   await sql`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes')`;
   const afterPlain = await sql<Row[]>`
@@ -1690,6 +1692,11 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
     VALUES
       (${workspace}::uuid, ${queuedAskId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '15 minutes', statement_timestamp() - interval '14 minutes', 'queued'),
       (${workspace}::uuid, ${todoNoticeId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '12 minutes', NULL, NULL)
+    ON CONFLICT (signal_id, recipient_agent_principal_id)
+    DO UPDATE SET
+      enqueued_at = EXCLUDED.enqueued_at,
+      acked_at = EXCLUDED.acked_at,
+      ack_outcome = EXCLUDED.ack_outcome
   `;
 
   const [sync1] = await sql<{ res: Row }[]>`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes') AS res`;
