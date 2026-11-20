@@ -297,23 +297,23 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
 
       // Replies (answers):
       await tx`
-        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, channel_id, in_reply_to, until, created_at)
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, channel_id, thread_root_id, in_reply_to, until, created_at)
         VALUES
-          (${choiceReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Approve quote, Book install', ${chBoiler}::uuid, ${choiceAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(100)}::timestamptz),
-          (${plainReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Yes, Tuesday at 9am works.', NULL, ${plainAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(90)}::timestamptz),
-          (${staleReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Closed as stale. Re-ask with choices if still needed.', ${chBoiler}::uuid, ${staleAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(80)}::timestamptz),
-          (${privReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Vault secret confirmed', ${chPriv}::uuid, ${privAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(70)}::timestamptz),
-          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Maya answered before leaving', NULL, ${gen1MayaAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(60)}::timestamptz),
-          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Viewer secret post-leave answer', NULL, ${gen1PostLeaveAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(120)}::timestamptz),
-          (${noConsentReplyId}::uuid, ${wsId}::uuid, ${noConsentId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Got it', ${chBoiler}::uuid, ${noConsentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(50)}::timestamptz)
+          (${choiceReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Approve quote, Book install', ${chBoiler}::uuid, NULL, ${choiceAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(100)}::timestamptz),
+          (${plainReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Yes, Tuesday at 9am works.', NULL, NULL, ${plainAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(90)}::timestamptz),
+          (${staleReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Closed as stale. Re-ask with choices if still needed.', ${chBoiler}::uuid, NULL, ${staleAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(80)}::timestamptz),
+          (${privReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Vault secret confirmed', ${chPriv}::uuid, NULL, ${privAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(70)}::timestamptz),
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Maya answered before leaving', NULL, ${gen1MayaAskId}::uuid, ${gen1MayaAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(60)}::timestamptz),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Viewer secret post-leave answer', NULL, ${gen1PostLeaveAskId}::uuid, ${gen1PostLeaveAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(120)}::timestamptz),
+          (${noConsentReplyId}::uuid, ${wsId}::uuid, ${noConsentId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Got it', ${chBoiler}::uuid, NULL, ${noConsentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(50)}::timestamptz)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, recipient_agent_principal_id, position)
         VALUES
-          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL, 0),
-          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 1),
-          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, NULL, 0),
-          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 1)
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 0),
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL, 1),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 0),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, NULL, 1)
       `;
       await tx`
         INSERT INTO swarm.ui_actions (
@@ -693,10 +693,10 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
         VALUES
-          (${crossDmAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Public ask answered in Maya-Scout DM?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-220)}::timestamptz),
-          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${mayaId}::uuid, 'ask', 'Public ask answered in private vault?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-215)}::timestamptz),
-          (${crossUiAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Choice ask with ui_action reply in Maya-Scout DM?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-210)}::timestamptz),
-          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Unmapped ask with unmapped reply to revoked Scout?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-205)}::timestamptz)
+          (${crossDmAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Public ask answered in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-220)}::timestamptz),
+          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${mayaId}::uuid, 'ask', 'Public ask answered in private vault?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-215)}::timestamptz),
+          (${crossUiAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Choice ask with ui_action reply in Maya-Scout DM?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-210)}::timestamptz),
+          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Unmapped ask with unmapped reply to revoked Scout?', ${chBoiler}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-205)}::timestamptz)
       `;
       await tx`
         INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
@@ -734,10 +734,12 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
 
       // Simulate a pre-Step-2b unmapped legacy reply (no conversation_signals row) addressed only to Scout.
+      await tx`SET LOCAL session_replication_role = replica`;
       await tx`
         DELETE FROM swarm.conversation_signals
         WHERE workspace_id = ${wsId}::uuid AND signal_id = ${legacyRevokedAgentReplyId}::uuid
       `;
+      await tx`SET LOCAL session_replication_role = origin`;
 
       // Revoke Scout's workspace seat (simulating ended canonical oversight, where legacy swarm_read.signals still admitted owner reads!).
       await tx`
