@@ -665,4 +665,95 @@ test("C3 Conditions 2 & 3: narrow addressed thread root audience, unmapped root 
   assert.equal(probeHidden.status, 404);
   assert.deepEqual(probeHidden.body, probeUnknown.body);
   assert.deepEqual(auditHidden, auditUnknown, "hidden vs unknown review_check probes must leave identical audit_log visibility");
+
+  // 4. Step 2b narrow addressed group-DM root:
+  //    (a) Admission check refuses opening on a narrow group-DM root hidden from a live member.
+  //    (b) If eligibility is lost after open (a new member joins the group DM), final pass stamp
+  //        still succeeds cleanly without aborting on the deferred trigger or leaking a DM note.
+  const narrowGdm = await send(owner.jwt, {
+    kind: "conversation_open",
+    members: [{ kind: "agent", id: seatSec.principal }, { kind: "agent", id: outsider.principal }],
+    new_group: true,
+  });
+  assert.equal(narrowGdm.status, 200, JSON.stringify(narrowGdm.body));
+  const narrowGdmId = String((narrowGdm.body.conversation as Row).conversation_id);
+  const narrowGdmRootId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at)
+      VALUES (${narrowGdmRootId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', ${seatSec.principal}::uuid, 'ask', 'Narrow group DM root', statement_timestamp() + interval '1 day', statement_timestamp())
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience, created_at)
+      VALUES (${workspace}::uuid, ${narrowGdmId}::uuid, ${narrowGdmRootId}::uuid, 'addressed', statement_timestamp())
+    `;
+  });
+  await assert.rejects(
+    openReviewCheck(target, owner.jwt, workspace, {
+      repo: "yulanventures/commonswarm",
+      ref: "710-gdm-narrow-refuse",
+      headSha: head,
+      requiredSeats: [{ kind: "agent", id: seatSec.principal }],
+      threadRootId: narrowGdmRootId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "not_found" && error.status === 404,
+  );
+
+  // Now model an addressed group-DM root initially visible to all live members (owner, seatSec, seatLead),
+  // then add outsider after open (losing Step 2b DM-thread eligibility) before seatSec casts the final pass!
+  const eligibleGdm = await send(owner.jwt, {
+    kind: "conversation_open",
+    members: [{ kind: "agent", id: seatSec.principal }, { kind: "agent", id: seatLead.principal }],
+    new_group: true,
+  });
+  assert.equal(eligibleGdm.status, 200, JSON.stringify(eligibleGdm.body));
+  const eligibleGdmId = String((eligibleGdm.body.conversation as Row).conversation_id);
+  const eligibleGdmRootId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at)
+      VALUES (${eligibleGdmRootId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', ${seatSec.principal}::uuid, 'ask', 'Addressed group DM root initially visible to all live members', statement_timestamp() + interval '1 day', statement_timestamp())
+    `;
+    await tx`
+      INSERT INTO swarm.signal_recipients (signal_id, workspace_id, position, recipient_agent_principal_id, created_at)
+      VALUES
+        (${eligibleGdmRootId}::uuid, ${workspace}::uuid, 0, ${seatSec.principal}::uuid, statement_timestamp()),
+        (${eligibleGdmRootId}::uuid, ${workspace}::uuid, 1, ${seatLead.principal}::uuid, statement_timestamp())
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience, created_at)
+      VALUES (${workspace}::uuid, ${eligibleGdmId}::uuid, ${eligibleGdmRootId}::uuid, 'addressed', statement_timestamp())
+    `;
+  });
+  const gdmOpened = await openReviewCheck(target, owner.jwt, workspace, {
+    repo: "yulanventures/commonswarm",
+    ref: "710-gdm-loss",
+    headSha: head,
+    requiredSeats: [{ kind: "agent", id: seatSec.principal }],
+    threadRootId: eligibleGdmRootId,
+  });
+  assert.equal(gdmOpened.review_check.root_audience, "addressed");
+
+  // Add outsider to eligibleGdm after open so a live member can no longer read eligibleGdmRootId.
+  await sql`
+    INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_agent_principal_id, joined_at)
+    VALUES (${eligibleGdmId}::uuid, ${workspace}::uuid, ${outsider.principal}::uuid, statement_timestamp())
+    ON CONFLICT DO NOTHING
+  `;
+
+  // Final pass stamp must STILL succeed cleanly (no deferred-trigger abort) and skip the DM-wide fulfillment note!
+  const gdmFinalStamp = await stampReviewCheck(target, seatSec.token, workspace, {
+    checkId: gdmOpened.review_check.check_id,
+    headSha: head,
+    verdict: "pass",
+  });
+  assert.equal(gdmFinalStamp.satisfied_now, true);
+  assert.equal(gdmFinalStamp.review_check.satisfied_head_sha, head);
+  assert.equal(gdmFinalStamp.satisfied_signal_id, null, "loss of Step 2b DM-thread eligibility must skip the DM-wide fulfillment note without aborting the stamp");
+  await assert.rejects(
+    readReviewChecks(target, outsider.token, workspace, { checkId: gdmOpened.review_check.check_id }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "not_found" && error.status === 404,
+  );
 });

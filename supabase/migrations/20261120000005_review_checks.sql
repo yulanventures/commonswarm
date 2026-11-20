@@ -638,6 +638,28 @@ BEGIN
         RETURN jsonb_build_object('status', 'not_found');
       END IF;
 
+      -- Step 2b thread eligibility for DM / group_dm: a narrow addressed root that is not
+      -- visible to every live DM member cannot admit a thread check whose fulfillment note
+      -- routes to the conversation.
+      IF v_conv.kind IN ('dm', 'group_dm')
+        AND v_root.mapped_audience = 'addressed'
+        AND EXISTS (
+          SELECT 1
+          FROM swarm.conversation_members AS lm
+          WHERE lm.conversation_id = v_conv.conversation_id
+            AND lm.workspace_id = p_workspace_id
+            AND lm.left_at IS NULL
+            AND swarm.conversation_signal_visible_to(
+              p_workspace_id, v_root.id, v_root.mapped_audience,
+              v_root.from_kind::text, v_root.from_principal,
+              v_root.to_user_id, v_root.to_agent_principal_id,
+              CASE WHEN lm.member_user_id IS NOT NULL THEN 'user' ELSE 'agent' END,
+              COALESCE(lm.member_user_id, lm.member_agent_principal_id)
+            ) IS NOT TRUE
+        ) THEN
+        RETURN jsonb_build_object('status', 'not_found');
+      END IF;
+
       v_conv_id := v_conv.conversation_id;
       v_root_audience := v_root.mapped_audience;
       v_audit_channel_id := CASE
@@ -996,59 +1018,94 @@ BEGIN
             );
           END IF;
         ELSIF v_conv.kind IN ('dm', 'group_dm') THEN
-          v_named_agents := NULL;
-          IF v_conv.kind = 'group_dm' THEN
-            SELECT coalesce(array_agg(m.member_agent_principal_id), '{}')
-            INTO v_named_agents
-            FROM swarm.conversation_members AS m
-            WHERE m.conversation_id = v_conv.conversation_id
-              AND m.workspace_id = p_workspace_id
-              AND m.left_at IS NULL
-              AND m.member_agent_principal_id IS NOT NULL
-              AND NOT (p_actor_kind = 'agent' AND m.member_agent_principal_id = p_actor_id)
-              AND swarm.actor_can_access_channel(p_workspace_id, NULL, 'agent', m.member_agent_principal_id);
-          END IF;
-          v_route := swarm.conversation_post_route(
-            p_workspace_id, p_actor_kind, p_actor_id, v_conv.conversation_id, NULL, v_named_agents
-          );
-          IF v_route->>'status' = 'ok' AND jsonb_array_length(v_route->'to') > 0 THEN
-            v_to := v_route->'to';
-            v_to_user := NULL;
-            v_to_agent := NULL;
-            IF jsonb_array_length(v_to) = 1 THEN
-              IF (v_to->0)->>'kind' = 'user' THEN
-                v_to_user := ((v_to->0)->>'id')::uuid;
-              ELSE
-                v_to_agent := ((v_to->0)->>'id')::uuid;
-              END IF;
+          -- Re-verify Step 2b thread eligibility before writing a conversation-wide DM fulfillment note.
+          -- If a live member added after open cannot read the narrow addressed root, skip the DM
+          -- note cleanly rather than aborting the final stamp or exposing it to the new member.
+          IF v_check.thread_root_id IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM swarm.signals AS r
+              JOIN swarm.conversation_signals AS rcs
+                ON rcs.workspace_id = r.workspace_id AND rcs.signal_id = r.id
+              WHERE r.workspace_id = p_workspace_id
+                AND r.id = v_check.thread_root_id
+                AND r.thread_root_id IS NULL
+                AND rcs.conversation_id = v_conv.conversation_id
+                AND (
+                  rcs.audience = 'conversation'
+                  OR (
+                    rcs.audience = 'addressed'
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM swarm.conversation_members AS lm
+                      WHERE lm.conversation_id = v_conv.conversation_id
+                        AND lm.workspace_id = p_workspace_id
+                        AND lm.left_at IS NULL
+                        AND swarm.conversation_signal_visible_to(
+                          p_workspace_id, r.id, rcs.audience,
+                          r.from_kind::text, r.from_principal,
+                          r.to_user_id, r.to_agent_principal_id,
+                          CASE WHEN lm.member_user_id IS NOT NULL THEN 'user' ELSE 'agent' END,
+                          COALESCE(lm.member_user_id, lm.member_agent_principal_id)
+                        ) IS NOT TRUE
+                    )
+                  )
+                )
+            ) THEN
+            v_named_agents := NULL;
+            IF v_conv.kind = 'group_dm' THEN
+              SELECT coalesce(array_agg(m.member_agent_principal_id), '{}')
+              INTO v_named_agents
+              FROM swarm.conversation_members AS m
+              WHERE m.conversation_id = v_conv.conversation_id
+                AND m.workspace_id = p_workspace_id
+                AND m.left_at IS NULL
+                AND m.member_agent_principal_id IS NOT NULL
+                AND NOT (p_actor_kind = 'agent' AND m.member_agent_principal_id = p_actor_id)
+                AND swarm.actor_can_access_channel(p_workspace_id, NULL, 'agent', m.member_agent_principal_id);
             END IF;
-            v_signal_id := gen_random_uuid();
-            INSERT INTO swarm.signals (
-              id, workspace_id, from_principal, from_kind,
-              to_user_id, to_agent_principal_id,
-              about, kind, body, until, created_at,
-              thread_root_id, broadcast_to_channel
-            ) VALUES (
-              v_signal_id, p_workspace_id, p_actor_id, p_actor_kind,
-              v_to_user, v_to_agent,
-              left(v_check.subject_repo || '#' || v_check.subject_ref, 500),
-              'note', v_body, v_now + interval '30 days', v_now,
-              v_check.thread_root_id, false
+            v_route := swarm.conversation_post_route(
+              p_workspace_id, p_actor_kind, p_actor_id, v_conv.conversation_id, NULL, v_named_agents
             );
-            v_pos := 0;
-            FOR v_rec IN SELECT value FROM jsonb_array_elements(v_to) LOOP
-              INSERT INTO swarm.signal_recipients (
-                signal_id, workspace_id, position,
-                recipient_user_id, recipient_agent_principal_id, created_at
+            IF v_route->>'status' = 'ok' AND jsonb_array_length(v_route->'to') > 0 THEN
+              v_to := v_route->'to';
+              v_to_user := NULL;
+              v_to_agent := NULL;
+              IF jsonb_array_length(v_to) = 1 THEN
+                IF (v_to->0)->>'kind' = 'user' THEN
+                  v_to_user := ((v_to->0)->>'id')::uuid;
+                ELSE
+                  v_to_agent := ((v_to->0)->>'id')::uuid;
+                END IF;
+              END IF;
+              v_signal_id := gen_random_uuid();
+              INSERT INTO swarm.signals (
+                id, workspace_id, from_principal, from_kind,
+                to_user_id, to_agent_principal_id,
+                about, kind, body, until, created_at,
+                thread_root_id, broadcast_to_channel
               ) VALUES (
-                v_signal_id, p_workspace_id, v_pos,
-                CASE WHEN v_rec->>'kind' = 'user' THEN (v_rec->>'id')::uuid ELSE NULL END,
-                CASE WHEN v_rec->>'kind' = 'agent' THEN (v_rec->>'id')::uuid ELSE NULL END,
-                v_now
+                v_signal_id, p_workspace_id, p_actor_id, p_actor_kind,
+                v_to_user, v_to_agent,
+                left(v_check.subject_repo || '#' || v_check.subject_ref, 500),
+                'note', v_body, v_now + interval '30 days', v_now,
+                v_check.thread_root_id, false
               );
-              v_pos := v_pos + 1;
-            END LOOP;
-            PERFORM swarm.conversation_prefile(p_workspace_id, v_signal_id, v_conv.conversation_id);
+              v_pos := 0;
+              FOR v_rec IN SELECT value FROM jsonb_array_elements(v_to) LOOP
+                INSERT INTO swarm.signal_recipients (
+                  signal_id, workspace_id, position,
+                  recipient_user_id, recipient_agent_principal_id, created_at
+                ) VALUES (
+                  v_signal_id, p_workspace_id, v_pos,
+                  CASE WHEN v_rec->>'kind' = 'user' THEN (v_rec->>'id')::uuid ELSE NULL END,
+                  CASE WHEN v_rec->>'kind' = 'agent' THEN (v_rec->>'id')::uuid ELSE NULL END,
+                  v_now
+                );
+                v_pos := v_pos + 1;
+              END LOOP;
+              PERFORM swarm.conversation_prefile(p_workspace_id, v_signal_id, v_conv.conversation_id);
+            END IF;
           END IF;
         END IF;
       END IF;
