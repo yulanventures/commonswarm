@@ -4661,11 +4661,18 @@ export async function listConversations(
   workspaceId: string,
   includeArchived = false,
 ): Promise<ConversationSummary[]> {
-  const { status, body } = await postConversationRead(
-    buildListConversationsRequest(workspaceId, includeArchived),
-    "conversations",
-  );
-  const outcome = parseConversationsListOutcome(status, body);
+  const request = buildListConversationsRequest(workspaceId, includeArchived);
+  let result: { status: number; body: Record<string, unknown> };
+  try {
+    result = await postConversationRead(request, "conversations");
+  } catch (error) {
+    // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
+    // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
+    // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
+    if (!(error instanceof TypeError)) throw error;
+    result = await postConversationRead(request, "conversations");
+  }
+  const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
   if (outcome.status === "failed") throw new Error(outcome.message);
   return outcome.conversations;

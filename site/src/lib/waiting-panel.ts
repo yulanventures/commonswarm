@@ -89,6 +89,7 @@ export interface WaitingPanelHandlers {
 
 export const WAITING_PANEL_ID = "cs-waiting-panel";
 export const WAITING_SHEET_ID = "cs-waiting-sheet";
+export const WAITING_SHEET_MEDIA = "(max-width: 52rem), (max-height: 32rem)";
 
 /** Filters open choice asks by the selected scope and active conversation. */
 export function filterWaitingItems(
@@ -555,7 +556,7 @@ export function createWaitingSurface(
 ): WaitingSurface {
   const doc = app.ownerDocument;
   const panel = app.querySelector<HTMLElement>("[data-waiting-panel]");
-  const media = doc.defaultView!.matchMedia("(max-width: 52rem)");
+  const media = doc.defaultView!.matchMedia(WAITING_SHEET_MEDIA);
   const dialog = doc.createElement("dialog");
   dialog.id = WAITING_SHEET_ID;
   dialog.className = "cs-waiting-sheet";
