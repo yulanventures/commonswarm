@@ -164,11 +164,64 @@ struct VerifyPeopleDirectory {
             "Expected Beacon hosted MCP C2 status 'Turn-only, checks when opened · 5 min ago' with ring (never live dot); got '\(beaconSeat.line)'"
         )
 
-        // 1b. C2 SeatStatusClassifier pure truth rules (fixed clock & UTC calendar)
+        // 1b. C2 SeatStatusClassifier pure truth rules (cbf7c1e7e parity, fixed clock & UTC calendar)
         var utcCal = Calendar(identifier: .gregorian)
         utcCal.timeZone = TimeZone(secondsFromGMT: 0)!
         let fixedNow = PeopleDirectoryRules.parseISO8601("2026-11-20T10:50:00Z")!
         let wait1042 = PeopleDirectoryRules.parseISO8601("2026-11-20T10:42:00Z")!
+        let wait1049 = PeopleDirectoryRules.parseISO8601("2026-11-20T10:49:00Z")!
+
+        // Rule (1): Working WITHOUT a verified live push lease -> 'Working · 3 min ago' + hollow ring (never filled dot)
+        let unverifiedWorking = SeatStatusClassifier.classify(
+            transport: "hosted_mcp",
+            turnOnly: true,
+            connection: "live",
+            presenceProvided: true,
+            wake: SeatWakeTimestamps(watcherAt: nil, channelAt: nil, listenerAt: nil, turnAt: fixedNow.addingTimeInterval(-180)),
+            lastCommandAt: fixedNow.addingTimeInterval(-180),
+            lastActivityAt: fixedNow.addingTimeInterval(-180),
+            workingOnSince: fixedNow.addingTimeInterval(-180),
+            workingOnUntil: fixedNow.addingTimeInterval(600),
+            doingSince: nil,
+            serverWork: "working",
+            waitingSince: nil,
+            unseenCount: 0,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            unverifiedWorking.kind == .working
+                && unverifiedWorking.line == "Working · 3 min ago"
+                && unverifiedWorking.indicator == .ring,
+            "Unverified/turn-only working must say 'Working · 3 min ago' with hollow ring; got '\(unverifiedWorking.line)' (\(unverifiedWorking.indicator))"
+        )
+
+        // Rule (2): Known unseenCount > 0 immediately surfaces 'Waiting since HH:MM · N unseen' + diamond even at 1 min on working/turn-only seat
+        let immediateUnseenOnWorking = SeatStatusClassifier.classify(
+            transport: "local",
+            turnOnly: false,
+            connection: "live",
+            presenceProvided: true,
+            wake: SeatWakeTimestamps(watcherAt: fixedNow.addingTimeInterval(-30), channelAt: nil, listenerAt: nil, turnAt: nil),
+            lastCommandAt: fixedNow.addingTimeInterval(-30),
+            lastActivityAt: fixedNow.addingTimeInterval(-30),
+            workingOnSince: fixedNow.addingTimeInterval(-180),
+            workingOnUntil: fixedNow.addingTimeInterval(600),
+            doingSince: nil,
+            serverWork: "working",
+            waitingSince: wait1049,
+            unseenCount: 1,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            immediateUnseenOnWorking.kind == .waiting
+                && immediateUnseenOnWorking.line == "Waiting since 10:49 · 1 unseen"
+                && immediateUnseenOnWorking.indicator == .diamond
+                && !immediateUnseenOnWorking.staleWaiting,
+            "Known unseenCount > 0 must immediately show 'Waiting since 10:49 · 1 unseen' with diamond even at 1 min on a working seat; got '\(immediateUnseenOnWorking.line)'"
+        )
+
         let staleWaitingStatus = SeatStatusClassifier.classify(
             transport: "local",
             turnOnly: false,
@@ -219,6 +272,8 @@ struct VerifyPeopleDirectory {
             "Never-active hosted MCP seat must say 'Turn-only, checks when opened' with ring (never dot)"
         )
 
+        // Rule (3): Listening uses push lease timestamp ('Listening · verified 1 min ago'), NOT last_activity_at (4 min ago);
+        //           legacy unknown-count brief waiting (< 3 min) is tolerated on a live push listener.
         let liveListening = SeatStatusClassifier.classify(
             transport: "local",
             turnOnly: false,
@@ -231,16 +286,39 @@ struct VerifyPeopleDirectory {
             workingOnUntil: nil,
             doingSince: nil,
             serverWork: "idle",
-            waitingSince: fixedNow.addingTimeInterval(-30), // < 3 min tolerated on live push listener
-            unseenCount: 1,
+            waitingSince: fixedNow.addingTimeInterval(-30),
+            unseenCount: nil,
             now: fixedNow,
             calendar: utcCal
         )
         expect(
             liveListening.kind == .listening
-                && liveListening.line == "Listening · 4 min ago"
+                && liveListening.line == "Listening · verified 1 min ago"
                 && liveListening.indicator == .dot,
-            "Live push listener with < 3 min waiting must stay 'Listening · 4 min ago' with dot; got '\(liveListening.line)'"
+            "Live push listener must use lease timestamp 'Listening · verified 1 min ago' with dot; got '\(liveListening.line)'"
+        )
+
+        // Rule (3): Failed / unloaded status read shows 'Status unavailable' with hollow ring
+        let unloadedStatus = SeatStatusClassifier.classify(
+            transport: "local",
+            turnOnly: false,
+            connection: nil,
+            presenceProvided: false,
+            wake: nil,
+            lastCommandAt: nil,
+            lastActivityAt: nil,
+            workingOnSince: nil,
+            workingOnUntil: nil,
+            doingSince: nil,
+            serverWork: nil,
+            waitingSince: nil,
+            unseenCount: nil,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            unloadedStatus.kind == .unknown && unloadedStatus.line == "Status unavailable" && unloadedStatus.indicator == .ring,
+            "Unloaded status read must say 'Status unavailable' with hollow ring; got '\(unloadedStatus.line)'"
         )
 
         // 1c. Live loopback scenarios: waiting_stale, not_listening, fault, legacy fallback, and 403 refusal precedence
@@ -262,8 +340,8 @@ struct VerifyPeopleDirectory {
         expect(
             atlasNotListening.kind == .notListening
                 && atlasNotListening.indicator == .ring
-                && atlasNotListening.line == "Not listening · 2 h ago",
-            "Loopback not_listening must surface 'Not listening · 2 h ago' with ring (never live dot); got '\(atlasNotListening.line)'"
+                && atlasNotListening.line == "Not listening · last active 2 h ago",
+            "Loopback not_listening must surface 'Not listening · last active 2 h ago' with ring (never live dot); got '\(atlasNotListening.line)'"
         )
 
         try await postFixture("\(base)/fixture/seat-scenario?mode=fault")

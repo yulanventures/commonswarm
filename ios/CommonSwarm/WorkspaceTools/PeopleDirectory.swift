@@ -120,7 +120,7 @@ struct SeatStatus: Equatable, Hashable, Sendable {
 /// Swift parity port of `src/protocol/seat-status.ts` (`classifySeatStatus`).
 /// Truth rules:
 /// - Always show age or clock time when a timestamp exists.
-/// - Never fake a live dot: `.dot` ONLY for verified recent working or verified live push lease (<= 3 min).
+/// - Never fake a live dot: `.dot` ONLY when a live push listener lease is verified (<= 3 min).
 /// - People & agents never renders private work titles in seat status lines.
 enum SeatStatusClassifier {
     static let workRecentInterval: TimeInterval = 30 * 60
@@ -187,6 +187,7 @@ enum SeatStatusClassifier {
         serverWork: String?,
         waitingSince: Date?,
         unseenCount: Int?,
+        statusUnavailable: Bool = false,
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> SeatStatus {
@@ -251,7 +252,7 @@ enum SeatStatusClassifier {
         let resolvedLastActivity = activityCandidates.first
         let lastActivityAge = resolvedLastActivity.map { max(0, now.timeIntervalSince($0)) }
 
-        let wakeReference: Date? = [wake?.watcherAt, wake?.channelAt, wake?.listenerAt, wake?.turnAt]
+        let pushLeaseDate: Date? = [wake?.watcherAt, wake?.channelAt, wake?.listenerAt]
             .compactMap { date in
                 guard let date, date <= now else { return nil }
                 return date
@@ -260,12 +261,13 @@ enum SeatStatusClassifier {
             .first
 
         let effectiveUnseenCount: Int? = unseenCount.flatMap { $0 >= 0 ? $0 : nil }
+        let hasKnownUnseenCount = (effectiveUnseenCount ?? 0) > 0
         let hasWaitingRow = waitingSince != nil
             && (waitingSince! <= now)
             && (effectiveUnseenCount == nil || effectiveUnseenCount! > 0)
         let waitingAge: TimeInterval? = hasWaitingRow ? max(0, now.timeIntervalSince(waitingSince!)) : nil
         let staleWaiting = (waitingAge ?? -1) >= waitingStaleInterval
-        let reportedUnseenCount = hasWaitingRow ? (effectiveUnseenCount ?? 1) : 0
+        let reportedUnseenCount = hasKnownUnseenCount ? effectiveUnseenCount! : (hasWaitingRow ? 1 : 0)
 
         func build(
             _ kind: SeatStatusKind,
@@ -308,26 +310,47 @@ enum SeatStatusClassifier {
             return build(.connectionOff, "Needs reconnecting", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
         }
 
+        // Explicit status read failure.
+        if statusUnavailable {
+            return build(.unknown, "Status unavailable", .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
+        }
+
         let recentActivity = lastActivityAge.map { $0 <= workRecentInterval } ?? false
         let hasWorkClaim = doingSince != nil || workingActive
         let isWorking = serverWork == "working" || (serverWork != "idle" && hasWorkClaim && recentActivity)
 
-        // 2. Waiting messages: stale outranks working/listening/turn-only; non-stale surfaces when idle and not push-listening.
-        let showWaiting = hasWaitingRow && (staleWaiting || (!isWorking && !hasLiveListener))
-        if showWaiting, let waitingSince, let waitingAge {
-            let clock = formatClock(waitingSince, now: now, calendar: calendar)
-            let suffix = (effectiveUnseenCount ?? 0) > 0 ? " · \(effectiveUnseenCount!) unseen" : ""
-            return build(
-                .waiting,
-                "Waiting since \(clock)\(suffix)",
-                staleWaiting ? .diamond : .ring,
-                attention: staleWaiting && !isTurnSeat,
-                since: waitingSince,
-                age: waitingAge
-            )
+        // 2. Waiting messages (right after access faults):
+        //    - Whenever unseenCount > 0 is known, surface "Waiting since … · N unseen" with a diamond immediately.
+        //    - Otherwise (legacy timestamp without count), surface if stale (>= 3 min) or idle without a live listener.
+        let showWaiting = hasKnownUnseenCount || (hasWaitingRow && (staleWaiting || (!isWorking && !hasLiveListener)))
+        if showWaiting {
+            if hasWaitingRow, let waitingSince, let waitingAge {
+                let clock = formatClock(waitingSince, now: now, calendar: calendar)
+                let suffix = hasKnownUnseenCount ? " · \(effectiveUnseenCount!) unseen" : ""
+                return build(
+                    .waiting,
+                    "Waiting since \(clock)\(suffix)",
+                    (staleWaiting || hasKnownUnseenCount) ? .diamond : .ring,
+                    attention: staleWaiting && !isTurnSeat,
+                    since: waitingSince,
+                    age: waitingAge
+                )
+            }
+            if hasKnownUnseenCount {
+                return build(
+                    .waiting,
+                    "Waiting · \(effectiveUnseenCount!) unseen",
+                    .diamond,
+                    attention: false,
+                    since: nil,
+                    age: nil
+                )
+            }
         }
 
-        // 3. Verified recent work ("Working · 3 min").
+        // 3. Verified recent work:
+        //    - Filled dot + "Working · 3 min" ONLY when a live push listener lease is verified.
+        //    - Hollow ring + "Working · 3 min ago" otherwise (turn-only or unverified push seat).
         if isWorking {
             let refDate: Date?
             if let doingSince, doingSince <= now {
@@ -338,36 +361,39 @@ enum SeatStatusClassifier {
                 refDate = resolvedLastActivity
             }
             let workAge = refDate.map { max(0, now.timeIntervalSince($0)) } ?? lastActivityAge
-            let line = workAge.map { "Working · \(formatElapsed($0))" } ?? "Working"
-            return build(.working, line, .dot, attention: false, since: refDate, age: workAge)
+            let line: String
+            if let workAge {
+                line = hasLiveListener
+                    ? "Working · \(formatElapsed(workAge))"
+                    : "Working · \(formatAgo(workAge))"
+            } else {
+                line = "Working"
+            }
+            return build(.working, line, hasLiveListener ? .dot : .ring, attention: false, since: refDate, age: workAge)
         }
 
-        // 4. Turn-only seats (hosted MCP or turn-only local seat) — never fake a live dot.
+        // 4. Failed / unloaded status read -> "Status unavailable" with hollow ring.
+        if !presenceProvided {
+            return build(.unknown, "Status unavailable", .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
+        }
+
+        // 5. Turn-only seats (hosted MCP or turn-only local seat) — never fake a live dot.
         if isTurnSeat {
             let line = lastActivityAge.map { "Turn-only, checks when opened · \(formatAgo($0))" }
                 ?? "Turn-only, checks when opened"
             return build(.turnOnly, line, .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
         }
 
-        // 5. Verified live push listener lease (<= 3 min).
+        // 6. Verified live push listener lease (<= 3 min) — uses the push lease timestamp.
         if hasLiveListener {
-            let refDate = resolvedLastActivity ?? wakeReference
-            let refAge = refDate.map { max(0, now.timeIntervalSince($0)) } ?? wakeAge
-            let line = refAge.map { "Listening · \(formatAgo($0))" } ?? "Listening"
-            return build(.listening, line, .dot, attention: false, since: refDate, age: refAge)
+            let leaseAge = pushLeaseDate.map { max(0, now.timeIntervalSince($0)) } ?? wakeAge
+            let line = leaseAge.map { "Listening · verified \(formatAgo($0))" } ?? "Listening"
+            return build(.listening, line, .dot, attention: false, since: pushLeaseDate, age: leaseAge)
         }
 
-        // 6. Local push-capable seat with presence/wake reported, and no live push lease.
-        if presenceProvided {
-            let refDate = resolvedLastActivity ?? wakeReference
-            let refAge = refDate.map { max(0, now.timeIntervalSince($0)) }
-            let line = refAge.map { "Not listening · \(formatAgo($0))" } ?? "Not listening"
-            return build(.notListening, line, .ring, attention: false, since: refDate, age: refAge)
-        }
-
-        // 7. Presence/wake unavailable — honest fallback, never a live dot.
-        let line = lastActivityAge.map { "Last active \(formatAgo($0))" } ?? "Connected"
-        return build(.unknown, line, .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
+        // 7. Local push-capable seat with presence/wake reported and no live push lease — uses last_activity_at.
+        let line = lastActivityAge.map { "Not listening · last active \(formatAgo($0))" } ?? "Not listening"
+        return build(.notListening, line, .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
     }
 }
 
