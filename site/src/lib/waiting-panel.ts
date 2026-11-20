@@ -860,6 +860,24 @@ export function renderWaitingPanel(
     else cursor = cursor.nextSibling;
   }
 
+  for (const todo of todos) {
+    const key = `todo:${todo.id}`;
+    const sig = todoCardSignature(todo, vm.scope);
+    let card = existing.get(key);
+    if (!card || card.dataset.waitingCardSig !== sig) {
+      const built = buildTodoCard(doc, todo, vm.scope, handlers);
+      if (card) {
+        if (cursor === card) cursor = built;
+        card.replaceWith(built);
+      } else {
+        list.insertBefore(built, cursor);
+      }
+      card = built;
+    }
+    if (card !== cursor) list.insertBefore(card, cursor);
+    else cursor = cursor.nextSibling;
+  }
+
   for (const plain of plainAsks) {
     const key = `plain:${plain.id}`;
     const sig = plainAskCardSignature(plain, vm.scope);
@@ -880,24 +898,6 @@ export function renderWaitingPanel(
         const restored = doc.getElementById(activeControlId);
         if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
       }
-    }
-    if (card !== cursor) list.insertBefore(card, cursor);
-    else cursor = cursor.nextSibling;
-  }
-
-  for (const todo of todos) {
-    const key = `todo:${todo.id}`;
-    const sig = todoCardSignature(todo, vm.scope);
-    let card = existing.get(key);
-    if (!card || card.dataset.waitingCardSig !== sig) {
-      const built = buildTodoCard(doc, todo, vm.scope, handlers);
-      if (card) {
-        if (cursor === card) cursor = built;
-        card.replaceWith(built);
-      } else {
-        list.insertBefore(built, cursor);
-      }
-      card = built;
     }
     if (card !== cursor) list.insertBefore(card, cursor);
     else cursor = cursor.nextSibling;

@@ -257,13 +257,14 @@ export function renderWaitingSurvey(
   wrap.append(top);
 
   if (vm.mode === "review") {
+    const scroll = el(doc, "div", "cs-waiting-survey__scroll");
     const ready = surveyReadyEntries(vm.items, vm.drafts);
     const skippedCount = vm.items.length - ready.length;
     const summaryText =
       skippedCount > 0
         ? `${ready.length} ready to send · ${skippedCount} skipped`
         : `${ready.length} ready to send`;
-    wrap.append(el(doc, "p", "cs-waiting-panel__state-text", summaryText));
+    scroll.append(el(doc, "p", "cs-waiting-panel__state-text", summaryText));
 
     const list = el(doc, "div", "cs-waiting-survey__review-list");
     for (const item of vm.items) {
@@ -301,7 +302,8 @@ export function renderWaitingSurvey(
       row.append(actions);
       list.append(row);
     }
-    wrap.append(list);
+    scroll.append(list);
+    wrap.append(scroll);
 
     const footer = el(doc, "div", "cs-waiting-survey__nav");
     const back = el(doc, "button", "cs-waiting-panel__action", "Back");
@@ -442,7 +444,9 @@ export function renderWaitingSurvey(
     card.append(alert);
   }
 
-  wrap.append(card);
+  const scroll = el(doc, "div", "cs-waiting-survey__scroll");
+  scroll.append(card);
+  wrap.append(scroll);
 
   const nav = el(doc, "div", "cs-waiting-survey__nav");
   const back = el(doc, "button", "cs-waiting-panel__action", "Back");

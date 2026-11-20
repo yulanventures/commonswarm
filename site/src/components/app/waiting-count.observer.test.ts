@@ -1016,7 +1016,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     sub: "77777777-7777-4777-8777-777777777777",
     exp: Math.floor(Date.now() / 1000) + 3600,
     role: "authenticated",
-  })).toString("base64url")}.synthetic`;
+  })).toString("base64url")}.${Buffer.from("synthetic-sig").toString("base64url")}`;
   const peerSwitchBundle = (await build({
     stdin: {
       contents: `import { client } from "../../lib/commonswarm";
