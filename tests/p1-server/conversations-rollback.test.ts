@@ -7,10 +7,11 @@ import { releaseCatalogQuery } from '../support/release-catalog-query.js';
 
 const root = 'deploy/release-proofs/conversations/20261118000004';
 const root2a = 'deploy/release-proofs/conversations-2a/20261118000005';
+const rollback2b = repoSql('deploy/release-proofs/conversations-2b/20261120000001-rollback.sql');
 const catalog2a = (rollback = false) => dbAssert(
   releaseCatalogQuery(repoSql(`${root2a}-${rollback ? 'rollback-catalog' : 'catalog'}.sql`), rollback ? 'rollback_ok' : 'catalog_ok')
     .trim().replace(/;$/, ''), rollback ? 'conversations 2a rollback catalog' : 'conversations 2a catalog');
-const rollback2a = catalog2a() + repoSql(`${root2a}-rollback.sql`) + catalog2a(true);
+const rollback2a = rollback2b + catalog2a() + repoSql(`${root2a}-rollback.sql`) + catalog2a(true);
 const catalog = (rollback = false) => dbAssert(
   releaseCatalogQuery(repoSql(`${root}-${rollback ? 'rollback-catalog' : 'catalog'}.sql`), rollback ? 'rollback_ok' : 'catalog_ok')
     .trim().replace(/;$/, ''), rollback ? 'conversations rollback catalog' : 'conversations catalog');
@@ -76,7 +77,8 @@ SET CONSTRAINTS ALL IMMEDIATE;
 `;
 
 test('step 2a rolls back to step 1 and applies again; then step 1 rolls back after it', () => {
-  runSql(catalog2a()
+  runSql(rollback2b
+    + catalog2a()
     + seed2a
     + dbAssert(`(SELECT audience = 'conversation' FROM swarm.conversation_signals WHERE signal_id = '${explicit}')`,
       'a post to a group is filed in it for everyone in it')
@@ -94,4 +96,19 @@ test('step 2a rolls back to step 1 and applies again; then step 1 rolls back aft
     + catalog2a(true)
     + repoSql(`${root}-rollback.sql`)
     + catalog(true));
+});
+
+test('step 2b rolls back to step 2a cleanly, reapplies cleanly, and rolls back before step 2a', () => {
+  runSql(rollback2b
+    + catalog2a()
+    + dbAssert(`to_regprocedure('swarm_read.conversations(uuid,boolean)') IS NULL`, 'step 2b read RPC dropped on rollback')
+    + dbAssert(`to_regprocedure('swarm.conversation_thread_root(uuid,uuid,uuid)') IS NULL`, 'step 2b thread root helper dropped on rollback')
+    + repoSql('supabase/migrations/20261120000001_conversations_reads.sql')
+    + dbAssert(`to_regprocedure('swarm_read.conversations(uuid,boolean)') IS NOT NULL
+      AND to_regprocedure('swarm_read.conversation_history(uuid,uuid,timestamptz,uuid,timestamptz,uuid,integer,boolean,boolean)') IS NOT NULL
+      AND to_regprocedure('swarm_read.conversation_oversight(uuid,uuid)') IS NOT NULL
+      AND to_regprocedure('swarm_read.conversation_oversight_history(uuid,uuid,uuid,timestamptz,uuid,timestamptz,uuid,integer,boolean,boolean)') IS NOT NULL
+      AND to_regprocedure('swarm.conversation_thread_root(uuid,uuid,uuid)') IS NOT NULL`, 'step 2b functions reapplied cleanly')
+    + rollback2b
+    + catalog2a());
 });

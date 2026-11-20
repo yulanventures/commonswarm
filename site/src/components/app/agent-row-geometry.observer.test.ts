@@ -109,9 +109,12 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           action: () => { throw Error('No local action permitted'); }, saveModel: async () => { throw Error('No local model save permitted'); },
           confirm: (action,id,opener) => {
             const target = action === 'remove-person' ? model.people.find(item => item.id === id) : action === 'cancel-invite' ? model.invites.find(item => item.id === id) : model.agents.find(item => item.id === id);
-            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) } : { ...target, workspaceName: model.workspaceName };
+            const item = action === 'cancel-invite' ? { ...target, workspaceName: model.workspaceName, detail: PeopleView.peopleInviteDisplayDetail(target, model.invites) }
+              : action === 'remove-agent' && !target.hosted ? { ...target, workspaceName: model.workspaceName, removalScope: 'permanent' }
+              : { ...target, workspaceName: model.workspaceName };
             PeopleView.showPeopleConfirmation(pageConfirm,action,item,opener,
-              async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.');
+              async () => { commits.push(action); throw Error('No command sent'); },() => 'Controlled local boundary; no command sent.',
+              () => pageCallbacks.confirm('turn-off-key', id, opener));
           } };
         const number = value => Number.parseFloat(value) || 0;
         const modalPaint = button => {
@@ -168,8 +171,18 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
               const buttons=[...pageConfirm.querySelectorAll('.pd-confirm-actions button')], cancel=buttons[0];
               const row={dark,id,kind,width:innerWidth,modal:pageConfirm.matches(':modal'),outsideClassic:!pageConfirm.closest('[data-roster-dialog]'),
                 pageScope:pageConfirm.hasAttribute('data-people-page-confirm'),title:pageConfirm.querySelector('h2').textContent,
+                stopCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.stop').length,
+                keepCount:pageConfirm.querySelectorAll('.pd-confirm-facts li.keep').length,
+                noteCount:pageConfirm.querySelectorAll('.pd-confirm-note').length,
+                hasAlternative:!!pageConfirm.querySelector('[data-turn-off-key-instead]'),
+                switchedTitle:null,switchedSafeFocus:false,
                 actions:buttons.map(naturalAction),initial:modalPaint(cancel),cancelled:false,returned:false};
               pageRows.push(row); document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
+              if (kind === 'remove' && pageConfirm.querySelector('[data-turn-off-key-instead]')) {
+                pageConfirm.querySelector('[data-turn-off-key-instead]').click();
+                row.switchedTitle = pageConfirm.querySelector('h2')?.textContent ?? null;
+                row.switchedSafeFocus = document.activeElement === pageConfirm.querySelector('.pd-confirm-actions button');
+              }
               pageConfirm.addEventListener('cancel',event=>{row.cancelled=event.defaultPrevented;},{once:true}); pageConfirm.requestClose();
               row.returned=!pageConfirm.open && document.activeElement===opener;
               document.documentElement.dataset.pageModalPartial=btoa(unescape(encodeURIComponent(JSON.stringify(pageRows))));
@@ -287,7 +300,21 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
           assert.equal(row.describedByHasBoth, true, facts);
         } else {
           const name = row.id === 'agent' ? 'Alexandria Montgomery-Sutherland <img src=x onerror="document.title=1">' : 'Local Agent';
-          assert.equal(row.title, row.kind === 'turn-off-key' ? `Turn off ${name}’s key?` : `Remove ${name}?`, facts);
+          const longWorkspace = 'Rivera household & studio — shared with everyone, including the agents';
+          if (row.kind === 'turn-off-key') {
+            assert.equal(row.title, `Turn off ${name}’s key?`, facts);
+          } else if (row.id === 'agent') {
+            assert.equal(row.title, `Remove ${name} from ${longWorkspace}?`, facts);
+            assert.equal(row.stopCount, 1, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+            assert.equal(row.hasAlternative, true, facts);
+            assert.equal(row.switchedTitle, `Turn off ${name}’s key?`, facts);
+            assert.equal(row.switchedSafeFocus, true, facts);
+          } else {
+            assert.equal(row.title, `Remove ${name}?`, facts);
+            assert.equal(row.stopCount, 2, facts); assert.equal(row.keepCount, 0, facts); assert.equal(row.noteCount, 1, facts);
+            assert.equal(row.actions[1]?.text, 'Permanently remove agent', facts);
+            assert.equal(row.hasAlternative, false, facts);
+          }
         }
         assert.ok(row.cancelled && row.returned, `native close request must cancel and return to the actual opener: ${facts}`);
       }

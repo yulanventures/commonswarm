@@ -70,6 +70,7 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.conversation_prefile(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.conversation_visible(uuid,text,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.conversation_thread_root(uuid,uuid,uuid)', 'EXECUTE', false],
   // A person's channel read position: mark_channel_read writes it forward, never back.
   ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'SELECT', false],

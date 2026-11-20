@@ -2991,7 +2991,7 @@ function validateCommand(
         return { ok: false, status: 400, reason: "conversation_id is the id of the conversation to post in, as a UUID." };
       }
       if (
-        ["channel", "expected_channel_id", "thread_root_id", "broadcast_to_channel", "parent_signal_id", "reply_status"]
+        ["channel", "expected_channel_id", "broadcast_to_channel", "parent_signal_id", "reply_status"]
           .some((key) => Object.hasOwn(cmd, key)) ||
         cmd.to_user_id !== null || (cmd.to_agent_principal_id ?? null) !== null || (cmd.in_reply_to ?? null) !== null
       ) {
@@ -2999,7 +2999,7 @@ function validateCommand(
           ok: false,
           status: 400,
           error: "conversation_address",
-          reason: "conversation_id says where the message goes, so it takes no channel, thread_root_id, " +
+          reason: "conversation_id says where the message goes, so it takes no channel, " +
             "broadcast_to_channel, to_user_id, to_agent_principal_id or in_reply_to. In a group, an agent names " +
             "the agents to wake in to.",
         };
@@ -3110,6 +3110,7 @@ function validateCommand(
         : { broadcast_to_channel: broadcastToChannel }),
       ...(toList === undefined ? {} : { to: toList }),
       ...(mentionList === undefined ? {} : { mentions: mentionList }),
+      ...(hasConversation ? { has_conversation: true } : {}),
     });
     const keysOk = exactKeys(cmd, [
       "kind",
@@ -12318,6 +12319,8 @@ async function resolveThreadRoot(
   route: Route,
   auth: AuthContext,
   command: SignalCommand,
+  directConversationId: string | null = null,
+  expectedConversationChannelId: { check: boolean; channelId: string | null } | null = null,
 ): Promise<ThreadRootResolution> {
   const rootId = command.thread_root_id ?? null;
   if (rootId === null) {
@@ -12344,58 +12347,79 @@ async function resolveThreadRoot(
       reason: "thread_root_not_found",
     };
   }
-  const rows = await tx<{
-    id: string;
-    until: Date;
-    remaining_ms: number;
-    channel_id: string | null;
-    thread_root_id: string | null;
-    channel_archived_at: Date | null;
-  }[]>`
-    SELECT s.id, s.until,
-           EXTRACT(EPOCH FROM (s.until - statement_timestamp())) * 1000
-             AS remaining_ms,
-           s.channel_id, s.thread_root_id,
-           channel.archived_at AS channel_archived_at
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.channels AS channel
-      ON channel.channel_id = s.channel_id
-     AND channel.workspace_id = s.workspace_id
-    WHERE s.workspace_id = ${route.workspaceId}::uuid
-      AND s.id = ${rootId}::uuid
-      AND (
-        s.channel_id IS NULL
-        OR swarm.actor_can_access_channel(
-          s.workspace_id,
-          s.channel_id,
-          ${actor.kind},
-          ${actor.id}::uuid
+  const rows = directConversationId !== null
+    ? await tx<{
+        id: string;
+        until: Date;
+        remaining_ms: number;
+        channel_id: string | null;
+        thread_root_id: string | null;
+        channel_archived_at: Date | null;
+      }[]>`
+        SELECT id, until, remaining_ms, channel_id, thread_root_id,
+               NULL::timestamptz AS channel_archived_at
+        FROM swarm.conversation_thread_root(
+          ${route.workspaceId}::uuid,
+          ${directConversationId}::uuid,
+          ${rootId}::uuid
         )
-      )
-      /* A thread may root ONLY on an undirected signal, and this query is the
-       * enforcement. This function reads swarm.signals as swarm_command, which
-       * bypasses swarm_read.signals — the view that IS the read policy. Without
-       * this arm any member holding a signal id could hang a PUBLIC thread off
-       * a DIRECTED message between two other people: the reply itself is
-       * undirected and readable by everyone, so the thread would disclose that
-       * the private message exists and would attach public replies to it. A
-       * reply loop that needs a private one-hop answer already has in_reply_to,
-       * whose meaning this lane does not touch. */
-      AND s.to_user_id IS NULL
-      AND s.to_agent_principal_id IS NULL
-      /* Belt and braces. Every in_reply_to row is stored DIRECTED --
-       * resolveSignalWriteTarget re-addresses it to the referenced signal's
-       * author -- so the two arms above already exclude one. Asserting it here
-       * makes the property local to this query instead of a conclusion about
-       * another function that a later edit could quietly falsify. */
-      AND s.in_reply_to IS NULL
-      /* A one-second floor, not merely "still live". The reply's until is
-       * clamped to the root's in SQL, and CHECK (until > created_at) would
-       * fire if the root expired between this SELECT and the INSERT. The floor
-       * turns an unexplainable 500 into an honest refusal. */
-      AND s.until > statement_timestamp() + interval '1 second'
-    LIMIT 1
-  `;
+      `
+    : await tx<{
+        id: string;
+        until: Date;
+        remaining_ms: number;
+        channel_id: string | null;
+        thread_root_id: string | null;
+        channel_archived_at: Date | null;
+      }[]>`
+        SELECT s.id, s.until,
+               EXTRACT(EPOCH FROM (s.until - statement_timestamp())) * 1000
+                 AS remaining_ms,
+               s.channel_id, s.thread_root_id,
+               channel.archived_at AS channel_archived_at
+        FROM swarm.signals AS s
+        LEFT JOIN swarm.channels AS channel
+          ON channel.channel_id = s.channel_id
+         AND channel.workspace_id = s.workspace_id
+        WHERE s.workspace_id = ${route.workspaceId}::uuid
+          AND s.id = ${rootId}::uuid
+          AND (
+            s.channel_id IS NULL
+            OR swarm.actor_can_access_channel(
+              s.workspace_id,
+              s.channel_id,
+              ${actor.kind},
+              ${actor.id}::uuid
+            )
+          )
+          AND (
+            ${expectedConversationChannelId === null || !expectedConversationChannelId.check}
+            OR s.channel_id IS NOT DISTINCT FROM ${expectedConversationChannelId?.channelId ?? null}::uuid
+          )
+          /* A thread may root ONLY on an undirected signal, and this query is the
+           * enforcement. This function reads swarm.signals as swarm_command, which
+           * bypasses swarm_read.signals — the view that IS the read policy. Without
+           * this arm any member holding a signal id could hang a PUBLIC thread off
+           * a DIRECTED message between two other people: the reply itself is
+           * undirected and readable by everyone, so the thread would disclose that
+           * the private message exists and would attach public replies to it. A
+           * reply loop that needs a private one-hop answer already has in_reply_to,
+           * whose meaning this lane does not touch. */
+          AND s.to_user_id IS NULL
+          AND s.to_agent_principal_id IS NULL
+          /* Belt and braces. Every in_reply_to row is stored DIRECTED --
+           * resolveSignalWriteTarget re-addresses it to the referenced signal's
+           * author -- so the two arms above already exclude one. Asserting it here
+           * makes the property local to this query instead of a conclusion about
+           * another function that a later edit could quietly falsify. */
+          AND s.in_reply_to IS NULL
+          /* A one-second floor, not merely "still live". The reply's until is
+           * clamped to the root's in SQL, and CHECK (until > created_at) would
+           * fire if the root expired between this SELECT and the INSERT. The floor
+           * turns an unexplainable 500 into an honest refusal. */
+          AND s.until > statement_timestamp() + interval '1 second'
+        LIMIT 1
+      `;
   const root = rows[0];
   if (root === undefined) {
     return {
@@ -17779,6 +17803,7 @@ async function handleTransaction(
        * route rule (swarm.conversation_post_route), filed in that conversation after its recipients
        * (placement.conversationId). The database checks the same rule again at commit. */
       let conversationPrefile: string | null = null;
+      let expectedConversationChannel: { check: boolean; channelId: string | null } | null = null;
       if (command.conversation_id !== undefined) {
         const conversationId = command.conversation_id;
         const routed = await routeConversationPost(tx, route.workspaceId, authActorIdentity(auth), conversationId,
@@ -17807,8 +17832,16 @@ async function handleTransaction(
         }
         delete command.conversation_id;
         if (routed.ok && (routed.kind === "public_channel" || routed.kind === "private_channel")) {
-          command.channel = normalizeChannelSlug(routed.slug);
-          command.expected_channel_id = routed.channel_id;
+          if (command.thread_root_id == null) {
+            command.channel = normalizeChannelSlug(routed.slug);
+            command.expected_channel_id = routed.channel_id;
+          } else {
+            expectedConversationChannel = { check: true, channelId: routed.channel_id };
+          }
+        } else if (routed.ok && routed.kind === "general") {
+          if (command.thread_root_id != null) {
+            expectedConversationChannel = { check: true, channelId: null };
+          }
         } else if (routed.ok && (routed.kind === "dm" || routed.kind === "group_dm")) {
           command.to = routed.to;
           conversationPrefile = conversationId;
@@ -17961,6 +17994,8 @@ async function handleTransaction(
         route,
         auth,
         command,
+        conversationPrefile,
+        expectedConversationChannel,
       );
       if (!threadResolution.ok) {
         await insertAudit(tx, {
@@ -18271,7 +18306,12 @@ async function handleTransaction(
        * REFUSED by the validator (chatSignalShapeProblem), not silently
        * ignored here, so this line only ever chooses between an inherited
        * value and a top-level post's own channel. */
-      if (chatMentionsEnabled && threadResolution.threadRootId !== null && auth.credentialKind === "user") {
+      if (
+        chatMentionsEnabled &&
+        conversationPrefile === null &&
+        threadResolution.threadRootId !== null &&
+        auth.credentialKind === "user"
+      ) {
         /* A person's reply in a thread also reaches the agents already in it:
          * the root's author when that is an agent, and the agents the root
          * mentioned. Ones that are gone are skipped, not refused. */

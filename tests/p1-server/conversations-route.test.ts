@@ -417,21 +417,29 @@ test("history never filed: a thread reply under an unfiled root tells nobody; an
     "unfiled history for everyone: every live person");
 });
 
-test("an explicit read cursor follows the read rule 2a serves: an agent left off a group post cannot mark through it", async () => {
+test("an explicit read cursor follows step 2b's read rule: group members can mark through group posts, but an agent left off an addressed message cannot", async () => {
   const group = idOf(await open(w.people.bob!, "user", [w.people.alice!], [w.agents.agentA!, w.agents.agentB!]));
-  const mark = async (by: string, through: string) => await asEdge(async (tx) => (await tx<{ r: Result }[]>`
-    SELECT swarm.conversation_mark_read(${w.id}::uuid, 'agent', ${by}::uuid, ${group}::uuid, ${through}::uuid) AS r`)[0]!.r);
-  const cursor = async () => (await sql<{ at: Date | null }[]>`SELECT read_through_at AS at FROM swarm.conversation_reads
-    WHERE conversation_id = ${group}::uuid AND member_agent_principal_id = ${w.agents.agentB!}::uuid`)[0]?.at?.getTime() ?? null;
+  const mark = async (by: string, conv: string, through: string) => await asEdge(async (tx) => (await tx<{ r: Result }[]>`
+    SELECT swarm.conversation_mark_read(${w.id}::uuid, 'agent', ${by}::uuid, ${conv}::uuid, ${through}::uuid) AS r`)[0]!.r);
+  const cursor = async (conv: string) => (await sql<{ at: Date | null }[]>`SELECT read_through_at AS at FROM swarm.conversation_reads
+    WHERE conversation_id = ${conv}::uuid AND member_agent_principal_id = ${w.agents.agentB!}::uuid`)[0]?.at?.getTime() ?? null;
   const named = await explicit(group, { from: w.agents.agentA!, fromKind: "agent", to: [u("bob"), u("alice"), a("agentB")] });
-  assert.equal((await mark(w.agents.agentB!, named)).status, "ok", "the agent it named marks through it");
-  const before = await cursor();
-  const omitted = await explicit(group, { from: w.agents.agentA!, fromKind: "agent", to: [u("bob"), u("alice")] });
-  const refused = await mark(w.agents.agentB!, omitted);
-  const unknown = await mark(w.agents.agentB!, randomUUID());
+  assert.equal((await mark(w.agents.agentB!, group, named)).status, "ok", "the agent it named marks through it");
+  // Step 2b lifts 2a's temporary restriction: group posts have audience='conversation' and are readable by every group member.
+  const groupWide = await explicit(group, { from: w.agents.agentA!, fromKind: "agent", to: [u("bob"), u("alice")] });
+  assert.equal((await mark(w.agents.agentB!, group, groupWide)).status, "ok", "a group member marks through a group-audience post");
+  // An addressed message in a public channel (audience='addressed') that omits agentB stays hidden from agentB's cursor.
+  const room = await channel(sql, w, w.people.alice!);
+  const addressedOnlyToBob = await post(sql, w, { from: w.people.alice!, channel: room, to: [u("bob")] });
+  const roomFiled = await filed(sql, addressedOnlyToBob);
+  assert.equal(roomFiled?.audience, "addressed");
+  const roomConv = roomFiled!.conversation;
+  const beforeRoom = await cursor(roomConv);
+  const refused = await mark(w.agents.agentB!, roomConv, addressedOnlyToBob);
+  const unknown = await mark(w.agents.agentB!, roomConv, randomUUID());
   assert.equal(refused.status, "signal_not_found");
   assert.deepEqual(refused, unknown, "the same answer as an unknown message");
-  assert.equal(await cursor(), before, "and its cursor stays where it was");
+  assert.equal(await cursor(roomConv), beforeRoom, "and its cursor stays where it was");
 });
 
 test("who left a group is told only to a live sender of this workspace", async () => {

@@ -84,6 +84,11 @@ const adminReadResources = [...adminResources[1]!.matchAll(/"([a-z_]+)"/g)].map(
 // parseBody hands these to adminReadRequest through isAdminReadResource.
 assert.ok(parseBody.includes("if (isAdminReadResource(body.resource)) return adminReadRequest(body);"));
 for (const resource of adminReadResources) readResources.add(resource);
+const conversationContract = read("supabase/functions/read/conversations.ts");
+const conversationResources = /CONVERSATION_READ_RESOURCES = \[([^\]]*)\]/.exec(conversationContract);
+assert.ok(conversationResources, "CONVERSATION_READ_RESOURCES is readable");
+assert.ok(parseBody.includes("if (isConversationReadResource(body.resource)) return parseConversationReadRequest(body);"));
+for (const m of conversationResources[1]!.matchAll(/"([a-z_]+)"/g)) readResources.add(m[1]!);
 
 const UNDOCUMENTED_RESOURCES: Record<string, string> = {
   ...Object.fromEntries(adminReadResources.map((r) => [r, "admin recovery for the web app's admin pages"])),
