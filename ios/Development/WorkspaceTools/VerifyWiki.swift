@@ -108,6 +108,15 @@ struct VerifyWiki {
         let urlNoSplit = WikiRules.linkSegments(in: "See https://example.com/?topic=release-checklist for details.", topics: knownTopics)
         expect(urlNoSplit.allSatisfy { $0.topic == nil }, "URL containing topic slug must NOT split into a false link")
 
+        // Witness 2 (URL scheme sanitization): allow ONLY http/https with non-empty host; strip tel:, sms:, javascript:, custom, hostless
+        let mixedLinks = "[call](tel:12345) [text](sms:555) [js](javascript:alert(1)) [custom](myapp://open) [hostless](https:///path) [safe](https://example.com/docs) [http](http://docs.example.com)"
+        let sanitized = WikiRules.sanitizedInlineMarkdown(mixedLinks)
+        let keptLinks = sanitized.runs.compactMap { $0.link?.absoluteString }
+        expect(
+            keptLinks == ["https://example.com/docs", "http://docs.example.com"],
+            "sanitizedInlineMarkdown must keep ONLY http/https links with non-empty host; got: \(keptLinks)"
+        )
+
         let emailAPI = EmailCodeAPI(origin: origin, publicKey: publicKey)
         try await emailAPI.send(to: "reader@example.test")
         let tokens = try await emailAPI.verify(email: "reader@example.test", code: "012345")
@@ -162,6 +171,28 @@ struct VerifyWiki {
         await store.openTopic(fileID: checklist.fileID, version: 2)
         let editAllowedLatest = await MainActor.run { store.canEditTopic(checklist.fileID) }
         expect(editAllowedLatest, "Editor must be allowed to edit latest version")
+
+        // Witness 1 (version switch clears activeMarkdown & activeEditSession BEFORE loading target version)
+        _ = await MainActor.run { store.beginEdit(fileID: checklist.fileID) }
+        await MainActor.run { bearer.holdNext(1) }
+        let versionSwitchTask = Task { await store.openTopic(fileID: checklist.fileID, version: 1) }
+        await bearer.waitUntilHeld()
+        let clearedDuringSwitch = await MainActor.run {
+            store.activeVersion == 1 && store.activeMarkdown == nil && store.activeEditSession == nil && store.isLoadingContent
+        }
+        await MainActor.run { bearer.release() }
+        await versionSwitchTask.value
+        let v1Settled = await MainActor.run {
+            store.activeVersion == 1 && (store.activeMarkdown ?? "").contains("Initial checklist draft")
+        }
+        expect(clearedDuringSwitch && v1Settled, "Switching version on the same topic must clear activeMarkdown and activeEditSession before loading target version")
+        await store.openTopic(fileID: checklist.fileID, version: 2)
+
+        // Witness 3 (duplicate member_profiles & agent_principals rows never crash)
+        try await postFixture("\(base)/fixture/duplicate-directory?on=1")
+        let dupLoadOK = await store.loadTopics()
+        expect(dupLoadOK, "Duplicate member_profiles/agent_principals rows must decode safely without trapping")
+        try await postFixture("\(base)/fixture/duplicate-directory?on=0")
 
         // Held-bearer + edit sheet dismissed before transport -> ZERO write commands
         let dismissedEdit = await MainActor.run { store.beginEdit(fileID: checklist.fileID) }!

@@ -304,6 +304,28 @@ enum WikiRules {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Renders inline Markdown while stripping `.link` from any URL whose scheme is not `http`/`https`
+    /// with a non-empty host (blocking `tel:`, `sms:`, `javascript:`, custom schemes, and hostless links).
+    static func sanitizedInlineMarkdown(_ text: String) -> AttributedString {
+        guard var parsed = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else {
+            return AttributedString(text)
+        }
+        for run in parsed.runs {
+            if let url = run.link {
+                let scheme = url.scheme?.lowercased()
+                let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let allowed = (scheme == "http" || scheme == "https") && !host.isEmpty
+                if !allowed {
+                    parsed[run.range].link = nil
+                }
+            }
+        }
+        return parsed
+    }
+
     static func isAccessLossReason(_ reason: String) -> Bool {
         switch reason {
         case "unauthorized", "forbidden", "workspace_access_refused",
@@ -644,9 +666,10 @@ final class WikiStore: ObservableObject {
         let capturedSession = api.session
 
         let switchingFile = activeFileID != fileID
+        let switchingVersion = activeVersion != targetVersion
         activeFileID = fileID
         activeVersion = targetVersion
-        if switchingFile || activeVersion != targetVersion {
+        if switchingFile || switchingVersion {
             activeMarkdown = nil
             activeVersionState = nil
             activeEditSession = nil

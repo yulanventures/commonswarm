@@ -240,14 +240,20 @@ struct WikiAPI: Sendable {
         )
         let members = await membersTask ?? []
         let agents = await agentsTask ?? []
-        let userNames = Dictionary(uniqueKeysWithValues: members.compactMap { row -> (UUID, String)? in
-            let trimmed = row.display_name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? nil : (row.user_id, trimmed)
-        })
-        let agentNames = Dictionary(uniqueKeysWithValues: agents.compactMap { row -> (UUID, String)? in
-            let trimmed = row.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? nil : (row.principal_id, trimmed)
-        })
+        let userNames = Dictionary(
+            members.compactMap { row -> (UUID, String)? in
+                let trimmed = row.display_name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return trimmed.isEmpty ? nil : (row.user_id, trimmed)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let agentNames = Dictionary(
+            agents.compactMap { row -> (UUID, String)? in
+                let trimmed = row.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return trimmed.isEmpty ? nil : (row.principal_id, trimmed)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         let viewerID = await MainActor.run { api.session.userID }
 
         return rows.compactMap { row -> WikiTopic? in

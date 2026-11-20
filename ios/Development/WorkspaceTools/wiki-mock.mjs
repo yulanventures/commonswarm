@@ -105,6 +105,7 @@ let edge401Mode = false;
 let commitThen503 = false;
 let preReceiptRefusalReason = null;
 let expireNextDownload = false;
+let duplicateDirectory = false;
 
 const operationsForRole = (role) => (role === "editor" ? ["read", "create", "update"] : ["read"]);
 
@@ -145,6 +146,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/expire-next-download") {
       expireNextDownload = true;
       return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/duplicate-directory") {
+      duplicateDirectory = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, duplicateDirectory });
     }
     if (req.method === "POST" && url.pathname === "/fixture/advance-version") {
       const fid = url.searchParams.get("file_id") || fileChecklistID;
@@ -367,13 +372,17 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
     if (url.pathname === "/rest/v1/files") return reply(200, Array.from(files.values()));
     if (url.pathname === "/rest/v1/member_profiles") {
-      return reply(200, [
+      const rows = [
         { user_id: me, display_name: "You" },
         { user_id: maya, display_name: "Maya Chen" },
-      ]);
+      ];
+      if (duplicateDirectory) rows.push({ user_id: maya, display_name: "Maya Chen" });
+      return reply(200, rows);
     }
     if (url.pathname === "/rest/v1/agent_principals") {
-      return reply(200, [{ principal_id: atlas, name: "Atlas" }]);
+      const rows = [{ principal_id: atlas, name: "Atlas" }];
+      if (duplicateDirectory) rows.push({ principal_id: atlas, name: "Atlas" });
+      return reply(200, rows);
     }
     return reply(404, {});
   } catch {

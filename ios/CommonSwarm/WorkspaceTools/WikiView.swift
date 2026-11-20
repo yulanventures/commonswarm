@@ -515,10 +515,7 @@ private struct WikiMarkdownContentView: View {
     }
 
     private func renderedAttributed(_ text: String) -> AttributedString {
-        if let parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return parsed
-        }
-        return AttributedString(text)
+        WikiRules.sanitizedInlineMarkdown(text)
     }
 
     var body: some View {
