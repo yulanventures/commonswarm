@@ -311,7 +311,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashb
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply-window {
   display: inline;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-reply-cancel] {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-reply-cancel],
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-move-to-conversation] {
   grid-column: 2;
   grid-row: 1;
   min-inline-size: 44px;
@@ -319,6 +320,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-
   padding: 8px 4px;
   color: var(--k-shell-secondary);
   font: inherit;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-move-to-conversation] {
+  color: var(--k-shell-ink);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer .dashboard__composer-reply-broadcast {
   grid-column: 1 / -1;

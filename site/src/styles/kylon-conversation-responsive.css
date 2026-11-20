@@ -100,7 +100,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
     grid-column: 1;
     min-inline-size: 0;
   }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame [data-composer-reply-cancel] {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame [data-composer-reply-cancel],
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame [data-composer-move-to-conversation] {
     grid-column: 2;
     grid-row: 1;
   }

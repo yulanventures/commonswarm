@@ -249,6 +249,92 @@ async function observeDmThreads() {
   };
 
   try {
+    if (f.capture === "missing-thread-capture" || f.capture === "missing-thread-flow") {
+      await wait("group DM loaded for missing-thread check", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM launch checklist root."));
+      await dismissEntityPanel();
+      const input = one<HTMLTextAreaElement>("[data-composer-input]")!;
+      const isPhone = window.innerWidth < 1024;
+      await openReply(f.ids.missingRootId);
+      await wait("missing-root reply bar open", () => visible(one("[data-composer-reply]")));
+      input.value = "Draft for deleted root";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const cmdsBefore = f.signalCommands.length;
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await wait("404 thread_root_not_found shows Move draft to conversation", () =>
+        f.signalCommands.length === cmdsBefore + 1 &&
+        visible(one("[data-composer-reply]")) &&
+        visible(one("[data-composer-move-to-conversation]")) &&
+        (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+      );
+      check(input.value === "Draft for deleted root", "missing thread must preserve unsent draft text");
+      check(!visible(one("[data-composer-reply-cancel]")), "unavailable thread bar must show Move draft to conversation instead of Cancel reply");
+      const moveRect = one<HTMLElement>("[data-composer-move-to-conversation]")!.getBoundingClientRect();
+      check(moveRect.height >= 44, `Move draft to conversation target must be >=44px tall, got ${moveRect.height.toFixed(1)}px`);
+      // Repeat Send (phone 360px) or Enter (desktop 1440px): must NOT post to main DM before explicit Move draft to conversation.
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await new Promise((r) => setTimeout(r, 80));
+      check(
+        f.signalCommands.length === cmdsBefore + 1,
+        `Designer: ${isPhone ? "phone Send" : "desktop Enter"} must not post to main DM before Move draft to conversation`,
+      );
+      if (f.capture === "missing-thread-capture") {
+        await document.fonts.ready;
+        check(document.documentElement.scrollWidth <= innerWidth, "missing-thread page overflow");
+        document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
+          ok: true, capture: f.capture, moveHeight: moveRect.height, commands: f.signalCommands.length,
+        });
+        return;
+      }
+      // Edit preserved draft, verify repeated Send/Enter is still blocked, then click Move draft to conversation and send to main DM.
+      input.value = "Draft for deleted root (edited)";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      check(visible(one("[data-composer-move-to-conversation]")), "editing draft must keep Move draft to conversation visible");
+      await press("Escape");
+      check(visible(one("[data-composer-move-to-conversation]")), "Escape must not silently move draft to conversation");
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await wait("blocked send re-surfaces unavailable error", () =>
+        (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+      );
+      check(f.signalCommands.length === cmdsBefore + 1, "edited draft must still not post to main DM before explicit Move draft to conversation");
+      await click("[data-composer-move-to-conversation]:visible");
+      await wait("Move draft to conversation closed reply bar", () => !visible(one("[data-composer-reply]")));
+      check(input.value === "Draft for deleted root (edited)", "Move draft to conversation must keep edited draft text");
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await wait("moved draft posted to main group DM", () => f.signalCommands.length === cmdsBefore + 2);
+      const movedCmd = f.signalCommands[f.signalCommands.length - 1];
+      check(
+        movedCmd.conversation_id === f.ids.dmGroupConv &&
+        !("thread_root_id" in movedCmd) &&
+        !("channel" in movedCmd) &&
+        movedCmd.body === "Draft for deleted root (edited)",
+        "Moved draft must post as top-level main DM message: " + JSON.stringify(movedCmd),
+      );
+      document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
+        ok: true, capture: f.capture, mode: isPhone ? "phone-send" : "desktop-enter", commands: f.signalCommands.length,
+      });
+      return;
+    }
+
     if (f.capture === "group-thread-capture") {
       await wait("group DM loaded", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM launch checklist root."));
       await dismissEntityPanel();
@@ -329,15 +415,35 @@ async function observeDmThreads() {
 
     await openReply(f.ids.missingRootId);
     await wait("missing-root reply bar open", () => visible(one("[data-composer-reply]")));
+    const cmdsBeforeMissing = f.signalCommands.length;
     input.value = "Draft for deleted root";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await click("[data-composer-send]:visible");
-    await wait("404 thread_root_not_found handled", () =>
-      !visible(one("[data-composer-reply]")) &&
+    await wait("404 thread_root_not_found handled with explicit Move draft to conversation", () =>
+      f.signalCommands.length === cmdsBeforeMissing + 1 &&
+      visible(one("[data-composer-reply]")) &&
+      visible(one("[data-composer-move-to-conversation]")) &&
       (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
     );
     check(input.value === "Draft for deleted root", "404 thread_root_not_found must preserve unsent draft text");
     check((one("[data-feed-list]")?.textContent ?? "").includes("Group DM launch checklist root."), "404 thread_root_not_found must not evict DM");
+    // Repeat Send and Enter before Move draft to conversation: must NOT post to main DM.
+    await click("[data-composer-send]:visible");
+    input.focus();
+    await press("Enter");
+    await new Promise((r) => setTimeout(r, 80));
+    check(f.signalCommands.length === cmdsBeforeMissing + 1, "Send/Enter must not post to main DM before Move draft to conversation");
+    // Explicitly move draft to conversation, then verify top-level post succeeds.
+    await click("[data-composer-move-to-conversation]:visible");
+    await wait("Move draft to conversation cleared reply bar", () => !visible(one("[data-composer-reply]")));
+    check(input.value === "Draft for deleted root", "Move draft to conversation must keep draft text");
+    await click("[data-composer-send]:visible");
+    await wait("explicitly moved draft posted to main group DM", () => f.signalCommands.length === cmdsBeforeMissing + 2);
+    const movedMainCmd = f.signalCommands[f.signalCommands.length - 1];
+    check(
+      movedMainCmd.conversation_id === f.ids.dmGroupConv && !("thread_root_id" in movedMainCmd),
+      "Moved draft must post to main group DM without thread_root_id: " + JSON.stringify(movedMainCmd),
+    );
 
     await openReply(f.ids.groupRootId);
     await wait("reply bar open for Escape check", () => visible(one("[data-composer-reply]")));
@@ -381,6 +487,7 @@ async function observeDmThreads() {
       (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
     );
     check(visible(one("[data-composer-reply]")), "HezSec C1: private-channel 404 must keep reply bar bound to #secret-ops, never close to #general");
+    check(!visible(one("[data-composer-move-to-conversation]")), "HezSec C1: private-channel 404 must never offer Move draft to conversation");
     check(
       (one("[data-composer-reply-target-text]")?.textContent ?? "").includes("#secret-ops"),
       "HezSec C1: reply bar must stay bound to #secret-ops: " + one("[data-composer-reply-target-text]")?.textContent,
@@ -440,6 +547,12 @@ test("Step 3D-2 signed-in dashboard enables 1-level DM and group DM threads, hid
     const dmGroup = "bbbb2222-2222-4222-8222-222222222222";
     const cases: { name: string; width: number; height: number; query: string; screenshot?: boolean }[] = [
       { name: "flow-1024-light", width: 1024, height: 1366, query: `w=${ws}&dm=${dmAlex}&theme=light&capture=flow` },
+      { name: "missing-thread-360-send", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-flow` },
+      { name: "missing-thread-1440-enter", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-flow` },
+      { name: "360x740-light-dm-thread-missing", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-capture`, screenshot: true },
+      { name: "360x740-dark-dm-thread-missing", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=dark&capture=missing-thread-capture`, screenshot: true },
+      { name: "1440x900-light-dm-thread-missing", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-capture`, screenshot: true },
+      { name: "1440x900-dark-dm-thread-missing", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=dark&capture=missing-thread-capture`, screenshot: true },
       { name: "360x740-light-dm-thread", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=group-thread-capture&test_escape=1`, screenshot: true },
       { name: "360x740-dark-dm-thread", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=dark&capture=group-thread-capture`, screenshot: true },
       { name: "390x844-light-dm-thread", width: 390, height: 844, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=group-thread-capture&test_escape=1`, screenshot: true },

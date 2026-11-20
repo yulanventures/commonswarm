@@ -825,6 +825,9 @@ import "../../styles/kylon-image-viewer.css";
                 <button class="dashboard__text-button" type="button" data-composer-reply-cancel>
                   {THREAD_REPLY_CANCEL_LABEL}
                 </button>
+                <button class="dashboard__text-button" type="button" data-composer-move-to-conversation hidden>
+                  Move draft to conversation
+                </button>
               </div>
               <div class="dashboard__composer-box">
                 {/* The visible name of the box (Space.dc.html "Message Home"). renderHomeShell writes
@@ -2435,6 +2438,9 @@ import "../../styles/kylon-image-viewer.css";
      * slug-shaped version of it in the channels lane.
      */
     let threadReplyRoot: ThreadReplyRoot | null = null;
+    /** True after a canonical DM/group DM reply hits 404 thread_root_not_found: keeps the draft editable and
+     *  blocks Enter/Send until the reader explicitly chooses "Move draft to conversation". */
+    let threadReplyRootUnavailable = false;
     /** Originating root id so Escape on an open thread reply returns keyboard focus to its control. */
     let threadReplyOpenerSignalId: string | null = null;
     /** Thread roots the reader has opened. Replies are collapsed under their root until then. */
@@ -5501,6 +5507,7 @@ import "../../styles/kylon-image-viewer.css";
          intent and syncs the pass, and both are done here already, in the order this teardown
          needs them. */
       threadReplyRoot = null;
+      threadReplyRootUnavailable = false;
       threadReplyOpenerSignalId = null;
       expandedThreadIds = new Set<string>();
       syncComposerPlacement();
@@ -16914,8 +16921,27 @@ import "../../styles/kylon-image-viewer.css";
       const broadcastRow = one<HTMLElement>("[data-composer-reply-broadcast-row]");
       const broadcastLabel = one<HTMLElement>("[data-composer-reply-broadcast-label]");
       const broadcast = one<HTMLInputElement>("[data-composer-reply-broadcast]");
+      const cancelReply = one<HTMLButtonElement>("[data-composer-reply-cancel]");
+      const moveDraft = one<HTMLButtonElement>("[data-composer-move-to-conversation]");
+      const replyUnavailable = typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable;
       if (bar) bar.hidden = threadReplyRoot === null;
       if (threadReplyRoot !== null) {
+        if (replyUnavailable) {
+          if (targetText) targetText.textContent = "Thread unavailable";
+          if (windowText) windowText.textContent = "";
+          if (broadcastRow) broadcastRow.hidden = true;
+          if (broadcastLabel) broadcastLabel.textContent = "";
+          if (broadcast) broadcast.checked = false;
+          if (cancelReply) cancelReply.hidden = true;
+          if (moveDraft) moveDraft.hidden = false;
+          if (input) {
+            input.placeholder = "Reply…";
+            input.setAttribute("aria-label", "Thread reply");
+          }
+          return;
+        }
+        if (cancelReply) cancelReply.hidden = false;
+        if (moveDraft) moveDraft.hidden = true;
         const place = threadReplyPlaceOf(threadReplyRoot);
         const block = threadReplyBlock(threadReplyRoot);
         if (targetText) {
@@ -16958,6 +16984,8 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (broadcast) broadcast.checked = false;
       if (broadcastRow) broadcastRow.hidden = true;
+      if (cancelReply) cancelReply.hidden = false;
+      if (moveDraft) moveDraft.hidden = true;
       const channel = activeChannel();
       if (!input) return;
       const directPartner = typeof activeDm === "undefined" ? null : activeDm;
@@ -17042,8 +17070,10 @@ import "../../styles/kylon-image-viewer.css";
 
     /** Open a reply on a root, or close the one that is open. One writer for both. */
     const setThreadReplyRoot = (root: ThreadReplyRoot | null): void => {
-      if ((threadReplyRoot?.id ?? null) === (root?.id ?? null)) return;
+      const wasUnavailable = typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable;
+      if ((threadReplyRoot?.id ?? null) === (root?.id ?? null) && !wasUnavailable) return;
       threadReplyRoot = root;
+      if (typeof threadReplyRootUnavailable !== "undefined") threadReplyRootUnavailable = false;
       if (root === null && typeof threadReplyOpenerSignalId !== "undefined") {
         threadReplyOpenerSignalId = null;
       }
@@ -20523,6 +20553,7 @@ import "../../styles/kylon-image-viewer.css";
           !event.isComposing &&
           !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
           threadReplyRoot !== null &&
+          !threadReplyRootUnavailable &&
           !composerSending
         ) {
           event.preventDefault();
@@ -20615,6 +20646,10 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       const replyRoot = threadReplyRoot;
+      if (replyRoot !== null && threadReplyRootUnavailable) {
+        setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
+        return;
+      }
       const isDirectReply = replyRoot?.conversationId != null &&
         (replyRoot.conversationKind === "dm" || replyRoot.conversationKind === "group_dm");
       const activeDmConvIdNow = typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null;
@@ -21263,19 +21298,22 @@ import "../../styles/kylon-image-viewer.css";
           signalMentionRows.delete(pendingId);
           deliveryReceiptCache.delete(pendingId);
           composerIntent = null;
-          if (replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
-            setThreadReplyRoot(null);
-          }
-          if (sameDirectConversation) {
+          if (sameDirectConversation && replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
+            threadReplyRootUnavailable = true;
             input.value = rawBody;
             stagedAttachments = attachmentSnapshot;
             renderStagedAttachments();
             resizeComposerInput(input);
+            syncComposerControls();
             const staleRetry = one<HTMLButtonElement>("[data-composer-retry]");
             if (staleRetry) staleRetry.hidden = true;
+            syncComposerPlacement();
             setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
             renderFeed("latest");
           } else {
+            if (replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
+              setThreadReplyRoot(null);
+            }
             for (const attachment of attachmentSnapshot) {
               if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
             }
@@ -21426,6 +21464,14 @@ import "../../styles/kylon-image-viewer.css";
          Cancelling mid-post would retire the intent of a send the server may already hold. */
       if (composerSending) return;
       setThreadReplyRoot(null);
+      one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+    });
+    one<HTMLButtonElement>("[data-composer-move-to-conversation]")?.addEventListener("click", () => {
+      if (composerSending || !threadReplyRootUnavailable) return;
+      setThreadReplyRoot(null);
+      setComposerStatus("", "idle");
+      scheduleComposerDraft();
+      syncComposerControls();
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });
     /* THE WHOLE EDIT SURFACE OF THE ADDRESS: remove a name, or put one first so the message
@@ -21816,7 +21862,7 @@ import "../../styles/kylon-image-viewer.css";
     const closeThreadReplyOnEscape = (event: KeyboardEvent): void => {
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
           event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      if (threadReplyRoot === null || composerSending) return;
+      if (threadReplyRoot === null || threadReplyRootUnavailable || composerSending) return;
       if (document.querySelector("dialog[open], [data-context-menu], [data-reaction-picker], .dashboard__message-receipt[open]")) return;
       const mentions = one<HTMLElement>("[data-mention-picker]");
       if (mentions && !mentions.hidden) return;
