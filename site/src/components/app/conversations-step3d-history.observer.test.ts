@@ -407,6 +407,10 @@ async function observeConversations3D() {
     const response = await fetch(`/__press?key=${encodeURIComponent(key)}`);
     check(response.ok, "press failed (" + key + "): " + await response.text());
   };
+  const wheel = async (dy: number) => {
+    const response = await fetch(`/__wheel?dy=${encodeURIComponent(String(dy))}`);
+    check(response.ok, "wheel failed (" + dy + "): " + await response.text());
+  };
   const openDrawerIfPhone = async () => {
     if (!visible(shown("[data-home-dms]"))) {
       await click('button[aria-label="Open navigation"]:visible');
@@ -414,6 +418,72 @@ async function observeConversations3D() {
     }
   };
   try {
+    // Designer wheel-scroll-during-Retry witness: scrolling down 100px while Retry is pending updates the
+    // reading-position anchor so background redraws and older-page prepend preserve the newer scroll position.
+    if (f.capture === "designer-retry-scroll") {
+      await wait("group dm history loaded for designer scroll retry", () =>
+        (one("[data-feed-list]")?.textContent ?? "").includes("Group DM message #22") &&
+        visible(one("[data-load-older]")),
+      );
+      const scroller = one<HTMLElement>(".dashboard__feed-view")!;
+      scroller.scrollTop = 0;
+      if (!visible(one("[data-load-older-error]")) && !one<HTMLButtonElement>("[data-load-older]")?.disabled) {
+        await click("[data-load-older]:visible");
+      }
+      await wait("older 503 error visible for scroll retry", () => visible(one("[data-load-older-error]")));
+      const findMsg6 = () =>
+        [...document.querySelectorAll<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")]
+          .find((row) => (row.textContent ?? "").includes("Group DM message #6"))!;
+      const loadBtn = one<HTMLButtonElement>("[data-load-older]")!;
+      loadBtn.focus();
+      let feedRebuildCount = 0;
+      const feedList = one<HTMLElement>("[data-feed-list]")!;
+      const rebuildObserver = new MutationObserver(() => { feedRebuildCount += 1; });
+      rebuildObserver.observe(feedList, { childList: true });
+
+      f.failOlderSticky = false;
+      f.holdNextOlder = true;
+      f.failHeldOlder = false;
+      await press("Enter");
+      await wait("scroll retry request held in flight", () => typeof f.releaseOlder === "function");
+      await wheel(100);
+      await wait("scroller moved down by wheel during held Retry", () => scroller.scrollTop >= 80);
+      const scrollTopAfterWheel = scroller.scrollTop;
+      const topAfterWheel = findMsg6().getBoundingClientRect().top;
+
+      let scrollTopAfterRedraw = scroller.scrollTop;
+      let topAfterRedraw = topAfterWheel;
+      if (typeof f.releaseReactions === "function") {
+        const beforeRedraws = feedRebuildCount;
+        f.releaseReactions();
+        await wait("background reactions renderFeed completed during scrolled Retry", () => feedRebuildCount > beforeRedraws);
+        scrollTopAfterRedraw = scroller.scrollTop;
+        topAfterRedraw = findMsg6().getBoundingClientRect().top;
+        check(
+          Math.abs(scrollTopAfterRedraw - scrollTopAfterWheel) <= 1.0,
+          `Designer scroll-during-Retry: scrollTop snapped back on redraw (${scrollTopAfterWheel.toFixed(1)} -> ${scrollTopAfterRedraw.toFixed(1)})`,
+        );
+        check(
+          Math.abs(topAfterRedraw - topAfterWheel) <= 1.0,
+          `Designer scroll-during-Retry: message #6 moved on redraw (${topAfterWheel.toFixed(1)} -> ${topAfterRedraw.toFixed(1)})`,
+        );
+      }
+      f.releaseOlder();
+      await wait("older final page prepended after scrolled Retry", () =>
+        (one("[data-feed-list]")?.textContent ?? "").includes("Older group DM history #1") && !visible(one("[data-load-older]")),
+      );
+      rebuildObserver.disconnect();
+      const topAfterPrepend = findMsg6().getBoundingClientRect().top;
+      check(
+        Math.abs(topAfterPrepend - topAfterWheel) <= 1.5,
+        `Designer scroll-during-Retry: message #6 moved after prepend (${topAfterWheel.toFixed(1)} -> ${topAfterPrepend.toFixed(1)})`,
+      );
+      document.documentElement.dataset.step3dObservation = JSON.stringify({
+        ok: true, capture: f.capture, scrollTopAfterWheel, scrollTopAfterRedraw, topAfterWheel, topAfterRedraw, topAfterPrepend,
+      });
+      return;
+    }
+
     // Designer #1 & #2 witness: Retry Load older keeps visible message coordinate stable before, while pending, and after prepend,
     // and moves keyboard focus from the disappearing Load older button to a visible message (or preserves focus if reader tabbed away).
     if (f.capture === "designer-retry" || f.capture === "designer-retry-tab-away") {
@@ -783,6 +853,9 @@ async function observeConversations3D() {
       await click("[data-conversation-members-add-toggle]:visible");
       await wait("Lead candidate visible in Members add panel", () => !!shown(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]`));
       await click(`[data-conversation-members-candidate="agent:${f.ids.peerLead}"]:visible`);
+      // Let #ops's debounced syncChannelRead -> mark_channel_read -> refreshChannelUnread settle
+      // before taking the preflight conversations read baseline so it never races with the assertion.
+      await new Promise((r) => setTimeout(r, 280));
       const convReadsBeforePreflight = f.conversationsReadCount;
       const convCmdsBeforePreflight = f.convCommands.length;
       f.holdNextAuthUser = true;
@@ -1066,6 +1139,7 @@ test("Step 3D-1 signed-in dashboard wires conversation_history cursors, post_sig
     if (url.pathname === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
     if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).first().click({ timeout: 8_000 }).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname === "/__press") { void activePage!.keyboard.press(url.searchParams.get("key")!).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
+    if (url.pathname === "/__wheel") { const dy = Number(url.searchParams.get("dy") ?? "100"); void activePage!.locator(".dashboard__feed-view").first().hover().then(() => activePage!.mouse.wheel(0, dy)).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname.startsWith("/fonts/") && url.pathname.endsWith(".woff2")) { void readFile(join(fonts, basename(url.pathname))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return; }
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(url.pathname === "/app.js" ? bundled.join("\n") : html);
@@ -1083,6 +1157,7 @@ test("Step 3D-1 signed-in dashboard wires conversation_history cursors, post_sig
       { name: "flow-1024-light", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=flow&fail_older=1` },
       { name: "designer-retry-360", width: 360, height: 740, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1&hold_reactions=1` },
       { name: "designer-retry-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry&fail_older_sticky=1&hold_reactions=1` },
+      { name: "designer-retry-scroll-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-scroll&fail_older_sticky=1&hold_reactions=1` },
       { name: "designer-retry-tab-away-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=designer-retry-tab-away&fail_older_sticky=1` },
       { name: "hezsec-drafts-and-audience-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-drafts-and-audience` },
       { name: "hezsec-held-omission-and-fences-1024", width: 1024, height: 1366, query: `w=${ws}&dm=${groupConv}&theme=light&capture=hezsec-held-omission-and-fences&hold_first_history=${groupConv}` },

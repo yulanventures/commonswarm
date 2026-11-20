@@ -2111,8 +2111,26 @@ import "../../styles/kylon-image-viewer.css";
     /** Sticky Step 2b capability per (`${userId}:${workspaceId}`): once confirmed, never downgrade to legacy. */
     const modernConversationsConfirmed = new Set<string>();
     /** Reading-position anchor captured before Retry/Load older so the visible message never shifts pixels. */
-    let pendingLoadOlderAnchor: { signalId: string; topInScroller: number } | null = null;
+    let pendingLoadOlderAnchor: { signalId: string; topInScroller: number; scrollTop: number } | null = null;
     let loadOlderGeneration = 0;
+    let restoringLoadOlderScroll = false;
+    const captureLoadOlderAnchor = (
+      scroller: HTMLElement | null,
+    ): { signalId: string; topInScroller: number; scrollTop: number } | null => {
+      if (!scroller) return null;
+      const scrollerRect = scroller.getBoundingClientRect();
+      const visibleRow = all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
+        .find((row) => {
+          const r = row.getBoundingClientRect();
+          return r.height > 0 && r.bottom > scrollerRect.top + 1 && r.top < scrollerRect.bottom;
+        }) ?? null;
+      if (!visibleRow || !visibleRow.dataset.signalId) return null;
+      return {
+        signalId: visibleRow.dataset.signalId,
+        topInScroller: visibleRow.getBoundingClientRect().top - scrollerRect.top,
+        scrollTop: scroller.scrollTop,
+      };
+    };
     const resetLoadOlderState = (clearError: boolean): void => {
       loadOlderGeneration += 1;
       pendingLoadOlderAnchor = null;
@@ -11696,7 +11714,8 @@ import "../../styles/kylon-image-viewer.css";
      * People only: never in the sample. */
     const channelReadViewId = (): string | null =>
       !sampleMode && session && activeWorkspaceId && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        activeDm === null && unknownChannelId === null && activeChannelId !== null ? activeChannelId : null;
+        activeDm === null && (typeof activeDmConversationId === "undefined" || activeDmConversationId === null) &&
+        unknownChannelId === null && activeChannelId !== null ? activeChannelId : null;
     const channelReadVisitKey = (): string => {
       const viewId = channelReadViewId();
       return viewId === null ? "" : `${activeWorkspaceId}\u0000${viewId}`;
@@ -12450,6 +12469,16 @@ import "../../styles/kylon-image-viewer.css";
       const scrollerBefore = feedScroller();
       const heightBefore = scrollerBefore?.scrollHeight ?? 0;
       const topBefore = scrollerBefore?.scrollTop ?? 0;
+      if (
+        scrollerBefore &&
+        typeof pendingLoadOlderAnchor !== "undefined" &&
+        pendingLoadOlderAnchor !== null &&
+        Math.abs(topBefore - pendingLoadOlderAnchor.scrollTop) > 0.5 &&
+        typeof captureLoadOlderAnchor === "function"
+      ) {
+        const scrolledAnchor = captureLoadOlderAnchor(scrollerBefore);
+        if (scrolledAnchor) pendingLoadOlderAnchor = scrolledAnchor;
+      }
       const list = one<HTMLOListElement>("[data-feed-list]");
       const count = one<HTMLElement>("[data-update-count]");
       const more = one<HTMLElement>("[data-feed-more]");
@@ -13150,7 +13179,13 @@ import "../../styles/kylon-image-viewer.css";
           if (anchoredRow) {
             const scrollerRect = el.getBoundingClientRect();
             const afterTopInScroller = anchoredRow.getBoundingClientRect().top - scrollerRect.top;
-            el.scrollTop += afterTopInScroller - anchor.topInScroller;
+            if (typeof restoringLoadOlderScroll !== "undefined") restoringLoadOlderScroll = true;
+            try {
+              el.scrollTop += afterTopInScroller - anchor.topInScroller;
+              if (pendingLoadOlderAnchor !== null) pendingLoadOlderAnchor.scrollTop = el.scrollTop;
+            } finally {
+              if (typeof restoringLoadOlderScroll !== "undefined") restoringLoadOlderScroll = false;
+            }
           } else if (heightBefore > 0) {
             el.scrollTop = topBefore + (el.scrollHeight - heightBefore);
           }
@@ -21755,22 +21790,17 @@ import "../../styles/kylon-image-viewer.css";
       document.addEventListener("focusin", trackFocusMove, true);
       // Capture the first visible message at the reading position before hiding the error notice
       // or prepending older rows, and reserve `.dashboard__feed-more`'s height across every pending redraw.
-      let anchor: { signalId: string; topInScroller: number } | null = null;
-      if (scroller) {
-        const scrollerRect = scroller.getBoundingClientRect();
-        const visibleRow = all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")
-          .find((row) => {
-            const r = row.getBoundingClientRect();
-            return r.height > 0 && r.bottom > scrollerRect.top + 1 && r.top < scrollerRect.bottom;
-          }) ?? null;
-        if (visibleRow && visibleRow.dataset.signalId) {
-          anchor = {
-            signalId: visibleRow.dataset.signalId,
-            topInScroller: visibleRow.getBoundingClientRect().top - scrollerRect.top,
-          };
-          pendingLoadOlderAnchor = anchor;
+      let anchor = captureLoadOlderAnchor(scroller);
+      if (anchor) pendingLoadOlderAnchor = anchor;
+      const trackReaderScroll = (): void => {
+        if (restoringLoadOlderScroll || myLoadOlderGen !== loadOlderGeneration || pendingLoadOlderAnchor === null || !scroller) return;
+        const nextAnchor = captureLoadOlderAnchor(scroller);
+        if (nextAnchor) {
+          anchor = nextAnchor;
+          pendingLoadOlderAnchor = nextAnchor;
         }
-      }
+      };
+      scroller?.addEventListener("scroll", trackReaderScroll, { passive: true });
       if (more) {
         const currentMoreHeight = more.getBoundingClientRect().height;
         if (currentMoreHeight > 0) more.style.minBlockSize = `${currentMoreHeight}px`;
@@ -21793,6 +21823,7 @@ import "../../styles/kylon-image-viewer.css";
         if (more) more.style.minBlockSize = "";
       } finally {
         document.removeEventListener("focusin", trackFocusMove, true);
+        scroller?.removeEventListener("scroll", trackReaderScroll);
         if (myLoadOlderGen === loadOlderGeneration) {
           pendingLoadOlderAnchor = null;
           if (more) more.style.minBlockSize = "";
