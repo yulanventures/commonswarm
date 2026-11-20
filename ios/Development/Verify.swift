@@ -214,6 +214,33 @@ enum Verify {
             let removed = try await api.conversationList(ws.id)?.first(where: { $0.id == target.id })
             try expect(removed?.members?.contains(where: { $0.id == twin.id.id }) == false, "the confirmed same-name target was removed")
         }
+        guard let through = thread.last_message_id, let groupRow = afterOpen?.first(where: { $0.id == group }) else {
+            throw Failure.mismatch("conversation action fixtures")
+        }
+        let readRow = try await api.perform(.markRead(through: through), on: thread, workspace: ws.id, commandID: UUID())
+        try expect(readRow.mention_count == 0 && readRow.unread_count == 0, "Mark as read confirms the displayed DM cursor")
+        for channel in [thread, target] {
+            let savedStar = try await api.perform(.star(true), on: channel, workspace: ws.id, commandID: UUID())
+            let muted = try await api.perform(.notify("muted"), on: savedStar, workspace: ws.id, commandID: UUID())
+            try expect(muted.starred == true && muted.notify_level == "muted", "star survives mute on public and private preference routes")
+            let unstarred = try await api.perform(.star(false), on: muted, workspace: ws.id, commandID: UUID())
+            let restored = try await api.perform(.notify("mentions"), on: unstarred, workspace: ws.id, commandID: UUID())
+            try expect(restored.starred == false && restored.notify_level == "mentions", "unstar and unmute are independent")
+        }
+        for leaving in [preview, target, groupRow] {
+            guard let live = try await api.conversationList(ws.id)?.first(where: { $0.id == leaving.id }) else { throw Failure.mismatch("joined row") }
+            let destination = live.item(viewer: session.userID)
+            let leavingDraft = session.composer(workspace: ws.id, conversation: destination.id)
+            _ = try await api.history(ws.id, destination.destination)
+            leavingDraft.text = "Draft before Leave"
+            guard let outgoing = leavingDraft.begin(workspace: ws.id, destination: destination.destination) else { throw Failure.mismatch("live send") }
+            try leavingDraft.stage(StagedFile(data: Data("Draft file".utf8), name: "draft.txt"))
+            leavingDraft.text = "Unsent draft"
+            let left = try await api.perform(.leave, on: live, workspace: ws.id, commandID: UUID())
+            try expect(!left.joined && leavingDraft.access == (live.kind == .publicChannel ? .preview : .unavailable) &&
+                       leavingDraft.text.isEmpty && leavingDraft.attachments.isEmpty &&
+                       leavingDraft.outgoing.isEmpty && !leavingDraft.canDispatch(outgoing.command_id), "Leave receipt retires the outgoing message before refreshing")
+        }
         let canonical = thread.item(viewer: session.userID)
         _ = try await api.history(ws.id, canonical.destination)
         let canonicalDraft = session.composer(workspace: ws.id, conversation: canonical.id)

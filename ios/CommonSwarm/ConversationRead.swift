@@ -23,10 +23,13 @@ struct ConversationSummary: Identifiable, Decodable {
     let kind: ConversationKind
     let channel_id: UUID?
     let slug, description, archived_at: String?
-    let joined: Bool
+    var joined: Bool
     let members: [ConversationMember]?
-    let last_message_at, notify_level: String?
-    let mention_count, unread_count: Int?
+    let last_message_at: String?
+    let last_message_id: UUID?
+    var notify_level: String?
+    var mention_count, unread_count, star_rank: Int?
+    var starred: Bool?
     var id: UUID { conversation_id }
     var access: Composer.Access {
         if archived_at != nil { return .unavailable }

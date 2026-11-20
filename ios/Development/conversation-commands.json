@@ -33,5 +33,19 @@
       "id": "00000000-0000-4000-8000-000000000002",
       "kind": "agent"
     }
+  },
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000024",
+    "kind": "conversation_mark_read",
+    "through_signal_id": "00000000-0000-4000-8000-000000000033"
+  },
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000024",
+    "kind": "conversation_set_notify",
+    "notify_level": "mentions"
+  },
+  {
+    "conversation_id": "00000000-0000-4000-8000-000000000023",
+    "kind": "conversation_leave"
   }
 ]

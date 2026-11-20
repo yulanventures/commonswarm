@@ -78,6 +78,68 @@ final class ReaderPositionTests: XCTestCase {
         screenshot("thread-reply-reconciled")
     }
 
+    func testConversationStarMuteAndLeave() throws {
+        continueAfterFailure = false
+        app.launch()
+        if app.buttons["Continue with email"].waitForExistence(timeout: 3) {
+            try tap("Continue with email")
+            let field = app.textFields["Email address"]
+            field.tap()
+            field.typeText("reader@example.test")
+            try tap("Send code")
+            let code = app.secureTextFields["Email code"]
+            code.tap()
+            code.typeText("012345")
+            try tap("Sign in")
+        }
+        try tap("Simulator workspace")
+        try tap("#mobile")
+        try tap("Conversation options")
+        try tap("Star")
+        try tap("Conversation options")
+        XCTAssertTrue(app.buttons["Unstar"].exists)
+        try tap("Notify for mentions only")
+        try tap("Conversation options")
+        try tap("Mute")
+        try tap("Conversation options")
+        XCTAssertTrue(app.buttons["Notify for all messages"].exists)
+        try tap("Notify for mentions only")
+        try tap("Attach files")
+        try tap("Photos and videos")
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 10), "Seed one photo in the test simulator")
+        // Photos exposes each thumbnail as an image and handles touches in the grid.
+        let thumbnail = photo.frame
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: thumbnail.midX - app.frame.minX, dy: thumbnail.midY - app.frame.minY)).tap()
+        try tap("Done")
+        let attachment = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove ")).firstMatch
+        XCTAssertTrue(attachment.waitForExistence(timeout: 10))
+        let attachmentLabel = attachment.label
+        let composer = app.textFields["Message #mobile"]
+        composer.tap()
+        composer.typeText("Keep this draft")
+        try tap("Conversation options")
+        XCTAssertTrue(app.buttons["Notify for all messages"].exists)
+        XCTAssertFalse(app.buttons["Notify for mentions only"].exists)
+        try tap("Leave…")
+        XCTAssertTrue(app.staticTexts["Your unsent draft in #mobile will be discarded."].waitForExistence(timeout: 5))
+        screenshot("leave-draft-warning")
+        try tap("Cancel")
+        XCTAssertEqual(composer.value as? String, "Keep this draft")
+        XCTAssertTrue(app.buttons[attachmentLabel].exists)
+        try tap("Conversation options")
+        try tap("Leave…")
+        try tap("Leave")
+        XCTAssertTrue(app.buttons["Join #mobile"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.textFields["Message #mobile"].exists)
+        screenshot("left-channel-preview")
+        try tap("Join #mobile")
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        XCTAssertNotEqual(composer.value as? String, "Keep this draft")
+        XCTAssertFalse(app.buttons[attachmentLabel].exists)
+    }
+
     func testReadingPositionSurvivesPrependAndOlderRetry() throws {
         continueAfterFailure = false
         app.launch()
