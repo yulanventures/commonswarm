@@ -64,8 +64,12 @@ function installWaitingFixture() {
   const archivedUnavailable = scenario.startsWith("archived-unavailable-");
   const archivedPage2Case = scenario.startsWith("archived-channel-page2-");
   const archivedCacheDenyCase = scenario.startsWith("archived-cache-revalidate-and-deny-");
+  const archivedConvLossCase = scenario.startsWith("archived-conversation-loss-");
   const archivedBucket = archivedUnavailable ? "unavailable" : scenario.endsWith("-phone") ? "phone" : "desktop";
   const gardenArchivedAskId = askIdAt(76);
+  const privLossAskId = askIdAt(75);
+  const unchangedWsAskId = askIdAt(74);
+  const heldPage2AskId = askIdAt(73);
   const reviewOfferId = "99999999-9999-4999-8999-000000000001";
   const reviewTodoId = todoIdAt(91);
   const olderArchivedAskId = askIdAt(77);
@@ -98,7 +102,9 @@ function installWaitingFixture() {
   let releaseWs2QueueA: (() => void) | null = null;
   let releaseArchivedHeld: (() => void) | null = null;
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
-    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, gardenArchivedAskId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
+    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, gardenArchivedAskId,
+    privLossAskId, unchangedWsAskId, heldPage2AskId,
+    todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
     convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
@@ -106,6 +112,10 @@ function installWaitingFixture() {
     archivedPages: 0,
     archivedMode: "ok" as "ok" | "null" | "deny403" | "hold",
     archivedHeld: false,
+    archivedHoldNext: false,
+    dropGroupSM: false,
+    conversationsRefreshes: 0,
+    archivedPostChangeInitialReads: 0,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -439,6 +449,99 @@ function installWaitingFixture() {
       if (archivedUnavailable) {
         return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
       }
+      if (id === ids[0] && archivedConvLossCase) {
+        f.archivedPages += 1;
+        const baseMs = Date.now() - 3600_000;
+        const hasCursor = typeof body?.p_after_item_key === "string" && body.p_after_item_key.length > 0;
+        if (f.archivedHoldNext) {
+          f.archivedHoldNext = false;
+          f.archivedHeld = true;
+          f.log.push("archived-conv-loss-held");
+          await new Promise<void>(resolve => { releaseArchivedHeld = resolve; });
+          f.log.push("archived-conv-loss-released");
+          return Response.json({
+            workspace_id: id,
+            generated_at: new Date().toISOString(),
+            untrusted_content: true,
+            total: 3,
+            truncated: false,
+            items: [
+              {
+                item_key: `ask:${heldPage2AskId}`,
+                kind: "ask",
+                id: heldPage2AskId,
+                todo_id: null,
+                ask_kind: "plain",
+                title: "Held pre-change private page-2 secret?",
+                from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered",
+                outcome_text: "Held pre-change private page-2 secret",
+                archived_at: new Date(baseMs + 50 * 1000).toISOString(),
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "group_dm",
+                channel_id: null,
+                conversation_id: convGroupSM,
+                conversation_kind: "group_dm",
+              },
+            ],
+          });
+        }
+        const unchangedItem = {
+          item_key: `ask:${unchangedWsAskId}`,
+          kind: "ask",
+          id: unchangedWsAskId,
+          todo_id: null,
+          ask_kind: "choice",
+          title: "General unchanged question?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "answered",
+          outcome_text: "Still authorized",
+          archived_at: new Date(baseMs + 200 * 1000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        };
+        if (f.dropGroupSM) {
+          if (!hasCursor) f.archivedPostChangeInitialReads += 1;
+          return Response.json({
+            workspace_id: id,
+            generated_at: new Date().toISOString(),
+            untrusted_content: true,
+            total: 1,
+            truncated: false,
+            items: [unchangedItem],
+          });
+        }
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: 3,
+          truncated: true,
+          items: [
+            {
+              item_key: `ask:${privLossAskId}`,
+              kind: "ask",
+              id: privLossAskId,
+              todo_id: null,
+              ask_kind: "plain",
+              title: "Private group secret question?",
+              from: { kind: "agent", id: agent, name: "Scout" },
+              outcome_kind: "answered",
+              outcome_text: "Private group secret answer",
+              archived_at: new Date(baseMs + 300 * 1000).toISOString(),
+              answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+              placement: "group_dm",
+              channel_id: null,
+              conversation_id: convGroupSM,
+              conversation_kind: "group_dm",
+            },
+            unchangedItem,
+          ],
+        });
+      }
       if (id === ids[0] && (archivedPage2Case || archivedCacheDenyCase)) {
         f.archivedPages += 1;
         if (f.archivedMode === "hold") {
@@ -760,61 +863,64 @@ function installWaitingFixture() {
     if (url.pathname === "/functions/v1/read") {
       if (body?.resource === "conversations") {
         if (dmConvCase && body?.workspace_id === ids[0]) {
-          return Response.json({
-            conversations: [
-              {
-                conversation_id: convGeneral, kind: "general", channel_id: null, slug: "general", description: null,
-                archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
-                starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convDmScout, kind: "dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convGroupSM2, kind: "group_dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 2,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: before, last_message_id: null,
-              },
-              {
-                conversation_id: convDmMaya, kind: "dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-            ],
-          });
+          f.conversationsRefreshes += 1;
+          const convList = [
+            {
+              conversation_id: convGeneral, kind: "general", channel_id: null, slug: "general", description: null,
+              archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
+              starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
+            },
+            {
+              conversation_id: convDmScout, kind: "dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            },
+            ...(f.dropGroupSM ? [] : [{
+              conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            }]),
+            {
+              conversation_id: convGroupSM2, kind: "group_dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 2,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: before, last_message_id: null,
+            },
+            {
+              conversation_id: convDmMaya, kind: "dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            },
+          ];
+          return Response.json({ conversations: convList });
         }
         return Response.json({ error: "unsupported_resource" }, { status: 400 });
       }
       return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "channel_preference_set") {
+      return Response.json({ status: "accepted", ok: true });
     }
     if (url.pathname === "/functions/v1/command") return Response.json({ status: "refused", reason: "content_consent_required" });
     f.unexpected.push(request.method + " " + url.pathname);
@@ -1242,6 +1348,59 @@ async function observeWaitingCount() {
       check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer synthetic-human-refreshed" &&
         f.plainCommandIds[0] === f.plainCommandIds[1],
         "expected refreshed bearer retry with same command_id: " + JSON.stringify({ attempts: f.plainAttempts, bearers: f.plainBearers, ids: f.plainCommandIds }));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-conversation-loss-")) {
+      await wait(() => shown(control()) && Boolean(document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`)),
+        "mounted in #general with readable private group DM in rail");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened in #general");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "Archived scope selector ready");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      // 1. Page 1 in All channels (workspace scope) shows BOTH the private group DM item and the unchanged #general item, count (3).
+      await wait(() => shown(card(`ask:${f.privLossAskId}`)) && shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        shown(panel()?.querySelector("[data-waiting-archived-more]")) &&
+        scope()!.options[1]!.textContent === "All channels (3)",
+        "workspace-scope Archived loaded private group DM item, unchanged #general item, count (3), and Load older");
+      check(panel()!.textContent!.includes("Private group secret answer"), "private answer initially present");
+      // 2. Start a Load older request and hold it in flight before the conversations refresh drops convGroupSM.
+      f.archivedHoldNext = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedHeld, "pre-change Load older response held in flight");
+      // 3. Authoritative conversations refresh omits convGroupSM while #general and workspace membership stay unchanged.
+      const convReadsBefore = f.conversationsRefreshes;
+      f.dropGroupSM = true;
+      const starBtn = document.querySelector<HTMLButtonElement>("[data-home-workspace-header] [data-channel-star]");
+      check(Boolean(starBtn), "#general header star control missing");
+      starBtn!.click();
+      await wait(() => f.conversationsRefreshes > convReadsBefore &&
+        !document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`) &&
+        f.archivedPostChangeInitialReads >= 1 &&
+        !card(`ask:${f.privLossAskId}`) &&
+        shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        scope()!.options[1]!.textContent === "All channels (1)",
+        "authoritative conversations loss invalidated archive, revalidated from page 1, dropped private row/count, and kept unchanged item");
+      // 4. Release the held pre-change Load older response: it MUST be discarded and never enter the DOM or count.
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      check(!card(`ask:${f.privLossAskId}`), "private group DM row must stay absent after held release");
+      check(!card(`ask:${f.heldPage2AskId}`), "held pre-change page-2 row must never appear");
+      const panelText = panel()!.textContent ?? "";
+      check(!panelText.includes("Private group secret question?") && !panelText.includes("Private group secret answer"),
+        "private title/answer leaked in panel: " + panelText);
+      check(!panelText.includes("Held pre-change private page-2 secret"),
+        "held pre-change page-2 text leaked in panel: " + panelText);
+      check(shown(card(`ask:${f.unchangedWsAskId}`)) && card(`ask:${f.unchangedWsAskId}`)!.textContent!.includes("Still authorized"),
+        "unchanged workspace item must remain visible after revalidation");
+      check(scope()!.options[1]!.textContent === "All channels (1)",
+        "expected All channels (1) after revalidation, got " + scope()!.options[1]!.textContent);
+      check(route("c") === "general", "viewer stayed in #general throughout: " + route("c"));
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -1911,6 +2070,7 @@ test("Waiting on you: Archived view shows answered asks, completed to-dos, and a
     "archived-channel-page2-desktop",
     "archived-channel-page2-phone",
     "archived-cache-revalidate-and-deny-desktop",
+    "archived-conversation-loss-desktop",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

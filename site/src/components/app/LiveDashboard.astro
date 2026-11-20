@@ -7050,10 +7050,34 @@ import "../../styles/kylon-image-viewer.css";
     const invalidateWaitingArchived = (workspaceId?: string): void => {
       clearWaitingArchivedCache(workspaceId);
       if (waitingTab === "archived" && waitingSurface?.isOpen()) {
-        ensureWaitingArchivedLoaded(true);
+        ensureWaitingArchivedLoaded(false);
       } else if (waitingSurface?.isOpen()) {
         renderWaitingPanelView();
       }
+    };
+
+    const hasLostConversationAccess = (
+      workspaceId: string,
+      prevRows: readonly ConversationSummary[] | null,
+      nextRows: readonly ConversationSummary[],
+    ): boolean => {
+      const nextById = new Map(nextRows.map(c => [c.conversationId, c]));
+      if (prevRows !== null) {
+        for (const prev of prevRows) {
+          const next = nextById.get(prev.conversationId);
+          if (!next) return true;
+          if ((prev.kind === "private_channel" || prev.kind === "dm" || prev.kind === "group_dm") && prev.joined && !next.joined) {
+            return true;
+          }
+        }
+      }
+      const arch = waitingArchivedByWorkspace.get(workspaceId);
+      if (arch && arch.entries.length > 0) {
+        for (const entry of arch.entries) {
+          if (entry.conversation_id && !nextById.has(entry.conversation_id)) return true;
+        }
+      }
+      return false;
     };
 
     const loadMoreWaitingArchived = (): void => {
@@ -17182,6 +17206,9 @@ import "../../styles/kylon-image-viewer.css";
       conversationsReadState = "ready";
       conversationsReadError = "";
       if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
+      if (typeof hasLostConversationAccess === "function" && hasLostConversationAccess(workspaceId, prevList, rows)) {
+        if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
+      }
       // Reconcile authoritative omission even while the active conversation's first history page is still loading.
       const requestedDmId = activeDmConversationId ??
         (conversationHistory && conversationHistory.conversation?.kind && isDirectKind(conversationHistory.conversation.kind)
@@ -19106,9 +19133,16 @@ import "../../styles/kylon-image-viewer.css";
         throw error;
       }
       if (!current()) return;
+      const prevChannels = channels;
+      const lostChannelAccess =
+        channelsLoaded &&
+        prevChannels.some(prev => !next.some(cur => cur.channelId === prev.channelId));
       channels = next;
       channelListFailed = false;
       channelsLoaded = true;
+      if (lostChannelAccess && typeof invalidateWaitingArchived === "function") {
+        invalidateWaitingArchived(workspaceId);
+      }
       /* A `?c=` that could not be resolved earlier gets one more chance against this list:
          the read it was resolved against can have been dropped for a newer one, or the
          channel can be newer than this reader's list. Through selectChannel, so the head,
