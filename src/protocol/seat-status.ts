@@ -35,9 +35,9 @@ export type SeatStatusKind =
   | "unknown";
 
 /** Visual indicator shape — never fake a live dot.
- *  - "dot" ONLY for verified recent working or verified live push lease (<= WAKE_LEASE_STALE_MS).
- *  - "diamond" for disconnected/attention/stale waiting.
- *  - "ring" for turn-only, not listening, non-stale waiting, or unknown. */
+ *  - "dot" ONLY when a live push listener lease is verified (<= WAKE_LEASE_STALE_MS).
+ *  - "diamond" for disconnected/attention faults or known unseen waiting messages.
+ *  - "ring" for turn-only, unverified working, not listening, unknown-count brief waiting, or unavailable status. */
 export type SeatIndicator = "dot" | "ring" | "diamond";
 
 export type SeatWorkScope =
@@ -98,15 +98,17 @@ export interface SeatStatusInput extends SeatClockOptions {
   waitingSince?: string | null;
   /** Count of unacked visible directed messages waiting for this seat. */
   unseenCount?: number | null;
+  /** True when the status read failed and live seat status is unavailable. */
+  statusUnavailable?: boolean;
   /** Only set true when rendering inside the exact private audience authorized to see private work titles. */
   viewerInPrivateAudience?: boolean;
 }
 
 export interface SeatStatus {
   kind: SeatStatusKind;
-  /** Single concise status line ("Working · 3 min", "Waiting since 10:42 · 2 unseen", "Turn-only, checks when opened · 5 min ago", "Not listening · 2 h ago"). */
+  /** Single concise status line ("Working · 3 min", "Working · 3 min ago", "Waiting since 10:42 · 2 unseen", "Turn-only, checks when opened · 5 min ago", "Listening · verified just now", "Not listening · last active 2 h ago", "Status unavailable"). */
   line: string;
-  /** Visual shape: "dot" ONLY for verified live working/listening, "diamond" for attention/fault, "ring" otherwise. */
+  /** Visual shape: "dot" ONLY when a live push listener lease is verified, "diamond" for faults/waiting, "ring" otherwise. */
   indicator: SeatIndicator;
   /** True when the seat needs owner/manager attention (broken connection or stale unpicked-up mail on a push seat). */
   attention: boolean;
@@ -255,14 +257,14 @@ function presenceRowFromWake(wake: SeatWakeInput | null | undefined): AgentPrese
   };
 }
 
-function wakeReferenceTimestamp(
+function pushLeaseTimestamp(
   presence: AgentPresenceRow | null | undefined,
   wake: SeatWakeInput | null | undefined,
   now: number,
 ): string | null {
   const source = presence ?? wake;
   if (!source) return null;
-  const candidates = [source.watcher_at, source.channel_at, source.listener_at, source.turn_at]
+  const candidates = [source.watcher_at, source.channel_at, source.listener_at]
     .map((value) => ({ iso: value ?? null, ms: parseTimestamp(value) }))
     .filter((entry): entry is { iso: string; ms: number } => entry.iso !== null && entry.ms !== null && entry.ms <= now)
     .sort((left, right) => right.ms - left.ms);
@@ -275,7 +277,7 @@ function wakeReferenceTimestamp(
  *
  * Truth rules:
  * - Always show the age (or clock time) of every status value when a timestamp exists.
- * - Never fake a live dot: `indicator === "dot"` ONLY for verified recent working or verified live push lease.
+ * - Never fake a live dot: `indicator === "dot"` ONLY when a live push listener lease is verified.
  * - Private titles stay out of other audiences: `work_text` is fail-closed unless workspace/public-channel scoped.
  */
 export function classifySeatStatus(input: SeatStatusInput, now = Date.now()): SeatStatus {
@@ -327,10 +329,11 @@ export function classifySeatStatus(input: SeatStatusInput, now = Date.now()): Se
     typeof input.unseenCount === "number" && Number.isSafeInteger(input.unseenCount) && input.unseenCount >= 0
       ? input.unseenCount
       : null;
+  const hasKnownUnseenCount = effectiveUnseenCount !== null && effectiveUnseenCount > 0;
   const hasWaitingRow = waitingSinceMs !== null && waitingSinceMs <= now && (effectiveUnseenCount === null || effectiveUnseenCount > 0);
   const waitingAgeMs = hasWaitingRow ? Math.max(0, now - waitingSinceMs) : null;
   const staleWaiting = waitingAgeMs !== null && waitingAgeMs >= SEAT_WAITING_STALE_MS;
-  const reportedUnseenCount = hasWaitingRow ? (effectiveUnseenCount ?? 1) : 0;
+  const reportedUnseenCount = hasKnownUnseenCount ? effectiveUnseenCount : hasWaitingRow ? 1 : 0;
 
   const build = (
     kind: SeatStatusKind,
@@ -374,32 +377,49 @@ export function classifySeatStatus(input: SeatStatusInput, now = Date.now()): Se
     return build("connection_off", "Needs reconnecting", "diamond", true, lastActivityIso, lastActivityAgeMs);
   }
 
+  // Explicit status read failure.
+  if (input.statusUnavailable === true) {
+    return build("unknown", "Status unavailable", "ring", false, lastActivityIso, lastActivityAgeMs);
+  }
+
   // Determine whether the seat is currently doing active work.
   const recentActivity = lastActivityAgeMs !== null && lastActivityAgeMs <= SEAT_WORK_RECENT_MS;
   const hasWorkClaim = Boolean(input.doingTodo || workingActive);
   const isWorking = input.serverWork === "working" || (input.serverWork !== "idle" && hasWorkClaim && recentActivity);
 
-  // 2. Waiting messages:
-  //    - If stale (>= WAKE_STALE_MS), waiting outranks working/listening/turn-only so stuck seats are visible.
-  //    - If not stale, waiting still surfaces when the seat is not actively working and has no live push listener.
-  const showWaiting = hasWaitingRow && (staleWaiting || (!isWorking && !hasLiveListener));
-  if (showWaiting && input.waitingSince && waitingAgeMs !== null) {
-    const clock = formatSeatClock(input.waitingSince, now, input);
-    const unseenSuffix = effectiveUnseenCount !== null && effectiveUnseenCount > 0
-      ? ` · ${effectiveUnseenCount} unseen`
-      : "";
-    const line = `Waiting since ${clock}${unseenSuffix}`;
-    return build(
-      "waiting",
-      line,
-      staleWaiting ? "diamond" : "ring",
-      staleWaiting && !isTurnSeat,
-      input.waitingSince,
-      waitingAgeMs,
-    );
+  // 2. Waiting messages (right after access faults):
+  //    - Whenever the unseen count is known (> 0), surface "Waiting since … · N unseen" with a diamond immediately.
+  //    - Otherwise (legacy timestamp without count), surface if stale (>= WAKE_STALE_MS) or if idle without a live listener.
+  const showWaiting = hasKnownUnseenCount || (hasWaitingRow && (staleWaiting || (!isWorking && !hasLiveListener)));
+  if (showWaiting) {
+    if (hasWaitingRow && input.waitingSince && waitingAgeMs !== null) {
+      const clock = formatSeatClock(input.waitingSince, now, input);
+      const unseenSuffix = hasKnownUnseenCount ? ` · ${effectiveUnseenCount} unseen` : "";
+      const line = `Waiting since ${clock}${unseenSuffix}`;
+      return build(
+        "waiting",
+        line,
+        staleWaiting || hasKnownUnseenCount ? "diamond" : "ring",
+        staleWaiting && !isTurnSeat,
+        input.waitingSince,
+        waitingAgeMs,
+      );
+    }
+    if (hasKnownUnseenCount) {
+      return build(
+        "waiting",
+        `Waiting · ${effectiveUnseenCount} unseen`,
+        "diamond",
+        false,
+        null,
+        null,
+      );
+    }
   }
 
-  // 3. Verified recent work ("Working · 3 min").
+  // 3. Verified recent work:
+  //    - Filled dot + "Working · 3 min" ONLY when a live listener lease is verified.
+  //    - Hollow ring + "Working · 3 min ago" otherwise (e.g., turn-only or unverified push seat).
   if (isWorking) {
     const doingMs = parseTimestamp(doingSinceIso);
     const workMs = workingActive ? parseTimestamp(workingSinceIso) : null;
@@ -410,11 +430,20 @@ export function classifySeatStatus(input: SeatStatusInput, now = Date.now()): Se
         : lastActivityIso;
     const refMs = parseTimestamp(refIso);
     const workAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : lastActivityAgeMs;
-    const line = workAgeMs !== null ? `Working · ${formatSeatElapsed(workAgeMs)}` : "Working";
-    return build("working", line, "dot", false, refIso, workAgeMs);
+    const line = workAgeMs !== null
+      ? hasLiveListener
+        ? `Working · ${formatSeatElapsed(workAgeMs)}`
+        : `Working · ${formatSeatAgo(workAgeMs)}`
+      : "Working";
+    return build("working", line, hasLiveListener ? "dot" : "ring", false, refIso, workAgeMs);
   }
 
-  // 4. Turn-only seats (hosted MCP or turn-only local seat) — never fake a live dot!
+  // 4. Failed / unloaded status read: neither presence nor wake was supplied -> "Status unavailable".
+  if (!presenceProvided) {
+    return build("unknown", "Status unavailable", "ring", false, lastActivityIso, lastActivityAgeMs);
+  }
+
+  // 5. Turn-only seats (hosted MCP or turn-only local seat) — never fake a live dot!
   if (isTurnSeat) {
     const line = lastActivityAgeMs !== null
       ? `Turn-only, checks when opened · ${formatSeatAgo(lastActivityAgeMs)}`
@@ -422,29 +451,18 @@ export function classifySeatStatus(input: SeatStatusInput, now = Date.now()): Se
     return build("turn_only", line, "ring", false, lastActivityIso, lastActivityAgeMs);
   }
 
-  // 5. Verified live push listener lease (<= WAKE_LEASE_STALE_MS) — the only non-working state that earns a live dot.
+  // 6. Verified live push listener lease (<= WAKE_LEASE_STALE_MS) — uses the lease timestamp ("Listening · verified …").
   if (hasLiveListener) {
-    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
-    const refIso = lastActivityIso ?? wakeIso;
-    const refMs = parseTimestamp(refIso);
-    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : classifiedPresence?.wake.age_ms ?? null;
-    const line = refAgeMs !== null ? `Listening · ${formatSeatAgo(refAgeMs)}` : "Listening";
-    return build("listening", line, "dot", false, refIso, refAgeMs);
+    const leaseIso = pushLeaseTimestamp(input.presence, input.wake, now);
+    const leaseMs = parseTimestamp(leaseIso);
+    const leaseAgeMs = leaseMs !== null && leaseMs <= now ? Math.max(0, now - leaseMs) : classifiedPresence?.wake.age_ms ?? null;
+    const line = leaseAgeMs !== null ? `Listening · verified ${formatSeatAgo(leaseAgeMs)}` : "Listening";
+    return build("listening", line, "dot", false, leaseIso, leaseAgeMs);
   }
 
-  // 6. Local push-capable seat with presence/wake reported, and NO live push lease -> "Not listening".
-  if (presenceProvided) {
-    const wakeIso = wakeReferenceTimestamp(input.presence, input.wake, now);
-    const refIso = lastActivityIso ?? wakeIso;
-    const refMs = parseTimestamp(refIso);
-    const refAgeMs = refMs !== null && refMs <= now ? Math.max(0, now - refMs) : null;
-    const line = refAgeMs !== null ? `Not listening · ${formatSeatAgo(refAgeMs)}` : "Not listening";
-    return build("not_listening", line, "ring", false, refIso, refAgeMs);
-  }
-
-  // 7. Presence/wake was not supplied at all -> honest fallback, never a live dot.
-  const line = lastActivityAgeMs !== null ? `Last active ${formatSeatAgo(lastActivityAgeMs)}` : "Connected";
-  return build("unknown", line, "ring", false, lastActivityIso, lastActivityAgeMs);
+  // 7. Local push-capable seat with presence/wake reported and NO live push lease -> uses last-activity timestamp.
+  const line = lastActivityAgeMs !== null ? `Not listening · last active ${formatSeatAgo(lastActivityAgeMs)}` : "Not listening";
+  return build("not_listening", line, "ring", false, lastActivityIso, lastActivityAgeMs);
 }
 
 /** Convenience adapter for `swarm_read.workspace_roster` entries used by CLI, stdio MCP, and hosted MCP. */

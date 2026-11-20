@@ -4099,25 +4099,74 @@ async function recordHostedCoarsePresence(
   `;
 }
 
-/** True when signalIds is empty or includes at least one non-private signal. */
-async function hasNonPrivateSignal(
+/**
+ * True only when signalIds includes at least one signal filed in a canonical workspace-visible
+ * conversation (#general or an open public channel) with whole-conversation audience.
+ * DMs, group DMs, private channels, and addressed open-channel signals return false so
+ * workspace-visible agent_presence never leaks private activity.
+ */
+async function hasWorkspaceVisibleSignal(
   tx: Sql,
   workspaceId: string,
   signalIds: readonly string[],
 ): Promise<boolean> {
-  if (signalIds.length === 0) return true;
+  if (signalIds.length === 0) return false;
   const [row] = await tx<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM swarm.signals AS s
-      LEFT JOIN swarm.channels AS c
-        ON c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id
+      JOIN swarm.conversation_signals AS cs
+        ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+      JOIN swarm.conversations AS conv
+        ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
       WHERE s.workspace_id = ${workspaceId}::uuid
         AND s.id = ANY(${signalIds as string[]}::uuid[])
-        AND (s.channel_id IS NULL OR c.visibility IS DISTINCT FROM 'private')
+        AND conv.kind IN ('general', 'public_channel')
+        AND cs.audience = 'conversation'
     ) AS exists
   `;
   return row?.exists === true;
+}
+
+/**
+ * True when a hosted seat command touches private-channel, DM, group-DM, or addressed activity
+ * that must not advance workspace-visible agent_presence.
+ */
+async function isHostedNonPublicCommand(
+  tx: Sql,
+  workspaceId: string,
+  kind: string,
+  localBody: Record<string, unknown> | null,
+): Promise<boolean> {
+  if (await isPrivateChannelAgentCommand(tx, workspaceId, kind, localBody)) {
+    return true;
+  }
+  const signalObj = record(localBody?.signal);
+  if (signalObj) {
+    if (
+      signalObj.to != null
+      || signalObj.to_agent != null
+      || (Array.isArray(signalObj.recipients) && signalObj.recipients.length > 0)
+    ) {
+      return true;
+    }
+    if (
+      typeof signalObj.thread_root_id === "string"
+      && UUID_RE.test(signalObj.thread_root_id)
+      && UUID_RE.test(workspaceId)
+    ) {
+      const [root] = await tx<{ is_public: boolean }[]>`
+        SELECT (conv.kind IN ('general', 'public_channel') AND cs.audience = 'conversation') AS is_public
+        FROM swarm.conversation_signals AS cs
+        JOIN swarm.conversations AS conv
+          ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
+        WHERE cs.workspace_id = ${workspaceId}::uuid
+          AND cs.signal_id = ${signalObj.thread_root_id}::uuid
+      `;
+      if (root?.is_public !== true) return true;
+    }
+  }
+  return false;
 }
 
 function stateFromRow(row: Record<string, unknown> | undefined): TaskState | null {
@@ -20092,7 +20141,7 @@ async function handleTransaction(
       && localBody?.ok !== false && localBody?.status !== "rejected" && localBody?.status !== "refused"
       && record(localBody?.result)?.status !== "refused"
     ) {
-      const suppressPrivatePresence = await isPrivateChannelAgentCommand(
+      const suppressPrivatePresence = await isHostedNonPublicCommand(
         tx,
         String(body.workspace_id ?? ""),
         kind,
@@ -20801,7 +20850,7 @@ async function handleHostedChannelReadSeen(
           "hosted_channel_read_receipt_failed", undefined, dbCode(error) ?? null);
       }
     }
-    if (input.signal_ids.length > 0 && await hasNonPrivateSignal(tx, seat.workspace_id, input.signal_ids)) {
+    if (input.signal_ids.length > 0 && await hasWorkspaceVisibleSignal(tx, seat.workspace_id, input.signal_ids)) {
       await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
     }
     return { status: 200, body: { ok: true } };
@@ -21111,7 +21160,7 @@ async function handleHostedCheck(
     const batch = decision.return_batch;
     if (batch === null) {
       const recordCheckPresence = acknowledgeBatchId === null
-        || await hasNonPrivateSignal(tx, seat.workspace_id, acknowledgedSignalIds);
+        || await hasWorkspaceVisibleSignal(tx, seat.workspace_id, acknowledgedSignalIds);
       if (recordCheckPresence) {
         await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
       }
@@ -21159,7 +21208,10 @@ async function handleHostedCheck(
     }
     // 👀 and Seen on what this check returns, under the seat's claims installed above. Never fails the check.
     await markHostedSeatSeen(tx, seat.workspace_id, seat.principal_id, signals, input.command.kind);
-    if (await hasNonPrivateSignal(tx, seat.workspace_id, batch.signal_ids)) {
+    const presenceSignalIds = acknowledgeBatchId !== null
+      ? [...batch.signal_ids, ...acknowledgedSignalIds]
+      : batch.signal_ids;
+    if (await hasWorkspaceVisibleSignal(tx, seat.workspace_id, presenceSignalIds)) {
       await recordHostedCoarsePresence(tx, seat.workspace_id, seat.principal_id);
     }
     return { status: 200, body: {

@@ -27,6 +27,8 @@ DECLARE
  claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
  caller uuid;
  caller_agent uuid;
+ v_actor_kind text;
+ v_actor_id uuid;
  read_at timestamptz := statement_timestamp();
  result jsonb;
 BEGIN
@@ -48,6 +50,8 @@ BEGIN
    RETURN NULL;
   END IF;
  END IF;
+ v_actor_kind := CASE WHEN caller_agent IS NOT NULL THEN 'agent' ELSE 'user' END;
+ v_actor_id := coalesce(caller_agent, caller);
 
  WITH agents AS MATERIALIZED (
   SELECT p.principal_id, p.workspace_id, p.name, p.transport, p.turn_only, p.owner_user_id
@@ -71,7 +75,16 @@ BEGIN
        AND (cardinality(b.signal_ids) = 0 OR EXISTS (
         SELECT 1 FROM unnest(b.signal_ids) AS sid
         JOIN swarm.signals bs ON bs.workspace_id = b.workspace_id AND bs.id = sid
-        WHERE bs.channel_id IS NULL OR swarm.claims_can_access_channel(bs.workspace_id, bs.channel_id)))),
+        JOIN swarm.conversation_signals bcs ON bcs.workspace_id = bs.workspace_id AND bcs.signal_id = bs.id
+        WHERE EXISTS (
+          SELECT 1 FROM swarm.conversation_target(b.workspace_id, v_actor_kind, v_actor_id, bcs.conversation_id) AS ct
+          WHERE ct.visible
+        )
+        AND swarm.conversation_signal_visible_to(
+          bcs.workspace_id, bcs.signal_id, bcs.audience,
+          bs.from_kind, bs.from_principal, bs.to_user_id, bs.to_agent_principal_id,
+          v_actor_kind, v_actor_id
+        )))),
     (SELECT max(e.occurred_at) FROM swarm.household_todo_events e WHERE e.workspace_id = a.workspace_id AND e.event->>'actor_agent_principal' = a.principal_id::text),
     (SELECT to_timestamp(max((e.event->>'occurred_at_server')::numeric)/1000) FROM swarm.household_object_events e
      WHERE e.workspace_id = a.workspace_id AND e.event->>'actor_agent_principal' = a.principal_id::text)) AS last_activity_at,
@@ -85,11 +98,20 @@ BEGIN
    SELECT min(d.enqueued_at) AS since, count(*)::integer AS unseen_count
    FROM swarm.signal_deliveries d
    JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+   JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
    WHERE d.workspace_id = a.workspace_id
      AND d.recipient_agent_principal_id = a.principal_id
      AND (d.acked_at IS NULL OR d.ack_outcome = 'queued')
      AND s.until > read_at
-     AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
+     AND EXISTS (
+       SELECT 1 FROM swarm.conversation_target(s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id) AS ct
+       WHERE ct.visible
+     )
+     AND swarm.conversation_signal_visible_to(
+       cs.workspace_id, cs.signal_id, cs.audience,
+       s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+       v_actor_kind, v_actor_id
+     )
   ) waiting_mail ON true
   LEFT JOIN LATERAL (
    SELECT s.created_at, s.body,
@@ -320,7 +342,16 @@ BEGIN
         AND (cardinality(b.signal_ids) = 0 OR EXISTS (
          SELECT 1 FROM unnest(b.signal_ids) AS sid
          JOIN swarm.signals bs ON bs.workspace_id = b.workspace_id AND bs.id = sid
-         WHERE bs.channel_id IS NULL OR swarm.actor_can_access_channel(bs.workspace_id, bs.channel_id, 'user', viewer)))),
+         JOIN swarm.conversation_signals bcs ON bcs.workspace_id = bs.workspace_id AND bcs.signal_id = bs.id
+         WHERE EXISTS (
+           SELECT 1 FROM swarm.conversation_target(b.workspace_id, 'user', viewer, bcs.conversation_id) AS ct
+           WHERE ct.visible
+         )
+         AND swarm.conversation_signal_visible_to(
+           bcs.workspace_id, bcs.signal_id, bcs.audience,
+           bs.from_kind, bs.from_principal, bs.to_user_id, bs.to_agent_principal_id,
+           'user', viewer
+         )))),
      (SELECT max(e.occurred_at) FROM swarm.household_todo_events e WHERE e.workspace_id = p.workspace_id AND e.event->>'actor_agent_principal' = p.principal_id::text),
      (SELECT to_timestamp(max((e.event->>'occurred_at_server')::numeric)/1000) FROM swarm.household_object_events e
       WHERE e.workspace_id = p.workspace_id AND e.event->>'actor_agent_principal' = p.principal_id::text)) AS last_activity_at,
@@ -338,11 +369,20 @@ BEGIN
     SELECT min(d.enqueued_at) AS since, count(*)::integer AS unseen_count
     FROM swarm.signal_deliveries d
     JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+    JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
     WHERE d.workspace_id = p.workspace_id
       AND d.recipient_agent_principal_id = p.principal_id
       AND (d.acked_at IS NULL OR d.ack_outcome = 'queued')
       AND s.until > read_at
-      AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'user', viewer))
+      AND EXISTS (
+        SELECT 1 FROM swarm.conversation_target(s.workspace_id, 'user', viewer, cs.conversation_id) AS ct
+        WHERE ct.visible
+      )
+      AND swarm.conversation_signal_visible_to(
+        cs.workspace_id, cs.signal_id, cs.audience,
+        s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+        'user', viewer
+      )
    ) waiting_mail ON true
    LEFT JOIN LATERAL (
     SELECT jsonb_build_object('todo_id',t.todo_id,'title',CASE WHEN can_read THEN t.title ELSE NULL END,'since',t.state_at) value

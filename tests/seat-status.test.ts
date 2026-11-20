@@ -33,7 +33,7 @@ function presenceRow(overrides: Record<string, unknown> = {}) {
 }
 
 test("C2 canonical status lines match spec with age on every value and never fake a live dot", () => {
-  // 1. Working · 3 min (verified recent work -> dot)
+  // 1. Working · 3 min (verified live push listener lease -> dot)
   const working = classifySeatStatus({
     transport: "local",
     turnOnly: false,
@@ -47,6 +47,36 @@ test("C2 canonical status lines match spec with age on every value and never fak
   assert.equal(working.indicator, "dot");
   assert.equal(working.attention, false);
   assert.equal(working.work_text, "shipping C2");
+
+  // 1b. Turn-only seat with work 3 min ago -> "Working · 3 min ago" and hollow ring (never a filled dot without a verified live listener lease)
+  const turnOnlyWorking = classifySeatStatus({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    connection: "live",
+    presence: presenceRow({ last_command_at: ago(3 * 60_000), turn_at: ago(3 * 60_000) }),
+    workingOn: { since: ago(3 * 60_000), until: new Date(NOW + 30 * 60_000).toISOString(), text: "shipping C2", scope: "public_channel" },
+    timeZone: "UTC",
+  }, NOW);
+  assert.equal(turnOnlyWorking.kind, "working");
+  assert.equal(turnOnlyWorking.line, "Working · 3 min ago");
+  assert.equal(turnOnlyWorking.indicator, "ring");
+  assert.equal(turnOnlyWorking.attention, false);
+
+  // 1c. Same turn-only working seat with 2 unseen messages from 1 min ago -> "Waiting since … · 2 unseen" with diamond immediately once count is known
+  const turnOnlyWorkingWithUnseen = classifySeatStatus({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    connection: "live",
+    presence: presenceRow({ last_command_at: ago(3 * 60_000), turn_at: ago(3 * 60_000) }),
+    workingOn: { since: ago(3 * 60_000), until: new Date(NOW + 30 * 60_000).toISOString(), text: "shipping C2", scope: "public_channel" },
+    waitingSince: ago(60_000),
+    unseenCount: 2,
+    timeZone: "America/Chicago",
+  }, NOW);
+  assert.equal(turnOnlyWorkingWithUnseen.kind, "waiting");
+  assert.equal(turnOnlyWorkingWithUnseen.line, "Waiting since 10:44 · 2 unseen");
+  assert.equal(turnOnlyWorkingWithUnseen.indicator, "diamond");
+  assert.equal(turnOnlyWorkingWithUnseen.unseen_count, 2);
 
   // 2. Waiting since 10:42 · 2 unseen (stale >= 3 min -> diamond, attention on push seat)
   const waiting = classifySeatStatus({
@@ -87,7 +117,7 @@ test("C2 canonical status lines match spec with age on every value and never fak
   assert.equal(hostedNever.line, "Turn-only, checks when opened");
   assert.equal(hostedNever.indicator, "ring");
 
-  // 4. Not listening (local push seat with stale or missing lease -> NEVER a live dot)
+  // 4. Not listening (local push seat with stale or missing lease -> uses last-activity timestamp, NEVER a live dot)
   const notListening = classifySeatStatus({
     transport: "local",
     turnOnly: false,
@@ -98,7 +128,7 @@ test("C2 canonical status lines match spec with age on every value and never fak
     }),
   }, NOW);
   assert.equal(notListening.kind, "not_listening");
-  assert.equal(notListening.line, "Not listening · 2 h ago");
+  assert.equal(notListening.line, "Not listening · last active 2 h ago");
   assert.equal(notListening.indicator, "ring");
   assert.equal(notListening.attention, false);
 
@@ -112,35 +142,83 @@ test("C2 canonical status lines match spec with age on every value and never fak
   assert.equal(neverListened.line, "Not listening");
   assert.equal(neverListened.indicator, "ring");
 
-  // 5. Verified live push listener lease (<= WAKE_LEASE_STALE_MS -> dot + age)
+  // 5. Verified live push listener lease (<= WAKE_LEASE_STALE_MS -> uses lease timestamp "Listening · verified …", NOT last activity)
+  const listeningVerifiedNow = classifySeatStatus({
+    transport: "local",
+    turnOnly: false,
+    connection: "live",
+    presence: presenceRow({
+      last_command_at: ago(110 * 60_000),
+      watcher_at: ago(0),
+    }),
+  }, NOW);
+  assert.equal(listeningVerifiedNow.kind, "listening");
+  assert.equal(listeningVerifiedNow.line, "Listening · verified just now");
+  assert.equal(listeningVerifiedNow.indicator, "dot");
+  assert.equal(listeningVerifiedNow.attention, false);
+
   const listening = classifySeatStatus({
     transport: "local",
     turnOnly: false,
     connection: "live",
     presence: presenceRow({
-      last_command_at: ago(4 * 60_000),
-      watcher_at: ago(SEAT_WAKE_LEASE_STALE_MS - 1_000),
+      last_command_at: ago(110 * 60_000),
+      watcher_at: ago(2 * 60_000),
     }),
   }, NOW);
   assert.equal(listening.kind, "listening");
-  assert.equal(listening.line, "Listening · 4 min ago");
+  assert.equal(listening.line, "Listening · verified 2 min ago");
   assert.equal(listening.indicator, "dot");
   assert.equal(listening.attention, false);
+
+  // 6. Failed status read -> "Status unavailable" with hollow ring
+  const failedReadLocal = classifySeatStatus({
+    transport: "local",
+    turnOnly: false,
+    connection: "live",
+  }, NOW);
+  assert.equal(failedReadLocal.kind, "unknown");
+  assert.equal(failedReadLocal.line, "Status unavailable");
+  assert.equal(failedReadLocal.indicator, "ring");
+
+  const failedReadHosted = classifySeatStatus({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    connection: "live",
+    statusUnavailable: true,
+  }, NOW);
+  assert.equal(failedReadHosted.kind, "unknown");
+  assert.equal(failedReadHosted.line, "Status unavailable");
+  assert.equal(failedReadHosted.indicator, "ring");
 });
 
-test("C2 waiting threshold: live listener tolerates brief <3m delivery, non-listening surfaces waiting immediately", () => {
+test("C2 waiting threshold: known unseen count wins immediately with diamond; legacy unknown count waits for WAKE_STALE_MS on live seats", () => {
   const briefWaiting = ago(SEAT_WAITING_STALE_MS - 60_000); // 2 min ago
-  const liveSeat = classifySeatStatus({
+  // Legacy wake_path without unseen_count: live listener tolerates brief <3m delivery
+  const liveSeatLegacy = classifySeatStatus({
     transport: "local",
     turnOnly: false,
     connection: "live",
     presence: presenceRow({ last_command_at: ago(60_000), listener_at: ago(10_000) }),
     waitingSince: briefWaiting,
-    unseenCount: 1,
     timeZone: "UTC",
   }, NOW);
-  assert.equal(liveSeat.kind, "listening", "live listener does not jitter to waiting before WAKE_STALE_MS");
-  assert.equal(liveSeat.indicator, "dot");
+  assert.equal(liveSeatLegacy.kind, "listening", "live listener without known unseenCount does not jitter before WAKE_STALE_MS");
+  assert.equal(liveSeatLegacy.indicator, "dot");
+
+  // Once unseenCount is known (> 0), Waiting with diamond surfaces immediately even at 1 min
+  const liveSeatKnownCount = classifySeatStatus({
+    transport: "local",
+    turnOnly: false,
+    connection: "live",
+    presence: presenceRow({ last_command_at: ago(60_000), listener_at: ago(10_000) }),
+    waitingSince: ago(60_000),
+    unseenCount: 2,
+    timeZone: "UTC",
+  }, NOW);
+  assert.equal(liveSeatKnownCount.kind, "waiting");
+  assert.equal(liveSeatKnownCount.line, "Waiting since 16:44 · 2 unseen");
+  assert.equal(liveSeatKnownCount.indicator, "diamond");
 
   const deadSeat = classifySeatStatus({
     transport: "local",
@@ -154,7 +232,7 @@ test("C2 waiting threshold: live listener tolerates brief <3m delivery, non-list
   assert.equal(deadSeat.kind, "waiting");
   assert.equal(deadSeat.line, "Waiting since 16:43 · 1 unseen");
   assert.equal(deadSeat.stale_waiting, false);
-  assert.equal(deadSeat.indicator, "ring");
+  assert.equal(deadSeat.indicator, "diamond");
   assert.equal(deadSeat.attention, false);
 
   const hostedWaiting = classifySeatStatus({
@@ -188,7 +266,8 @@ test("C2 private titles are redacted fail-closed across cross-audience surfaces"
     workingOn: { since: ago(3 * 60_000), text: "SECRET-LOCK-WORK", scope: "private_channel" },
   }, NOW);
   assert.equal(privateWorking.kind, "working");
-  assert.equal(privateWorking.line, "Working · 3 min");
+  assert.equal(privateWorking.line, "Working · 3 min ago");
+  assert.equal(privateWorking.indicator, "ring");
   assert.equal(privateWorking.work_text, null);
   assert.equal(privateWorking.line.includes("SECRET-LOCK-WORK"), false);
 

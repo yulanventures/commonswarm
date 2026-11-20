@@ -71,15 +71,15 @@ test("dialog status precedence preserves terminal, security, delivery and activi
     ["stale-messages", "Waiting since 11:55", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }), oldestUnobservedAt }],
     ["new-computer", "Used from a new computer", { grant: key({ kind: "timeboxed", horizonExpiresAt: at(-86400000), newHostAt: at(1000) }) }],
     ["new-computer", "Used from a new computer", { grant: key({ newHostAt: at(1000) }) }],
-    ["inactive", "Not listening · 15 d ago", { presence: row({ last_command_at: at(15 * 86400000) }) }],
-    ["inactive", "Not listening · 90 d ago", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
+    ["inactive", "Not listening · last active 15 d ago", { presence: row({ last_command_at: at(15 * 86400000) }) }],
+    ["inactive", "Not listening · last active 90 d ago", { grant: key({ lastUsedAt: at(90 * 86400000) }), presence: row({ last_command_at: at(90 * 86400000) }) }],
     ["idle", "Not listening", { presence: null }],
-    ["connected", "Connected", { presence: undefined }],
-    ["active", "Listening · just now", {}],
+    ["connected", "Status unavailable", { presence: undefined }],
+    ["active", "Listening · verified just now", {}],
     ["active", "Working · 3 min", { workingOn: { at: at(3 * 60000), until: at(-30 * 60000) } }],
     ["idle", "Turn-only, checks when opened · 5 min ago", { transport: "hosted_mcp", turnOnly: true, presence: row({ last_command_at: at(5 * 60000), turn_at: at(5 * 60000) }) }],
-    ["idle", "Not listening · 2 h ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
-    ["active", "Listening · 2 h ago", { presence: row({ last_command_at: at(2 * 3600000), watcher_at: at(30000) }) }],
+    ["idle", "Not listening · last active 2 h ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
+    ["active", "Listening · verified just now", { presence: row({ last_command_at: at(110 * 60000), watcher_at: at(30000) }) }],
   ];
   for (const [kind, label, facts] of cases) {
     const status = peopleAgentStatus(input(facts), NOW);
@@ -159,7 +159,7 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   const facts = input({ presence: row({ last_command_at: at(15 * 86400000) }), grant: key({ suspendedAt: at(1) }) });
   assert.equal(peopleAgentStatus(facts, NOW).kind, "paused");
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
-  assert.equal(resumed.label, "Not listening · 15 d ago"); assert.equal(resumed.attention, false);
+  assert.equal(resumed.label, "Not listening · last active 15 d ago"); assert.equal(resumed.attention, false);
   assert.equal(resumed.indicator, "ring");
   assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
   assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet.");
@@ -353,7 +353,41 @@ test("C2 People & agents status matches shared classifier, never fakes a live do
   const notListening = peopleAgentStatus(input({
     presence: row({ last_command_at: at(2 * 3_600_000), watcher_at: at(10 * 60_000) }),
   }), NOW);
-  assert.equal(notListening.label, "Not listening · 2 h ago");
+  assert.equal(notListening.label, "Not listening · last active 2 h ago");
   assert.equal(notListening.indicator, "ring");
   assert.equal(notListening.kind, "idle");
+
+  // Designer-verified turn-only working, 1-min unseen precedence, lease vs activity timestamp, and failed read
+  const turnOnlyWorking = peopleAgentStatus(input({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    presence: row({ last_command_at: at(3 * 60_000), turn_at: at(3 * 60_000) }),
+    workingOn: { at: at(3 * 60_000), until: at(-30 * 60_000) },
+  }), NOW);
+  assert.equal(turnOnlyWorking.label, "Working · 3 min ago");
+  assert.equal(turnOnlyWorking.indicator, "ring");
+
+  const turnOnlyWorkingUnseen = peopleAgentStatus(input({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    presence: row({ last_command_at: at(3 * 60_000), turn_at: at(3 * 60_000) }),
+    workingOn: { at: at(3 * 60_000), until: at(-30 * 60_000) },
+    oldestUnobservedAt: at(60_000),
+    unseenCount: 2,
+  }), NOW);
+  assert.equal(turnOnlyWorkingUnseen.label, "Waiting since 11:59 · 2 unseen");
+  assert.equal(turnOnlyWorkingUnseen.indicator, "diamond");
+
+  const verifiedNowOldActivity = peopleAgentStatus(input({
+    presence: row({ last_command_at: at(110 * 60_000), watcher_at: at(0) }),
+  }), NOW);
+  assert.equal(verifiedNowOldActivity.label, "Listening · verified just now");
+  assert.equal(verifiedNowOldActivity.indicator, "dot");
+
+  const unavailable = peopleAgentStatus(input({
+    presence: undefined,
+    statusUnavailable: true,
+  }), NOW);
+  assert.equal(unavailable.label, "Status unavailable");
+  assert.equal(unavailable.indicator, "ring");
 });
