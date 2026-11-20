@@ -39,6 +39,11 @@ struct DirectoryView: View {
             return ($0.last_message_at ?? "") > ($1.last_message_at ?? "")
         }
         return List {
+            Section("Workspace") {
+                NavigationLink(value: WorkspaceFilesRoute()) {
+                    Label("Files", systemImage: "folder")
+                }
+            }
             Section("Channels") {
                 ForEach(channels) { row in link(row) }
                 NavigationLink("All channels", value: ChannelDirectoryRoute())
@@ -48,6 +53,9 @@ struct DirectoryView: View {
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
+         .navigationDestination(for: WorkspaceFilesRoute.self) { _ in
+             WorkspaceFilesView(api: api, workspace: workspace)
+         }
          .navigationDestination(for: ChannelDirectoryRoute.self) { _ in
              List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
                  VStack(alignment: .leading) {
