@@ -399,6 +399,13 @@ struct PeopleDirectoryAPI: Sendable {
             decodedAdminGrants = nil
         }
 
+        let freshNonOwner = decodedPeople.map { people in
+            people.first(where: { $0.isViewer })?.role != .owner
+        } ?? false
+        let effectiveAdminGrants: [WorkspaceAgentAdminGrant]? = freshNonOwner
+            ? (decodedAdminGrants != nil ? [] : nil)
+            : decodedAdminGrants
+
         if let people = decodedPeople, let agents = decodedAgents {
             return .complete(
                 PeopleDirectorySnapshot(
@@ -406,8 +413,8 @@ struct PeopleDirectoryAPI: Sendable {
                     agents: agents,
                     invites: decodedInvites ?? [],
                     invitesLoaded: decodedInvites != nil,
-                    adminGrants: decodedAdminGrants ?? [],
-                    adminGrantsLoaded: decodedAdminGrants != nil
+                    adminGrants: effectiveAdminGrants ?? [],
+                    adminGrantsLoaded: effectiveAdminGrants != nil
                 )
             )
         }
@@ -417,7 +424,7 @@ struct PeopleDirectoryAPI: Sendable {
                 people: decodedPeople,
                 agents: decodedAgents,
                 invites: decodedInvites,
-                adminGrants: decodedAdminGrants
+                adminGrants: effectiveAdminGrants
             )
         )
     }
