@@ -9970,6 +9970,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const peopleDialogOpen = (): boolean => one<HTMLDialogElement>("[data-roster-dialog]")?.open === true;
     let rosterDialogAddAgent: "choice" | "connect" | null = null;
+    let rosterAddAgentGeneration = 0;
     const rosterAddAgentOpen = (): boolean => peopleDialogOpen() && rosterDialogAddAgent !== null;
     const parkAddAgentViewsHome = (): void => {
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
@@ -9995,6 +9996,7 @@ import "../../styles/kylon-image-viewer.css";
       if (connect) connect.hidden = activeView !== "connect";
     };
     const teardownRosterDialogAddAgent = (): void => {
+      rosterAddAgentGeneration += 1;
       if (typeof stopHostJoinWatch === "function") stopHostJoinWatch();
       one<SecretHoldingAgentConnect>("agent-connect")?.retirePending();
       panelKeyMint = null;
@@ -10673,6 +10675,10 @@ import "../../styles/kylon-image-viewer.css";
       if (activeWorkspaceId !== workspaceId) await navigateHome({ view: "chat", workspaceId }, "replace");
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       if (!dialog || activeWorkspaceId !== workspaceId) return;
+      if (typeof rosterDialogAddAgent !== "undefined" && rosterDialogAddAgent !== null) {
+        if (dialog.open && typeof keepConnectCredentialVisible === "function" && keepConnectCredentialVisible()) return;
+        if (typeof teardownRosterDialogAddAgent === "function") teardownRosterDialogAddAgent();
+      }
       if (!dialog.open) {
         layout.closeNavigation(false);
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
@@ -10703,8 +10709,8 @@ import "../../styles/kylon-image-viewer.css";
       window.requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) focus(); });
     };
     const closeRosterDialog = (restoreFocus = false): void => {
-      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
-        if (restoreFocus && typeof keepConnectCredentialVisible === "function" && keepConnectCredentialVisible()) return;
+      if (typeof rosterDialogAddAgent !== "undefined" && rosterDialogAddAgent !== null) {
+        if (restoreFocus && typeof peopleDialogOpen === "function" && peopleDialogOpen() && typeof keepConnectCredentialVisible === "function" && keepConnectCredentialVisible()) return;
         if (typeof teardownRosterDialogAddAgent === "function") teardownRosterDialogAddAgent();
       }
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
@@ -15276,9 +15282,12 @@ import "../../styles/kylon-image-viewer.css";
       if (!session || !section || !host || !workspace || sampleMode) return;
       const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
       const inDialog = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen();
+      const addGen = typeof rosterAddAgentGeneration === "number" ? rosterAddAgentGeneration : 0;
       const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
         version === requestVersion && navigation === homeNavigation &&
-        (inDialog ? (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) : homeRoute.view === "add-agent");
+        (inDialog
+          ? (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen() && (typeof rosterAddAgentGeneration !== "number" || addGen === rosterAddAgentGeneration))
+          : homeRoute.view === "add-agent");
       existingAgentChoiceIsCurrent = current;
       mountWorkspaceAgentPicker(host, {
         session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
@@ -15329,6 +15338,7 @@ import "../../styles/kylon-image-viewer.css";
       host.hidden = false;
       dialog.dataset.rosterMode = "add-agent";
       rosterDialogAddAgent = "choice";
+      rosterAddAgentGeneration += 1;
       const backLabel = one<HTMLElement>("[data-ahp-home-back-label]");
       if (backLabel) backLabel.textContent = "People & agents";
       choice.hidden = false;
@@ -22456,7 +22466,7 @@ import "../../styles/kylon-image-viewer.css";
     const rosterDialog = one<HTMLDialogElement>("[data-roster-dialog]");
     one<HTMLButtonElement>("[data-roster-close]")?.addEventListener("click", () => closeRosterDialog(true));
     rosterDialog?.addEventListener("cancel", event => { if (event.target !== rosterDialog) return; event.preventDefault(); closeRosterDialog(true); });
-    rosterDialog?.addEventListener("close", event => { if (event.target === rosterDialog && !rosterDialog.open && peopleDialogReturn) closeRosterDialog(true); });
+    rosterDialog?.addEventListener("close", event => { if (event.target === rosterDialog && !rosterDialog.open && (peopleDialogReturn || rosterDialogAddAgent !== null)) closeRosterDialog(true); });
     window.addEventListener("resize", syncPeopleDialogLayout);
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);

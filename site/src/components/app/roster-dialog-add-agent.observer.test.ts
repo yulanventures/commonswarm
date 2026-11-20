@@ -190,6 +190,7 @@ test("Add an agent stays inside <dialog[data-roster-dialog]>, returns to roster,
       try {
         await page.goto(`${origin}/app?w=${WS}&case=people&theme=${theme}`, { waitUntil: "load" });
         await page.addScriptTag({ content: axeSource });
+        await page.waitForSelector('[data-channel-view="feed"]:not([hidden]), [data-channel-view="feed-empty"]:not([hidden])');
 
         // Open People & agents modal from the visible workspace door (matching people-hosts.observer.test.ts).
         await page.waitForFunction(() =>
@@ -350,7 +351,57 @@ test("Add an agent stays inside <dialog[data-roster-dialog]>, returns to roster,
         assert.equal(afterEscape.activeWatchIntervals, 0, `${label}: Escape must clear host-join watch`);
         assert.equal(afterEscape.activeNotBody, true, `${label}: Escape must restore focus to workspace control`);
 
-        summary[label] = { ok: true, inModalState, afterBack, afterEscape };
+        // 4b. Re-open People & agents -> Add an agent -> Claude watch -> call native dialog.close() directly:
+        // must still clear watch intervals, park agent-choice outside dialog, and render roster list on reopen.
+        if (width <= 520) {
+          await page.click('button[aria-label="Open navigation"]');
+          await page.waitForSelector("[data-rail-person]");
+          await page.locator("[data-rail-person]").first().click();
+        } else {
+          await page.locator("[data-roster-open]:visible").first().click();
+        }
+        await page.waitForSelector("dialog[data-roster-dialog][open] [data-dialog-agent-list]:not([hidden])");
+        const backToList2 = page.locator("[data-people-profile-back]");
+        if (await backToList2.isVisible()) await backToList2.click();
+        await page.locator('[data-roster-dialog] [data-pd-focus="tab-agents"]').click();
+        await page.waitForSelector("[data-roster-dialog] [data-people-page-add-agent]");
+        await page.click("[data-roster-dialog] [data-people-page-add-agent]");
+        await page.waitForSelector('[data-roster-dialog] [data-ahp-host="claude"]');
+        await page.click('[data-roster-dialog] [data-ahp-host="claude"]');
+        await page.waitForFunction(() => (window as any).__activeWatchIntervals() >= 1);
+        await page.evaluate(() => {
+          document.querySelector<HTMLDialogElement>("[data-roster-dialog]")?.close();
+        });
+        await page.waitForFunction(() => {
+          const dialog = document.querySelector<HTMLDialogElement>("[data-roster-dialog]");
+          const choice = document.querySelector<HTMLElement>('[data-channel-view="agent-choice"]');
+          return dialog?.open === false && !!choice && !dialog.contains(choice);
+        });
+        const afterNativeClose = await page.evaluate(() => {
+          const dialog = document.querySelector<HTMLDialogElement>("[data-roster-dialog]")!;
+          const choice = document.querySelector<HTMLElement>('[data-channel-view="agent-choice"]')!;
+          return {
+            open: dialog.open,
+            choiceOutsideDialog: !dialog.contains(choice),
+            choiceHidden: choice.hidden,
+            activeWatchIntervals: (window as any).__activeWatchIntervals(),
+          };
+        });
+        assert.equal(afterNativeClose.open, false, `${label}: native dialog.close() must close modal`);
+        assert.equal(afterNativeClose.choiceOutsideDialog, true, `${label}: native dialog.close() must park agent-choice outside dialog`);
+        assert.equal(afterNativeClose.choiceHidden, true, `${label}: native dialog.close() must keep parked agent-choice hidden`);
+        assert.equal(afterNativeClose.activeWatchIntervals, 0, `${label}: native dialog.close() must stop host-join watch`);
+
+        if (width <= 520) {
+          await page.click('button[aria-label="Open navigation"]');
+          await page.waitForSelector("[data-rail-person]");
+          await page.locator("[data-rail-person]").first().click();
+        } else {
+          await page.locator("[data-roster-open]:visible").first().click();
+        }
+        await page.waitForSelector("dialog[data-roster-dialog][open] [data-dialog-agent-list]:not([hidden])");
+
+        summary[label] = { ok: true, inModalState, afterBack, afterEscape, afterNativeClose };
       } finally {
         await context.close();
       }
