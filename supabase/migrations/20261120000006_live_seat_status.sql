@@ -68,8 +68,17 @@ BEGIN
    presence.watcher_at, presence.channel_at, presence.listener_at, presence.turn_at,
    greatest(presence.last_command_at,
     (SELECT max(s.created_at) FROM swarm.signals s
+     JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
      WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
-       AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))),
+       AND EXISTS (
+         SELECT 1 FROM swarm.conversation_target(s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id) AS ct
+         WHERE ct.visible
+       )
+       AND swarm.conversation_signal_visible_to(
+         cs.workspace_id, cs.signal_id, cs.audience,
+         s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+         v_actor_kind, v_actor_id
+       )),
     (SELECT max(greatest(b.created_at, b.acknowledged_at)) FROM swarm.hosted_mcp_check_batches b
      WHERE b.workspace_id = a.workspace_id AND b.principal_id = a.principal_id
        AND (cardinality(b.signal_ids) = 0 OR EXISTS (
@@ -137,17 +146,35 @@ BEGIN
      AND s.parent_signal_id IS NULL AND s.chain_participants IS NULL
      AND NOT EXISTS (SELECT 1 FROM swarm.signal_recipients r WHERE r.signal_id = s.id)) AS public_work
    FROM swarm.signals s
+   JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
    WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
      AND s.kind = 'working-on' AND s.until > read_at
-     AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
+     AND EXISTS (
+       SELECT 1 FROM swarm.conversation_target(s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id) AS ct
+       WHERE ct.visible
+     )
+     AND swarm.conversation_signal_visible_to(
+       cs.workspace_id, cs.signal_id, cs.audience,
+       s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+       v_actor_kind, v_actor_id
+     )
    ORDER BY s.created_at DESC, s.id DESC LIMIT 1
   ) working ON true
   LEFT JOIN LATERAL (
    SELECT count(*)::integer AS open_count, min(s.created_at) AS oldest_at
    FROM swarm.signals s
+   JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
    WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
      AND s.kind = 'ask' AND s.until > read_at
-     AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
+     AND EXISTS (
+       SELECT 1 FROM swarm.conversation_target(s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id) AS ct
+       WHERE ct.visible
+     )
+     AND swarm.conversation_signal_visible_to(
+       cs.workspace_id, cs.signal_id, cs.audience,
+       s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+       v_actor_kind, v_actor_id
+     )
      AND EXISTS (
       SELECT 1 FROM (
        SELECT s.to_user_id AS user_id WHERE s.to_user_id IS NOT NULL
@@ -335,8 +362,17 @@ BEGIN
     ELSE '{}'::jsonb END AS connection_policy,
     greatest(presence.last_command_at,
      (SELECT max(s.created_at) FROM swarm.signals s
+      JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
       WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id
-        AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'user', viewer))),
+        AND EXISTS (
+          SELECT 1 FROM swarm.conversation_target(s.workspace_id, 'user', viewer, cs.conversation_id) AS ct
+          WHERE ct.visible
+        )
+        AND swarm.conversation_signal_visible_to(
+          cs.workspace_id, cs.signal_id, cs.audience,
+          s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+          'user', viewer
+        )),
      (SELECT max(greatest(b.created_at,b.acknowledged_at)) FROM swarm.hosted_mcp_check_batches b
       WHERE b.workspace_id = p.workspace_id AND b.principal_id = p.principal_id
         AND (cardinality(b.signal_ids) = 0 OR EXISTS (
@@ -391,8 +427,20 @@ BEGIN
    ) doing ON true
    LEFT JOIN LATERAL (
     SELECT jsonb_build_object('signal_id',s.id,'at',s.created_at,'until',s.until) value
-    FROM swarm_read.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s."from" = p.principal_id
-     AND s.kind = 'working-on' AND s.until > read_at ORDER BY s.created_at DESC, s.id LIMIT 1
+    FROM swarm.signals s
+    JOIN swarm.conversation_signals cs ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+    WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id
+      AND s.kind = 'working-on' AND s.until > read_at
+      AND EXISTS (
+        SELECT 1 FROM swarm.conversation_target(s.workspace_id, 'user', viewer, cs.conversation_id) AS ct
+        WHERE ct.visible
+      )
+      AND swarm.conversation_signal_visible_to(
+        cs.workspace_id, cs.signal_id, cs.audience,
+        s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+        'user', viewer
+      )
+    ORDER BY s.created_at DESC, s.id LIMIT 1
    ) working ON true
    LEFT JOIN LATERAL swarm_read.local_connection_selection(p.workspace_id,p.principal_id,p.owner_user_id)
     selected ON p.transport='local'

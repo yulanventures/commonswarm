@@ -106,22 +106,28 @@ test("asks to people are counted once, with no ids, text or recipients; answered
   await signal(ws, from, "ask", "PRIVATE-EXPIRED", { toUser: owner, ago: "4 hours", expired: true });
   await signal(ws, from, "ask", "PRIVATE-AGENT-ONLY", { toAgent: other, ago: "6 hours" });
 
-  const result = await roster(ws, owner, other);
-  assert.ok(result);
-  const row = result.agents.find((entry) => entry.principal_id === asker)!;
-  assert.equal(row.waiting_on_people.count, 2);
-  const oldest = Date.parse(row.waiting_on_people.since!);
-  assert.ok(Math.abs(Date.now() - 40 * 60_000 - oldest) < 60_000, "since is the oldest open ask");
-  const otherRow = result.agents.find((entry) => entry.principal_id === other)!;
-  assert.deepEqual(otherRow.waiting_on_people, { count: 0, since: null });
-  const text = JSON.stringify(result);
-  assert.equal(/PRIVATE-/.test(text), false, "no ask text");
-  // The exact key set: no ask ids, recipients or per-person breakdown on any row.
-  assert.deepEqual(Object.keys(row).sort(), ["connection", "job", "last_activity_at", "messages_waiting", "name", "open_work", "owner", "parent",
-    "platform", "principal_id", "reports_to", "source", "status", "transport", "turn_only", "waiting_on_people", "wake"]);
+  // Participants (addressed person `owner` and asking agent `asker`) see both open asks; an unrelated agent (`other`) sees 0.
+  for (const result of [await roster(ws, owner), await roster(ws, owner, asker)]) {
+    assert.ok(result);
+    const row = result.agents.find((entry) => entry.principal_id === asker)!;
+    assert.equal(row.waiting_on_people.count, 2);
+    const oldest = Date.parse(row.waiting_on_people.since!);
+    assert.ok(Math.abs(Date.now() - 40 * 60_000 - oldest) < 60_000, "since is the oldest open ask");
+    const otherRow = result.agents.find((entry) => entry.principal_id === other)!;
+    assert.deepEqual(otherRow.waiting_on_people, { count: 0, since: null });
+    const text = JSON.stringify(result);
+    assert.equal(/PRIVATE-/.test(text), false, "no ask text");
+    // The exact key set: no ask ids, recipients or per-person breakdown on any row.
+    assert.deepEqual(Object.keys(row).sort(), ["connection", "job", "last_activity_at", "messages_waiting", "name", "open_work", "owner", "parent",
+      "platform", "principal_id", "reports_to", "source", "status", "transport", "turn_only", "waiting_on_people", "wake"]);
+  }
+  const unrelatedResult = await roster(ws, owner, other);
+  assert.ok(unrelatedResult);
+  assert.deepEqual(unrelatedResult.agents.find((entry) => entry.principal_id === asker)!.waiting_on_people, { count: 0, since: null },
+    "unrelated agent must not count private DM/group-DM asks it is not a participant in");
 });
 
-test("working-on text appears only for a workspace-wide broadcast; addressed or channel-scoped work shows its time only", async () => {
+test("working-on text appears only for a workspace-wide broadcast; addressed or channel-scoped work shows its time only to participants", async () => {
   const owner = await person("Owner");
   const helper = await person("Helper");
   const ws = await workspace(owner, "Work test");
@@ -139,15 +145,24 @@ test("working-on text appears only for a workspace-wide broadcast; addressed or 
   const root = await signal(ws, { kind: "user", id: owner }, "note", "thread root", { toAgent: replying, ago: "5 minutes" });
   await signal(ws, { kind: "agent", id: replying }, "working-on", "SECRET-REPLY", { replyTo: root, toUser: owner });
 
-  const result = (await roster(ws, owner))!;
-  const by = (id: string) => result.agents.find((entry) => entry.principal_id === id)!;
-  assert.equal(by(broadcaster).open_work!.text, "shipping the roster");
-  for (const id of [toPerson, toRecipients, replying]) {
-    assert.equal(by(id).open_work!.text, null);
-    assert.ok(Date.parse(by(id).open_work!.since) > 0, "an addressed working-on still supplies its time");
+  const ownerResult = (await roster(ws, owner))!;
+  const helperResult = (await roster(ws, helper))!;
+  const by = (res: Roster, id: string) => res.agents.find((entry) => entry.principal_id === id)!;
+  assert.equal(by(ownerResult, broadcaster).open_work!.text, "shipping the roster");
+  assert.equal(by(helperResult, broadcaster).open_work!.text, "shipping the roster");
+  // Helper (DM participant for toPerson & toRecipients) sees open_work.since with null text; unrelated owner sees null.
+  for (const id of [toPerson, toRecipients]) {
+    assert.equal(by(helperResult, id).open_work!.text, null);
+    assert.ok(Date.parse(by(helperResult, id).open_work!.since) > 0, "participant sees addressed working-on time with null text");
+    assert.equal(by(ownerResult, id).open_work, null, "unrelated member must not see private DM working-on timestamp");
   }
-  assert.equal(by(quiet).open_work, null);
-  assert.equal(/SECRET-/.test(JSON.stringify(result)), false);
+  // Owner (DM participant for replying) sees open_work.since with null text; unrelated helper sees null.
+  assert.equal(by(ownerResult, replying).open_work!.text, null);
+  assert.ok(Date.parse(by(ownerResult, replying).open_work!.since) > 0, "participant sees DM reply working-on time with null text");
+  assert.equal(by(helperResult, replying).open_work, null, "unrelated member must not see DM reply working-on timestamp");
+  assert.equal(by(ownerResult, quiet).open_work, null);
+  assert.equal(/SECRET-/.test(JSON.stringify(ownerResult)), false);
+  assert.equal(/SECRET-/.test(JSON.stringify(helperResult)), false);
 });
 
 test("only a live member or an admitted agent of that workspace gets rows", async () => {
@@ -840,10 +855,25 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   assert.equal((find(outsiderRoster, worker).open_work as { text: string | null }).text, "deploying C2");
   assert.equal((find(ownerRoster, secretWorker).open_work as { text: string | null }).text, null, "private channel working-on keeps text null even for member");
   assert.equal(find(outsiderRoster, secretWorker).open_work, null, "outsider cannot see private channel open_work");
-  assert.equal((find(ownerRoster, dmWorker).open_work as { text: string | null }).text, null, "DM working-on keeps text null");
+  assert.equal((find(ownerRoster, dmWorker).open_work as { text: string | null }).text, null, "DM working-on keeps text null for participant");
+  assert.equal(find(outsiderRoster, dmWorker).open_work, null, "outsider cannot see private DM open_work.since");
+  assert.equal(find(outsiderRoster, dmWorker).last_activity_at, null, "outsider cannot see private DM last_activity_at");
+  assert.ok(find(ownerRoster, dmWorker).last_activity_at !== null, "DM participant sees dmWorker last_activity_at");
   assert.equal((find(ownerRoster, groupDmWorker).open_work as { text: string | null }).text, null, "group_dm working-on keeps text null");
   assert.equal(/SECRET-VAULT|SECRET-DM|SECRET-GROUP-DM/.test(JSON.stringify(ownerRoster)), false);
   assert.equal(/SECRET-VAULT|SECRET-DM|SECRET-GROUP-DM/.test(JSON.stringify(outsiderRoster)), false);
+
+  // Outgoing private DM ask from dmWorker to owner: participant (owner) sees waiting_on_people count=1 + since,
+  // while unrelated outsider sees waiting_on_people count=0 + since=null and last_activity_at=null.
+  const privateOutgoingAsk = await signal(ws, { kind: "agent", id: dmWorker }, "ask", "SECRET-OUTGOING-DM-ASK", { toUser: owner, ago: "1 minute" });
+  assert.ok(privateOutgoingAsk);
+  const ownerAfterPrivateAsk = (await roster(ws, owner))!;
+  const outsiderAfterPrivateAsk = (await roster(ws, outsider))!;
+  assert.equal((find(ownerAfterPrivateAsk, dmWorker).waiting_on_people as { count: number; since: string | null }).count, 1, "DM participant sees private outgoing ask count");
+  assert.ok((find(ownerAfterPrivateAsk, dmWorker).waiting_on_people as { count: number; since: string | null }).since !== null);
+  assert.deepEqual(find(outsiderAfterPrivateAsk, dmWorker).waiting_on_people, { count: 0, since: null }, "outsider must not see private outgoing ask count or timestamp");
+  assert.equal(find(outsiderAfterPrivateAsk, dmWorker).last_activity_at, null, "outsider last_activity_at must stay null after private outgoing ask");
+  assert.equal(find(outsiderAfterPrivateAsk, dmWorker).open_work, null, "outsider open_work must stay null for private DM work");
 
   // Owner (sender of DMs + open addressed ask + public mention) sees all 5 unseen deliveries (excludes observed).
   const ownerWorkerWaiting = find(ownerRoster, worker).messages_waiting as { count: number; since: string | null };

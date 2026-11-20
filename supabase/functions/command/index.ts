@@ -4150,20 +4150,23 @@ async function isHostedNonPublicCommand(
     ) {
       return true;
     }
-    if (
-      typeof signalObj.thread_root_id === "string"
-      && UUID_RE.test(signalObj.thread_root_id)
-      && UUID_RE.test(workspaceId)
-    ) {
-      const [root] = await tx<{ is_public: boolean }[]>`
-        SELECT (conv.kind IN ('general', 'public_channel') AND cs.audience = 'conversation') AS is_public
-        FROM swarm.conversation_signals AS cs
-        JOIN swarm.conversations AS conv
-          ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
-        WHERE cs.workspace_id = ${workspaceId}::uuid
-          AND cs.signal_id = ${signalObj.thread_root_id}::uuid
-      `;
-      if (root?.is_public !== true) return true;
+    for (const parentKey of ["thread_root_id", "in_reply_to"] as const) {
+      const parentId = signalObj[parentKey];
+      if (
+        typeof parentId === "string"
+        && UUID_RE.test(parentId)
+        && UUID_RE.test(workspaceId)
+      ) {
+        const [parent] = await tx<{ is_public: boolean }[]>`
+          SELECT (conv.kind IN ('general', 'public_channel') AND cs.audience = 'conversation') AS is_public
+          FROM swarm.conversation_signals AS cs
+          JOIN swarm.conversations AS conv
+            ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
+          WHERE cs.workspace_id = ${workspaceId}::uuid
+            AND cs.signal_id = ${parentId}::uuid
+        `;
+        if (parent?.is_public !== true) return true;
+      }
     }
   }
   return false;
