@@ -39,7 +39,9 @@ export interface ReviewCheckRecord {
   };
   head_sha: string;
   conversation_id: string | null;
+  channel_id?: string | null;
   thread_root_id: string | null;
+  root_audience?: "conversation" | "addressed";
   required_seats: ReviewCheckSeatInfo[];
   stamps: ReviewCheckStamp[];
   status: ReviewCheckStatus;
@@ -48,6 +50,7 @@ export interface ReviewCheckRecord {
   satisfied_signal_id: string | null;
   satisfied_at: string | null;
   created_by: ReviewCheckSeat;
+  updated_by?: ReviewCheckSeat;
   created_at: string;
   updated_at: string;
 }
@@ -84,13 +87,13 @@ export class ReviewCheckError extends Error {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SHA_RE = /^[0-9a-f]{7,64}$/i;
+const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const CTRL_RE = /[\u0000-\u001f\u007f]/u;
 
 export function normalizeReviewCheckSha(value: string): string {
   const sha = value.trim().toLowerCase();
-  if (!SHA_RE.test(sha)) {
-    throw new ReviewCheckError("invalid_request", "head_sha must be a 7 to 64 character hex commit SHA.", 400);
+  if (!FULL_SHA_RE.test(sha)) {
+    throw new ReviewCheckError("invalid_request", "head_sha must be a full 40-character SHA-1 or 64-character SHA-256 hex commit SHA.", 400);
   }
   return sha;
 }
@@ -210,6 +213,7 @@ export async function openReviewCheck(
   token: string,
   workspaceId: string,
   input: {
+    checkId?: string | null;
     repo: string;
     ref: string;
     headSha: string;
@@ -227,6 +231,7 @@ export async function openReviewCheck(
     workspaceId,
     {
       kind: "review_check_open",
+      ...(input.checkId ? { check_id: input.checkId.toLowerCase() } : {}),
       subject_repo: normalizeReviewCheckRepo(input.repo),
       subject_ref: normalizeReviewCheckRef(input.ref),
       head_sha: normalizeReviewCheckSha(input.headSha),

@@ -238,10 +238,12 @@ import {
   applyReviewCheckCommand,
   isReviewCheckCommandKind,
   parseReviewCheckCommand,
+  reauthorizeReviewCheckReplay,
   REVIEW_CHECK_COMMAND_KINDS,
   type ReviewCheckCommand,
   reviewCheckReplayFields,
-  storedReviewCheckConversationId,
+  storedReviewCheckChannelId,
+  storedReviewCheckId,
 } from "./review-checks.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
@@ -13622,6 +13624,10 @@ async function replayAuditChannelIds(
       typeof alert.channel_id === "string" && UUID_RE.test(alert.channel_id)) {
     collected.add(alert.channel_id);
   }
+  const reviewCheckChannelId = stored !== null ? storedReviewCheckChannelId(stored) : undefined;
+  if (reviewCheckChannelId !== undefined) {
+    collected.add(reviewCheckChannelId);
+  }
   const reraise = record(stored?.reraise);
   if (typeof reraise?.signal_id === "string" && UUID_RE.test(reraise.signal_id)) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [reraise.signal_id]));
@@ -17440,14 +17446,22 @@ async function handleTransaction(
           };
         }
         /* A stored conversation answer, or a post to a conversation (its signal names the members it went
-         * to), replays only while the caller may still open that conversation; the replay row above keeps
-         * its tags either way. */
+         * to), replays only while the caller may still open that conversation; a stored review check
+         * replay re-checks BOTH conversation visibility AND addressed thread-root audience; the replay
+         * audit row above keeps its canonical channel tags either way. */
+        if (matches && isReviewCheckCommandKind(kind)) {
+          const replayedCheckId = storedReviewCheckId(record(existing.response) ?? {});
+          if (replayedCheckId !== undefined) {
+            const reauthorizedCheck = await reauthorizeReviewCheckReplay(
+              tx, route.workspaceId, authActorIdentity(auth), replayedCheckId,
+            );
+            if (reauthorizedCheck !== null) return reauthorizedCheck;
+          }
+        }
         const replayedConversation = !matches
           ? undefined
           : isConversationCommandKind(kind)
           ? storedConversationId(record(existing.response) ?? {})
-          : isReviewCheckCommandKind(kind)
-          ? storedReviewCheckConversationId(record(existing.response) ?? {})
           : command.kind === "post_signal"
           ? command.conversation_id
           : undefined;
@@ -17810,6 +17824,7 @@ async function handleTransaction(
           auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
           reason: outcome.reason, detail: ignoredIdentity, hash,
+          channelIds: outcome.audit_channel_ids,
         });
         const refusal: HttpResult = {
           status: outcome.status,
@@ -17840,6 +17855,7 @@ async function handleTransaction(
       await insertAudit(tx, {
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash,
+        channelIds: outcome.audit_channel_ids,
       });
       return { status: 200, body: { status: "accepted", ...response } };
     }

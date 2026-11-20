@@ -247,7 +247,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
       try {
         if (request.params.name === "review_check_open") {
           for (const k of Object.keys(args)) {
-            if (!["subject_repo", "subject_ref", "head_sha", "required_seats", "conversation_id", "thread_root_id", "request_id"].includes(k)) {
+            if (!["check_id", "subject_repo", "subject_ref", "head_sha", "required_seats", "conversation_id", "thread_root_id", "request_id"].includes(k)) {
               throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
             }
           }
@@ -272,6 +272,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             return { kind: row.kind, id: row.id };
           });
           const res = await openReviewCheck(target, auth.token, profile.workspace_id, {
+            checkId: typeof args.check_id === "string" ? args.check_id : null,
             repo: args.subject_repo,
             ref: args.subject_ref,
             headSha: args.head_sha,

@@ -262,8 +262,9 @@ test("C3 lifecycle: open, own-seat stamp, once-only satisfied thread note, head 
   assert.equal(repeatPass.satisfied_now, false);
   assert.equal(repeatPass.satisfied_signal_id, null);
 
-  // Advancing head_sha to head2 invalidates earlier stamps.
+  // Advancing head_sha to head2 invalidates earlier stamps (opener passes checkId or same placement).
   const advanced = await openReviewCheck(target, seatLead.token, workspace, {
+    checkId,
     repo: "yulanventures/commonswarm",
     ref: "700",
     headSha: head2,
@@ -277,6 +278,63 @@ test("C3 lifecycle: open, own-seat stamp, once-only satisfied thread note, head 
   assert.equal(advanced.review_check.status, "pending");
   assert.equal(advanced.review_check.satisfied, false);
   assert.equal(advanced.review_check.stamps.every((s) => s.stale && s.effective_verdict === "pending"), true);
+
+  // Condition 1: unauthorized viewer (even a bystander or non-opener required reviewer) CANNOT
+  // replace head_sha or required_seats on an existing check -> 403 forbidden!
+  await assert.rejects(
+    openReviewCheck(target, outsider.token, workspace, {
+      checkId,
+      repo: "yulanventures/commonswarm",
+      ref: "700",
+      headSha: head2,
+      requiredSeats: [{ kind: "agent", id: outsider.principal }],
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "forbidden" && error.status === 403,
+  );
+  await assert.rejects(
+    openReviewCheck(target, seatSec.token, workspace, {
+      repo: "yulanventures/commonswarm",
+      ref: "700",
+      headSha: head2,
+      requiredSeats: [{ kind: "agent", id: seatSec.principal }],
+      threadRootId: rootId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "forbidden" && error.status === 403,
+  );
+
+  // Condition 1 delegated update: channel lead or workspace admin CAN update, and updated_by records who did it.
+  const adminUpdate = await openReviewCheck(target, owner.jwt, workspace, {
+    checkId,
+    repo: "yulanventures/commonswarm",
+    ref: "700",
+    headSha: head2,
+    requiredSeats: [
+      { kind: "agent", id: seatLead.principal },
+      { kind: "agent", id: seatSec.principal },
+    ],
+  });
+  assert.equal(adminUpdate.created, false);
+  assert.deepEqual(adminUpdate.review_check.updated_by, { kind: "user", id: owner.id });
+
+  // Condition 2 placement immutability: moving an existing check to another conversation returns 409.
+  const otherCh = await send(owner.jwt, {
+    kind: "channel_create",
+    slug: `rc-other-${randomBytes(4).toString("hex")}`,
+    purpose: "Other channel",
+  });
+  assert.equal(otherCh.status, 200);
+  const otherChId = String((otherCh.body.channel as Row).channel_id);
+  await assert.rejects(
+    openReviewCheck(target, seatLead.token, workspace, {
+      checkId,
+      repo: "yulanventures/commonswarm",
+      ref: "700",
+      headSha: head2,
+      requiredSeats: [{ kind: "agent", id: seatLead.principal }],
+      conversationId: otherChId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "placement_immutable" && error.status === 409,
+  );
 
   // Stamping old head1 is refused with 409 stale_head carrying head2.
   await assert.rejects(
@@ -360,4 +418,250 @@ test("C3 private conversation isolation: outsider receives uniform 404 on read a
   });
   assert.equal(stamped.satisfied_now, true);
   assert.ok(stamped.satisfied_signal_id);
+
+  // Condition 2 no hidden-subject existence oracle: outsider opening the SAME repo+ref in workspace
+  // scope succeeds independently and never probes the hidden DM check!
+  const publicSameSubject = await openReviewCheck(target, outsider.token, workspace, {
+    repo: "yulanventures/private-repo",
+    ref: "42",
+    headSha: head,
+    requiredSeats: [{ kind: "agent", id: outsider.principal }],
+  });
+  assert.equal(publicSameSubject.created, true);
+  assert.notEqual(publicSameSubject.review_check.check_id, checkId);
+});
+
+test("C3 Conditions 2 & 3: narrow addressed thread root audience, unmapped root fail-closed, replay reauth, and private channel audit isolation", async () => {
+  const target = { url: local.API_URL, anonKey: local.ANON_KEY };
+  const head = "4444444ddddddd44444444444444444444444444";
+
+  // Create a second human workspace administrator who is NOT a member of the private channel.
+  const outsideAdmin = await createUser("rc-outside-admin");
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${outsideAdmin.id}::uuid, 'OutsideAdmin')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${outsideAdmin.id}::uuid, 'admin')`;
+
+  // 1. Narrow addressed root inside a PUBLIC channel: owner -> seatSec ONLY (outsider is in workspace
+  //    and can open the public channel, but CANNOT read the addressed root!).
+  const pubCh = await send(owner.jwt, {
+    kind: "channel_create",
+    slug: `rc-addr-${randomBytes(4).toString("hex")}`,
+    purpose: "Addressed root test",
+  });
+  assert.equal(pubCh.status, 200);
+  const pubChId = String((pubCh.body.channel as Row).channel_id);
+  const addrRootPost = await send(owner.jwt, {
+    kind: "post_signal",
+    signal_kind: "ask",
+    conversation_id: pubChId,
+    to_user_id: null,
+    to_agent_principal_id: seatSec.principal,
+    in_reply_to: null,
+    body: "Narrow addressed thread root",
+    about: "yulanventures/commonswarm#710",
+  });
+  assert.equal(addrRootPost.status, 200, JSON.stringify(addrRootPost.body));
+  const addrRootId = String((addrRootPost.body.signal as Row).id);
+
+  // Bystander who can open pubCh but cannot read addrRootId gets uniform 404 trying to open on it.
+  await assert.rejects(
+    openReviewCheck(target, outsider.token, workspace, {
+      repo: "yulanventures/commonswarm",
+      ref: "710-narrow",
+      headSha: head,
+      requiredSeats: [{ kind: "agent", id: outsider.principal }],
+      threadRootId: addrRootId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "not_found" && error.status === 404,
+  );
+
+  // Authorized owner opens check on the narrow addressed root with seatSec; non-recipient outsider is rejected as invalid_seat.
+  await assert.rejects(
+    openReviewCheck(target, owner.jwt, workspace, {
+      repo: "yulanventures/commonswarm",
+      ref: "710-narrow",
+      headSha: head,
+      requiredSeats: [{ kind: "agent", id: outsider.principal }],
+      threadRootId: addrRootId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "invalid_seat" && error.status === 400,
+  );
+  const narrowOpen = await openReviewCheck(target, owner.jwt, workspace, {
+    repo: "yulanventures/commonswarm",
+    ref: "710-narrow",
+    headSha: head,
+    requiredSeats: [{ kind: "agent", id: seatSec.principal }],
+    threadRootId: addrRootId,
+  });
+  assert.equal(narrowOpen.review_check.root_audience, "addressed");
+  const narrowCheckId = narrowOpen.review_check.check_id;
+
+  // Bystander in pubCh gets 404 on read & stamp, and list omits it.
+  await assert.rejects(
+    readReviewChecks(target, outsider.token, workspace, { checkId: narrowCheckId }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "not_found" && error.status === 404,
+  );
+  const bystanderList = await readReviewChecks(target, outsider.token, workspace, { conversationId: pubChId });
+  assert.equal(bystanderList.review_checks?.some((c) => c.check_id === narrowCheckId), false);
+
+  // seatSec stamps pass -> satisfaction note MUST remain addressed (audience='addressed'), never public channel-wide!
+  const narrowStamp = await stampReviewCheck(target, seatSec.token, workspace, {
+    checkId: narrowCheckId,
+    headSha: head,
+    verdict: "pass",
+  });
+  assert.equal(narrowStamp.satisfied_now, true);
+  assert.ok(narrowStamp.satisfied_signal_id);
+  const [satFiling] = await sql<{ audience: string; conversation_id: string }[]>`
+    SELECT audience, conversation_id FROM swarm.conversation_signals
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${narrowStamp.satisfied_signal_id!}::uuid
+  `;
+  assert.equal(satFiling!.audience, "addressed", "satisfaction note on addressed root MUST preserve addressed audience");
+  assert.equal(satFiling!.conversation_id, pubChId);
+
+  // 2. Unmapped root fails closed (404, never treated as workspace-scoped).
+  const unmappedRootId = randomUUID();
+  await sql`
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at)
+    VALUES (${unmappedRootId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', ${seatSec.principal}::uuid, 'ask', 'legacy unmapped', statement_timestamp() + interval '1 day', statement_timestamp())
+  `;
+  // Remove conversation_signals row to simulate legacy unmapped addressed root.
+  await sql.begin(async (tx) => {
+    await tx`ALTER TABLE swarm.conversation_signals DISABLE TRIGGER conversation_signals_append_only`;
+    try {
+      await tx`DELETE FROM swarm.conversation_signals WHERE workspace_id = ${workspace}::uuid AND signal_id = ${unmappedRootId}::uuid`;
+    } finally {
+      await tx`ALTER TABLE swarm.conversation_signals ENABLE TRIGGER conversation_signals_append_only`;
+    }
+  });
+  await assert.rejects(
+    openReviewCheck(target, owner.jwt, workspace, {
+      repo: "yulanventures/commonswarm",
+      ref: "710-unmapped",
+      headSha: head,
+      requiredSeats: [{ kind: "agent", id: seatSec.principal }],
+      threadRootId: unmappedRootId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.code === "not_found" && error.status === 404,
+  );
+
+  // 3. Condition 3: Private channel audit tagging (accepted, replayed, conflicting, post-removal) +
+  //    outside workspace administrator sees ZERO private check audit rows and indistinguishable 404 probes!
+  const privCh = await send(owner.jwt, {
+    kind: "channel_create",
+    slug: `rc-priv-audit-${randomBytes(4).toString("hex")}`,
+    visibility: "private",
+    members: [{ kind: "agent", id: seatLead.principal }],
+  });
+  assert.equal(privCh.status, 200, JSON.stringify(privCh.body));
+  const privChId = String((privCh.body.channel as Row).channel_id);
+
+  const auditRowsFor = async (viewerId: string, mark: string) =>
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewerId, role: "authenticated" })}, true)`;
+      await tx.unsafe("SET LOCAL ROLE authenticated");
+      const rows = await tx<{ command_kind: string; outcome: string; reason: string | null }[]>`
+        SELECT command_kind, outcome, reason FROM swarm_read.audit_log
+        WHERE workspace_id = ${workspace}::uuid
+          AND command_kind IN ('review_check_open', 'review_check_stamp')
+          AND audit_id > ${mark}::bigint
+        ORDER BY audit_id
+      `;
+      return rows.map((r) => ({ ...r }));
+    }) as Array<{ command_kind: string; outcome: string; reason: string | null }>;
+
+  const mark1 = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
+  const openCmdId = randomUUID();
+  const stampCmdId = randomUUID();
+
+  // Accepted private open + replay + conflict on same command_id
+  const privOpen = await openReviewCheck(target, owner.jwt, workspace, {
+    repo: "yulanventures/private-audit",
+    ref: "99",
+    headSha: head,
+    requiredSeats: [{ kind: "agent", id: seatLead.principal }],
+    conversationId: privChId,
+    commandId: openCmdId,
+  });
+  const privCheckId = privOpen.review_check.check_id;
+  assert.equal(privOpen.review_check.channel_id, privChId);
+  // Replay open
+  await openReviewCheck(target, owner.jwt, workspace, {
+    repo: "yulanventures/private-audit",
+    ref: "99",
+    headSha: head,
+    requiredSeats: [{ kind: "agent", id: seatLead.principal }],
+    conversationId: privChId,
+    commandId: openCmdId,
+  });
+  // Conflicting payload on same command_id
+  await assert.rejects(
+    openReviewCheck(target, owner.jwt, workspace, {
+      repo: "yulanventures/private-audit",
+      ref: "99-conflict",
+      headSha: head,
+      requiredSeats: [{ kind: "agent", id: seatLead.principal }],
+      conversationId: privChId,
+      commandId: openCmdId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.status === 409,
+  );
+  // Accepted private stamp + replay + conflict + post-removal replay refusal
+  await stampReviewCheck(target, seatLead.token, workspace, {
+    checkId: privCheckId,
+    headSha: head,
+    verdict: "pass",
+    commandId: stampCmdId,
+  });
+  await stampReviewCheck(target, seatLead.token, workspace, {
+    checkId: privCheckId,
+    headSha: head,
+    verdict: "pass",
+    commandId: stampCmdId,
+  });
+  await assert.rejects(
+    stampReviewCheck(target, seatLead.token, workspace, {
+      checkId: privCheckId,
+      headSha: head,
+      verdict: "hold",
+      commandId: stampCmdId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.status === 409,
+  );
+  // Remove seatLead from private channel -> replay must refuse 404 AND keep private channel audit tag!
+  assert.equal((await send(owner.jwt, {
+    kind: "channel_member_remove",
+    channel_id: privChId,
+    member: { kind: "agent", id: seatLead.principal },
+  })).status, 200);
+  await assert.rejects(
+    stampReviewCheck(target, seatLead.token, workspace, {
+      checkId: privCheckId,
+      headSha: head,
+      verdict: "pass",
+      commandId: stampCmdId,
+    }),
+    (error: unknown) => error instanceof ReviewCheckError && error.status === 404,
+  );
+
+  // Outside workspace administrator sees ZERO of those private channel audit rows; private-channel member owner sees all 7!
+  assert.equal((await auditRowsFor(outsideAdmin.id, mark1)).length, 0, "outside workspace admin must see ZERO private review_check open/stamp/replay/conflict audit rows");
+  assert.equal((await auditRowsFor(owner.id, mark1)).length, 7, "private channel member owner must see all 7 tagged audit rows");
+
+  // Unknown vs hidden private check probe by outsideAdmin -> identical 404 and identical audit_log visibility!
+  const markUnknown = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
+  const probeUnknown = await send(outsideAdmin.jwt, {
+    kind: "review_check_stamp", check_id: randomUUID(), head_sha: head, verdict: "pass",
+  });
+  const auditUnknown = await auditRowsFor(outsideAdmin.id, markUnknown);
+
+  const markHidden = (await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`)[0]!.mark;
+  const probeHidden = await send(outsideAdmin.jwt, {
+    kind: "review_check_stamp", check_id: privCheckId, head_sha: head, verdict: "pass",
+  });
+  const auditHidden = await auditRowsFor(outsideAdmin.id, markHidden);
+
+  assert.equal(probeUnknown.status, 404);
+  assert.equal(probeHidden.status, 404);
+  assert.deepEqual(probeHidden.body, probeUnknown.body);
+  assert.deepEqual(auditHidden, auditUnknown, "hidden vs unknown review_check probes must leave identical audit_log visibility");
 });

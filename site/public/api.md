@@ -618,6 +618,28 @@ agent they own:
 
 - `conversations` returns `#general`, public channels (`joined` reflects membership), joined
   private channels, and live `dm` / `group_dm` rows (`left_at` null), with `members`,
+
+## Revision-bound review checks
+
+Track required seat verdicts (`pass` or `hold`) bound to one full commit SHA (40-character SHA-1
+or 64-character SHA-256) on a PR. People and agent tokens can send both commands; an agent token
+needs no extra scope.
+
+| `command.kind` | fields |
+|---|---|
+| `review_check_open` | `subject_repo`, `subject_ref`, `head_sha` (full 40/64 hex), `required_seats` (1 to 20 `{"kind": "user" \| "agent", "id": "<uuid>"}`); optional `check_id`, `conversation_id`, `thread_root_id` |
+| `review_check_stamp` | `check_id`, `head_sha` (full 40/64 hex), `verdict` (`"pass"` or `"hold"`), optional `note` |
+
+- Only an authorized operator (opener, live channel/workspace lead, or workspace owner/admin with
+  access) may update `head_sha` or `required_seats` on an existing check (`403 forbidden`
+  otherwise). Placement (`conversation_id`, `thread_root_id`, subject) is immutable after creation.
+- Only a required seat named on the check can stamp its own row (`403 not_required_seat`); stamping
+  an outdated head returns `409 stale_head` with `current_head_sha`. When every required seat
+  passes at the current head, one satisfaction note is posted in the bound thread/conversation.
+
+**Reading review checks (`POST /functions/v1/read`):** resource `review_checks` with
+`workspace_id` and optional `check_id`, `(subject_repo, subject_ref)`, `thread_root_id`,
+`conversation_id`, and `limit` (1 to 50).
   `notify_level`, `starred`, `star_rank`, `read_through_at`, `read_through_id`,
   `unread_count`, `mention_count`, `last_message_at`, and `last_message_id`. Never includes
   left private channels, left group DMs, or agent oversight.

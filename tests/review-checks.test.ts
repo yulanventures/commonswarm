@@ -5,7 +5,9 @@ import {
   isReviewCheckCommandKind,
   parseReviewCheckCommand,
   reviewCheckReplayFields,
+  storedReviewCheckChannelId,
   storedReviewCheckConversationId,
+  storedReviewCheckId,
 } from "../supabase/functions/command/review-checks.ts";
 import {
   isReviewCheckReadResource,
@@ -59,12 +61,19 @@ test("review check command parser validates open and stamp wire shapes strictly"
     assert.equal(openOk.command.thread_root_id, ROOT_ID);
   }
 
-  // Extra keys, bad SHA, empty seats are refused.
+  // Extra keys, bad SHA, short/ambiguous SHA, empty seats are refused.
   assert.equal(parseReviewCheckCommand({
     kind: "review_check_open",
     subject_repo: "yulanventures/commonswarm",
     subject_ref: "698",
     head_sha: "not-hex!",
+    required_seats: [{ kind: "agent", id: AGENT_A }],
+  }).ok, false);
+  assert.equal(parseReviewCheckCommand({
+    kind: "review_check_open",
+    subject_repo: "yulanventures/commonswarm",
+    subject_ref: "698",
+    head_sha: "8003522",
     required_seats: [{ kind: "agent", id: AGENT_A }],
   }).ok, false);
   assert.equal(parseReviewCheckCommand({
@@ -146,16 +155,18 @@ test("review check read parser enforces workspace_id, paired subject fields, and
   }), null);
 });
 
-test("replay helpers preserve review_check fields and extract conversation_id", () => {
+test("replay helpers preserve review_check fields and extract check_id, channel_id, and conversation_id", () => {
   const stored = {
     ok: true,
-    review_check: { check_id: CHECK_ID, conversation_id: CONV_ID },
+    review_check: { check_id: CHECK_ID, conversation_id: CONV_ID, channel_id: CONV_ID },
     satisfied_now: true,
     satisfied_signal_id: ROOT_ID,
   };
+  assert.equal(storedReviewCheckId(stored), CHECK_ID);
+  assert.equal(storedReviewCheckChannelId(stored), CONV_ID);
   assert.equal(storedReviewCheckConversationId(stored), CONV_ID);
   assert.deepEqual(reviewCheckReplayFields(stored), {
-    review_check: { check_id: CHECK_ID, conversation_id: CONV_ID },
+    review_check: { check_id: CHECK_ID, conversation_id: CONV_ID, channel_id: CONV_ID },
     satisfied_now: true,
     satisfied_signal_id: ROOT_ID,
   });
@@ -194,7 +205,7 @@ test("seat resolver, subject parser, and renderer handle names, UUIDs, and stale
     check_id: CHECK_ID,
     workspace_id: WS,
     subject: { kind: "pr", repo: "yulanventures/commonswarm", ref: "698" },
-    head_sha: "bbbbbbbbbbbb",
+    head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     conversation_id: CONV_ID,
     thread_root_id: ROOT_ID,
     required_seats: [
@@ -207,7 +218,7 @@ test("seat resolver, subject parser, and renderer handle names, UUIDs, and stale
         seat_id: AGENT_A,
         name: "Lead",
         verdict: "pass",
-        head_sha: "aaaaaaaaaaaa",
+        head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         note: "old head",
         stamped_at: "2026-11-20T12:00:00Z",
         stale: true,
@@ -218,7 +229,7 @@ test("seat resolver, subject parser, and renderer handle names, UUIDs, and stale
         seat_id: AGENT_B,
         name: "Sec",
         verdict: "hold",
-        head_sha: "bbbbbbbbbbbb",
+        head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         note: "needs test",
         stamped_at: "2026-11-20T12:05:00Z",
         stale: false,

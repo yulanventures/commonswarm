@@ -1,7 +1,8 @@
 /**
  * Revision-bound review checks (C3): dedicated command module (kept separate from command/index.ts).
- * Every authority, lock, head-invalidation, and once-only satisfied thread note rule lives in
- * 20261120000005_review_checks.sql; this module validates the wire shape and maps SQL outcomes.
+ * Every authority, lock, placement-immutability, head-invalidation, audit-channel tagging, and
+ * once-only satisfied thread note rule lives in 20261120000005_review_checks.sql; this module
+ * validates the wire shape and maps SQL outcomes.
  */
 import type postgres from "postgres";
 
@@ -26,6 +27,7 @@ export interface ReviewCheckSeat {
 export type ReviewCheckCommand =
   | {
     kind: "review_check_open";
+    check_id: string | null;
     subject_repo: string;
     subject_ref: string;
     head_sha: string;
@@ -51,7 +53,7 @@ export interface ReviewCheckActor {
 }
 
 export type ReviewCheckOutcome =
-  | { ok: true; response: Record<string, unknown> }
+  | { ok: true; response: Record<string, unknown>; audit_channel_ids?: string[] }
   | {
     ok: false;
     status: 400 | 403 | 404 | 409;
@@ -59,10 +61,11 @@ export type ReviewCheckOutcome =
     message: string;
     reason: string;
     extra?: Record<string, unknown>;
+    audit_channel_ids?: string[];
   };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SHA_RE = /^[0-9a-f]{7,64}$/i;
+const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const CTRL_RE = /[\x00-\x1f\x7f]/;
 
 export function isReviewCheckCommandKind(kind: unknown): kind is ReviewCheckCommandKind {
@@ -87,6 +90,12 @@ function parseSeat(value: unknown): ReviewCheckSeat | null {
   return { kind: row.kind, id: row.id.toLowerCase() };
 }
 
+function auditTags(result: Record<string, unknown>): { audit_channel_ids?: string[] } {
+  return typeof result.audit_channel_id === "string" && UUID_RE.test(result.audit_channel_id)
+    ? { audit_channel_ids: [result.audit_channel_id.toLowerCase()] }
+    : {};
+}
+
 export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewCheckParse {
   if (cmd.kind === "review_check_open") {
     const allowed = [
@@ -95,6 +104,7 @@ export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewChe
       "subject_ref",
       "head_sha",
       "required_seats",
+      ...(Object.hasOwn(cmd, "check_id") ? ["check_id"] : []),
       ...(Object.hasOwn(cmd, "conversation_id") ? ["conversation_id"] : []),
       ...(Object.hasOwn(cmd, "thread_root_id") ? ["thread_root_id"] : []),
     ];
@@ -102,8 +112,16 @@ export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewChe
       return {
         ok: false,
         status: 400,
-        reason: "review_check_open takes subject_repo, subject_ref, head_sha, required_seats, and optionally conversation_id and thread_root_id.",
+        reason: "review_check_open takes subject_repo, subject_ref, head_sha, required_seats, and optionally check_id, conversation_id, and thread_root_id.",
       };
+    }
+    const checkId = cmd.check_id === undefined || cmd.check_id === null
+      ? null
+      : isUuid(cmd.check_id)
+      ? cmd.check_id.toLowerCase()
+      : undefined;
+    if (checkId === undefined) {
+      return { ok: false, status: 400, reason: "check_id must be a UUID or null." };
     }
     const repo = typeof cmd.subject_repo === "string" ? cmd.subject_repo.trim() : "";
     if (repo.length < 1 || repo.length > 160 || CTRL_RE.test(repo)) {
@@ -114,8 +132,8 @@ export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewChe
       return { ok: false, status: 400, reason: "subject_ref must be 1 to 80 printable characters." };
     }
     const sha = typeof cmd.head_sha === "string" ? cmd.head_sha.trim().toLowerCase() : "";
-    if (!SHA_RE.test(sha)) {
-      return { ok: false, status: 400, reason: "head_sha must be a 7 to 64 character hex commit SHA." };
+    if (!FULL_SHA_RE.test(sha)) {
+      return { ok: false, status: 400, reason: "head_sha must be a full 40-character SHA-1 or 64-character SHA-256 hex commit SHA." };
     }
     if (!Array.isArray(cmd.required_seats) || cmd.required_seats.length < 1 || cmd.required_seats.length > REVIEW_CHECK_SEATS_MAX) {
       return {
@@ -161,6 +179,7 @@ export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewChe
       ok: true,
       command: {
         kind: "review_check_open",
+        check_id: checkId,
         subject_repo: repo,
         subject_ref: ref,
         head_sha: sha,
@@ -190,8 +209,8 @@ export function parseReviewCheckCommand(cmd: Record<string, unknown>): ReviewChe
       return { ok: false, status: 400, reason: "check_id must be a UUID." };
     }
     const sha = typeof cmd.head_sha === "string" ? cmd.head_sha.trim().toLowerCase() : "";
-    if (!SHA_RE.test(sha)) {
-      return { ok: false, status: 400, reason: "head_sha must be a 7 to 64 character hex commit SHA." };
+    if (!FULL_SHA_RE.test(sha)) {
+      return { ok: false, status: 400, reason: "head_sha must be a full 40-character SHA-1 or 64-character SHA-256 hex commit SHA." };
     }
     if (typeof cmd.verdict !== "string" || !(REVIEW_CHECK_VERDICTS as readonly string[]).includes(cmd.verdict)) {
       return { ok: false, status: 400, reason: 'verdict must be "pass" or "hold".' };
@@ -239,11 +258,13 @@ export async function applyReviewCheckCommand(
         ${command.head_sha},
         ${tx.json(command.required_seats as unknown as postgres.JSONValue)}::jsonb,
         ${command.conversation_id}::uuid,
-        ${command.thread_root_id}::uuid
+        ${command.thread_root_id}::uuid,
+        ${command.check_id}::uuid
       ) AS result
     `;
     const result = row?.result ?? {};
     const status = typeof result.status === "string" ? result.status : "invalid_request";
+    const tags = auditTags(result);
     if (status === "ok") {
       return {
         ok: true,
@@ -252,6 +273,7 @@ export async function applyReviewCheckCommand(
           created: Boolean(result.created),
           head_changed: Boolean(result.head_changed),
         },
+        ...tags,
       };
     }
     if (status === "not_found") {
@@ -263,6 +285,26 @@ export async function applyReviewCheckCommand(
         reason: "review_check_target_not_found",
       };
     }
+    if (status === "placement_immutable") {
+      return {
+        ok: false,
+        status: 409,
+        error: "placement_immutable",
+        message: "A review check's conversation, thread root, and subject cannot be changed after creation.",
+        reason: "review_check_placement_immutable",
+        ...tags,
+      };
+    }
+    if (status === "update_forbidden") {
+      return {
+        ok: false,
+        status: 403,
+        error: "forbidden",
+        message: "Only the review check opener, live channel/workspace lead, or a workspace owner/admin with access may update head_sha or required_seats.",
+        reason: "review_check_update_forbidden",
+        ...tags,
+      };
+    }
     if (status === "forbidden") {
       return {
         ok: false,
@@ -270,6 +312,7 @@ export async function applyReviewCheckCommand(
         error: "forbidden",
         message: "You cannot open a review check in this workspace.",
         reason: "review_check_forbidden",
+        ...tags,
       };
     }
     if (status === "invalid_seat") {
@@ -277,8 +320,9 @@ export async function applyReviewCheckCommand(
         ok: false,
         status: 400,
         error: "invalid_seat",
-        message: "Every required seat must be an active member of this workspace with access to the target conversation.",
+        message: "Every required seat must be an active member of this workspace with access to the target conversation and thread audience.",
         reason: "review_check_invalid_seat",
+        ...tags,
       };
     }
     return {
@@ -287,6 +331,7 @@ export async function applyReviewCheckCommand(
       error: "invalid_request",
       message: "Invalid review check parameters.",
       reason: "review_check_invalid_request",
+      ...tags,
     };
   }
 
@@ -303,6 +348,7 @@ export async function applyReviewCheckCommand(
   `;
   const result = row?.result ?? {};
   const status = typeof result.status === "string" ? result.status : "invalid_request";
+  const tags = auditTags(result);
   if (status === "ok") {
     return {
       ok: true,
@@ -311,6 +357,7 @@ export async function applyReviewCheckCommand(
         satisfied_now: Boolean(result.satisfied_now),
         satisfied_signal_id: result.satisfied_signal_id ?? null,
       },
+      ...tags,
     };
   }
   if (status === "not_found") {
@@ -329,6 +376,7 @@ export async function applyReviewCheckCommand(
       error: "not_required_seat",
       message: "Only a required seat named on this review check can stamp its own row.",
       reason: "review_check_not_required_seat",
+      ...tags,
     };
   }
   if (status === "stale_head") {
@@ -342,6 +390,7 @@ export async function applyReviewCheckCommand(
         : "Head SHA has moved. Re-verify the current head before stamping.",
       reason: "review_check_stale_head",
       ...(currentHead ? { extra: { current_head_sha: currentHead } } : {}),
+      ...tags,
     };
   }
   if (status === "forbidden") {
@@ -351,6 +400,7 @@ export async function applyReviewCheckCommand(
       error: "forbidden",
       message: "You cannot stamp a review check in this workspace.",
       reason: "review_check_forbidden",
+      ...tags,
     };
   }
   return {
@@ -359,7 +409,24 @@ export async function applyReviewCheckCommand(
     error: "invalid_request",
     message: "Invalid review check stamp parameters.",
     reason: "review_check_invalid_request",
+    ...tags,
   };
+}
+
+/** Check ID stored on a review_check replay, for re-checking BOTH conversation and root audience. */
+export function storedReviewCheckId(response: Record<string, unknown>): string | undefined {
+  const check = response.review_check;
+  if (!check || typeof check !== "object" || Array.isArray(check)) return undefined;
+  const checkId = (check as Record<string, unknown>).check_id;
+  return typeof checkId === "string" && UUID_RE.test(checkId) ? checkId.toLowerCase() : undefined;
+}
+
+/** Canonical channel ID stored on a review_check replay, for private-channel audit tagging. */
+export function storedReviewCheckChannelId(response: Record<string, unknown>): string | undefined {
+  const check = response.review_check;
+  if (!check || typeof check !== "object" || Array.isArray(check)) return undefined;
+  const channelId = (check as Record<string, unknown>).channel_id;
+  return typeof channelId === "string" && UUID_RE.test(channelId) ? channelId.toLowerCase() : undefined;
 }
 
 /** Conversation ID stored on a review_check replay, if scoped to a conversation. */
@@ -367,7 +434,29 @@ export function storedReviewCheckConversationId(response: Record<string, unknown
   const check = response.review_check;
   if (!check || typeof check !== "object" || Array.isArray(check)) return undefined;
   const convId = (check as Record<string, unknown>).conversation_id;
-  return typeof convId === "string" && UUID_RE.test(convId) ? convId : undefined;
+  return typeof convId === "string" && UUID_RE.test(convId) ? convId.toLowerCase() : undefined;
+}
+
+/** Reauthorize a stored review_check replay against live conversation AND addressed-root audience. */
+export async function reauthorizeReviewCheckReplay(
+  tx: Sql,
+  workspaceId: string,
+  actor: ReviewCheckActor,
+  checkId: string,
+): Promise<{ status: 404; body: Record<string, unknown> } | null> {
+  const [row] = await tx<{ visible: boolean }[]>`
+    SELECT swarm.review_check_replay_visible(
+      ${workspaceId}::uuid,
+      ${actor.kind},
+      ${actor.id}::uuid,
+      ${checkId}::uuid
+    ) AS visible
+  `;
+  if (row?.visible === true) return null;
+  return {
+    status: 404,
+    body: { error: "not_found", message: "Review check not found." },
+  };
 }
 
 /** Preserve review check fields on idempotency replay without touching other stored responses. */

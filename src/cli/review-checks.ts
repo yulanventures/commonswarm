@@ -85,6 +85,7 @@ export async function executeCheckOpenCli(
     : { members: [], agents: [] };
   const requiredSeats = resolveReviewCheckSeats(rawSeats, directory);
   const result = await openReviewCheck(auth.target, auth.bearer, auth.workspaceId, {
+    checkId: args.optional("check-id") ?? null,
     repo: subject.repo,
     ref: subject.ref,
     headSha,
