@@ -98,7 +98,11 @@ async function renderServedMultiAccountPage(
           resultScopedSlot: true,
           resolvePath: (specifier) => specifier,
         });
-        assert.deepEqual(compiled.diagnostics.filter((d) => d.severity === "error"), []);
+        assert.deepEqual(
+          compiled.diagnostics.filter((d) => d.severity === "error"),
+          [],
+          `Astro compiler errors in ${args.path}`,
+        );
         scripts.set(
           args.path,
           compiled.scripts.map((s) => s.code).filter((code): code is string => typeof code === "string"),
@@ -204,8 +208,8 @@ unitTest("served witness fixture compiles real LiveDashboard and InviteOnramp wi
     ]);
     assert.ok(app.markup.includes('data-signin-provider="google"'), "/app renders Google provider button");
     assert.ok(inv.markup.includes('data-signin-provider="google"'), "/invite renders Google provider button");
-    assert.ok(app.js.includes("MULTI_ACCOUNT_ENABLED = !0") || app.js.includes("MULTI_ACCOUNT_ENABLED = true"));
-    assert.ok(inv.js.includes("MULTI_ACCOUNT_ENABLED = !0") || inv.js.includes("MULTI_ACCOUNT_ENABLED = true"));
+    assert.ok(app.js.includes("MULTI_ACCOUNT_ENABLED = !0") || app.js.includes("MULTI_ACCOUNT_ENABLED = true"), "/app test bundle must enable MULTI_ACCOUNT_ENABLED");
+    assert.ok(inv.js.includes("MULTI_ACCOUNT_ENABLED = !0") || inv.js.includes("MULTI_ACCOUNT_ENABLED = true"), "/invite test bundle must enable MULTI_ACCOUNT_ENABLED");
     const parsedConv = parseConversationsListOutcome(200, {
       conversations: [{
         conversation_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -221,9 +225,9 @@ unitTest("served witness fixture compiles real LiveDashboard and InviteOnramp wi
         starred: false,
       }],
     });
-    assert.equal(parsedConv.status, "ready");
-    assert.equal(parsedConv.conversations.length, 1);
-    assert.equal(parsedConv.conversations[0]?.joined, true);
+    assert.equal(parsedConv.status, "ready", "mock #ops conversation fixture must parse as ready");
+    assert.equal(parsedConv.conversations.length, 1, "mock #ops conversation fixture must parse 1 channel");
+    assert.equal(parsedConv.conversations[0]?.joined, true, "mock #ops conversation fixture must mark viewer joined");
     const sampleInvite = memberInviteUrl(url, {
       v: 1,
       url,
@@ -234,7 +238,7 @@ unitTest("served witness fixture compiles real LiveDashboard and InviteOnramp wi
       inviter_display_name: "Host",
       inviter_user_id: "33333333-3333-4333-8333-333333333333",
     });
-    assert.ok(sampleInvite.includes("#invite="));
+    assert.ok(sampleInvite.includes("#invite="), "sample invite URL must encode #invite= fragment");
   } finally {
     srv.closeAllConnections();
     await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -284,41 +288,53 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
   let releaseOtp: (() => void) | null = null;
   let otpHeldResolve: (() => void) | null = null;
   let otpHeldPromise = new Promise<void>((r) => { otpHeldResolve = r; });
+  let otpResponseResolve: (() => void) | null = null;
+  let otpResponseSent = new Promise<void>((r) => { otpResponseResolve = r; });
 
   let holdVerify = false;
   let releaseVerify: (() => void) | null = null;
   let verifyHeldResolve: (() => void) | null = null;
   let verifyHeldPromise = new Promise<void>((r) => { verifyHeldResolve = r; });
+  let verifyResponseResolve: (() => void) | null = null;
+  let verifyResponseSent = new Promise<void>((r) => { verifyResponseResolve = r; });
 
   let holdChannelVisibility = false;
   let releaseChannelVisibility: (() => void) | null = null;
   let channelVisibilityHeldResolve: (() => void) | null = null;
   let channelVisibilityHeldPromise = new Promise<void>((r) => { channelVisibilityHeldResolve = r; });
+  let channelVisibilityResponseResolve: (() => void) | null = null;
+  let channelVisibilityResponseSent = new Promise<void>((r) => { channelVisibilityResponseResolve = r; });
 
   let holdFileCreate = false;
   let releaseFileCreate: (() => void) | null = null;
   let fileCreateHeldResolve: (() => void) | null = null;
   let fileCreateHeldPromise = new Promise<void>((r) => { fileCreateHeldResolve = r; });
+  let fileCreateResponseResolve: (() => void) | null = null;
+  let fileCreateResponseSent = new Promise<void>((r) => { fileCreateResponseResolve = r; });
 
   const resetFileCreateGate = (hold: boolean): void => {
     holdFileCreate = hold;
     releaseFileCreate = null;
     fileCreateHeldPromise = new Promise<void>((r) => { fileCreateHeldResolve = r; });
+    fileCreateResponseSent = new Promise<void>((r) => { fileCreateResponseResolve = r; });
   };
   const resetOtpGate = (hold: boolean): void => {
     holdOtp = hold;
     releaseOtp = null;
     otpHeldPromise = new Promise<void>((r) => { otpHeldResolve = r; });
+    otpResponseSent = new Promise<void>((r) => { otpResponseResolve = r; });
   };
   const resetVerifyGate = (hold: boolean): void => {
     holdVerify = hold;
     releaseVerify = null;
     verifyHeldPromise = new Promise<void>((r) => { verifyHeldResolve = r; });
+    verifyResponseSent = new Promise<void>((r) => { verifyResponseResolve = r; });
   };
   const resetChannelVisibilityGate = (hold: boolean): void => {
     holdChannelVisibility = hold;
     releaseChannelVisibility = null;
     channelVisibilityHeldPromise = new Promise<void>((r) => { channelVisibilityHeldResolve = r; });
+    channelVisibilityResponseSent = new Promise<void>((r) => { channelVisibilityResponseResolve = r; });
   };
 
   let origin = "";
@@ -443,19 +459,23 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       }
       if (url.pathname === "/auth/v1/otp" && method === "POST") {
         await readJsonBody(req);
-        if (holdOtp) {
+        const wasHeld = holdOtp;
+        if (wasHeld) {
           otpHeldResolve?.();
           await new Promise<void>((resolve) => { releaseOtp = resolve; });
         }
+        res.once("finish", () => { if (wasHeld) otpResponseResolve?.(); });
         sendJson(res, 200, {});
         return;
       }
       if (url.pathname === "/auth/v1/verify" && method === "POST") {
         await readJsonBody(req);
-        if (holdVerify) {
+        const wasHeld = holdVerify;
+        if (wasHeld) {
           verifyHeldResolve?.();
           await new Promise<void>((resolve) => { releaseVerify = resolve; });
         }
+        res.once("finish", () => { if (wasHeld) verifyResponseResolve?.(); });
         sendJson(res, 400, { error_code: "otp_expired", msg: "Token has expired or is invalid" });
         return;
       }
@@ -496,10 +516,12 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         return;
       }
       if (url.pathname === "/rest/v1/channels" && method === "GET") {
-        if (holdChannelVisibility && url.searchParams.get("channel_id") === `eq.${opsChannelId}`) {
+        const wasHeld = holdChannelVisibility && url.searchParams.get("channel_id") === `eq.${opsChannelId}`;
+        if (wasHeld) {
           channelVisibilityHeldResolve?.();
           await new Promise<void>((resolve) => { releaseChannelVisibility = resolve; });
         }
+        res.once("finish", () => { if (wasHeld) channelVisibilityResponseResolve?.(); });
         sendJson(res, 200, [{
           channel_id: opsChannelId,
           workspace_id: sharedWs,
@@ -602,10 +624,12 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
           ...(typeof cmd.content_role === "string" ? { contentRole: cmd.content_role } : {}),
         });
         if (kind === "file_version_create") {
-          if (holdFileCreate) {
+          const wasHeld = holdFileCreate;
+          if (wasHeld) {
             fileCreateHeldResolve?.();
             await new Promise<void>((resolve) => { releaseFileCreate = resolve; });
           }
+          res.once("finish", () => { if (wasHeld) fileCreateResponseResolve?.(); });
           sendJson(res, 200, {
             status: "accepted",
             file_id: String(cmd.file_id ?? "f-1"),
@@ -754,6 +778,53 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       throw lastError instanceof Error ? lastError : new Error(`Could not click account menu item ${selector}`);
     };
 
+    const settleFrames = async (p: Awaited<ReturnType<typeof context.newPage>>): Promise<void> => {
+      await p.evaluate(
+        () => new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        }),
+      );
+    };
+    const dismissDialogWithEscape = async (
+      p: Awaited<ReturnType<typeof context.newPage>>,
+      dialogSelector: string,
+      expectedFocusSelector: string,
+      label: string,
+    ): Promise<{ isAccountTile: boolean }> => {
+      await p.evaluate((sel: string) => {
+        const dlg = document.querySelector<HTMLDialogElement>(sel);
+        if (!dlg || !dlg.open) throw new Error(`Expected open dialog ${sel}`);
+        dlg.dataset.testCloseFired = "0";
+        dlg.addEventListener("close", () => { dlg.dataset.testCloseFired = "1"; }, { once: true });
+      }, dialogSelector);
+      await p.keyboard.press("Escape");
+      await p.waitForFunction(
+        (sel: string) => {
+          const dlg = document.querySelector<HTMLDialogElement>(sel);
+          return Boolean(dlg && !dlg.open && dlg.dataset.testCloseFired === "1");
+        },
+        dialogSelector,
+        { timeout: 10_000 },
+      );
+      await settleFrames(p);
+      const active = await p.evaluate((focusSel: string) => {
+        const el = document.activeElement;
+        return {
+          matches: el?.matches(focusSel) ?? false,
+          tag: el?.tagName ?? "null",
+          ariaLabel: el?.getAttribute("aria-label") ?? "",
+          className: el instanceof HTMLElement ? el.className : "",
+          isAccountTile: el?.hasAttribute("data-user-menu-trigger") ?? false,
+        };
+      }, expectedFocusSelector);
+      assert.equal(
+        active.matches,
+        true,
+        `${label}: expected focus on ${expectedFocusSelector}, got <${active.tag} aria-label="${active.ariaLabel}" class="${active.className}">`,
+      );
+      return { isAccountTile: active.isAccountTile };
+    };
+
     const waitForServerCondition = async (
       predicate: () => boolean,
       label: string,
@@ -856,7 +927,8 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.click("[data-add-account-otp-change]");
     await page.waitForSelector("[data-add-account-entry]:not([hidden])");
     (releaseOtp as (() => void) | null)?.();
-    await page.waitForTimeout(80);
+    await otpResponseSent;
+    await settleFrames(page);
     const afterHeldResendChange = await page.evaluate(() => ({
       entryVisible: !(document.querySelector<HTMLElement>("[data-add-account-entry]")?.hidden ?? true),
       codeHidden: document.querySelector<HTMLElement>("[data-add-account-code-step]")?.hidden ?? false,
@@ -878,7 +950,8 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.click("[data-add-account-otp-change]");
     await page.waitForSelector("[data-add-account-entry]:not([hidden])");
     (releaseVerify as (() => void) | null)?.();
-    await page.waitForTimeout(80);
+    await verifyResponseSent;
+    await settleFrames(page);
     const afterHeldVerifyChange = await page.evaluate(() => ({
       entryVisible: !(document.querySelector<HTMLElement>("[data-add-account-entry]")?.hidden ?? true),
       codeStatus: (document.querySelector<HTMLElement>("[data-add-account-code-status]")?.textContent ?? "").trim(),
@@ -886,14 +959,16 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(afterHeldVerifyChange.entryVisible, true, "held verify refusal must stay on Step 1 after Change email");
     assert.equal(afterHeldVerifyChange.codeStatus, "", "held verify refusal must NOT repaint stale error after Change email");
 
-    // Press Escape -> dialog closes, focus returns to desktop account trigger, staging attempt cleared!
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-add-account-dialog]")?.open);
+    // Press Escape -> dialog close event fires, focus returns to desktop account trigger, staging attempt cleared!
+    await dismissDialogWithEscape(
+      page,
+      "[data-add-account-dialog]",
+      "[data-user-menu-trigger]",
+      "FLOW 2 desktop Escape from Add account",
+    );
     const afterEscape = await page.evaluate(() => ({
-      activeIsTrigger: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
       attemptKeys: Object.keys(sessionStorage).filter((k) => k.includes(":attempt:")),
     }));
-    assert.equal(afterEscape.activeIsTrigger, true, "Escape from Add account must return focus to desktop account trigger");
     assert.equal(afterEscape.attemptKeys.length, 0, "Escape must retire staging attempt cleanly");
 
     // ── FLOW 2b (Designer 245c13fc/94b7ba0c keyboard focus): 1280px Enter switch + 360px phone Escape & Enter switch ──
@@ -903,7 +978,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.waitForSelector("[data-composer]:not([hidden])");
     await openAccountMenu(page);
     await page.waitForSelector(`[data-account-switch="${userA.id}"]:visible`);
-    await page.waitForTimeout(50);
+    await settleFrames(page);
     await page.focus(`[data-account-switch="${userA.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
@@ -936,17 +1011,11 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.waitForSelector("[data-menu-add-account]:visible");
     await page.click("[data-menu-add-account]");
     await page.waitForSelector("[data-add-account-dialog][open]");
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-add-account-dialog]")?.open);
-    const phoneAfterAddEscape = await page.evaluate(() => ({
-      isMoreTrigger: document.activeElement?.matches(".cs-kylon-workspace-menu .hm-menu__trigger") ?? false,
-      isAccountTile: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
-      activeLabel: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? "",
-    }));
-    assert.equal(
-      phoneAfterAddEscape.isMoreTrigger,
-      true,
-      `360px Escape from Add account must return focus to More button (got ${phoneAfterAddEscape.activeLabel})`,
+    const phoneAfterAddEscape = await dismissDialogWithEscape(
+      page,
+      "[data-add-account-dialog]",
+      ".cs-kylon-workspace-menu .hm-menu__trigger",
+      "FLOW 2b 360px Escape from Add account",
     );
     assert.equal(phoneAfterAddEscape.isAccountTile, false, "360px Escape from Add account must NOT focus the account tile");
 
@@ -954,23 +1023,17 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await page.waitForSelector("[data-menu-sign-out-all]:visible");
     await page.click("[data-menu-sign-out-all]");
     await page.waitForSelector("[data-signout-all-dialog][open]");
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(() => !document.querySelector<HTMLDialogElement>("[data-signout-all-dialog]")?.open);
-    const phoneAfterSignOutAllEscape = await page.evaluate(() => ({
-      isMoreTrigger: document.activeElement?.matches(".cs-kylon-workspace-menu .hm-menu__trigger") ?? false,
-      isAccountTile: document.activeElement?.hasAttribute("data-user-menu-trigger") ?? false,
-      activeLabel: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? "",
-    }));
-    assert.equal(
-      phoneAfterSignOutAllEscape.isMoreTrigger,
-      true,
-      `360px Escape from Sign out all must return focus to More button (got ${phoneAfterSignOutAllEscape.activeLabel})`,
+    const phoneAfterSignOutAllEscape = await dismissDialogWithEscape(
+      page,
+      "[data-signout-all-dialog]",
+      ".cs-kylon-workspace-menu .hm-menu__trigger",
+      "FLOW 2b 360px Escape from Sign out all",
     );
     assert.equal(phoneAfterSignOutAllEscape.isAccountTile, false, "360px Escape from Sign out all must NOT focus the account tile");
 
     await page.click(".cs-kylon-workspace-menu .hm-menu__trigger");
     await page.waitForSelector(`[data-menu-account-switch="${userB.id}"]:visible`);
-    await page.waitForTimeout(50);
+    await settleFrames(page);
     await page.focus(`[data-menu-account-switch="${userB.id}"]`);
     await page.keyboard.press("Enter");
     await page.waitForFunction(
@@ -1019,7 +1082,8 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await channelVisibilityHeldPromise;
     await clickAccountMenuItem(page, `[data-account-switch="${userB.id}"]`);
     (releaseChannelVisibility as (() => void) | null)?.();
-    await page.waitForTimeout(100);
+    await channelVisibilityResponseSent;
+    await settleFrames(page);
     resetChannelVisibilityGate(false);
     assert.equal(
       commandsSent.some((c) => ["file_version_create", "file_version_commit", "post_signal"].includes(c.kind)),
@@ -1061,6 +1125,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         { kind: "file_version_commit", actor: userA.id },
         { kind: "post_signal", actor: userA.id },
       ],
+      "Case 3a1 unchanged #ops control must complete create/commit/post under Account A",
     );
 
     // Navigate to the workspace chat composer as Account A.
@@ -1083,9 +1148,14 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     // Switch to Account B while file_version_create is in flight!
     await clickAccountMenuItem(page, `[data-account-switch="${userB.id}"]`);
     (releaseFileCreate as (() => void) | null)?.();
-    await page.waitForTimeout(100);
+    await fileCreateResponseSent;
+    await settleFrames(page);
     assert.equal(putCount, 0, "real composer Send must issue 0 PUTs after same-workspace A->B");
-    assert.equal(commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"), false);
+    assert.equal(
+      commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"),
+      false,
+      "Case 3a held file_version_create across A->B must send 0 commit/post commands",
+    );
 
     // Case 3b: Hold file_version_create across same-workspace A -> B -> A!
     await waitForAppReady(page, userB.email);
@@ -1109,9 +1179,14 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     await waitForAppReady(page, userB.email);
     await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
     (releaseFileCreate as (() => void) | null)?.();
-    await page.waitForTimeout(100);
+    await fileCreateResponseSent;
+    await settleFrames(page);
     assert.equal(putCount, 0, "real composer Send must issue 0 PUTs after same-workspace A->B->A");
-    assert.equal(commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"), false);
+    assert.equal(
+      commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"),
+      false,
+      "Case 3b held file_version_create across A->B->A must send 0 commit/post commands",
+    );
 
     // Case 3c: Unchanged-account control succeeds end-to-end!
     await page.goto(`${origin}/app?w=${sharedWs}`);
@@ -1144,10 +1219,11 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
         { kind: "file_version_commit", actor: userA.id },
         { kind: "post_signal", actor: userA.id },
       ],
+      "Case 3c unchanged control must complete create/commit/post under Account A",
     );
 
     // ── FLOW 4 (C5): Peer removes A from localStorage without storage event while A's menu is open -> real [data-signout] spares B! ──
-    await page.waitForTimeout(150);
+    await settleFrames(page);
     await openAccountMenu(page);
     await page.waitForFunction(
       (emailA: string) => (document.querySelector<HTMLElement>("[data-signout-sub]")?.textContent ?? "").trim() === emailA,
@@ -1172,7 +1248,8 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
 
     // Click the already-open Sign out button for Account A directly (never reopening the menu if fallback to B already occurred).
     await page.click("[data-user-menu] [data-signout]");
-    await page.waitForTimeout(150);
+    await waitForAppReady(page, userB.email);
+    await settleFrames(page);
     assert.equal(revokedTokens.includes(tokenB), false, "real [data-signout] after peer removal of A must NEVER revoke B");
     assert.equal(liveTokens.has(tokenB), true, "Account B token must remain live");
 
@@ -1237,6 +1314,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       assert.equal(
         noticeText,
         `You’re now joining as ${userB.email}. Review this invitation again.`,
+        "FLOW 5 /invite review must show identity-change notice naming Account B",
       );
       const resetState = await inviteTab.evaluate(() => ({
         consentChecked: document.querySelector<HTMLInputElement>("[data-independent-consent]")?.checked ?? true,
@@ -1249,7 +1327,11 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       commandsSent.length = 0;
       await inviteTab.click("[data-confirm-join]");
       await inviteTab.waitForSelector("[data-review-hint]:not([hidden])");
-      assert.equal(commandsSent.some((c) => c.kind === "household_invitation:accept"), false);
+      assert.equal(
+        commandsSent.some((c) => c.kind === "household_invitation:accept"),
+        false,
+        "FLOW 5 clicking Join before re-confirming must send 0 household_invitation:accept commands",
+      );
 
       // Freshly choose role + tick consent as Account B -> Join succeeds under Account B!
       await inviteTab.check('[data-content-role][value="reader"]');
@@ -1259,6 +1341,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       assert.deepEqual(
         commandsSent.filter((c) => c.kind === "household_invitation:accept"),
         [{ kind: "household_invitation:accept", actor: userB.id, contentRole: "reader" }],
+        "FLOW 5 re-confirmed Join must send household_invitation:accept under Account B as reader",
       );
     } finally {
       await inviteCtx.close();
