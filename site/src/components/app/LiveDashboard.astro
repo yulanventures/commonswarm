@@ -8430,7 +8430,7 @@ import "../../styles/kylon-image-viewer.css";
          or leaves a public channel thread root underneath a private DM marker. */
       const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
       if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
-      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
+      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
@@ -16195,7 +16195,7 @@ import "../../styles/kylon-image-viewer.css";
         activeDmConversationId === conversationId ||
         (conversationHistory !== null && conversationHistory.conversationId === conversationId);
       if (threadReplyRoot !== null && (viewingEvicted || threadReplyRoot.conversationId === conversationId)) {
-        setThreadReplyRoot(null);
+        setThreadReplyRoot(null, { skipAddressSync: true });
       }
       if (viewingEvicted) {
         conversationHistoryGeneration += 1;
@@ -16366,7 +16366,7 @@ import "../../styles/kylon-image-viewer.css";
         : null;
       const outgoingDraftKey = composerDraftKey(workspaceId);
       if (outgoingDraftKey) persistComposerDraft(outgoingDraftKey);
-      if (threadReplyRoot !== null) setThreadReplyRoot(null);
+      if (threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
       activeChannelId = null;
       unknownChannelId = null;
       unavailableDmConversationId = null;
@@ -17142,7 +17142,10 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     /** Open a reply on a root, or close the one that is open. One writer for both. */
-    const setThreadReplyRoot = (root: ThreadReplyRoot | null): void => {
+    const setThreadReplyRoot = (
+      root: ThreadReplyRoot | null,
+      options?: { skipAddressSync?: boolean },
+    ): void => {
       const wasUnavailable = typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable;
       if ((threadReplyRoot?.id ?? null) === (root?.id ?? null) && !wasUnavailable) return;
       threadReplyRoot = root;
@@ -17157,8 +17160,10 @@ import "../../styles/kylon-image-viewer.css";
       retireComposerIntentOnAddressMove();
       syncComposerPlacement();
       /* The pass HOLDS while replying and runs again when the reply closes, so the chips the
-         reader had before the reply come back from `composerTo` rather than from storage. */
-      syncComposerAddress();
+         reader had before the reply come back from `composerTo` rather than from storage.
+         Scope switches pass `skipAddressSync` because they just persisted the outgoing draft
+         (including any unavailable DM thread destination) and sync the new scope right after. */
+      if (!options?.skipAddressSync) syncComposerAddress();
     };
 
     const renderChannelHead = (): void => {
@@ -17355,7 +17360,7 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       if ((requested === null || requested === "") && requestedDm !== null && requestedDm !== "") {
-        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
+        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
         activeChannelId = null;
         unknownChannelId = null;
         if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
@@ -17402,7 +17407,7 @@ import "../../styles/kylon-image-viewer.css";
       if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
       if (leavingDm) {
         if (threadReplyRoot !== null) {
-          setThreadReplyRoot(null);
+          setThreadReplyRoot(null, { skipAddressSync: true });
           threadReplyOpenerSignalId = null;
         }
         activeDm = null;

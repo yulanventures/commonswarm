@@ -11,7 +11,7 @@ import { compileFixtureFunction, renderAstroFixture } from "../../../tests/astro
 function installDmThreadsFixture() {
   const f = (window as any).existingFixture;
   const params = new URL(location.href).searchParams;
-  f.capture = params.get("capture") ?? "flow";
+  f.capture = params.get("capture") ?? sessionStorage.getItem("step3d2ReloadCapture") ?? "flow";
   f.testEscape = params.get("test_escape") === "1";
   f.signalCommands = [] as any[];
   f.uploadCalls = [] as string[];
@@ -298,6 +298,7 @@ async function observeDmThreads() {
         await new Promise((r) => setTimeout(r, 80));
         check(f.signalCommands.length === cmdsBefore + 1, "Send/Enter after leave+return must still be blocked before Move draft to conversation");
         sessionStorage.setItem("step3d2ReloadPhase", "verify");
+        sessionStorage.setItem("step3d2ReloadCapture", "missing-thread-reload");
         document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
           ok: true, capture: f.capture, phase: "setup", mode: isPhone ? "phone-send" : "desktop-enter",
         });
