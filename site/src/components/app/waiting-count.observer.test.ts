@@ -57,10 +57,20 @@ function installWaitingFixture() {
   const askPeerB = askIdAt(99);
   const askWs2A = askIdAt(98);
   const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
+  const dmConvCase = scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-");
+  const dmAmbiguousCase = scenario.startsWith("dm-ambiguous-incomplete-");
   const plainCleanupCase = scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-");
   const plain401RetireCase = scenario.startsWith("plain-401-retire-");
   const plain401ControlCase = scenario.startsWith("plain-401-refresh-control-");
   const plainAsks = [askIdAt(11), askIdAt(12)];
+  const maya = "44444444-4444-4444-8444-444444444444";
+  const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
+  const convDmScout = "eeeeeeee-eeee-4eee-8eee-000000000002";
+  const convDmMaya = "eeeeeeee-eeee-4eee-8eee-000000000003";
+  const convGroupSM = "eeeeeeee-eeee-4eee-8eee-000000000004";
+  const convGroupSM2 = "eeeeeeee-eeee-4eee-8eee-000000000005";
+  const todoGroupId = todoIdAt(90);
+  const dmAsks = { gen: askIdAt(1), dmScout: askIdAt(2), groupSM: askIdAt(3), dmMaya: askIdAt(4) };
   const peerUserB = {
     id: "77777777-7777-4777-8777-777777777777",
     aud: "authenticated",
@@ -76,9 +86,11 @@ function installWaitingFixture() {
   let releaseWs9ChannelsA: (() => void) | null = null;
   let releaseWs2QueueA: (() => void) | null = null;
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
-    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !plainCleanupCase,
+    todoId, todoGroupId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
+    convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
+    ambiguousResolved: false,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -117,6 +129,38 @@ function installWaitingFixture() {
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
+    if (dmConvCase) {
+      const baseMs = Date.now() - 600_000;
+      const rows = dmAmbiguousCase
+        ? [
+            {
+              signal_id: dmAsks.groupSM,
+              from: { kind: "agent" as const, id: agent, name: "Scout" },
+              body: "Unresolved restarted group question?",
+              offset: 0,
+              conversation_id: f.ambiguousResolved ? convGroupSM : undefined,
+              conversation_kind: f.ambiguousResolved ? ("group_dm" as const) : undefined,
+            },
+          ]
+        : [
+            { signal_id: dmAsks.gen, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "General channel question?", offset: 0, conversation_id: convGeneral, conversation_kind: "general" as const },
+            { signal_id: dmAsks.dmScout, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Direct question from Scout?", offset: 1, conversation_id: convDmScout, conversation_kind: "dm" as const },
+            { signal_id: dmAsks.groupSM, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Group question with Scout and Maya?", offset: 2, conversation_id: convGroupSM, conversation_kind: "group_dm" as const },
+            { signal_id: dmAsks.dmMaya, from: { kind: "user" as const, id: maya, name: "Maya" }, body: "Direct question from Maya?", offset: 3, conversation_id: convDmMaya, conversation_kind: "dm" as const },
+          ];
+      return rows
+        .filter(r => !f.answeredIds.includes(r.signal_id))
+        .map(r => ({
+          signal_id: r.signal_id,
+          from: r.from,
+          body: r.body,
+          created_at: new Date(baseMs + r.offset * 1000).toISOString(),
+          until,
+          ...(r.conversation_id ? { conversation_id: r.conversation_id } : {}),
+          ...(r.conversation_kind ? { conversation_kind: r.conversation_kind } : {}),
+          reraised: null,
+        }));
+    }
     if (plainCleanupCase) {
       const baseMs = Date.now() - 600_000;
       const titles = ["Legacy open question without options?", "Stale historical question to clear?"];
@@ -221,20 +265,30 @@ function installWaitingFixture() {
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
-          const asks = id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)
+          const asks = id === ids[0] && (multiBatch || surveyCase || dmConvCase || plainCleanupCase)
             ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: a.from.kind, id: a.from.id }, created_at: a.created_at, until }))
             : readRetireCase && id === ids[1]
               ? [{ signal_id: askWs2A, from: { kind: "agent", id: agent }, created_at: recent, until }]
               : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
             ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
-            : id === ids[0] && todoCase && !f.todoDone
-              ? [{ todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22" }]
-              : [];
+            : id === ids[0] && dmConvCase && !dmAmbiguousCase
+              ? [
+                  { todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23" },
+                  { todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22" },
+                ]
+              : id === ids[0] && todoCase && !f.todoDone
+                ? [{ todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22" }]
+                : [];
           return {
             workspace_id: id, name: "Workspace " + number(id), role: "owner", last_seen_at: recent, new_messages: 0, content: null,
             // No agents on the roster: an agent of the viewer's that needs fixing would be counted too.
-            people: [{ user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true, agents: [] }],
+            people: dmConvCase
+              ? [
+                  { user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true, agents: [] },
+                  { user_id: maya, display_name: "Maya", role: "member", is_viewer: false, agents: [] },
+                ]
+              : [{ user_id: owner, display_name: "Synthetic owner", role: "owner", is_viewer: true, agents: [] }],
             needs_you: { asks, assigned, waiting: [] },
           };
         }) });
@@ -256,7 +310,7 @@ function installWaitingFixture() {
             created_at: recent, until, reraised: null }],
         });
       }
-      if (id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
+      if (id === ids[0] && (multiBatch || surveyCase || dmConvCase || plainCleanupCase)) {
         const asks = ws1Asks();
         const total = truncatedQueue ? 105 : asks.length;
         const page = asks.slice(0, 100);
@@ -301,10 +355,23 @@ function installWaitingFixture() {
           todos: page,
         });
       }
+      if (id === ids[0] && dmConvCase && !dmAmbiguousCase) {
+        const list = [
+          {
+            todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23",
+            reason: "assigned", agent_id: null, state_at: recent, placement: "group_dm", channel_id: null, conversation_id: convGroupSM,
+          },
+          {
+            todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22",
+            reason: "assigned", agent_id: null, state_at: before, placement: "workspace", channel_id: null, conversation_id: null,
+          },
+        ];
+        return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: list.length, truncated: false, todos: list });
+      }
       if (id === ids[0] && todoCase) {
         const list = f.todoDone ? [] : [{
           todo_id: todoId, title: "Confirm boiler visit time", state: "open", due_on: "2026-11-22",
-          reason: "assigned", agent_id: null, state_at: recent, placement: "workspace", channel_id: null,
+          reason: "assigned", agent_id: null, state_at: recent, placement: "workspace", channel_id: null, conversation_id: null,
         }];
         return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: list.length, truncated: false, todos: list });
       }
@@ -316,7 +383,7 @@ function installWaitingFixture() {
       if (body?.p_workspace_id === ids[0] && plainCleanupCase) {
         return Response.json({ asks: [] });
       }
-      if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase)) {
+      if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase || dmConvCase)) {
         f.choiceBatchSizes.push(reqIds.length);
         return Response.json({ asks: reqIds.map(sigId => ({ signal_id: sigId, multi: false,
           options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
@@ -330,6 +397,28 @@ function installWaitingFixture() {
       return Response.json({ asks: body?.p_workspace_id === ids[8] && reqIds.includes(ask) ? [{ signal_id: ask, multi: false,
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
+    }
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && dmConvCase) {
+      const idFilter = url.searchParams.get("id") ?? "";
+      const match = idFilter.match(/^in\.\(([^)]+)\)$/);
+      if (match) {
+        const reqIds = match[1]!.split(",").map(s => s.trim()).filter(Boolean);
+        return Response.json(reqIds.map(sigId => {
+          if (sigId === dmAsks.dmScout) {
+            return { id: sigId, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
+              recipients: [{ kind: "user", id: owner, position: 0 }] };
+          }
+          if (sigId === dmAsks.groupSM) {
+            return { id: sigId, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
+              recipients: [{ kind: "user", id: owner, position: 0 }, { kind: "user", id: maya, position: 1 }] };
+          }
+          if (sigId === dmAsks.dmMaya) {
+            return { id: sigId, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: maya, from_kind: "user",
+              recipients: [{ kind: "user", id: owner, position: 0 }] };
+          }
+          return { id: sigId, channel_id: null, to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent", recipients: [] };
+        }));
+      }
     }
     if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
       const idFilter = url.searchParams.get("id") ?? "";
@@ -463,11 +552,70 @@ function installWaitingFixture() {
         : [{ channel_id: null, slug: "general", unread: null }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json(ids.map(id => (
       { workspace_id: id, org_id: org, name: "Workspace " + number(id), archived_at: null })));
-    if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
+    if (url.pathname === "/rest/v1/member_profiles") {
+      return Response.json(dmConvCase
+        ? [{ user_id: owner, display_name: "Synthetic owner", role: "owner" }, { user_id: maya, display_name: "Maya", role: "member" }]
+        : [{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
+    }
     // Signals, channels, rosters, files and the rest: every workspace is quiet.
     if (url.pathname.startsWith("/rest/v1/")) return Response.json([]);
     if (url.pathname === "/functions/v1/read") {
-      if (body?.resource === "conversations") return Response.json({ error: "unsupported_resource" }, { status: 400 });
+      if (body?.resource === "conversations") {
+        if (dmConvCase && body?.workspace_id === ids[0]) {
+          return Response.json({
+            conversations: [
+              {
+                conversation_id: convGeneral, kind: "general", channel_id: null, slug: "general", description: null,
+                archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
+                starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
+              },
+              {
+                conversation_id: convDmScout, kind: "dm", channel_id: null, slug: null, description: null,
+                archived_at: null, joined: true, generation: 1,
+                members: [
+                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                  { kind: "agent", id: agent, name: "Scout", left_at: null },
+                ],
+                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+                last_message_at: recent, last_message_id: null,
+              },
+              {
+                conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
+                archived_at: null, joined: true, generation: 1,
+                members: [
+                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                  { kind: "agent", id: agent, name: "Scout", left_at: null },
+                  { kind: "user", id: maya, name: "Maya", left_at: null },
+                ],
+                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+                last_message_at: recent, last_message_id: null,
+              },
+              {
+                conversation_id: convGroupSM2, kind: "group_dm", channel_id: null, slug: null, description: null,
+                archived_at: null, joined: true, generation: 2,
+                members: [
+                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                  { kind: "agent", id: agent, name: "Scout", left_at: null },
+                  { kind: "user", id: maya, name: "Maya", left_at: null },
+                ],
+                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+                last_message_at: before, last_message_id: null,
+              },
+              {
+                conversation_id: convDmMaya, kind: "dm", channel_id: null, slug: null, description: null,
+                archived_at: null, joined: true, generation: 1,
+                members: [
+                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                  { kind: "user", id: maya, name: "Maya", left_at: null },
+                ],
+                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+                last_message_at: recent, last_message_id: null,
+              },
+            ],
+          });
+        }
+        return Response.json({ error: "unsupported_resource" }, { status: 400 });
+      }
       return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
     }
     if (url.pathname === "/functions/v1/command") return Response.json({ status: "refused", reason: "content_consent_required" });
@@ -899,6 +1047,94 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("dm-ambiguous-incomplete-")) {
+      const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
+      const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
+      await wait(() => shown(groupSMLink()) && shown(groupSM2Link()), "restarted group DM generations rendered in rail");
+      groupSMLink()!.click();
+      await wait(() => groupSMLink()?.getAttribute("aria-current") === "page", "Gen 1 group DM opened");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector("[data-waiting-retry]")),
+        "ambiguous restarted group DM without conversation_id stays visibly incomplete");
+      check(!panel()!.textContent!.includes("Nothing waiting"),
+        "ambiguous restarted group DM must never render a false Nothing waiting: " + panel()!.textContent);
+      check(scope()!.options[0]!.textContent === "This conversation",
+        "ambiguous restarted group DM must omit local count (never exact zero): " + scope()!.options[0]!.textContent);
+      // Once authoritative conversation_id arrives, Retry recovers Gen 1 cleanly with count 1.
+      f.ambiguousResolved = true;
+      panel()!.querySelector<HTMLElement>("[data-waiting-retry]")!.click();
+      await wait(() => shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`)) &&
+        scope()!.options[0]!.textContent === "This conversation (1)" &&
+        !panel()?.querySelector("[data-waiting-retry]"),
+        "Retry recovers authoritative Gen 1 ask with count 1 once conversation_id is supplied");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("dm-convergence-")) {
+      await wait(() => shown(control()) && count() === "6", "4 choice asks + 2 to-dos counted in top bar");
+      const dmScoutLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convDmScout}"]`);
+      const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
+      const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
+      const generalLink = () => document.querySelector<HTMLElement>('a[href*="c=general"]');
+      await wait(() => shown(dmScoutLink()) && shown(groupSMLink()) && shown(groupSM2Link()),
+        "Step 2b Direct messages rail rendered 1:1 DM and both restarted group DM generations");
+      // 1. Open 1:1 DM with Scout and open Waiting on you column.
+      dmScoutLink()!.click();
+      await wait(() => dmScoutLink()?.getAttribute("aria-current") === "page", "1:1 DM with Scout opened");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const placeHeading = () => panel()?.querySelector<HTMLElement>("[data-waiting-place]")?.textContent ?? "";
+      await wait(() => shown(panel()) && placeHeading() === "Scout" && shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`)),
+        "1:1 DM Waiting on you shows only Scout's 1:1 DM ask");
+      check(scope()!.options[0]!.textContent === "This conversation (1)", "1:1 DM scope option 0 mismatch: " + scope()!.options[0]!.textContent);
+      check(panel()!.querySelectorAll("[data-waiting-card]").length === 1 && panel()!.querySelectorAll("[data-waiting-todo]").length === 0,
+        "1:1 DM must not bleed group DM asks, group DM to-dos, other DMs, #general asks, or workspace-only to-dos");
+      // 2. Switch directly to Group DM Gen 1 (Scout and Maya): shows its own ask AND its group-DM-origin to-do (never false zero!).
+      groupSMLink()!.click();
+      await wait(() => shown(panel()) && placeHeading() === "Scout and Maya" &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`)) &&
+        shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`)) &&
+        !panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`),
+        "desktop column follows switch to Gen 1 group DM showing its ask and group-DM to-do with zero cross-DM bleed");
+      check(scope()!.options[0]!.textContent === "This conversation (2)", "Gen 1 group DM scope option 0 mismatch: " + scope()!.options[0]!.textContent);
+      check(panel()!.querySelectorAll("[data-waiting-card]").length === 1 && panel()!.querySelectorAll("[data-waiting-todo]").length === 1,
+        "Gen 1 group DM must show only its own ask and its own group-DM to-do");
+      check(shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"] [data-waiting-todo-done]`)),
+        "group DM to-do must render Mark done action in its group DM");
+      // 3. Switch to restarted Group DM Gen 2 (same members!): must show 0 (zero Gen 1 ask/to-do bleed!).
+      groupSM2Link()!.click();
+      await wait(() => groupSM2Link()?.getAttribute("aria-current") === "page" &&
+        scope()!.options[0]!.textContent === "This conversation (0)" &&
+        panel()!.querySelectorAll("[data-waiting-card]").length === 0 &&
+        panel()!.querySelectorAll("[data-waiting-todo]").length === 0,
+        "restarted Gen 2 group DM shows This conversation (0) with zero bleed from Gen 1");
+      // 4. Switch to All channels: all 4 asks + 2 to-dos appear with exact conversation titles on cards.
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => panel()!.querySelectorAll("[data-waiting-card]").length === 4 && panel()!.querySelectorAll("[data-waiting-todo]").length === 2,
+        "All channels shows all 4 asks and 2 to-dos");
+      const groupPlaceBadge = panel()!.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"] .cs-waiting-card__place`)?.textContent ?? "";
+      const dmPlaceBadge = panel()!.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"] .cs-waiting-card__place`)?.textContent ?? "";
+      const groupTodoBadge = panel()!.querySelector(`[data-waiting-todo="${f.todoGroupId}"] .cs-waiting-card__place`)?.textContent ?? "";
+      const wsTodoBadge = panel()!.querySelector(`[data-waiting-todo="${f.todoId}"] .cs-waiting-card__place`)?.textContent ?? "";
+      check(groupPlaceBadge === "Scout and Maya" && dmPlaceBadge === "Scout" && groupTodoBadge === "Scout and Maya" && wsTodoBadge === "",
+        `unexpected location badges in All channels: groupAsk=${groupPlaceBadge}, dmAsk=${dmPlaceBadge}, groupTodo=${groupTodoBadge}, wsTodo=${wsTodoBadge}`);
+      // 5. Switch back to #general and return to channel scope: label switches back to This channel (1).
+      generalLink()!.click();
+      await wait(() => generalLink()?.getAttribute("aria-current") === "page", "switched back to #general");
+      scope()!.value = "channel";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => placeHeading() === "#general" && scope()!.options[0]!.textContent === "This channel (1)" &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.gen}"]`)) &&
+        panel()!.querySelectorAll("[data-waiting-card]").length === 1 &&
+        panel()!.querySelectorAll("[data-waiting-todo]").length === 0,
+        "#general returns to This channel (1) and excludes all DM asks and DM/workspace to-dos");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario.startsWith("historical-cleanup-")) {
       await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted");
       // Mount a synthetic corner invitation card to verify desktop clearance next to the open Waiting on you column.
@@ -1074,7 +1310,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -1116,6 +1352,12 @@ test("Waiting on you: multi-question survey keeps drafts across Back/Skip/close,
   const outcomes = await runWaitingScenarios(["survey-desktop", "survey-phone"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
+
+test("Waiting on you: Step 2b 1:1 DM and group DM convergence scopes This conversation by conversationId with zero cross-DM bleed", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["dm-convergence-desktop", "dm-ambiguous-incomplete-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
 test("Waiting on you: Check F historical plain-text asks answer inline or clear as stale with Retry focus and desktop corner invite clearance", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["historical-cleanup-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));

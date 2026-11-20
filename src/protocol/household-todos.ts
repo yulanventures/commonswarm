@@ -17,7 +17,7 @@ export type Party = { kind: 'user'; id: string } | { kind: 'agent'; id: string }
 export interface TodoActor { user_id: string; principal_id: string | null }
 export type TodoState = 'open' | 'doing' | 'done' | 'dropped';
 export type TodoStart = 'queue' | 'now';
-export type TodoOriginPlacement = 'workspace' | 'general' | 'channel';
+export type TodoOriginPlacement = 'workspace' | 'general' | 'channel' | 'dm' | 'group_dm';
 export type TodoGate = { kind: 'none' } | { kind: 'hold'; note: string | null }
   | { kind: 'after'; todo_id: string } | { kind: 'at'; at: string };
 export interface TodoOffer {
@@ -34,6 +34,7 @@ export interface Todo {
   queue_rank: number | null; state_by: TodoActor; state_at: string; comment_count: number;
   origin_placement?: TodoOriginPlacement;
   origin_channel_id?: string | null;
+  origin_conversation_id?: string | null;
 }
 export type CommentTarget = { kind: 'todo'; id: string } | { kind: 'list' | 'doc' | 'file'; id: string };
 export interface TodoComment {
@@ -92,6 +93,7 @@ export type TodoCommand =
     assign?: AssignInput;
     origin_placement?: TodoOriginPlacement;
     origin_channel_id?: string | null;
+    origin_conversation_id?: string | null;
   }
   | { kind: 'todo_update'; todo_id: string; base_version: number; title?: string; notes?: string; due_on?: string | null }
   | { kind: 'todo_assign'; todo_id: string; base_version: number; to: Party | null; start?: TodoStart; gate?: TodoGate }
@@ -114,6 +116,8 @@ export interface DecideTodoContext {
   objects: readonly { kind: 'list' | 'doc' | 'file'; id: string }[];
   /** Verified in-transaction channel access for todo_create when origin_placement === 'channel'. */
   origin_channel_accessible?: boolean;
+  /** Verified in-transaction direct conversation membership for todo_create when origin_placement is 'dm' or 'group_dm'. */
+  origin_conversation_accessible?: boolean;
   identity_write_attempts: number; workspace_write_attempts: number;
 }
 export interface TodoDecision { outcome: TodoOutcome; events: readonly TodoEvent[]; receipt: TodoReceipt | null; notices: readonly TodoNotice[]; replayed: boolean }
@@ -336,17 +340,31 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
     if (!validDate(command.due_on ?? null)) return refuse('due_invalid');
     const rawPlacement = command.origin_placement;
     const rawChannelId = command.origin_channel_id;
+    const rawConversationId = command.origin_conversation_id;
     let originPlacement: TodoOriginPlacement = 'workspace';
     let originChannelId: string | null = null;
+    let originConversationId: string | null = null;
     if (rawPlacement === undefined) {
-      if (rawChannelId !== undefined && rawChannelId !== null) return refuse('target_not_found');
+      if ((rawChannelId !== undefined && rawChannelId !== null) || (rawConversationId !== undefined && rawConversationId !== null)) {
+        return refuse('target_not_found');
+      }
     } else if (rawPlacement === 'workspace' || rawPlacement === 'general') {
-      if (rawChannelId !== undefined && rawChannelId !== null) return refuse('target_not_found');
+      if ((rawChannelId !== undefined && rawChannelId !== null) || (rawConversationId !== undefined && rawConversationId !== null)) {
+        return refuse('target_not_found');
+      }
       originPlacement = rawPlacement;
     } else if (rawPlacement === 'channel') {
-      if (!uuid(rawChannelId) || ctx.origin_channel_accessible !== true) return refuse('target_not_found');
+      if (!uuid(rawChannelId) || (rawConversationId !== undefined && rawConversationId !== null) || ctx.origin_channel_accessible !== true) {
+        return refuse('target_not_found');
+      }
       originPlacement = 'channel';
       originChannelId = rawChannelId.toLowerCase();
+    } else if (rawPlacement === 'dm' || rawPlacement === 'group_dm') {
+      if (!uuid(rawConversationId) || (rawChannelId !== undefined && rawChannelId !== null) || ctx.origin_conversation_accessible !== true) {
+        return refuse('target_not_found');
+      }
+      originPlacement = rawPlacement;
+      originConversationId = rawConversationId.toLowerCase();
     } else {
       return refuse('target_not_found');
     }
@@ -356,7 +374,7 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
       title: command.title, notes: command.notes ?? '', due_on: command.due_on ?? null, state: 'open',
       created_by: actor, created_at: timestamp, assignee: null, assigned_by: null, assigned_at: null,
       offer: null, gate: { kind: 'none' }, gate_set_by: null, queue_rank: null, state_by: actor, state_at: timestamp, comment_count: 0,
-      origin_placement: originPlacement, origin_channel_id: originChannelId };
+      origin_placement: originPlacement, origin_channel_id: originChannelId, origin_conversation_id: originConversationId };
     emit('TodoCreated', { todo });
     if (command.assign) {
       const failure = assigned(todo, command.assign);
@@ -514,15 +532,21 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
       if (todo.offer && (!uuid(todo.offer.offer_id) || !validParty(todo.offer.to) || !id(todo.offer.decider_user_id)
         || !['queue', 'now'].includes(todo.offer.start) || !validGate(todo.offer.gate) || !validActor(todo.offer.by)
         || !Number.isFinite(Date.parse(todo.offer.at)))) fail('invalid offer');
-      const hasOrigin = todo.origin_placement !== undefined || todo.origin_channel_id !== undefined;
+      const hasOrigin = todo.origin_placement !== undefined || todo.origin_channel_id !== undefined || todo.origin_conversation_id !== undefined;
       if (hasOrigin) {
-        if (todo.origin_placement !== 'workspace' && todo.origin_placement !== 'general' && todo.origin_placement !== 'channel') {
+        if (todo.origin_placement !== 'workspace' && todo.origin_placement !== 'general' && todo.origin_placement !== 'channel'
+          && todo.origin_placement !== 'dm' && todo.origin_placement !== 'group_dm') {
           fail('invalid origin placement');
         }
         if (todo.origin_placement === 'channel') {
           if (!uuid(todo.origin_channel_id)) fail('invalid origin channel');
-        } else if (todo.origin_channel_id !== null) {
+        } else if (todo.origin_channel_id !== undefined && todo.origin_channel_id !== null) {
           fail('invalid origin channel');
+        }
+        if (todo.origin_placement === 'dm' || todo.origin_placement === 'group_dm') {
+          if (!uuid(todo.origin_conversation_id)) fail('invalid origin conversation');
+        } else if (todo.origin_conversation_id !== undefined && todo.origin_conversation_id !== null) {
+          fail('invalid origin conversation');
         }
       }
       if (create) {
@@ -544,6 +568,7 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
         const originFieldEqual = (key: string): boolean => {
           if (key === 'origin_placement') return (current!.origin_placement ?? 'workspace') === (todo.origin_placement ?? 'workspace');
           if (key === 'origin_channel_id') return (current!.origin_channel_id ?? null) === (todo.origin_channel_id ?? null);
+          if (key === 'origin_conversation_id') return (current!.origin_conversation_id ?? null) === (todo.origin_conversation_id ?? null);
           return equal(current![key as keyof Todo], todo[key as keyof Todo]);
         };
         if ([...allKeys].some(key => !allowed.has(key as keyof Todo) && !originFieldEqual(key))) fail('unrelated field changed');

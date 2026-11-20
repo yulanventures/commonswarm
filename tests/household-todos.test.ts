@@ -28,7 +28,7 @@ function todo(todoId = first, extra: Partial<Todo> = {}): Todo {
     state: 'open', created_by: { user_id: alice, principal_id: null }, created_at: at,
     assignee: null, assigned_by: null, assigned_at: null, offer: null, gate: { kind: 'none' }, gate_set_by: null,
     queue_rank: null, state_by: { user_id: alice, principal_id: null }, state_at: at, comment_count: 0,
-    origin_placement: 'workspace', origin_channel_id: null, ...extra };
+    origin_placement: 'workspace', origin_channel_id: null, origin_conversation_id: null, ...extra };
 }
 function state(...todos: Todo[]): HouseholdTodoState {
   return { ...emptyHouseholdTodoState('home', 'stream'), todos: Object.fromEntries(todos.map(t => [t.todo_id, t])) };
@@ -790,6 +790,7 @@ test('origin_placement and origin_channel_id validate on create, replay determin
   const legacyTodo = todo();
   delete legacyTodo.origin_placement;
   delete legacyTodo.origin_channel_id;
+  delete legacyTodo.origin_conversation_id;
   const legacyEvent: TodoEvent = {
     ...golden,
     payload: {
@@ -829,6 +830,40 @@ test('origin_placement and origin_channel_id validate on create, replay determin
   if (forgedChannelStrip[0]!.type === 'TodoDetailsChanged') {
     delete forgedChannelStrip[0]!.payload.todo.origin_placement;
     delete forgedChannelStrip[0]!.payload.todo.origin_channel_id;
+    delete forgedChannelStrip[0]!.payload.todo.origin_conversation_id;
   }
   assert.throws(() => reduceTodoEvents(replayedCh, forgedChannelStrip), /unrelated field changed/);
+
+  // Step 2b DM & group DM origins: validate membership, reject mismatched fields, stay immutable across updates.
+  const convDm = uid(9011);
+  const convGroup = uid(9012);
+  const groupCmd: TodoCommand = { kind: 'todo_create', title: 'Group DM task', origin_placement: 'group_dm', origin_conversation_id: convGroup.toUpperCase() };
+  refused(decideTodo(state(), groupCmd, { ...context(state(), groupCmd), origin_conversation_accessible: false }), 'target_not_found');
+  refused(run(state(), groupCmd), 'target_not_found');
+  const missingConvCmd: TodoCommand = { kind: 'todo_create', title: 'Missing conv id', origin_placement: 'dm' };
+  refused(decideTodo(state(), missingConvCmd, { ...context(state(), missingConvCmd), origin_conversation_accessible: true }), 'target_not_found');
+  const conflictCmd: TodoCommand = { kind: 'todo_create', title: 'Channel + conv conflict', origin_placement: 'group_dm', origin_channel_id: chBoiler, origin_conversation_id: convGroup };
+  refused(decideTodo(state(), conflictCmd, { ...context(state(), conflictCmd), origin_conversation_accessible: true }), 'target_not_found');
+
+  const groupDecision = decideTodo(state(), groupCmd, { ...context(state(), groupCmd), origin_conversation_accessible: true });
+  const groupTodo = value(groupDecision);
+  assert.equal(groupTodo.origin_placement, 'group_dm');
+  assert.equal(groupTodo.origin_channel_id, null);
+  assert.equal(groupTodo.origin_conversation_id, convGroup);
+  const replayedGroup = reduceTodoEvents(state(), groupDecision.events);
+  assert.equal(replayedGroup.todos[groupTodo.todo_id]!.origin_placement, 'group_dm');
+  assert.equal(replayedGroup.todos[groupTodo.todo_id]!.origin_conversation_id, convGroup);
+
+  const dmCmd: TodoCommand = { kind: 'todo_create', title: '1:1 DM task', origin_placement: 'dm', origin_conversation_id: convDm };
+  const dmDecision = decideTodo(state(), dmCmd, { ...context(state(), dmCmd), origin_conversation_accessible: true });
+  const dmTodo = value(dmDecision);
+  assert.equal(dmTodo.origin_placement, 'dm');
+  assert.equal(dmTodo.origin_conversation_id, convDm);
+  const groupUpdated = run(replayedGroup, { kind: 'todo_update', todo_id: groupTodo.todo_id, base_version: 1, title: 'Renamed group task' });
+  assert.equal(groupUpdated.outcome.status, 'committed');
+  const forgedConvSwap = structuredClone(groupUpdated.events);
+  if (forgedConvSwap[0]!.type === 'TodoDetailsChanged') {
+    forgedConvSwap[0]!.payload.todo.origin_conversation_id = convDm;
+  }
+  assert.throws(() => reduceTodoEvents(replayedGroup, forgedConvSwap), /unrelated field changed/);
 });

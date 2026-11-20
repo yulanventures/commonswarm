@@ -4,14 +4,17 @@ import {
   WAITING_PANEL_ID,
   WAITING_SHEET_ID,
   classifyAskConversation,
+  conversationParticipantKey,
   createWaitingSurface,
   filterWaitingItems,
   filterWaitingTodos,
   focusWaitingPanelAfterAction,
+  indexDirectConversations,
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
 import { answerChoice, answerPlainAsk, plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { parseDecisionQueue, parseWaitingTodosQueue } from "./home/client.ts";
 
 class FakeNode {
   tagName;
@@ -848,6 +851,353 @@ test("filterWaitingTodos separates channel-origin, #general, and workspace-only 
   assert.equal(host.querySelector("[data-waiting-status]").textContent, "Done");
   focusWaitingPanelAfterAction(host, { kind: "completed-todo", prevIndex: 0 });
   assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-scope]"));
+});
+
+test("Step 2b DM and group DM convergence: zero cross-DM bleed from the same sender, exact conversationId & generation separation, and This conversation scope label", () => {
+  const viewer = "u-viewer";
+  const alice = "u-alice";
+  const bob = "u-bob";
+  const carol = "u-carol";
+  const atlas = "a-atlas";
+
+  const conversations = [
+    {
+      conversationId: "conv-dm-alice",
+      kind: "dm",
+      members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }],
+    },
+    {
+      conversationId: "conv-dm-atlas",
+      kind: "dm",
+      members: [{ kind: "user", id: viewer }, { kind: "agent", id: atlas }],
+    },
+    {
+      conversationId: "conv-self",
+      kind: "dm",
+      members: [{ kind: "user", id: viewer }],
+    },
+    {
+      conversationId: "conv-grp-ab",
+      kind: "group_dm",
+      members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }],
+    },
+    {
+      conversationId: "conv-grp-ac",
+      kind: "group_dm",
+      members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: carol }],
+    },
+  ];
+  const directByParticipantKey = indexDirectConversations(conversations);
+
+  // Same sender (Alice) sends asks in her 1:1 DM, in group DM {viewer, Alice, Bob}, in group DM {viewer, Alice, Carol},
+  // and as a thread reply inside group DM {viewer, Alice, Bob} where only the root carries all 3 participants.
+  const conv1to1 = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }],
+    },
+    null,
+    { directByParticipantKey },
+  );
+  const convGrpAB = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+    { directByParticipantKey },
+  );
+  const convGrpAC = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: carol }],
+    },
+    null,
+    { directByParticipantKey },
+  );
+  const convGrpABThread = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: "root-grp-ab", from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }],
+    },
+    {
+      channelId: null, to: viewer, toAgent: null, from: bob, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: alice }],
+    },
+    { directByParticipantKey },
+  );
+  const convSelf = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: viewer, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }],
+    },
+    null,
+    { directByParticipantKey },
+  );
+  // Pre-Step-2b server (no conversations index): 3+ participants STILL classify as group_dm and never bleed into 1:1 DM.
+  const convGrpLegacy = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+  );
+  // Re-created group generation (same members, different authoritative conversationId).
+  const convGrpGen1 = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      conversationId: "conv-grp-ab-gen1",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+    { directByParticipantKey },
+  );
+
+  assert.equal(conv1to1.kind, "dm");
+  assert.equal(conv1to1.conversationId, "conv-dm-alice");
+  assert.equal(convGrpAB.kind, "group_dm");
+  assert.equal(convGrpAB.conversationId, "conv-grp-ab");
+  assert.equal(convGrpAC.kind, "group_dm");
+  assert.equal(convGrpAC.conversationId, "conv-grp-ac");
+  assert.equal(convGrpABThread.kind, "group_dm");
+  assert.equal(convGrpABThread.conversationId, "conv-grp-ab");
+  assert.equal(convSelf.kind, "dm");
+  assert.equal(convSelf.conversationId, "conv-self");
+  assert.equal(convGrpLegacy.kind, "group_dm");
+  assert.equal(convGrpLegacy.conversationId, undefined);
+  assert.equal(convGrpGen1.kind, "group_dm");
+  assert.equal(convGrpGen1.conversationId, "conv-grp-ab-gen1");
+
+  const items = [
+    sampleAsk({ id: "ask-1to1", conversation: conv1to1, channelLabel: "Alice" }),
+    sampleAsk({ id: "ask-grp-ab", conversation: convGrpAB, channelLabel: "Alice and Bob" }),
+    sampleAsk({ id: "ask-grp-ab-thread", conversation: convGrpABThread, channelLabel: "Alice and Bob" }),
+    sampleAsk({ id: "ask-grp-ac", conversation: convGrpAC, channelLabel: "Alice and Carol" }),
+    sampleAsk({ id: "ask-grp-legacy", conversation: convGrpLegacy, channelLabel: "Group direct message" }),
+    sampleAsk({ id: "ask-grp-gen1", conversation: convGrpGen1, channelLabel: "Alice and Bob" }),
+    sampleAsk({ id: "ask-self", conversation: convSelf, channelLabel: "Notes to self" }),
+    sampleAsk({ id: "ask-general", conversation: { kind: "general" }, channelLabel: "#general" }),
+  ];
+
+  const key1to1 = conversationParticipantKey([{ kind: "user", id: viewer }, { kind: "user", id: alice }]);
+  const keyGrpAB = conversationParticipantKey([{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }]);
+  const keyGrpAC = conversationParticipantKey([{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: carol }]);
+  const keySelf = conversationParticipantKey([{ kind: "user", id: viewer }]);
+
+  const place1to1 = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "dm", channelId: null, label: "Alice",
+    conversationId: "conv-dm-alice", participantKey: key1to1, dm: { kind: "person", id: alice },
+  };
+  const placeGrpAB = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Bob",
+    conversationId: "conv-grp-ab", participantKey: keyGrpAB,
+  };
+  const placeGrpAC = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Carol",
+    conversationId: "conv-grp-ac", participantKey: keyGrpAC,
+  };
+  const placeSelf = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "dm", channelId: null, label: "Notes to self",
+    conversationId: "conv-self", participantKey: keySelf, dm: { kind: "person", id: viewer },
+  };
+  const placeUnknownDm = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "dm", channelId: null, label: "Direct message",
+    conversationId: "conv-unknown-404",
+  };
+
+  assert.deepEqual(filterWaitingItems(items, "channel", place1to1).map(i => i.id), ["ask-1to1"], "1:1 DM must not include group DM or self DM asks");
+  assert.deepEqual(
+    filterWaitingItems(items, "channel", placeGrpAB).map(i => i.id),
+    ["ask-grp-ab", "ask-grp-ab-thread", "ask-grp-legacy"],
+    "group DM AB includes direct + thread + legacy-key asks for AB, excludes 1:1 DM, group AC, and gen-1 conversationId",
+  );
+  assert.deepEqual(filterWaitingItems(items, "channel", placeGrpAC).map(i => i.id), ["ask-grp-ac"]);
+  assert.deepEqual(filterWaitingItems(items, "channel", placeSelf).map(i => i.id), ["ask-self"]);
+  assert.deepEqual(filterWaitingItems(items, "channel", placeUnknownDm).map(i => i.id), [], "unknown ?dm=<id> must never bleed asks");
+
+  // To-dos: workspace-only and channel-origin to-dos stay out of DMs; DM-origin to-dos match strictly by conversationId.
+  const todos = [
+    { id: "todo-ws", workspaceId: "ws-1", workspaceName: "Rivera", title: "Ws task", state: "open", dueOn: null, reason: "assigned", href: "/t1", canMarkDone: true, placement: "workspace" },
+    { id: "todo-dm", workspaceId: "ws-1", workspaceName: "Rivera", title: "DM task", state: "open", dueOn: null, reason: "assigned", href: "/t2", canMarkDone: true, placement: "group_dm", conversationId: "conv-grp-ab" },
+  ];
+  assert.deepEqual(filterWaitingTodos(todos, "channel", place1to1).map(t => t.id), []);
+  assert.deepEqual(filterWaitingTodos(todos, "channel", placeGrpAB).map(t => t.id), ["todo-dm"]);
+  assert.deepEqual(filterWaitingTodos(todos, "channel", placeGrpAC).map(t => t.id), []);
+
+  // Ambiguous generations in indexDirectConversations map to null; omitting participantKey on place prevents
+  // a legacy signal without conversationId from appearing in both restarted generations, and classifying
+  // a direct ask without conversationId against an ambiguous participant key returns "unknown" (never a false zero).
+  const ambiguous = indexDirectConversations([
+    { conversationId: "conv-gen1", kind: "group_dm", members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }] },
+    { conversationId: "conv-gen2", kind: "group_dm", members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }] },
+  ]);
+  assert.equal(ambiguous.get(keyGrpAB), null);
+  const ambiguousUnresolved = classifyAskConversation(
+    {
+      channelId: null, to: viewer, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+    { directByParticipantKey: ambiguous },
+  );
+  assert.deepEqual(ambiguousUnresolved, { kind: "unknown" }, "ambiguous restarted group DM without conversationId must stay unknown (never false zero)");
+  const authoritativeGen1 = classifyAskConversation(
+    {
+      channelId: null, to: null, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      conversationId: "conv-gen1", conversationKind: "group_dm",
+    },
+    null,
+    { directByParticipantKey: ambiguous },
+  );
+  assert.equal(authoritativeGen1.kind, "group_dm");
+  assert.equal(authoritativeGen1.conversationId, "conv-gen1");
+  const placeAmbiguousGen1 = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Bob",
+    conversationId: "conv-gen1",
+  };
+  const placeAmbiguousGen2 = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Bob",
+    conversationId: "conv-gen2",
+  };
+  const genAsk = sampleAsk({ id: "ask-gen1-auth", conversation: authoritativeGen1, channelLabel: "Alice and Bob" });
+  assert.deepEqual(filterWaitingItems([genAsk], "channel", placeAmbiguousGen1).map(i => i.id), ["ask-gen1-auth"]);
+  assert.deepEqual(filterWaitingItems([genAsk], "channel", placeAmbiguousGen2).map(i => i.id), []);
+
+  // Decoders accept authoritative conversation_id / conversation_kind on decision_queue and dm/group_dm origins on waiting_todos_page.
+  const decodedQueue = parseDecisionQueue({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-19T12:00:00Z",
+    total: 3,
+    truncated: false,
+    asks: [
+      {
+        signal_id: "sig-1",
+        from: { kind: "agent", id: "ag-1", name: "Scout" },
+        body: "Approve?",
+        created_at: "2026-11-19T11:55:00Z",
+        until: "2026-11-20T11:55:00Z",
+        conversation_id: "CONV-GEN1",
+        conversation_kind: "group_dm",
+        reraised: null,
+      },
+      {
+        signal_id: "sig-redacted",
+        from: { kind: "user", id: alice, name: "Alice" },
+        body: "Left group ask",
+        created_at: "2026-11-19T11:56:00Z",
+        until: "2026-11-20T11:56:00Z",
+        conversation_id: null,
+        conversation_kind: null,
+        reraised: null,
+      },
+      {
+        signal_id: "sig-legacy",
+        from: { kind: "user", id: alice, name: "Alice" },
+        body: "Pre-migration ask",
+        created_at: "2026-11-19T11:57:00Z",
+        until: "2026-11-20T11:57:00Z",
+        reraised: null,
+      },
+    ],
+  }, "ws-1");
+  assert.equal(decodedQueue.asks[0].conversation_id, "conv-gen1");
+  assert.equal(decodedQueue.asks[0].conversation_kind, "group_dm");
+  assert.equal(decodedQueue.asks[1].conversation_id, null);
+  assert.equal(decodedQueue.asks[1].conversation_kind, null);
+  assert.equal(decodedQueue.asks[2].conversation_id, undefined);
+  assert.equal(decodedQueue.asks[2].conversation_kind, undefined);
+
+  // Explicit null/null redaction (viewer left group DM gen 1 while restarted gen 2 is uniquely active)
+  // stays unattached ("redacted"): excluded from gen 2 / This conversation, shown in All channels / All workspaces,
+  // and never classified as "unknown".
+  const onlyGen2Active = indexDirectConversations([
+    { conversationId: "conv-gen2", kind: "group_dm", members: [{ kind: "user", id: viewer }, { kind: "user", id: alice }, { kind: "user", id: bob }] },
+  ]);
+  const redactedConv = classifyAskConversation(
+    {
+      channelId: null, to: null, toAgent: null, threadRootId: null, from: alice, fromKind: "user",
+      conversationId: decodedQueue.asks[1].conversation_id,
+      conversationKind: decodedQueue.asks[1].conversation_kind,
+      recipients: [{ kind: "user", id: viewer }, { kind: "user", id: bob }],
+    },
+    null,
+    { directByParticipantKey: onlyGen2Active },
+  );
+  assert.deepEqual(redactedConv, { kind: "redacted" }, "explicit null/null must classify as redacted, never gen 2 or unknown");
+  const redactedAsk = sampleAsk({ id: "ask-left-gen1", conversation: redactedConv, channelLabel: "" });
+  const placeOnlyGen2 = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "group_dm", channelId: null, label: "Alice and Bob",
+    conversationId: "conv-gen2", participantKey: keyGrpAB,
+  };
+  const placeAllMessages = {
+    workspaceId: "ws-1", workspaceName: "Rivera", kind: "all", channelId: null, label: "All messages",
+  };
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", placeOnlyGen2).map(i => i.id), [], "redacted left-gen-1 ask must stay out of restarted gen 2");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", place1to1).map(i => i.id), [], "redacted ask must stay out of 1:1 DM");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "workspace", placeOnlyGen2).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All channels");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "all", placeOnlyGen2).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All workspaces");
+  assert.deepEqual(filterWaitingItems([redactedAsk], "channel", placeAllMessages).map(i => i.id), ["ask-left-gen1"], "redacted ask remains visible in All messages");
+
+  const decodedTodos = parseWaitingTodosQueue({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-19T12:00:00Z",
+    total: 2,
+    truncated: false,
+    todos: [
+      {
+        todo_id: "t-group", title: "Group task", state: "open", due_on: null, reason: "assigned",
+        agent_id: null, state_at: "2026-11-19T11:55:00Z", placement: "group_dm", channel_id: null, conversation_id: "CONV-GEN1",
+      },
+      {
+        todo_id: "t-dm", title: "DM task", state: "open", due_on: null, reason: "assigned",
+        agent_id: null, state_at: "2026-11-19T11:54:00Z", placement: "dm", channel_id: null, conversation_id: "CONV-DM-1",
+      },
+    ],
+  }, "ws-1");
+  assert.deepEqual(decodedTodos.todos.map(t => [t.todo_id, t.placement, t.conversation_id]), [
+    ["t-group", "group_dm", "conv-gen1"],
+    ["t-dm", "dm", "conv-dm-1"],
+  ]);
+  assert.throws(() => parseWaitingTodosQueue({
+    workspace_id: "ws-1", generated_at: "2026-11-19T12:00:00Z", total: 1, truncated: false,
+    todos: [{
+      todo_id: "t-bad", title: "Missing conv", state: "open", due_on: null, reason: "assigned",
+      agent_id: null, state_at: "2026-11-19T11:55:00Z", placement: "group_dm", channel_id: null, conversation_id: null,
+    }],
+  }, "ws-1"), /home_waiting_todos_malformed/);
+
+  // Scope option 0 says "This conversation" for 1:1 DM and group DM, and "This channel" for channels.
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const noopHandlers = {
+    onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
+    onSubmitChoice: () => {}, onRetryChoice: () => {}, onDraftChoice: () => {},
+  };
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place: placeGrpAB,
+    items: [items[1]],
+    counts: { channel: { min: 1, complete: true }, workspace: { min: 4, complete: true }, all: { min: 4, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, noopHandlers);
+  assert.equal(host.querySelector("[data-waiting-place]").textContent, "Alice and Bob");
+  assert.deepEqual(
+    host.querySelector("[data-waiting-scope]").options.map(o => o.textContent),
+    ["This conversation (1)", "All channels (4)", "All workspaces (4)"],
+  );
+
+  renderWaitingPanel(host, {
+    scope: "channel",
+    place: { workspaceId: "ws-1", workspaceName: "Rivera", kind: "general", channelId: null, label: "#general" },
+    items: [items[7]],
+    counts: { channel: { min: 1, complete: true }, workspace: { min: 4, complete: true }, all: { min: 4, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, noopHandlers);
+  assert.deepEqual(
+    host.querySelector("[data-waiting-scope]").options.map(o => o.textContent),
+    ["This channel (1)", "All channels (4)", "All workspaces (4)"],
+  );
 });
 
 test("Check F historical plain-text asks: inline answer, one-tap Clear as stale, DOM preservation while typing, and keyboard focus recovery on failure and completion", () => {

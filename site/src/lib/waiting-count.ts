@@ -84,10 +84,72 @@ export function syncWaitingButtonToggle(link: HTMLElement, toggle: { active: boo
   }
 }
 
+export interface WaitingParticipantRef {
+  kind: "user" | "agent";
+  id: string;
+}
+
+export interface DirectConversationIndexEntry {
+  conversationId: string;
+  kind: "dm" | "group_dm";
+}
+
+/**
+ * Canonical sorted unique key for a DM or group DM's participant set so asks from the same sender
+ * in a 1:1 DM vs. a 3+ member group DM never collide even before conversation_id is attached.
+ */
+export function conversationParticipantKey(participants: readonly WaitingParticipantRef[]): string {
+  const keys = new Set<string>();
+  for (const p of participants) {
+    const id = p.id.trim().toLowerCase();
+    if (!id) continue;
+    keys.add(`${p.kind}:${id}`);
+  }
+  return [...keys].sort().join("|");
+}
+
+/**
+ * Maps canonical participant keys to unique direct conversations (`dm` / `group_dm`).
+ * If two generations share the exact same member roster, the key maps to `null` (ambiguous) so
+ * legacy signals without an explicit `conversationId` never guess the wrong generation.
+ */
+export function indexDirectConversations(
+  conversations: readonly {
+    conversationId: string;
+    kind: string;
+    members: readonly { kind: "user" | "agent"; id: string; leftAt?: string | null }[];
+  }[],
+): Map<string, DirectConversationIndexEntry | null> {
+  const out = new Map<string, DirectConversationIndexEntry | null>();
+  for (const conv of conversations) {
+    if (conv.kind !== "dm" && conv.kind !== "group_dm") continue;
+    const key = conversationParticipantKey(conv.members);
+    if (!key) continue;
+    if (out.has(key)) {
+      out.set(key, null);
+    } else {
+      out.set(key, { conversationId: conv.conversationId.toLowerCase(), kind: conv.kind });
+    }
+  }
+  return out;
+}
+
 export type WaitingConversation =
   | { kind: "channel"; channelId: string }
   | { kind: "general" }
-  | { kind: "dm"; partnerKind: "person" | "agent"; partnerId: string }
+  | {
+    kind: "dm";
+    partnerKind: "person" | "agent";
+    partnerId: string;
+    conversationId?: string;
+    participantKey?: string;
+  }
+  | {
+    kind: "group_dm";
+    conversationId?: string;
+    participantKey: string;
+  }
+  | { kind: "redacted" }
   | { kind: "unknown" };
 
 export interface WaitingSignalPlacement {
@@ -97,6 +159,37 @@ export interface WaitingSignalPlacement {
   threadRootId: string | null;
   from: string;
   fromKind: string;
+  conversationId?: string | null;
+  conversationKind?: "general" | "public_channel" | "private_channel" | "dm" | "group_dm" | null;
+  recipients?: readonly WaitingParticipantRef[];
+}
+
+export interface ClassifyAskOptions {
+  directByParticipantKey?: ReadonlyMap<string, DirectConversationIndexEntry | null>;
+  conversationsById?: ReadonlyMap<string, { kind: string; channelId?: string | null }>;
+}
+
+function collectParticipants(
+  source: Pick<WaitingSignalPlacement, "to" | "toAgent"> & Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "recipients">>,
+): WaitingParticipantRef[] {
+  const seen = new Set<string>();
+  const out: WaitingParticipantRef[] = [];
+  const push = (kind: "user" | "agent", rawId: string | null | undefined) => {
+    const id = rawId?.trim().toLowerCase() ?? "";
+    if (!id) return;
+    const k = `${kind}:${id}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ kind, id });
+  };
+  if (source.from) push(source.fromKind === "agent" ? "agent" : "user", source.from);
+  if (source.recipients && source.recipients.length > 0) {
+    for (const r of source.recipients) push(r.kind, r.id);
+  } else {
+    if (source.to) push("user", source.to);
+    if (source.toAgent) push("agent", source.toAgent);
+  }
+  return out;
 }
 
 /**
@@ -104,25 +197,116 @@ export interface WaitingSignalPlacement {
  * - non-null channelId -> named channel
  * - thread reply without channelId -> its root's conversation (unknown if root wasn't read)
  * - null channelId and unaddressed -> #general
- * - null channelId and addressed -> direct message with the sender (never #general)
+ * - null channelId and addressed (or with explicit conversationId) -> 1:1 DM or group DM
+ *   (3+ distinct participants or matched group_dm conversation never bleeds into a 1:1 DM)
  * - missing/failed placement lookup -> unknown (never #general)
  */
 export function classifyAskConversation(
   loc: WaitingSignalPlacement | null,
-  rootLoc: Pick<WaitingSignalPlacement, "channelId" | "to" | "toAgent"> | null = null,
+  rootLoc: (Pick<WaitingSignalPlacement, "channelId" | "to" | "toAgent"> &
+    Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "conversationId" | "conversationKind" | "recipients">>) | null = null,
+  options?: ClassifyAskOptions,
 ): WaitingConversation {
   if (!loc) return { kind: "unknown" };
+  // Explicit null/null from a 20261120000002+ decision_queue server means the conversation
+  // was intentionally redacted (e.g. viewer left a group DM). Keep it unattached so it stays
+  // out of This conversation (including any restarted generation) without becoming "unknown".
+  if (loc.conversationId === null && loc.conversationKind === null) {
+    return { kind: "redacted" };
+  }
+
+  let explicitConversationId: string | null = loc.conversationId?.trim() ? loc.conversationId.trim().toLowerCase() : null;
+  let explicitKind = loc.conversationKind ?? null;
+  if (!explicitConversationId && rootLoc?.conversationId?.trim()) {
+    explicitConversationId = rootLoc.conversationId.trim().toLowerCase();
+  }
+  if (!explicitKind && rootLoc?.conversationKind) {
+    explicitKind = rootLoc.conversationKind;
+  }
+  const knownConv = explicitConversationId ? options?.conversationsById?.get(explicitConversationId) ?? null : null;
+  const resolvedKind = explicitKind ?? knownConv?.kind ?? null;
+
+  if (resolvedKind === "general") return { kind: "general" };
+  if (resolvedKind === "public_channel" || resolvedKind === "private_channel") {
+    const channelId = loc.channelId ?? rootLoc?.channelId ?? knownConv?.channelId ?? explicitConversationId;
+    return channelId ? { kind: "channel", channelId } : { kind: "unknown" };
+  }
+  if (resolvedKind === "group_dm" && explicitConversationId) {
+    const participants = collectParticipants(rootLoc && (rootLoc.from || rootLoc.recipients?.length) ? rootLoc : loc);
+    return {
+      kind: "group_dm",
+      conversationId: explicitConversationId,
+      participantKey: conversationParticipantKey(participants),
+    };
+  }
+  if (resolvedKind === "dm" && explicitConversationId) {
+    const participants = collectParticipants(rootLoc && (rootLoc.from || rootLoc.recipients?.length) ? rootLoc : loc);
+    const participantKey = conversationParticipantKey(participants);
+    return {
+      kind: "dm",
+      partnerKind: loc.fromKind === "agent" ? "agent" : "person",
+      partnerId: loc.from,
+      conversationId: explicitConversationId,
+      ...(participantKey ? { participantKey } : {}),
+    };
+  }
+
   if (loc.channelId !== null) return { kind: "channel", channelId: loc.channelId };
-  const dmFrom = (): WaitingConversation =>
-    loc.from
-      ? { kind: "dm", partnerKind: loc.fromKind === "agent" ? "agent" : "person", partnerId: loc.from }
-      : { kind: "unknown" };
+
+  const isUnaddressed = (
+    row: Pick<WaitingSignalPlacement, "to" | "toAgent"> & Partial<Pick<WaitingSignalPlacement, "conversationId" | "recipients">>,
+  ): boolean =>
+    row.to === null &&
+    row.toAgent === null &&
+    !(row.recipients && row.recipients.length > 0) &&
+    !(row.conversationId && row.conversationId.trim() !== "");
+
+  let source: Pick<WaitingSignalPlacement, "to" | "toAgent"> &
+    Partial<Pick<WaitingSignalPlacement, "from" | "fromKind" | "conversationId" | "recipients">> = loc;
+
   if (loc.threadRootId !== null) {
     if (!rootLoc) return { kind: "unknown" };
     if (rootLoc.channelId !== null) return { kind: "channel", channelId: rootLoc.channelId };
-    if (rootLoc.to === null && rootLoc.toAgent === null) return { kind: "general" };
-    return dmFrom();
+    if (isUnaddressed(rootLoc)) return { kind: "general" };
+    if (rootLoc.conversationId?.trim()) explicitConversationId = rootLoc.conversationId.trim().toLowerCase();
+    if (rootLoc.from || (rootLoc.recipients && rootLoc.recipients.length > 0)) {
+      source = rootLoc;
+    }
+  } else if (isUnaddressed(loc)) {
+    return { kind: "general" };
   }
-  if (loc.to === null && loc.toAgent === null) return { kind: "general" };
-  return dmFrom();
+
+  const participants = collectParticipants(source);
+  const participantKey = conversationParticipantKey(participants);
+  const hasAmbiguousParticipantKey = Boolean(
+    !explicitConversationId &&
+    participantKey &&
+    options?.directByParticipantKey?.has(participantKey) &&
+    options.directByParticipantKey.get(participantKey) === null,
+  );
+  // Two or more direct conversations share this exact participant set (e.g. a restarted group DM)
+  // and the ask carries no authoritative conversationId: keep placement unresolved (never a false zero).
+  if (hasAmbiguousParticipantKey) return { kind: "unknown" };
+
+  const matched = participantKey ? options?.directByParticipantKey?.get(participantKey) ?? null : null;
+  const conversationId = explicitConversationId ?? matched?.conversationId;
+
+  if (participants.length >= 3 || matched?.kind === "group_dm") {
+    return {
+      kind: "group_dm",
+      ...(conversationId ? { conversationId } : {}),
+      participantKey,
+    };
+  }
+  if (!loc.from && !conversationId) return { kind: "unknown" };
+  const includeParticipantKey =
+    Boolean(participantKey) &&
+    (source.recipients !== undefined || explicitConversationId !== null || matched !== null);
+  return {
+    kind: "dm",
+    partnerKind: loc.fromKind === "agent" ? "agent" : "person",
+    partnerId: loc.from,
+    ...(conversationId ? { conversationId } : {}),
+    ...(includeParticipantKey ? { participantKey } : {}),
+  };
 }

@@ -12,7 +12,11 @@ import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
 import {
   classifyAskConversation,
+  conversationParticipantKey,
+  indexDirectConversations,
+  type ClassifyAskOptions,
   type WaitingConversation,
+  type WaitingParticipantRef,
   type WaitingSignalPlacement,
 } from "./waiting-count";
 import {
@@ -29,12 +33,16 @@ import {
 
 export {
   classifyAskConversation,
+  conversationParticipantKey,
   focusWaitingSurvey,
+  indexDirectConversations,
   surveyDraftKey,
   surveyReadyEntries,
   surveySubmissionFromDraft,
+  type ClassifyAskOptions,
   type SurveyDraft,
   type WaitingConversation,
+  type WaitingParticipantRef,
   type WaitingSignalPlacement,
   type WaitingSurveyFocusTarget,
   type WaitingSurveyHandlers,
@@ -46,10 +54,12 @@ export type WaitingScope = "channel" | "workspace" | "all";
 export interface WaitingPlace {
   workspaceId: string;
   workspaceName: string;
-  kind: "channel" | "general" | "all" | "dm";
+  kind: "channel" | "general" | "all" | "dm" | "group_dm";
   channelId: string | null;
   label: string;
   dm?: { kind: "person" | "agent"; id: string };
+  conversationId?: string | null;
+  participantKey?: string;
 }
 
 export interface WaitingAskItem {
@@ -96,7 +106,7 @@ export interface WaitingPlainAskItem {
 }
 
 export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "agent_removed";
-export type WaitingTodoPlacement = "channel" | "general" | "workspace";
+export type WaitingTodoPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace";
 
 export interface WaitingTodoItem {
   id: string;
@@ -110,6 +120,7 @@ export interface WaitingTodoItem {
   canMarkDone: boolean;
   placement?: WaitingTodoPlacement;
   channelId?: string | null;
+  conversationId?: string | null;
   channelLabel?: string;
   pending?: true;
   error?: string;
@@ -183,20 +194,39 @@ export function filterWaitingItems<T extends { workspaceId: string; conversation
     if (place.kind === "general") {
       return item.conversation.kind === "general";
     }
-    if (place.kind === "dm" && place.dm) {
-      return (
-        item.conversation.kind === "dm" &&
-        item.conversation.partnerKind === place.dm.kind &&
-        item.conversation.partnerId === place.dm.id
-      );
+    if (place.kind === "dm" || place.kind === "group_dm") {
+      if (item.conversation.kind !== "dm" && item.conversation.kind !== "group_dm") return false;
+      const placeConvId = place.conversationId?.trim().toLowerCase() || null;
+      const itemConvId = item.conversation.conversationId?.trim().toLowerCase() || null;
+      if (placeConvId && itemConvId) {
+        return itemConvId === placeConvId;
+      }
+      if (place.kind === "group_dm") {
+        return (
+          item.conversation.kind === "group_dm" &&
+          Boolean(place.participantKey && item.conversation.participantKey === place.participantKey)
+        );
+      }
+      if (item.conversation.kind !== "dm") return false;
+      if (place.participantKey && item.conversation.participantKey) {
+        return item.conversation.participantKey === place.participantKey;
+      }
+      if (place.dm) {
+        return (
+          item.conversation.partnerKind === place.dm.kind &&
+          item.conversation.partnerId.toLowerCase() === place.dm.id.toLowerCase()
+        );
+      }
+      return false;
     }
     return false;
   });
 }
 
 /** Filters waiting/assigned to-dos by scope. Channel-origin and #general-origin to-dos appear in
- *  their authoritative channel's This channel queue; genuinely workspace-only to-dos stay in All
- *  channels, All workspaces, and All messages so they never clutter an unrelated channel or DM. */
+ *  their authoritative channel's This channel queue; DM-origin to-dos match only by authoritative
+ *  conversation_id; genuinely workspace-only to-dos stay in All channels, All workspaces, and All
+ *  messages so they never clutter an unrelated channel or DM. */
 export function filterWaitingTodos(
   todos: readonly WaitingTodoItem[],
   scope: WaitingScope,
@@ -213,6 +243,11 @@ export function filterWaitingTodos(
     }
     if (place.kind === "general") {
       return placement === "general";
+    }
+    if (place.kind === "dm" || place.kind === "group_dm") {
+      const placeConvId = place.conversationId?.trim().toLowerCase() || null;
+      const todoConvId = todo.conversationId?.trim().toLowerCase() || null;
+      return (placement === "dm" || placement === "group_dm") && Boolean(placeConvId && todoConvId && todoConvId === placeConvId);
     }
     return false;
   });
@@ -251,6 +286,7 @@ function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
     item.workspaceName,
     item.placement ?? "workspace",
     item.channelId ?? "",
+    item.conversationId ?? "",
     item.channelLabel ?? "",
     item.title,
     item.state,
@@ -632,8 +668,9 @@ export function renderWaitingPanel(
 
   const scopeEl = root.querySelector<HTMLSelectElement>("[data-waiting-scope]");
   if (scopeEl) {
+    const isDirectPlace = vm.place.kind === "dm" || vm.place.kind === "group_dm";
     const labels: Record<WaitingScope, string> = {
-      channel: scopeOptionText("This channel", vm.counts.channel),
+      channel: scopeOptionText(isDirectPlace ? "This conversation" : "This channel", vm.counts.channel),
       workspace: scopeOptionText("All channels", vm.counts.workspace),
       all: scopeOptionText("All workspaces", vm.counts.all),
     };

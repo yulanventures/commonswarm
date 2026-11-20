@@ -209,6 +209,8 @@ async function householdSurface(
 const isoTime = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
 const count = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0;
 
+const DECISION_CONVERSATION_KINDS = new Set(['general', 'public_channel', 'private_channel', 'dm', 'group_dm']);
+
 function decisionAsk(value: unknown): DecisionAsk {
   if (!record(value) || typeof value.signal_id !== 'string' || !record(value.from)
     || (value.from.kind !== 'agent' && value.from.kind !== 'user') || typeof value.from.id !== 'string'
@@ -218,10 +220,28 @@ function decisionAsk(value: unknown): DecisionAsk {
   if (reraised !== null && !(record(reraised) && count(reraised.count) && reraised.count > 0 && isoTime(reraised.last_at))) {
     throw new Error('home_decision_queue_malformed');
   }
+  let conversationId: string | null | undefined;
+  if (value.conversation_id !== undefined) {
+    if (value.conversation_id !== null && typeof value.conversation_id !== 'string') {
+      throw new Error('home_decision_queue_malformed');
+    }
+    conversationId = typeof value.conversation_id === 'string' && value.conversation_id.trim()
+      ? value.conversation_id.trim().toLowerCase()
+      : null;
+  }
+  let conversationKind: DecisionAsk['conversation_kind'];
+  if (value.conversation_kind !== undefined) {
+    if (value.conversation_kind !== null && (typeof value.conversation_kind !== 'string' || !DECISION_CONVERSATION_KINDS.has(value.conversation_kind))) {
+      throw new Error('home_decision_queue_malformed');
+    }
+    conversationKind = value.conversation_kind as DecisionAsk['conversation_kind'];
+  }
   return {
     signal_id: value.signal_id,
     from: { kind: value.from.kind, id: value.from.id, name: value.from.name },
     body: value.body, created_at: value.created_at, until: value.until,
+    ...(conversationId !== undefined ? { conversation_id: conversationId } : {}),
+    ...(conversationKind !== undefined ? { conversation_kind: conversationKind } : {}),
     reraised: reraised === null ? null : { count: reraised.count as number, last_at: reraised.last_at as string },
   };
 }
@@ -238,7 +258,7 @@ export function parseDecisionQueue(data: unknown, workspaceId: Uuid): DecisionQu
 }
 
 const WAITING_TODO_REASONS = new Set(['assigned', 'request', 'after', 'hold', 'agent_removed']);
-const WAITING_TODO_PLACEMENTS = new Set<WaitingTodoPlacement>(['channel', 'general', 'workspace']);
+const WAITING_TODO_PLACEMENTS = new Set<WaitingTodoPlacement>(['channel', 'general', 'workspace', 'dm', 'group_dm']);
 
 function waitingTodoEntry(value: unknown): WaitingTodoEntry {
   if (!record(value) || typeof value.todo_id !== 'string' || typeof value.title !== 'string'
@@ -248,11 +268,18 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     || (value.agent_id !== null && typeof value.agent_id !== 'string')
     || !isoTime(value.state_at)
     || typeof value.placement !== 'string' || !WAITING_TODO_PLACEMENTS.has(value.placement as WaitingTodoPlacement)
-    || (value.channel_id !== null && typeof value.channel_id !== 'string')) {
+    || (value.channel_id !== null && typeof value.channel_id !== 'string')
+    || (value.conversation_id !== undefined && value.conversation_id !== null && typeof value.conversation_id !== 'string')) {
     throw new Error('home_waiting_todos_malformed');
   }
   const placement = value.placement as WaitingTodoPlacement;
-  if (placement === 'channel' && !value.channel_id) throw new Error('home_waiting_todos_malformed');
+  const rawConvId = typeof value.conversation_id === 'string' && value.conversation_id.trim()
+    ? value.conversation_id.trim().toLowerCase()
+    : null;
+  if (placement === 'channel' && (!value.channel_id || rawConvId !== null)) throw new Error('home_waiting_todos_malformed');
+  if ((placement === 'dm' || placement === 'group_dm') && (!rawConvId || value.channel_id !== null)) {
+    throw new Error('home_waiting_todos_malformed');
+  }
   return {
     todo_id: value.todo_id,
     title: value.title,
@@ -263,6 +290,7 @@ function waitingTodoEntry(value: unknown): WaitingTodoEntry {
     state_at: value.state_at,
     placement,
     channel_id: placement === 'channel' ? value.channel_id : null,
+    conversation_id: (placement === 'dm' || placement === 'group_dm') ? rawConvId : null,
   };
 }
 
@@ -514,6 +542,9 @@ export function createHomeServer(
       if (input.notes !== undefined) args.notes = input.notes;
       if (input.due_on !== undefined) args.due_on = input.due_on;
       if (input.assign) args.assign = input.assign;
+      if (input.origin_placement !== undefined) args.origin_placement = input.origin_placement;
+      if (input.origin_channel_id !== undefined) args.origin_channel_id = input.origin_channel_id;
+      if (input.origin_conversation_id !== undefined) args.origin_conversation_id = input.origin_conversation_id;
       const body = await householdTool(resolved, session, workspaceId, requestId, 'todo_create', args, 'The to-do may or may not have been saved. Reload to check.', true, pinOptions);
       return parseWriteResult<Todo>(body);
     },
