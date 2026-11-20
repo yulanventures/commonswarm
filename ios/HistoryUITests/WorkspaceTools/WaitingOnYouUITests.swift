@@ -10,15 +10,6 @@ final class WaitingOnYouUITests: XCTestCase {
         button.tap()
     }
 
-    private func postFixture(_ pathAndQuery: String) {
-        guard let url = URL(string: "http://127.0.0.1:8765" + pathAndQuery) else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
-        _ = sem.wait(timeout: .now() + 5)
-    }
-
     private func capture(_ name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
@@ -26,7 +17,7 @@ final class WaitingOnYouUITests: XCTestCase {
         add(attachment)
     }
 
-    private func ensureSignedInOnWorkspace() throws {
+    private func openGeneralChannel() throws {
         let general = app.buttons["#general"].firstMatch
         if !general.waitForExistence(timeout: 3) {
             let emailButton = app.buttons["Continue with email"].firstMatch
@@ -48,52 +39,20 @@ final class WaitingOnYouUITests: XCTestCase {
                 workspace.tap()
             }
         }
-        XCTAssertTrue(general.waitForExistence(timeout: 10), "Expected workspace directory with #general")
+        try tapButton("#general", timeout: 10)
     }
 
-    func testChannelWaitingSheetInCardAnswerAndScopeSwitch() throws {
+    func testChannelWaitingSheetAsksAndTodos() throws {
         continueAfterFailure = false
         app.launch()
 
-        try ensureSignedInOnWorkspace()
-
-        // 1. Quiet channel (group DM) shows cross-workspace Waiting 4 in channel header
-        let groupButton = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Maya Chen, Atlas")).firstMatch
-        XCTAssertTrue(groupButton.waitForExistence(timeout: 8), "Expected group DM in directory")
-        groupButton.tap()
+        try openGeneralChannel()
 
         let waitingButton = app.buttons["waiting-on-you-button"].firstMatch
-        XCTAssertTrue(waitingButton.waitForExistence(timeout: 8), "Expected Waiting on you button in quiet channel header")
-        let crossWorkspacePredicate = NSPredicate(format: "label CONTAINS %@", "Waiting 4")
-        wait(for: [expectation(for: crossWorkspacePredicate, evaluatedWith: waitingButton)], timeout: 8)
-        capture("waiting-quiet-header")
-
-        // 2. Incomplete read shows Retry instead of a false empty state
-        postFixture("/fixture/fail-decision-queue?ws=00000000-0000-4000-8000-000000000003")
-        waitingButton.tap()
-        XCTAssertTrue(app.staticTexts["Couldn’t check all waiting questions"].firstMatch.waitForExistence(timeout: 8), "Expected incomplete-read message instead of empty state")
-        let retryButton = app.buttons["Retry"].firstMatch
-        XCTAssertTrue(retryButton.waitForExistence(timeout: 5), "Expected Retry button on incomplete read")
-        capture("waiting-incomplete-retry")
-
-        // Restore read, tap Retry, and switch scope to "All workspaces (4)"
-        postFixture("/fixture/fail-decision-queue")
-        retryButton.tap()
-        let allWorkspacesScope = app.buttons["waiting-scope-all"].firstMatch
-        XCTAssertTrue(allWorkspacesScope.waitForExistence(timeout: 8), "Expected All workspaces scope button")
-        allWorkspacesScope.tap()
-        XCTAssertTrue(app.staticTexts["All workspaces (4)"].firstMatch.waitForExistence(timeout: 5) || allWorkspacesScope.label.contains("All workspaces"), "Expected All workspaces label in scope selector")
-        capture("waiting-all-workspaces")
-
-        try tapButton("Done", timeout: 5)
-
-        // Go back to directory and open #general
-        let backButton = app.navigationBars.buttons.element(boundBy: 0)
-        XCTAssertTrue(backButton.waitForExistence(timeout: 5))
-        backButton.tap()
-        try tapButton("#general", timeout: 10)
-
-        XCTAssertTrue(waitingButton.waitForExistence(timeout: 8))
+        XCTAssertTrue(waitingButton.waitForExistence(timeout: 8), "Expected Waiting on you button in channel header")
+        let crossWorkspacePredicate = NSPredicate(format: "label CONTAINS %@", "Waiting 8")
+        let crossWorkspaceExpectation = expectation(for: crossWorkspacePredicate, evaluatedWith: waitingButton)
+        wait(for: [crossWorkspaceExpectation], timeout: 8)
         waitingButton.tap()
 
         let question = app.staticTexts["Should we publish build 14 to internal testers now?"].firstMatch
@@ -101,16 +60,41 @@ final class WaitingOnYouUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Recommended"].firstMatch.exists, "Expected Recommended badge")
         capture("waiting-channel")
 
-        // Answer directly in the card with one tap
+        // Answer the ask directly in the card with one tap
         let publishOption = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Publish now")).firstMatch
         XCTAssertTrue(publishOption.waitForExistence(timeout: 5))
         publishOption.tap()
-
         XCTAssertTrue(app.staticTexts["Sent"].firstMatch.waitForExistence(timeout: 8), "Expected visible Sent confirmation")
-        XCTAssertTrue(app.staticTexts["Nothing waiting in #general"].firstMatch.waitForExistence(timeout: 5))
-        capture("waiting-sent")
 
-        // Jump to All channels from empty state and verify VoiceOver checked state
+        // Channel-placed assigned to-do now sits at the top of This channel
+        let generalTodoTitle = app.staticTexts["Approve App Store release notes for iOS 1.0"].firstMatch
+        XCTAssertTrue(generalTodoTitle.waitForExistence(timeout: 8), "Expected #general assigned to-do card")
+        capture("waiting-todo-card")
+
+        // Open to-do detail inside the sheet
+        let openTodo = app.buttons["waiting-todo-open-50000000-0000-4000-8000-000000000001"].firstMatch
+        XCTAssertTrue(openTodo.waitForExistence(timeout: 5))
+        openTodo.tap()
+        XCTAssertTrue(app.staticTexts["Verify screenshots, privacy labels, and TestFlight release summary before submission."].firstMatch.waitForExistence(timeout: 8), "Expected to-do notes in detail view")
+        XCTAssertTrue(app.staticTexts["Maya Chen"].firstMatch.exists, "Expected resolved comment author")
+        capture("waiting-todo-detail")
+
+        // Return to Waiting on you sheet and mark the assigned to-do done
+        let detailNavBar = app.navigationBars["To-do"].firstMatch
+        XCTAssertTrue(detailNavBar.waitForExistence(timeout: 5))
+        let backButton = detailNavBar.buttons.element(boundBy: 0)
+        XCTAssertTrue(backButton.waitForExistence(timeout: 5))
+        backButton.tap()
+
+        let markDone = app.buttons["waiting-todo-done-50000000-0000-4000-8000-000000000001"].firstMatch
+        XCTAssertTrue(markDone.waitForExistence(timeout: 8))
+        markDone.tap()
+
+        XCTAssertTrue(app.staticTexts["Done"].firstMatch.waitForExistence(timeout: 8), "Expected visible Done banner")
+        XCTAssertTrue(app.staticTexts["Nothing waiting in #general"].firstMatch.waitForExistence(timeout: 5))
+        capture("waiting-todo-done")
+
+        // Jump to All channels from empty state, verify accessible multi-select toggle + waiting to-dos
         let showAll = app.buttons.containing(NSPredicate(format: "label BEGINSWITH %@", "Show all channels")).firstMatch
         XCTAssertTrue(showAll.waitForExistence(timeout: 5))
         showAll.tap()
@@ -120,6 +104,53 @@ final class WaitingOnYouUITests: XCTestCase {
         XCTAssertEqual(multiOption.value as? String, "Not checked")
         multiOption.tap()
         XCTAssertEqual(multiOption.value as? String, "Checked")
+        let mobileTodo = app.staticTexts["Review dark mode token audit for iPhone SE"].firstMatch
+        for _ in 0..<4 where !mobileTodo.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(mobileTodo.exists, "Expected #mobile waiting to-do in All channels")
         capture("waiting-workspace")
+
+        // Switch to All workspaces scope pill and launch survey-style Review questions
+        let allWorkspacesScope = app.buttons["waiting-scope-all"].firstMatch
+        XCTAssertTrue(allWorkspacesScope.waitForExistence(timeout: 5))
+        allWorkspacesScope.tap()
+
+        let reviewButton = app.buttons["waiting-review-questions-button"].firstMatch
+        XCTAssertTrue(reviewButton.waitForExistence(timeout: 8), "Expected Review questions button when >= 2 questions are visible")
+        reviewButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Question 1 of 3"].firstMatch.waitForExistence(timeout: 8), "Expected Question 1 of 3 header")
+        capture("waiting-review-step")
+
+        // Q1 already has "To-dos list and detail" checked from session draft persistence; advance with Next
+        let nextButton = app.buttons["review-next-button"].firstMatch
+        XCTAssertTrue(nextButton.waitForExistence(timeout: 5))
+        nextButton.tap()
+
+        // Q2: Skip it
+        XCTAssertTrue(app.staticTexts["Question 2 of 3"].firstMatch.waitForExistence(timeout: 5))
+        let skipButton = app.buttons["review-skip-button"].firstMatch
+        XCTAssertTrue(skipButton.waitForExistence(timeout: 5))
+        skipButton.tap()
+
+        // Q3: Select recommended option and proceed to Final Review
+        XCTAssertTrue(app.staticTexts["Question 3 of 3"].firstMatch.waitForExistence(timeout: 5))
+        let rotateOption = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Rotate now")).firstMatch
+        XCTAssertTrue(rotateOption.waitForExistence(timeout: 5))
+        rotateOption.tap()
+        nextButton.tap()
+
+        // Final Review shows 2 ready to send + 1 skipped
+        XCTAssertTrue(app.staticTexts["2 ready to send"].firstMatch.waitForExistence(timeout: 8), "Expected 2 ready to send on final review")
+        XCTAssertTrue(app.staticTexts["1 skipped, won’t be sent"].firstMatch.exists, "Expected 1 skipped summary")
+        capture("waiting-review-summary")
+
+        // Send only the 2 answered questions
+        let sendAllButton = app.buttons["review-send-all-button"].firstMatch
+        XCTAssertTrue(sendAllButton.waitForExistence(timeout: 5))
+        sendAllButton.tap()
+        XCTAssertTrue(app.staticTexts["Sent 2 answers"].firstMatch.waitForExistence(timeout: 8), "Expected Sent 2 answers banner after review send")
+        capture("waiting-review-sent")
     }
 }

@@ -1,6 +1,9 @@
 /** Real site DOM/transport proof with synthetic HTTP: the Waiting on you count across every workspace. */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
@@ -48,12 +51,54 @@ function installWaitingFixture() {
   const todoCase = scenario.startsWith("todos-");
   const todo21Case = scenario.startsWith("todos-21-");
   const todoTruncatedCase = scenario.startsWith("todos-truncated-");
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101,
-    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, question,
-    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase,
+  const surveyCase = scenario.startsWith("survey-");
+  const surveyAuthRetireCase = scenario.startsWith("survey-auth-retire-");
+  const readRetireCase = scenario.startsWith("waiting-read-retire-");
+  const askPeerB = askIdAt(99);
+  const askWs2A = askIdAt(98);
+  const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
+  const plainCleanupCase = scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-");
+  const plain401RetireCase = scenario.startsWith("plain-401-retire-");
+  const plain401ControlCase = scenario.startsWith("plain-401-refresh-control-");
+  const plainAsks = [askIdAt(11), askIdAt(12)];
+  const peerUserB = {
+    id: "77777777-7777-4777-8777-777777777777",
+    aud: "authenticated",
+    role: "authenticated",
+    email: "peer-b@example.test",
+    app_metadata: {},
+    user_metadata: {},
+    created_at: before,
+  };
+  let releaseFirstAnswer: (() => void) | null = null;
+  let releaseIdentityCheck: (() => void) | null = null;
+  let releaseRefresh: (() => void) | null = null;
+  let releaseWs9ChannelsA: (() => void) | null = null;
+  let releaseWs2QueueA: (() => void) | null = null;
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
+    todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks, question,
+    asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
+    surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
+    plainFailOnceId: scenario.startsWith("historical-cleanup-") ? plainAsks[1]! : "",
+    plainFailedCommandId: "",
+    plain401Once: plain401RetireCase || plain401ControlCase,
+    plainAttempts: 0,
+    plainBearers: [] as string[],
+    plainCommandIds: [] as string[],
+    plainReplies: [] as any[],
+    firstAnswerHeld: false,
+    identityCheckHeld: false,
+    refreshHeld: false,
+    ws9ChannelsAHeld: false,
+    ws2QueueAHeld: false,
+    releaseFirstAnswer: () => { releaseFirstAnswer?.(); releaseFirstAnswer = null; },
+    releaseIdentityCheck: () => { releaseIdentityCheck?.(); releaseIdentityCheck = null; },
+    releaseRefresh: () => { releaseRefresh?.(); releaseRefresh = null; },
+    releaseWs9ChannelsA: () => { releaseWs9ChannelsA?.(); releaseWs9ChannelsA = null; },
+    releaseWs2QueueA: () => { releaseWs2QueueA?.(); releaseWs2QueueA = null; },
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -72,6 +117,32 @@ function installWaitingFixture() {
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
   const ws1Asks = () => {
+    if (plainCleanupCase) {
+      const baseMs = Date.now() - 600_000;
+      const titles = ["Legacy open question without options?", "Stale historical question to clear?"];
+      return plainAsks
+        .map((id, i) => ({ id, title: titles[i]!, i }))
+        .filter(entry => !f.answeredIds.includes(entry.id))
+        .map(entry => ({
+          signal_id: entry.id,
+          from: { kind: "agent" as const, id: agent, name: "Scout" },
+          body: entry.title,
+          created_at: new Date(baseMs + entry.i * 1000).toISOString(), until, reraised: null,
+        }));
+    }
+    if (surveyCase) {
+      const baseMs = Date.now() - 600_000;
+      const titles = ["Which boiler quote?", "Which paint finish?", "Which arrival window?"];
+      return surveyAsks
+        .map((id, i) => ({ id, title: titles[i]!, i }))
+        .filter(entry => !f.answeredIds.includes(entry.id))
+        .map(entry => ({
+          signal_id: entry.id,
+          from: { kind: "agent" as const, id: agent, name: "Scout" },
+          body: entry.title,
+          created_at: new Date(baseMs + entry.i * 1000).toISOString(), until, reraised: null,
+        }));
+    }
     const count = batch51 ? 51 : batch101 ? 101 : truncatedQueue ? 100 : 0;
     if (!count) return [];
     const baseMs = Date.now() - 3600_000;
@@ -93,14 +164,68 @@ function installWaitingFixture() {
     if (url.origin === location.origin) return network(input, init);
     const body = request.method === "POST" ? await request.json().catch(() => null) : null;
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.href); return Response.json({}, { status: 404 }); }
-    if (url.pathname === "/auth/v1/user") return Response.json(user);
+    if (url.pathname === "/auth/v1/user") {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if ((surveyAuthRetireCase || readRetireCase) && authHeader && authHeader !== "Bearer synthetic-human") {
+        if (surveyAuthRetireCase) {
+          f.identityCheckHeld = true;
+          f.log.push("auth-user-peer-b-held");
+          await new Promise<void>(resolve => { releaseIdentityCheck = resolve; });
+          f.log.push("auth-user-peer-b-released");
+        }
+        return Response.json(peerUserB);
+      }
+      return Response.json(user);
+    }
+    if (url.pathname === "/auth/v1/logout") {
+      f.log.push("auth-logout");
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
+      f.log.push("auth-refresh");
+      if (plain401RetireCase) {
+        f.refreshHeld = true;
+        await new Promise<void>(resolve => { releaseRefresh = resolve; });
+        f.log.push("auth-refresh-released");
+      }
+      return Response.json({
+        access_token: "synthetic-human-refreshed",
+        refresh_token: "synthetic-refresh-2",
+        token_type: "bearer",
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user,
+      });
+    }
     if (url.pathname === "/rest/v1/rpc/home_overview") {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if (surveyAuthRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+        return Response.json({ viewer_user_id: peerUserB.id, generated_at: new Date().toISOString(), workspaces: [] });
+      }
+      if (readRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+        f.overviewReads++; f.log.push("overview-b");
+        return Response.json({
+          viewer_user_id: peerUserB.id,
+          generated_at: new Date().toISOString(),
+          workspaces: ids.map(id => ({
+            workspace_id: id, name: "Workspace " + number(id), role: "member", last_seen_at: recent, new_messages: 0, content: null,
+            people: [{ user_id: peerUserB.id, display_name: "Peer B", role: "member", is_viewer: true, agents: [] }],
+            needs_you: {
+              asks: id === ids[8] ? [{ signal_id: askPeerB, from: { kind: "agent", id: agent }, created_at: recent, until }] : [],
+              assigned: [],
+              waiting: [],
+            },
+          })),
+        });
+      }
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
-          const asks = id === ids[0] && multiBatch
-            ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: "agent", id: agent }, created_at: a.created_at, until }))
-            : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
+          const asks = id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)
+            ? ws1Asks().slice(0, 10).map(a => ({ signal_id: a.signal_id, from: { kind: a.from.kind, id: a.from.id }, created_at: a.created_at, until }))
+            : readRetireCase && id === ids[1]
+              ? [{ signal_id: askWs2A, from: { kind: "agent", id: agent }, created_at: recent, until }]
+              : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
             ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
             : id === ids[0] && todoCase && !f.todoDone
@@ -116,7 +241,22 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/rest/v1/rpc/decision_queue") {
       const id = body?.p_workspace_id; f.log.push("queue:" + number(id));
-      if (id === ids[0] && multiBatch) {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if (readRetireCase && id === ids[1] && authHeader === "Bearer synthetic-human") {
+        f.ws2QueueAHeld = true;
+        f.log.push("queue-2-a-held");
+        await new Promise<void>(resolve => { releaseWs2QueueA = resolve; });
+        f.log.push("queue-2-a-failed");
+        return Response.json({ message: "simulated retired failure" }, { status: 500 });
+      }
+      if (readRetireCase && id === ids[8] && authHeader && authHeader !== "Bearer synthetic-human") {
+        return Response.json({
+          workspace_id: id, generated_at: new Date().toISOString(), total: 1, truncated: false,
+          asks: [{ signal_id: askPeerB, from: { kind: "agent", id: agent, name: "Scout" }, body: "Peer B question in shared workspace?",
+            created_at: recent, until, reraised: null }],
+        });
+      }
+      if (id === ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
         const asks = ws1Asks();
         const total = truncatedQueue ? 105 : asks.length;
         const page = asks.slice(0, 100);
@@ -173,30 +313,42 @@ function installWaitingFixture() {
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
-      if (body?.p_workspace_id === ids[0] && multiBatch) {
+      if (body?.p_workspace_id === ids[0] && plainCleanupCase) {
+        return Response.json({ asks: [] });
+      }
+      if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase)) {
         f.choiceBatchSizes.push(reqIds.length);
         return Response.json({ asks: reqIds.map(sigId => ({ signal_id: sigId, multi: false,
           options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
           answer: f.answeredIds.includes(sigId) ? { option_id: "yes", by_viewer: true } : null })) });
       }
       if (f.scenario.startsWith("failed-choices")) return Response.json({ message: "choices unavailable" }, { status: 500 });
+      if (readRetireCase && body?.p_workspace_id === ids[8] && reqIds.includes(askPeerB)) {
+        return Response.json({ asks: [{ signal_id: askPeerB, multi: false,
+          options: [{ id: "yes", label: "Approve B" }, { id: "no", label: "Skip B" }], answer: null }] });
+      }
       return Response.json({ asks: body?.p_workspace_id === ids[8] && reqIds.includes(ask) ? [{ signal_id: ask, multi: false,
         options: [{ id: "yes", label: "Yes, ship it" }, { id: "no", label: "Not yet" }],
         answer: f.answered ? { option_id: "yes", by_viewer: true } : null }] : [] });
     }
-    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && multiBatch) {
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || surveyCase || plainCleanupCase)) {
       const idFilter = url.searchParams.get("id") ?? "";
       const match = idFilter.match(/^in\.\(([^)]+)\)$/);
       if (match) {
         const reqIds = match[1]!.split(",").map(s => s.trim()).filter(Boolean);
         return Response.json(reqIds.map(sigId => ({
           id: sigId,
-          channel_id: (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
+          channel_id: surveyCase || plainCleanupCase || (batch51 && sigId === ask51) || (batch101 && sigId === ask101) ? null : otherChannel,
           to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent",
         })));
       }
     }
-    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[8] && url.searchParams.get("id")?.includes(ask)) {
+    if (url.pathname === "/rest/v1/signals" && url.searchParams.get("workspace_id") === "eq." + ids[8] && (url.searchParams.get("id")?.includes(ask) || url.searchParams.get("id")?.includes(askPeerB))) {
+      if (readRetireCase) {
+        const idFilter = url.searchParams.get("id") ?? "";
+        const targetId = idFilter.includes(askPeerB) ? askPeerB : ask;
+        return Response.json([{ id: targetId, channel_id: otherChannel, to: null, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent" }]);
+      }
       return Response.json([{ id: ask, channel_id: null, to: owner, to_agent: null, thread_root_id: null, from: agent, from_kind: "agent" }]);
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_read") {
@@ -237,12 +389,60 @@ function installWaitingFixture() {
         replayed: false,
       });
     }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "post_signal" && typeof body?.command?.in_reply_to === "string") {
+      const replyTarget = body.command.in_reply_to;
+      f.plainAttempts += 1;
+      f.plainBearers.push(request.headers.get("authorization") ?? "");
+      f.plainCommandIds.push(String(body.command_id ?? ""));
+      if (f.plain401Once) {
+        f.plain401Once = false;
+        f.log.push("plain-401");
+        return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
+      }
+      if (f.plainFailOnceId && replyTarget === f.plainFailOnceId) {
+        f.plainFailOnceId = "";
+        f.plainFailedCommandId = String(body.command_id ?? "");
+        f.log.push("plain-failed");
+        return Response.json({ status: "refused", error: "temporary_error", message: "Could not deliver reply." }, { status: 500 });
+      }
+      f.plainReplies.push(body);
+      f.answeredIds.push(replyTarget);
+      f.log.push("plain-reply");
+      return Response.json({
+        status: "accepted",
+        ok: true,
+        event_ids: [],
+        signal: { id: "88888888-8888-4888-8888-00000000000" + f.plainReplies.length, body: body.command.body, in_reply_to: replyTarget },
+      });
+    }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
+      if (surveyAuthRetireCase && body.command.signal_id === surveyAsks[0] && !f.firstAnswerHeld) {
+        f.firstAnswerHeld = true;
+        f.log.push("answer-1-held");
+        await new Promise<void>(resolve => { releaseFirstAnswer = resolve; });
+        f.log.push("answer-1-released");
+      }
+      if (f.surveyFailOnceId && body.command.signal_id === f.surveyFailOnceId) {
+        f.surveyFailOnceId = "";
+        f.log.push("answer-failed");
+        return Response.json({ status: "refused", error: "temporary_error", message: "Could not deliver answer." }, { status: 500 });
+      }
       // From here on the answered ask is no longer waiting.
       f.answers.push(body); f.answered = true;
       if (typeof body.command.signal_id === "string") f.answeredIds.push(body.command.signal_id);
       f.log.push("answer");
-      return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id } });
+      return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id, other_text: body.command.other_text ?? null } });
+    }
+    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[8] && readRetireCase) {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if (authHeader === "Bearer synthetic-human") {
+        f.ws9ChannelsAHeld = true;
+        f.log.push("channels-9-a-held");
+        await new Promise<void>(resolve => { releaseWs9ChannelsA = resolve; });
+        f.log.push("channels-9-a-released");
+        return Response.json([{ channel_id: otherChannel, slug: "leaked-a-secret", title: "Secret A", kind: "private", archived_at: null }]);
+      }
+      return Response.json([{ channel_id: otherChannel, slug: "shared-b-channel", title: "Shared B", kind: "public", archived_at: null }]);
     }
     if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case)) {
       if (todo21Case) {
@@ -482,6 +682,281 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("waiting-read-retire-")) {
+      await wait(() => f.ws9ChannelsAHeld && f.ws2QueueAHeld, "Account A background workspaceChannels and ws2 decision_queue held in flight");
+      // Switch to Account B in a peer document while Account A's background reads are still held in flight.
+      const peer = document.createElement("iframe");
+      peer.src = "/peer-switch";
+      document.body.append(peer);
+      await wait(() => f.log.includes("overview-b") && shown(control()) && count() === "1",
+        "Account B booted and counted its own shared-workspace ask");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(scope()), "Account B opened Waiting on you panel");
+      scope()!.value = "all";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      const cardB = () => panel()?.querySelector<HTMLElement>(`[data-waiting-card="${f.askPeerB}"]`) ?? null;
+      await wait(() => shown(cardB()) && cardB()!.querySelector(".cs-waiting-card__place")?.textContent === "Workspace 9 · #shared-b-channel",
+        "Account B sees Workspace 9 #shared-b-channel card cleanly");
+      // Now release Account A's retired workspaceChannels (#leaked-a-secret) and failed ws2 decision_queue (500).
+      f.releaseWs9ChannelsA();
+      f.releaseWs2QueueA();
+      for (let i = 0; i < 25; i++) await tick();
+      // Force a panel re-render via scope toggle to prove waitingWorkspaceChannels was NOT overwritten by Account A.
+      scope()!.value = "channel";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await tick();
+      scope()!.value = "all";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(cardB()), "Account B card still visible after retired Account A reads settled");
+      const placeBadge = cardB()!.querySelector(".cs-waiting-card__place")?.textContent ?? "";
+      check(placeBadge === "Workspace 9 · #shared-b-channel" && !panel()!.textContent!.includes("leaked-a-secret"),
+        "retired Account A workspaceChannels poisoned Account B channel label: " + placeBadge);
+      check(!panel()!.querySelector("[data-waiting-incomplete]"),
+        "retired Account A failed queue altered Account B load state");
+      check(!panel()!.querySelector(`[data-waiting-card="${f.ask}"]`),
+        "retired Account A card appeared in Account B panel");
+      peer.remove();
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("survey-auth-retire-")) {
+      await wait(() => shown(control()) && count() === "3", "3 survey questions counted in top bar");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const reviewBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-review-start]") ?? null;
+      await wait(() => shown(reviewBtn()), "Review questions button rendered");
+      reviewBtn()!.click();
+      const optYes = () => panel()?.querySelector<HTMLButtonElement>('[data-survey-option="yes"]') ?? null;
+      const nextBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-next]") ?? null;
+      const skipBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]") ?? null;
+      const sendAllBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-send]") ?? null;
+      await wait(() => shown(optYes()), "Survey step 1 rendered");
+      optYes()!.click();
+      nextBtn()!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3", "Survey step 2 rendered");
+      optYes()!.click();
+      nextBtn()!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "Survey step 3 rendered");
+      skipBtn()!.click();
+      await wait(() => shown(sendAllBtn()), "Survey review rendered");
+      // Click Send all: Q1 answer_choice is held in flight.
+      sendAllBtn()!.click();
+      await wait(() => f.firstAnswerHeld, "Q1 answer_choice held in flight");
+      // Trigger a real peer account switch in another document while Q1 is in flight and hold /auth/v1/user for User B.
+      const peer = document.createElement("iframe");
+      peer.src = "/peer-switch";
+      document.body.append(peer);
+      await wait(() => f.identityCheckHeld, "peer account switch triggered new /auth/v1/user check (held pending)");
+      // Panel must already be retired synchronously before Q1 or /auth/v1/user settles.
+      check(!shown(panel()) && panel()!.textContent!.trim() === "",
+        "Waiting panel was not retired immediately at peer account switch: " + panel()!.textContent);
+      // Release Q1 while User B's /auth/v1/user is STILL pending (dashboard session still holds User A's old session!).
+      f.releaseFirstAnswer();
+      for (let i = 0; i < 25; i++) await tick();
+      check(f.answers.length === 1 && f.answers[0].command.signal_id === f.surveyAsks[0],
+        "held survey batch sent an extra answer after peer account switch: " + JSON.stringify(f.answers));
+      check(!shown(panel()) && panel()!.textContent!.trim() === "",
+        "Waiting panel re-rendered old viewer cards after retired Q1 settled: " + panel()!.textContent);
+      f.releaseIdentityCheck();
+      for (let i = 0; i < 15; i++) await tick();
+      check(f.answers.length === 1, "extra answer sent after User B identity check settled: " + JSON.stringify(f.answers));
+      peer.remove();
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("survey-")) {
+      await wait(() => shown(control()) && count() === "3", "3 choice questions counted in #general");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const reviewStart = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-review-start]") ?? null;
+      await wait(() => shown(reviewStart()) && reviewStart()!.textContent === "Review questions", "Review questions button visible");
+      check(reviewStart()!.getBoundingClientRect().height >= 44, "Review questions button under 44px");
+      reviewStart()!.focus();
+      reviewStart()!.click();
+      // Q1: pick Approve, click Next.
+      await wait(() => shown(panel()?.querySelector('[data-survey-option="yes"]')), "Q1 shown in survey");
+      check(Boolean(panel()?.contains(document.activeElement)), "entering survey must keep focus inside panel");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+      await wait(() => panel()?.querySelector('[data-survey-option="yes"]')?.getAttribute("aria-pressed") === "true", "Q1 choice staged");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      // Q2: type "Keep this for later" under Something else, Skip, then Back -> draft is restored;
+      // Skip again -> stays skipped and omitted from final Send 2 answers.
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3", "stepped to Q2");
+      check(Boolean(panel()?.contains(document.activeElement)), "Next must keep focus inside panel");
+      panel()!.querySelector<HTMLButtonElement>("[data-survey-other-toggle]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")), "Other input opened on Q2");
+      const q2Other = panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!;
+      q2Other.value = "Keep this for later";
+      q2Other.dispatchEvent(new Event("input", { bubbles: true }));
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "stepped to Q3 after skipping Q2");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-back]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 3" &&
+        shown(panel()?.querySelector("[data-survey-other-input]")) &&
+        panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!.value === "Keep this for later",
+        "Back after Skip restored Q2 Other draft");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]")!.click();
+      // Q3: Something else + custom text, then close and reopen panel to prove session drafts persist.
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 3 of 3", "stepped to Q3");
+      panel()!.querySelector<HTMLButtonElement>("[data-survey-other-toggle]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")), "Other input opened on Q3");
+      const otherInput = panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!;
+      check(document.activeElement === otherInput, "toggling Something else open focuses its input");
+      otherInput.value = "After 2pm";
+      otherInput.dispatchEvent(new Event("input", { bubbles: true }));
+      // Close and reopen panel: survey drafts persist in this session.
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed mid-survey");
+      control()!.click();
+      await wait(() => shown(panel()?.querySelector("[data-survey-other-input]")) &&
+        panel()!.querySelector<HTMLInputElement>("[data-survey-other-input]")!.value === "After 2pm",
+        "reopening panel preserved Q3 Other draft");
+      // Advance to Review answers: 2 ready, 1 skipped.
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-waiting-survey-send]")) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 2 answers",
+        "Review answers shows Send 2 answers");
+      // First Send: Q1 succeeds, Q3 fails once -> stays on review with Q3 editable, error alert, and focus inside panel.
+      const sendBtn = panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!;
+      sendBtn.focus();
+      sendBtn.click();
+      await wait(() => f.answers.length === 1 && f.answers[0].command.signal_id === f.surveyAsks[0] &&
+        shown(panel()?.querySelector(`[data-waiting-survey-item="${f.surveyAsks[2]}"] [role="alert"]`)) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 1 answer",
+        "partial send kept failed Q3 editable on review while Q1 left");
+      check(document.activeElement !== document.body && Boolean(panel()?.contains(document.activeElement)),
+        "partial survey failure must keep focus inside panel, got " + (document.activeElement?.tagName ?? "null"));
+      // Retry Q3: succeeds, exits survey, shows visible Sent banner, leaves skipped Q2 open (count 1), keeps focus inside panel.
+      const retrySend = panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!;
+      retrySend.focus();
+      retrySend.click();
+      await wait(() => f.answers.length === 2 && f.answers[1].command.signal_id === f.surveyAsks[2] &&
+        f.answers[1].command.other_text === "After 2pm" &&
+        shown(panel()?.querySelector("[data-waiting-status]")) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.surveyAsks[1]}"]`)) &&
+        count() === "1",
+        "retry sent Q3, showed Sent banner, and left skipped Q2 open");
+      check(document.activeElement !== document.body && Boolean(panel()?.contains(document.activeElement)),
+        "survey completion must keep focus inside panel, got " + (document.activeElement?.tagName ?? "null"));
+      if (!f.phone) {
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        await wait(() => Boolean(panel()?.hidden) && document.activeElement === control(),
+          "Escape closes desktop column after survey completion and returns focus to opener");
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("plain-401-retire-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()), "plain-text ask card 1 rendered");
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      input1.focus();
+      input1.value = "Owner A private draft";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      // Click Send: initial post_signal returns 401 and postCommand enters /auth/v1/token refresh (held open).
+      send1.click();
+      await wait(() => f.refreshHeld && f.plainAttempts === 1, "historical plain-ask 401 entered held refresh");
+      // Explicit sign-out synchronously calls resetWorkspaceSessionState() -> retireWaitingState() while refresh is held.
+      const signOutBtn = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-signout]")).find(el => !el.hidden) ??
+        document.querySelector<HTMLButtonElement>("[data-signout]");
+      check(Boolean(signOutBtn), "sign-out button missing");
+      signOutBtn!.click();
+      // Panel and previous viewer's cards/draft must be cleared immediately.
+      await wait(() => !shown(panel()) && panel()!.textContent!.trim() === "", "Waiting panel retired immediately on sign-out");
+      // Release refresh with a refreshed session for Owner A: postCommand's isAlive fence must block the 401 retry.
+      f.releaseRefresh();
+      for (let i = 0; i < 25; i++) await tick();
+      check(f.plainAttempts === 1 && f.plainReplies.length === 0,
+        "401 retry was NOT fenced after login retired: attempts=" + f.plainAttempts + ", replies=" + JSON.stringify(f.plainReplies));
+      check(!panel()!.textContent!.includes("Owner A private draft") && !panel()!.querySelector("[data-waiting-plain-ask]"),
+        "previous viewer's plain-ask card or draft reappeared after retired 401 settled");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("plain-401-refresh-control-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted for unchanged-login control");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()), "plain-text ask card 1 rendered");
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      input1.focus();
+      input1.value = "Refreshed login control answer";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      send1.click();
+      await wait(() => f.plainReplies.length === 1 && !card1() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent" && count() === "1",
+        "unchanged-login 401 token refresh retried and delivered reply");
+      check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer synthetic-human-refreshed" &&
+        f.plainCommandIds[0] === f.plainCommandIds[1],
+        "expected refreshed bearer retry with same command_id: " + JSON.stringify({ attempts: f.plainAttempts, bearers: f.plainBearers, ids: f.plainCommandIds }));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("historical-cleanup-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted");
+      // Mount a synthetic corner invitation card to verify desktop clearance next to the open Waiting on you column.
+      const inviteCard = document.createElement("human-invitation-inbox");
+      inviteCard.setAttribute("data-kylon-invite", "");
+      inviteCard.setAttribute("data-placement", "corner");
+      inviteCard.style.position = "fixed";
+      inviteCard.style.insetBlockEnd = "144px";
+      inviteCard.style.inlineSize = "320px";
+      inviteCard.style.blockSize = "140px";
+      inviteCard.style.display = "block";
+      document.body.append(inviteCard);
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      const card2 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[1]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()) && shown(card2()), "Waiting on you rendered both historical plain-text ask cards");
+      const panelBox = panel()!.getBoundingClientRect();
+      const inviteBox = inviteCard.getBoundingClientRect();
+      check(inviteBox.right <= panelBox.left + 1 && inviteBox.left >= 0,
+        `corner invitation overlapped Waiting on you column or left edge: invite=${JSON.stringify(inviteBox)}, panel=${JSON.stringify(panelBox)}`);
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      const stale1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-stale]")!;
+      check(send1.disabled === true, "Send button should start disabled before typing");
+      check(send1.getBoundingClientRect().height >= 44 && stale1.getBoundingClientRect().height >= 44 && input1.getBoundingClientRect().height >= 44,
+        "plain-ask controls under 44px hit target");
+      input1.focus();
+      input1.value = "Go with Option B next Tuesday.";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      check(send1.disabled === false, "Send button should enable after typing");
+      send1.click();
+      await wait(() => f.plainReplies.length === 1 && !card1() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent",
+        "plain-ask inline answer sent post_signal reply and removed card");
+      check(f.plainReplies[0].command.in_reply_to === f.plainAsks[0] && f.plainReplies[0].command.body === "Go with Option B next Tuesday.",
+        "unexpected plain-ask reply payload: " + JSON.stringify(f.plainReplies[0]));
+      check(panel()!.contains(document.activeElement), "focus fell outside panel after answering plain-text ask");
+      // Second card: Clear as stale hits simulated failure -> Retry button receives focus -> Retry clears it cleanly.
+      const stale2 = card2()!.querySelector<HTMLButtonElement>("[data-waiting-plain-stale]")!;
+      stale2.focus();
+      stale2.click();
+      await wait(() => shown(card2()?.querySelector('[role="alert"]')) && shown(card2()?.querySelector("[data-waiting-plain-retry]")),
+        "failed Clear as stale kept card with role=alert and Retry button");
+      check(document.activeElement === card2()!.querySelector("[data-waiting-plain-retry]"),
+        "focus did not move to Retry button after failed Clear as stale");
+      card2()!.querySelector<HTMLButtonElement>("[data-waiting-plain-retry]")!.click();
+      await wait(() => f.plainReplies.length === 2 && !card2() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Cleared" && count() === "0",
+        "Retry cleared stale historical ask and updated count to 0");
+      check(f.plainReplies[1].command.in_reply_to === f.plainAsks[1] &&
+        f.plainReplies[1].command.body === "Closed as stale. Re-ask with choices if still needed." &&
+        f.plainFailedCommandId !== "" &&
+        f.plainReplies[1].command_id === f.plainFailedCommandId,
+        "unexpected stale close payload or command_id reuse mismatch: " + JSON.stringify({ failed: f.plainFailedCommandId, retry: f.plainReplies[1] }));
+      check(panel()!.contains(document.activeElement), "focus fell outside panel after clearing last plain-text ask");
+      inviteCard.remove();
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. Workspace one's chat has no question; the ninth workspace's question is counted from here.
     await wait(() => shown(control()) && count() === "1", "the ninth workspace's question is counted");
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
@@ -550,12 +1025,42 @@ async function observeWaitingCount() {
 async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record<string, any>> {
   const { markup, styles, bundled } = await renderAstroFixture(new URL("./LiveDashboard.astro", import.meta.url));
   const compileFixture = (name: string) => compileFixtureFunction(new URL(import.meta.url), name);
+  const peerJwt = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${Buffer.from(JSON.stringify({
+    sub: "77777777-7777-4777-8777-777777777777",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    role: "authenticated",
+  })).toString("base64url")}.${Buffer.from("synthetic-sig").toString("base64url")}`;
+  const peerSwitchBundle = (await build({
+    stdin: {
+      contents: `import { client } from "../../lib/commonswarm";
+        void client()!.auth.setSession({ access_token: ${JSON.stringify(peerJwt)}, refresh_token: "synthetic-refresh-b" });`,
+      loader: "ts",
+      resolveDir: dirname(fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url))),
+    },
+    bundle: true,
+    write: false,
+    format: "iife",
+    platform: "browser",
+    define: { "import.meta.env": JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.test.invalid", PUBLIC_SUPABASE_ANON_KEY: "synthetic-public" }) },
+  })).outputFiles[0]!.text;
+  const peerSwitchPage = `<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><script>
+    const peerUserB = { id: "77777777-7777-4777-8777-777777777777", aud: "authenticated", role: "authenticated", email: "peer-b@example.test", app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() };
+    const net = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const req = new Request(input, init), url = new URL(req.url);
+      if (url.origin === location.origin) return net(input, init);
+      if (url.pathname === "/auth/v1/user") return Response.json(peerUserB);
+      if (url.pathname === "/auth/v1/token") return Response.json({ access_token: ${JSON.stringify(peerJwt)}, refresh_token: "synthetic-refresh-b", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user: peerUserB });
+      return Response.json({});
+    };
+  </script></head><body><script>${peerSwitchBundle}</script></body></html>`;
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixture("installWaitingFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixture("observeWaitingCount") + "</script></body></html>";
   const server = createServer((request, response) => {
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
     if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
+    if (request.url === "/peer-switch") { response.writeHead(200, { "Content-Type": "text/html" }); response.end(peerSwitchPage); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
     response.end(request.url === "/app.js" ? bundled.join("\n") : app);
   });
@@ -569,7 +1074,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -604,5 +1109,19 @@ test("Waiting on you: pages past 50 and 100 choice asks and keeps unpaged trunca
 
 test("Waiting on you: assigned to-dos paginate past 20, scope to channel-origin vs workspace-only, and keep keyboard focus on failure and completion", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["todos-desktop", "todos-phone", "todos-21-channels-desktop", "todos-truncated-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: multi-question survey keeps drafts across Back/Skip/close, sends only filled-in answers, keeps failed answers editable and skipped open", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["survey-desktop", "survey-phone"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+test("Waiting on you: Check F historical plain-text asks answer inline or clear as stale with Retry focus and desktop corner invite clearance", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["historical-cleanup-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: retires survey batch, background reads, and historical 401 retry immediately when login changes, while preserving unchanged-login token refresh", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["survey-auth-retire-desktop", "waiting-read-retire-desktop", "plain-401-retire-desktop", "plain-401-refresh-control-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

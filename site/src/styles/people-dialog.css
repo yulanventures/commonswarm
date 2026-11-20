@@ -280,7 +280,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-agent-more > s
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-agent-more[open] > summary { color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-agent-more > .pd-fact-sheet { margin-block: 4px 16px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-agent-more > .pd-technical { margin-block-start: 16px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail .pd-person-agents .pd-text-button { border: 1px solid var(--k-shell-line); border-radius: 6px; background: transparent; color: var(--k-shell-ink); padding: 8px 12px; font-size: 13px; text-decoration: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail .pd-person-agents .pd-text-button { border: 1px solid var(--k-shell-control); border-radius: 6px; background: transparent; color: var(--k-shell-ink); padding: 8px 12px; font-size: 13px; text-decoration: none; }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail { padding: 8px 6px 32px; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-detail-identity { margin-block-end: 18px; }
@@ -332,9 +332,9 @@ live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],
   font: 500 13px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; box-shadow: none; scroll-margin: 6px;
 }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions button { flex: 1 1 10rem; }
-/* The regular dialog is outside .cs-ui; use tokens owned by the live-dashboard ancestor. */
-live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary { border-color: var(--k-shell-focus); background: var(--k-shell-focus); color: var(--k-shell-surface); }
-live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary:hover:not(:disabled) { border-color: var(--k-shell-ink); background: var(--k-shell-ink); }
+/* Use canonical Carbon primary button tokens (19.98:1 light, 13.97:1 dark) instead of --k-shell-focus (#3b82f6 -> 3.68:1 light). */
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary { border-color: var(--k-shell-accent); background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
+live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .dashboard__button--primary:hover:not(:disabled) { border-color: var(--k-shell-accent-hover); background: var(--k-shell-accent-hover); }
 /* Keep the existing destructive-action palette and meaning. */
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-danger-ink); }
 live-dashboard.dashboard[data-kylon-shell] :is(dialog[data-people-page-confirm],[data-people-page] dialog[data-role-confirm]) .pd-confirm-actions .pd-danger-fill:hover:not(:disabled) { border-color: var(--home-danger-hover); background: var(--home-danger-hover); }

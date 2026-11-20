@@ -77,7 +77,7 @@ import {
   type ComposerRecipient,
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
-import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
+import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, STALE_ASK_CLOSE_BODY, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
 import {
   buildConversationHistoryRequest,
   buildInviteConversationCommand,
@@ -4879,9 +4879,10 @@ export async function answerChoice(
   signalId: string,
   multi: boolean,
   submission: ChoiceSubmission,
+  options?: { isAlive?: () => boolean },
 ): Promise<AnswerChoiceResult> {
   const command = answerChoiceCommand(signalId, multi, submission);
-  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, options);
   if (status === 200 && body.status === "accepted") {
     const answer = (body as { choice_answer?: { option_id?: unknown; option_ids?: unknown; other_text?: unknown } }).choice_answer;
     const optionIds = Array.isArray(answer?.option_ids) && answer.option_ids.every(id => typeof id === "string")
@@ -4898,6 +4899,46 @@ export async function answerChoice(
   const message = typeof (body as { message?: unknown }).message === "string"
     ? (body as { message: string }).message
     : CHOICE_ANSWER_FAILED;
+  return { ok: false, status, error, message };
+}
+
+export { STALE_ASK_CLOSE_BODY };
+
+export type AnswerPlainAskResult =
+  | { ok: true }
+  | { ok: false; status: number; error: string | null; message: string };
+
+/** Wire body for a directed reply (`post_signal` with `in_reply_to`) answering or clearing a historical plain-text ask. */
+export function plainAskReplyCommand(signalId: string, bodyText: string): Record<string, unknown> {
+  return {
+    kind: "post_signal",
+    signal_kind: "note",
+    body: bodyText,
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: signalId,
+    about: null,
+  };
+}
+
+/** Sends a directed reply to answer or close a historical plain-text ask right from Waiting on you. */
+export async function answerPlainAsk(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  signalId: string,
+  bodyText: string,
+  options?: { isAlive?: () => boolean },
+): Promise<AnswerPlainAskResult> {
+  const command = plainAskReplyCommand(signalId, bodyText);
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, options);
+  if (status === 200 && body.status === "accepted") return { ok: true };
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : status === 403
+      ? "Whoever asked is no longer in this workspace, so this could not be sent."
+      : CHOICE_ANSWER_FAILED;
   return { ok: false, status, error, message };
 }
 
