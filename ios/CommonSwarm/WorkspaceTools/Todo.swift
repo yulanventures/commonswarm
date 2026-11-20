@@ -546,26 +546,79 @@ struct TodoConflictMergeResult: Equatable, Sendable {
     let conflictingFields: Set<TodoFieldKey>
 }
 
-/// Preserves both the version the author opened (`base*`) and their unsent edits (`edited*`)
+/// Exact field values captured when the author opened Edit, retained across lost-response retries
+/// so conflict recovery never mistakes a refetched teammate update for the original base.
+struct TodoEditBase: Equatable, Sendable {
+    let title: String
+    let notes: String
+    let dueOn: String?
+}
+
+/// Preserves both the version the author opened (`base`) and their unsent edits (`edited*`)
 /// so conflict recovery restores ONLY fields the author changed and carries forward any
 /// teammate updates to other fields (e.g. a teammate's newer title or due date).
+/// If `base` is unavailable (`nil`), `merge(...)` never auto-applies fields and keeps recovery manual.
 struct TodoConflictDraft: Equatable, Sendable {
-    let baseTitle: String
-    let baseNotes: String
-    let baseDueOn: String?
+    let base: TodoEditBase?
     let editedTitle: String
     let editedNotes: String
     let editedDueOn: String?
 
+    init(
+        base: TodoEditBase?,
+        editedTitle: String,
+        editedNotes: String,
+        editedDueOn: String?
+    ) {
+        self.base = base
+        self.editedTitle = editedTitle
+        self.editedNotes = editedNotes
+        self.editedDueOn = editedDueOn
+    }
+
+    init(
+        baseTitle: String,
+        baseNotes: String,
+        baseDueOn: String?,
+        editedTitle: String,
+        editedNotes: String,
+        editedDueOn: String?
+    ) {
+        self.base = TodoEditBase(title: baseTitle, notes: baseNotes, dueOn: baseDueOn)
+        self.editedTitle = editedTitle
+        self.editedNotes = editedNotes
+        self.editedDueOn = editedDueOn
+    }
+
     var editedKeys: Set<TodoFieldKey> {
+        guard let base else {
+            var keys: Set<TodoFieldKey> = [.title]
+            if !editedNotes.isEmpty { keys.insert(.notes) }
+            if editedDueOn != nil { keys.insert(.dueOn) }
+            return keys
+        }
         var keys: Set<TodoFieldKey> = []
-        if editedTitle != baseTitle { keys.insert(.title) }
-        if editedNotes != baseNotes { keys.insert(.notes) }
-        if editedDueOn != baseDueOn { keys.insert(.dueOn) }
+        if editedTitle != base.title { keys.insert(.title) }
+        if editedNotes != base.notes { keys.insert(.notes) }
+        if editedDueOn != base.dueOn { keys.insert(.dueOn) }
         return keys
     }
 
     func merge(onto latestTitle: String, latestNotes: String, latestDueOn: String?) -> TodoConflictMergeResult {
+        guard let base else {
+            var conflicts: Set<TodoFieldKey> = []
+            if editedTitle != latestTitle { conflicts.insert(.title) }
+            if editedNotes != latestNotes { conflicts.insert(.notes) }
+            if editedDueOn != latestDueOn { conflicts.insert(.dueOn) }
+            return TodoConflictMergeResult(
+                title: latestTitle,
+                notes: latestNotes,
+                dueOn: latestDueOn,
+                appliedFields: [],
+                conflictingFields: conflicts
+            )
+        }
+
         var applied: Set<TodoFieldKey> = []
         var conflicts: Set<TodoFieldKey> = []
 
@@ -589,9 +642,9 @@ struct TodoConflictDraft: Equatable, Sendable {
             return current
         }
 
-        let mergedTitle = resolveString(.title, base: baseTitle, edited: editedTitle, current: latestTitle)
-        let mergedNotes = resolveString(.notes, base: baseNotes, edited: editedNotes, current: latestNotes)
-        let mergedDue = resolveOptional(.dueOn, base: baseDueOn, edited: editedDueOn, current: latestDueOn)
+        let mergedTitle = resolveString(.title, base: base.title, edited: editedTitle, current: latestTitle)
+        let mergedNotes = resolveString(.notes, base: base.notes, edited: editedNotes, current: latestNotes)
+        let mergedDue = resolveOptional(.dueOn, base: base.dueOn, edited: editedDueOn, current: latestDueOn)
         return TodoConflictMergeResult(
             title: mergedTitle,
             notes: mergedNotes,
@@ -1399,6 +1452,7 @@ final class TodoDetailViewModel: ObservableObject {
         let workspaceID: UUID
         let todoID: UUID
         let version: Int
+        let base: TodoEditBase?
         let title: String
         let notes: String
         let dueOn: String?
@@ -1629,11 +1683,12 @@ final class TodoDetailViewModel: ObservableObject {
                   pending.notes == notes,
                   pending.dueOn == dueOn else { return false }
             let attemptToken = UUID()
-            guard let claimed = claimPendingUpdate(session: api.session, workspaceID: workspaceID, todoID: todoID, baseVersion: baseVersion, title: title, notes: notes, dueOn: dueOn, ownerToken: attemptToken),
+            guard let claimed = claimPendingUpdate(session: api.session, workspaceID: workspaceID, todoID: todoID, baseVersion: baseVersion, base: pending.base, title: title, notes: notes, dueOn: dueOn, ownerToken: attemptToken),
                   claimed.commandID == item.commandID else { return false }
             return await executeUpdate(
                 todoID: todoID,
                 baseVersion: baseVersion,
+                base: claimed.base,
                 title: title,
                 notes: notes,
                 dueOn: dueOn,
@@ -1911,24 +1966,24 @@ final class TodoDetailViewModel: ObservableObject {
         syncBucket(bucket)
     }
 
-    private func claimPendingUpdate(session: HumanSession, workspaceID: UUID, todoID: UUID, baseVersion: Int, title: String, notes: String, dueOn: String?, ownerToken: UUID) -> PendingUpdate? {
+    private func claimPendingUpdate(session: HumanSession, workspaceID: UUID, todoID: UUID, baseVersion: Int, base: TodoEditBase?, title: String, notes: String, dueOn: String?, ownerToken: UUID) -> PendingUpdate? {
         let sid = ObjectIdentifier(session)
         var claimed: PendingUpdate?
         let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
             if let existing = b.update, existing.sessionID == sid, existing.workspaceID == workspaceID {
                 if existing.todoID == todoID && existing.version == baseVersion && existing.title == title && existing.notes == notes && existing.dueOn == dueOn {
-                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, base: existing.base ?? base, title: title, notes: notes, dueOn: dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
                     b.update = next
                     claimed = next
                 } else if existing.outcomeUnknown {
                     claimed = nil
                 } else {
-                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, base: base, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
                     b.update = next
                     claimed = next
                 }
             } else {
-                let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, base: base, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
                 b.update = next
                 claimed = next
             }
@@ -1941,7 +1996,7 @@ final class TodoDetailViewModel: ObservableObject {
         var transitioned = false
         let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
             guard let existing = b.update, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
-            b.update = PendingUpdate(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, version: existing.version, title: existing.title, notes: existing.notes, dueOn: existing.dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+            b.update = PendingUpdate(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, version: existing.version, base: existing.base, title: existing.title, notes: existing.notes, dueOn: existing.dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
             transitioned = true
         }
         syncBucket(bucket)
@@ -2663,17 +2718,20 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
 
+        let originalBase = TodoEditBase(
+            title: TodoRules.cleanTitle(editSession.initialTitle),
+            notes: TodoRules.cleanBody(editSession.initialNotes),
+            dueOn: editSession.initialDueOn
+        )
         let attemptToken = UUID()
-        guard let claimed = claimPendingUpdate(session: api.session, workspaceID: workspaceID, todoID: editSession.todoID, baseVersion: editSession.baseVersion, title: title, notes: notes, dueOn: dueOn, ownerToken: attemptToken) else {
+        guard let claimed = claimPendingUpdate(session: api.session, workspaceID: workspaceID, todoID: editSession.todoID, baseVersion: editSession.baseVersion, base: originalBase, title: title, notes: notes, dueOn: dueOn, ownerToken: attemptToken) else {
             actionError = "An earlier edit has an unknown outcome. Retry it unchanged to check before saving different changes."
             return false
         }
         return await executeUpdate(
             todoID: editSession.todoID,
             baseVersion: editSession.baseVersion,
-            baseTitle: TodoRules.cleanTitle(editSession.initialTitle),
-            baseNotes: TodoRules.cleanBody(editSession.initialNotes),
-            baseDueOn: editSession.initialDueOn,
+            base: claimed.base ?? originalBase,
             title: title,
             notes: notes,
             dueOn: dueOn,
@@ -2689,9 +2747,7 @@ final class TodoDetailViewModel: ObservableObject {
     private func executeUpdate(
         todoID: UUID,
         baseVersion: Int,
-        baseTitle: String? = nil,
-        baseNotes: String? = nil,
-        baseDueOn: String? = nil,
+        base: TodoEditBase?,
         title: String,
         notes: String,
         dueOn: String?,
@@ -2753,13 +2809,10 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
         if case .conflict = outcome {
-            let bTitle = baseTitle ?? detail.map { TodoRules.cleanTitle($0.title) } ?? title
-            let bNotes = baseNotes ?? detail.map { TodoRules.cleanBody($0.notes) } ?? notes
-            let bDue = baseTitle != nil ? baseDueOn : detail?.due_on
+            // Always use the true original base captured when Edit opened (never the refetched server `detail`).
+            // If `base` is nil, `TodoConflictDraft` keeps recovery strictly manual without auto-merging.
             let draft = TodoConflictDraft(
-                baseTitle: bTitle,
-                baseNotes: bNotes,
-                baseDueOn: bDue,
+                base: base,
                 editedTitle: title,
                 editedNotes: notes,
                 editedDueOn: dueOn

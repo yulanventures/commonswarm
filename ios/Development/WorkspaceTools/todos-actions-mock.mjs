@@ -239,8 +239,10 @@ const server = createServer(async (req, res) => {
       t.version += 2;
       const newTitle = url.searchParams.get("title");
       const newState = url.searchParams.get("state");
+      const newDueOn = url.searchParams.get("due_on");
       if (newTitle) t.title = newTitle;
       if (newState) t.state = newState;
+      if (newDueOn !== null) t.due_on = newDueOn === "" ? null : newDueOn;
       return reply(200, { ok: true, version: t.version });
     }
     if (req.method === "POST" && url.pathname === "/fixture/hold-next-comment-page") {

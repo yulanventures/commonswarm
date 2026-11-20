@@ -822,7 +822,10 @@ private struct TodoEditSheet: View {
                                     .filter { activeConflicts.contains($0) }
                                     .map(\.label)
                                     .joined(separator: ", ")
-                                Text(verbatim: "Both you and a teammate edited \(names). The latest version is kept below so you can compare or copy your text.")
+                                let conflictCopy = unsentDraft.base == nil
+                                    ? "Review \(names) manually against the latest version below and copy any wording you want to keep."
+                                    : "Both you and a teammate edited \(names). The latest version is kept below so you can compare or copy your text."
+                                Text(verbatim: conflictCopy)
                                     .font(.footnote.weight(.semibold))
                                     .foregroundStyle(errorForeground)
                                     .fixedSize(horizontal: false, vertical: true)

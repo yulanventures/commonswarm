@@ -1138,6 +1138,145 @@ struct VerifyTodoActions {
             detailVM.commentDraftMentions.removeAll()
         }
 
+        // 5h. HezSec witness: lost-response notes-only edit -> teammate updates title & due date ->
+        //     Back & reopen on a fresh TodoDetailViewModel -> original-ID Retry hits 409 conflict ->
+        //     conflictDraft retains the TRUE original base (never the refetched server values),
+        //     marks ONLY .notes as author-edited, merges without clobbering teammate's title/due date,
+        //     and nil-base fallback keeps recovery strictly manual (zero auto-applied fields).
+        let seedBaseEdit = await MainActor.run { detailVM.beginEdit() }!
+        let seedBaseOK = await detailVM.updateDetails(
+            session: seedBaseEdit,
+            title: "Original base title",
+            notes: "Original base notes",
+            dueOn: "2026-12-10",
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        expect(seedBaseOK, "Expected clean base title/notes/due_on before lost-response retry conflict witness")
+
+        let lostRespEdit = await MainActor.run { detailVM.beginEdit() }!
+        try await postFixture("\(base)/fixture/fail-next-write")
+        let lostRespOK = await detailVM.updateDetails(
+            session: lostRespEdit,
+            title: lostRespEdit.initialTitle,
+            notes: "Lost-response notes edit.",
+            dueOn: lostRespEdit.initialDueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        let originalUpdateCmdID = await MainActor.run { detailVM.pendingUpdate?.commandID }
+        let pendingRetainsBase = await MainActor.run {
+            !lostRespOK
+                && detailVM.hasUnknownPendingUpdate
+                && originalUpdateCmdID != nil
+                && detailVM.pendingUpdate?.base == TodoEditBase(
+                    title: "Original base title",
+                    notes: "Original base notes",
+                    dueOn: "2026-12-10"
+                )
+        }
+        expect(pendingRetainsBase, "Lost-response edit must remain unknown and retain the original edit base in PendingUpdate")
+
+        // Teammate changes title AND due date while the author's edit outcome is uncertain
+        try await postFixture("\(base)/fixture/advance-version?title=Teammate%20renamed%20title&due_on=2026-12-20")
+
+        // Navigate Back (retire old VM) and reopen on a brand-new TodoDetailViewModel (refetches teammate's title & due date)
+        await MainActor.run { detailVM.retire() }
+        let reopenedEditVM = await MainActor.run { TodoDetailViewModel() }
+        await reopenedEditVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let retryEditItem = await MainActor.run {
+            reopenedEditVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .update = $0.action { return true }
+                return false
+            }
+        }
+        let reopenedReady = await MainActor.run {
+            reopenedEditVM.detail?.title == "Teammate renamed title"
+                && reopenedEditVM.detail?.due_on == "2026-12-20"
+                && retryEditItem?.commandID == originalUpdateCmdID
+                && reopenedEditVM.pendingUpdate?.base == TodoEditBase(
+                    title: "Original base title",
+                    notes: "Original base notes",
+                    dueOn: "2026-12-10"
+                )
+        }
+        expect(reopenedReady, "Reopened view must show teammate's newer title & due date while recovering original commandID and true original base")
+
+        // Retry with original commandID -> hits 409 conflict
+        let retryConflictOK = await reopenedEditVM.retryPending(retryEditItem!, api: todoAPI, workspaceID: ws.id)
+        let retryConflictDraftOK = await MainActor.run {
+            !retryConflictOK
+                && !reopenedEditVM.hasUnknownPendingUpdate
+                && reopenedEditVM.conflictDraft?.base == TodoEditBase(
+                    title: "Original base title",
+                    notes: "Original base notes",
+                    dueOn: "2026-12-10"
+                )
+                && reopenedEditVM.conflictDraft?.editedKeys == [.notes]
+                && reopenedEditVM.conflictDraft?.editedNotes == "Lost-response notes edit."
+        }
+        expect(retryConflictDraftOK, "Conflict on original-ID retry after Back/reopen must use the true original base and mark ONLY .notes as author-edited")
+
+        let reopenedEditAfterConflict = await MainActor.run { reopenedEditVM.beginEdit() }!
+        let mergedAfterRetryConflict = await MainActor.run {
+            reopenedEditVM.conflictDraft!.merge(
+                onto: reopenedEditAfterConflict.initialTitle,
+                latestNotes: reopenedEditAfterConflict.initialNotes,
+                latestDueOn: reopenedEditAfterConflict.initialDueOn
+            )
+        }
+        expect(
+            mergedAfterRetryConflict.title == "Teammate renamed title"
+                && mergedAfterRetryConflict.dueOn == "2026-12-20"
+                && mergedAfterRetryConflict.notes == "Lost-response notes edit."
+                && mergedAfterRetryConflict.appliedFields == [.notes]
+                && mergedAfterRetryConflict.conflictingFields.isEmpty,
+            "Merging after original-ID retry conflict must preserve teammate's newer title and due date while restoring author's notes"
+        )
+        let savedAfterRetryMerge = await reopenedEditVM.updateDetails(
+            session: reopenedEditAfterConflict,
+            title: mergedAfterRetryConflict.title,
+            notes: mergedAfterRetryConflict.notes,
+            dueOn: mergedAfterRetryConflict.dueOn,
+            api: todoAPI,
+            workspaceID: ws.id
+        )
+        await reopenedEditVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let savedReadBackRetryMerge = await MainActor.run {
+            savedAfterRetryMerge
+                && reopenedEditVM.conflictDraft == nil
+                && reopenedEditVM.detail?.title == "Teammate renamed title"
+                && reopenedEditVM.detail?.due_on == "2026-12-20"
+                && reopenedEditVM.detail?.notes == "Lost-response notes edit."
+        }
+        expect(savedReadBackRetryMerge, "Saved record after retry-conflict merge must persist teammate's title, due date, AND author's notes")
+
+        // Manual-recovery invariant when original base is unavailable (nil): never auto-applies any field
+        let unknownBaseDraft = TodoConflictDraft(
+            base: nil,
+            editedTitle: "Original base title",
+            editedNotes: "Lost-response notes edit.",
+            editedDueOn: "2026-12-10"
+        )
+        let manualOnlyMerge = unknownBaseDraft.merge(
+            onto: "Teammate renamed title",
+            latestNotes: "Original base notes",
+            latestDueOn: "2026-12-20"
+        )
+        expect(
+            manualOnlyMerge.appliedFields.isEmpty
+                && manualOnlyMerge.title == "Teammate renamed title"
+                && manualOnlyMerge.notes == "Original base notes"
+                && manualOnlyMerge.dueOn == "2026-12-20"
+                && manualOnlyMerge.conflictingFields == [.title, .notes, .dueOn],
+            "When original base is unavailable, TodoConflictDraft.merge must keep recovery strictly manual with ZERO auto-applied fields"
+        )
+
+        await MainActor.run {
+            reopenedEditVM.retire()
+            detailVM.activate()
+        }
+
         // =========================================================================
         // 6. C1: Refusal clears named directory, closes mention picker & sheets, and drops older held comment page errors
         // =========================================================================
