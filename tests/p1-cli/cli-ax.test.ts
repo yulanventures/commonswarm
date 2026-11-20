@@ -297,6 +297,8 @@ async function startMockCloud(options: {
 test("cswarm whoami --json returns richer workspace, seat, and conversations metadata (Step 2b + pre-2b fallback) without leaking secrets", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cswarm-ax-whoami-"));
   chmodSync(dir, 0o700);
+  const previousHome = process.env.HOME;
+  process.env.HOME = dir;
   const cloud = await startMockCloud({ supportConversationsList: true });
   const legacyCloud = await startMockCloud({ supportConversationsList: false });
   try {
@@ -372,6 +374,8 @@ test("cswarm whoami --json returns richer workspace, seat, and conversations met
     assert.equal(legacyBody.conversations.channels[0].slug, "general");
     assert.equal(legacyBody.conversations.channels[1].slug, "ops");
   } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await cloud.close();
     await legacyCloud.close();
     rmSync(dir, { recursive: true, force: true });
@@ -381,6 +385,8 @@ test("cswarm whoami --json returns richer workspace, seat, and conversations met
 test("cswarm conversation read and check round-trip opaque --after <cursor> and emit self-healing --json error envelopes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cswarm-ax-cursor-"));
   chmodSync(dir, 0o700);
+  const previousHome = process.env.HOME;
+  process.env.HOME = dir;
   const cloud = await startMockCloud({ supportConversationsList: true });
   const rateLimitCloud = await startMockCloud({ supportConversationsList: true, rateLimitNextConversationRead: true });
   try {
@@ -464,7 +470,8 @@ test("cswarm conversation read and check round-trip opaque --after <cursor> and 
       "--json",
     ]);
     assert.equal(badCursor.code, 1);
-    const badCursorJson = JSON.parse(badCursor.stdout) as Record<string, any>;
+    assert.equal(badCursor.stdout, "");
+    const badCursorJson = JSON.parse(badCursor.stderr) as Record<string, any>;
     assert.equal(badCursorJson.ok, false);
     assert.equal(badCursorJson.error, "invalid_cursor");
     assert.equal(badCursorJson.reason, "invalid_cursor");
@@ -482,7 +489,8 @@ test("cswarm conversation read and check round-trip opaque --after <cursor> and 
       "--json",
     ]);
     assert.equal(missingConv.code, 1);
-    const missingConvJson = JSON.parse(missingConv.stdout) as Record<string, any>;
+    assert.equal(missingConv.stdout, "");
+    const missingConvJson = JSON.parse(missingConv.stderr) as Record<string, any>;
     assert.equal(missingConvJson.ok, false);
     assert.equal(missingConvJson.error, "conversation_not_found");
     assert.equal(missingConvJson.reason, "conversation_not_found");
@@ -500,7 +508,8 @@ test("cswarm conversation read and check round-trip opaque --after <cursor> and 
       "--json",
     ]);
     assert.equal(missingCh.code, 1);
-    const missingChJson = JSON.parse(missingCh.stdout) as Record<string, any>;
+    assert.equal(missingCh.stdout, "");
+    const missingChJson = JSON.parse(missingCh.stderr) as Record<string, any>;
     assert.equal(missingChJson.ok, false);
     assert.equal(missingChJson.reason, "channel_not_found");
     assert.match(missingChJson.next[0], /^cswarm channel ls /);
@@ -566,7 +575,8 @@ test("cswarm conversation read and check round-trip opaque --after <cursor> and 
       "--json",
     ]);
     assert.equal(wrongSession.code, 1);
-    const wrongSessionJson = JSON.parse(wrongSession.stdout) as Record<string, any>;
+    assert.equal(wrongSession.stdout, "");
+    const wrongSessionJson = JSON.parse(wrongSession.stderr) as Record<string, any>;
     assert.equal(wrongSessionJson.ok, false);
     assert.equal(wrongSessionJson.reason, "profile_session_mismatch");
     assert.match(wrongSessionJson.next[0], /^cswarm setup --connection-file/);
@@ -589,12 +599,15 @@ test("cswarm conversation read and check round-trip opaque --after <cursor> and 
       "--json",
     ]);
     assert.equal(rl.code, 1);
-    assert.doesNotMatch(rl.stdout, /swm_agt_/);
-    const rlJson = JSON.parse(rl.stdout) as Record<string, any>;
+    assert.equal(rl.stdout, "");
+    assert.doesNotMatch(rl.stderr, /swm_agt_/);
+    const rlJson = JSON.parse(rl.stderr) as Record<string, any>;
     assert.equal(rlJson.ok, false);
     assert.equal(rlJson.reason, "rate_limited");
     assert.match(rlJson.message, /\[redacted\]/);
   } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await cloud.close();
     await rateLimitCloud.close();
     rmSync(dir, { recursive: true, force: true });

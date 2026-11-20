@@ -12760,7 +12760,7 @@ if (isCliMain()) {
       error instanceof RenewalSuspended
     ) {
       if (wantsJson) {
-        process.stdout.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeParagraph(error.message)))}\n`);
+        process.stderr.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeParagraph(error.message)))}\n`);
       } else {
         process.stderr.write(`${safeParagraph(error.message)}\n`);
       }
@@ -12845,7 +12845,7 @@ if (isCliMain()) {
       return;
     }
     if (wantsJson) {
-      process.stdout.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeError(error)))}\n`);
+      process.stderr.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeError(error)))}\n`);
       process.exitCode = error instanceof UsageError ? 1 : exitCodeFor(error);
       return;
     }

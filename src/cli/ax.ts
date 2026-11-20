@@ -498,6 +498,14 @@ export function classifyCliError(
   }
 
   // 9. Auth expired / unauthenticated
+  // Never suggest `cswarm login` when a transient refresh error preserved the saved credential.
+  if (lower.includes("your credential was kept")) {
+    return {
+      error: rawCode ?? "transient_auth_error",
+      reason: "timeout",
+      next: ["Retry the same command."],
+    };
+  }
   if (
     status === 401 ||
     name === "RenewalReauthorisationRequired" ||
