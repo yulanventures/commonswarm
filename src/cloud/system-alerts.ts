@@ -25,6 +25,8 @@ export interface SystemAlertRecord {
   resolved_by_id?: string | null;
   resolution_note?: string | null;
   was_escalated?: boolean;
+  sender_kind?: "user" | "agent" | null;
+  sender_id?: string | null;
 }
 
 export interface SystemAlertsReadResult {
@@ -69,6 +71,8 @@ export function systemAlertToSignalRecord(
   const until = new Date(Date.parse(routedAt) + 7 * 24 * 3600_000).toISOString();
   const body = alert.kind === "agent_quiet"
     ? `System alert (${alert.kind}, id ${alert.alert_id}): ${alert.affected_seat_name} has stopped listening (${alert.waiting_count ?? 0} waiting since ${alert.oldest_waiting_at ?? alert.opened_at}). Fix: ${alert.fix_hint}`
+    : alert.kind === "agent_unseen"
+    ? `System alert (${alert.kind}, id ${alert.alert_id}): ${alert.affected_seat_name} has ${alert.waiting_count ?? 0} unseen ask/notice waiting since ${alert.oldest_waiting_at ?? alert.opened_at}. Fix: ${alert.fix_hint}`
     : `System alert (${alert.kind}, id ${alert.alert_id}): ${alert.affected_seat_name} lost access. Fix: ${alert.fix_hint}`;
   return {
     id: alert.alert_id,

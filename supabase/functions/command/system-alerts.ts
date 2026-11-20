@@ -6,6 +6,7 @@
 export const RESOLVE_SYSTEM_ALERT_KIND = "resolve_system_alert";
 export const SYSTEM_ALERT_KINDS = [
   "agent_quiet",
+  "agent_unseen",
   "local_renewal_superseded",
   "local_credential_revoked",
   "hosted_seat_refused",

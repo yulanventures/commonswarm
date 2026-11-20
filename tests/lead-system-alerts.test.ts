@@ -79,6 +79,8 @@ test("resolve_system_alert refuses wrong fields, bad UUID, empty/overlong/contro
 
 test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron schedule, owner-only escalation and clean rollback", () => {
   const migration = readFileSync("supabase/migrations/20261119000001_lead_system_alerts.sql", "utf8");
+  const unseenMigration = readFileSync("supabase/migrations/20261120000004_agent_unseen_alerts.sql", "utf8");
+  const combinedMigrations = `${migration}\n${unseenMigration}`;
   const rollback = readFileSync("deploy/release-proofs/lead-system-alerts/20261119000001-rollback.sql", "utf8");
   const commandEdge = readFileSync("supabase/functions/command/index.ts", "utf8");
 
@@ -86,8 +88,12 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   assert.match(commandEdge, /"resolve_system_alert"/);
 
   for (const kind of SYSTEM_ALERT_KINDS) {
-    assert.match(migration, new RegExp(`'${kind}'`));
+    assert.match(combinedMigrations, new RegExp(`'${kind}'`));
   }
+  assert.match(unseenMigration, /CREATE UNIQUE INDEX IF NOT EXISTS system_alerts_agent_unseen_open_seat_unique/);
+  assert.match(unseenMigration, /FOR UPDATE SKIP LOCKED/);
+  assert.match(unseenMigration, /swarm-sync-agent-unseen-alerts/);
+  assert.doesNotMatch(unseenMigration, /GRANT EXECUTE[^;]*sync_agent_unseen_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);
 
   assert.match(migration, /ALTER TABLE swarm\.system_alerts ENABLE ROW LEVEL SECURITY;/);
   assert.match(migration, /ALTER TABLE swarm\.system_alerts FORCE ROW LEVEL SECURITY;/);
@@ -449,4 +455,38 @@ test("best-effort access_lost alert writes run post-tx with 250ms lock_timeout a
   // activity/index.ts and mcp/index.ts must bound best-effort alert lock wait to 250ms.
   assert.match(activityEdge, /set_config\('lock_timeout',\s*'250ms',\s*true\)/);
   assert.match(mcpEdge, /set_config\('lock_timeout',\s*'250ms',\s*true\)/);
+});
+
+test("C1a: agent_unseen kind is allowlisted and renders clear unseen ask/notice copy", async () => {
+  const modPath = "../supabase/functions/command/system-alerts.ts";
+  const { SYSTEM_ALERT_KINDS } = (await import(modPath)) as { SYSTEM_ALERT_KINDS: readonly string[] };
+  assert.ok(SYSTEM_ALERT_KINDS.includes("agent_unseen"), "SYSTEM_ALERT_KINDS must include agent_unseen");
+
+  const sig = systemAlertToSignalRecord(
+    {
+      alert_id: ALERT,
+      workspace_id: WS,
+      channel_id: null,
+      kind: "agent_unseen",
+      affected_principal_id: AFFECTED,
+      affected_seat_name: "Reviewer",
+      fix_hint: "Ask the agent seat to run cswarm check (or open its host session) to view unseen messages.",
+      waiting_count: 2,
+      oldest_waiting_at: "2026-11-20T10:42:00.000Z",
+      routed_lead_principal_id: LEAD,
+      opened_at: "2026-11-20T10:55:00.000Z",
+      escalated_at: null,
+      sender_kind: "agent",
+      sender_id: "99999999-9999-4999-8999-999999999999",
+    },
+    LEAD,
+  );
+  assert.equal(sig.about, "system_alert:agent_unseen");
+  assert.match(sig.body, /System alert \(agent_unseen/);
+  assert.match(sig.body, /Reviewer has 2 unseen ask\/notice waiting since 2026-11-20T10:42:00.000Z/);
+  assert.deepEqual(sig.system_alert, {
+    alert_id: ALERT,
+    kind: "agent_unseen",
+    affected_principal_id: AFFECTED,
+  });
 });

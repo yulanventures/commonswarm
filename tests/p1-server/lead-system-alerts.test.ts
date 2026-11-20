@@ -1647,3 +1647,100 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
     "revoked multi-workspace credential must record alerts across both workspaces once unlocked",
   );
 });
+
+test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/mentions/todo-notices (incl. queued), notifies lead + sender, enforces scope, and clears when seen", async () => {
+  const unseenSeat = await agentOf(owner.id, "c1a-unseen-seat");
+  const senderAgent = await agentOf(owner.id, "c1a-sender-agent");
+  const bystanderAgent = await agentOf(owner.id, "c1a-bystander-agent");
+  await setPresence(wsLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(senderAgent, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(unseenSeat, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+
+  // 1. Plain unmentioned note and working-on MUST NOT raise agent_unseen.
+  const plainNoteId = randomUUID();
+  const workingOnId = randomUUID();
+  await sql`
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, to_agent_principal_id, until, created_at)
+    VALUES
+      (${plainNoteId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'note', 'plain note', ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '20 minutes'),
+      (${workingOnId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'working-on', 'working on stuff', NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '20 minutes')
+  `;
+  await sql`
+    INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
+    VALUES (${workspace}::uuid, ${plainNoteId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '20 minutes')
+  `;
+  await sql`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes')`;
+  const afterPlain = await sql<Row[]>`
+    SELECT alert_id FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid AND kind = 'agent_unseen' AND affected_principal_id = ${unseenSeat.principal}::uuid AND resolved_at IS NULL
+  `;
+  assert.equal(afterPlain.length, 0, "plain unmentioned note must NOT trigger agent_unseen");
+
+  // 2. Queued ask (ack_outcome = 'queued') AND unacked todo notice older than 10 min -> ONE deduplicated alert per seat!
+  const queuedAskId = randomUUID();
+  const todoNoticeId = randomUUID();
+  await sql`
+    INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, about, to_agent_principal_id, until, created_at)
+    VALUES
+      (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes'),
+      (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes')
+  `;
+  await sql`
+    INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
+    VALUES
+      (${workspace}::uuid, ${queuedAskId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '15 minutes', statement_timestamp() - interval '14 minutes', 'queued'),
+      (${workspace}::uuid, ${todoNoticeId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '12 minutes', NULL, NULL)
+  `;
+
+  const [sync1] = await sql<{ res: Row }[]>`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes') AS res`;
+  assert.ok(Number(sync1!.res.synced) >= 1);
+
+  const openAlerts = await sql<Row[]>`
+    SELECT alert_id, waiting_count, routed_lead_principal_id, sender_kind, sender_id, resolved_at
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid AND kind = 'agent_unseen' AND affected_principal_id = ${unseenSeat.principal}::uuid AND resolved_at IS NULL
+  `;
+  assert.equal(openAlerts.length, 1, "must deduplicate to exactly ONE open agent_unseen alert per seat");
+  assert.equal(Number(openAlerts[0]!.waiting_count), 2);
+  assert.equal(openAlerts[0]!.routed_lead_principal_id, wsLead.principal);
+  assert.equal(openAlerts[0]!.sender_kind, "agent");
+  assert.equal(openAlerts[0]!.sender_id, senderAgent.principal);
+  const alertId = String(openAlerts[0]!.alert_id);
+
+  // 3. Lead AND sender agent both receive the agent_unseen alert in their inbox/system_alerts; bystander does NOT!
+  const leadRead = await readResource(wsLead.token, { resource: "system_alerts", workspace_id: workspace });
+  assert.equal(leadRead.status, 200);
+  assert.ok((leadRead.body.alerts as Row[]).some((a) => a.alert_id === alertId), "lead must read agent_unseen alert");
+
+  const senderRead = await readResource(senderAgent.token, { resource: "system_alerts", workspace_id: workspace });
+  assert.equal(senderRead.status, 200);
+  assert.ok((senderRead.body.alerts as Row[]).some((a) => a.alert_id === alertId), "sender agent must read its own agent_unseen alert");
+
+  const senderInbox = await readResource(senderAgent.token, { resource: "signals", workspace_id: workspace, inbox: true });
+  assert.equal(senderInbox.status, 200);
+  assert.ok((senderInbox.body.signals as Row[]).some((s) => s.id === alertId && s.about === "system_alert:agent_unseen"), "sender agent must receive agent_unseen in inbox");
+
+  const bystanderRead = await readResource(bystanderAgent.token, { resource: "system_alerts", workspace_id: workspace });
+  assert.equal(bystanderRead.status, 200);
+  assert.equal((bystanderRead.body.alerts as Row[]).some((a) => a.alert_id === alertId), false, "unrelated agent must NOT see agent_unseen alert");
+
+  // 4. Observing ONLY the first message keeps the alert open while the second remains unseen.
+  await sql`
+    UPDATE swarm.signal_deliveries
+    SET acked_at = clock_timestamp(), ack_outcome = 'observed'
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${queuedAskId}::uuid AND recipient_agent_principal_id = ${unseenSeat.principal}::uuid
+  `;
+  const [stillOpen] = await sql<Row[]>`SELECT resolved_at FROM swarm.system_alerts WHERE alert_id = ${alertId}::uuid`;
+  assert.equal(stillOpen!.resolved_at, null, "alert stays open while a second unseen notice remains");
+
+  // 5. Observing the last remaining unseen message IMMEDIATELY auto-clears the alert!
+  await sql`
+    UPDATE swarm.signal_deliveries
+    SET acked_at = clock_timestamp(), ack_outcome = 'observed'
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${todoNoticeId}::uuid AND recipient_agent_principal_id = ${unseenSeat.principal}::uuid
+  `;
+  const [cleared] = await sql<Row[]>`SELECT resolved_at, resolved_by_kind, resolved_by_id, resolution_note FROM swarm.system_alerts WHERE alert_id = ${alertId}::uuid`;
+  assert.ok(cleared!.resolved_at !== null, "agent_unseen alert must clear automatically once the seat views all unseen asks/notices");
+  assert.equal(cleared!.resolved_by_kind, "agent");
+  assert.equal(cleared!.resolved_by_id, unseenSeat.principal);
+});
