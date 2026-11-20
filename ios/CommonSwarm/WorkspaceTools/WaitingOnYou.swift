@@ -555,10 +555,12 @@ final class WaitingOnYouStore: ObservableObject {
     var sentBanner: String? { statusBanner?.text }
 
     let place: WaitingPlace
+    private weak var session: HumanSession?
     private var bannerTask: Task<Void, Never>?
 
-    init(place: WaitingPlace) {
+    init(place: WaitingPlace, session: HumanSession? = nil) {
         self.place = place
+        self.session = session
     }
 
     var visibleItems: [WaitingAskItem] {
@@ -605,6 +607,16 @@ final class WaitingOnYouStore: ObservableObject {
         draftsBySignal[signalID] ?? WaitingChoiceDraft()
     }
 
+    func persistDraft(_ draft: WaitingChoiceDraft?, workspaceID: UUID, signalID: UUID) {
+        draftsBySignal[signalID] = draft
+        WaitingSessionDraftMemory.shared.setDraft(draft, workspaceID: workspaceID, signalID: signalID, session: session)
+    }
+
+    func persistFailure(_ failure: WaitingCardFailure?, workspaceID: UUID, signalID: UUID) {
+        failuresBySignal[signalID] = failure
+        WaitingSessionDraftMemory.shared.setFailure(failure, workspaceID: workspaceID, signalID: signalID, session: session)
+    }
+
     func toggleOption(_ optionID: String, for item: WaitingAskItem) {
         var current = draft(for: item.id)
         if let idx = current.selected.firstIndex(of: optionID) {
@@ -612,20 +624,24 @@ final class WaitingOnYouStore: ObservableObject {
         } else {
             current.selected.append(optionID)
         }
-        draftsBySignal[item.id] = current
-        failuresBySignal[item.id] = nil
+        persistDraft(current, workspaceID: item.workspaceID, signalID: item.id)
+        persistFailure(nil, workspaceID: item.workspaceID, signalID: item.id)
     }
 
     func updateOtherText(_ text: String, for signalID: UUID) {
         var current = draft(for: signalID)
         current.otherText = text
-        draftsBySignal[signalID] = current
-        failuresBySignal[signalID] = nil
+        let wsID = items.first(where: { $0.id == signalID })?.workspaceID ?? place.workspaceID
+        persistDraft(current, workspaceID: wsID, signalID: signalID)
+        persistFailure(nil, workspaceID: wsID, signalID: signalID)
     }
 
     func load(api: WaitingOnYouAPI) async {
         isLoading = true
         loadFailed = false
+        if session == nil {
+            session = api.api.session
+        }
         let result = await api.loadAll(currentWorkspaceID: place.workspaceID, currentWorkspaceName: place.workspaceName)
         guard !Task.isCancelled else { return }
         allWorkspacesEnumerated = result.enumeratedAllWorkspaces
@@ -633,9 +649,26 @@ final class WaitingOnYouStore: ObservableObject {
         workspaceFailed = result.workspaceFailed
         items = result.items
         todos = result.todos
+        hydrateSessionDrafts(for: result.items)
         hasLoadedOnce = true
         loadFailed = (!result.enumeratedAllWorkspaces || result.workspaceFailed.values.contains(true)) && result.items.isEmpty && result.todos.isEmpty
         isLoading = false
+    }
+
+    private func hydrateSessionDrafts(for loadedItems: [WaitingAskItem]) {
+        guard let session else { return }
+        var restoredDrafts = draftsBySignal
+        var restoredFailures = failuresBySignal
+        for item in loadedItems {
+            if let savedDraft = WaitingSessionDraftMemory.shared.draft(workspaceID: item.workspaceID, signalID: item.id, session: session) {
+                restoredDrafts[item.id] = savedDraft
+            }
+            if let savedFailure = WaitingSessionDraftMemory.shared.failure(workspaceID: item.workspaceID, signalID: item.id, session: session) {
+                restoredFailures[item.id] = savedFailure
+            }
+        }
+        draftsBySignal = restoredDrafts
+        failuresBySignal = restoredFailures
     }
 
     func submitSingleOption(_ optionID: String, for item: WaitingAskItem, api: WaitingOnYouAPI) async {
@@ -692,13 +725,15 @@ final class WaitingOnYouStore: ObservableObject {
         }
     }
 
-    private func submit(
+    @discardableResult
+    func submitChoice(
         _ submission: WaitingChoiceSubmission,
         for item: WaitingAskItem,
         api: WaitingOnYouAPI,
-        commandID: UUID
-    ) async {
-        guard !pendingBySignal.contains(item.id) else { return }
+        commandID: UUID,
+        announceBanner: Bool = true
+    ) async -> Bool {
+        guard !pendingBySignal.contains(item.id) else { return false }
         pendingBySignal.insert(item.id)
         failuresBySignal[item.id] = nil
 
@@ -714,20 +749,42 @@ final class WaitingOnYouStore: ObservableObject {
         switch outcome {
         case .accepted:
             items.removeAll { $0.id == item.id }
-            draftsBySignal[item.id] = nil
-            failuresBySignal[item.id] = nil
-            showStatusBanner(.sent, "Sent")
+            persistDraft(nil, workspaceID: item.workspaceID, signalID: item.id)
+            persistFailure(nil, workspaceID: item.workspaceID, signalID: item.id)
+            if announceBanner {
+                showStatusBanner(.sent, "Sent")
+            }
+            return true
         case .failed(let message, let retryable):
-            failuresBySignal[item.id] = WaitingCardFailure(
-                commandID: commandID,
-                submission: submission,
-                message: message,
-                retryable: retryable
+            persistFailure(
+                WaitingCardFailure(
+                    commandID: commandID,
+                    submission: submission,
+                    message: message,
+                    retryable: retryable
+                ),
+                workspaceID: item.workspaceID,
+                signalID: item.id
             )
+            return false
         }
     }
 
-    private func showStatusBanner(_ kind: WaitingBannerKind, _ text: String) {
+    private func submit(
+        _ submission: WaitingChoiceSubmission,
+        for item: WaitingAskItem,
+        api: WaitingOnYouAPI,
+        commandID: UUID
+    ) async {
+        await submitChoice(submission, for: item, api: api, commandID: commandID, announceBanner: true)
+    }
+
+    func clearFailure(for signalID: UUID) {
+        let wsID = items.first(where: { $0.id == signalID })?.workspaceID ?? place.workspaceID
+        persistFailure(nil, workspaceID: wsID, signalID: signalID)
+    }
+
+    func showStatusBanner(_ kind: WaitingBannerKind, _ text: String) {
         statusBanner = WaitingStatusBanner(kind: kind, text: text)
         bannerTask?.cancel()
         bannerTask = Task { [weak self] in

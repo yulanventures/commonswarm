@@ -53,7 +53,8 @@ private struct WaitingOnYouToolbarModifier: ViewModifier {
                     viewerID: api.session.userID,
                     directory: directory,
                     channelID: channelID
-                )
+                ),
+                session: api.session
             )
         )
     }
@@ -113,6 +114,7 @@ struct WaitingOnYouSheetView: View {
     let api: WaitingOnYouAPI
     let onDismiss: () -> Void
     @State private var openedTodo: WaitingTodoItem?
+    @State private var reviewSnapshot: [WaitingAskItem]?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
 
@@ -188,6 +190,9 @@ struct WaitingOnYouSheetView: View {
                         store.removeDroppedTodo(droppedID, announce: announce)
                     }
                 )
+            }
+            .navigationDestination(item: $reviewSnapshot) { snapshot in
+                WaitingQuestionReviewView(store: store, api: api, initialItems: snapshot)
             }
         }
         .task {
@@ -277,6 +282,29 @@ struct WaitingOnYouSheetView: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                    if visibleAsks.count >= 2 {
+                        Button {
+                            reviewSnapshot = visibleAsks
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checklist.checked")
+                                    .accessibilityHidden(true)
+                                Text("Review questions (\(visibleAsks.count))")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .accessibilityHidden(true)
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(selectedScopeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("waiting-review-questions-button")
+                    }
+
                     ForEach(visibleAsks) { item in
                         WaitingAskCardView(
                             item: item,

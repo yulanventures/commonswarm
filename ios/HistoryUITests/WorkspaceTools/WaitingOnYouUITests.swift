@@ -111,15 +111,46 @@ final class WaitingOnYouUITests: XCTestCase {
         XCTAssertTrue(mobileTodo.exists, "Expected #mobile waiting to-do in All channels")
         capture("waiting-workspace")
 
-        // Switch to All workspaces scope pill and verify cross-workspace to-do appears
+        // Switch to All workspaces scope pill and launch survey-style Review questions
         let allWorkspacesScope = app.buttons["waiting-scope-all"].firstMatch
         XCTAssertTrue(allWorkspacesScope.waitForExistence(timeout: 5))
         allWorkspacesScope.tap()
-        let secondWsTodo = app.staticTexts["Unpause nightly staging sync job"].firstMatch
-        for _ in 0..<6 where !secondWsTodo.exists {
-            app.swipeUp()
-        }
-        XCTAssertTrue(secondWsTodo.exists, "Expected Second workspace waiting to-do in All workspaces")
-        capture("waiting-all-workspaces")
+
+        let reviewButton = app.buttons["waiting-review-questions-button"].firstMatch
+        XCTAssertTrue(reviewButton.waitForExistence(timeout: 8), "Expected Review questions button when >= 2 questions are visible")
+        reviewButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Question 1 of 3"].firstMatch.waitForExistence(timeout: 8), "Expected Question 1 of 3 header")
+        capture("waiting-review-step")
+
+        // Q1 already has "To-dos list and detail" checked from session draft persistence; advance with Next
+        let nextButton = app.buttons["review-next-button"].firstMatch
+        XCTAssertTrue(nextButton.waitForExistence(timeout: 5))
+        nextButton.tap()
+
+        // Q2: Skip it
+        XCTAssertTrue(app.staticTexts["Question 2 of 3"].firstMatch.waitForExistence(timeout: 5))
+        let skipButton = app.buttons["review-skip-button"].firstMatch
+        XCTAssertTrue(skipButton.waitForExistence(timeout: 5))
+        skipButton.tap()
+
+        // Q3: Select recommended option and proceed to Final Review
+        XCTAssertTrue(app.staticTexts["Question 3 of 3"].firstMatch.waitForExistence(timeout: 5))
+        let rotateOption = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Rotate now")).firstMatch
+        XCTAssertTrue(rotateOption.waitForExistence(timeout: 5))
+        rotateOption.tap()
+        nextButton.tap()
+
+        // Final Review shows 2 ready to send + 1 skipped
+        XCTAssertTrue(app.staticTexts["2 ready to send"].firstMatch.waitForExistence(timeout: 8), "Expected 2 ready to send on final review")
+        XCTAssertTrue(app.staticTexts["1 skipped, won’t be sent"].firstMatch.exists, "Expected 1 skipped summary")
+        capture("waiting-review-summary")
+
+        // Send only the 2 answered questions
+        let sendAllButton = app.buttons["review-send-all-button"].firstMatch
+        XCTAssertTrue(sendAllButton.waitForExistence(timeout: 5))
+        sendAllButton.tap()
+        XCTAssertTrue(app.staticTexts["Sent 2 answers"].firstMatch.waitForExistence(timeout: 8), "Expected Sent 2 answers banner after review send")
+        capture("waiting-review-sent")
     }
 }
