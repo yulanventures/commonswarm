@@ -145,10 +145,17 @@ import {
   resolveSystemAlertCommand,
 } from "./cloud/system-alerts.js";
 import {
+  CONVERSATION_INVITE_MAX,
+  CONVERSATION_MEMBER_MAX,
+  channelConversationCommand,
+  classifyConversationMemberSelector,
+  dedupeConversationMembers,
+  findChannelConversation,
   listConversations,
   postConversationCommand,
   readConversationHistory,
   type ConversationMemberRef,
+  type ConversationSummaryWire,
 } from "./cloud/conversations.js";
 import {
   getMemoryAsAgent,
@@ -5156,7 +5163,7 @@ async function runConversationRead(args: Arguments): Promise<void> {
 }
 
 async function runConversationOpen(args: Arguments): Promise<void> {
-  args.assertShape(RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS, 11);
+  args.assertAcceptedFlags(RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS);
   const rawMembers = args.positionals.slice(2);
   if (rawMembers.length < 1 || rawMembers.length > 9) {
     throw new UsageError("cswarm conversation open requires 1 to 9 <user|agent>:<uuid> members");
@@ -5240,6 +5247,80 @@ async function runConversationMarkRead(args: Arguments): Promise<void> {
     return;
   }
   process.stdout.write(`Marked conversation ${conversationId.toLowerCase()} read.\n`);
+}
+
+async function resolveConversationTargets(
+  rawTargets: readonly string[],
+  cloud: CloudTarget,
+  selected: Awaited<ReturnType<typeof commandWorkspaceAndCredential>>,
+): Promise<ConversationMemberRef[]> {
+  const classified = rawTargets.map((raw) => ({ raw, item: classifyConversationMemberSelector(raw) }));
+  for (const entry of classified) {
+    if (entry.item.kind === "invalid_explicit") {
+      throw new UsageError(entry.item.message);
+    }
+  }
+  const needsDirectory = classified.some((entry) => entry.item.kind === "lookup");
+  const directory = needsDirectory
+    ? await signalDirectory(cloud, selected.selectedWorkspace, selected)
+    : null;
+  const resolved: ConversationMemberRef[] = classified.map(({ raw, item }) => {
+    if (item.kind === "explicit") return item.member;
+    const matched = resolveSignalRecipient(raw, directory!);
+    return { kind: matched.kind, id: matched.id.toLowerCase() };
+  });
+  return dedupeConversationMembers(resolved);
+}
+
+async function resolveChannelConversation(
+  cloud: CloudTarget,
+  selected: Awaited<ReturnType<typeof commandWorkspaceAndCredential>>,
+  selector: string,
+): Promise<ConversationSummaryWire> {
+  if (!UUID_RE.test(selector) && !isGeneralChannel(selector)) {
+    const problem = channelSelectorProblem(selector);
+    if (problem !== null) throw new Error(problem);
+  }
+  const { conversations } = await listConversations(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    { includeArchived: true, fetcher: selected.fetcher },
+  );
+  const found = findChannelConversation(conversations, selector);
+  if (found === null) {
+    throw new Error(
+      UUID_RE.test(selector)
+        ? `There is no channel with id ${selector.toLowerCase()} in this workspace. Run cswarm channel ls to see them.`
+        : `There is no channel named ${normalizeChannelSlug(selector)} in this workspace. Run cswarm channel ls to see them.`,
+    );
+  }
+  return found;
+}
+
+export const RUN_DM_ACCEPTED_FLAGS = RUN_CONVERSATION_OPEN_ACCEPTED_FLAGS;
+
+async function runDm(args: Arguments): Promise<void> {
+  args.assertAcceptedFlags(RUN_DM_ACCEPTED_FLAGS);
+  const rawTargets = args.positionals.slice(1);
+  if (rawTargets.length < 1 || rawTargets.length > CONVERSATION_MEMBER_MAX) {
+    throw new UsageError(`cswarm dm requires 1 to ${CONVERSATION_MEMBER_MAX} member or agent names or ids`);
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const members = await resolveConversationTargets(rawTargets, cloud, selected);
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    { kind: "conversation_open", members, ...(args.has("new-group") ? { new_group: true } : {}) },
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_open failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
+    return;
+  }
+  const conv = res.body.conversation as Record<string, unknown> | undefined;
+  process.stdout.write(`Opened ${String(conv?.kind ?? "conversation")} ${String(conv?.conversation_id ?? "")}.\n`);
 }
 
 async function runMembers(args: Arguments): Promise<void> {
@@ -10709,6 +10790,160 @@ async function runChannelLead(args: Arguments): Promise<void> {
   process.stdout.write(`Channel ${channel.slug} lead: ${lead}.\n`);
 }
 
+export const RUN_CHANNEL_JOIN_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function runChannelJoin(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  if (selector === undefined) {
+    throw new UsageError("cswarm channel join needs the channel");
+  }
+  args.assertShape(RUN_CHANNEL_JOIN_1_ACCEPTED_FLAGS, 3);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const conv = await resolveChannelConversation(cloud, selected, selector);
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace,
+    channelConversationCommand(conv, { action: "join" }),
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_join failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    printJson(res.body);
+    return;
+  }
+  const label = conv.slug ?? "general";
+  process.stdout.write(
+    res.body.changed === false
+      ? `Already in #${label} (${conv.conversation_id}).\n`
+      : `Joined #${label} (${conv.conversation_id}).\n`,
+  );
+}
+
+export const RUN_CHANNEL_LEAVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function runChannelLeave(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  if (selector === undefined) {
+    throw new UsageError("cswarm channel leave needs the channel");
+  }
+  args.assertShape(RUN_CHANNEL_LEAVE_1_ACCEPTED_FLAGS, 3);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const conv = await resolveChannelConversation(cloud, selected, selector);
+  const cmd = channelConversationCommand(conv, { action: "leave" });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace, cmd,
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    printJson(res.body);
+    return;
+  }
+  const label = conv.slug ?? "general";
+  process.stdout.write(`Left #${label}.\n`);
+}
+
+export const RUN_CHANNEL_INVITE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function runChannelInvite(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  const rawTargets = args.positionals.slice(3);
+  if (selector === undefined || rawTargets.length < 1 || rawTargets.length > CONVERSATION_INVITE_MAX) {
+    throw new UsageError(
+      `cswarm channel invite requires <channel> and 1 to ${CONVERSATION_INVITE_MAX} member or agent names or ids`,
+    );
+  }
+  args.assertAcceptedFlags(RUN_CHANNEL_INVITE_1_ACCEPTED_FLAGS);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const conv = await resolveChannelConversation(cloud, selected, selector);
+  const members = await resolveConversationTargets(rawTargets, cloud, selected);
+  const cmd = channelConversationCommand(conv, { action: "invite", members });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace, cmd,
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    printJson(res.body);
+    return;
+  }
+  const label = conv.slug ?? "general";
+  process.stdout.write(
+    `Invited ${members.length} ${members.length === 1 ? "member" : "members"} to #${label}.\n`,
+  );
+}
+
+export const RUN_CHANNEL_REMOVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function runChannelRemove(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  const rawTarget = args.positionals[3];
+  if (selector === undefined || rawTarget === undefined) {
+    throw new UsageError("cswarm channel remove requires <channel> and <member|agent>");
+  }
+  args.assertShape(RUN_CHANNEL_REMOVE_1_ACCEPTED_FLAGS, 4);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const conv = await resolveChannelConversation(cloud, selected, selector);
+  const [member] = await resolveConversationTargets([rawTarget], cloud, selected);
+  const cmd = channelConversationCommand(conv, { action: "remove", member: member! });
+  const res = await postConversationCommand(
+    cloud, selected.bearer, selected.selectedWorkspace, cmd,
+    { fetcher: selected.fetcher },
+  );
+  if (res.status !== 200) {
+    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+  }
+  if (args.has("json")) {
+    printJson(res.body);
+    return;
+  }
+  const label = conv.slug ?? "general";
+  process.stdout.write(`Removed ${member!.kind}:${member!.id} from #${label}.\n`);
+}
+
+export const RUN_CHANNEL_MEMBERS_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function runChannelMembers(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  if (selector === undefined) {
+    throw new UsageError("cswarm channel members needs the channel");
+  }
+  args.assertShape(RUN_CHANNEL_MEMBERS_1_ACCEPTED_FLAGS, 3);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const conv = await resolveChannelConversation(cloud, selected, selector);
+  const liveMembers = conv.members.filter((m) => !m.left_at);
+  const label = conv.slug ?? "general";
+  if (args.has("json")) {
+    printJson({
+      workspace_id: selected.selectedWorkspace,
+      channel_id: conv.channel_id,
+      conversation_id: conv.conversation_id,
+      slug: label,
+      kind: conv.kind,
+      members: liveMembers,
+    });
+    return;
+  }
+  if (liveMembers.length === 0) {
+    process.stdout.write(`No members in #${label}.\n`);
+    return;
+  }
+  process.stdout.write(`#${label} members (${liveMembers.length}):\n`);
+  for (const m of liveMembers) {
+    process.stdout.write(`- ${sanitizeDisplayLabel(m.name ?? m.id, m.kind)} (${m.kind}:${m.id})\n`);
+  }
+}
+
 export const RUN_TASK_COMMAND_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS] as const;
 
 async function runTaskCommand(args: Arguments): Promise<void> {
@@ -11805,6 +12040,11 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     lead: commandEntry({ ...noTool("a person's channel setting; never a model tool"), handler: traced("runChannel", runChannelLead), description: "Choose who untagged posts from people in a channel wake.", mutates: true, flags: RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm channel lead <name|channel-id> (<agent> | --workspace | --none) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     unarchive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUnarchive), description: "Bring an archived channel back.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel unarchive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    join: commandEntry({ ...noTool("local MCP exposes conversation_join"), handler: traced("runChannel", runChannelJoin), description: "Join a public channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel join <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    leave: commandEntry({ ...noTool("local MCP exposes conversation_leave"), handler: traced("runChannel", runChannelLeave), description: "Leave a public or private channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel leave <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    invite: commandEntry({ ...noTool("channel membership uses channel invite/remove commands"), handler: traced("runChannel", runChannelInvite), description: "Add one or more members or agents to a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel invite <name|channel-id> <member|agent>... [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    remove: commandEntry({ ...noTool("channel membership uses channel invite/remove commands"), handler: traced("runChannel", runChannelRemove), description: "Remove a member or agent from a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel remove <name|channel-id> <member|agent> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    members: commandEntry({ ...noTool("local MCP exposes conversations_list"), handler: traced("runChannel", runChannelMembers), description: "List live members of a channel.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel members <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 15,
@@ -11863,6 +12103,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 31,
     refusalTrace: "runConversation",
   }),
+  dm: commandEntry({ ...noTool("local MCP exposes conversation_open"), handler: traced("runDm", runDm), description: "Find or open a 1:1 DM or group DM by member or agent name or id.", mutates: true, flags: [...agentFlags, "new-group"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 32, visible: true, help: ["cswarm dm <member|agent>... [--new-group] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
@@ -11969,6 +12210,11 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
   "channel.unarchive": RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS,
   "channel.lead": RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS,
+  "channel.join": RUN_CHANNEL_JOIN_1_ACCEPTED_FLAGS,
+  "channel.leave": RUN_CHANNEL_LEAVE_1_ACCEPTED_FLAGS,
+  "channel.invite": RUN_CHANNEL_INVITE_1_ACCEPTED_FLAGS,
+  "channel.remove": RUN_CHANNEL_REMOVE_1_ACCEPTED_FLAGS,
+  "channel.members": RUN_CHANNEL_MEMBERS_1_ACCEPTED_FLAGS,
   "file.put": FILE_PUT_ACCEPTED_FLAGS,
   "file.ls": FILE_LS_ACCEPTED_FLAGS,
   "file.get": FILE_GET_ACCEPTED_FLAGS,
@@ -11997,6 +12243,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "conversation.join": RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS,
   "conversation.leave": RUN_CONVERSATION_ACTION_ACCEPTED_FLAGS,
   "conversation.mark-read": RUN_CONVERSATION_MARK_READ_ACCEPTED_FLAGS,
+  dm: RUN_DM_ACCEPTED_FLAGS,
   react: RUN_REACT_ACCEPTED_FLAGS,
   unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,

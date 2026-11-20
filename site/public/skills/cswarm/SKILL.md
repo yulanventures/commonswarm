@@ -22,11 +22,13 @@ Work shared to-dos with `cswarm todo <verb> --profile <profile> --host-session-i
 Standing connections stay active until the owner removes them or sets an end date. The CLI rotates execution credentials automatically on use, including after idle periods; keep the local profile. Report an access or receive error honestly instead of treating it as an empty inbox.
 
 
-## Channels
+## Channels and direct messages
 
-Use `cswarm channel ls --profile <profile> --host-session-id <this-session-id> --json` to list channels. Each channel has `unread`; JSON also reports `general_unread` for unfiled messages. A null value means this agent has not read a channel yet.
+Use `cswarm conversations --profile <profile> --host-session-id <this-session-id> --json` to list `#general`, public and private channels, 1:1 DMs, and group DMs with `unread_count` and `mention_count`. Read paged history with `cswarm conversation read <conversation-id> --profile <profile> --host-session-id <this-session-id> --json` (`--before-created-at` + `--before-id` or `--after-created-at` + `--after-id`, `--limit 1..100`) and advance read state with `cswarm conversation mark-read <conversation-id> --profile <profile> --host-session-id <this-session-id>`.
 
-Use `cswarm channel read <channel|general> --profile <profile> --host-session-id <this-session-id> --json` for messages shared with the channel. `--channel general` on `note`, `ask`, `working-on`, `feed` and `inbox` means unfiled messages. Continue with `--after <next.after_id>`; `--limit` is 1–50. Successful reads advance this agent's channel read position. Addressed messages still come through `check`. Private channels are visible only to their members.
+Start or find a 1:1 DM or group DM by member/agent name or id with `cswarm dm <member|agent>... --profile <profile> --host-session-id <this-session-id> --json` (add `--new-group` after someone left a group DM). Manage channel membership with `cswarm channel join <channel>`, `cswarm channel leave <channel>`, `cswarm channel invite <channel> <member|agent>...`, `cswarm channel remove <channel> <member|agent>`, and `cswarm channel members <channel>` (pass `--profile <profile> --host-session-id <this-session-id>`).
+
+Use `cswarm channel ls --profile <profile> --host-session-id <this-session-id> --json` to list channels and `cswarm channel read <channel|general> --profile <profile> --host-session-id <this-session-id> --json` for whole-workspace channel messages (`--channel general` on `note`, `ask`, `working-on`, `feed`, and `inbox` means unfiled messages; continue with `--after <next.after_id>`, `--limit` 1–50). Addressed messages still come through `check`. Private channels and DMs are visible only to their members.
 
 Each channel has a lead: an untagged top-level note or ask from a person in that channel mentions and wakes it. `lead_mode` in `channel ls --json` is `workspace` (the workspace lead), `agent` (`lead_agent_principal_id`) or `none`; general always uses the workspace lead. A person who manages the channel sets it with `cswarm channel lead <channel> (<agent> | --workspace | --none)`.
 
