@@ -4365,6 +4365,108 @@
             "reason": "Use of WAIT_REQUEST_TIMEOUT_MS.",
             "proxy_operation": "channel-ls"
           }
+        },
+        "src/cli.ts:setInterval": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cli.ts:8396",
+          "detail": "1-second local native-wake scheduler tick in runConfiguredListener for debounce/retry progression.",
+          "operation": {
+            "name": "listener-native-wake-tick",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local scheduler tick interval, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-codex.ts:CODEX_QUEUE_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-codex.ts:61",
+          "detail": "12-second local subprocess timeout for codex queue (bounded below RECEIVE_HEARTBEAT_MAX_AGE_MS=15s).",
+          "operation": {
+            "name": "codex-queue-subprocess-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local CLI subprocess timeout, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-codex.ts:setInterval": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-codex.ts:380",
+          "detail": "5-second local standalone Codex wake-bridge heartbeat interval.",
+          "operation": {
+            "name": "codex-wake-heartbeat",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local heartbeat interval, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-codex.ts:signalRequestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/native-wake-codex.ts:262",
+          "detail": "ThinCommandClient signal request timeout for self-addressed Codex idle canary emission.",
+          "operation": {
+            "name": "codex-wake-canary-timeout",
+            "class": "not-run",
+            "writes": [
+              "channel or signal command state"
+            ],
+            "removes": [],
+            "reason": "Codex wake canary posts a self-addressed signal command."
+          }
+        },
+        "src/cloud/native-wake.ts:timeoutMs": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake.ts:206",
+          "detail": "2-second local file-lock acquisition timeout for wake-state-<scope> updates.",
+          "operation": {
+            "name": "native-wake-state-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local filesystem lock timeout, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake.ts:timeoutMs#2": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake.ts:605",
+          "detail": "2-second local file-lock acquisition timeout for atomic wake slot reservation.",
+          "operation": {
+            "name": "native-wake-reserve-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local filesystem lock timeout, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake.ts:timeoutMs#3": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake.ts:665",
+          "detail": "20-second local receive-<scope> dispatch lock timeout serializing opt-out against codex queue.",
+          "operation": {
+            "name": "native-wake-dispatch-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local filesystem lock timeout, not a network request timeout."
+          }
         }
       }
     }

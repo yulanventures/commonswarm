@@ -95,7 +95,6 @@ import {
   type NativeWakeRoute,
 } from "./cloud/native-wake.js";
 import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
-import { receiveStatus } from "./cloud/agent-receive.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
