@@ -2813,7 +2813,7 @@ import "../../styles/kylon-image-viewer.css";
         disarmLiveFeed();
       }
       for (const section of all<HTMLElement>("[data-channel-view]")) {
-        if (section.closest("[data-roster-add-agent]")) continue;
+        if (typeof section.closest === "function" && section.closest("[data-roster-add-agent]")) continue;
         section.hidden = section.dataset.channelView !== name;
       }
       const composer = one<HTMLFormElement>("[data-composer]");
@@ -15275,10 +15275,10 @@ import "../../styles/kylon-image-viewer.css";
       existingAgentChoiceIsCurrent = undefined;
       if (!session || !section || !host || !workspace || sampleMode) return;
       const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
-      const inDialog = rosterAddAgentOpen();
+      const inDialog = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen();
       const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
         version === requestVersion && navigation === homeNavigation &&
-        (inDialog ? rosterAddAgentOpen() : homeRoute.view === "add-agent");
+        (inDialog ? (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) : homeRoute.view === "add-agent");
       existingAgentChoiceIsCurrent = current;
       mountWorkspaceAgentPicker(host, {
         session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
@@ -15370,7 +15370,7 @@ import "../../styles/kylon-image-viewer.css";
 
     const openAgentChoice = (): void => {
       if (sampleMode) return;
-      parkAddAgentViewsHome();
+      if (typeof parkAddAgentViewsHome === "function") parkAddAgentViewsHome();
       if (homeRoute.view !== "add-agent" && activeWorkspaceId) {
         void navigateHome({ view: "add-agent", workspaceId: activeWorkspaceId }, "push");
         return;
@@ -15498,7 +15498,7 @@ import "../../styles/kylon-image-viewer.css";
       syncConnectWorkspace(selected);
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) exitStatus.hidden = true;
-      if (rosterAddAgentOpen()) {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
         rosterDialogAddAgent = "connect";
         const choice = one<HTMLElement>('[data-channel-view="agent-choice"]');
         const connectView = one<HTMLElement>('[data-channel-view="connect"]');
@@ -22095,7 +22095,7 @@ import "../../styles/kylon-image-viewer.css";
        rail keeps no management doors (operator ruling 2026-08-19, header-roster test). */
     one<HTMLButtonElement>("[data-add-agent-objects]")?.addEventListener("click", openAgentChoice);
     const leaveAddAgentForHome = (): void => {
-      if (rosterAddAgentOpen()) {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
         exitRosterDialogAddAgent(true);
         return;
       }
@@ -22104,7 +22104,7 @@ import "../../styles/kylon-image-viewer.css";
       homeBack();
     };
     const finishJoinedAgent = (agentId: string): void => {
-      if (rosterAddAgentOpen()) {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
         exitRosterDialogAddAgent(true, agentId || undefined);
         return;
       }
@@ -22144,7 +22144,7 @@ import "../../styles/kylon-image-viewer.css";
       if (!workspaceId || !principalId || !button || !status) return;
       void allowAgentFromPeople(workspaceId, principalId, button, status).then((outcome) => {
         if (outcome === "setup" && activeWorkspaceId === workspaceId) {
-          if (rosterAddAgentOpen()) closeRosterDialog(false);
+          if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) closeRosterDialog(false);
           void navigateHome({ view: "lists", workspaceId }, "push", true);
         }
       }).catch((error: unknown) => { status.textContent = readableError(error); button.disabled = false; });
@@ -22464,7 +22464,7 @@ import "../../styles/kylon-image-viewer.css";
     one<HTMLButtonElement>("[data-agent-owner-teammate]")?.addEventListener(
       "click",
       () => {
-        if (rosterAddAgentOpen()) {
+        if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
           exitRosterDialogAddAgent(false);
           peopleDialogState.tab = "invites";
           renderDialogRoster();
@@ -22679,7 +22679,7 @@ import "../../styles/kylon-image-viewer.css";
         livePromptPrincipalId = detail.principalId;
       }
       // A new agent named in the panel; a new key for an agent that exists is not one.
-      panelKeyMint = detail?.named === true && (homeRoute.view === "add-agent" || rosterAddAgentOpen()) && session
+      panelKeyMint = detail?.named === true && (homeRoute.view === "add-agent" || (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen())) && session
         && typeof detail.principalId === "string" && typeof detail.name === "string"
         ? { workspaceId, userId: session.user.id, principalId: detail.principalId, name: detail.name }
         : null;
@@ -22720,7 +22720,7 @@ import "../../styles/kylon-image-viewer.css";
     const finishPanelKeyMint = (reason: unknown): boolean => {
       const mint = panelKeyMint;
       panelKeyMint = null;
-      const inDialogConnect = rosterAddAgentOpen() && rosterDialogAddAgent === "connect";
+      const inDialogConnect = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen() && rosterDialogAddAgent === "connect";
       const inPageConnect = homeRoute.view === "add-agent" && app.dataset.channelView === "connect";
       if (reason !== "consumed" || !mint || mint.workspaceId !== activeWorkspaceId || mint.userId !== session?.user.id
         || (!inDialogConnect && !inPageConnect) || pendingWorkspaceId || pendingWorkspaceCreate) return false;
@@ -22749,10 +22749,11 @@ import "../../styles/kylon-image-viewer.css";
     app.addEventListener("commonswarm:agent-prompt-failed", (event) => {
       const detail = (event as CustomEvent<{ message?: unknown; named?: unknown }>).detail;
       const picker = one<AddAgentPanel>("agent-host-picker");
-      if (detail?.named !== true || typeof detail.message !== "string" || (!rosterAddAgentOpen() && homeRoute.view !== "add-agent") || !picker) return;
+      const inDialogAddAgent = typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen();
+      if (detail?.named !== true || typeof detail.message !== "string" || (!inDialogAddAgent && homeRoute.view !== "add-agent") || !picker) return;
       connectFocusObserver?.disconnect();
       connectFocusObserver = null;
-      if (rosterAddAgentOpen()) showRosterDialogAddAgentChoice();
+      if (inDialogAddAgent) showRosterDialogAddAgentChoice();
       else showChannelView("agent-choice");
       picker.mintFailed(detail.message);
     });
@@ -22777,7 +22778,7 @@ import "../../styles/kylon-image-viewer.css";
       const connect = one<SecretHoldingAgentConnect>("agent-connect");
       if (!selected || !connect) return;
       syncConnectWorkspace(selected);
-      if (rosterAddAgentOpen()) {
+      if (typeof rosterAddAgentOpen === "function" && rosterAddAgentOpen()) {
         showRosterDialogAddAgentChoice();
         return;
       }
