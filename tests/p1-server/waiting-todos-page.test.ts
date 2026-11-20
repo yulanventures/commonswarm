@@ -863,7 +863,7 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
         `;
         await tx`
           INSERT INTO swarm.hosted_mcp_seat_handles (handle, seat_id, grant_id, workspace_id, principal_id, created_at)
-          VALUES (${`h-${connId.slice(0, 8)}`}, ${connId}::uuid, ${grantId}::uuid, ${wsId}::uuid, ${agentId}::uuid, clock_timestamp())
+          VALUES (${`seat_${connId.replace(/-/g, "")}`}, ${connId}::uuid, ${grantId}::uuid, ${wsId}::uuid, ${agentId}::uuid, clock_timestamp())
         `;
         await tx`
           INSERT INTO swarm.household_content_connections (
