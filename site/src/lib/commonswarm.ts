@@ -4879,9 +4879,10 @@ export async function answerChoice(
   signalId: string,
   multi: boolean,
   submission: ChoiceSubmission,
+  options?: { isAlive?: () => boolean },
 ): Promise<AnswerChoiceResult> {
   const command = answerChoiceCommand(signalId, multi, submission);
-  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, options);
   if (status === 200 && body.status === "accepted") {
     const answer = (body as { choice_answer?: { option_id?: unknown; option_ids?: unknown; other_text?: unknown } }).choice_answer;
     const optionIds = Array.isArray(answer?.option_ids) && answer.option_ids.every(id => typeof id === "string")
@@ -4927,9 +4928,10 @@ export async function answerPlainAsk(
   workspaceId: string,
   signalId: string,
   bodyText: string,
+  options?: { isAlive?: () => boolean },
 ): Promise<AnswerPlainAskResult> {
   const command = plainAskReplyCommand(signalId, bodyText);
-  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } }, undefined, options);
   if (status === 200 && body.status === "accepted") return { ok: true };
   const error = typeof body.error === "string" ? body.error : null;
   const message = typeof (body as { message?: unknown }).message === "string"

@@ -1,6 +1,9 @@
 /** Real site DOM/transport proof with synthetic HTTP: the Waiting on you count across every workspace. */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
@@ -49,19 +52,44 @@ function installWaitingFixture() {
   const todo21Case = scenario.startsWith("todos-21-");
   const todoTruncatedCase = scenario.startsWith("todos-truncated-");
   const surveyCase = scenario.startsWith("survey-");
+  const surveyAuthRetireCase = scenario.startsWith("survey-auth-retire-");
   const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
-  const plainCleanupCase = scenario.startsWith("historical-cleanup-");
+  const plainCleanupCase = scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-");
+  const plain401RetireCase = scenario.startsWith("plain-401-retire-");
+  const plain401ControlCase = scenario.startsWith("plain-401-refresh-control-");
   const plainAsks = [askIdAt(11), askIdAt(12)];
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, ids, ask, ask51, ask101,
+  const peerUserB = {
+    id: "77777777-7777-4777-8777-777777777777",
+    aud: "authenticated",
+    role: "authenticated",
+    email: "peer-b@example.test",
+    app_metadata: {},
+    user_metadata: {},
+    created_at: before,
+  };
+  let releaseFirstAnswer: (() => void) | null = null;
+  let releaseIdentityCheck: (() => void) | null = null;
+  let releaseRefresh: (() => void) | null = null;
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, ask51, ask101,
     todoId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
-    surveyFailOnceId: surveyCase ? surveyAsks[2]! : "",
-    plainFailOnceId: plainCleanupCase ? plainAsks[1]! : "",
+    surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
+    plainFailOnceId: scenario.startsWith("historical-cleanup-") ? plainAsks[1]! : "",
     plainFailedCommandId: "",
+    plain401Once: plain401RetireCase || plain401ControlCase,
+    plainAttempts: 0,
+    plainBearers: [] as string[],
+    plainCommandIds: [] as string[],
     plainReplies: [] as any[],
+    firstAnswerHeld: false,
+    identityCheckHeld: false,
+    refreshHeld: false,
+    releaseFirstAnswer: () => { releaseFirstAnswer?.(); releaseFirstAnswer = null; },
+    releaseIdentityCheck: () => { releaseIdentityCheck?.(); releaseIdentityCheck = null; },
+    releaseRefresh: () => { releaseRefresh?.(); releaseRefresh = null; },
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -127,8 +155,42 @@ function installWaitingFixture() {
     if (url.origin === location.origin) return network(input, init);
     const body = request.method === "POST" ? await request.json().catch(() => null) : null;
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.href); return Response.json({}, { status: 404 }); }
-    if (url.pathname === "/auth/v1/user") return Response.json(user);
+    if (url.pathname === "/auth/v1/user") {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if (surveyAuthRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+        f.identityCheckHeld = true;
+        f.log.push("auth-user-peer-b-held");
+        await new Promise<void>(resolve => { releaseIdentityCheck = resolve; });
+        f.log.push("auth-user-peer-b-released");
+        return Response.json(peerUserB);
+      }
+      return Response.json(user);
+    }
+    if (url.pathname === "/auth/v1/logout") {
+      f.log.push("auth-logout");
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
+      f.log.push("auth-refresh");
+      if (plain401RetireCase) {
+        f.refreshHeld = true;
+        await new Promise<void>(resolve => { releaseRefresh = resolve; });
+        f.log.push("auth-refresh-released");
+      }
+      return Response.json({
+        access_token: "synthetic-human-refreshed",
+        refresh_token: "synthetic-refresh-2",
+        token_type: "bearer",
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user,
+      });
+    }
     if (url.pathname === "/rest/v1/rpc/home_overview") {
+      const authHeader = request.headers.get("authorization") ?? "";
+      if (surveyAuthRetireCase && authHeader && authHeader !== "Bearer synthetic-human") {
+        return Response.json({ viewer_user_id: peerUserB.id, generated_at: new Date().toISOString(), workspaces: [] });
+      }
       f.overviewReads++; f.log.push("overview");
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
@@ -276,6 +338,14 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "post_signal" && typeof body?.command?.in_reply_to === "string") {
       const replyTarget = body.command.in_reply_to;
+      f.plainAttempts += 1;
+      f.plainBearers.push(request.headers.get("authorization") ?? "");
+      f.plainCommandIds.push(String(body.command_id ?? ""));
+      if (f.plain401Once) {
+        f.plain401Once = false;
+        f.log.push("plain-401");
+        return Response.json({ error: "unauthenticated", message: "expired" }, { status: 401 });
+      }
       if (f.plainFailOnceId && replyTarget === f.plainFailOnceId) {
         f.plainFailOnceId = "";
         f.plainFailedCommandId = String(body.command_id ?? "");
@@ -293,6 +363,12 @@ function installWaitingFixture() {
       });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "answer_choice") {
+      if (surveyAuthRetireCase && body.command.signal_id === surveyAsks[0] && !f.firstAnswerHeld) {
+        f.firstAnswerHeld = true;
+        f.log.push("answer-1-held");
+        await new Promise<void>(resolve => { releaseFirstAnswer = resolve; });
+        f.log.push("answer-1-released");
+      }
       if (f.surveyFailOnceId && body.command.signal_id === f.surveyFailOnceId) {
         f.surveyFailOnceId = "";
         f.log.push("answer-failed");
@@ -542,6 +618,51 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("survey-auth-retire-")) {
+      await wait(() => shown(control()) && count() === "3", "3 survey questions counted in top bar");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const reviewBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-review-start]") ?? null;
+      await wait(() => shown(reviewBtn()), "Review questions button rendered");
+      reviewBtn()!.click();
+      const optYes = () => panel()?.querySelector<HTMLButtonElement>('[data-survey-option="yes"]') ?? null;
+      const nextBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-next]") ?? null;
+      const skipBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-skip]") ?? null;
+      const sendAllBtn = () => panel()?.querySelector<HTMLButtonElement>("[data-waiting-survey-send-all]") ?? null;
+      await wait(() => shown(optYes()), "Survey step 1 rendered");
+      optYes()!.click();
+      nextBtn()!.click();
+      await wait(() => panel()?.querySelector("[data-survey-progress]")?.textContent === "Question 2 of 3", "Survey step 2 rendered");
+      optYes()!.click();
+      nextBtn()!.click();
+      await wait(() => panel()?.querySelector("[data-survey-progress]")?.textContent === "Question 3 of 3", "Survey step 3 rendered");
+      skipBtn()!.click();
+      await wait(() => shown(sendAllBtn()), "Survey review rendered");
+      // Click Send all: Q1 answer_choice is held in flight.
+      sendAllBtn()!.click();
+      await wait(() => f.firstAnswerHeld, "Q1 answer_choice held in flight");
+      // Trigger a real peer account switch in another document while Q1 is in flight and hold /auth/v1/user for User B.
+      const peer = document.createElement("iframe");
+      peer.src = "/peer-switch";
+      document.body.append(peer);
+      await wait(() => f.identityCheckHeld, "peer account switch triggered new /auth/v1/user check (held pending)");
+      // Panel must already be retired synchronously before Q1 or /auth/v1/user settles.
+      check(!shown(panel()) && panel()!.textContent!.trim() === "",
+        "Waiting panel was not retired immediately at peer account switch: " + panel()!.textContent);
+      // Release Q1 while User B's /auth/v1/user is STILL pending (dashboard session still holds User A's old session!).
+      f.releaseFirstAnswer();
+      for (let i = 0; i < 25; i++) await tick();
+      check(f.answers.length === 1 && f.answers[0].command.signal_id === f.surveyAsks[0],
+        "held survey batch sent an extra answer after peer account switch: " + JSON.stringify(f.answers));
+      check(!shown(panel()) && panel()!.textContent!.trim() === "",
+        "Waiting panel re-rendered old viewer cards after retired Q1 settled: " + panel()!.textContent);
+      f.releaseIdentityCheck();
+      for (let i = 0; i < 15; i++) await tick();
+      check(f.answers.length === 1, "extra answer sent after User B identity check settled: " + JSON.stringify(f.answers));
+      peer.remove();
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario.startsWith("survey-")) {
       await wait(() => shown(control()) && count() === "3", "3 choice questions counted in #general");
       control()!.click();
@@ -608,6 +729,57 @@ async function observeWaitingCount() {
         await wait(() => Boolean(panel()?.hidden) && document.activeElement === control(),
           "Escape closes desktop column after survey completion and returns focus to opener");
       }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("plain-401-retire-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()), "plain-text ask card 1 rendered");
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      input1.focus();
+      input1.value = "Owner A private draft";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      // Click Send: initial post_signal returns 401 and postCommand enters /auth/v1/token refresh (held open).
+      send1.click();
+      await wait(() => f.refreshHeld && f.plainAttempts === 1, "historical plain-ask 401 entered held refresh");
+      // Explicit sign-out synchronously calls resetWorkspaceSessionState() -> retireWaitingState() while refresh is held.
+      const signOutBtn = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-signout]")).find(el => !el.hidden) ??
+        document.querySelector<HTMLButtonElement>("[data-signout]");
+      check(Boolean(signOutBtn), "sign-out button missing");
+      signOutBtn!.click();
+      // Panel and previous viewer's cards/draft must be cleared immediately.
+      await wait(() => !shown(panel()) && panel()!.textContent!.trim() === "", "Waiting panel retired immediately on sign-out");
+      // Release refresh with a refreshed session for Owner A: postCommand's isAlive fence must block the 401 retry.
+      f.releaseRefresh();
+      for (let i = 0; i < 25; i++) await tick();
+      check(f.plainAttempts === 1 && f.plainReplies.length === 0,
+        "401 retry was NOT fenced after login retired: attempts=" + f.plainAttempts + ", replies=" + JSON.stringify(f.plainReplies));
+      check(!panel()!.textContent!.includes("Owner A private draft") && !panel()!.querySelector("[data-waiting-plain-ask]"),
+        "previous viewer's plain-ask card or draft reappeared after retired 401 settled");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("plain-401-refresh-control-")) {
+      await wait(() => shown(control()) && count() === "2", "two historical plain-text asks counted for unchanged-login control");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const card1 = () => panel()?.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(card1()), "plain-text ask card 1 rendered");
+      const input1 = card1()!.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      const send1 = card1()!.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!;
+      input1.focus();
+      input1.value = "Refreshed login control answer";
+      input1.dispatchEvent(new Event("input", { bubbles: true }));
+      send1.click();
+      await wait(() => f.plainReplies.length === 1 && !card1() && panel()?.querySelector("[data-waiting-status]")?.textContent === "Sent" && count() === "1",
+        "unchanged-login 401 token refresh retried and delivered reply");
+      check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer synthetic-human-refreshed" &&
+        f.plainCommandIds[0] === f.plainCommandIds[1],
+        "expected refreshed bearer retry with same command_id: " + JSON.stringify({ attempts: f.plainAttempts, bearers: f.plainBearers, ids: f.plainCommandIds }));
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -737,12 +909,42 @@ async function observeWaitingCount() {
 async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record<string, any>> {
   const { markup, styles, bundled } = await renderAstroFixture(new URL("./LiveDashboard.astro", import.meta.url));
   const compileFixture = (name: string) => compileFixtureFunction(new URL(import.meta.url), name);
+  const peerJwt = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${Buffer.from(JSON.stringify({
+    sub: "77777777-7777-4777-8777-777777777777",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    role: "authenticated",
+  })).toString("base64url")}.synthetic`;
+  const peerSwitchBundle = (await build({
+    stdin: {
+      contents: `import { client } from "../../lib/commonswarm";
+        void client()!.auth.setSession({ access_token: ${JSON.stringify(peerJwt)}, refresh_token: "synthetic-refresh-b" });`,
+      loader: "ts",
+      resolveDir: dirname(fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url))),
+    },
+    bundle: true,
+    write: false,
+    format: "iife",
+    platform: "browser",
+    define: { "import.meta.env": JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.test.invalid", PUBLIC_SUPABASE_ANON_KEY: "synthetic-public" }) },
+  })).outputFiles[0]!.text;
+  const peerSwitchPage = `<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><script>
+    const peerUserB = { id: "77777777-7777-4777-8777-777777777777", aud: "authenticated", role: "authenticated", email: "peer-b@example.test", app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() };
+    const net = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const req = new Request(input, init), url = new URL(req.url);
+      if (url.origin === location.origin) return net(input, init);
+      if (url.pathname === "/auth/v1/user") return Response.json(peerUserB);
+      if (url.pathname === "/auth/v1/token") return Response.json({ access_token: ${JSON.stringify(peerJwt)}, refresh_token: "synthetic-refresh-b", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user: peerUserB });
+      return Response.json({});
+    };
+  </script></head><body><script>${peerSwitchBundle}</script></body></html>`;
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixture("installWaitingFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixture("observeWaitingCount") + "</script></body></html>";
   const server = createServer((request, response) => {
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
     if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
+    if (request.url === "/peer-switch") { response.writeHead(200, { "Content-Type": "text/html" }); response.end(peerSwitchPage); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
     response.end(request.url === "/app.js" ? bundled.join("\n") : app);
   });
@@ -756,7 +958,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
       const channelParam = scenario.startsWith("todos-21-")
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("historical-cleanup-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -800,5 +1002,10 @@ test("Waiting on you: multi-question survey keeps drafts across Back/Skip/close,
 });
 test("Waiting on you: Check F historical plain-text asks answer inline or clear as stale with Retry focus and desktop corner invite clearance", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["historical-cleanup-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: retires survey batch and historical 401 retry immediately when login changes, while preserving unchanged-login token refresh", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios(["survey-auth-retire-desktop", "plain-401-retire-desktop", "plain-401-refresh-control-desktop"]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

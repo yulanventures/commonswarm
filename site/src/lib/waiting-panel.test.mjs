@@ -11,7 +11,7 @@ import {
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
-import { plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { answerChoice, answerPlainAsk, plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
 
 class FakeNode {
   tagName;
@@ -976,4 +976,63 @@ test("Check F historical plain-text asks: inline answer, one-tap Clear as stale,
   assert.equal(host.querySelector("[data-waiting-status]").textContent, "Cleared");
   focusWaitingPanelAfterAction(host, { kind: "completed-plain", prevIndex: 0 });
   assert.strictEqual(doc.activeElement, host.querySelector('[data-waiting-plain-stale="plain-2"]'));
+});
+
+test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 retry when login retires", async () => {
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.document = {
+    querySelector(sel) {
+      if (sel === 'meta[name="commonswarm:url"]') return { content: "https://api.test.invalid" };
+      if (sel === 'meta[name="commonswarm:anon-key"]') return { content: "synthetic-public" };
+      return null;
+    },
+  };
+  let nextStatus = 200;
+  let nextBody = { status: "accepted", choice_answer: { option_id: "yes", other_text: null } };
+  let onFetch = null;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+    onFetch?.();
+    return new Response(JSON.stringify(nextBody), { status: nextStatus, headers: { "content-type": "application/json" } });
+  };
+  const fakeSession = {
+    access_token: "synthetic-a",
+    refresh_token: "synthetic-refresh-a",
+    token_type: "bearer",
+    expires_in: 3600,
+    user: { id: "u-a" },
+  };
+  try {
+    // 1. Pre-retired guard blocks dispatch with zero HTTP calls for both wrappers.
+    const choiceBlocked = await answerChoice(fakeSession, "cmd-1", "ws-1", "sig-1", false, { optionIds: ["yes"], otherText: null }, { isAlive: () => false });
+    const plainBlocked = await answerPlainAsk(fakeSession, "cmd-2", "ws-1", "sig-2", "Answer text", { isAlive: () => false });
+    assert.equal(choiceBlocked.ok, false);
+    assert.equal(choiceBlocked.error, "operation_retired");
+    assert.equal(plainBlocked.ok, false);
+    assert.equal(plainBlocked.error, "operation_retired");
+    assert.equal(calls.length, 0);
+
+    // 2. Flipping isAlive to false upon a 401 response fences the 401 retry cleanly with zero second fetch.
+    let alive = true;
+    nextStatus = 401;
+    nextBody = { error: "unauthenticated" };
+    onFetch = () => { alive = false; };
+    const plain401 = await answerPlainAsk(fakeSession, "cmd-3", "ws-1", "sig-3", "Answer text", { isAlive: () => alive });
+    assert.equal(plain401.ok, false);
+    assert.equal(plain401.error, "operation_retired");
+    assert.equal(calls.length, 1);
+
+    // 3. Unchanged-login control (isAlive stays true) delivers normally.
+    nextStatus = 200;
+    nextBody = { status: "accepted", ok: true, signal: { id: "sig-reply" } };
+    onFetch = null;
+    const plainOk = await answerPlainAsk(fakeSession, "cmd-4", "ws-1", "sig-4", "Control answer", { isAlive: () => true });
+    assert.deepEqual(plainOk, { ok: true });
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.document = prevDocument;
+    globalThis.fetch = prevFetch;
+  }
 });
