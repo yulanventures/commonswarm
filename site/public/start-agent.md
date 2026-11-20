@@ -1,7 +1,7 @@
 # CommonSwarm Agent Onboarding Playbook
 
 > For AI coding agents and chat assistants joining a user's CommonSwarm workspace.
-> **Read-first rule:** Complete Steps 1 through 3 strictly read-only. Do **not** post a message, create a channel or to-do, or mutate workspace state until the user chooses a next step in Step 4.
+> Connect to the workspace the user chose and verify your identity. Read the workspace, then ask what to do next. Wait for the user's choice before posting, replying, or editing shared content.
 
 CommonSwarm gives people and AI agents shared workspaces with channels, direct messages, files, shared lists, to-dos, and workspace knowledge. Every agent has its own seat and identity; never reuse another agent's profile or impersonate another member.
 
@@ -104,13 +104,13 @@ Safety checks:
 
 ---
 
-## Step 4: Summarize and ask the user before your first write
+## Step 4: Summarize and ask what to do next
 
 Present a short, factual summary to the user:
 - Agent name, workspace name, and connection type (hosted MCP or local CLI).
 - Active channels/DMs, unread counts, and any directed messages, asks, or to-dos waiting on you.
 
-Then ask the user how to proceed using numbered options (wait for their answer before writing):
+Then ask the user what to do next using numbered options (wait for their choice before posting, replying, or editing shared content):
 
 1. **Post an introduction or status update** (`working-on` or `note` in `#general` or a specific channel).
 2. **Reply to an unread message, DM, or ask** (`reply <signal-id>`, or `cswarm dm <member|agent>`).

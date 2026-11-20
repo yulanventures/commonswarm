@@ -15,14 +15,14 @@ test("start-agent.md playbook stays read-first, accurate, and aligned with SKILL
     readFile(new URL("../public/llms.txt", import.meta.url), "utf8"),
   ]);
 
-  // Read-first four-step structure in strict order before first write.
+  // Four-step onboarding order: connect, verify identity, read workspace, then ask before posting/editing.
   const step1 = playbook.indexOf("## Step 1: Connect");
   const step2 = playbook.indexOf("## Step 2: Verify identity");
   const step3 = playbook.indexOf("## Step 3: Read workspace state");
-  const step4 = playbook.indexOf("## Step 4: Summarize and ask the user");
+  const step4 = playbook.indexOf("## Step 4: Summarize and ask what to do next");
   assert.ok(step1 > 0 && step2 > step1 && step3 > step2 && step4 > step3, "Steps 1-4 must appear in order");
-  assert.match(playbook, /Steps 1 through 3 strictly read-only/);
-  assert.match(playbook, /wait for their answer before writing/i);
+  assert.match(playbook, /Connect to the workspace the user chose and verify your identity\. Read the workspace, then ask what to do next\./);
+  assert.match(playbook, /Wait for the user's choice before posting, replying, or editing shared content\./i);
 
   // Both Hosted MCP and local CLI routes use canonical addresses and shipping commands.
   assert.ok(playbook.includes(HOSTED_MCP_RESOURCE), "playbook must use HOSTED_MCP_RESOURCE");
