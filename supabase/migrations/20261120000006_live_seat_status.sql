@@ -87,7 +87,7 @@ BEGIN
    JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
    WHERE d.workspace_id = a.workspace_id
      AND d.recipient_agent_principal_id = a.principal_id
-     AND d.acked_at IS NULL
+     AND (d.acked_at IS NULL OR d.ack_outcome = 'queued')
      AND s.until > read_at
      AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
   ) waiting_mail ON true
@@ -102,6 +102,14 @@ BEGIN
          AND ch.channel_id = s.channel_id
          AND ch.visibility = 'open'
       )
+     )
+     AND NOT EXISTS (
+      SELECT 1 FROM swarm.conversation_signals cs
+      JOIN swarm.conversations conv
+        ON conv.conversation_id = cs.conversation_id AND conv.workspace_id = cs.workspace_id
+      WHERE cs.workspace_id = s.workspace_id
+        AND cs.signal_id = s.id
+        AND conv.kind NOT IN ('general', 'public_channel')
      )
      AND s.in_reply_to IS NULL AND s.thread_root_id IS NULL AND s.chain_root_id IS NULL
      AND s.parent_signal_id IS NULL AND s.chain_participants IS NULL
@@ -332,7 +340,7 @@ BEGIN
     JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
     WHERE d.workspace_id = p.workspace_id
       AND d.recipient_agent_principal_id = p.principal_id
-      AND d.acked_at IS NULL
+      AND (d.acked_at IS NULL OR d.ack_outcome = 'queued')
       AND s.until > read_at
       AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'user', viewer))
    ) waiting_mail ON true

@@ -783,17 +783,27 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
            (${randomUUID()}::uuid, ${ws}::uuid, ${secretWorker}::uuid, 'agent', 'working-on', 'SECRET-VAULT-TASK',
             statement_timestamp() + interval '1 hour', statement_timestamp() - interval '2 minutes', ${privCh}::uuid)`;
 
-  // Two unacked public deliveries to worker + one unacked private delivery to secretWorker.
-  const pubAsk1 = await signal(ws, { kind: "user", id: owner }, "ask", "first public ask", { toAgent: worker, ago: "5 minutes" });
+  // Plus one DM working-on signal and one group_dm working-on signal (neither may expose open_work.text).
+  const dmWorker = await agent(ws, owner, "DmWorker");
+  const dmWorkingSignal = await signal(ws, { kind: "agent", id: dmWorker }, "working-on", "SECRET-DM-WORKING", { toUser: owner, ago: "2 minutes" });
+  assert.ok(dmWorkingSignal);
+  const groupDmWorker = await agent(ws, owner, "GroupDmWorker");
+  const groupDmSignal = await signal(ws, { kind: "agent", id: groupDmWorker }, "working-on", "SECRET-GROUP-DM-WORKING", { recipients: [owner, outsider], ago: "2 minutes" });
+  assert.ok(groupDmSignal);
+  const pubAsk1 = await signal(ws, { kind: "user", id: owner }, "ask", "first public ask", { toAgent: worker, ago: "6 minutes" });
   const pubAsk2 = await signal(ws, { kind: "user", id: owner }, "ask", "second public ask", { toAgent: worker, ago: "4 minutes" });
+  const queuedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "queued-only public ask", { toAgent: worker, ago: "5 minutes" });
+  const observedAsk = await signal(ws, { kind: "user", id: owner }, "ask", "already observed ask", { toAgent: worker, ago: "7 minutes" });
   const privAsk = randomUUID();
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at, channel_id)
     VALUES (${privAsk}::uuid, ${ws}::uuid, ${owner}::uuid, 'user', ${secretWorker}::uuid, 'ask', 'SECRET-VAULT-ASK',
             statement_timestamp() + interval '1 hour', statement_timestamp() - interval '5 minutes', ${privCh}::uuid)`;
-  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
-    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 minutes'),
-           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 minutes'),
-           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 minutes')`;
+  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
+    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '6 minutes', NULL, NULL),
+           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 minutes', NULL, NULL),
+           (${ws}::uuid, ${queuedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 minutes', statement_timestamp() - interval '4 minutes', 'queued'),
+           (${ws}::uuid, ${observedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '7 minutes', statement_timestamp() - interval '6 minutes', 'observed'),
+           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 minutes', NULL, NULL)`;
   await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at, watcher_at)
     VALUES (${ws}::uuid, ${worker}::uuid, statement_timestamp() - interval '1 minute', statement_timestamp() - interval '10 seconds')`;
 
@@ -805,17 +815,19 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   assert.equal((find(outsiderRoster, worker).open_work as { text: string | null }).text, "deploying C2");
   assert.equal((find(ownerRoster, secretWorker).open_work as { text: string | null }).text, null, "private channel working-on keeps text null even for member");
   assert.equal(find(outsiderRoster, secretWorker).open_work, null, "outsider cannot see private channel open_work");
-  assert.equal(/SECRET-VAULT/.test(JSON.stringify(ownerRoster)), false);
-  assert.equal(/SECRET-VAULT/.test(JSON.stringify(outsiderRoster)), false);
+  assert.equal((find(ownerRoster, dmWorker).open_work as { text: string | null }).text, null, "DM working-on keeps text null");
+  assert.equal((find(ownerRoster, groupDmWorker).open_work as { text: string | null }).text, null, "group_dm working-on keeps text null");
+  assert.equal(/SECRET-VAULT|SECRET-DM|SECRET-GROUP-DM/.test(JSON.stringify(ownerRoster)), false);
+  assert.equal(/SECRET-VAULT|SECRET-DM|SECRET-GROUP-DM/.test(JSON.stringify(outsiderRoster)), false);
 
-  assert.equal((find(ownerRoster, worker).messages_waiting as { count: number; since: string | null }).count, 2);
+  assert.equal((find(ownerRoster, worker).messages_waiting as { count: number; since: string | null }).count, 3, "counts unacked + queued-only deliveries, excludes observed");
   assert.ok((find(ownerRoster, worker).messages_waiting as { count: number; since: string | null }).since !== null);
   assert.equal((find(ownerRoster, secretWorker).messages_waiting as { count: number }).count, 1, "private member sees secretWorker unseen count");
   assert.equal((find(outsiderRoster, secretWorker).messages_waiting as { count: number; since: string | null }).count, 0, "outsider must not see private unseen count");
   assert.equal((find(outsiderRoster, secretWorker).messages_waiting as { count: number; since: string | null }).since, null);
   assert.ok((find(ownerRoster, worker).wake as { watcher_at: string | null }).watcher_at !== null);
 
-  // home_overview exposes messages_waiting_count & wake, with identical private-channel isolation.
+  // home_overview exposes messages_waiting_count (including queued-only) & wake, with identical private-channel isolation.
   const homeAs = async (userId: string) => await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE authenticated`;
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
@@ -825,12 +837,12 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   });
   const ownerHome = await homeAs(owner);
   const outsiderHome = await homeAs(outsider);
-  assert.equal(ownerHome.find((a) => a.principal_id === worker)!.status.facts.messages_waiting_count, 2);
+  assert.equal(ownerHome.find((a) => a.principal_id === worker)!.status.facts.messages_waiting_count, 3);
   assert.ok(ownerHome.find((a) => a.principal_id === worker)!.status.facts.wake.watcher_at !== null);
   assert.equal(ownerHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 1);
   assert.equal(outsiderHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 0);
 
-  // agent_wake_path exposes unseen_count once the seat has an observed wake-path baseline.
+  // agent_wake_path exposes unseen_count for the 2 unclaimed deliveries once the seat has an observed baseline.
   const baseline = await signal(ws, { kind: "user", id: owner }, "note", "baseline", { toAgent: worker, ago: "10 minutes" });
   await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
     VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 minutes', statement_timestamp() - interval '9 minutes', 'observed')`;
