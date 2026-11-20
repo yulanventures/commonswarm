@@ -404,6 +404,15 @@ export function parseWaitingArchivedPage(data: unknown, workspaceId: Uuid): Wait
 export class HomeToolsUnavailable extends Error {
   constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
 }
+export class HomeArchivedDeniedError extends Error {
+  constructor() { super('home_waiting_archived_denied'); this.name = 'HomeArchivedDeniedError'; }
+}
+/** Detect explicit auth/permission refusal from PostgREST/Postgres RPC error payloads. */
+function isArchivedAuthDenied(error: { code?: string | null; status?: number | null }): boolean {
+  const code = typeof error.code === 'string' ? error.code : '';
+  const status = typeof error.status === 'number' ? error.status : 0;
+  return status === 401 || status === 403 || code === '42501' || code === 'PGRST301' || code === 'PGRST302' || code === 'PGRST303';
+}
 /** Detect absence by owned response codes, never by error prose. */
 export function homeToolsMissing(body: Record<string, unknown>): boolean {
   return [body.error, body.code, body.reason].some(code => code === 'unknown_tool' || code === 'unknown_household_tool' || code === 'PGRST202' || code === '42883');
@@ -584,9 +593,10 @@ export function createHomeServer(
         params.p_after_archived_at = options.after.archived_at;
         params.p_after_item_key = options.after.item_key;
       }
-      const { data, error } = await c.schema('swarm_read').rpc('waiting_archived_page', params);
+      const { data, error, status } = await c.schema('swarm_read').rpc('waiting_archived_page', params);
       if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
+      if (error && isArchivedAuthDenied({ code: error.code, status })) throw new HomeArchivedDeniedError();
       if (error) throw new Error('home_waiting_archived_failed');
       return parseWaitingArchivedPage(data, workspaceId);
     },

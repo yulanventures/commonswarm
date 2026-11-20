@@ -864,9 +864,11 @@ function renderWaitingArchivedBody(
       ? "unavailable"
       : archived?.failed
         ? "failed"
-        : !archived || archived.loading || !archived.complete
+        : !archived || archived.loading || archived.loadingMore || !archived.complete
           ? "loading"
-          : "empty";
+          : archived.hasMore
+            ? "more"
+            : "empty";
     const counts = archived?.counts ?? {
       channel: { min: 0, complete: false },
       workspace: { min: 0, complete: false },
@@ -884,6 +886,9 @@ function renderWaitingArchivedBody(
       allNum,
       counts.workspace.min,
       counts.all.min,
+      archived?.hasMore ?? false,
+      archived?.loadingMore ?? false,
+      Boolean(handlers.onLoadMoreArchived),
     ]);
     if (body.dataset.waitingArchivedEmptyKey === emptyKey) return;
     body.dataset.waitingArchivedEmptyKey = emptyKey;
@@ -901,6 +906,46 @@ function renderWaitingArchivedBody(
       wrap.append(retry);
     } else if (emptyState === "loading") {
       wrap.append(node(doc, "p", "cs-waiting-panel__state-text", "Loading…"));
+    } else if (emptyState === "more") {
+      const moreCopy =
+        vm.scope === "channel"
+          ? `No matches in ${vm.place.label} on the loaded archive pages.`
+          : vm.scope === "workspace"
+            ? `Older archived items in ${vm.place.workspaceName} are not loaded yet.`
+            : "Older archived items are not loaded yet.";
+      wrap.append(node(doc, "p", "cs-waiting-panel__state-text", moreCopy));
+      const actions = node(doc, "div", "cs-waiting-panel__actions");
+      if (handlers.onLoadMoreArchived) {
+        const loadMore = node(doc, "button", "cs-waiting-panel__action cs-waiting-panel__more", "Load older");
+        loadMore.type = "button";
+        loadMore.dataset.waitingArchivedMore = "";
+        loadMore.addEventListener("click", () => handlers.onLoadMoreArchived?.());
+        actions.append(loadMore);
+      }
+      if (vm.scope === "channel" && counts.workspace.min > 0) {
+        const showWs = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          wsNum ? `Show all channels (${wsNum})` : "Show all channels",
+        );
+        showWs.type = "button";
+        showWs.dataset.waitingSwitchScope = "workspace";
+        showWs.addEventListener("click", () => handlers.onScopeChange("workspace"));
+        actions.append(showWs);
+      } else if (vm.scope !== "all" && counts.all.min > 0) {
+        const showAll = node(
+          doc,
+          "button",
+          "cs-waiting-panel__action",
+          allNum ? `Show all workspaces (${allNum})` : "Show all workspaces",
+        );
+        showAll.type = "button";
+        showAll.dataset.waitingSwitchScope = "all";
+        showAll.addEventListener("click", () => handlers.onScopeChange("all"));
+        actions.append(showAll);
+      }
+      if (actions.children.length > 0) wrap.append(actions);
     } else {
       const emptyCopy =
         vm.scope === "channel"

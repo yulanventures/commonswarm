@@ -1416,7 +1416,7 @@ import "../../styles/kylon-image-viewer.css";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
   import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
-  import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
+  import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused, HomeArchivedDeniedError } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue, WaitingTodosQueue, WaitingArchivedEntry } from "../../lib/home/contract";
   import { buildWaitingButton, classifyAskConversation, conversationParticipantKey, indexDirectConversations, syncWaitingButtonToggle, updateWaitingButton, waitingTotal, type WaitingConversation } from "../../lib/waiting-count";
@@ -6551,16 +6551,23 @@ import "../../styles/kylon-image-viewer.css";
     const waitingPanelPlainAsks = new Map<string, WaitingPlainAskItem[]>();
     const waitingPanelTodos = new Map<string, WaitingTodoItem[]>();
     let waitingTab: WaitingPanelTab = "active";
+    let waitingArchivedEpoch = 0;
+    let waitingArchivedAutoPlaceKey = "";
+    const WAITING_ARCHIVED_AUTO_PAGE_CAP = 5;
     type WaitingArchivedWorkspaceState = {
       entries: WaitingArchivedEntry[];
       total: number;
       hasMore: boolean;
       loaded: boolean;
+      validated: boolean;
       loading: boolean;
       loadingMore: boolean;
       failed: boolean;
+      denied: boolean;
       unavailable: boolean;
       stale: boolean;
+      requestSeq: number;
+      autoPages: number;
     };
     const waitingArchivedByWorkspace = new Map<string, WaitingArchivedWorkspaceState>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
@@ -6835,7 +6842,7 @@ import "../../styles/kylon-image-viewer.css";
       const now = Date.now();
       for (const workspace of workspaces) {
         const state = waitingArchivedByWorkspace.get(workspace.id);
-        if (!state) continue;
+        if (!state || !state.validated || state.denied || state.unavailable) continue;
         for (const entry of state.entries) {
           items.push(waitingPanelMod.mapWaitingArchivedEntry(entry, {
             workspaceId: workspace.id,
@@ -6851,31 +6858,91 @@ import "../../styles/kylon-image-viewer.css";
       return items;
     };
 
+    const clearWaitingArchivedCache = (workspaceId?: string): void => {
+      if (workspaceId) {
+        const st = waitingArchivedByWorkspace.get(workspaceId);
+        if (st) st.requestSeq += 1;
+        waitingArchivedByWorkspace.delete(workspaceId);
+        waitingWorkspaceChannels.delete(workspaceId);
+        return;
+      }
+      waitingArchivedEpoch += 1;
+      waitingArchivedAutoPlaceKey = "";
+      for (const st of waitingArchivedByWorkspace.values()) st.requestSeq += 1;
+      waitingArchivedByWorkspace.clear();
+      waitingWorkspaceChannels.clear();
+    };
+
+    const pruneRetiredWaitingArchivedScopes = (keepIds?: ReadonlySet<string>): void => {
+      const liveIds = keepIds ?? new Set(workspaces.map(ws => ws.id));
+      for (const [wsId, st] of waitingArchivedByWorkspace) {
+        if (!liveIds.has(wsId)) {
+          st.requestSeq += 1;
+          waitingArchivedByWorkspace.delete(wsId);
+          waitingWorkspaceChannels.delete(wsId);
+        }
+      }
+    };
+
     const getArchivedWorkspaceState = (workspaceId: string): WaitingArchivedWorkspaceState => {
       let state = waitingArchivedByWorkspace.get(workspaceId);
       if (!state) {
-        state = { entries: [], total: 0, hasMore: false, loaded: false, loading: false, loadingMore: false, failed: false, unavailable: false, stale: false };
+        state = {
+          entries: [],
+          total: 0,
+          hasMore: false,
+          loaded: false,
+          validated: false,
+          loading: false,
+          loadingMore: false,
+          failed: false,
+          denied: false,
+          unavailable: false,
+          stale: false,
+          requestSeq: 0,
+          autoPages: 0,
+        };
         waitingArchivedByWorkspace.set(workspaceId, state);
       }
       return state;
     };
 
-    const loadWaitingArchivedWorkspace = async (workspace: Workspace, mode: "initial" | "more"): Promise<void> => {
+    const loadWaitingArchivedWorkspace = async (
+      workspace: Workspace,
+      mode: "initial" | "more",
+      isAuto = false,
+    ): Promise<void> => {
       if (sampleMode || !session) return;
       const server = homeServer();
       if (!server) return;
       const state = getArchivedWorkspaceState(workspace.id);
       if (state.unavailable) return;
-      if (mode === "initial" && state.loading) return;
-      if (mode === "more" && (state.loading || state.loadingMore || !state.hasMore)) return;
+      if (mode === "more" && (state.loading || state.loadingMore || !state.validated || state.denied || !state.hasMore)) return;
       const viewer = session.user.id;
       const authGen = waitingAuthGeneration;
       const isAlive = waitingActionGuard(viewer, authGen);
       const last = mode === "more" ? state.entries[state.entries.length - 1] ?? null : null;
       if (mode === "more" && !last) return;
+      const epoch = waitingArchivedEpoch;
+      const reqSeq = ++state.requestSeq;
+      const isCurrent = (): boolean =>
+        isAlive() &&
+        epoch === waitingArchivedEpoch &&
+        state.requestSeq === reqSeq &&
+        waitingArchivedByWorkspace.get(workspace.id) === state &&
+        workspaces.some(ws => ws.id === workspace.id);
       if (mode === "initial") {
-        state.loading = true;
+        // Revalidate before showing cached content: clear previous rows immediately so
+        // formerly authorized rows never stay in the render path during or after refusal.
+        state.entries = [];
+        state.total = 0;
+        state.hasMore = false;
+        state.validated = false;
+        state.denied = false;
         state.failed = false;
+        state.autoPages = 0;
+        state.loading = true;
+        state.loadingMore = false;
       } else {
         state.loadingMore = true;
         state.failed = false;
@@ -6886,15 +6953,24 @@ import "../../styles/kylon-image-viewer.css";
           limit: 30,
           ...(last ? { after: { archived_at: last.archived_at, item_key: last.item_key } } : {}),
         });
-        if (!isAlive()) return;
+        if (!isCurrent()) return;
         if (!page) {
+          // Explicit NULL refusal (removed/non-member or disallowed claim): clear immediately.
+          state.entries = [];
+          state.total = 0;
+          state.hasMore = false;
+          state.validated = false;
+          state.loaded = true;
+          state.stale = false;
+          state.denied = true;
           state.failed = true;
+          waitingWorkspaceChannels.delete(workspace.id);
           return;
         }
         const hasNamedChannel = page.items.some(entry => entry.placement === "channel" && entry.channel_id);
         if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
           const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
-          if (!isAlive()) return;
+          if (!isCurrent()) return;
           waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
         }
         if (mode === "initial") {
@@ -6907,24 +6983,48 @@ import "../../styles/kylon-image-viewer.css";
               state.entries.push(entry);
             }
           }
+          if (isAuto) state.autoPages += 1;
         }
         state.total = Math.max(page.total, state.entries.length);
         state.hasMore = page.truncated;
         state.loaded = true;
+        state.validated = true;
         state.stale = false;
+        state.denied = false;
         state.failed = false;
       } catch (err) {
-        if (!isAlive()) return;
+        if (!isCurrent()) return;
         if (err instanceof HomeToolsUnavailable) {
+          state.entries = [];
+          state.total = 0;
+          state.hasMore = false;
+          state.validated = false;
           state.unavailable = true;
           state.loaded = true;
-          state.hasMore = false;
+          state.denied = false;
           state.failed = false;
+        } else if (err instanceof HomeArchivedDeniedError || err instanceof HomeCommandRefused) {
+          // Explicit authorization denial: immediately clear any previously cached rows.
+          state.entries = [];
+          state.total = 0;
+          state.hasMore = false;
+          state.validated = false;
+          state.loaded = true;
+          state.stale = false;
+          state.denied = true;
+          state.failed = true;
+          waitingWorkspaceChannels.delete(workspace.id);
         } else {
+          if (mode === "initial") {
+            state.entries = [];
+            state.total = 0;
+            state.hasMore = false;
+            state.validated = false;
+          }
           state.failed = true;
         }
       } finally {
-        if (!isAlive()) return;
+        if (!isCurrent()) return;
         state.loading = false;
         state.loadingMore = false;
         renderWaitingPanelView();
@@ -6936,24 +7036,23 @@ import "../../styles/kylon-image-viewer.css";
       const targets = waitingScope === "all"
         ? workspaces
         : workspaces.filter(ws => ws.id === (activeWorkspaceId || workspaces[0]?.id));
+      pruneRetiredWaitingArchivedScopes(new Set(targets.map(ws => ws.id)));
       for (const ws of targets) {
         const state = getArchivedWorkspaceState(ws.id);
         if (state.unavailable) continue;
-        if (force || !state.loaded || state.stale) {
+        if (force || !state.loaded || !state.validated || state.stale) {
+          if (!force && state.loading) continue;
           void loadWaitingArchivedWorkspace(ws, "initial");
         }
       }
     };
 
     const invalidateWaitingArchived = (workspaceId?: string): void => {
-      if (workspaceId) {
-        const state = waitingArchivedByWorkspace.get(workspaceId);
-        if (state) state.stale = true;
-      } else {
-        for (const state of waitingArchivedByWorkspace.values()) state.stale = true;
-      }
+      clearWaitingArchivedCache(workspaceId);
       if (waitingTab === "archived" && waitingSurface?.isOpen()) {
         ensureWaitingArchivedLoaded(true);
+      } else if (waitingSurface?.isOpen()) {
+        renderWaitingPanelView();
       }
     };
 
@@ -6963,8 +7062,8 @@ import "../../styles/kylon-image-viewer.css";
         : workspaces.filter(ws => ws.id === (activeWorkspaceId || workspaces[0]?.id));
       for (const ws of targets) {
         const state = waitingArchivedByWorkspace.get(ws.id);
-        if (state && state.hasMore && !state.loading && !state.loadingMore && !state.unavailable) {
-          void loadWaitingArchivedWorkspace(ws, "more");
+        if (state && state.validated && !state.denied && state.hasMore && !state.loading && !state.loadingMore && !state.unavailable) {
+          void loadWaitingArchivedWorkspace(ws, "more", false);
         }
       }
     };
@@ -7291,7 +7390,8 @@ import "../../styles/kylon-image-viewer.css";
           }
           if (typeof closeEntityPanel === "function") closeEntityPanel(false);
         },
-        onStateChange: () => {
+        onStateChange: (open) => {
+          if (!open) clearWaitingArchivedCache();
           syncWaitingButtons();
         },
       });
@@ -7517,6 +7617,15 @@ import "../../styles/kylon-image-viewer.css";
       } : null;
       let archivedVM = null;
       if (waitingTab === "archived") {
+        pruneRetiredWaitingArchivedScopes();
+        if (waitingArchivedAutoPlaceKey !== placeKey) {
+          if (waitingArchivedAutoPlaceKey !== "") {
+            // Place changed (channel, DM, or workspace switch): clear cached rows & held requests so
+            // the new place revalidates before showing archived content.
+            clearWaitingArchivedCache();
+          }
+          waitingArchivedAutoPlaceKey = placeKey;
+        }
         const allArchived = allWaitingArchivedItems();
         const channelArchived = waitingPanelMod.filterWaitingArchived(allArchived, "channel", place);
         const workspaceArchived = waitingPanelMod.filterWaitingArchived(allArchived, "workspace", place);
@@ -7525,34 +7634,70 @@ import "../../styles/kylon-image-viewer.css";
         const targetStates = waitingScope === "all"
           ? workspaces.map(ws => waitingArchivedByWorkspace.get(ws.id))
           : [activeArchState];
-        const wsArchLoaded = Boolean(activeArchState?.loaded && !activeArchState.failed && !activeArchState.hasMore);
-        const allArchLoaded = workspaces.length > 0 && workspaces.every(ws => {
-          const st = waitingArchivedByWorkspace.get(ws.id);
-          return Boolean(st?.loaded && !st.failed && !st.hasMore);
-        });
+        const wsArchLoaded = Boolean(activeArchState?.validated && activeArchState.loaded && !activeArchState.failed && !activeArchState.hasMore);
         const anyArchLoading = targetStates.some(st => Boolean(st?.loading));
         const anyArchLoadingMore = targetStates.some(st => Boolean(st?.loadingMore));
         const anyArchFailed = targetStates.some(st => Boolean(st?.failed));
         const allArchUnavailable = targetStates.length > 0 && targetStates.every(st => Boolean(st?.unavailable));
-        const anyArchHasMore = targetStates.some(st => Boolean(st?.hasMore && !st.unavailable));
-        const targetLoaded = targetStates.length > 0 && targetStates.every(st => Boolean(st?.loaded));
-        if (targetStates.some(st => !st || (!st.loaded && !st.loading && !st.failed && !st.unavailable) || (st.stale && !st.loading && !st.unavailable))) {
+        const anyArchHasMore = targetStates.some(st => Boolean(st?.validated && st.hasMore && !st.unavailable && !st.denied));
+        const targetLoaded = targetStates.length > 0 && targetStates.every(st => Boolean(st?.loaded && (st.validated || st.unavailable || st.denied)));
+        const needsInitialLoad = targetStates.some(
+          st => !st || (!st.loaded && !st.loading && !st.failed && !st.unavailable) || (st.stale && !st.loading && !st.unavailable),
+        );
+        if (needsInitialLoad) {
           queueMicrotask(() => { if (waitingTab === "archived" && waitingSurface?.isOpen()) ensureWaitingArchivedLoaded(); });
         }
-        const wsArchTotal = activeArchState?.loaded ? Math.max(activeArchState.total, workspaceArchived.length) : workspaceArchived.length;
+        // When the current channel/conversation scope has 0 matches on the loaded page(s) and older pages
+        // remain available, automatically page forward (bounded) until a match appears or the archive ends.
+        const shouldAutoPageCurrentScope =
+          !needsInitialLoad &&
+          waitingScope === "channel" &&
+          place.kind !== "all" &&
+          visibleArchived.length === 0 &&
+          Boolean(
+            activeArchState &&
+            activeArchState.validated &&
+            activeArchState.loaded &&
+            activeArchState.hasMore &&
+            !activeArchState.loading &&
+            !activeArchState.loadingMore &&
+            !activeArchState.failed &&
+            !activeArchState.denied &&
+            !activeArchState.unavailable &&
+            activeArchState.autoPages < WAITING_ARCHIVED_AUTO_PAGE_CAP,
+          );
+        if (shouldAutoPageCurrentScope) {
+          const autoEpoch = waitingArchivedEpoch;
+          const autoPlaceKey = placeKey;
+          const activeWs = workspaces.find(ws => ws.id === place.workspaceId);
+          if (activeWs) {
+            queueMicrotask(() => {
+              if (
+                waitingTab === "archived" &&
+                waitingScope === "channel" &&
+                waitingSurface?.isOpen() &&
+                waitingArchivedEpoch === autoEpoch &&
+                waitingArchivedAutoPlaceKey === autoPlaceKey
+              ) {
+                void loadWaitingArchivedWorkspace(activeWs, "more", true);
+              }
+            });
+          }
+        }
+        const wsArchTotal = activeArchState?.validated && activeArchState.loaded ? Math.max(activeArchState.total, workspaceArchived.length) : workspaceArchived.length;
         const allArchTotal = workspaces.reduce((sum, ws) => {
           const st = waitingArchivedByWorkspace.get(ws.id);
-          return sum + (st?.loaded ? Math.max(st.total, st.entries.length) : 0);
+          return sum + (st?.validated && st.loaded ? Math.max(st.total, st.entries.length) : 0);
         }, 0);
         archivedVM = {
           items: visibleArchived,
           counts: {
             channel: { min: channelArchived.length, complete: wsArchLoaded },
-            workspace: { min: wsArchTotal, complete: Boolean(activeArchState?.loaded && !activeArchState.failed) },
-            all: { min: Math.max(allArchTotal, allArchived.length), complete: workspaces.length > 0 && workspaces.every(ws => { const st = waitingArchivedByWorkspace.get(ws.id); return Boolean(st?.loaded && !st.failed); }) },
+            workspace: { min: wsArchTotal, complete: Boolean(activeArchState?.validated && activeArchState.loaded && !activeArchState.failed) },
+            all: { min: Math.max(allArchTotal, allArchived.length), complete: workspaces.length > 0 && workspaces.every(ws => { const st = waitingArchivedByWorkspace.get(ws.id); return Boolean(st?.validated && st.loaded && !st.failed); }) },
           },
-          loading: anyArchLoading && visibleArchived.length === 0,
-          loadingMore: anyArchLoadingMore,
+          loading: (anyArchLoading || needsInitialLoad) && visibleArchived.length === 0,
+          loadingMore: anyArchLoadingMore || shouldAutoPageCurrentScope,
           complete: targetLoaded && !anyArchFailed,
           failed: anyArchFailed && !anyArchLoading,
           unavailable: allArchUnavailable,
@@ -7587,19 +7732,25 @@ import "../../styles/kylon-image-viewer.css";
           onTabChange: (next) => {
             clearWaitingStatus();
             waitingSurvey.active = false;
+            clearWaitingArchivedCache();
             waitingTab = next;
             renderWaitingPanelView();
-            if (next === "archived") ensureWaitingArchivedLoaded();
+            if (next === "archived") ensureWaitingArchivedLoaded(true);
           },
           onScopeChange: (next) => {
             clearWaitingStatus();
             waitingSurvey.active = false;
             waitingScope = next;
-            renderWaitingPanelView();
-            if (waitingTab === "archived") ensureWaitingArchivedLoaded();
-            else if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
+            if (waitingTab === "archived") {
+              clearWaitingArchivedCache();
+              renderWaitingPanelView();
+              ensureWaitingArchivedLoaded(true);
+            } else {
+              renderWaitingPanelView();
+              if (next === "all" && !allLoaded && !waitingInFlight) void refreshWaitingCounts();
+            }
           },
-          onClose: () => { clearWaitingStatus(); waitingSurface?.close(true); },
+          onClose: () => { clearWaitingStatus(); clearWaitingArchivedCache(); waitingSurface?.close(true); },
           onRetryLoad: () => {
             waitingPanelOverviewFailed = false;
             waitingPanelFailedWorkspaces.clear();
@@ -7607,7 +7758,7 @@ import "../../styles/kylon-image-viewer.css";
             void refreshWaitingCounts();
           },
           onRetryArchived: () => {
-            for (const st of waitingArchivedByWorkspace.values()) st.failed = false;
+            clearWaitingArchivedCache();
             renderWaitingPanelView();
             ensureWaitingArchivedLoaded(true);
           },
@@ -7730,7 +7881,10 @@ import "../../styles/kylon-image-viewer.css";
 
     const syncWaitingPanel = (): void => {
       const active = isWaitingChannelView();
-      if (!active) waitingOpenEpoch += 1;
+      if (!active) {
+        waitingOpenEpoch += 1;
+        clearWaitingArchivedCache();
+      }
       waitingSurface?.setEnabled(active);
       syncWaitingButtons();
       if (active && waitingSurface?.isOpen()) renderWaitingPanelView();
@@ -7756,10 +7910,12 @@ import "../../styles/kylon-image-viewer.css";
         void loadWaitingPanelModule().then(mod => {
           if (epoch !== waitingOpenEpoch || authGen !== waitingAuthGeneration || !isWaitingChannelView() || document.querySelector("dialog[open]") !== null) return;
           const surface = ensureWaitingSurface(mod);
-          // Opening always starts in This channel; channel switches keep the desktop column open.
+          // Opening always starts in This channel; clear any archived cache so reopening always revalidates.
           waitingScope = "channel";
+          clearWaitingArchivedCache();
           surface.open(trigger);
           renderWaitingPanelView();
+          if (waitingTab === "archived") ensureWaitingArchivedLoaded(true);
         });
         return;
       }
@@ -7803,8 +7959,7 @@ import "../../styles/kylon-image-viewer.css";
       waitingSurveySkipped.clear();
       waitingSurveyErrors.clear();
       waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
-      waitingArchivedByWorkspace.clear();
-      waitingWorkspaceChannels.clear();
+      clearWaitingArchivedCache();
       waitingPanelOverviewFailed = false;
     };
     /** Synchronously retire every Waiting on you read, draft, ticket, and rendered card when login changes. */
@@ -7898,6 +8053,7 @@ import "../../styles/kylon-image-viewer.css";
             counted.set(workspace.id, null);
             waitingPanelFailedWorkspaces.add(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
+            clearWaitingArchivedCache(workspace.id);
           } else if (row.needs_you.asks.length > 0 || row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0) {
             counted.set(workspace.id, null);
             toRead.push(workspace);
@@ -15243,6 +15399,7 @@ import "../../styles/kylon-image-viewer.css";
             workspaces,
           );
           workspaces = closed.workspaces;
+          pruneRetiredWaitingArchivedScopes();
           closeWorkspaceDetailsDialog();
           if (closed.activeWorkspaceRemains) {
             renderWorkspaceList(closed.nextWorkspace!);
@@ -17327,6 +17484,7 @@ import "../../styles/kylon-image-viewer.css";
       groupLeaveSucceeded = true;
       syncGroupLeaveDialogControls();
       one<HTMLDialogElement>("[data-group-leave-dialog]")?.close();
+      invalidateWaitingArchived(target.workspaceId);
       void refreshConversations(target.workspaceId, true, true, pinned);
     };
 
@@ -19467,6 +19625,7 @@ import "../../styles/kylon-image-viewer.css";
         }
         workspaces = await workspaceMemberships();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
+        pruneRetiredWaitingArchivedScopes();
         if (workspaces.length === 0) {
           resetWorkspaceSessionState();
           const pending = readCreateIntent(session.user.id);

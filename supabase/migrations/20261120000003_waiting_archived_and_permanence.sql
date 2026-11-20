@@ -5,14 +5,16 @@
 --   older threads never lock and unanswered asks never silently lapse out of Waiting on you.
 --   Only working-on signals keep an expiry ceiling (<= 30 days from created_at). Explicit
 --   short horizons (<= 30 days) on asks and notes remain allowed.
---   Current active ask and note rows are backfilled so nothing in flight lapses.
+--   Pre-existing rows are left untouched because swarm.signals does not distinguish explicit
+--   sender horizons from prior defaults; explicit horizons and ambiguous history are preserved.
 --
 -- Part 2 (3c459c72 — Waiting on you Archived view):
 --   Read-only, keyset-paginated RPC returning the signed-in person's resolved Waiting on you items
 --   in one workspace (newest first):
 --     1. Answered asks (choice asks with resolved option labels / Other text, survey answers, and
---        plain-text asks answered inline or cleared as stale), gated whole-row by swarm_read.signals
---        and canonical live conversation membership/audience matching swarm_read.decision_queue_page.
+--        plain-text asks answered inline or cleared as stale), gated whole-row by canonical live
+--        conversation membership and per-message audience independently on BOTH the ask AND the
+--        answer (never via legacy owner-of-agent signal reads).
 --     2. Completed or dropped to-dos (state IN ('done', 'dropped')) assigned to the viewer or
 --        resolved by the viewer for their own seated agent, gated by swarm.household_human_can_read
 --        with private-channel and direct-conversation origin redaction matching waiting_todos_page.
@@ -37,30 +39,6 @@ ALTER TABLE swarm.signals ADD CONSTRAINT signals_until_bound CHECK (
     )
   )
 );
-
--- Backfill currently active ask and note rows so nothing in flight lapses.
--- Historical already-expired signals stay expired; working-on signals keep their expiry;
--- thread replies whose root is a working-on signal keep their root-clamped expiry.
-ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only;
-
-UPDATE swarm.signals AS s
-SET until = '9999-12-31T23:59:59Z'::timestamptz
-WHERE s.kind IN ('ask', 'note')
-  AND s.until > statement_timestamp()
-  AND s.until < '9999-12-31T23:59:59Z'::timestamptz
-  AND (
-    s.thread_root_id IS NULL
-    OR EXISTS (
-      SELECT 1
-      FROM swarm.signals AS root
-      WHERE root.id = s.thread_root_id
-        AND root.workspace_id = s.workspace_id
-        AND root.kind IN ('ask', 'note')
-        AND root.until > statement_timestamp()
-    )
-  );
-
-ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only;
 
 -- ---------------------------------------------------------------------------
 -- Part 2: Waiting on you Archived read model
@@ -100,7 +78,7 @@ BEGIN
  END IF;
  viewer := (claims->>'sub')::uuid;
 
- IF p_workspace_id IS NULL OR NOT swarm.is_member(p_workspace_id, viewer) THEN
+ IF p_workspace_id IS NULL OR NOT swarm.actor_can_access_channel(p_workspace_id, NULL, 'user', viewer) THEN
   RETURN NULL;
  END IF;
 
@@ -126,14 +104,14 @@ BEGIN
    CASE WHEN ac.signal_id IS NOT NULL THEN 'choice' ELSE 'plain' END AS ask_kind,
    pg_catalog.left(s.body, 4000) AS title,
    s.from_kind AS from_kind,
-   s."from" AS from_id,
+   s.from_principal AS from_id,
    CASE
     WHEN act.action_id IS NOT NULL THEN 'answered'
     WHEN rep.body = 'Closed as stale. Re-ask with choices if still needed.' THEN 'cleared_stale'
     ELSE 'answered'
    END AS outcome_kind,
    CASE
-    WHEN act.action_id IS NOT NULL THEN pg_catalog.left(coalesce(nullif(choice_fmt.label_text, ''), nullif(rep.body, ''), 'Answered'), 500)
+    WHEN act.action_id IS NOT NULL THEN pg_catalog.left(coalesce(nullif(choice_fmt.label_text, ''), nullif(act.reply_body, ''), 'Answered'), 500)
     WHEN rep.body = 'Closed as stale. Re-ask with choices if still needed.' THEN 'Cleared as stale'
     ELSE pg_catalog.left(rep.body, 500)
    END AS outcome_text,
@@ -144,7 +122,7 @@ BEGIN
    place.channel_id AS channel_id,
    place.conversation_id AS conversation_id,
    place.conversation_kind AS conversation_kind
-  FROM swarm_read.signals s
+  FROM swarm.signals s
   LEFT JOIN swarm.ask_choices ac
    ON ac.workspace_id = p_workspace_id AND ac.signal_id = s.id
   LEFT JOIN swarm.conversation_signals cs
@@ -157,26 +135,106 @@ BEGIN
    AND viewer_cm.conversation_id = raw_c.conversation_id
    AND viewer_cm.member_user_id = viewer
   LEFT JOIN LATERAL (
-   SELECT a.action_id, a.actor_user_id, a.option_id, a.option_ids, a.other_text, a.reply_signal_id, a.completed_at
+   SELECT
+    a.action_id,
+    a.actor_user_id,
+    a.option_id,
+    a.option_ids,
+    a.other_text,
+    a.reply_signal_id,
+    a.completed_at,
+    act_sig.body AS reply_body
    FROM swarm.ui_actions a
+   LEFT JOIN swarm.signals act_sig
+    ON act_sig.workspace_id = p_workspace_id AND act_sig.id = a.reply_signal_id
+   LEFT JOIN swarm.conversation_signals act_cs
+    ON act_cs.workspace_id = p_workspace_id AND act_cs.signal_id = act_sig.id
+   LEFT JOIN swarm.conversations act_c
+    ON act_c.workspace_id = p_workspace_id AND act_c.conversation_id = act_cs.conversation_id
+   LEFT JOIN swarm.conversation_members act_cm
+    ON act_c.kind IN ('dm', 'group_dm')
+    AND act_cm.workspace_id = act_c.workspace_id
+    AND act_cm.conversation_id = act_c.conversation_id
+    AND act_cm.member_user_id = viewer
    WHERE a.workspace_id = p_workspace_id
     AND a.signal_id = s.id
     AND a.state = 'completed'
     AND (
-     a.actor_user_id = viewer
-     OR EXISTS (SELECT 1 FROM swarm_read.signals vr WHERE vr.workspace_id = p_workspace_id AND vr.id = a.reply_signal_id)
+     (a.reply_signal_id IS NULL AND a.actor_user_id = viewer)
+     OR (
+      a.reply_signal_id IS NOT NULL
+      AND act_sig.id IS NOT NULL
+      AND (
+       (
+        act_c.conversation_id IS NOT NULL
+        AND (
+         act_c.kind IN ('general', 'public_channel')
+         OR (
+          act_c.kind = 'private_channel'
+          AND swarm.actor_can_access_channel(p_workspace_id, act_c.channel_id, 'user', viewer)
+         )
+         OR (
+          act_c.kind IN ('dm', 'group_dm')
+          AND act_cm.member_user_id IS NOT NULL
+          AND act_cm.left_at IS NULL
+         )
+        )
+        AND swarm.conversation_signal_visible_to(
+         act_cs.workspace_id, act_cs.signal_id, act_cs.audience,
+         act_sig.from_kind, act_sig.from_principal, act_sig.to_user_id, act_sig.to_agent_principal_id,
+         'user', viewer
+        )
+       )
+       OR (
+        act_c.conversation_id IS NULL
+        AND (
+         act_sig.channel_id IS NULL
+         OR swarm.actor_can_access_channel(p_workspace_id, act_sig.channel_id, 'user', viewer)
+        )
+        AND (
+         (act_sig.from_kind = 'user' AND act_sig.from_principal = viewer)
+         OR act_sig.to_user_id = viewer
+         OR EXISTS (
+          SELECT 1 FROM swarm.signal_recipients ar
+          WHERE ar.workspace_id = act_sig.workspace_id
+           AND ar.signal_id = act_sig.id
+           AND ar.recipient_user_id = viewer
+         )
+         OR (
+          act_sig.to_user_id IS NULL
+          AND act_sig.to_agent_principal_id IS NULL
+          AND NOT EXISTS (
+           SELECT 1 FROM swarm.signal_recipients ar
+           WHERE ar.workspace_id = act_sig.workspace_id
+            AND ar.signal_id = act_sig.id
+          )
+         )
+        )
+       )
+      )
+     )
     )
+   ORDER BY a.completed_at ASC, a.action_id ASC
    LIMIT 1
   ) act ON true
   LEFT JOIN LATERAL (
    SELECT reply.id, reply.from_kind, reply.from_principal, reply.body, reply.created_at
    FROM swarm.signals reply
+   LEFT JOIN swarm.conversation_signals rep_cs
+    ON rep_cs.workspace_id = p_workspace_id AND rep_cs.signal_id = reply.id
+   LEFT JOIN swarm.conversations rep_c
+    ON rep_c.workspace_id = p_workspace_id AND rep_c.conversation_id = rep_cs.conversation_id
+   LEFT JOIN swarm.conversation_members rep_cm
+    ON rep_c.kind IN ('dm', 'group_dm')
+    AND rep_cm.workspace_id = rep_c.workspace_id
+    AND rep_cm.conversation_id = rep_c.conversation_id
+    AND rep_cm.member_user_id = viewer
    WHERE reply.workspace_id = s.workspace_id
     AND reply.in_reply_to = s.id
-    AND NOT (reply.from_kind = s.from_kind AND reply.from_principal = s."from")
+    AND NOT (reply.from_kind = s.from_kind AND reply.from_principal = s.from_principal)
     AND (
      (reply.from_kind = 'user' AND (
-      reply.from_principal = s."to"
+      reply.from_principal = s.to_user_id
       OR EXISTS (
        SELECT 1 FROM swarm.signal_recipients ar
        WHERE ar.workspace_id = s.workspace_id AND ar.signal_id = s.id AND ar.recipient_user_id = reply.from_principal
@@ -189,7 +247,7 @@ BEGIN
       WHERE rp.principal_id = reply.from_principal
        AND ram.workspace_id = s.workspace_id
        AND (
-        rp.owner_user_id = s."to"
+        rp.owner_user_id = s.to_user_id
         OR EXISTS (
          SELECT 1 FROM swarm.signal_recipients ar
          WHERE ar.workspace_id = s.workspace_id AND ar.signal_id = s.id AND ar.recipient_user_id = rp.owner_user_id
@@ -197,9 +255,55 @@ BEGIN
        )
      ))
     )
+    -- Independent canonical conversation and message access check on the answer itself
+    -- (never falls back to legacy swarm_read.signals or ended agent oversight).
     AND (
-     (reply.from_kind = 'user' AND reply.from_principal = viewer)
-     OR EXISTS (SELECT 1 FROM swarm_read.signals vr WHERE vr.workspace_id = p_workspace_id AND vr.id = reply.id)
+     (
+      rep_c.conversation_id IS NOT NULL
+      AND (
+       rep_c.kind IN ('general', 'public_channel')
+       OR (
+        rep_c.kind = 'private_channel'
+        AND swarm.actor_can_access_channel(p_workspace_id, rep_c.channel_id, 'user', viewer)
+       )
+       OR (
+        rep_c.kind IN ('dm', 'group_dm')
+        AND rep_cm.member_user_id IS NOT NULL
+        AND rep_cm.left_at IS NULL
+       )
+      )
+      AND swarm.conversation_signal_visible_to(
+       rep_cs.workspace_id, rep_cs.signal_id, rep_cs.audience,
+       reply.from_kind, reply.from_principal, reply.to_user_id, reply.to_agent_principal_id,
+       'user', viewer
+      )
+     )
+     OR (
+      rep_c.conversation_id IS NULL
+      AND (
+       reply.channel_id IS NULL
+       OR swarm.actor_can_access_channel(p_workspace_id, reply.channel_id, 'user', viewer)
+      )
+      AND (
+       (reply.from_kind = 'user' AND reply.from_principal = viewer)
+       OR reply.to_user_id = viewer
+       OR EXISTS (
+        SELECT 1 FROM swarm.signal_recipients rr
+        WHERE rr.workspace_id = reply.workspace_id
+         AND rr.signal_id = reply.id
+         AND rr.recipient_user_id = viewer
+       )
+       OR (
+        reply.to_user_id IS NULL
+        AND reply.to_agent_principal_id IS NULL
+        AND NOT EXISTS (
+         SELECT 1 FROM swarm.signal_recipients rr
+         WHERE rr.workspace_id = reply.workspace_id
+          AND rr.signal_id = reply.id
+        )
+       )
+      )
+     )
     )
    ORDER BY reply.created_at ASC, reply.id ASC
    LIMIT 1
@@ -230,12 +334,12 @@ BEGIN
     CASE
      WHEN raw_c.conversation_id IS NOT NULL AND raw_c.kind IN ('public_channel', 'private_channel') THEN 'channel'
      WHEN raw_c.conversation_id IS NOT NULL THEN raw_c.kind
-     WHEN s.channel_id IS NOT NULL AND swarm.claims_can_access_channel(p_workspace_id, s.channel_id) THEN 'channel'
+     WHEN s.channel_id IS NOT NULL AND swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', viewer) THEN 'channel'
      ELSE 'redacted'
     END AS placement,
     CASE
      WHEN raw_c.conversation_id IS NOT NULL AND raw_c.kind IN ('public_channel', 'private_channel') THEN raw_c.channel_id
-     WHEN raw_c.conversation_id IS NULL AND s.channel_id IS NOT NULL AND swarm.claims_can_access_channel(p_workspace_id, s.channel_id) THEN s.channel_id
+     WHEN raw_c.conversation_id IS NULL AND s.channel_id IS NOT NULL AND swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', viewer) THEN s.channel_id
      ELSE NULL
     END AS channel_id,
     CASE WHEN raw_c.conversation_id IS NOT NULL THEN raw_c.conversation_id ELSE NULL END AS conversation_id,
@@ -244,29 +348,40 @@ BEGIN
   WHERE s.workspace_id = p_workspace_id
    AND s.kind = 'ask'
    AND (
-    s."to" = viewer
+    s.to_user_id = viewer
     OR EXISTS (
      SELECT 1 FROM swarm.signal_recipients r
      WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer
     )
    )
-   -- Whole-row canonical membership and audience gate matching decision_queue / decision_queue_page:
+   -- Whole-row canonical membership and audience gate on the ask matching decision_queue_page:
    -- a departed DM/group_dm member or unauthorized private-channel reader gets nothing (zero body/count/cursor).
    AND (
-    raw_c.conversation_id IS NULL
-    OR raw_c.kind IN ('general', 'public_channel')
-    OR (
-     raw_c.kind = 'private_channel'
-     AND swarm.claims_can_access_channel(p_workspace_id, raw_c.channel_id)
-    )
-    OR (
-     raw_c.kind IN ('dm', 'group_dm')
-     AND viewer_cm.member_user_id IS NOT NULL
-     AND viewer_cm.left_at IS NULL
+    (
+     raw_c.conversation_id IS NOT NULL
+     AND (
+      raw_c.kind IN ('general', 'public_channel')
+      OR (
+       raw_c.kind = 'private_channel'
+       AND swarm.actor_can_access_channel(p_workspace_id, raw_c.channel_id, 'user', viewer)
+      )
+      OR (
+       raw_c.kind IN ('dm', 'group_dm')
+       AND viewer_cm.member_user_id IS NOT NULL
+       AND viewer_cm.left_at IS NULL
+      )
+     )
      AND swarm.conversation_signal_visible_to(
       cs.workspace_id, cs.signal_id, cs.audience,
-      s.from_kind, s."from", s."to", s.to_agent,
+      s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
       'user', viewer
+     )
+    )
+    OR (
+     raw_c.conversation_id IS NULL
+     AND (
+      s.channel_id IS NULL
+      OR swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', viewer)
      )
     )
    )

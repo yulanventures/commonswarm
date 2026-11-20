@@ -1592,4 +1592,66 @@ test("Waiting on you Archived view: decoder validation, scope/redaction isolatio
     loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
   }, handlers);
   assert.equal(host.querySelector('[data-waiting-archived-state="unavailable"]').textContent, "Archived history is unavailable on this server.");
+
+  // Designer CHANGES witness: when the current channel (#garden) has 0 matches on page 1 but older
+  // archive pages remain (hasMore: true), NEVER say "No archived items in #garden." — keep Load older
+  // available in the current scope, and show the empty message ONLY after the last page (hasMore: false).
+  const placeGarden = { workspaceId: "ws-1", workspaceName: "Home", kind: "channel", channelId: "ch-garden", label: "#garden" };
+  let gardenLoadMore = 0;
+  const gardenHandlers = { ...handlers, onLoadMoreArchived: () => { gardenLoadMore += 1; } };
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "channel",
+    place: placeGarden,
+    items: [],
+    archived: {
+      items: [],
+      counts: {
+        channel: { min: 0, complete: false },
+        workspace: { min: 35, complete: true },
+        all: { min: 35, complete: true },
+      },
+      loading: false,
+      loadingMore: false,
+      complete: true,
+      failed: false,
+      hasMore: true,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, gardenHandlers);
+  assert.equal(host.querySelector('[data-waiting-archived-state="empty"]'), null, "must not show empty state while older archive pages remain");
+  assert.ok(host.querySelector('[data-waiting-archived-state="more"]'), "renders more-pages state in #garden scope");
+  assert.equal(host.textContent.includes("No archived items in #garden."), false, "must not claim #garden is empty before exhausting older pages");
+  const gardenMoreBtn = host.querySelector("[data-waiting-archived-more]");
+  assert.ok(gardenMoreBtn, "Load older stays available in #garden scope");
+  assert.equal(gardenMoreBtn.textContent, "Load older");
+  gardenMoreBtn.click();
+  assert.equal(gardenLoadMore, 1);
+
+  // Once the final page finishes with still zero matches (hasMore: false), NOW show the empty message.
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "channel",
+    place: placeGarden,
+    items: [],
+    archived: {
+      items: [],
+      counts: {
+        channel: { min: 0, complete: true },
+        workspace: { min: 35, complete: true },
+        all: { min: 35, complete: true },
+      },
+      loading: false,
+      loadingMore: false,
+      complete: true,
+      failed: false,
+      hasMore: false,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, gardenHandlers);
+  assert.ok(host.querySelector('[data-waiting-archived-state="empty"]'), "empty state appears after archive is exhausted");
+  assert.equal(host.querySelector(".cs-waiting-panel__state-text").textContent, "No archived items in #garden.");
+  assert.equal(host.querySelector("[data-waiting-archived-more]"), null);
 });

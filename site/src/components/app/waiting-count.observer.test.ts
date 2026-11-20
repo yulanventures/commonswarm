@@ -62,7 +62,10 @@ function installWaitingFixture() {
   const archivedCase = scenario.startsWith("archived-");
   const archivedAfterReload = scenario.startsWith("archived-after-reload-");
   const archivedUnavailable = scenario.startsWith("archived-unavailable-");
+  const archivedPage2Case = scenario.startsWith("archived-channel-page2-");
+  const archivedCacheDenyCase = scenario.startsWith("archived-cache-revalidate-and-deny-");
   const archivedBucket = archivedUnavailable ? "unavailable" : scenario.endsWith("-phone") ? "phone" : "desktop";
+  const gardenArchivedAskId = askIdAt(76);
   const reviewOfferId = "99999999-9999-4999-8999-000000000001";
   const reviewTodoId = todoIdAt(91);
   const olderArchivedAskId = askIdAt(77);
@@ -93,13 +96,16 @@ function installWaitingFixture() {
   let releaseRefresh: (() => void) | null = null;
   let releaseWs9ChannelsA: (() => void) | null = null;
   let releaseWs2QueueA: (() => void) | null = null;
+  let releaseArchivedHeld: (() => void) | null = null;
   const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
-    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
+    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, gardenArchivedAskId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
     convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     ambiguousResolved: false,
     archivedPages: 0,
+    archivedMode: "ok" as "ok" | "null" | "deny403" | "hold",
+    archivedHeld: false,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -120,6 +126,7 @@ function installWaitingFixture() {
     releaseRefresh: () => { releaseRefresh?.(); releaseRefresh = null; },
     releaseWs9ChannelsA: () => { releaseWs9ChannelsA?.(); releaseWs9ChannelsA = null; },
     releaseWs2QueueA: () => { releaseWs2QueueA?.(); releaseWs2QueueA = null; },
+    releaseArchivedHeld: () => { releaseArchivedHeld?.(); releaseArchivedHeld = null; },
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -432,6 +439,73 @@ function installWaitingFixture() {
       if (archivedUnavailable) {
         return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
       }
+      if (id === ids[0] && (archivedPage2Case || archivedCacheDenyCase)) {
+        f.archivedPages += 1;
+        if (f.archivedMode === "hold") {
+          f.archivedHeld = true;
+          f.log.push("archived-held");
+          await new Promise<void>(resolve => { releaseArchivedHeld = resolve; });
+          f.log.push("archived-released");
+        }
+        if (f.archivedMode === "null") {
+          return Response.json(null);
+        }
+        if (f.archivedMode === "deny403") {
+          return Response.json({ code: "42501", message: "permission denied" }, { status: 403 });
+        }
+        const baseMs = Date.now() - 3600_000;
+        const all = [
+          ...Array.from({ length: 5 }, (_, idx) => ({
+            item_key: `ask:${askIdAt(60 + idx)}`,
+            kind: "ask",
+            id: askIdAt(60 + idx),
+            todo_id: null,
+            ask_kind: "choice",
+            title: `General archived item #${idx + 1}?`,
+            from: { kind: "agent", id: agent, name: "Scout" },
+            outcome_kind: "answered",
+            outcome_text: `General answer ${idx + 1}`,
+            archived_at: new Date(baseMs + (500 - idx * 10) * 1000).toISOString(),
+            answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+            placement: "general",
+            channel_id: null,
+            conversation_id: convGeneral,
+            conversation_kind: "general",
+          })),
+          {
+            item_key: `ask:${gardenArchivedAskId}`,
+            kind: "ask",
+            id: gardenArchivedAskId,
+            todo_id: null,
+            ask_kind: "choice",
+            title: "Plant lavender by the fence?",
+            from: { kind: "agent", id: agent, name: "Scout" },
+            outcome_kind: "answered",
+            outcome_text: "Yes, spring",
+            archived_at: new Date(baseMs + 100 * 1000).toISOString(),
+            answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+            placement: "channel",
+            channel_id: chBoiler,
+            conversation_id: null,
+            conversation_kind: null,
+          },
+        ];
+        const afterAt = typeof body?.p_after_archived_at === "string" ? body.p_after_archived_at : null;
+        const afterKey = typeof body?.p_after_item_key === "string" ? body.p_after_item_key.toLowerCase() : null;
+        const rest = afterAt && afterKey
+          ? all.filter(item => Date.parse(item.archived_at) < Date.parse(afterAt) || (Date.parse(item.archived_at) === Date.parse(afterAt) && item.item_key > afterKey))
+          : all;
+        const pageSize = 5;
+        const page = rest.slice(0, pageSize);
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: all.length,
+          truncated: rest.length > pageSize,
+          items: page,
+        });
+      }
       if (id === ids[0] && archivedCase) {
         f.archivedPages += 1;
         const persisted = await archivedSyncState();
@@ -651,7 +725,13 @@ function installWaitingFixture() {
       }
       return Response.json([{ channel_id: otherChannel, slug: "shared-b-channel", title: "Shared B", kind: "public", archived_at: null }]);
     }
-    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case)) {
+    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case || archivedPage2Case)) {
+      if (archivedPage2Case) {
+        return Response.json([
+          { channel_id: chBoiler, slug: "garden", title: "Garden", kind: "public", archived_at: null },
+          { channel_id: chReno, slug: "quiet", title: "Quiet", kind: "public", archived_at: null },
+        ]);
+      }
       if (todo21Case) {
         return Response.json([
           { channel_id: chBoiler, slug: "boiler-quotes", title: "Boiler quotes", kind: "public", archived_at: null },
@@ -661,11 +741,11 @@ function installWaitingFixture() {
       return Response.json([{ channel_id: otherChannel, slug: "other", title: "Other", kind: "public", archived_at: null }]);
     }
     if (url.pathname === "/rest/v1/rpc/channel_unread") return Response.json({ workspace_id: body?.p_workspace_id ?? ids[0],
-      generated_at: new Date().toISOString(), channels: todo21Case && body?.p_workspace_id === ids[0]
+      generated_at: new Date().toISOString(), channels: (todo21Case || archivedPage2Case) && body?.p_workspace_id === ids[0]
         ? [
             { channel_id: null, slug: "general", unread: null },
-            { channel_id: chBoiler, slug: "boiler-quotes", unread: null },
-            { channel_id: chReno, slug: "renovation", unread: null },
+            { channel_id: chBoiler, slug: archivedPage2Case ? "garden" : "boiler-quotes", unread: null },
+            { channel_id: chReno, slug: archivedPage2Case ? "quiet" : "renovation", unread: null },
           ]
         : [{ channel_id: null, slug: "general", unread: null }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json(ids.map(id => (
@@ -1162,6 +1242,94 @@ async function observeWaitingCount() {
       check(f.plainAttempts === 2 && f.plainBearers[1] === "Bearer synthetic-human-refreshed" &&
         f.plainCommandIds[0] === f.plainCommandIds[1],
         "expected refreshed bearer retry with same command_id: " + JSON.stringify({ attempts: f.plainAttempts, bearers: f.plainBearers, ids: f.plainCommandIds }));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-channel-page2-")) {
+      await wait(() => shown(control()), "Waiting control ready on #garden");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened in #garden");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      // Page 1 has only #general items; #garden answer sits on page 2 -> MUST appear without changing scope!
+      await wait(() => shown(card(`ask:${f.gardenArchivedAskId}`)),
+        "#garden answer from page 2 appeared in default channel scope without switching scope");
+      check(scope()!.value === "channel", "scope must remain channel (#garden): " + scope()!.value);
+      check(card(`ask:${f.gardenArchivedAskId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Yes, spring",
+        "unexpected #garden archived answer text");
+      check(f.archivedPages >= 2, "must have paged through page 1 and page 2: " + f.archivedPages);
+      if (!f.phone) {
+        // Switch to #quiet (0 matches on page 1 AND page 2): empty state appears ONLY after exhausting page 2.
+        const quietLink = () => document.querySelector<HTMLElement>(`[data-channel-item="${f.chReno}"]`);
+        await wait(() => shown(quietLink()), "#quiet channel link rendered in rail");
+        const pagesBeforeQuiet = f.archivedPages;
+        quietLink()!.click();
+        await wait(() => quietLink()?.getAttribute("aria-current") === "page" &&
+          shown(panel()?.querySelector('[data-waiting-archived-state="empty"]')),
+          "#quiet showed empty state after exhausting all archive pages");
+        check(panel()!.querySelector(".cs-waiting-panel__state-text")!.textContent === "No archived items in #quiet.",
+          "unexpected #quiet empty text: " + panel()!.querySelector(".cs-waiting-panel__state-text")!.textContent);
+        check(f.archivedPages >= pagesBeforeQuiet + 2,
+          `#quiet must exhaust both pages before showing empty (before=${pagesBeforeQuiet}, after=${f.archivedPages})`);
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-cache-revalidate-and-deny-")) {
+      await wait(() => shown(control()), "Waiting control ready");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const archivedCards = () => Array.from(panel()?.querySelectorAll<HTMLElement>("[data-waiting-archived-item]") ?? []);
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened");
+      // 1. Initial load populates page 1 with 5 #general cards + Load older.
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => archivedCards().length === 5 && shown(panel()?.querySelector("[data-waiting-archived-more]")),
+        "initial Archived page 1 loaded 5 cards");
+      check(f.archivedPages === 1, "expected 1 initial archived read, got " + f.archivedPages);
+      // 2. Close & reopen: MUST revalidate (never skip read on warm cache!).
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed");
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 2 && archivedCards().length === 5,
+        "reopening Archived revalidated from server");
+      // 3. Explicit NULL refusal on reopen: previously cached rows MUST be cleared immediately.
+      f.archivedMode = "null";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed before NULL refusal");
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 3 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "NULL refusal cleared all previously cached rows immediately");
+      // 4. Restore ok + Retry -> page 1 loads -> then HTTP 403 on Load older MUST immediately clear page 1 rows!
+      f.archivedMode = "ok";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-retry]")!.click();
+      await wait(() => f.archivedPages === 4 && archivedCards().length === 5 && shown(panel()?.querySelector("[data-waiting-archived-more]")),
+        "Retry reloaded page 1 cleanly");
+      f.archivedMode = "deny403";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedPages === 5 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "403 authorization error on Load older immediately cleared previously cached page-1 rows");
+      // 5. Held request retirement: start slow request, close panel, release held response -> discarded (never repopulates DOM).
+      f.archivedMode = "hold";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-retry]")!.click();
+      await wait(() => f.archivedHeld, "held archived request in flight");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed while archived request held");
+      f.archivedMode = "ok";
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      // Switch to null before reopening so we prove the released held response never warmed the cache!
+      f.archivedMode = "null";
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 7 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "retired held request was discarded and never repopulated Archived");
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -1673,7 +1841,7 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     for (const scenario of scenarios) {
       // A phone (390 x 844) draws the control in the shell's top bar; a desktop (1280 x 800) in the workspace header.
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
-      const channelParam = scenario.startsWith("todos-21-")
+      const channelParam = (scenario.startsWith("todos-21-") || scenario.startsWith("archived-channel-page2-"))
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
         : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("archived-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
           ? "&c=general"
@@ -1740,6 +1908,9 @@ test("Waiting on you: Archived view shows answered asks, completed to-dos, and a
     "archived-reload-phone",
     "archived-after-reload-phone",
     "archived-unavailable-desktop",
+    "archived-channel-page2-desktop",
+    "archived-channel-page2-phone",
+    "archived-cache-revalidate-and-deny-desktop",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

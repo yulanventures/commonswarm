@@ -308,6 +308,16 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
           (${noConsentReplyId}::uuid, ${wsId}::uuid, ${noConsentId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Got it', ${chBoiler}::uuid, ${noConsentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(50)}::timestamptz)
       `;
       await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, recipient_agent_principal_id, position)
+        VALUES
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL, 0),
+          (${gen1MayaReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 1),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, NULL, 0),
+          (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 1)
+      `;
+      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1MayaReplyId}::uuid, ${convGroupGen1}::uuid)`;
+      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1PostLeaveReplyId}::uuid, ${convGroupGen1}::uuid)`;
+      await tx`
         INSERT INTO swarm.ui_actions (
           action_id, workspace_id, signal_id, actor_user_id, option_id, option_ids, other_text,
           state, reply_signal_id, created_at, completed_at
@@ -618,15 +628,23 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       await tx`ROLLBACK TO SAVEPOINT sp_maya`;
 
       // 4b. C6 signals_until_bound CHECK proof:
-      //     - ask/note accept permanent sentinel 9999-12-31T23:59:59Z
+      //     - ask/note accept permanent sentinel 9999-12-31T23:59:59Z AND explicit short horizons (<=30d)
       //     - ask/note reject arbitrary > 30 days
       //     - working-on rejects 9999-12-31T23:59:59Z and > 30 days
       await tx`SAVEPOINT sp_c6_check`;
       const permNoteId = randomUUID();
+      const shortExplicitAskId = randomUUID();
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at)
-        VALUES (${permNoteId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', 'note', 'Permanent note', '9999-12-31T23:59:59Z'::timestamptz, ${ts(200)}::timestamptz)
+        VALUES
+          (${permNoteId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', 'note', 'Permanent note', '9999-12-31T23:59:59Z'::timestamptz, ${ts(200)}::timestamptz),
+          (${shortExplicitAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', 'ask', 'Short explicit 1h ask', ${ts(200)}::timestamptz + interval '1 hour', ${ts(200)}::timestamptz)
       `;
+      const [shortCheck] = await tx<{ horizon_sec: number }[]>`
+        SELECT EXTRACT(EPOCH FROM (until - created_at))::int AS horizon_sec
+        FROM swarm.signals WHERE id = ${shortExplicitAskId}::uuid
+      `;
+      assert.equal(shortCheck!.horizon_sec, 3600, "explicit short horizon on ask is stored verbatim");
       await tx`SAVEPOINT sp_c6_bad_ask`;
       await assert.rejects(
         () => tx`
@@ -648,6 +666,129 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       );
       await tx`ROLLBACK TO SAVEPOINT sp_c6_bad_working`;
       await tx`ROLLBACK TO SAVEPOINT sp_c6_check`;
+
+      // 4c. HezSec Condition 2 witness: independent canonical access check on the answer signal!
+      //     A public ask whose ONLY answer lives in a different private conversation (Maya <-> Scout 1:1 DM,
+      //     where viewer owns Scout — tested both while Scout is live and after Scout is revoked — OR a
+      //     private channel Maya is NOT in, OR a ui_action whose reply lives in an inaccessible DM, OR an
+      //     unmapped legacy reply addressed only to viewer's revoked agent) MUST NOT appear in Archived
+      //     (zero text, zero row, zero count, zero cursor anchor).
+      await tx`SAVEPOINT sp_answer_canonical`;
+      const [dmMayaScoutOpen] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
+        SELECT swarm.conversation_open(
+          ${wsId}::uuid, 'user', ${mayaId}::uuid, ARRAY[]::uuid[], ARRAY[${scoutAgentId}]::uuid[], false
+        ) AS r
+      `;
+      const convMayaScoutDm = dmMayaScoutOpen!.r.conversation.conversation_id;
+
+      const crossDmAskId = randomUUID();
+      const crossDmReplyId = randomUUID();
+      const crossPrivAskId = randomUUID();
+      const crossPrivReplyId = randomUUID();
+      const crossUiAskId = randomUUID();
+      const crossUiReplyId = randomUUID();
+      const legacyRevokedAgentAskId = randomUUID();
+      const legacyRevokedAgentReplyId = randomUUID();
+
+      await tx`SET CONSTRAINTS ALL DEFERRED`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      await tx`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
+        VALUES
+          (${crossDmAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Public ask answered in Maya-Scout DM?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-220)}::timestamptz),
+          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${mayaId}::uuid, 'ask', 'Public ask answered in private vault?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-215)}::timestamptz),
+          (${crossUiAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Choice ask with ui_action reply in Maya-Scout DM?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-210)}::timestamptz),
+          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid, 'ask', 'Unmapped ask with unmapped reply to revoked Scout?', NULL, '9999-12-31T23:59:59Z'::timestamptz, ${ts(-205)}::timestamptz)
+      `;
+      await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES
+          (${crossDmAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 0),
+          (${crossDmAskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 1),
+          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 0),
+          (${crossPrivAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 1),
+          (${crossUiAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 0),
+          (${crossUiAskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 1),
+          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 0),
+          (${legacyRevokedAgentAskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 1)
+      `;
+      await tx`
+        INSERT INTO swarm.ask_choices (signal_id, workspace_id, multi, options)
+        VALUES (${crossUiAskId}::uuid, ${wsId}::uuid, false, ${tx.json([{ id: "secret_opt", label: "Secret Choice Label" }])}::jsonb)
+      `;
+      await tx`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, channel_id, in_reply_to, until, created_at)
+        VALUES
+          (${crossDmReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_MAYA_SCOUT_DM_ANSWER', NULL, ${crossDmAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(130)}::timestamptz),
+          (${crossPrivReplyId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_VAULT_ONLY_ANSWER', ${chPriv}::uuid, ${crossPrivAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(131)}::timestamptz),
+          (${crossUiReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_UI_ACTION_DM_ANSWER', NULL, ${crossUiAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(132)}::timestamptz),
+          (${legacyRevokedAgentReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_LEGACY_AGENT_ONLY_ANSWER', NULL, ${legacyRevokedAgentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(133)}::timestamptz)
+      `;
+      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${crossDmReplyId}::uuid, ${convMayaScoutDm}::uuid)`;
+      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${crossUiReplyId}::uuid, ${convMayaScoutDm}::uuid)`;
+      await tx`
+        INSERT INTO swarm.ui_actions (
+          action_id, workspace_id, signal_id, actor_user_id, option_id, state, reply_signal_id, created_at, completed_at
+        ) VALUES (
+          ${randomUUID()}::uuid, ${wsId}::uuid, ${crossUiAskId}::uuid, ${mayaId}::uuid,
+          'secret_opt', 'completed', ${crossUiReplyId}::uuid, ${ts(132)}::timestamptz, ${ts(132)}::timestamptz
+        )
+      `;
+      await tx`RESET ROLE`;
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+
+      // Simulate a pre-Step-2b unmapped legacy reply (no conversation_signals row) addressed only to Scout.
+      await tx`
+        DELETE FROM swarm.conversation_signals
+        WHERE workspace_id = ${wsId}::uuid AND signal_id = ${legacyRevokedAgentReplyId}::uuid
+      `;
+
+      // Revoke Scout's workspace seat (simulating ended canonical oversight, where legacy swarm_read.signals still admitted owner reads!).
+      await tx`
+        UPDATE swarm.agent_workspace_memberships
+        SET revoked_at = now()
+        WHERE workspace_id = ${wsId}::uuid AND principal_id = ${scoutAgentId}::uuid
+      `;
+
+      // Viewer must NOT see crossDmAskId, crossUiAskId, or legacyRevokedAgentAskId (neither in items, total, nor outcome text).
+      await tx`SAVEPOINT sp_viewer_canon_check`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: viewerId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [viewerCanonPage] = await tx<{ r: WaitingArchivedPagePayload | null }[]>`
+        SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 100, NULL, NULL) AS r
+      `;
+      assert.ok(viewerCanonPage?.r);
+      const viewerCanonKeys = new Set(viewerCanonPage.r.items.map((i) => i.item_key));
+      assert.equal(viewerCanonKeys.has(`ask:${crossDmAskId}`), false, "viewer must not see ask answered in Maya-Scout DM");
+      assert.equal(viewerCanonKeys.has(`ask:${crossUiAskId}`), false, "viewer must not see ui_action whose reply lives in Maya-Scout DM");
+      assert.equal(viewerCanonKeys.has(`ask:${legacyRevokedAgentAskId}`), false, "viewer must not see unmapped reply addressed only to revoked Scout");
+      const viewerCanonJson = JSON.stringify(viewerCanonPage.r);
+      assert.equal(viewerCanonJson.includes("SECRET_MAYA_SCOUT_DM_ANSWER"), false);
+      assert.equal(viewerCanonJson.includes("SECRET_UI_ACTION_DM_ANSWER"), false);
+      assert.equal(viewerCanonJson.includes("Secret Choice Label"), false);
+      assert.equal(viewerCanonJson.includes("SECRET_LEGACY_AGENT_ONLY_ANSWER"), false);
+      assert.equal(
+        viewerCanonPage.r.total,
+        expectedTotal + 1,
+        "viewer total includes ONLY crossPrivAskId (viewer IS in #private-vault) and excludes all 3 unauthorized answers",
+      );
+      await tx`ROLLBACK TO SAVEPOINT sp_viewer_canon_check`;
+
+      // Maya (NOT in #private-vault) must NOT see crossPrivAskId, while she DOES see crossDmAskId and crossUiAskId (she is in Maya-Scout DM!).
+      await tx`SAVEPOINT sp_maya_canon_check`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: mayaId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [mayaCanonPage] = await tx<{ r: WaitingArchivedPagePayload | null }[]>`
+        SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 100, NULL, NULL) AS r
+      `;
+      assert.ok(mayaCanonPage?.r);
+      const mayaCanonKeys = new Set(mayaCanonPage.r.items.map((i) => i.item_key));
+      assert.equal(mayaCanonKeys.has(`ask:${crossPrivAskId}`), false, "Maya must not see ask whose answer lives in #private-vault");
+      assert.equal(JSON.stringify(mayaCanonPage.r).includes("SECRET_VAULT_ONLY_ANSWER"), false);
+      assert.equal(mayaCanonKeys.has(`ask:${crossDmAskId}`), true, "Maya sees her own authorized DM answer");
+      assert.equal(mayaCanonKeys.has(`ask:${crossUiAskId}`), true, "Maya sees her own authorized ui_action DM answer");
+      await tx`ROLLBACK TO SAVEPOINT sp_maya_canon_check`;
+      await tx`ROLLBACK TO SAVEPOINT sp_answer_canonical`;
 
       // 5. Authz gates: noConsentId sees answered asks (1) and zero to-dos/reviews; non-member & agent get NULL;
       //    swarm_read & swarm_command are denied EXECUTE.
