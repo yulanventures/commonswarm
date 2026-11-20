@@ -288,6 +288,8 @@ final class PeopleDirectoryStore: ObservableObject {
     @Published private(set) var invitesReady = false
     @Published private(set) var invitesFailed = false
     @Published private(set) var adminGrantsReady = false
+    @Published private(set) var adminGrantsFailed = false
+    @Published private(set) var adminGrantsAll = false
     @Published private(set) var accessUnavailable = false
 
     let workspaceID: UUID
@@ -364,7 +366,8 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     var visibleAdminGrants: [WorkspaceAgentAdminGrant] {
-        guard !accessUnavailable, viewerIsOwner else { return [] }
+        guard !accessUnavailable else { return [] }
+        if adminGrantsAll && !viewerIsOwner { return [] }
         return adminGrants
     }
 
@@ -452,6 +455,7 @@ final class PeopleDirectoryStore: ObservableObject {
         isLoading = true
         loadFailed = false
         invitesFailed = false
+        adminGrantsFailed = false
 
         let readGate: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self else { return false }
@@ -470,11 +474,27 @@ final class PeopleDirectoryStore: ObservableObject {
                 people = snapshot.people
                 agents = snapshot.agents
                 invites = snapshot.invites
-                adminGrants = viewerIsOwner ? snapshot.adminGrants : []
                 coreReady = true
                 invitesReady = snapshot.invitesLoaded
                 invitesFailed = !snapshot.invitesLoaded
-                adminGrantsReady = snapshot.adminGrantsLoaded
+                if snapshot.adminGrantsLoaded {
+                    if snapshot.adminGrantsAll && !viewerIsOwner {
+                        adminGrants = []
+                        adminGrantsAll = false
+                    } else {
+                        adminGrants = snapshot.adminGrants
+                        adminGrantsAll = snapshot.adminGrantsAll
+                    }
+                    adminGrantsReady = true
+                    adminGrantsFailed = false
+                } else {
+                    if adminGrantsAll && !viewerIsOwner {
+                        adminGrants = []
+                        adminGrantsAll = false
+                    }
+                    adminGrantsReady = false
+                    adminGrantsFailed = true
+                }
                 accessUnavailable = false
                 loadFailed = false
             case .coreFailed(let partial):
@@ -492,16 +512,25 @@ final class PeopleDirectoryStore: ObservableObject {
                     invitesReady = false
                     invitesFailed = true
                 }
-                if partial.people != nil && !viewerIsOwner {
-                    // Fresh non-owner roster overrides both a failed grant RPC and any
-                    // stale pre-demotion owner grant snapshot returned in parallel.
-                    adminGrants = []
-                    adminGrantsReady = partial.adminGrants != nil
-                } else if let updatedAdminGrants = partial.adminGrants {
-                    adminGrants = updatedAdminGrants
+                if let updatedAdminGrants = partial.adminGrants {
+                    let updatedAll = partial.adminGrantsAll ?? false
+                    if updatedAll && !viewerIsOwner {
+                        adminGrants = []
+                        adminGrantsAll = false
+                    } else {
+                        adminGrants = updatedAdminGrants
+                        adminGrantsAll = updatedAll
+                    }
                     adminGrantsReady = true
+                    adminGrantsFailed = false
                 } else {
+                    if partial.people != nil && !viewerIsOwner && adminGrantsAll {
+                        // Fresh non-owner roster clears cached owner-wide grants on failure.
+                        adminGrants = []
+                        adminGrantsAll = false
+                    }
                     adminGrantsReady = false
+                    adminGrantsFailed = true
                 }
                 loadFailed = true
             }
@@ -536,6 +565,8 @@ final class PeopleDirectoryStore: ObservableObject {
         invitesReady = false
         invitesFailed = false
         adminGrantsReady = false
+        adminGrantsFailed = false
+        adminGrantsAll = false
         loadFailed = false
         accessUnavailable = true
     }

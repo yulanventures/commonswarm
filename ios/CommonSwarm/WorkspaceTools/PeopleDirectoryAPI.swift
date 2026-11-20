@@ -7,6 +7,7 @@ struct PeopleDirectorySnapshot: Sendable {
     let invitesLoaded: Bool
     let adminGrants: [WorkspaceAgentAdminGrant]
     let adminGrantsLoaded: Bool
+    let adminGrantsAll: Bool
 }
 
 struct PeopleDirectoryPartialUpdate: Sendable {
@@ -14,6 +15,7 @@ struct PeopleDirectoryPartialUpdate: Sendable {
     let agents: [WorkspaceAgent]?
     let invites: [WorkspacePendingInvite]?
     let adminGrants: [WorkspaceAgentAdminGrant]?
+    let adminGrantsAll: Bool?
 }
 
 enum PeopleDirectoryLoadResult: Sendable {
@@ -77,6 +79,20 @@ struct PeopleDirectoryAPI: Sendable {
         let may_end: Bool?
     }
 
+    private struct MyAdminGrantsRPCResponse: Decodable {
+        let grants: [MyAdminGrantWire]?
+    }
+
+    private struct MyAdminGrantWire: Decodable {
+        let grant_id: String?
+        let principal_id: UUID?
+        let level: String?
+        let workspace_ids: [String]?
+        let expires_at: String?
+        let state: String?
+        let created_at: String?
+    }
+
     private struct PostgrestErrorWire: Decodable {
         let code: String?
     }
@@ -136,6 +152,43 @@ struct PeopleDirectoryAPI: Sendable {
             return nil
         }
         let decoded = try JSONDecoder().decode(AdminGrantsRPCResponse.self, from: data)
+        guard let grants = decoded.grants else {
+            throw APIError.invalidResponse
+        }
+        return grants
+    }
+
+    /// Calls `POST rest/v1/rpc/my_seat_admin_grants` with `{}` for non-owner members and admins,
+    /// matching `loadMySeatAdminGrants` in `site/src/lib/seat-admin.ts`.
+    private func fetchMyAdminGrantsRPC(
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [MyAdminGrantWire] {
+        var request = api.request("rest/v1/rpc/my_seat_admin_grants")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        request.setValue("swarm_read", forHTTPHeaderField: "Content-Profile")
+        request.httpBody = Data("{}".utf8)
+        let (data, response) = try await api.session.data(for: request, canDispatch: canDispatch)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+            throw APIError.invalidResponse
+        }
+        if status == 401 || status == 403 {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if status != 200 {
+            let errWire = try? JSONDecoder().decode(PostgrestErrorWire.self, from: data)
+            if status == 404 || errWire?.code == "PGRST202" || errWire?.code == "42883" {
+                return []
+            }
+            throw APIError.refused(status)
+        }
+        let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "null" {
+            return []
+        }
+        let decoded = try JSONDecoder().decode(MyAdminGrantsRPCResponse.self, from: data)
         guard let grants = decoded.grants else {
             throw APIError.invalidResponse
         }
@@ -362,49 +415,99 @@ struct PeopleDirectoryAPI: Sendable {
             decodedInvites = nil
         }
 
-        let decodedAdminGrants: [WorkspaceAgentAdminGrant]?
-        switch grantsResult {
-        case .success(let maybeRows):
-            // Both live owners ({ grants: [...] }) and non-owners (null -> []) complete cleanly.
-            let rows = maybeRows ?? []
-            decodedAdminGrants = rows.compactMap { row in
-                guard let grantID = row.grant_id, !grantID.isEmpty,
-                      let principalID = row.principal_id else {
-                    return nil
-                }
-                let rawAgentName = row.agent_name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let agentName = rawAgentName.isEmpty ? (agentNamesByID[principalID] ?? "Agent") : rawAgentName
-                let rawOwnerDisplay = row.owner_display?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let ownerDisplay: String?
-                if let rawOwnerDisplay, !rawOwnerDisplay.isEmpty {
-                    ownerDisplay = rawOwnerDisplay
-                } else if let ownerID = row.owner_user_id {
-                    ownerDisplay = ownerID == viewerID ? "You" : namesByUserID[ownerID]
-                } else {
-                    ownerDisplay = nil
-                }
-                return WorkspaceAgentAdminGrant(
-                    grantID: grantID,
-                    principalID: principalID,
-                    agentName: agentName,
-                    ownerUserID: row.owner_user_id,
-                    ownerDisplay: ownerDisplay,
-                    level: row.level?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "scoped",
-                    expiresAt: PeopleDirectoryRules.parseISO8601(row.expires_at),
-                    createdAt: PeopleDirectoryRules.parseISO8601(row.created_at),
-                    mayEnd: row.may_end ?? false
-                )
-            }
-        case .failure:
-            decodedAdminGrants = nil
-        }
-
         let freshNonOwner = decodedPeople.map { people in
             people.first(where: { $0.isViewer })?.role != .owner
         } ?? false
-        let effectiveAdminGrants: [WorkspaceAgentAdminGrant]? = freshNonOwner
-            ? (decodedAdminGrants != nil ? [] : nil)
-            : decodedAdminGrants
+
+        let workspaceGrantsReturnedNull: Bool
+        if case .success(nil) = grantsResult {
+            workspaceGrantsReturnedNull = true
+        } else {
+            workspaceGrantsReturnedNull = false
+        }
+
+        let effectiveAdminGrants: [WorkspaceAgentAdminGrant]?
+        let effectiveAdminGrantsAll: Bool
+
+        if freshNonOwner || workspaceGrantsReturnedNull {
+            // Non-owner viewer (or owner RPC returned null): never reuse owner-wide rows;
+            // fetch the viewer's own grants and keep only active grants for this workspace.
+            effectiveAdminGrantsAll = false
+            do {
+                let myRows = try await fetchMyAdminGrantsRPC(canDispatch: canDispatch)
+                let targetWorkspace = workspaceID.uuidString.lowercased()
+                let now = Date()
+                effectiveAdminGrants = myRows.compactMap { row in
+                    guard let grantID = row.grant_id, !grantID.isEmpty,
+                          let principalID = row.principal_id,
+                          row.state?.lowercased() == "active" else {
+                        return nil
+                    }
+                    let workspaceIDs = (row.workspace_ids ?? []).map { $0.lowercased() }
+                    guard workspaceIDs.contains(targetWorkspace) else {
+                        return nil
+                    }
+                    let expiresAt = PeopleDirectoryRules.parseISO8601(row.expires_at)
+                    if let expiresAt, expiresAt <= now {
+                        return nil
+                    }
+                    let agentName = agentNamesByID[principalID] ?? "Agent"
+                    return WorkspaceAgentAdminGrant(
+                        grantID: grantID,
+                        principalID: principalID,
+                        agentName: agentName,
+                        ownerUserID: viewerID,
+                        ownerDisplay: "You",
+                        level: row.level?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "scoped",
+                        expiresAt: expiresAt,
+                        createdAt: PeopleDirectoryRules.parseISO8601(row.created_at),
+                        mayEnd: true
+                    )
+                }
+            } catch PeopleDirectoryError.accessRefused {
+                throw PeopleDirectoryError.accessRefused
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                effectiveAdminGrants = nil
+            }
+        } else {
+            effectiveAdminGrantsAll = true
+            switch grantsResult {
+            case .success(let maybeRows):
+                let rows = maybeRows ?? []
+                effectiveAdminGrants = rows.compactMap { row in
+                    guard let grantID = row.grant_id, !grantID.isEmpty,
+                          let principalID = row.principal_id else {
+                        return nil
+                    }
+                    let rawAgentName = row.agent_name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let agentName = rawAgentName.isEmpty ? (agentNamesByID[principalID] ?? "Agent") : rawAgentName
+                    let rawOwnerDisplay = row.owner_display?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let ownerDisplay: String?
+                    if let rawOwnerDisplay, !rawOwnerDisplay.isEmpty {
+                        ownerDisplay = rawOwnerDisplay
+                    } else if let ownerID = row.owner_user_id {
+                        ownerDisplay = ownerID == viewerID ? "You" : namesByUserID[ownerID]
+                    } else {
+                        ownerDisplay = nil
+                    }
+                    return WorkspaceAgentAdminGrant(
+                        grantID: grantID,
+                        principalID: principalID,
+                        agentName: agentName,
+                        ownerUserID: row.owner_user_id,
+                        ownerDisplay: ownerDisplay,
+                        level: row.level?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "scoped",
+                        expiresAt: PeopleDirectoryRules.parseISO8601(row.expires_at),
+                        createdAt: PeopleDirectoryRules.parseISO8601(row.created_at),
+                        mayEnd: row.may_end ?? false
+                    )
+                }
+            case .failure:
+                effectiveAdminGrants = nil
+            }
+        }
 
         if let people = decodedPeople, let agents = decodedAgents {
             return .complete(
@@ -414,7 +517,8 @@ struct PeopleDirectoryAPI: Sendable {
                     invites: decodedInvites ?? [],
                     invitesLoaded: decodedInvites != nil,
                     adminGrants: effectiveAdminGrants ?? [],
-                    adminGrantsLoaded: effectiveAdminGrants != nil
+                    adminGrantsLoaded: effectiveAdminGrants != nil,
+                    adminGrantsAll: effectiveAdminGrantsAll
                 )
             )
         }
@@ -424,7 +528,8 @@ struct PeopleDirectoryAPI: Sendable {
                 people: decodedPeople,
                 agents: decodedAgents,
                 invites: decodedInvites,
-                adminGrants: effectiveAdminGrants
+                adminGrants: effectiveAdminGrants,
+                adminGrantsAll: effectiveAdminGrants != nil ? effectiveAdminGrantsAll : nil
             )
         )
     }

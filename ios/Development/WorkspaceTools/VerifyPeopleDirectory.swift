@@ -569,8 +569,60 @@ struct VerifyPeopleDirectory {
         try await postFixture("\(base)/fixture/omit-maya?on=0")
         try await postFixture("\(base)/fixture/fail-agents?on=0")
 
+        // 11. Designer Witnesses: non-owner my_seat_admin_grants read & active/workspace filtering + grant-read 503 Retry state
+        await MainActor.run { store.enterList() }
+        try await postFixture("\(base)/fixture/viewer-role?role=member")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=1")
+        try await postFixture("\(base)/fixture/own-admin-grants?on=1")
+        await store.load(api: directoryAPI)
+        let memberOwnGrantsOK = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.accessUnavailable
+                && !store.viewerIsOwner
+                && !store.adminGrantsAll
+                && store.adminGrantsReady
+                && !store.adminGrantsFailed
+                && store.visibleAdminGrants.count == 1
+                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
+                && store.visibleAdminGrants.first?.agentName == "Atlas"
+                && store.managers.count == 1
+                && adminsTab?.count == 2
+        }
+        expect(memberOwnGrantsOK, "Non-owner member must load active own grants for THIS workspace via my_seat_admin_grants (filtering out other-workspace, ended, and expired grants)")
+
+        // 11b. Grant-read 503 while people load keeps people/managers visible and flags adminGrantsFailed (never empty state)
+        try await postFixture("\(base)/fixture/fail-my-admin-grants?on=1")
+        await store.load(api: directoryAPI)
+        let grants503ErrorState = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.accessUnavailable
+                && store.coreReady
+                && store.managers.count == 1
+                && store.adminGrantsFailed
+                && !store.adminGrantsReady
+                && adminsTab?.count == nil
+        }
+        expect(grants503ErrorState, "my_seat_admin_grants 503 must keep people/managers visible and surface adminGrantsFailed (never empty state)")
+
+        // 11c. Retry after 503 recovers own grants cleanly
+        try await postFixture("\(base)/fixture/fail-my-admin-grants?on=0")
+        await store.load(api: directoryAPI)
+        let grantsRecovered = await MainActor.run {
+            !store.adminGrantsFailed
+                && store.adminGrantsReady
+                && store.visibleAdminGrants.count == 1
+                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
+        }
+        expect(grantsRecovered, "Retrying after grant-read 503 must recover viewer's active grants cleanly")
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=0")
+        try await postFixture("\(base)/fixture/own-admin-grants?on=0")
+
         // Leaving detail when list is already gone must retire the store (0 sends on held bearer)
-        await MainActor.run { bearer.holdAll() }
+        await MainActor.run {
+            store.leaveList()
+            bearer.holdAll()
+        }
         let readsBeforeLeaveAll = try await readCount(origin)
         let leaveAllTask = Task { await store.load(api: directoryAPI) }
         await bearer.waitUntilHeld()
@@ -582,6 +634,6 @@ struct VerifyPeopleDirectory {
         let readsAfterLeaveAll = try await readCount(origin)
         expect(readsBeforeLeaveAll == readsAfterLeaveAll, "Leaving detail with no visible list must retire store with ZERO sends")
 
-        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants RPC owner & null non-owner, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, mixed 503+403 refusal precedence, authoritative empty 200 []/null clearing under peer 503, ID-bound detail routes with held-refusal/omission/live-control)")
+        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants + my_seat_admin_grants active/workspace filtering, 503 grant-error Retry state, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, mixed 503+403 refusal precedence, authoritative empty 200 []/null clearing under peer 503, ID-bound detail routes with held-refusal/omission/live-control)")
     }
 }

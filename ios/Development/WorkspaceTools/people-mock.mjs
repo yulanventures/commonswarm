@@ -13,6 +13,7 @@ const beacon = "00000000-0000-4000-8000-000000000004";
 const maya = "00000000-0000-4000-8000-000000000011";
 const devon = "00000000-0000-4000-8000-000000000012";
 const wsMain = "00000000-0000-4000-8000-000000000003";
+const wsOther = "00000000-0000-4000-8000-000000000099";
 
 const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
 
@@ -26,8 +27,10 @@ let failInvites = false;
 let emptyInvites = false;
 let refuseInvites = false;
 let failAdminGrants = false;
+let failMyAdminGrants = false;
 let refuseAdminGrants = false;
 let nonOwnerGrants = false;
+let ownAdminGrants = false;
 let duplicateRows = false;
 let omitMaya = false;
 let viewerRole = "owner";
@@ -92,6 +95,10 @@ const server = createServer(async (req, res) => {
       failAdminGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failAdminGrants });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-my-admin-grants") {
+      failMyAdminGrants = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, failMyAdminGrants });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/refuse-admin-grants") {
       refuseAdminGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, refuseAdminGrants });
@@ -103,6 +110,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/non-owner-grants") {
       nonOwnerGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, nonOwnerGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/own-admin-grants") {
+      ownAdminGrants = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, ownAdminGrants });
     }
     if (req.method === "POST" && url.pathname === "/fixture/duplicate-rows") {
       duplicateRows = url.searchParams.get("on") !== "0";
@@ -242,6 +253,66 @@ const server = createServer(async (req, res) => {
         });
       }
       return reply(200, ownerPayload);
+    }
+
+    // Production RPC: POST /rest/v1/rpc/my_seat_admin_grants (viewer's own grants across workspaces)
+    if (req.method === "POST" && url.pathname === "/rest/v1/rpc/my_seat_admin_grants") {
+      readRequestCount += 1;
+      if (req.headers["accept-profile"] !== "swarm_read" || req.headers["content-profile"] !== "swarm_read") {
+        return reply(400, { error: "missing_profile" });
+      }
+      if (edge401) return reply(401, {});
+      if (accessRefused || refuseAdminGrants) return reply(403, { error: "forbidden" });
+      if (failAdminGrants || failMyAdminGrants) return reply(503, { error: "unavailable" });
+      if (!ownAdminGrants) return reply(200, { grants: [] });
+      return reply(200, {
+        grants: [
+          {
+            grant_id: "my_grant_atlas_active",
+            principal_id: atlas,
+            level: "scoped",
+            organization_id: null,
+            scope_names: ["members.invite"],
+            workspace_ids: [wsMain],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_other_ws",
+            principal_id: beacon,
+            level: "workspace",
+            organization_id: null,
+            scope_names: [],
+            workspace_ids: [wsOther],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_ended",
+            principal_id: atlas,
+            level: "scoped",
+            organization_id: null,
+            scope_names: ["members.invite"],
+            workspace_ids: [wsMain],
+            expires_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+            state: "ended",
+            created_at: new Date(Date.now() - 7200 * 1000).toISOString(),
+          },
+          {
+            grant_id: "my_grant_expired",
+            principal_id: atlas,
+            level: "scoped",
+            organization_id: null,
+            scope_names: ["members.invite"],
+            workspace_ids: [wsMain],
+            expires_at: new Date(Date.now() - 60 * 1000).toISOString(),
+            state: "active",
+            created_at: new Date(Date.now() - 7200 * 1000).toISOString(),
+          },
+        ],
+      });
     }
 
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});

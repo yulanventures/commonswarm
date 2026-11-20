@@ -187,12 +187,22 @@ struct PeopleDirectoryView: View {
                 .font(.subheadline)
                 .foregroundStyle(mutedForeground)
                 .accessibilityHidden(true)
-            TextField(store.selectedTab.searchPlaceholder, text: $store.query)
-                .textFieldStyle(.plain)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .accessibilityLabel(store.selectedTab.searchPlaceholder)
-                .accessibilityIdentifier("people-search-field")
+            ZStack(alignment: .leading) {
+                if store.query.isEmpty {
+                    Text(store.selectedTab.searchPlaceholder)
+                        .foregroundStyle(mutedForeground)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                TextField("", text: $store.query)
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(.primary)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .accessibilityLabel(store.selectedTab.searchPlaceholder)
+                    .accessibilityIdentifier("people-search-field")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             if !store.query.isEmpty {
                 Button {
                     store.query = ""
@@ -284,8 +294,11 @@ struct PeopleDirectoryView: View {
         case .admins:
             let adminPeople = store.filteredAdminPeople
             let grants = store.filteredAdminGrants
-            if adminPeople.isEmpty && grants.isEmpty {
-                emptyState(hasQuery ? PeopleDirectoryRules.noMatchMessage(for: .admins) : "No workspace admins listed.", icon: "person.badge.shield.checkmark")
+            let grantsHeading = store.adminGrantsAll
+                ? "Admin access given to agents"
+                : "Admin access you gave to agents"
+            if hasQuery && adminPeople.isEmpty && grants.isEmpty && !store.adminGrantsFailed {
+                emptyState(PeopleDirectoryRules.noMatchMessage(for: .admins), icon: "person.badge.shield.checkmark")
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
@@ -301,16 +314,72 @@ struct PeopleDirectoryView: View {
                                     .buttonStyle(.plain)
                                 }
                             }
+                        } else if !hasQuery {
+                            Text("People who manage this workspace")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(mutedForeground)
+                            Text("No workspace managers listed.")
+                                .font(.subheadline)
+                                .foregroundStyle(mutedForeground)
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
-                        if !grants.isEmpty {
-                            Text("Agents with scoped admin access")
+
+                        if !hasQuery || !grants.isEmpty || store.adminGrantsFailed {
+                            Text(grantsHeading)
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(mutedForeground)
                                 .padding(.top, 4)
-                            VStack(spacing: 10) {
-                                ForEach(grants) { grant in
-                                    adminGrantCard(grant)
+
+                            if store.adminGrantsFailed {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Couldn’t load agent admin access.")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(errorForeground)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Button {
+                                        Task { await store.load(api: directoryAPI) }
+                                    } label: {
+                                        Text("Retry")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 16)
+                                            .frame(minHeight: 44)
+                                            .background(primaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("admins-grants-retry")
                                 }
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .accessibilityElement(children: .contain)
+                                .accessibilityIdentifier("admins-grants-error")
+                            } else if !store.adminGrantsReady {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                    Text("Loading agent admin access…")
+                                        .font(.subheadline)
+                                        .foregroundStyle(mutedForeground)
+                                }
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            } else if !grants.isEmpty {
+                                VStack(spacing: 10) {
+                                    ForEach(grants) { grant in
+                                        adminGrantCard(grant)
+                                    }
+                                }
+                            } else if !hasQuery {
+                                Text(store.adminGrantsAll ? "No active admin grants for agents here." : "No active admin grants from you here.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(mutedForeground)
+                                    .padding(14)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .accessibilityIdentifier("admins-grants-empty")
                             }
                         }
                     }
