@@ -46,6 +46,9 @@ struct DirectoryView: View {
                 NavigationLink(value: SharedObjectsRoute()) {
                     Label("Lists & docs", systemImage: "list.bullet.rectangle")
                 }
+                NavigationLink(value: WorkspaceFilesRoute()) {
+                    Label("Files", systemImage: "folder")
+                }
             }
             Section("Channels") {
                 ForEach(channels) { row in link(row) }
@@ -61,6 +64,9 @@ struct DirectoryView: View {
          }
          .navigationDestination(for: SharedObjectsRoute.self) { _ in
              SharedObjectsListView(api: api, workspace: workspace)
+         }
+         .navigationDestination(for: WorkspaceFilesRoute.self) { _ in
+             WorkspaceFilesView(api: api, workspace: workspace)
          }
          .navigationDestination(for: ChannelDirectoryRoute.self) { _ in
              List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
