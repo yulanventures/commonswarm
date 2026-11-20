@@ -1085,7 +1085,6 @@ test("7. C5 cswarm wait aligns with real Postgres ms-bucket+UUID pagination and 
   const liveAsk = await posted(ann.jwt, {
     conversation_id: dmWait,
     signal_kind: "ask",
-    to_agent_principal_id: waitBot.id,
     body: "C5 real-DB delivery ack check",
   });
   const askId = String(liveAsk.id);
@@ -1139,10 +1138,10 @@ test("7. C5 cswarm wait aligns with real Postgres ms-bucket+UUID pagination and 
   const claimed = ok(await send(waitBot.token, {
     kind: "claim_agent_inbox",
     listener_instance_id: randomUUID(),
-    limit: 20,
+    limit: 10,
   }), "claim_agent_inbox after cswarm wait");
-  const claimedIds = ((claimed.deliveries as Array<{ signal?: { id?: string } }>) ?? [])
-    .map((d) => String(d.signal?.id ?? ""));
+  const claimedIds = ((claimed.deliveries as Array<{ signal_id?: string; signal?: { id?: string } }>) ?? [])
+    .map((d) => String(d.signal_id ?? d.signal?.id ?? ""));
   assert.equal(
     claimedIds.includes(askId),
     false,
