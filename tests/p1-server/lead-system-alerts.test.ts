@@ -1444,12 +1444,9 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   assert.equal(firstRenew.status, 200, JSON.stringify(firstRenew.body));
   assert.equal(firstRenew.body.status, "accepted", JSON.stringify(firstRenew.body));
   assert.equal(typeof firstRenew.body.agent_token, "string", JSON.stringify(firstRenew.body));
-  const succToken = String(firstRenew.body.agent_token);
-  const useSucc = await send(succToken, {
-    kind: "post_signal", signal_kind: "note", channel: openCh.slug, body: "mark successor first_used_at",
-    to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null,
-  });
-  assert.equal(useSucc.status, 200, JSON.stringify(useSucc.body));
+  // Keep the minted successor unused so predToken still authenticates and a
+  // second renew_agent_token with a different command_id hits the exact
+  // predecessor_superseded domain refusal + insertAudit hook.
 
   const revokedCmd = await agentOf(owner.id, "lock-revoked-cmd");
   const revokedAct = await agentOf(owner.id, "lock-revoked-act");
@@ -1503,7 +1500,7 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
         workspace_id: workspace,
         stream_id: randomUUID(),
         sequence: 1,
-        phase: "prompting",
+        phase: "idle",
         signal_id: null,
         tool_title: null,
         elapsed_ms: 0,
