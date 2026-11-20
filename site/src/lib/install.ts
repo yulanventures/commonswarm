@@ -48,3 +48,9 @@ export const INSTALL_CMD_DIR =
  */
 export const INSTALL_CMD_LOGIN_SHELL =
   `zsh -lic 'curl -fsSL https://${INSTALL_HOST}/install.sh | sh'`;
+
+/** Single-URL read-first agent onboarding playbook served from site/public/start-agent.md. */
+export const AGENT_PLAYBOOK_URL = `https://${INSTALL_HOST}/start-agent.md`;
+
+/** Copyable 1-line prompt that points an agent to the read-first onboarding playbook. */
+export const AGENT_START_PROMPT = `Read ${AGENT_PLAYBOOK_URL} and join my workspace`;
