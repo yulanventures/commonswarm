@@ -13,6 +13,7 @@ function installStep3CA11yFixture() {
   const params = new URL(location.href).searchParams;
   f.scene = params.get("scene") ?? "picker-chips";
   f.convCommands = [] as any[];
+  f.removeCommands = [] as any[];
 
   const opsChannel = "66666666-6666-4666-8666-666666666666";
   const generalConv = "99990000-0000-4000-8000-000000000001";
@@ -113,6 +114,10 @@ function installStep3CA11yFixture() {
           { status: 409 },
         );
       }
+      if (command?.kind === "conversation_remove") {
+        f.removeCommands.push(command);
+        return Response.json({ status: "accepted", conversation_id: command.conversation_id });
+      }
     }
     return previous(input, init);
   };
@@ -128,6 +133,10 @@ async function observeStep3CA11y() {
   const key = async (name: string) => {
     const res = await fetch(`/__key?key=${encodeURIComponent(name)}`);
     if (!res.ok) throw new Error(`key failed (${name}): ${await res.text()}`);
+  };
+  const tapPoint = async (x: number, y: number) => {
+    const res = await fetch(`/__tap?x=${encodeURIComponent(String(x))}&y=${encodeURIComponent(String(y))}`);
+    if (!res.ok) throw new Error(`tap failed (${x},${y}): ${await res.text()}`);
   };
   const one = <T extends Element>(s: string) => document.querySelector<T>(s);
   const visible = (el: Element | null) => !!el && !el.closest("[hidden]") && el.getClientRects().length > 0;
@@ -297,6 +306,59 @@ async function observeStep3CA11y() {
       return;
     }
 
+    if (f.scene === "members-remove-double-tap") {
+      await openMembersSheet();
+      const targetKey = `user:${f.ids.peerAlex}`;
+      const openerSel = `[data-conversation-member-remove="${targetKey}"]`;
+      const cancelSel = `[data-conversation-member-remove-cancel="${targetKey}"]`;
+      const confirmSel = `[data-conversation-member-remove-confirm="${targetKey}"]`;
+      const opener = one<HTMLButtonElement>(openerSel)!;
+      const openerRect = opener.getBoundingClientRect();
+      const probes = [
+        { name: "center", x: (openerRect.left + openerRect.right) / 2, y: (openerRect.top + openerRect.bottom) / 2 },
+        { name: "left-edge", x: openerRect.left + 2, y: (openerRect.top + openerRect.bottom) / 2 },
+        { name: "right-edge", x: openerRect.right - 2, y: (openerRect.top + openerRect.bottom) / 2 },
+        { name: "top-edge", x: (openerRect.left + openerRect.right) / 2, y: openerRect.top + 2 },
+        { name: "bottom-edge", x: (openerRect.left + openerRect.right) / 2, y: openerRect.bottom - 2 },
+      ];
+      let focusOnCancel = true;
+      let disjointFromConfirm = true;
+      for (const probe of probes) {
+        await click(`${openerSel}:visible`);
+        await wait(`confirm open (${probe.name})`, () => visible(one(confirmSel)));
+        const cancelBtn = one<HTMLButtonElement>(cancelSel)!;
+        const confirmBtn = one<HTMLButtonElement>(confirmSel)!;
+        if (document.activeElement !== cancelBtn) focusOnCancel = false;
+        const cRect = confirmBtn.getBoundingClientRect();
+        const overlaps = !(cRect.right <= openerRect.left || cRect.left >= openerRect.right || cRect.bottom <= openerRect.top || cRect.top >= openerRect.bottom);
+        if (overlaps) disjointFromConfirm = false;
+        await tapPoint(probe.x, probe.y);
+        await tick();
+        if (visible(one(confirmSel))) {
+          await click(`${cancelSel}:visible`);
+          await wait(`confirm closed (${probe.name})`, () => !one(confirmSel));
+        } else {
+          await wait(`opener restored (${probe.name})`, () => visible(one(openerSel)));
+        }
+      }
+      const removalsAfterRepeatedTaps = f.removeCommands.length;
+      // Now deliberately confirm removal once and verify exactly one removal command is sent.
+      await click(`${openerSel}:visible`);
+      await wait("confirm open for deliberate tap", () => visible(one(confirmSel)));
+      const confirmRect = one<HTMLButtonElement>(confirmSel)!.getBoundingClientRect();
+      await tapPoint((confirmRect.left + confirmRect.right) / 2, (confirmRect.top + confirmRect.bottom) / 2);
+      await wait("deliberate removal completed", () => f.removeCommands.length === 1 && !one(`[data-conversation-member-row="${targetKey}"]`));
+      document.documentElement.dataset.step3cA11y = JSON.stringify({
+        ok: focusOnCancel && disjointFromConfirm && removalsAfterRepeatedTaps === 0 && f.removeCommands.length === 1,
+        scene: f.scene,
+        focusOnCancel,
+        disjointFromConfirm,
+        removalsAfterRepeatedTaps,
+        deliberateRemovals: f.removeCommands.length,
+      });
+      return;
+    }
+
     throw new Error(`unknown scene: ${f.scene}`);
   } catch (error) {
     document.documentElement.dataset.step3cA11y = JSON.stringify({
@@ -318,11 +380,19 @@ test("Step 3C accessibility, Escape focus-return, 44 px target, and light/dark p
     "</style><script>" + install + fixture + "</script></head><body>" + markup + "<script type='module'>" + observe + "</script></body></html>";
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
   let activePage: Page | null = null;
+  let activeHasTouch = false;
   const server = createServer((request, response) => {
     const url = new URL(request.url!, "http://127.0.0.1");
     if (url.pathname === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
     if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).first().click({ timeout: 8_000 }).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname === "/__key") { void activePage!.keyboard.press(url.searchParams.get("key")!).then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
+    if (url.pathname === "/__tap") {
+      const x = Number(url.searchParams.get("x"));
+      const y = Number(url.searchParams.get("y"));
+      const action = activeHasTouch ? activePage!.touchscreen.tap(x, y) : activePage!.mouse.click(x, y);
+      void action.then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); });
+      return;
+    }
     if (url.pathname.startsWith("/fonts/") && url.pathname.endsWith(".woff2")) { void readFile(join(fonts, basename(url.pathname))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return; }
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(url.pathname === "/app.js" ? bundled.join("\n") : html);
@@ -348,9 +418,16 @@ test("Step 3C accessibility, Escape focus-return, 44 px target, and light/dark p
         { name: `360x740-${theme}-members-add`, width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=${theme}&scene=members-add`, screenshot: true },
         { name: `1440x900-${theme}-members-remove-confirm`, width: 1440, height: 900, query: `w=${ws}&c=${opsCh}&theme=${theme}&scene=members-remove-confirm`, screenshot: true },
         { name: `390x844-${theme}-members-remove-confirm`, width: 390, height: 844, query: `w=${ws}&c=${opsCh}&theme=${theme}&scene=members-remove-confirm`, screenshot: true },
+        { name: `360x740-${theme}-members-remove-confirm`, width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=${theme}&scene=members-remove-confirm`, screenshot: true },
         { name: `1024x768-${theme}-members-readonly`, width: 1024, height: 768, query: `w=${ws}&c=general&theme=${theme}&scene=members-readonly`, screenshot: true },
         { name: `360x740-${theme}-members-readonly`, width: 360, height: 740, query: `w=${ws}&c=general&theme=${theme}&scene=members-readonly`, screenshot: true },
       ]),
+      // Repeated-tap safety witnesses on inline Remove confirmation (phone, landscape, and desktop):
+      { name: "360x740-light-members-remove-double-tap", width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=light&scene=members-remove-double-tap` },
+      { name: "360x740-dark-members-remove-double-tap", width: 360, height: 740, query: `w=${ws}&c=${opsCh}&theme=dark&scene=members-remove-double-tap` },
+      { name: "390x844-light-members-remove-double-tap", width: 390, height: 844, query: `w=${ws}&c=${opsCh}&theme=light&scene=members-remove-double-tap` },
+      { name: "844x390-light-members-remove-double-tap", width: 844, height: 390, query: `w=${ws}&c=${opsCh}&theme=light&scene=members-remove-double-tap` },
+      { name: "1440x900-light-members-remove-double-tap", width: 1440, height: 900, query: `w=${ws}&c=${opsCh}&theme=light&scene=members-remove-double-tap` },
       // Keyboard Escape focus-return witnesses (desktop & phone):
       { name: "1024x768-picker-escape", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&scene=picker-escape` },
       { name: "360x740-picker-escape", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&scene=picker-escape` },
@@ -359,7 +436,8 @@ test("Step 3C accessibility, Escape focus-return, 44 px target, and light/dark p
     ];
     const report: Record<string, any> = {};
     for (const item of cases) {
-      const context = await browser.newContext({ viewport: { width: item.width, height: item.height }, hasTouch: item.width < 1024 });
+      activeHasTouch = item.width < 1024;
+      const context = await browser.newContext({ viewport: { width: item.width, height: item.height }, hasTouch: activeHasTouch });
       activePage = await context.newPage();
       try {
         await activePage.goto(`http://127.0.0.1:${address.port}/app?${item.query}`);

@@ -357,7 +357,7 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
 
           const cancelBtn = doc.createElement("button");
           cancelBtn.type = "button";
-          cancelBtn.className = "dashboard__button dashboard__button--secondary";
+          cancelBtn.className = "dashboard__button dashboard__button--secondary cm-member-row__remove-cancel";
           cancelBtn.dataset.conversationMemberRemoveCancel = key;
           cancelBtn.disabled = busy;
           cancelBtn.textContent = "Cancel";
@@ -384,7 +384,9 @@ export function createChannelMembersDialogController(dialog: HTMLDialogElement):
             void submitRemove(member);
           });
 
-          confirm.append(prompt, cancelBtn, confirmBtn);
+          // Place Cancel under the original right-aligned Remove target so a repeated tap cancels
+          // instead of hitting the destructive confirmation; Cancel still receives initial focus.
+          confirm.append(prompt, confirmBtn, cancelBtn);
           li.append(confirm);
         } else {
           const removeBtn = doc.createElement("button");
