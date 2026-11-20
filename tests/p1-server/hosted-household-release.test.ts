@@ -155,8 +155,8 @@ test("edge router admits hosted to-do and list tools only with the storage brief
     request_id: "c7dmopen01",
   });
   const dmConvId = String((dmOpened.conversation as { conversation_id?: string }).conversation_id ?? "");
-  const dmRootId = String((dmOpened.signal as { id?: string }).id ?? "");
-  assert.ok(dmConvId.length > 0 && dmRootId.length > 0, "hosted dm opens conversation and posts root signal");
+  const dmRootId = String((dmOpened.signal as { signal_id?: string }).signal_id ?? "");
+  assert.ok(dmConvId.length > 0 && dmRootId.length > 0, `hosted dm opens conversation and posts root signal: ${JSON.stringify(dmOpened)}`);
   const memberConvs = await call(off, token, "conversations", { seat: approved });
   assert.equal(
     (memberConvs.conversations as Array<{ conversation_id?: string }>).some((c) => c.conversation_id === dmConvId),
@@ -177,7 +177,7 @@ test("edge router admits hosted to-do and list tools only with the storage brief
     body: "Mentioning @Synthetic unapproved seat inside DM thread",
     request_id: "c7dmthr01",
   });
-  assert.ok(dmThreadReply.signal, "hosted DM thread with inline @tag succeeds");
+  assert.ok(typeof dmThreadReply.signal_id === "string" && dmThreadReply.signal_id.length > 0, `hosted DM thread with inline @tag succeeds: ${JSON.stringify(dmThreadReply)}`);
   const dmMarkRead = await call(off, token, "mark_read", {
     seat: approved,
     conversation_id: dmConvId,
