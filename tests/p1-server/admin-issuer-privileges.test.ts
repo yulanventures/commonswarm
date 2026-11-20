@@ -124,6 +124,9 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.record_system_alert(uuid,text,uuid,uuid,integer,timestampwithtimezone,interval)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.record_hosted_seat_refused_alerts(text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.resolve_system_alert(uuid,uuid,text,uuid,uuid,text)', 'EXECUTE', false],
+  // Revision-bound review checks (C3, 20261120000005): open/update-head and own-seat stamp definers.
+  ['swarm_command', 'FUNCTION', 'swarm.review_check_open(uuid,text,uuid,text,text,text,jsonb,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.review_check_stamp(uuid,text,uuid,uuid,text,text,text)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

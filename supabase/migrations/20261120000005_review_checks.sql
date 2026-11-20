@@ -184,7 +184,7 @@ BEGIN
             AND ap.principal_id = (seat_item->>'id')::uuid
         )
         ELSE (
-          SELECT coalesce(nullif(btrim(u.display_name), ''), u.email)
+          SELECT nullif(btrim(u.display_name), '')
           FROM swarm.users AS u
           WHERE u.user_id = (seat_item->>'id')::uuid
         )
@@ -205,7 +205,7 @@ BEGIN
             AND ap.principal_id = (seat_item->>'id')::uuid
         )
         ELSE (
-          SELECT coalesce(nullif(btrim(u.display_name), ''), u.email)
+          SELECT nullif(btrim(u.display_name), '')
           FROM swarm.users AS u
           WHERE u.user_id = (seat_item->>'id')::uuid
         )
@@ -688,13 +688,25 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION swarm.review_check_validate_refs() FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION swarm.review_check_can_read(uuid, text, uuid, uuid) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION swarm.review_check_payload(uuid) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION swarm.review_check_open(uuid, text, uuid, text, text, text, jsonb, uuid, uuid) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION swarm.review_check_stamp(uuid, text, uuid, uuid, text, text, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION swarm.review_check_read(uuid, text, uuid, uuid, text, text, uuid, uuid, integer) FROM PUBLIC, anon, authenticated;
+ALTER TABLE swarm.review_checks OWNER TO swarm_admin;
+ALTER TABLE swarm.review_check_stamps OWNER TO swarm_admin;
 
-GRANT EXECUTE ON FUNCTION swarm.review_check_open(uuid, text, uuid, text, text, text, jsonb, uuid, uuid) TO swarm_command, swarm_admin;
-GRANT EXECUTE ON FUNCTION swarm.review_check_stamp(uuid, text, uuid, uuid, text, text, text) TO swarm_command, swarm_admin;
-GRANT EXECUTE ON FUNCTION swarm.review_check_read(uuid, text, uuid, uuid, text, text, uuid, uuid, integer) TO swarm_read, swarm_command, swarm_admin;
+ALTER FUNCTION swarm.review_check_validate_refs() OWNER TO swarm_admin;
+ALTER FUNCTION swarm.review_check_can_read(uuid, text, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.review_check_payload(uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.review_check_open(uuid, text, uuid, text, text, text, jsonb, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.review_check_stamp(uuid, text, uuid, uuid, text, text, text) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.review_check_read(uuid, text, uuid, uuid, text, text, uuid, uuid, integer) OWNER TO swarm_admin;
+
+REVOKE ALL ON FUNCTION swarm.review_check_validate_refs() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.review_check_can_read(uuid, text, uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.review_check_payload(uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.review_check_open(uuid, text, uuid, text, text, text, jsonb, uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.review_check_stamp(uuid, text, uuid, uuid, text, text, text) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.review_check_read(uuid, text, uuid, uuid, text, text, uuid, uuid, integer) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+GRANT EXECUTE ON FUNCTION swarm.review_check_open(uuid, text, uuid, text, text, text, jsonb, uuid, uuid) TO swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.review_check_stamp(uuid, text, uuid, uuid, text, text, text) TO swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.review_check_read(uuid, text, uuid, uuid, text, text, uuid, uuid, integer) TO swarm_read;
+
+RESET search_path;

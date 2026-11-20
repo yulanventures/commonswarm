@@ -128,17 +128,24 @@ before(async () => {
     }
     await delay(200);
   }
-  await awaitFunctionRunning(`${local.API_URL}/functions/v1/command`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  }, 30_000);
+  await awaitFunctionRunning({
+    url: `${local.API_URL}/functions/v1/command`,
+    fetcher: fetch,
+    timeoutMs: 30_000,
+    sleep: (ms) => delay(ms),
+    now: () => Date.now(),
+    diagnostics: () => `local command function was not ready: ${functionLogs.slice(-2000)}`,
+    cliState,
+  });
 
   workspace = randomUUID();
   owner = await createUser("rc-owner");
-  await sql`INSERT INTO swarm.workspaces (workspace_id, name, owner_user_id) VALUES (${workspace}::uuid, 'review-checks-ws', ${owner.id}::uuid)`;
-  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${owner.id}::uuid, 'Owner')`;
-  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner.id}::uuid, 'owner')`;
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${owner.id}::uuid, 'Owner')`;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'review-checks-ws', ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace')`;
+  });
   seatLead = await agentOf(owner.id, "lead");
   seatSec = await agentOf(owner.id, "sec");
   outsider = await agentOf(owner.id, "outsider");
@@ -158,13 +165,20 @@ test("C3 lifecycle: open, own-seat stamp, once-only satisfied thread note, head 
   const head2 = "2222222bbbbbbb22222222222222222222222222";
 
   // Create a public channel and thread root signal.
-  const ch = await send(owner.jwt, { kind: "channel_create", slug: `rc-${randomBytes(4).toString("hex")}` });
+  const ch = await send(owner.jwt, {
+    kind: "channel_create",
+    slug: `rc-${randomBytes(4).toString("hex")}`,
+    purpose: "Review checks",
+  });
   assert.equal(ch.status, 200, JSON.stringify(ch.body));
   const channelId = String((ch.body.channel as Row).channel_id);
   const rootPost = await send(seatLead.token, {
     kind: "post_signal",
     signal_kind: "note",
     channel_id: channelId,
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
     body: "PR #700 review thread",
     about: "yulanventures/commonswarm#700",
   });
