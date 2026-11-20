@@ -256,11 +256,16 @@ final class WorkspaceFilesStore: ObservableObject {
     @Published private(set) var downloadStates: [WorkspaceFileVersionKey: WorkspaceFileDownloadState] = [:]
     @Published var activeShareItem: DownloadedFileShare?
 
+    private struct TrackedTransfer {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
     let workspaceID: UUID
     private var loadGeneration = 0
     private var accessGeneration = 0
     private var isRetired = false
-    private var trackedTasks: [WorkspaceFileVersionKey: Task<Void, Never>] = [:]
+    private var trackedTasks: [WorkspaceFileVersionKey: TrackedTransfer] = [:]
     private var managedDirectories: Set<URL> = []
 
     init(workspaceID: UUID) {
@@ -268,8 +273,8 @@ final class WorkspaceFilesStore: ObservableObject {
     }
 
     deinit {
-        for task in trackedTasks.values {
-            task.cancel()
+        for transfer in trackedTasks.values {
+            transfer.task.cancel()
         }
         for dir in managedDirectories {
             try? FileManager.default.removeItem(at: dir)
@@ -280,8 +285,24 @@ final class WorkspaceFilesStore: ObservableObject {
         downloadStates[WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)] ?? .idle
     }
 
+    func hasTrackedTask(for file: WorkspaceFileItem) -> Bool {
+        trackedTasks[WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)] != nil
+    }
+
     private func isCurrentLiveVersion(fileID: String, version: Int) -> Bool {
         files.contains { $0.fileID == fileID && $0.currentVersion == version && !$0.isRemoved }
+    }
+
+    private func canCommitListRead(
+        generation: Int,
+        capturedAccessGen: Int,
+        session: HumanSession
+    ) -> Bool {
+        !Task.isCancelled
+            && !isRetired
+            && session.isActive
+            && generation == loadGeneration
+            && capturedAccessGen == accessGeneration
     }
 
     private func isTransferStillValid(
@@ -310,8 +331,8 @@ final class WorkspaceFilesStore: ObservableObject {
     }
 
     private func cancelAllTransfers() {
-        for task in trackedTasks.values {
-            task.cancel()
+        for transfer in trackedTasks.values {
+            transfer.task.cancel()
         }
         trackedTasks.removeAll()
     }
@@ -322,8 +343,8 @@ final class WorkspaceFilesStore: ObservableObject {
                 .filter { !$0.isRemoved }
                 .map { WorkspaceFileVersionKey(fileID: $0.fileID, version: $0.currentVersion) }
         )
-        for (key, task) in trackedTasks where !liveKeys.contains(key) {
-            task.cancel()
+        for (key, transfer) in trackedTasks where !liveKeys.contains(key) {
+            transfer.task.cancel()
             trackedTasks.removeValue(forKey: key)
         }
         for (key, state) in downloadStates where !liveKeys.contains(key) {
@@ -339,10 +360,23 @@ final class WorkspaceFilesStore: ObservableObject {
         }
     }
 
+    /// Registers a managed downloaded file for share-sheet presentation.
+    func acceptDownloadedShare(_ share: DownloadedFileShare) {
+        let key = WorkspaceFileVersionKey(fileID: share.fileID, version: share.version)
+        if case .ready(let previous) = downloadStates[key], previous.id != share.id {
+            deleteDirectory(previous.fileURL.deletingLastPathComponent())
+        }
+        managedDirectories.insert(share.fileURL.deletingLastPathComponent())
+        downloadStates[key] = .ready(share)
+        activeShareItem = share
+    }
+
     /// Retires in-flight downloads, dismisses any active share sheet, and removes all app-managed temporary files.
     func retire() {
         isRetired = true
+        loadGeneration += 1
         accessGeneration += 1
+        isLoading = false
         cancelAllTransfers()
         activeShareItem = nil
         purgeAllManagedFiles()
@@ -356,13 +390,15 @@ final class WorkspaceFilesStore: ObservableObject {
         }
     }
 
-    /// Removes the per-download temporary directory immediately when the share sheet is dismissed.
-    func dismissActiveShare() {
-        guard let active = activeShareItem else { return }
-        activeShareItem = nil
-        let key = WorkspaceFileVersionKey(fileID: active.fileID, version: active.version)
-        deleteDirectory(active.fileURL.deletingLastPathComponent())
-        if case .ready = downloadStates[key] {
+    /// Deletes the temporary directory owned by `share` and updates ready state only if `share.id` is still current.
+    /// Idempotent and safe across completion, cancel, swipe-down, error, replacement, or after SwiftUI clears the binding.
+    func finishShare(_ share: DownloadedFileShare) {
+        deleteDirectory(share.fileURL.deletingLastPathComponent())
+        if activeShareItem?.id == share.id {
+            activeShareItem = nil
+        }
+        let key = WorkspaceFileVersionKey(fileID: share.fileID, version: share.version)
+        if case .ready(let current) = downloadStates[key], current.id == share.id {
             downloadStates[key] = .downloaded
         }
     }
@@ -375,27 +411,38 @@ final class WorkspaceFilesStore: ObservableObject {
         }
         loadGeneration += 1
         let generation = loadGeneration
+        let capturedAccessGen = accessGeneration
+        let capturedSession = api.session
         isLoading = true
         loadFailed = false
         do {
             let loaded = try await api.listFiles(workspaceID: workspaceID)
-            guard !Task.isCancelled, !isRetired, api.session.isActive, generation == loadGeneration else { return }
+            guard canCommitListRead(
+                generation: generation,
+                capturedAccessGen: capturedAccessGen,
+                session: capturedSession
+            ) else { return }
             files = loaded
             accessUnavailable = false
             loadFailed = false
             pruneStaleDownloads(against: loaded)
         } catch WorkspaceFilesError.accessRefused {
-            guard !Task.isCancelled, !isRetired, generation == loadGeneration else { return }
+            guard !Task.isCancelled, !isRetired, capturedSession.isActive,
+                  generation == loadGeneration, capturedAccessGen == accessGeneration else { return }
             applyAccessUnavailable()
         } catch is CancellationError {
-            if !api.session.isActive {
+            if !capturedSession.isActive {
                 retire()
             }
         } catch {
-            guard !Task.isCancelled, !isRetired, generation == loadGeneration else { return }
+            guard canCommitListRead(
+                generation: generation,
+                capturedAccessGen: capturedAccessGen,
+                session: capturedSession
+            ) else { return }
             loadFailed = true
         }
-        if generation == loadGeneration {
+        if generation == loadGeneration && capturedAccessGen == accessGeneration {
             isLoading = false
         }
     }
@@ -404,28 +451,51 @@ final class WorkspaceFilesStore: ObservableObject {
     func startDownload(_ file: WorkspaceFileItem, api: WorkspaceFilesAPI) {
         let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
         if trackedTasks[key] != nil { return }
+        let token = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.download(file, api: api)
+            defer {
+                if self.trackedTasks[key]?.id == token {
+                    self.trackedTasks.removeValue(forKey: key)
+                }
+            }
+            await self.performDownload(file, api: api)
         }
-        trackedTasks[key] = task
+        trackedTasks[key] = TrackedTransfer(id: token, task: task)
     }
 
     func download(_ file: WorkspaceFileItem, api: WorkspaceFilesAPI) async {
         let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
-        defer { trackedTasks.removeValue(forKey: key) }
+        if let existing = trackedTasks[key] {
+            await existing.task.value
+            return
+        }
+        startDownload(file, api: api)
+        if let running = trackedTasks[key] {
+            await running.task.value
+        }
+    }
 
-        guard !isRetired,
-              !accessUnavailable,
-              api.session.isActive,
+    private func performDownload(
+        _ file: WorkspaceFileItem,
+        api: WorkspaceFilesAPI,
+        capturedAccessGen explicitAccessGen: Int? = nil
+    ) async {
+        let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
+        let capturedSession = api.session
+        let capturedAccessGen = explicitAccessGen ?? accessGeneration
+
+        guard !Task.isCancelled,
               !file.isRemoved,
-              isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) else {
+              isTransferStillValid(
+                  session: capturedSession,
+                  capturedAccessGen: capturedAccessGen,
+                  fileID: file.fileID,
+                  version: file.currentVersion
+              ) else {
             return
         }
         if case .preparing = downloadStates[key] { return }
-
-        let capturedSession = api.session
-        let capturedAccessGen = accessGeneration
 
         // Clean up any previous local file for this version before replacing
         if case .ready(let existing) = downloadStates[key] {
@@ -479,7 +549,6 @@ final class WorkspaceFilesStore: ObservableObject {
                 return
             }
 
-            managedDirectories.insert(tempDir)
             let share = DownloadedFileShare(
                 fileID: file.fileID,
                 fileName: file.name,
@@ -487,10 +556,9 @@ final class WorkspaceFilesStore: ObservableObject {
                 fileURL: localURL,
                 contentWarning: grant.contentWarning
             )
-            downloadStates[key] = .ready(share)
-            activeShareItem = share
+            acceptDownloadedShare(share)
         } catch WorkspaceFilesError.accessRefused {
-            if !Task.isCancelled, !isRetired, capturedSession.isActive {
+            if !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration {
                 applyAccessUnavailable()
             } else {
                 downloadStates.removeValue(forKey: key)
@@ -511,6 +579,9 @@ final class WorkspaceFilesStore: ObservableObject {
                 downloadStates[key] = .failed(message: WorkspaceFilesRules.downloadErrorMessage(error))
             } else {
                 downloadStates.removeValue(forKey: key)
+                if !capturedSession.isActive {
+                    retire()
+                }
             }
         }
     }
@@ -520,16 +591,33 @@ final class WorkspaceFilesStore: ObservableObject {
     func startShareOrSave(_ file: WorkspaceFileItem, api: WorkspaceFilesAPI) {
         let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
         if trackedTasks[key] != nil { return }
+        let token = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.openReadyDownload(for: file, api: api)
+            defer {
+                if self.trackedTasks[key]?.id == token {
+                    self.trackedTasks.removeValue(forKey: key)
+                }
+            }
+            await self.performShareOrSave(for: file, api: api)
         }
-        trackedTasks[key] = task
+        trackedTasks[key] = TrackedTransfer(id: token, task: task)
     }
 
     func openReadyDownload(for file: WorkspaceFileItem, api: WorkspaceFilesAPI) async {
         let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
-        defer { trackedTasks.removeValue(forKey: key) }
+        if let existing = trackedTasks[key] {
+            await existing.task.value
+            return
+        }
+        startShareOrSave(file, api: api)
+        if let running = trackedTasks[key] {
+            await running.task.value
+        }
+    }
+
+    private func performShareOrSave(for file: WorkspaceFileItem, api: WorkspaceFilesAPI) async {
+        let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
 
         guard !isRetired,
               !accessUnavailable,
@@ -550,29 +638,41 @@ final class WorkspaceFilesStore: ObservableObject {
             existingReadyShare = nil
         }
 
-        // 1. Live membership & version check through swarm_read.files (catches both 403 and empty-list omission)
+        // 1. Live membership & version check through swarm_read.files, fenced with the same loadGeneration + accessGeneration.
+        loadGeneration += 1
+        let listGeneration = loadGeneration
         do {
             let freshList = try await api.listFiles(workspaceID: workspaceID)
-            guard !Task.isCancelled, !isRetired, capturedSession.isActive, accessGeneration == capturedAccessGen else {
+            guard canCommitListRead(
+                generation: listGeneration,
+                capturedAccessGen: capturedAccessGen,
+                session: capturedSession
+            ) else {
                 if let share = existingReadyShare { deleteDirectory(share.fileURL.deletingLastPathComponent()) }
                 return
             }
             files = freshList
+            accessUnavailable = false
+            loadFailed = false
+            isLoading = false
             pruneStaleDownloads(against: freshList)
 
-            guard let matched = freshList.first(where: {
-                $0.fileID == file.fileID && $0.currentVersion == file.currentVersion && !$0.isRemoved
-            }) else {
+            guard !Task.isCancelled,
+                  let matched = freshList.first(where: {
+                      $0.fileID == file.fileID && $0.currentVersion == file.currentVersion && !$0.isRemoved
+                  }) else {
                 // Authoritative omission, removal, or version bump — ensure any cached copy is purged and do not open sheet.
                 if let share = existingReadyShare {
                     deleteDirectory(share.fileURL.deletingLastPathComponent())
                 }
-                activeShareItem = nil
+                if let share = existingReadyShare, activeShareItem?.id == share.id {
+                    activeShareItem = nil
+                }
                 downloadStates.removeValue(forKey: key)
                 return
             }
 
-            // 2. If we still have a live protected copy in memory, still verify live command authorization before opening.
+            // 2. If we still have a live protected copy in memory, verify live command authorization before opening.
             if let existing = existingReadyShare {
                 _ = try await api.requestDownloadGrant(
                     workspaceID: workspaceID,
@@ -590,7 +690,9 @@ final class WorkspaceFilesStore: ObservableObject {
                       ),
                       FileManager.default.fileExists(atPath: existing.fileURL.path) else {
                     deleteDirectory(existing.fileURL.deletingLastPathComponent())
-                    activeShareItem = nil
+                    if activeShareItem?.id == existing.id {
+                        activeShareItem = nil
+                    }
                     downloadStates.removeValue(forKey: key)
                     return
                 }
@@ -598,11 +700,11 @@ final class WorkspaceFilesStore: ObservableObject {
                 return
             }
 
-            // 3. No cached copy on disk (purged on dismissal) -> run a fresh authorized download for the displayed version.
-            trackedTasks.removeValue(forKey: key)
-            await download(matched, api: api)
+            // 3. No cached copy on disk (purged on dismissal) -> run a fresh authorized download
+            //    while keeping the outer tracked task registered through settlement.
+            await performDownload(matched, api: api, capturedAccessGen: capturedAccessGen)
         } catch WorkspaceFilesError.accessRefused {
-            if !Task.isCancelled, !isRetired, capturedSession.isActive {
+            if !Task.isCancelled, !isRetired, capturedSession.isActive, capturedAccessGen == accessGeneration {
                 applyAccessUnavailable()
             }
         } catch is CancellationError {
@@ -614,7 +716,12 @@ final class WorkspaceFilesStore: ObservableObject {
             if let share = existingReadyShare {
                 deleteDirectory(share.fileURL.deletingLastPathComponent())
             }
-            activeShareItem = nil
+            if let share = existingReadyShare, activeShareItem?.id == share.id {
+                activeShareItem = nil
+            }
+            if listGeneration == loadGeneration && capturedAccessGen == accessGeneration {
+                isLoading = false
+            }
             if !Task.isCancelled,
                isTransferStillValid(
                    session: capturedSession,
@@ -623,12 +730,16 @@ final class WorkspaceFilesStore: ObservableObject {
                    version: file.currentVersion
                ) {
                 downloadStates[key] = .failed(message: WorkspaceFilesRules.downloadErrorMessage(error))
+            } else if !capturedSession.isActive {
+                retire()
             }
         }
     }
 
     private func applyAccessUnavailable() {
+        loadGeneration += 1
         accessGeneration += 1
+        isLoading = false
         cancelAllTransfers()
         activeShareItem = nil
         purgeAllManagedFiles()

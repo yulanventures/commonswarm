@@ -8,15 +8,41 @@ struct WorkspaceFilesView: View {
     let workspace: Workspace
 
     @StateObject private var store: WorkspaceFilesStore
+    @State private var presentedShare: DownloadedFileShare?
     @Environment(\.colorScheme) private var colorScheme
+    private let autoLoad: Bool
 
-    init(api: ConversationAPI, workspace: Workspace) {
+    init(
+        api: ConversationAPI,
+        workspace: Workspace,
+        store: WorkspaceFilesStore? = nil,
+        autoLoad: Bool = true
+    ) {
         self.api = api
         self.workspace = workspace
-        _store = StateObject(wrappedValue: WorkspaceFilesStore(workspaceID: workspace.id))
+        self.autoLoad = autoLoad
+        _store = StateObject(wrappedValue: store ?? WorkspaceFilesStore(workspaceID: workspace.id))
     }
 
     private var filesAPI: WorkspaceFilesAPI { WorkspaceFilesAPI(api: api) }
+
+    private var shareSheetBinding: Binding<DownloadedFileShare?> {
+        Binding(
+            get: { store.activeShareItem },
+            set: { next in
+                let previous = store.activeShareItem
+                if let previous, previous.id != next?.id {
+                    if presentedShare?.id == previous.id {
+                        presentedShare = nil
+                    }
+                    store.finishShare(previous)
+                }
+                if store.activeShareItem?.id != next?.id {
+                    store.activeShareItem = next
+                }
+            }
+        )
+    }
 
     private var primaryBackground: Color {
         colorScheme == .dark
@@ -127,15 +153,40 @@ struct WorkspaceFilesView: View {
         .navigationTitle("Files")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(
-            item: $store.activeShareItem,
-            onDismiss: { store.dismissActiveShare() }
+            item: shareSheetBinding,
+            onDismiss: {
+                if let closed = presentedShare {
+                    presentedShare = nil
+                    store.finishShare(closed)
+                }
+            }
         ) { item in
-            FileActivityShareSheet(fileURL: item.fileURL)
+            FileActivityShareSheet(fileURL: item.fileURL) {
+                if presentedShare?.id == item.id {
+                    presentedShare = nil
+                }
+                store.finishShare(item)
+            }
+            .onAppear {
+                presentedShare = item
+            }
+            .onDisappear {
+                if presentedShare?.id == item.id {
+                    presentedShare = nil
+                }
+                store.finishShare(item)
+            }
         }
         .task {
-            await store.load(api: filesAPI)
+            if autoLoad {
+                await store.load(api: filesAPI)
+            }
         }
         .onDisappear {
+            if let closed = presentedShare {
+                presentedShare = nil
+                store.finishShare(closed)
+            }
             store.retire()
         }
     }
@@ -311,10 +362,45 @@ struct WorkspaceFilesView: View {
 
 private struct FileActivityShareSheet: UIViewControllerRepresentable {
     let fileURL: URL
+    let onFinish: @MainActor () -> Void
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+    @MainActor
+    final class Coordinator {
+        private var finished = false
+        var onFinish: @MainActor () -> Void
+
+        init(onFinish: @escaping @MainActor () -> Void) {
+            self.onFinish = onFinish
+        }
+
+        func finishOnce() {
+            guard !finished else { return }
+            finished = true
+            onFinish()
+        }
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFinish: onFinish)
+    }
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        let coordinator = context.coordinator
+        controller.completionWithItemsHandler = { _, _, _, _ in
+            Task { @MainActor in
+                coordinator.finishOnce()
+            }
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
+        context.coordinator.onFinish = onFinish
+    }
+
+    static func dismantleUIViewController(_ uiViewController: UIActivityViewController, coordinator: Coordinator) {
+        uiViewController.completionWithItemsHandler = nil
+        coordinator.finishOnce()
+    }
 }

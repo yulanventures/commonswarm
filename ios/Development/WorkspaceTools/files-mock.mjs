@@ -70,6 +70,8 @@ let emptyFileListMode = false;
 let expireNextStorageDownload = false;
 let holdNextStorageDownload = false;
 let heldStorageResolver = null;
+let holdNextList = false;
+let heldListResolver = null;
 let badDownloadPathOnce = null;
 const receivedDownloadCommands = [];
 let tokenCounter = 0;
@@ -111,6 +113,21 @@ const server = createServer(async (req, res) => {
       if (heldStorageResolver) {
         const resolve = heldStorageResolver;
         heldStorageResolver = null;
+        resolve();
+      }
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-next-list") {
+      holdNextList = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/list-held") {
+      return reply(200, { held: heldListResolver !== null });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-held-list") {
+      if (heldListResolver) {
+        const resolve = heldListResolver;
+        heldListResolver = null;
         resolve();
       }
       return reply(200, { ok: true });
@@ -272,6 +289,16 @@ const server = createServer(async (req, res) => {
 
     switch (url.pathname) {
       case "/rest/v1/files": {
+        if (holdNextList) {
+          holdNextList = false;
+          const snapshotRefused = filesAccessRefused;
+          const snapshotEmpty = emptyFileListMode;
+          const snapshotRows = files.map(({ payload: _ignored, ...rest }) => rest);
+          await new Promise((resolve) => { heldListResolver = resolve; });
+          if (snapshotRefused) return reply(403, { message: "workspace_access_refused" });
+          if (snapshotEmpty) return reply(200, []);
+          return reply(200, snapshotRows);
+        }
         if (filesAccessRefused) return reply(403, { message: "workspace_access_refused" });
         if (emptyFileListMode) return reply(200, []);
         const rows = files.map(({ payload: _ignored, ...rest }) => rest);

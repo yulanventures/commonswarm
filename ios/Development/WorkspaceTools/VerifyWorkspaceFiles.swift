@@ -15,16 +15,24 @@ struct VerifyWorkspaceFiles {
         let (_, _) = try await URLSession.shared.data(for: req)
     }
 
-    static func waitForHeldStorage(_ origin: URL) async throws -> Bool {
+    static func waitForHeld(_ origin: URL, path: String) async throws -> Bool {
         struct HeldState: Decodable { let held: Bool }
         for _ in 0..<50 {
-            let (hData, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/storage-held"))
+            let (hData, _) = try await URLSession.shared.data(from: origin.appending(path: path))
             if let st = try? JSONDecoder().decode(HeldState.self, from: hData), st.held {
                 return true
             }
             try await Task.sleep(for: .milliseconds(20))
         }
         return false
+    }
+
+    static func waitForHeldStorage(_ origin: URL) async throws -> Bool {
+        try await waitForHeld(origin, path: "fixture/storage-held")
+    }
+
+    static func waitForHeldList(_ origin: URL) async throws -> Bool {
+        try await waitForHeld(origin, path: "fixture/list-held")
     }
 
     static func managedDownloadEntries() -> [URL] {
@@ -198,14 +206,86 @@ struct VerifyWorkspaceFiles {
         expect(!FileManager.default.fileExists(atPath: readyFor403.fileURL.deletingLastPathComponent().path), "Explicit 403 must delete managed temp copy on disk")
         expect(managedDownloadEntries().isEmpty, "Zero leftover files after explicit 403")
 
-        // 6. Dismissal deletes temp file immediately; bumping v3 -> v4 clears state; held v4 across bump to v5 discards stale bytes
+        // 6. HezSec R2 C1 store-level witness: finishShare deletes temp file even if SwiftUI cleared activeShareItem first,
+        //    and fences cleanup by share.id if a newer share replaced activeShareItem before the older sheet closed.
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=0")!)
         await store.load(api: filesAPI)
         await store.download(budget, api: filesAPI)
         let shareToDismiss = await MainActor.run { store.activeShareItem }!
-        await MainActor.run { store.dismissActiveShare() }
-        expect(!FileManager.default.fileExists(atPath: shareToDismiss.fileURL.deletingLastPathComponent().path), "Share sheet dismissal must immediately delete temp directory")
-        expect(await MainActor.run { store.downloadState(for: budget) == .downloaded }, "Dismissed state should keep lightweight .downloaded receipt without file on disk")
+        // Simulate SwiftUI resetting the item binding to nil BEFORE onDismiss runs
+        await MainActor.run {
+            store.activeShareItem = nil
+            store.finishShare(shareToDismiss)
+        }
+        expect(!FileManager.default.fileExists(atPath: shareToDismiss.fileURL.deletingLastPathComponent().path), "finishShare must delete temp dir even after binding cleared activeShareItem")
+        expect(await MainActor.run { store.downloadState(for: budget) == .downloaded }, "Dismissed state should transition .ready -> .downloaded even after binding cleared activeShareItem")
+
+        // Replacement identity fence: older sheet callback must delete only older temp dir and preserve newer share
+        await store.download(budget, api: filesAPI)
+        let olderShare = await MainActor.run { store.activeShareItem }!
+        await store.download(report, api: filesAPI)
+        let newerShare = await MainActor.run { store.activeShareItem }!
+        await MainActor.run { store.finishShare(olderShare) }
+        expect(!FileManager.default.fileExists(atPath: olderShare.fileURL.deletingLastPathComponent().path), "Older sheet dismissal must delete older temp dir")
+        expect(FileManager.default.fileExists(atPath: newerShare.fileURL.path), "Older sheet dismissal must NOT delete newer sheet temp file")
+        expect(await MainActor.run { store.activeShareItem?.id == newerShare.id }, "Older sheet dismissal must NOT clear newer activeShareItem")
+        await MainActor.run { store.finishShare(newerShare) }
+        expect(managedDownloadEntries().isEmpty, "Finishing both sheets must leave zero temp files")
+
+        // 7. HezSec R2 C2 Witness A: Held successful list load across an observed 403 -> list stays cleared and accessUnavailable remains true
+        try await postFixture(origin.appending(path: "fixture/hold-next-list"))
+        let heldLoadTask = Task { await store.load(api: filesAPI) }
+        expect(try await waitForHeldList(origin), "Expected list load to be held before 403")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=1")!)
+        await store.download(budget, api: filesAPI) // observes 403 -> applyAccessUnavailable() increments accessGeneration & loadGeneration
+        expect(await MainActor.run { store.accessUnavailable && store.files.isEmpty }, "Observed 403 from download must mark accessUnavailable and clear files")
+        try await postFixture(origin.appending(path: "fixture/release-held-list"))
+        await heldLoadTask.value
+        let afterHeldList403 = await MainActor.run { store.accessUnavailable && store.files.isEmpty && !store.isLoading && store.activeShareItem == nil }
+        expect(afterHeldList403, "Held successful list load released after observed 403 must NOT restore files or clear accessUnavailable")
+        expect(managedDownloadEntries().isEmpty, "Held list race across 403 must leave zero temp files")
+
+        // 8. HezSec R2 C2 Witness B: Held Share / Save list read across an observed 403 -> list stays cleared, no sheet or temp file
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=0")!)
+        await store.load(api: filesAPI)
+        await store.download(budget, api: filesAPI)
+        let shareBeforeHold = await MainActor.run { store.activeShareItem }!
+        await MainActor.run { store.finishShare(shareBeforeHold) }
+        try await postFixture(origin.appending(path: "fixture/hold-next-list"))
+        let heldShareListTask = Task { await store.openReadyDownload(for: budget, api: filesAPI) }
+        expect(try await waitForHeldList(origin), "Expected Share / Save list read to be held before 403")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=1")!)
+        await store.load(api: filesAPI) // observes 403 immediately
+        try await postFixture(origin.appending(path: "fixture/release-held-list"))
+        await heldShareListTask.value
+        let afterHeldShareList403 = await MainActor.run { store.accessUnavailable && store.files.isEmpty && store.activeShareItem == nil && store.downloadStates.isEmpty }
+        expect(afterHeldShareList403, "Held Share / Save list released after observed 403 must NOT restore files or open sheet")
+        expect(managedDownloadEntries().isEmpty, "Held Share / Save list across 403 must leave zero temp files")
+
+        // 9. HezSec R2 C2 Witness C: Held replacement download inside Share / Save across observed empty-list omission
+        //    -> outer tracked task stays registered during replacement download, omission cancels it through trackedTasks, no sheet or temp file returns
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=0")!)
+        await store.load(api: filesAPI)
+        await store.download(budget, api: filesAPI)
+        let dismissedForReplacement = await MainActor.run { store.activeShareItem }!
+        await MainActor.run { store.finishShare(dismissedForReplacement) }
+        expect(managedDownloadEntries().isEmpty, "Dismissed file must be gone before replacement download test")
+        try await postFixture(origin.appending(path: "fixture/hold-next-storage"))
+        let replacementTask = Task { await store.openReadyDownload(for: budget, api: filesAPI) }
+        expect(try await waitForHeldStorage(origin), "Expected Share / Save replacement storage download to be held")
+        let trackedDuringReplacement = await MainActor.run { store.hasTrackedTask(for: budget) }
+        expect(trackedDuringReplacement, "Replacement download inside Share / Save must remain under trackedTasks ownership through settlement")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/empty-list?on=1")!)
+        await store.load(api: filesAPI) // observes empty-list omission -> pruneStaleDownloads cancels trackedTasks[key]
+        let cancelledOnOmission = await MainActor.run { !store.hasTrackedTask(for: budget) && store.files.isEmpty }
+        expect(cancelledOnOmission, "Observed empty-list omission must cancel replacement download through trackedTasks immediately")
+        try await postFixture(origin.appending(path: "fixture/release-held-storage"))
+        await replacementTask.value
+        let afterReplacementOmission = await MainActor.run { store.files.isEmpty && store.activeShareItem == nil && store.downloadStates.isEmpty }
+        expect(afterReplacementOmission, "Held replacement download after omission must leave list cleared with no sheet or ready state")
+        expect(managedDownloadEntries().isEmpty, "Held replacement download after omission must leave zero temp files")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/empty-list?on=0")!)
+        await store.load(api: filesAPI)
 
         // Bump v3 -> v4 and refresh -> clears .downloaded so v4 offers fresh Download
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/bump-version?file_id=file_budget_pdf")!)
@@ -214,7 +294,7 @@ struct VerifyWorkspaceFiles {
         let v4StateIdle = await MainActor.run { store.downloadState(for: budgetV4) == .idle }
         expect(budgetV4.currentVersion == 4 && v4StateIdle, "Refreshed v4 must clear v3 state")
 
-        // 7. HezSec C2 Witness A: Held storage response across observed workspace refusal (403) -> no ready item, no sheet, no leftover file!
+        // 10. HezSec R1 C2 Witness A: Held storage response across observed workspace refusal (403) -> no ready item, no sheet, no leftover file!
         try await postFixture(origin.appending(path: "fixture/hold-next-storage"))
         let refusalRaceTask = Task { await store.download(budgetV4, api: filesAPI) }
         expect(try await waitForHeldStorage(origin), "Expected storage download to be held before 403")
@@ -225,7 +305,7 @@ struct VerifyWorkspaceFiles {
         expect(await MainActor.run { store.accessUnavailable && store.activeShareItem == nil && store.downloadStates.isEmpty }, "Held storage response after observed 403 must produce no ready item or sheet")
         expect(managedDownloadEntries().isEmpty, "Held storage response after observed 403 must leave zero temp files")
 
-        // 8. HezSec C2 Witness B: Held storage response across sign-out (session.close()) -> no ready item, no sheet, no leftover file!
+        // 11. HezSec R1 C2 Witness B: Held storage response across sign-out (session.signOut()) -> no ready item, no sheet, no leftover file!
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/access-refused?on=0")!)
         await store.load(api: filesAPI)
         let liveV4 = await MainActor.run { store.files.first { $0.fileID == "file_budget_pdf" } }!
@@ -238,6 +318,6 @@ struct VerifyWorkspaceFiles {
         expect(await MainActor.run { store.activeShareItem == nil && store.downloadStates.isEmpty }, "Held storage response after sign-out must produce no ready item or sheet")
         expect(managedDownloadEntries().isEmpty, "Held storage response after sign-out must leave zero temp files")
 
-        print("PASS: VerifyWorkspaceFiles (HezSec C1 live reauth on 403 & empty-list omission + temp purge, C2 login-scoped transport & held transfer retirement across sign-out & 403, exact swarm-files path binding, version-bound state)")
+        print("PASS: VerifyWorkspaceFiles (C1 identity-fenced dismissal cleanup + live reauth on 403 & omission, C2 generation-fenced list reads across 403 + tracked Share/Save replacement download cancellation on omission + held transfer retirement across sign-out & 403)")
     }
 }
