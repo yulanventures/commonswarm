@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildOrganizationMenu, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceMenu, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { homeStructureKey, refreshHomeShellSeatStatus } from "./home-focus.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -323,4 +324,61 @@ test("workspace header and ⋯ menu expose conversation members only when Step 2
   assert.equal(menuItem.textContent, "Members (3)");
   menuItem.listeners.click();
   assert.deepEqual(actions, [{ kind: "conversation-members" }]);
+});
+
+test("C2 agent DM header renders live seat status on desktop and phone and updates in place without changing structure key", () => {
+  const flat = node => [node, ...node.children.flatMap(flat)];
+  const element = (tag) => ({
+    tag, className: "", textContent: "", title: "", hidden: false, type: "", id: "",
+    dataset: {}, attrs: {}, children: [], listeners: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    append(...items) { this.children.push(...items.filter(Boolean)); },
+    prepend(...items) { this.children.unshift(...items.filter(Boolean)); },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    querySelector(sel) {
+      if (sel === ".hm-member-stack__count") return flat(this).find(n => n.className === "hm-member-stack__count") ?? null;
+      if (sel === ".hm-dm-seat-status__shape") return flat(this).find(n => n.className === "hm-dm-seat-status__shape") ?? null;
+      if (sel === ".hm-dm-seat-status__text") return flat(this).find(n => n.className === "hm-dm-seat-status__text") ?? null;
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel === "[data-dm-seat-status]") return flat(this).filter(n => Object.hasOwn(n.dataset, "dmSeatStatus"));
+      return [];
+    },
+    focus() {},
+  });
+  const doc = { createElement: element, createElementNS: (_ns, tag) => element(tag), defaultView: { matchMedia: () => ({ matches: false }) } };
+  const vmWorking = {
+    sample: false, workspaceId: "ws-1", name: "Home", pane: "chat",
+    people: [{ person: person("u1", "Owner", true), agents: [] }],
+    hrefs, todosAvailable: true, menu: { settings: true, adminAccess: false },
+    channelTitle: "Wren",
+    dmSeatStatus: { kind: "working", line: "Working · 3 min", indicator: "dot", attention: false },
+  };
+  const desktop = buildWorkspaceHeader(doc, vmWorking, { openPeople: () => {}, menu: () => {} });
+  const phone = buildPhoneTopBar(doc, vmWorking, { openPeople: () => {}, menu: () => {} });
+  for (const [label, root] of [["desktop", desktop], ["phone", phone]]) {
+    const line = flat(root).find(n => Object.hasOwn(n.dataset, "dmSeatStatus"));
+    assert.ok(line, `${label} agent DM header must render [data-dm-seat-status]`);
+    assert.ok(Object.hasOwn(line.dataset, "channelHeaderDescription"), `${label} seat status must carry data-channel-header-description for phone projection`);
+    assert.equal(line.dataset.dmSeatStatus, "working");
+    assert.equal(line.dataset.indicator, "dot");
+    assert.equal(line.dataset.attention, "false");
+    assert.equal(line.querySelector(".hm-dm-seat-status__shape").dataset.shape, "dot");
+    assert.equal(line.querySelector(".hm-dm-seat-status__text").textContent, "Working · 3 min");
+  }
+
+  // Live tick updates line & indicator in place while keeping homeStructureKey identical.
+  const vmWaiting = {
+    ...vmWorking,
+    dmSeatStatus: { kind: "waiting", line: "Waiting since 10:42 · 2 unseen", indicator: "diamond", attention: true },
+  };
+  assert.equal(homeStructureKey(vmWorking), homeStructureKey(vmWaiting), "live seat status ticks keep shell structure key stable");
+  refreshHomeShellSeatStatus(desktop, vmWaiting);
+  const updated = desktop.querySelectorAll("[data-dm-seat-status]")[0];
+  assert.equal(updated.dataset.dmSeatStatus, "waiting");
+  assert.equal(updated.dataset.indicator, "diamond");
+  assert.equal(updated.dataset.attention, "true");
+  assert.equal(updated.querySelector(".hm-dm-seat-status__shape").dataset.shape, "diamond");
+  assert.equal(updated.querySelector(".hm-dm-seat-status__text").textContent, "Waiting since 10:42 · 2 unseen");
 });

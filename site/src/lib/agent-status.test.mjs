@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AGENT_INACTIVE_AFTER_MS, agentStatus } from "./agent-status.ts";
+import { AGENT_INACTIVE_AFTER_MS, agentStatus, dmAgentSeatStatus } from "./agent-status.ts";
 
 const NOW = Date.parse("2026-10-04T12:00:00Z");
 const at = (msAgo) => new Date(NOW - msAgo).toISOString();
@@ -390,4 +390,63 @@ test("C2 People & agents status matches shared classifier, never fakes a live do
   }), NOW);
   assert.equal(unavailable.label, "Status unavailable");
   assert.equal(unavailable.indicator, "ring");
+});
+
+test("C2 dmAgentSeatStatus mirrors shared classifier for agent DM header and never fakes a live dot", () => {
+  const working = dmAgentSeatStatus({
+    transport: "local",
+    connection: "live",
+    presence: row({ last_command_at: at(30_000), watcher_at: at(10_000) }),
+    workingOn: { at: at(3 * 60_000), until: at(-60_000) },
+  }, NOW);
+  assert.equal(working.kind, "working");
+  assert.equal(working.line, "Working · 3 min");
+  assert.equal(working.indicator, "dot");
+  assert.equal(working.attention, false);
+
+  const waiting = dmAgentSeatStatus({
+    transport: "local",
+    connection: "live",
+    presence: row({ last_command_at: at(6 * 60_000), watcher_at: at(10_000) }),
+    oldestUnobservedAt: at(5 * 60_000),
+    unseenCount: 2,
+    timeZone: "UTC",
+  }, NOW);
+  assert.equal(waiting.kind, "waiting");
+  assert.equal(waiting.line, "Waiting since 11:55 · 2 unseen");
+  assert.equal(waiting.indicator, "diamond");
+  assert.equal(waiting.attention, true);
+
+  const turnOnly = dmAgentSeatStatus({
+    transport: "hosted_mcp",
+    turnOnly: true,
+    connection: "live",
+    presence: null,
+    lastActivityAt: at(5 * 60_000),
+  }, NOW);
+  assert.equal(turnOnly.kind, "turn_only");
+  assert.equal(turnOnly.line, "Turn-only, checks when opened · 5 min ago");
+  assert.equal(turnOnly.indicator, "ring");
+  assert.equal(turnOnly.attention, false);
+
+  const notListening = dmAgentSeatStatus({
+    transport: "local",
+    connection: "live",
+    presence: row({ last_command_at: at(2 * 3_600_000), watcher_at: at(10 * 60_000) }),
+  }, NOW);
+  assert.equal(notListening.kind, "not_listening");
+  assert.equal(notListening.line, "Not listening · last active 2 h ago");
+  assert.equal(notListening.indicator, "ring");
+  assert.equal(notListening.attention, false);
+
+  const unavailable = dmAgentSeatStatus({
+    transport: "local",
+    connection: "live",
+    presence: undefined,
+    statusUnavailable: true,
+  }, NOW);
+  assert.equal(unavailable.kind, "unknown");
+  assert.equal(unavailable.line, "Status unavailable");
+  assert.equal(unavailable.indicator, "ring");
+  assert.equal(unavailable.attention, false);
 });

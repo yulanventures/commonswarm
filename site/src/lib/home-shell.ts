@@ -3,6 +3,7 @@
 // goes in through textContent only. The shipped hooks (data-roster-open, data-workspace-view,
 // data-workspace-settings-item, data-admin-access-open, data-channel-*) are kept so the page wiring
 // can find them.
+import type { DmAgentSeatStatus } from "./agent-status";
 import { ALL_SIGNALS_SLUG, CHANNEL_INVOLVEMENT_LABELS, CHANNEL_INVOLVEMENT_LEVELS, CHANNEL_NOTIFY_LABEL, channelLabel, starChannelLabel, type ChannelInvolvement } from "./channels";
 import { personAvatar, agentOrb } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
@@ -27,6 +28,8 @@ export interface WorkspaceShellVM {
   channelTitle?: string;
   /** A resolved named channel. Other feed views and Direct Messages have no channel settings. */
   channel?: { slug: string; description: string | null; manageable: boolean };
+  /** C2 live seat status line for a 1:1 agent Direct Message header (shared classifySeatStatus output). */
+  dmSeatStatus?: DmAgentSeatStatus;
   /** Step 2b conversation members control (channels and DMs) when Step 2b conversations data is present. */
   conversationMembers?: { count: number; label: string };
   /** The viewer's own star and notification level for the place being read (#general or a live channel), once known. */
@@ -458,19 +461,34 @@ function channelNotifyButton(doc: Document, place: NonNullable<WorkspaceShellVM[
   return button;
 }
 
-/** The actual description is visible in the reading header; managers can edit it directly. */
+/** The actual description is visible in the reading header; managers can edit it directly.
+ *  In a 1:1 agent DM, the same compact header subline shows the agent's live seat status (C2). */
 function channelDescription(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks): HTMLElement | null {
-  if (!vm.channel?.description) return null;
-  const description = node(doc, vm.channel.manageable ? "button" : "p", "hm-channel-description", vm.channel.description);
-  description.dataset.channelHeaderDescription = "";
-  description.title = vm.channel.description;
-  if (vm.channel.manageable) {
-    (description as HTMLButtonElement).type = "button";
-    description.setAttribute("aria-label", `Edit description for #${vm.channel.slug}: ${vm.channel.description}`);
-    description.setAttribute("aria-haspopup", "dialog");
-    description.addEventListener("click", () => callbacks.channelSettings?.(description, true));
+  if (vm.channel?.description) {
+    const description = node(doc, vm.channel.manageable ? "button" : "p", "hm-channel-description", vm.channel.description);
+    description.dataset.channelHeaderDescription = "";
+    description.title = vm.channel.description;
+    if (vm.channel.manageable) {
+      (description as HTMLButtonElement).type = "button";
+      description.setAttribute("aria-label", `Edit description for #${vm.channel.slug}: ${vm.channel.description}`);
+      description.setAttribute("aria-haspopup", "dialog");
+      description.addEventListener("click", () => callbacks.channelSettings?.(description, true));
+    }
+    return description;
   }
-  return description;
+  if (!vm.dmSeatStatus) return null;
+  const status = node(doc, "p", "hm-channel-description hm-dm-seat-status");
+  status.dataset.channelHeaderDescription = "";
+  status.dataset.dmSeatStatus = vm.dmSeatStatus.kind;
+  status.dataset.indicator = vm.dmSeatStatus.indicator;
+  status.dataset.attention = String(vm.dmSeatStatus.attention);
+  status.title = vm.dmSeatStatus.line;
+  const shape = node(doc, "span", "hm-dm-seat-status__shape");
+  shape.setAttribute("aria-hidden", "true");
+  shape.dataset.shape = vm.dmSeatStatus.indicator;
+  const text = node(doc, "span", "hm-dm-seat-status__text", vm.dmSeatStatus.line);
+  status.append(shape, text);
+  return status;
 }
 
 /** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access. */

@@ -1403,7 +1403,7 @@ import "../../styles/kylon-image-viewer.css";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
-  import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
+  import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes, refreshHomeShellSeatStatus } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails, catchUpReadOrder,
@@ -1463,7 +1463,8 @@ import "../../styles/kylon-image-viewer.css";
   } from "../../lib/household-access";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
-  import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
+  import { agentStatus, dmAgentSeatStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
+  import { createConversationReadLifecycle } from "../../lib/conversation-read-lifecycle";
   import { renderPeopleDialog, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
@@ -8085,6 +8086,44 @@ import "../../styles/kylon-image-viewer.css";
         ? (workspaceConversations?.find(c => c.conversationId === activeDmConversationId) ??
           (conversationHistory?.conversationId === activeDmConversationId ? conversationHistory.conversation : null))
         : null;
+      const dmAgentId = !dmUnavailable && homeRoute.view === "chat" && unknownChannelId === null
+        ? (typeof activeDm !== "undefined" && activeDm?.kind === "agent"
+          ? activeDm.id
+          : headerDmConv?.kind === "dm"
+            ? (headerDmConv.members.find(m => !m.leftAt && m.kind === "agent")?.id ?? null)
+            : null)
+        : null;
+      const dmAgent = dmAgentId ? (agents.find(agent => agent.principalId === dmAgentId) ?? null) : null;
+      const dmSeatStatus = dmAgent && typeof dmAgentSeatStatus === "function"
+        ? (() => {
+            const overviewHasWaiting = (dmAgent.work?.facts.messages_waiting_count ?? 0) > 0;
+            const waitingSince = overviewHasWaiting
+              ? (dmAgent.work?.facts.messages_waiting_since ?? dmAgent.oldestUnobservedAt ?? null)
+              : (dmAgent.oldestUnobservedAt ?? dmAgent.work?.facts.messages_waiting_since ?? null);
+            const waitingCount = overviewHasWaiting
+              ? (dmAgent.work?.facts.messages_waiting_count ?? null)
+              : (dmAgent.unseenCount ?? dmAgent.work?.facts.messages_waiting_count ?? null);
+            const activityTimes = [dmAgent.presence?.last_command_at, dmAgent.work?.facts.last_activity_at]
+              .filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)))
+              .sort((left, right) => Date.parse(right) - Date.parse(left));
+            return dmAgentSeatStatus({
+              transport: dmAgent.transport,
+              turnOnly: dmAgent.turnOnly,
+              connection: dmAgent.work?.facts.connection,
+              presence: dmAgent.presence,
+              wake: dmAgent.work?.facts.wake ?? null,
+              lastActivityAt: activityTimes[0] ?? null,
+              workingOn: dmAgent.work?.facts.working_on
+                ? { at: dmAgent.work.facts.working_on.at, until: dmAgent.work.facts.working_on.until }
+                : null,
+              doingTodo: dmAgent.work?.facts.doing ? { since: dmAgent.work.facts.doing.since } : null,
+              serverWork: dmAgent.work?.work,
+              oldestUnobservedAt: waitingSince,
+              unseenCount: waitingCount,
+              statusUnavailable: dmAgent.presence === undefined && !dmAgent.work,
+            });
+          })()
+        : undefined;
       const headerPlace = dmUnavailable ? null : activePlace();
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
@@ -8093,6 +8132,7 @@ import "../../styles/kylon-image-viewer.css";
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
         channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
+        ...(dmSeatStatus ? { dmSeatStatus } : {}),
         conversationMembers: headerConv ? {
           count: headerConv.members.filter(m => !m.leftAt).length,
           label: headerConv.kind === "dm" || headerConv.kind === "group_dm"
@@ -8115,7 +8155,12 @@ import "../../styles/kylon-image-viewer.css";
          the same way. The placement owns the name and reads the label set above. */
       syncComposerPlacement();
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); if (typeof syncWaitingPanel === "function") syncWaitingPanel(); return; }
+      if (key === homeShellKey && slot.childElementCount) {
+        if (typeof refreshHomeShellSeatStatus === "function") refreshHomeShellSeatStatus(app, vm);
+        layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons();
+        if (typeof syncWaitingPanel === "function") syncWaitingPanel();
+        return;
+      }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
         openConversationMembers: (opener) => {
@@ -13514,97 +13559,21 @@ import "../../styles/kylon-image-viewer.css";
       const convTarget = !sampleMode && session && typeof activeConversationHistoryTarget === "function"
         ? activeConversationHistoryTarget()
         : { mode: "legacy" as const };
-      if (convTarget.mode === "conversation" && typeof readConversationHistory === "function") {
+      if (convTarget.mode === "conversation" && typeof conversationReadLifecycle !== "undefined") {
         const pinnedUserId = session?.user.id ?? "";
-        const convId = convTarget.conversationId;
-        const histGen = ++conversationHistoryGeneration;
-        const beforeCursor = reset
-          ? null
-          : conversationHistory && conversationHistory.conversationId === convId
-            ? conversationHistory.nextBefore
-            : signalCursor;
         if (reset) {
-          if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
-          conversationSessionEpoch += 1;
           signalCursor = null;
           signalCutoff = new Date().toISOString();
           unavailableDmConversationId = null;
-          if (!conversationHistory || conversationHistory.conversationId !== convId || conversationHistory.workspaceId !== workspaceId || conversationHistory.viewerId !== pinnedUserId) {
-            conversationHistory = createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
-          }
         }
-        const pinnedSessionEpoch = conversationSessionEpoch;
-        const stillMatches = () => {
-          if (
-            pinnedSessionEpoch !== conversationSessionEpoch ||
-            version !== requestVersion ||
-            workspaceId !== activeWorkspaceId ||
-            (session?.user.id ?? "") !== pinnedUserId
-          ) {
-            return false;
-          }
-          const nowTarget = activeConversationHistoryTarget();
-          return nowTarget.mode === "conversation" && nowTarget.conversationId === convId;
-        };
-        const readStillAlive = () => (!reset || histGen === conversationHistoryGeneration) && stillMatches();
-        if (!readStillAlive()) return;
-        let result;
-        try {
-          result = await readConversationHistory(workspaceId, convId, {
-            ...(beforeCursor ? { before: beforeCursor } : {}),
-            limit: 50,
-            includeMentions: true,
-            includeReactions: true,
-            expectedUserId: pinnedUserId,
-            isAlive: readStillAlive,
-          });
-        } catch (error) {
-          if (error instanceof SessionIdentityMismatch) return;
-          throw error;
-        }
-        if (!readStillAlive()) return;
-        const liveState = conversationHistory && conversationHistory.conversationId === convId
-          ? conversationHistory
-          : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
-        if (!reset && liveState.status === "unavailable") return;
-        const next = reset
-          ? applyConversationHistoryInitial(liveState, result, optimisticRowsForConversation(convId))
-          : applyConversationHistoryOlder(liveState, result);
-        conversationHistory = next;
-        if (next.status === "unavailable") {
-          if (typeof evictConversationLocalState === "function") {
-            evictConversationLocalState(workspaceId, convId, true);
-          }
-          return;
-        }
-        if (!reset && next.olderError) {
-          throw new Error(next.olderError);
-        }
-        if (reset && next.status === "error") {
-          throw new Error(next.errorMessage || "CommonSwarm could not load this conversation.");
-        }
-        forgetFetchedPostedIds(next.rows);
-        signals = next.rows;
-        signalCursor = next.nextBefore;
-        signalHasMore = next.hasMore;
-        unavailableDmConversationId = null;
-        if (next.conversation && workspaceConversations) {
-          const exists = workspaceConversations.some((c) => c.conversationId === next.conversation!.conversationId);
-          if (exists) {
-            workspaceConversations = workspaceConversations.map((c) =>
-              c.conversationId === next.conversation!.conversationId ? next.conversation! : c,
-            );
-          }
-        }
-        renderHomeRail();
-        renderHomeShell();
-        renderChannelBlocked();
-        renderFeed(reset ? "history" : "older");
-        void refreshDeliveryReceipts(workspaceId, version);
-        void refreshMessageStatus(workspaceId, version);
-        void refreshChoices(workspaceId, version);
-        void refreshSignalMentions(workspaceId, version);
-        void refreshSignalReactions(workspaceId, version);
+        await conversationReadLifecycle.loadConversationPage({
+          workspaceId,
+          conversationId: convTarget.conversationId,
+          pinnedUserId,
+          version,
+          reset,
+          fallbackBeforeCursor: signalCursor,
+        });
         return;
       }
 
@@ -13698,60 +13667,14 @@ import "../../styles/kylon-image-viewer.css";
         const convTarget = session && typeof activeConversationHistoryTarget === "function"
           ? activeConversationHistoryTarget()
           : { mode: "legacy" as const };
-        if (convTarget.mode === "conversation" && typeof readConversationHistory === "function") {
-          const convId = convTarget.conversationId;
-          const histGen = ++conversationHistoryGeneration;
-          const pinnedSessionEpoch = conversationSessionEpoch;
-          const afterCursor = conversationHistory && conversationHistory.conversationId === convId &&
-            conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
-            ? conversationHistory.nextAfter
-            : null;
-          const refreshStillAlive = () => {
-            const nowTarget = activeConversationHistoryTarget();
-            return (
-              pinnedSessionEpoch === conversationSessionEpoch &&
-              histGen === conversationHistoryGeneration &&
-              version === requestVersion &&
-              workspaceId === activeWorkspaceId &&
-              (session?.user.id ?? "") === pinnedUserId &&
-              nowTarget.mode === "conversation" &&
-              nowTarget.conversationId === convId
-            );
-          };
-          if (!refreshStillAlive()) return;
-          let result;
-          try {
-            result = await readConversationHistory(workspaceId, convId, {
-              ...(afterCursor ? { after: afterCursor } : {}),
-              limit: 50,
-              includeMentions: true,
-              includeReactions: true,
-              expectedUserId: pinnedUserId,
-              isAlive: refreshStillAlive,
-            });
-          } catch (error) {
-            if (error instanceof SessionIdentityMismatch) return;
-            throw error;
-          }
-          if (!refreshStillAlive()) return;
-          const liveState = conversationHistory && conversationHistory.conversationId === convId &&
-            conversationHistory.workspaceId === workspaceId && conversationHistory.viewerId === pinnedUserId
-            ? conversationHistory
-            : createConversationHistoryState<Signal>(workspaceId, pinnedUserId, convId);
-          if (liveState.status === "unavailable") return;
-          const refreshed = applyConversationHistoryRefresh(
-            liveState,
-            result,
-            optimisticRowsForConversation(convId),
-          );
-          conversationHistory = refreshed.state;
-          if (refreshed.lostAccess) {
-            if (typeof evictConversationLocalState === "function") {
-              evictConversationLocalState(workspaceId, convId, true);
-            }
-            return;
-          }
-          if (refreshed.state.status === "ready") {
+        if (convTarget.mode === "conversation" && typeof conversationReadLifecycle !== "undefined") {
+          const refreshed = await conversationReadLifecycle.refreshConversationLatest({
+            workspaceId,
+            conversationId: convTarget.conversationId,
+            pinnedUserId,
+            version,
+          });
+          if (refreshed.status === "ready") {
             forgetFetchedPostedIds(refreshed.state.rows);
             const knownAgents = new Set(agents.map((agent) => agent.principalId));
             for (const signal of refreshed.state.rows) {
@@ -16186,16 +16109,90 @@ import "../../styles/kylon-image-viewer.css";
       } catch { /* storage unavailable: the rail stays as the reader left it this session */ }
     };
 
+    const conversationReadLifecycle = createConversationReadLifecycle<Signal>({
+      store: {
+        getConversations: () => workspaceConversations,
+        setConversations: (rows) => { workspaceConversations = rows; },
+        getReadState: () => conversationsReadState,
+        setReadState: (next) => { conversationsReadState = next; },
+        getReadError: () => conversationsReadError,
+        setReadError: (error) => { conversationsReadError = error; },
+        getConversationsGeneration: () => conversationsGeneration,
+        setConversationsGeneration: (next) => { conversationsGeneration = next; },
+        getConversationsReadAt: () => conversationsReadAt,
+        setConversationsReadAt: (at) => { conversationsReadAt = at; },
+        getHistory: () => conversationHistory,
+        setHistory: (next) => { conversationHistory = next; },
+        getHistoryGeneration: () => conversationHistoryGeneration,
+        setHistoryGeneration: (next) => { conversationHistoryGeneration = next; },
+        getSessionEpoch: () => conversationSessionEpoch,
+        setSessionEpoch: (next) => { conversationSessionEpoch = next; },
+        modernConversationsConfirmed,
+        evictedConversationIds,
+      },
+      listConversations,
+      readConversationHistory,
+      isConversationsUnsupportedError: (error) => error instanceof ConversationsUnsupportedError,
+      isSessionIdentityMismatch: (error) => error instanceof SessionIdentityMismatch,
+      readableError,
+      generalChannelId: GENERAL_CHANNEL_ID,
+      isSampleMode: () => sampleMode,
+      activeSessionUserId: () => session?.user.id ?? "",
+      activeWorkspaceId: () => activeWorkspaceId,
+      activeRequestVersion: () => requestVersion,
+      activeChannelId: () => activeChannelId,
+      activeDmConversationId: () => activeDmConversationId,
+      activeConversationHistoryTarget: () => activeConversationHistoryTarget(),
+      optimisticRowsForConversation: (conversationId) => optimisticRowsForConversation(conversationId),
+      onClearOmittedConversationData: (workspaceId, pinnedUserId, conversationId) => {
+        if (typeof clearConversationDraftStorage === "function" && pinnedUserId) {
+          clearConversationDraftStorage(window.localStorage, pinnedUserId, workspaceId, conversationId);
+        }
+        for (const [id, entry] of postedSinceReset.entries()) {
+          if (entry.row.conversationId === conversationId) postedSinceReset.delete(id);
+        }
+      },
+      onEvictActiveConversation: (workspaceId, conversationId, markUnavailable) => {
+        if (typeof evictConversationLocalState === "function") {
+          evictConversationLocalState(workspaceId, conversationId, markUnavailable);
+        }
+      },
+      onResetLoadOlderState: () => {
+        if (typeof resetLoadOlderState === "function") resetLoadOlderState(true);
+      },
+      onConversationReadStateChanged: (render) => {
+        if (render) renderChannelBlocked();
+      },
+      onConversationsCommitted: (render) => {
+        if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
+        if (render) {
+          renderHomeRail();
+          renderHomeShell();
+          renderChannelBlocked();
+          renderChannelDirectoryDialog();
+        }
+      },
+      onHistoryApplied: ({ workspaceId, version, reset, state }) => {
+        forgetFetchedPostedIds(state.rows);
+        signals = state.rows;
+        signalCursor = state.nextBefore;
+        signalHasMore = state.hasMore;
+        unavailableDmConversationId = null;
+        renderHomeRail();
+        renderHomeShell();
+        renderChannelBlocked();
+        renderFeed(reset ? "history" : "older");
+        void refreshDeliveryReceipts(workspaceId, version);
+        void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
+        void refreshSignalMentions(workspaceId, version);
+        void refreshSignalReactions(workspaceId, version);
+      },
+    });
+
     const resetConversationsState = (): void => {
-      workspaceConversations = null;
-      conversationsReadState = "idle";
-      conversationsReadError = "";
-      conversationsGeneration += 1;
-      conversationsReadAt = 0;
+      conversationReadLifecycle.reset();
       activeDmConversationId = null;
-      conversationHistory = null;
-      conversationHistoryGeneration += 1;
-      conversationSessionEpoch += 1;
       unavailableDmConversationId = null;
       mountedPreviewKey = "";
       channelJoinPending.clear();
@@ -16282,63 +16279,7 @@ import "../../styles/kylon-image-viewer.css";
       pinnedUserId: string,
       rows: ConversationSummary[],
       render: boolean,
-    ): boolean => {
-      const prevList = workspaceConversations;
-      const nextIds = new Set(rows.map((r) => r.conversationId));
-      for (const r of rows) {
-        if (r.joined) evictedConversationIds.delete(`${workspaceId}:${r.conversationId}`);
-      }
-      if (prevList) {
-        for (const prev of prevList) {
-          if (!nextIds.has(prev.conversationId) && (prev.kind === "private_channel" || isDirectKind(prev.kind))) {
-            evictedConversationIds.add(`${workspaceId}:${prev.conversationId}`);
-            if (typeof clearConversationDraftStorage === "function" && pinnedUserId) {
-              clearConversationDraftStorage(window.localStorage, pinnedUserId, workspaceId, prev.conversationId);
-            }
-            for (const [id, entry] of postedSinceReset.entries()) {
-              if (entry.row.conversationId === prev.conversationId) postedSinceReset.delete(id);
-            }
-          }
-        }
-      }
-      workspaceConversations = rows;
-      conversationsReadState = "ready";
-      conversationsReadError = "";
-      if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
-      // Reconcile authoritative omission even while the active conversation's first history page is still loading.
-      const requestedDmId = activeDmConversationId ??
-        (conversationHistory && conversationHistory.conversation?.kind && isDirectKind(conversationHistory.conversation.kind)
-          ? conversationHistory.conversationId
-          : null);
-      if (requestedDmId !== null) {
-        const freshDm = rows.find((r) => r.conversationId === requestedDmId);
-        if (!freshDm || !freshDm.joined) {
-          evictConversationLocalState(workspaceId, requestedDmId, true);
-          return true;
-        }
-      }
-      if (activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID) {
-        const openPrivateConvId =
-          conversationHistory?.conversation?.kind === "private_channel"
-            ? conversationHistory.conversationId
-            : prevList?.find((c) => c.channelId === activeChannelId && c.kind === "private_channel")?.conversationId ?? null;
-        if (openPrivateConvId !== null) {
-          const freshPrivate = rows.find((r) => r.conversationId === openPrivateConvId);
-          if (!freshPrivate || !freshPrivate.joined) {
-            evictConversationLocalState(workspaceId, openPrivateConvId, true);
-            return true;
-          }
-        }
-      }
-      if (typeof reconcileOpenMembersSheet === "function") reconcileOpenMembersSheet();
-      if (render) {
-        renderHomeRail();
-        renderHomeShell();
-        renderChannelBlocked();
-        renderChannelDirectoryDialog();
-      }
-      return false;
-    };
+    ): boolean => conversationReadLifecycle.commitWorkspaceConversations(workspaceId, pinnedUserId, rows, render);
     /** Lookup for a Step 2b conversation matching a channel view id, or null until Step 2b answers. */
     const conversationForChannel = (channelId: string | null): ConversationSummary | null => {
       if (!workspaceConversations || channelId === null) return null;
@@ -18005,47 +17946,10 @@ import "../../styles/kylon-image-viewer.css";
 
     /**
      * Step 2b conversations read (`POST /functions/v1/read`, resource="conversations").
-     * Distinguishes a pre-Step-2b server (`ConversationsUnsupportedError` -> `"unsupported"`, legacy fallback)
-     * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
+     * Delegates to the extracted conversationReadLifecycle controller.
      */
-    const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
-      if (sampleMode || !session || !workspaceId || conversationsReadState === "unsupported") return;
-      const pinnedUserId = session.user.id;
-      const now = Date.now();
-      if (!force && now - conversationsReadAt < 15_000) return;
-      conversationsReadAt = now;
-      const generation = ++conversationsGeneration;
-      if (workspaceConversations === null && conversationsReadState === "idle") {
-        conversationsReadState = "pending";
-        if (render) renderChannelBlocked();
-      }
-      const listStillAlive = (): boolean =>
-        generation === conversationsGeneration &&
-        workspaceId === activeWorkspaceId &&
-        (session?.user.id ?? "") === pinnedUserId;
-      let rows: ConversationSummary[];
-      try {
-        rows = await listConversations(workspaceId, true, pinnedUserId, listStillAlive);
-      } catch (error) {
-        if (error instanceof SessionIdentityMismatch) return;
-        if (!listStillAlive()) return;
-        const confirmedModern = modernConversationsConfirmed.has(`${pinnedUserId}:${workspaceId}`);
-        if (error instanceof ConversationsUnsupportedError && !confirmedModern) {
-          conversationsReadState = "unsupported";
-          conversationsReadError = "";
-          if (render) renderChannelBlocked();
-          return;
-        }
-        if ((workspaceConversations === null && conversationsReadState !== "unsupported") || confirmedModern) {
-          conversationsReadState = workspaceConversations === null ? "failed" : conversationsReadState;
-          conversationsReadError = readableError(error) || "Couldn't check channel membership.";
-          if (render) renderChannelBlocked();
-        }
-        return;
-      }
-      if (!listStillAlive()) return;
-      commitWorkspaceConversations(workspaceId, pinnedUserId, rows, render);
-    };
+    const refreshConversations = (workspaceId: string, force: boolean, render = true): Promise<void> =>
+      conversationReadLifecycle.refreshConversations(workspaceId, force, render);
 
     /**
      * The viewer's unread state per channel (C1b), re-read at workspace open, after a seen receipt

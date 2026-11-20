@@ -18,6 +18,29 @@ live-dashboard.dashboard[data-kylon-shell] .hm-channel-description {
 }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description { min-block-size: 44px; cursor: pointer; }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description:hover { color: var(--k-shell-ink); text-decoration: underline; text-underline-offset: 3px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding-inline-start: 2px;
+  overflow: visible; text-overflow: clip; white-space: normal;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__text {
+  min-inline-size: 0; flex: 1 1 auto;
+  overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: break-word;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape {
+  flex: none; inline-size: 8px; block-size: 8px; margin-block-start: 6px; border-radius: 999px;
+  border: 1.5px solid currentColor; box-sizing: border-box;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape[data-shape="dot"] {
+  border: 0; background: var(--home-blue-deep, var(--k-shell-accent));
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape[data-shape="diamond"] {
+  inline-size: 7px; block-size: 7px; margin-block-start: 6.5px; border: 0; border-radius: 2px;
+  transform: rotate(45deg); background: currentColor;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status[data-attention="true"] {
+  color: var(--k-shell-danger, var(--k-shell-ink));
+}
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory], [data-group-leave-dialog], [data-conversation-picker-dialog], [data-conversation-members-dialog]) .cm-dialog-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none;
 }
@@ -146,6 +169,9 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-chan
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-phone-title .hm-channel-description { margin-block-start: 2px; font-size: 12px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-phone-title .hm-dm-seat-status { line-height: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-phone-title .hm-dm-seat-status__shape { margin-block-start: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-phone-title .hm-dm-seat-status__shape[data-shape="diamond"] { margin-block-start: 4.5px; }
   /* An editable description is a button with a 44px target. In the flow that box sat under the title with its text
      in the middle, leaving a hole between the two lines and a taller bar. The box now starts at the title's top and
      its text sits 2px under the title, where a plain description sits: the same 44px to press, covering both lines.
