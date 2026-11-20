@@ -822,7 +822,7 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
       VALUES (${publicMention}::uuid, ${ws}::uuid, ${owner}::uuid, 'user', 'note', 'public mention in #ops',
               statement_timestamp() + interval '1 hour', statement_timestamp() - interval '2 seconds', ${openCh}::uuid)`;
     await tx`INSERT INTO swarm.signal_mentions (workspace_id, signal_id, position, mentioned_agent_principal_id, source)
-      VALUES (${ws}::uuid, ${publicMention}::uuid, 0, ${worker}::uuid, 'explicit')`;
+      VALUES (${ws}::uuid, ${publicMention}::uuid, 0, ${worker}::uuid, 'author')`;
   });
   // 4. Private channel (#vault) ask to secretWorker: visible to #vault member/sender, NEVER to outsider.
   const privAsk = randomUUID();

@@ -4110,19 +4110,11 @@ async function hasWorkspaceVisibleSignal(
   workspaceId: string,
   signalIds: readonly string[],
 ): Promise<boolean> {
-  if (signalIds.length === 0) return false;
+  if (!UUID_RE.test(workspaceId) || signalIds.length === 0) return false;
   const [row] = await tx<{ exists: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1
-      FROM swarm.signals AS s
-      JOIN swarm.conversation_signals AS cs
-        ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
-      JOIN swarm.conversations AS conv
-        ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
-      WHERE s.workspace_id = ${workspaceId}::uuid
-        AND s.id = ANY(${signalIds as string[]}::uuid[])
-        AND conv.kind IN ('general', 'public_channel')
-        AND cs.audience = 'conversation'
+    SELECT swarm.signals_have_workspace_visible(
+      ${workspaceId}::uuid,
+      ${signalIds as string[]}::uuid[]
     ) AS exists
   `;
   return row?.exists === true;
@@ -4157,15 +4149,9 @@ async function isHostedNonPublicCommand(
         && UUID_RE.test(parentId)
         && UUID_RE.test(workspaceId)
       ) {
-        const [parent] = await tx<{ is_public: boolean }[]>`
-          SELECT (conv.kind IN ('general', 'public_channel') AND cs.audience = 'conversation') AS is_public
-          FROM swarm.conversation_signals AS cs
-          JOIN swarm.conversations AS conv
-            ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
-          WHERE cs.workspace_id = ${workspaceId}::uuid
-            AND cs.signal_id = ${parentId}::uuid
-        `;
-        if (parent?.is_public !== true) return true;
+        if (!await hasWorkspaceVisibleSignal(tx, workspaceId, [parentId])) {
+          return true;
+        }
       }
     }
   }

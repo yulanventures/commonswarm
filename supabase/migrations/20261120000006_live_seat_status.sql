@@ -492,3 +492,38 @@ ALTER FUNCTION swarm_read.home_overview() OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.home_overview()
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.home_overview() TO authenticated;
+
+-- Canonical workspace-visible signal predicate for command-role coarse presence gating.
+-- Returns true only when at least one signal in p_signal_ids is filed in #general or an open
+-- public channel with whole-conversation audience. DMs, group DMs, private channels, and
+-- addressed open-channel signals return false so swarm.agent_presence never leaks private activity.
+CREATE OR REPLACE FUNCTION swarm.signals_have_workspace_visible(
+  p_workspace_id uuid,
+  p_signal_ids uuid[]
+) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+  SELECT coalesce(
+    p_workspace_id IS NOT NULL
+    AND p_signal_ids IS NOT NULL
+    AND cardinality(p_signal_ids) > 0
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.signals AS s
+      JOIN swarm.conversation_signals AS cs
+        ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+      JOIN swarm.conversations AS conv
+        ON conv.workspace_id = cs.workspace_id AND conv.conversation_id = cs.conversation_id
+      WHERE s.workspace_id = p_workspace_id
+        AND s.id = ANY(p_signal_ids)
+        AND conv.kind IN ('general', 'public_channel')
+        AND cs.audience = 'conversation'
+    ),
+    false
+  );
+$$;
+
+ALTER FUNCTION swarm.signals_have_workspace_visible(uuid, uuid[]) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.signals_have_workspace_visible(uuid, uuid[])
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.signals_have_workspace_visible(uuid, uuid[]) TO swarm_command;
