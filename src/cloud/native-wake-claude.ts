@@ -427,7 +427,7 @@ export async function registerClaudeWakeSocket(options: {
 
     let nextBinding = binding;
     if (binding.requested_mode === "wake" && binding.wake_transport !== "socket") {
-      nextBinding = { ...binding, wake_transport: "socket" };
+      nextBinding = { ...binding, wake_transport: "socket", wake_verified_at: null, canary: null };
       await writeSecureJsonFile(
         join(dirname(profile), `receive-${profileScopeKey(host)}.json`),
         JSON.stringify(nextBinding),

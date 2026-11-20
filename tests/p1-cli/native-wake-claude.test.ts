@@ -255,6 +255,46 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
       await otherSrv.close();
     }
 
+    // Switching from channel wake (with prior wake_verified_at) to socket via registerClaudeWakeSocket
+    // clears wake_verified_at and canary so channel verification never falsely carries to claude-socket.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    assert.equal(
+      await readClaudeWakeRegistration(profile, SESSION_ID),
+      null,
+      "switching claude wake from socket to channel must delete wake-claude registration file",
+    );
+    const { updateReceiveBinding } = await import("../../src/cloud/agent-receive.js");
+    await updateReceiveBinding(profile, SESSION_ID, (b) => ({
+      ...b,
+      wake_verified_at: new Date().toISOString(),
+      canary: {
+        nonce: "66666666-6666-4666-8666-666666666666",
+        requested_at: new Date().toISOString(),
+        signal_id: "77777777-7777-4777-8777-777777777777",
+        emitted_while_idle: true,
+        received_at: new Date().toISOString(),
+      },
+    }));
+    const switchedToSocket = await registerClaudeWakeSocket({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+    });
+    assert.equal(switchedToSocket.wake_route, "claude-socket");
+    const afterSwitch = await readReceiveBinding(profile, SESSION_ID);
+    assert.equal(afterSwitch?.wake_transport, "socket");
+    assert.equal(afterSwitch?.wake_verified_at, null, "flipping channel -> socket must clear wake_verified_at");
+    assert.equal(afterSwitch?.canary, null, "flipping channel -> socket must clear prior canary");
+
     // Opting out to turn mode deletes the saved 0600 messaging token file.
     await configureAgentReceive({
       profilePath: profile,

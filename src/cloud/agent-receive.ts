@@ -352,7 +352,7 @@ export async function configureAgentReceive(options: {
       ...(nextTransport !== undefined ? { wake_transport: nextTransport } : {}),
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
-    if (options.mode === "turn" && provider === "claude") {
+    if ((options.mode === "turn" || nextTransport !== "socket") && provider === "claude") {
       const { clearClaudeWakeRegistration } = await import("./native-wake-claude.js");
       await clearClaudeWakeRegistration(profile, host).catch(() => undefined);
     }
