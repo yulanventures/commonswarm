@@ -706,8 +706,8 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
         VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout', 'hosted_mcp', true)
       `;
       await tx`
-        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id)
-        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid)
+        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid)
       `;
       const unseatedAgentId = randomUUID();
       const revokedSeatAgentId = randomUUID();
@@ -720,10 +720,10 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
           (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'SeatedNonMember', 'hosted_mcp', true)
       `;
       await tx`
-        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, revoked_at)
+        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by, revoked_at)
         VALUES
-          (${revokedSeatAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, now()),
-          (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL)
+          (${revokedSeatAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid, now()),
+          (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid, NULL)
       `;
       await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
