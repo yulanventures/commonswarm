@@ -267,14 +267,24 @@ async function observeStep3BA11y() {
       const triggerSel = `[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`;
       await click(triggerSel);
       await wait("rail context menu open", () => visible(one(".cs-context-menu")));
+      // Witness detached-anchor focus return: replace the rail trigger while the menu is open
+      // (simulating a background renderHomeRail() refresh), then press Escape -> focus must land
+      // on the re-rendered trigger, never <body>.
+      const originalTrigger = shown<HTMLButtonElement>(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]`)!;
+      const clonedTrigger = originalTrigger.cloneNode(true) as HTMLButtonElement;
+      originalTrigger.replaceWith(clonedTrigger);
       await key("Escape");
       await wait("rail context menu closed", () => !one(".cs-context-menu"));
       const activeAttr = document.activeElement?.getAttribute("data-rail-conversation-menu");
+      const focusedReplacement =
+        document.activeElement !== document.body &&
+        document.activeElement !== originalTrigger &&
+        activeAttr === f.ids.dmGroupConv;
       document.documentElement.dataset.step3bA11y = JSON.stringify({
-        ok: activeAttr === f.ids.dmGroupConv,
+        ok: focusedReplacement,
         scene: f.scene,
         returnedTo: document.activeElement?.outerHTML.slice(0, 180) ?? null,
-        error: activeAttr === f.ids.dmGroupConv ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`,
+        error: focusedReplacement ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`,
       });
       return;
     }
