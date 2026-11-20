@@ -40,6 +40,44 @@ final class ReaderPositionTests: XCTestCase {
         screenshot(label + "-after")
     }
 
+    func testThreadReplyKeepsRootAfterRetry() throws {
+        continueAfterFailure = false
+        app.launch()
+        if app.buttons["Continue with email"].waitForExistence(timeout: 3) {
+            try tap("Continue with email")
+            let address = app.textFields["Email address"]
+            address.tap()
+            address.typeText("reader@example.test")
+            try tap("Send code")
+            let code = app.secureTextFields["Email code"]
+            code.tap()
+            code.typeText("012345")
+            try tap("Sign in")
+        }
+        try tap("Simulator workspace")
+        try tap("Atlas, Morgan")
+        XCTAssertTrue(app.buttons["Reply to Group topic"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Restricted topic"].exists)
+        XCTAssertFalse(app.buttons["Reply to Restricted topic"].exists)
+        screenshot("group-thread-audiences")
+        app.navigationBars.buttons["Simulator workspace"].tap()
+        try tap("#mobile")
+        try tap("Reply to First topic")
+        let field = app.textFields["Thread reply"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Thread receipt lost")
+        try tap("Send message")
+        XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
+        try tap("Reply to Other topic")
+        try tap("Retry")
+        XCTAssertTrue(app.buttons["Retry"].waitForNonExistence(timeout: 6))
+        XCTAssertTrue(app.staticTexts["Reply to First topic"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Replying to Other topic"].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Thread receipt lost").count, 1)
+        screenshot("thread-reply-reconciled")
+    }
+
     func testReadingPositionSurvivesPrependAndOlderRetry() throws {
         continueAfterFailure = false
         app.launch()

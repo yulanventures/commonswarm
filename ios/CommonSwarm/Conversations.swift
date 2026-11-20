@@ -33,6 +33,30 @@ struct Message: Decodable, Identifiable {
     let from_kind: String
     let body: String
     let created_at: String
+    let thread_root_id, in_reply_to, to, to_agent: UUID?
+    let audience: String?
+    let recipients: [MemberRef]?
+    let until: String?
+
+    func allowsThread(in row: ConversationSummary) -> Bool {
+        guard thread_root_id == nil, in_reply_to == nil else { return false }
+        if let until {
+            let expiry = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(until))
+                ?? (try? Date.ISO8601FormatStyle().parse(until))
+            guard let expiry, expiry.timeIntervalSinceNow > 1 else { return false }
+        }
+        if audience == "conversation" {
+            return row.kind.direct || (to == nil && to_agent == nil && (recipients ?? []).isEmpty)
+        }
+        guard row.kind.direct, audience == "addressed", let members = row.members,
+              let authorKind = ConversationMember.Kind(rawValue: from_kind) else { return false }
+        var readers = Set(recipients ?? [])
+        readers.insert(MemberRef(kind: authorKind, id: from))
+        if let to { readers.insert(MemberRef(kind: .user, id: to)) }
+        if let to_agent { readers.insert(MemberRef(kind: .agent, id: to_agent)) }
+        let active = members.filter { $0.left_at == nil }
+        return !active.isEmpty && active.allSatisfy { readers.contains(MemberRef(kind: $0.kind, id: $0.id)) }
+    }
     let attachments: [MessageAttachment]?
 }
 
@@ -56,7 +80,7 @@ struct Post: Encodable {
 
     var body: String? { command["body"] ?? nil }
 
-    init(id: UUID, workspace: UUID, destination: Conversation.Destination, body: String) {
+    init(id: UUID, workspace: UUID, destination: Conversation.Destination, body: String, threadRootID: UUID? = nil) {
         command_id = id
         workspace_id = workspace
         var fields: [String: String?] = ["kind": "post_signal", "signal_kind": "note", "body": body,
@@ -71,6 +95,7 @@ struct Post: Encodable {
         case .person(let person): fields["to_user_id"] = person.uuidString.lowercased()
         case .agent(let agent): fields["to_agent_principal_id"] = agent.uuidString.lowercased()
         }
+        if let threadRootID { fields["thread_root_id"] = threadRootID.uuidString.lowercased() }
         command = fields
     }
 
@@ -158,7 +183,7 @@ struct ConversationAPI {
     }
 
     func history(_ workspace: UUID, _ destination: Conversation.Destination, before: Message? = nil) async throws -> [Message] {
-        var query = ["select": "id,from,from_kind,body,created_at,attachments", "workspace_id": "eq." + workspace.uuidString,
+        var query = ["select": "id,from,from_kind,body,created_at,thread_root_id,attachments", "workspace_id": "eq." + workspace.uuidString,
                      "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {
