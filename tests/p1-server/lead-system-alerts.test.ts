@@ -1541,12 +1541,13 @@ test("best-effort access_lost alerts bail within 250ms under #general FOR UPDATE
   //      so lower-UUID's alert is ALREADY visible while higher-UUID is still locked!
   const [wsLow, wsHigh] = [workspace, ws2].sort() as [string, string];
   const createTwoWorkspaceRevoked = async (label: string) => {
-    const a = await createAgent(owner.id, workspace, label);
+    const a = await agentOf(owner.id, label);
     await sql`
-      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
-      VALUES (${ws2}::uuid, ${a.principal}::uuid, ${owner.id}::uuid)
+      INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${a.principal}::uuid, ${ws2}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING
     `;
-    await sql`UPDATE swarm.agent_tokens SET revoked_at = now() WHERE principal_id = ${a.principal}::uuid`;
+    await sql`UPDATE swarm.agent_tokens SET revoked_at = statement_timestamp() WHERE principal_id = ${a.principal}::uuid`;
     return a;
   };
   const revokedWhenLowLocked = await createTwoWorkspaceRevoked("RevokedLowLocked");
