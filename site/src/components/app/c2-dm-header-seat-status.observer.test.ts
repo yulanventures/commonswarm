@@ -291,11 +291,36 @@ async function observeC2DmHeader() {
     });
     const statusEl = shown<HTMLElement>("[data-dm-seat-status]")!;
     const shapeEl = statusEl.querySelector<HTMLElement>(".hm-dm-seat-status__shape");
+    const textEl = statusEl.querySelector<HTMLElement>(".hm-dm-seat-status__text")!;
     check(statusEl.dataset.indicator === want.indicator, `expected indicator=${want.indicator}, got ${statusEl.dataset.indicator}`);
     check(statusEl.dataset.attention === want.attention, `expected attention=${want.attention}, got ${statusEl.dataset.attention}`);
     check(shapeEl?.dataset.shape === want.indicator, `expected shape=${want.indicator}, got ${shapeEl?.dataset.shape}`);
     check(!(statusEl.textContent ?? "").includes("Secret private title"), "DM header seat status must never expose private titles");
     await document.fonts.ready;
+    const textStyle = getComputedStyle(textEl);
+    check(textStyle.whiteSpace === "normal", `seat status text must wrap cleanly, got white-space=${textStyle.whiteSpace}`);
+    check(textStyle.textOverflow === "clip", `seat status text must not ellipsize, got text-overflow=${textStyle.textOverflow}`);
+    check(textEl.scrollWidth <= textEl.clientWidth + 1, `seat status text clipped horizontally: ${textEl.scrollWidth} > ${textEl.clientWidth}`);
+    const statusRect = statusEl.getBoundingClientRect();
+    check(statusRect.left >= 0 && statusRect.right <= innerWidth, `seat status outside viewport: ${statusRect.left}..${statusRect.right} vs ${innerWidth}`);
+    if (innerWidth <= 832) {
+      const phoneName = shown<HTMLElement>(".cs-org-phone-title > .hm-phone-bar__title")!;
+      check(Boolean(phoneName), "phone DM title must be visible");
+      check(getComputedStyle(phoneName).whiteSpace === "nowrap", "phone DM name must remain single-line independent of status wrap");
+      const nameRect = phoneName.getBoundingClientRect();
+      check(statusRect.top >= nameRect.bottom - 1, `status overlaps phone name: status.top=${statusRect.top} < name.bottom=${nameRect.bottom}`);
+      const phoneButtons = all<HTMLElement>(".cs-org-phone-bar button").filter(visible);
+      check(phoneButtons.length >= 2, `expected surrounding phone header buttons, got ${phoneButtons.length}`);
+      for (const btn of phoneButtons) {
+        const rect = btn.getBoundingClientRect();
+        check(rect.width >= 44 && rect.height >= 44, `phone header button too small: ${rect.width}x${rect.height}`);
+        check(rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+          `phone header button out of viewport: ${JSON.stringify({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom })}`);
+        const overlapsStatus = rect.left < statusRect.right - 1 && rect.right > statusRect.left + 1 &&
+          rect.top < statusRect.bottom - 1 && rect.bottom > statusRect.top + 1;
+        check(!overlapsStatus, `phone header button overlaps wrapped seat status`);
+      }
+    }
     check(document.documentElement.scrollWidth <= innerWidth, `horizontal overflow: ${document.documentElement.scrollWidth} > ${innerWidth}`);
 
     // On working flow, also verify human DM and #general omit [data-dm-seat-status], then return to agent DM.
@@ -364,6 +389,7 @@ test("C2 1:1 agent DM header renders live seat status across states, widths, and
       { name: "1440x900-light-working", width: 1440, height: 900, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=working&check_nav=1`, screenshot: true },
       { name: "1440x900-dark-working", width: 1440, height: 900, query: `w=${ws}&dm=${dmAgent}&theme=dark&seat=working`, screenshot: true },
       { name: "360x740-light-waiting", width: 360, height: 740, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=waiting`, screenshot: true },
+      { name: "360x740-light-turn-only", width: 360, height: 740, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=turn-only`, screenshot: true },
       { name: "1440x900-light-waiting", width: 1440, height: 900, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=waiting`, screenshot: true },
       { name: "1440x900-light-turn-only", width: 1440, height: 900, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=turn-only`, screenshot: true },
       { name: "1440x900-light-not-listening", width: 1440, height: 900, query: `w=${ws}&dm=${dmAgent}&theme=light&seat=not-listening`, screenshot: true },
