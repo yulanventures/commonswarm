@@ -280,11 +280,38 @@ async function observeStep3BA11y() {
         document.activeElement !== document.body &&
         document.activeElement !== originalTrigger &&
         activeAttr === f.ids.dmGroupConv;
+      // Also witness opening the context menu directly from the DM link (`data-rail-conversation`)
+      // and channel link (`data-rail-channel`), redrawing the link, and dismissing with Escape/Tab.
+      let linkReturnOk = focusedReplacement;
+      let linkError = focusedReplacement ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`;
+      if (linkReturnOk) {
+        for (const [attr, selector, dismissKey] of [
+          ["data-rail-conversation", `[data-rail-conversation="${f.ids.dmGroupConv}"]`, "Escape"],
+          ["data-rail-channel", `[data-rail-channel="${f.ids.opsChannel}"]`, "Tab"],
+        ] as const) {
+          const origLink = shown<HTMLElement>(selector);
+          if (!origLink) { linkReturnOk = false; linkError = `missing link ${selector}`; break; }
+          origLink.focus();
+          origLink.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+          await wait(`link context menu open (${attr})`, () => visible(one(".cs-context-menu")));
+          const clonedLink = origLink.cloneNode(true) as HTMLElement;
+          origLink.replaceWith(clonedLink);
+          await key(dismissKey);
+          await wait(`link context menu closed (${attr})`, () => !one(".cs-context-menu"));
+          const landed = document.activeElement;
+          const expectedId = attr === "data-rail-conversation" ? f.ids.dmGroupConv : f.ids.opsChannel;
+          if (!landed || landed === document.body || landed === origLink || landed.getAttribute(attr) !== expectedId) {
+            linkReturnOk = false;
+            linkError = `${dismissKey} from ${attr} link left focus on ${landed?.outerHTML.slice(0, 160)}`;
+            break;
+          }
+        }
+      }
       document.documentElement.dataset.step3bA11y = JSON.stringify({
-        ok: focusedReplacement,
+        ok: linkReturnOk,
         scene: f.scene,
         returnedTo: document.activeElement?.outerHTML.slice(0, 180) ?? null,
-        error: focusedReplacement ? undefined : `Escape from rail context menu left focus on ${document.activeElement?.outerHTML.slice(0, 160)}`,
+        error: linkError,
       });
       return;
     }

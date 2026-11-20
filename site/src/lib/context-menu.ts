@@ -22,6 +22,8 @@ export function closeContextMenu(): void {
 const STABLE_ANCHOR_ATTRS = [
   "data-rail-conversation-menu",
   "data-rail-channel-menu",
+  "data-rail-conversation",
+  "data-rail-channel",
   "data-menu-key",
   "data-channel-id",
   "data-home-focus-key",

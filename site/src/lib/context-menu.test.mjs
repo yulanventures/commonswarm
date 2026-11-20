@@ -268,3 +268,54 @@ test("resolveContextMenuReturnTarget supports data-channel-id and prefers connec
   );
   assert.equal(resolved, replacement);
 });
+
+test("context-menu Escape and Tab return focus to re-rendered channel and DM links (data-rail-channel, data-rail-conversation)", () => {
+  for (const [attr, id] of [
+    ["data-rail-channel", "ch-ops"],
+    ["data-rail-conversation", "conv-group-1"],
+  ]) {
+    for (const dismissKey of ["Escape", "Tab"]) {
+      const doc = new FakeDocument();
+      const shell = doc.createElement("live-dashboard");
+      const rail = doc.createElement("nav");
+      rail.className = "hm-rail";
+      const heading = doc.createElement("h2");
+      heading.textContent = "Channels";
+      const originalLink = doc.createElement("a");
+      originalLink.setAttribute(attr, id);
+      rail.append(heading, originalLink);
+      shell.append(rail);
+      doc.body.append(shell);
+
+      openContextMenu(
+        { preventDefault() {}, detail: 0, clientX: 0, clientY: 0 },
+        originalLink,
+        [{ label: "Star", run() {} }],
+        "Link options",
+      );
+
+      const menu = shell.children.find((c) => c.className === "cs-context-menu");
+      assert.ok(menu, `${attr}/${dismissKey}: menu should mount`);
+
+      originalLink.remove();
+      const rerenderedLink = doc.createElement("a");
+      rerenderedLink.setAttribute(attr, id);
+      rail.append(rerenderedLink);
+
+      menu.dispatchEvent({
+        type: "keydown",
+        key: dismissKey,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+
+      assert.equal(
+        doc.activeElement,
+        rerenderedLink,
+        `${attr}/${dismissKey}: must return focus to re-rendered link, not heading or <body>`,
+      );
+      assert.notEqual(doc.activeElement, heading);
+      assert.notEqual(doc.activeElement, doc.body);
+    }
+  }
+});
