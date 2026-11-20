@@ -75,7 +75,7 @@ live-dashboard.dashboard[data-kylon-shell] .cp-input {
   min-width: 0;
   min-height: 36px;
   padding: 6px 10px;
-  border: 1px solid var(--k-shell-line);
+  border: 1px solid var(--k-shell-control);
   border-radius: 8px;
   background: var(--k-shell-surface);
   color: var(--k-shell-ink);
@@ -169,7 +169,7 @@ live-dashboard.dashboard[data-kylon-shell] .cp-item__badge {
   flex: 0 0 auto;
   padding: 2px 7px;
   border-radius: 6px;
-  border: 1px solid var(--k-shell-line);
+  border: 1px solid var(--k-shell-control);
   background: var(--k-shell-subtle);
   color: var(--k-shell-secondary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);

@@ -226,6 +226,17 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [dat
   line-height: 24px;
   font-weight: 600;
 }
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__form-error {
+  color: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__form-error {
+    color: #f87171;
+  }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__form-error {
+  color: #f87171;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename .dashboard__form-error {
   flex-basis: 100%;
   margin: 0;

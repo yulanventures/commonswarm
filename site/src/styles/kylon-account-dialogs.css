@@ -1,5 +1,7 @@
 /* Native dialogs keep their lifecycle, data, permissions and action handlers. */
 :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) {
+  --k-dialog-danger-text: #b91c1c;
+  --k-dialog-danger-hover-bg: #fef2f2;
   margin: auto;
   inline-size: min(640px, calc(100% - 32px));
   max-inline-size: calc(100% - 32px);
@@ -173,17 +175,30 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats button {
   flex: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]) {
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) {
+    --k-dialog-danger-text: #f87171;
+    --k-dialog-danger-hover-bg: #2a1215;
+  }
+}
+:root[data-theme="dark"] :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) {
+  --k-dialog-danger-text: #f87171;
+  --k-dialog-danger-hover-bg: #2a1215;
+}
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) .dashboard__form-error {
+  color: var(--k-dialog-danger-text);
+}
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]) {
   justify-self: start;
-  color: var(--danger);
+  color: var(--k-dialog-danger-text);
   border-color: transparent;
   background: transparent;
   font-weight: 400;
   text-decoration: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]):hover:not(:disabled) {
-  color: var(--danger);
-  background: var(--danger-dim);
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-all-dialog], live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]):hover:not(:disabled) {
+  color: var(--k-dialog-danger-text);
+  background: var(--k-dialog-danger-hover-bg);
   border-color: transparent;
 }
 admin-delegations[data-kylon-account] > dialog :is(h3, h4, h5) {
@@ -350,13 +365,15 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-signout-others-dialog], [da
 live-dashboard.dashboard[data-kylon-shell] :is([data-signout-others-dialog], [data-signout-all-dialog]) .dashboard__signout-others-effect strong { color: var(--k-shell-ink); font-weight: 600; }
 /* The result of the sign-out stands apart from the two lines above it. */
 live-dashboard.dashboard[data-kylon-shell] :is([data-signout-others-dialog], [data-signout-all-dialog], [data-add-account-dialog]) .dashboard__connected-apps-status:not(:empty) { margin-block-start: 12px; color: var(--k-shell-ink); }
+/* Filled danger confirm buttons keep dark red fill (#b91c1c -> 6.47:1 with #fff; #991b1b -> 8.36:1 hover)
+   independent of foreground text danger tokens in both light and dark themes. */
 live-dashboard.dashboard[data-kylon-shell] :is([data-signout-others-dialog] [data-signout-others-confirm], [data-signout-all-dialog] [data-signout-all-confirm]) {
   color: #fff;
-  background: var(--k-shell-danger, #dc2626);
+  background: #b91c1c;
   border-color: transparent;
 }
 live-dashboard.dashboard[data-kylon-shell] :is([data-signout-others-dialog] [data-signout-others-confirm], [data-signout-all-dialog] [data-signout-all-confirm]):hover:not(:disabled) {
-  background: color-mix(in oklab, var(--k-shell-danger, #dc2626) 88%, #000);
+  background: #991b1b;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog] > header > [data-add-account-close] { font-size: 20px; line-height: 1; }
 live-dashboard.dashboard[data-kylon-shell] [data-add-account-dialog] .dashboard__add-account-body { display: grid; gap: 12px; margin: 0; }
