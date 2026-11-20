@@ -234,8 +234,11 @@ enum Verify {
             _ = try await api.history(ws.id, destination.destination)
             leavingDraft.text = "Draft before Leave"
             guard let outgoing = leavingDraft.begin(workspace: ws.id, destination: destination.destination) else { throw Failure.mismatch("live send") }
+            try leavingDraft.stage(StagedFile(data: Data("Draft file".utf8), name: "draft.txt"))
+            leavingDraft.text = "Unsent draft"
             let left = try await api.perform(.leave, on: live, workspace: ws.id, commandID: UUID())
             try expect(!left.joined && leavingDraft.access == (live.kind == .publicChannel ? .preview : .unavailable) &&
+                       leavingDraft.text.isEmpty && leavingDraft.attachments.isEmpty &&
                        leavingDraft.outgoing.isEmpty && !leavingDraft.canDispatch(outgoing.command_id), "Leave receipt retires the outgoing message before refreshing")
         }
         let canonical = thread.item(viewer: session.userID)

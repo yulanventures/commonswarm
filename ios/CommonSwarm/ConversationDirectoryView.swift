@@ -49,13 +49,27 @@ struct DirectoryView: View {
             Button("Leave", role: .destructive) { Task { await perform(target) } }
             Button("Cancel", role: .cancel) {}
         } message: { target in
-            if target.row.kind == .group { Text("You’ll lose access to this group’s history. A current member must start a new group to include you again.") }
-            else if target.row.kind == .privateChannel { Text("You’ll need a new invitation to return.") }
+            Text(leaveMessage(for: target.row))
         }
         .alert(actionError ?? "", isPresented: Binding(get: { actionError != nil && errorScreen == screen }, set: { if !$0 && errorScreen == screen { actionError = nil } })) {
             if let target = retryAction { Button("Retry " + target.row.item(viewer: api.session.userID, labels: labels).name) { Task { await perform(target) } } }
             Button("Cancel", role: .cancel) { retryAction = nil }
         }
+    }
+
+    private func leaveMessage(for row: ConversationSummary) -> String {
+        var lines: [String] = []
+        let draft = api.session.composer(workspace: workspace.id, conversation: .thread(row.id))
+        if !draft.text.isEmpty || !draft.attachments.isEmpty || draft.replyTarget != nil {
+            let name = row.item(viewer: api.session.userID, labels: labels).name
+            lines.append("Your unsent draft in " + name + " will be discarded.")
+        }
+        if row.kind == .group {
+            lines.append("You’ll lose access to this group’s history. A current member must start a new group to include you again.")
+        } else if row.kind == .privateChannel {
+            lines.append("You’ll need a new invitation to return.")
+        }
+        return lines.joined(separator: " ")
     }
 
     private func list(_ rows: [ConversationSummary]) -> some View {
@@ -207,13 +221,14 @@ struct DirectoryView: View {
             Button("Mark as read") { start(.markRead(through: through), row, on: screen) }
         }
         Button(row.starred == true ? "Unstar" : "Star") { start(.star(row.starred != true), row, on: screen) }
-        let muted = row.notify_level == "muted"
-        Button(muted ? "Unmute" : "Mute") { start(.notify(muted ? "everything" : "muted"), row, on: screen) }
-        if !muted {
-            let mentionsOnly = row.notify_level == "mentions"
-            Button(mentionsOnly ? "Notify for all messages" : "Notify for mentions only") {
-                start(.notify(mentionsOnly ? "everything" : "mentions"), row, on: screen)
-            }
+        if row.notify_level != "muted" {
+            Button("Mute") { start(.notify("muted"), row, on: screen) }
+        }
+        if row.notify_level != "mentions" {
+            Button("Notify for mentions only") { start(.notify("mentions"), row, on: screen) }
+        }
+        if row.notify_level == "mentions" || row.notify_level == "muted" {
+            Button("Notify for all messages") { start(.notify("everything"), row, on: screen) }
         }
         if row.kind.canLeave {
             Button("Leave…", role: .destructive) { leaveTarget = .init(id: UUID(), row: row, action: .leave, screen: screen) }
