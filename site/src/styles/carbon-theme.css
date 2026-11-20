@@ -27,6 +27,7 @@
   --k-shell-accent: #09090b;
   --k-shell-accent-hover: #27272a;
   --k-shell-accent-ink: #ffffff;
+  --k-shell-danger: #b91c1c; /* 6.47:1 on white, 5.89:1 on hover/subtle */
   --k-shell-focus: #3b82f6;
   --k-shell-shadow: 0 12px 40px #09090b1f, 0 2px 6px #09090b0d;
 
@@ -117,6 +118,7 @@
     --k-shell-accent: #e4e6eb;
     --k-shell-accent-hover: #d4d7de;
     --k-shell-accent-ink: #111317;
+    --k-shell-danger: #f87171; /* 6.23:1 on dark surface, 5.69:1 on menu, 5.05:1 on menu hover */
     --carbon-danger: #ef4444;
     --carbon-danger-soft: #2a1215;
     --carbon-warning-ink: #fbbf24;
@@ -133,6 +135,7 @@
   --k-shell-accent: #e4e6eb;
   --k-shell-accent-hover: #d4d7de;
   --k-shell-accent-ink: #111317;
+  --k-shell-danger: #f87171; /* 6.23:1 on dark surface, 5.69:1 on menu, 5.05:1 on menu hover */
   --carbon-danger: #ef4444;
   --carbon-danger-soft: #2a1215;
   --carbon-warning-ink: #fbbf24;
@@ -332,7 +335,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item {
   background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus-visible, :focus) { outline: none; box-shadow: none; background: var(--k-shell-hover); }
-live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[data-danger] { color: var(--k-shell-danger, #dc2626); }
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[data-danger] { color: var(--k-shell-danger, #b91c1c); }
 live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__separator { block-size: 1px; margin: 4px 6px; background: color-mix(in srgb, currentColor 10%, transparent); }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { background: var(--k-shell-hover); }
 @media (prefers-color-scheme: dark) {

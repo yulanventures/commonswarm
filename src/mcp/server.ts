@@ -18,6 +18,12 @@ import {
 import { decideReplyPlacement, type ReplyPlacement } from "../protocol/reply-placement.js";
 import { GENERAL_CHANNEL_SLUG, listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import {
+  listConversations,
+  postConversationCommand,
+  readConversationHistory,
+  type ConversationMemberRef,
+} from "../cloud/conversations.js";
+import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
   type MemoryKind, type MemorySaveInput,
 } from "../cloud/memory.js";
@@ -221,6 +227,140 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         signal: extra.signal,
       });
       return { content: [{ type: "text", text: JSON.stringify(capMcpResult(sent.response.alert)) }] };
+    }
+    if (
+      request.params.name === "conversations_list" ||
+      request.params.name === "conversation_read" ||
+      request.params.name === "conversation_open" ||
+      request.params.name === "conversation_join" ||
+      request.params.name === "conversation_leave" ||
+      request.params.name === "conversation_mark_read"
+    ) {
+      const args = selected.arguments;
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const auth = await authenticated();
+      const target = profileTarget(profile);
+      if (request.params.name === "conversations_list") {
+        for (const k of Object.keys(args)) {
+          if (k !== "include_archived") throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+        }
+        if (args.include_archived !== undefined && typeof args.include_archived !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "include_archived must be a boolean.");
+        }
+        const data = await listConversations(target, auth.token, profile.workspace_id, {
+          fetcher: auth.fetcher,
+          signal: extra.signal,
+          includeArchived: args.include_archived === true,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(capMcpResult({ workspace_id: profile.workspace_id, ...data })) }] };
+      }
+      if (request.params.name === "conversation_read") {
+        const allowed = new Set([
+          "conversation_id", "limit", "before_created_at", "before_id",
+          "after_created_at", "after_id", "include_mentions", "include_reactions",
+        ]);
+        for (const k of Object.keys(args)) {
+          if (!allowed.has(k)) throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+        }
+        if (typeof args.conversation_id !== "string" || !uuidRe.test(args.conversation_id)) {
+          throw new McpError(ErrorCode.InvalidParams, "conversation_id must be a UUID.");
+        }
+        const hasBefore = args.before_created_at !== undefined || args.before_id !== undefined;
+        const hasAfter = args.after_created_at !== undefined || args.after_id !== undefined;
+        if (hasBefore && hasAfter) {
+          throw new McpError(ErrorCode.InvalidParams, "Provide before_* or after_*, not both.");
+        }
+        let before: { created_at: string; id: string } | undefined;
+        if (hasBefore) {
+          if (typeof args.before_created_at !== "string" || typeof args.before_id !== "string" || !uuidRe.test(args.before_id)) {
+            throw new McpError(ErrorCode.InvalidParams, "before_created_at and before_id must be provided together.");
+          }
+          before = { created_at: args.before_created_at, id: args.before_id };
+        }
+        let after: { created_at: string; id: string } | undefined;
+        if (hasAfter) {
+          if (typeof args.after_created_at !== "string" || typeof args.after_id !== "string" || !uuidRe.test(args.after_id)) {
+            throw new McpError(ErrorCode.InvalidParams, "after_created_at and after_id must be provided together.");
+          }
+          after = { created_at: args.after_created_at, id: args.after_id };
+        }
+        if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || (args.limit as number) < 1 || (args.limit as number) > 100)) {
+          throw new McpError(ErrorCode.InvalidParams, "limit must be an integer between 1 and 100.");
+        }
+        const res = await readConversationHistory(
+          target, auth.token, profile.workspace_id, args.conversation_id,
+          {
+            ...(before ? { before } : {}),
+            ...(after ? { after } : {}),
+            ...(args.limit !== undefined ? { limit: args.limit as number } : {}),
+            ...(typeof args.include_mentions === "boolean" ? { includeMentions: args.include_mentions } : {}),
+            ...(typeof args.include_reactions === "boolean" ? { includeReactions: args.include_reactions } : {}),
+          },
+          { fetcher: auth.fetcher, signal: extra.signal },
+        );
+        if (!res.ok) {
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: res.error, message: res.message }) }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(capMcpResult(res.data)) }] };
+      }
+      if (request.params.name === "conversation_open") {
+        for (const k of Object.keys(args)) {
+          if (k !== "members" && k !== "new_group") throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+        }
+        if (!Array.isArray(args.members) || args.members.length < 1 || args.members.length > 9) {
+          throw new McpError(ErrorCode.InvalidParams, "members must be an array of 1 to 9 {kind, id} entries.");
+        }
+        const members: ConversationMemberRef[] = [];
+        for (const item of args.members) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            throw new McpError(ErrorCode.InvalidParams, "Each member must be an object with kind and id.");
+          }
+          const rec = item as Record<string, unknown>;
+          if ((rec.kind !== "user" && rec.kind !== "agent") || typeof rec.id !== "string" || !uuidRe.test(rec.id)) {
+            throw new McpError(ErrorCode.InvalidParams, "Each member must have kind ('user'|'agent') and UUID id.");
+          }
+          members.push({ kind: rec.kind, id: rec.id.toLowerCase() });
+        }
+        if (args.new_group !== undefined && typeof args.new_group !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "new_group must be a boolean.");
+        }
+        const res = await postConversationCommand(
+          target, auth.token, profile.workspace_id,
+          { kind: "conversation_open", members, ...(args.new_group === true ? { new_group: true } : {}) },
+          { fetcher: auth.fetcher, signal: extra.signal },
+        );
+        return { isError: res.status !== 200, content: [{ type: "text", text: JSON.stringify(capMcpResult(res.body)) }] };
+      }
+      if (typeof args.conversation_id !== "string" || !uuidRe.test(args.conversation_id)) {
+        throw new McpError(ErrorCode.InvalidParams, "conversation_id must be a UUID.");
+      }
+      if (request.params.name === "conversation_join" || request.params.name === "conversation_leave") {
+        for (const k of Object.keys(args)) {
+          if (k !== "conversation_id") throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+        }
+        const res = await postConversationCommand(
+          target, auth.token, profile.workspace_id,
+          { kind: request.params.name, conversation_id: args.conversation_id.toLowerCase() },
+          { fetcher: auth.fetcher, signal: extra.signal },
+        );
+        return { isError: res.status !== 200, content: [{ type: "text", text: JSON.stringify(capMcpResult(res.body)) }] };
+      }
+      for (const k of Object.keys(args)) {
+        if (k !== "conversation_id" && k !== "through_signal_id") throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+      }
+      if (args.through_signal_id !== undefined && (typeof args.through_signal_id !== "string" || !uuidRe.test(args.through_signal_id))) {
+        throw new McpError(ErrorCode.InvalidParams, "through_signal_id must be a UUID.");
+      }
+      const res = await postConversationCommand(
+        target, auth.token, profile.workspace_id,
+        {
+          kind: "conversation_mark_read",
+          conversation_id: args.conversation_id.toLowerCase(),
+          ...(typeof args.through_signal_id === "string" ? { through_signal_id: args.through_signal_id.toLowerCase() } : {}),
+        },
+        { fetcher: auth.fetcher, signal: extra.signal },
+      );
+      return { isError: res.status !== 200, content: [{ type: "text", text: JSON.stringify(capMcpResult(res.body)) }] };
     }
     if (isSeatAdminTool(request.params.name)) {
       let parsed: ReturnType<typeof seatAdminMcpCommand>;

@@ -1107,9 +1107,14 @@ export async function postCommand(
   command: Record<string, unknown>,
   extra: Record<string, unknown> = {},
   unknownOutcome?: string,
+  options?: { isAlive?: () => boolean },
 ): Promise<CommandResult> {
   const d = deployment();
   if (!d) throw new NoDeployment();
+  const isAlive = options?.isAlive;
+  if (isAlive && !isAlive()) {
+    return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+  }
 
   const wireBody = JSON.stringify({
     command_id: commandId,
@@ -1121,6 +1126,9 @@ export async function postCommand(
   const deadline = requestDeadline();
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (isAlive && !isAlive()) {
+        return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+      }
       const response = await fetch(`${d.url}/functions/v1/command`, {
         method: "POST",
         headers: {
@@ -1139,9 +1147,15 @@ export async function postCommand(
         body = { error: "unreadable_response" };
       }
       if (response.status === 401 && body.error === "unauthenticated") {
+        if (isAlive && !isAlive()) {
+          return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+        }
         const c = client();
         if (!c || attempt !== 0) throw new AuthRecoveryRequired();
         const recovered = await boundedAuth(c.auth.getSession());
+        if (isAlive && !isAlive()) {
+          return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+        }
         if (recovered.error) {
           if (isAuthSessionMissingError(recovered.error) || terminalRefreshCodes.has(recovered.error.code ?? "")) {
             throw new SessionExpired();
@@ -1157,6 +1171,9 @@ export async function postCommand(
           // refreshSession() reads the CURRENT token under the SDK lock; never
           // pass the rejected caller's possibly superseded refresh token.
           const refreshed = await boundedAuth(c.auth.refreshSession());
+          if (isAlive && !isAlive()) {
+            return { status: 0, body: { error: "operation_retired", message: "Action cancelled." } };
+          }
           if (refreshed.error) {
             if (isAuthSessionMissingError(refreshed.error) ||
                 terminalRefreshCodes.has(refreshed.error.code ?? "")) {
@@ -1733,6 +1750,39 @@ export async function setWorkspaceLead(
     : null;
 }
 
+export type AgentRemovalScope = "workspace" | "permanent";
+
+/** Asks the server whether removing this agent from this workspace is workspace-only or permanent retirement. */
+export async function readAgentRemovalScope(
+  session: Session,
+  workspaceId: string,
+  principalId: string,
+): Promise<AgentRemovalScope | null> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/rest/v1/rpc/agent_removal_scope`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "accept-profile": "swarm_read",
+        "content-profile": "swarm_read",
+      },
+      body: JSON.stringify({ p_workspace_id: workspaceId, p_principal_id: principalId }),
+      signal: deadline.controller.signal,
+    });
+    if (!response.ok) throw new Error(`Could not check removal scope (HTTP ${response.status}).`);
+    const raw = (await response.json()) as unknown;
+    return raw === "workspace" || raw === "permanent" ? raw : null;
+  } finally {
+    deadline.clear();
+  }
+}
+
 /**
  * Removes workspace access. Local account connections remain available in other workspaces.
  * Browser surface is principal-only — there is no per-token UI.
@@ -1748,20 +1798,31 @@ export async function revokeAgentPrincipal(
     commandId,
     { kind: "revoke_agent_principal", principal_id: principalId },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "CommonSwarm lost the removal result. Retry or reload the list to check.",
   );
+  const code = typeof body.error === "string" ? body.error : undefined;
   if (status === 403) {
-    throw new Error(
-      "Your current project role cannot remove this agent. CommonSwarm did not change anything.",
+    throw Object.assign(
+      new Error("Your current project role cannot remove this agent. CommonSwarm did not change anything."),
+      { status, code: code ?? "forbidden" },
+    );
+  }
+  if (status === 409 && code === "command_id_conflict") {
+    throw Object.assign(
+      new Error("CommonSwarm could not confirm whether this removal already completed. Reload the list to check."),
+      { status, code, uncertain: true },
     );
   }
   if (status !== 200) {
-    throw new Error(
-      `Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`,
+    throw Object.assign(
+      new Error(`Agent removal failed (HTTP ${status}). CommonSwarm did not confirm a change.`),
+      { status, code, uncertain: status === 0 || status >= 500 },
     );
   }
   if (body.status !== "accepted") {
-    throw new Error(
-      `Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`,
+    throw Object.assign(
+      new Error(`Agent removal was refused: ${String(body.reason ?? "required condition not met")}. The identity and credentials are unchanged.`),
+      { status, code: typeof body.reason === "string" ? body.reason : "refused" },
     );
   }
 }
@@ -4340,12 +4401,15 @@ export async function openConversation(
   workspaceId: string,
   members: readonly ConversationMemberRef[],
   newGroup = false,
+  options?: { isAlive?: () => boolean },
 ): Promise<ConversationOpenResult> {
   const { status, body } = await postCommand(
     session,
     commandId,
     buildOpenConversationCommand(members, newGroup),
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
   );
   return parseConversationOpenResponse(status, body);
 }
@@ -4356,12 +4420,15 @@ async function conversationAction(
   workspaceId: string,
   command: Record<string, unknown>,
   fallbackMessage: string,
+  options?: { isAlive?: () => boolean },
 ): Promise<ConversationActionResult> {
   const { status, body } = await postCommand(
     session,
     commandId,
     command,
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
   );
   return parseConversationActionResponse(status, body, fallbackMessage);
 }
@@ -4402,6 +4469,7 @@ export async function inviteToConversation(
   workspaceId: string,
   conversationId: string,
   members: readonly ConversationMemberRef[],
+  options?: { isAlive?: () => boolean },
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -4409,6 +4477,7 @@ export async function inviteToConversation(
     workspaceId,
     buildInviteConversationCommand(conversationId, members),
     "CommonSwarm could not add those members.",
+    options,
   );
 }
 
@@ -4418,6 +4487,7 @@ export async function removeFromConversation(
   workspaceId: string,
   conversationId: string,
   member: ConversationMemberRef,
+  options?: { isAlive?: () => boolean },
 ): Promise<ConversationActionResult> {
   return conversationAction(
     session,
@@ -4425,7 +4495,92 @@ export async function removeFromConversation(
     workspaceId,
     buildRemoveConversationCommand(conversationId, member),
     "CommonSwarm could not remove that member.",
+    options,
   );
+}
+
+/** Add live workspace people/agents to a private channel (`channel_member_add`). */
+export async function addChannelMembers(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  members: readonly ConversationMemberRef[],
+  options?: { isAlive?: () => boolean },
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    {
+      kind: "channel_member_add",
+      channel_id: channelId,
+      members: members.map((m) => ({ kind: m.kind, id: m.id })),
+    },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    const id = channelId.toLowerCase();
+    return { ok: true, conversationId: id, channelId: id };
+  }
+  return parseConversationActionResponse(status, body, "CommonSwarm could not add those members.");
+}
+
+/** Remove a person or agent from a private channel (`channel_member_remove`). */
+export async function removeChannelMember(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  member: ConversationMemberRef,
+  options?: { isAlive?: () => boolean },
+): Promise<ConversationActionResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    {
+      kind: "channel_member_remove",
+      channel_id: channelId,
+      member: { kind: member.kind, id: member.id },
+    },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    const id = channelId.toLowerCase();
+    return { ok: true, conversationId: id, channelId: id };
+  }
+  return parseConversationActionResponse(status, body, "CommonSwarm could not remove that member.");
+}
+
+/** Whether `userId` is a promoted manager on private `channelId` (`swarm_read.channel_members`). Fails closed to false. */
+export async function isPromotedPrivateChannelManager(
+  workspaceId: string,
+  channelId: string,
+  userId: string,
+): Promise<boolean> {
+  const api = client();
+  if (!api || !workspaceId || !channelId || !userId) return false;
+  try {
+    const { data, error } = await readWithDeadline("channel managers", (signal) =>
+      api.schema("swarm_read")
+        .from("channel_members")
+        .select("is_manager")
+        .eq("workspace_id", workspaceId)
+        .eq("channel_id", channelId)
+        .eq("kind", "user")
+        .eq("id", userId)
+        .eq("is_manager", true)
+        .limit(1)
+        .abortSignal(signal),
+    );
+    if (error || !Array.isArray(data)) return false;
+    return data.some((row) => (row as { is_manager?: unknown }).is_manager === true);
+  } catch {
+    return false;
+  }
 }
 
 export async function markConversationRead(
@@ -4535,11 +4690,18 @@ export async function listConversations(
   workspaceId: string,
   includeArchived = false,
 ): Promise<ConversationSummary[]> {
-  const { status, body } = await postConversationRead(
-    buildListConversationsRequest(workspaceId, includeArchived),
-    "conversations",
-  );
-  const outcome = parseConversationsListOutcome(status, body);
+  const request = buildListConversationsRequest(workspaceId, includeArchived);
+  let result: { status: number; body: Record<string, unknown> };
+  try {
+    result = await postConversationRead(request, "conversations");
+  } catch (error) {
+    // An idempotent conversations read can hit a dropped keep-alive socket under concurrent boot load.
+    // Retry once immediately on a bare network TypeError (never on HTTP errors, auth refusals, or timeouts),
+    // re-entering postConversationRead so currentSession() and requestDeadline() are rechecked fresh.
+    if (!(error instanceof TypeError)) throw error;
+    result = await postConversationRead(request, "conversations");
+  }
+  const outcome = parseConversationsListOutcome(result.status, result.body);
   if (outcome.status === "unsupported") throw new ConversationsUnsupportedError(outcome.message);
   if (outcome.status === "failed") throw new Error(outcome.message);
   return outcome.conversations;

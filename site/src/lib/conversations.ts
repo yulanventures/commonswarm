@@ -33,6 +33,7 @@ export interface ConversationMemberRef {
 export interface ConversationMember extends ConversationMemberRef {
   name?: string | null;
   leftAt?: string | null;
+  isManager?: boolean;
 }
 
 /** One conversation row for the sidebar and directory (fed by Step 2b `conversations` read). */
@@ -171,7 +172,88 @@ export const GROUP_LEAVE_CONFIRM_BODY =
   "You'll lose access to this group's history. Leaving is final; a current member must start a new group to include you again.";
 export const DM_ATTACHMENTS_REFUSAL_TEXT =
   "Attachments aren't available in private conversations.";
+export const DM_READONLY_SEND_REFUSAL_TEXT =
+  "Sending in group messages and Notes to self isn't available yet.";
 export const NOTES_TO_SELF_LABEL = "Notes to self";
+
+/**
+ * Fail-closed submit guard for true DMs (Step 3C C1):
+ * - Group DMs and Notes to self stay read-only until Step 3D posts by exact conversation_id,
+ *   so they must NEVER fall back to a workspace broadcast.
+ * - Any true DM whose conversation is missing, archived, left, or whose 1:1 partner no longer
+ *   belongs to the conversation refuses submission.
+ * - Workspace-readable attachments are refused on every true DM before any upload starts.
+ */
+export function trueDmSendRefusal(state: {
+  activeDmConversationId: string | null;
+  activeDm: { kind: "person" | "agent"; id: string } | null;
+  workspaceConversations: readonly ConversationSummary[] | null;
+  hasAttachments: boolean;
+}): string | null {
+  const { activeDmConversationId, activeDm, workspaceConversations, hasAttachments } = state;
+  if (activeDmConversationId !== null) {
+    const conv = workspaceConversations?.find((c) => c.conversationId === activeDmConversationId) ?? null;
+    if (!conv || !isDirectKind(conv.kind) || conv.archivedAt !== null || !conv.joined) {
+      return CONVERSATION_UNAVAILABLE_TEXT;
+    }
+    if (!activeDm || conv.kind !== "dm") {
+      return DM_READONLY_SEND_REFUSAL_TEXT;
+    }
+    const partnerKind = activeDm.kind === "agent" ? "agent" : "user";
+    const partnerId = activeDm.id.toLowerCase();
+    const stillMember = conv.members.some(
+      (m) => !m.leftAt && m.kind === partnerKind && m.id.toLowerCase() === partnerId,
+    );
+    if (!stillMember) return CONVERSATION_UNAVAILABLE_TEXT;
+    if (hasAttachments) return DM_ATTACHMENTS_REFUSAL_TEXT;
+    return null;
+  }
+  if (activeDm !== null && hasAttachments) {
+    return DM_ATTACHMENTS_REFUSAL_TEXT;
+  }
+  return null;
+}
+
+/**
+ * Append a stable non-secret short ID suffix whenever two or more same-kind people or agents
+ * share the same display name, extending the prefix length if 6-character prefixes collide so
+ * picker rows and remove confirmations stay strictly distinguishable.
+ */
+export function disambiguateMemberLabels<T extends { kind: "user" | "agent"; id: string; name: string }>(
+  entries: readonly T[],
+): Map<string, string> {
+  const buckets = new Map<string, T[]>();
+  for (const entry of entries) {
+    const bucket = `${entry.kind}:${entry.name.trim().toLowerCase()}`;
+    const list = buckets.get(bucket);
+    if (list) list.push(entry);
+    else buckets.set(bucket, [entry]);
+  }
+  const labels = new Map<string, string>();
+  for (const group of buckets.values()) {
+    const distinctIds = [...new Set(group.map((e) => e.id.toLowerCase()))];
+    if (distinctIds.length <= 1) {
+      for (const entry of group) {
+        labels.set(`${entry.kind}:${entry.id.toLowerCase()}`, entry.name.trim());
+      }
+      continue;
+    }
+    const maxLen = Math.max(...distinctIds.map((id) => id.length));
+    let prefixLen = 6;
+    while (prefixLen < maxLen) {
+      const prefixes = new Set(distinctIds.map((id) => id.slice(0, prefixLen)));
+      if (prefixes.size === distinctIds.length) break;
+      prefixLen = Math.min(maxLen, prefixLen + 2);
+    }
+    for (const entry of group) {
+      const cleanName = entry.name.trim();
+      const id = entry.id.toLowerCase();
+      const shortId = id.slice(0, prefixLen);
+      labels.set(`${entry.kind}:${id}`, shortId ? `${cleanName} · ${shortId}` : cleanName);
+    }
+  }
+  return labels;
+}
 
 export function isDirectKind(kind: ConversationKind): boolean {
   return kind === "dm" || kind === "group_dm";
@@ -558,6 +640,7 @@ function parseConversationMembers(value: unknown): ConversationMember[] {
         id: row.id.toLowerCase(),
         name: nullableText(row.name),
         leftAt: nullableText(row.left_at),
+        ...(row.is_manager === true ? { isManager: true } : {}),
       });
     }
   }

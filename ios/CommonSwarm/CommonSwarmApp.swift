@@ -110,7 +110,7 @@ private struct WorkspacesView: View {
     }
 }
 
-private struct RetryView: View {
+struct RetryView: View {
     let text: String
     let action: () async -> Void
     var body: some View {
@@ -118,7 +118,7 @@ private struct RetryView: View {
     }
 }
 
-private struct DirectoryView: View {
+struct LegacyDirectoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
     @ViewState private var directory: [Conversation]?
@@ -126,6 +126,7 @@ private struct DirectoryView: View {
 
     var body: some View {
         List {
+            WorkspaceToolsRootView(api: api, workspace: workspace)
             if failed { RetryView(text: "Couldn’t load conversations", action: load) }
             if let directory {
                 ForEach([false, true], id: \.self) { direct in
@@ -211,12 +212,15 @@ private struct HistoryRowPosition: View {
     }
 }
 
-private struct HistoryView: View {
+struct HistoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
     let item: Conversation
     let directory: [Conversation]
     @ObservedObject var draft: Composer
+    var previewBar: AnyView? = nil
+    var recipientDetails: [String] = []
+    var waitingChannelID: UUID? = nil
     @StateObject private var history = MessageHistory()
     @ViewState private var readingAnchor: HistoryAnchor?
     @ViewState private var restoreAnchor: HistoryAnchor?
@@ -234,8 +238,10 @@ private struct HistoryView: View {
                     if history.hasOlder, let first = history.messages?.first, history.retry == nil {
                         Button("Load earlier messages") { Task { await load(.older(before: first)) } }.disabled(history.loadingOlder)
                     }
-                    if let messages = history.messages {
-                        if messages.isEmpty && draft.outgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
+                    if draft.access == .unavailable {
+                        ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left")
+                    } else if let messages = history.messages {
+                        if messages.isEmpty && visibleOutgoing.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
                         ForEach(messages) { message in
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -252,7 +258,7 @@ private struct HistoryView: View {
                             }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
                     } else if history.retry == nil { ProgressView() }
-                    ForEach(draft.outgoing) { row in
+                    ForEach(visibleOutgoing) { row in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack {
                                 Text("You").bold()
@@ -316,10 +322,21 @@ private struct HistoryView: View {
                     .padding(.trailing, 12).padding(.bottom, 4)
                 }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                ConversationComposer(draft: draft, destination: item.name, allowsAttachments: item.symbol != "lock", send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if draft.access == .joined && !recipientDetails.isEmpty {
+                    Text(recipientDetails.joined(separator: "\n")).font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal).padding(.vertical, 4).background(.bar)
+                }
             }
-        }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if draft.access == .preview, let previewBar { previewBar }
+                else if draft.access == .joined {
+                    ConversationComposer(draft: draft, destination: item.name, allowsAttachments: { if case .thread(_, let kind) = item.destination { return kind.workspaceFiles }; return item.symbol != "lock" }(), send: { deliver(draft.begin(workspace: workspace.id, destination: item.destination)) })
+                }
+            }
+        }.navigationTitle(draft.access == .unavailable ? "Conversation unavailable" : item.name).navigationBarTitleDisplayMode(.inline)
+            .waitingOnYouToolbar(api: api, workspace: workspace, conversation: item, directory: directory, channelID: waitingChannelID)
             .task { await load() }
     }
 
@@ -344,10 +361,14 @@ private struct HistoryView: View {
         }
     }
 
-    private var latestID: UUID? { draft.outgoing.last?.id ?? history.messages?.last?.id }
+    private var latestID: UUID? { visibleOutgoing.last?.id ?? history.messages?.last?.id }
+
+    private var visibleOutgoing: [Composer.Outgoing] {
+        draft.access == .joined ? draft.outgoing : []
+    }
 
     private func deliver(_ post: Post?) {
-        guard let post else { return }
+        guard draft.access == .joined, let post else { return }
         scrollToLatest += 1
         Task {
             guard let row = draft.outgoing.first(where: { $0.id == post.command_id }) else { return }
@@ -361,6 +382,7 @@ private struct HistoryView: View {
                 return
             }
             do {
+                guard draft.access == .joined, draft.outgoing.contains(where: { $0.id == post.command_id }) else { return }
                 let signalID = try await api.post(post, attachments: refs)
                 guard api.session.isActive else { return }
                 draft.accepted(post.command_id, signalID: signalID)

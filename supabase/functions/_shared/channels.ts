@@ -664,6 +664,8 @@ export interface ChatSignalFields {
   to?: unknown;
   /** The mention list. `undefined` means the key was absent. */
   mentions?: unknown;
+  /** True when post_signal carries conversation_id (allows thread_root_id + agent-wake `to` in DMs/group DMs). */
+  has_conversation?: boolean;
 }
 
 /**
@@ -809,7 +811,7 @@ export function chatSignalShapeProblem(
     /* `to` is a third way to address a reply and is refused by the same rule.
      * Leaving it out of this test would have let a thread reply carry a
      * recipient set through the one check that exists to stop it. */
-    if (toUser !== null || toAgent !== null || recipientCount > 0) {
+    if (toUser !== null || toAgent !== null || (recipientCount > 0 && fields.has_conversation !== true)) {
       return "A thread reply is readable by everyone who can read its thread, so it cannot also be addressed to a recipient.";
     }
     if (fields.in_reply_to !== null && fields.in_reply_to !== undefined) {

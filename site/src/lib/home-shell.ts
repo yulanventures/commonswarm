@@ -27,6 +27,8 @@ export interface WorkspaceShellVM {
   channelTitle?: string;
   /** A resolved named channel. Other feed views and Direct Messages have no channel settings. */
   channel?: { slug: string; description: string | null; manageable: boolean };
+  /** Step 2b conversation members control (channels and DMs) when Step 2b conversations data is present. */
+  conversationMembers?: { count: number; label: string };
   /** The viewer's own star and notification level for the place being read (#general or a live channel), once known. */
   place?: { slug: string; starred: boolean; involvement: ChannelInvolvement };
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
@@ -42,6 +44,8 @@ export interface ShellCallbacks {
   /** Opens the People & agents page. */
   openPeople: () => void;
   channelSettings?: (opener: HTMLElement, editDescription?: boolean) => void;
+  /** Opens the current conversation's Members sheet (channels, 1:1 DMs, group DMs). */
+  openConversationMembers?: (opener: HTMLElement) => void;
   /** Star or unstar the place being read. */
   toggleStar?: (button: HTMLElement) => void;
   /** Opens the three notification levels for the place being read. */
@@ -203,6 +207,8 @@ export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];
   mayCreateChannel: boolean;
   channelSettings?: boolean;
+  /** Conversation members sheet entry (reachable on every screen size, including phones). */
+  conversationMembers?: { label: string } | null;
   /** The viewer's star and notification level for the place being read. The menu offers both wherever the header has no room for its buttons. */
   place?: { slug: string; starred: boolean; involvement: ChannelInvolvement } | null;
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
@@ -212,7 +218,7 @@ export interface FeedMenuState {
    *  The menu is every member's way to both, on every screen size (Escape and Shift+Escape are the keyboard's). */
   read?: { channel: boolean; all: boolean } | null;
 }
-export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" }
+export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" | "conversation-members" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" }
   | { kind: "mark-read" | "mark-all-read" }
   | { kind: "star"; starred: boolean } | { kind: "involvement"; value: ChannelInvolvement };
 
@@ -370,6 +376,31 @@ function headerIcon(doc: Document, paths: readonly string[]): SVGSVGElement {
 const STAR_PATH = "m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z";
 const BELL_PATHS = ["M6.5 16.5v-5.8a5.5 5.5 0 0 1 11 0v5.8l1.5 1.7H5z", "M10 20.5a2.1 2.1 0 0 0 4 0"];
 const BELL_OFF_PATH = "M4.5 4.5l15 15";
+const MEMBERS_PATHS = [
+  "M16 19v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 17.5V19",
+  "M10 10.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  "M20 19v-1.5a3.5 3.5 0 0 0-2.5-3.35",
+  "M15.5 4.65a3 3 0 0 1 0 5.7",
+];
+
+function conversationMembersButton(
+  doc: Document,
+  info: NonNullable<WorkspaceShellVM["conversationMembers"]>,
+  callbacks: ShellCallbacks,
+): HTMLButtonElement {
+  const button = node(doc, "button", "hm-channel-settings hm-channel-members");
+  button.type = "button";
+  button.dataset.conversationMembersOpen = "";
+  const aria = info.count > 0 ? `${info.label} (${info.count})` : info.label;
+  button.setAttribute("aria-label", aria);
+  button.title = aria;
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-controls", "dashboard-conversation-members");
+  button.append(headerIcon(doc, MEMBERS_PATHS));
+  if (info.count > 0) button.append(node(doc, "span", "hm-channel-members__count", String(info.count)));
+  button.addEventListener("click", () => callbacks.openConversationMembers?.(button));
+  return button;
+}
 
 /** A toggle: the name stays "Star #slug" and aria-pressed carries the state, so it reads the same before and after. */
 function channelStarButton(doc: Document, place: NonNullable<WorkspaceShellVM["place"]>, callbacks: ShellCallbacks): HTMLButtonElement {
@@ -514,6 +545,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       return button;
     };
     const channelActions = [plain("All channels", { kind: "all-channels" }, "menuAllChannels")];
+    if (state.conversationMembers) channelActions.unshift(plain(state.conversationMembers.label, { kind: "conversation-members" }, "menuConversationMembers"));
     if (state.channelSettings) channelActions.unshift(plain("Channel settings", { kind: "channel-settings" }, "menuChannelSettings"));
     /* Where the header shows the star and the bell (64rem and wider) the menu repeats neither. Narrower, this menu
        is the way in, so the two come first: they are about the channel on screen, and they must be reachable
@@ -648,6 +680,9 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   if (!vm.sample && channel && vm.place && callbacks.toggleStar) actions.append(channelStarButton(doc, vm.place, callbacks));
   if (!vm.sample && channel && vm.place && callbacks.notifyMenu) actions.append(channelNotifyButton(doc, vm.place, callbacks));
   if (!vm.sample && channel && vm.channel && callbacks.channelSettings) actions.append(channelSettingsButton(doc, callbacks));
+  if (!vm.sample && channel && vm.conversationMembers && callbacks.openConversationMembers) {
+    actions.append(conversationMembersButton(doc, vm.conversationMembers, callbacks));
+  }
   if (doors.people) {
     const people = node(doc, "button", "hm-ws-header__people");
     people.type = "button";
