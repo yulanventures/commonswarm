@@ -36,8 +36,25 @@ import {
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
+import {
+  buildCliErrorEnvelope,
+  buildConversationReadNext,
+  buildOnboardingErrorEnvelope,
+  classifyCliError,
+  ConversationReadRefusedError,
+  decodeOpaqueCursor,
+  encodeOpaqueCursor,
+  InvalidCursorError,
+  latestMessageCursor,
+  scrubCliSecrets,
+  summarizeWhoamiChannelsFallback,
+  summarizeWhoamiConversations,
+  unavailableWhoamiConversations,
+  type CliErrorContext,
+} from "./cli/ax.js";
 import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, selectAgentWorkspace, agentWorkspaceStatePath, profileSessionContext } from "./cloud/agent-profile.js";
+import { readReceiveBinding, receiveStatus } from "./cloud/agent-receive.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
@@ -791,6 +808,7 @@ export class Arguments {
   private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
   expandedProfilePath?: string;
+  expandedProfileInputPath?: string;
   expandedProfileHomeWorkspace?: string;
   expandedProfileConnectionContextPath?: string;
   expandedProfileHostSessionId?: string;
@@ -911,6 +929,7 @@ export class Arguments {
     await readProfileCredential(profile);
     const selectedProfile=selectAgentWorkspace(profile,this.optional("workspace-id"));
     this.expandedProfileHomeWorkspace=profile.workspace_id;
+    this.expandedProfileInputPath = path;
     this.expandedProfilePath = agentWorkspaceStatePath(path,profile.workspace_id,selectedProfile.workspace_id);
     this.expandedProfileHostSessionId = this.optional("host-session-id");
     if (this.has("host-session-id") && hostSessionId === "drop") {
@@ -4992,6 +5011,7 @@ export const RUN_CONVERSATION_READ_ACCEPTED_FLAGS = [
   "workspace-id",
   ...CREDENTIAL_FLAGS,
   "limit",
+  "after",
   "before-created-at",
   "before-id",
   "after-created-at",
@@ -5164,12 +5184,29 @@ async function runConversationsList(args: Arguments): Promise<void> {
   }
 }
 
+function conversationCommandRefused(
+  status: number,
+  body: Record<string, unknown>,
+  fallbackKind: string,
+): ConversationReadRefusedError {
+  const code = typeof body.error === "string"
+    ? body.error
+    : typeof body.code === "string"
+    ? body.code
+    : `http_${status}`;
+  const message = typeof body.message === "string"
+    ? body.message
+    : `${fallbackKind} failed (HTTP ${status})`;
+  return new ConversationReadRefusedError(status, code, message);
+}
+
 async function runConversationRead(args: Arguments): Promise<void> {
   args.assertShape(RUN_CONVERSATION_READ_ACCEPTED_FLAGS, 3);
   const conversationId = args.positionals[2];
   if (!conversationId || !UUID_RE.test(conversationId)) {
     throw new UsageError("cswarm conversation read requires <conversation-id> (UUID)");
   }
+  const rawAfter = args.optional("after");
   const beforeCreatedAt = args.optional("before-created-at");
   const beforeId = args.optional("before-id");
   const afterCreatedAt = args.optional("after-created-at");
@@ -5180,9 +5217,13 @@ async function runConversationRead(args: Arguments): Promise<void> {
   if ((afterCreatedAt !== undefined) !== (afterId !== undefined)) {
     throw new UsageError("--after-created-at and --after-id must be given together");
   }
+  if (rawAfter !== undefined && (beforeCreatedAt !== undefined || afterCreatedAt !== undefined)) {
+    throw new UsageError("Use --after <cursor> alone, not combined with --before-* or --after-created-at/--after-id");
+  }
   if (beforeCreatedAt !== undefined && afterCreatedAt !== undefined) {
     throw new UsageError("Use --before-* or --after-*, not both");
   }
+  const decodedAfter = rawAfter !== undefined ? decodeOpaqueCursor(rawAfter) : undefined;
   const rawLimit = args.optional("limit");
   const limit = rawLimit === undefined ? 50 : Number(rawLimit);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
@@ -5190,11 +5231,16 @@ async function runConversationRead(args: Arguments): Promise<void> {
   }
   const cloud = await target(args);
   const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const explicitAfter = decodedAfter
+    ? { created_at: decodedAfter.created_at, id: decodedAfter.id }
+    : afterCreatedAt && afterId
+    ? { created_at: afterCreatedAt, id: afterId }
+    : undefined;
   const res = await readConversationHistory(
     cloud, selected.bearer, selected.selectedWorkspace, conversationId,
     {
       ...(beforeCreatedAt && beforeId ? { before: { created_at: beforeCreatedAt, id: beforeId } } : {}),
-      ...(afterCreatedAt && afterId ? { after: { created_at: afterCreatedAt, id: afterId } } : {}),
+      ...(explicitAfter ? { after: explicitAfter } : {}),
       limit,
       includeMentions: true,
       includeReactions: true,
@@ -5202,19 +5248,36 @@ async function runConversationRead(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (!res.ok) {
-    throw new Error(res.message);
+    throw new ConversationReadRefusedError(res.status, res.error, res.message);
   }
+  const tipCursor = res.data.next_after
+    ?? latestMessageCursor(res.data.messages)
+    ?? explicitAfter
+    ?? null;
+  const nextCursor = tipCursor ? encodeOpaqueCursor(tipCursor) : null;
+  const next = nextCursor
+    ? [buildConversationReadNext({
+        conversationId,
+        afterCursor: nextCursor,
+        profilePath: args.expandedProfileInputPath,
+        hostSessionId: args.expandedProfileHostSessionId,
+        workspaceId: selected.selectedWorkspace,
+        limit,
+      })]
+    : [];
   if (args.has("json")) {
-    process.stdout.write(`${JSON.stringify(res.data, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...res.data, next_cursor: nextCursor, next }, null, 2)}\n`);
     return;
   }
   if (res.data.messages.length === 0) {
     process.stdout.write("No messages in this conversation.\n");
+    if (next.length > 0) process.stdout.write(`Next: ${next[0]}\n`);
     return;
   }
   for (const m of res.data.messages) {
     process.stdout.write(`${String(m.created_at ?? "")} · ${String(m.id ?? "")} · ${String(m.from_kind ?? "")}:${String(m.from ?? "")} · ${String(m.body ?? "")}\n`);
   }
+  if (next.length > 0) process.stdout.write(`Next: ${next[0]}\n`);
 }
 
 async function runConversationOpen(args: Arguments): Promise<void> {
@@ -5240,7 +5303,7 @@ async function runConversationOpen(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_open failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, "conversation_open");
   }
   if (args.has("json")) {
     process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
@@ -5264,7 +5327,7 @@ async function runConversationMembershipAction(args: Arguments, action: "convers
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `${action} failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, action);
   }
   if (args.has("json")) {
     process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
@@ -5295,7 +5358,7 @@ async function runConversationMarkRead(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_mark_read failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, "conversation_mark_read");
   }
   if (args.has("json")) {
     process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
@@ -5368,7 +5431,7 @@ async function runDm(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_open failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, "conversation_open");
   }
   if (args.has("json")) {
     process.stdout.write(`${JSON.stringify(res.body, null, 2)}\n`);
@@ -5543,6 +5606,94 @@ async function runWhoami(args: Arguments): Promise<void> {
    * a person would ask it. null on an older deployment or a nameless row; the id is always
    * printed, so a missing name degrades to what this command already showed. */
   const workspaceName = workspaceLabel(directory);
+  const activeGrant = renewalGrants.find(
+    (grant) => grant.principal_id === identity.principal_id,
+  ) ?? null;
+  const renewalGrantStatus = activeGrant === null
+    ? "none"
+    : activeGrant.revoked_at !== null
+    ? "revoked"
+    : activeGrant.suspended_at !== null
+    ? "suspended"
+    : activeGrant.connection_expired_at != null
+    ? "expired"
+    : "active";
+  const hostBindingMode = args.expandedProfileInputPath
+    ? (args.expandedProfileHostSessionId ? "session" : "manual")
+    : "direct";
+  let conversationsSummary;
+  try {
+    const listed = await listConversations(
+      cloud,
+      selected.bearer,
+      selected.selectedWorkspace,
+      { includeArchived: false, fetcher: selected.fetcher },
+    );
+    conversationsSummary = summarizeWhoamiConversations(listed.conversations);
+  } catch {
+    try {
+      const legacy = await listChannelsWithUnreadAsAgent(
+        cloud,
+        selected.bearer,
+        selected.selectedWorkspace,
+      );
+      conversationsSummary = summarizeWhoamiChannelsFallback(legacy);
+    } catch {
+      conversationsSummary = unavailableWhoamiConversations();
+    }
+  }
+  let receiveCapability: {
+    configured: boolean;
+    requested_mode: "wake" | "turn" | null;
+    effective_mode: "wake" | "turn" | "direct";
+    turn_check: "verified" | "pending_host" | "instruction" | "none";
+    wake_verified: boolean;
+    channel_running: boolean;
+    host_session_id: string | null;
+  };
+  if (args.expandedProfileInputPath) {
+    try {
+      const binding = await readReceiveBinding(
+        args.expandedProfileInputPath,
+        args.expandedProfileHostSessionId,
+      );
+      const status = receiveStatus(
+        binding,
+        Date.now(),
+        args.expandedProfileHostSessionId,
+        args.expandedProfileInputPath,
+      );
+      receiveCapability = {
+        configured: binding !== null,
+        requested_mode: status.requested_mode,
+        effective_mode: status.effective_mode as "wake" | "turn",
+        turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
+        wake_verified: status.wake_verified,
+        channel_running: status.channel_running,
+        host_session_id: status.host_session_id,
+      };
+    } catch {
+      receiveCapability = {
+        configured: false,
+        requested_mode: null,
+        effective_mode: "turn",
+        turn_check: "instruction",
+        wake_verified: false,
+        channel_running: false,
+        host_session_id: args.expandedProfileHostSessionId ?? null,
+      };
+    }
+  } else {
+    receiveCapability = {
+      configured: false,
+      requested_mode: null,
+      effective_mode: "direct",
+      turn_check: "none",
+      wake_verified: false,
+      channel_running: false,
+      host_session_id: null,
+    };
+  }
   const output = {
     credential_valid: identity.credential_valid,
     principal_id: identity.principal_id,
@@ -5558,9 +5709,29 @@ async function runWhoami(args: Arguments): Promise<void> {
     owner_user_id: identity.owner_user_id,
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
-    renewal_grant: renewalGrants.find(
-      (grant) => grant.principal_id === identity.principal_id,
-    ) ?? null,
+    renewal_grant: activeGrant,
+    workspace: {
+      workspace_id: identity.workspace_id,
+      name: workspaceName,
+      role: identity.is_workspace_lead === true ? "workspace_lead" : "agent",
+      is_workspace_lead: identity.is_workspace_lead === true,
+    },
+    seat: {
+      principal_id: identity.principal_id,
+      display_name: displayName,
+      status: "active" as const,
+      owner_user_id: identity.owner_user_id,
+      owner_display_name: ownerName,
+      renewal_grant_status: renewalGrantStatus,
+      renewal_grant_kind: activeGrant?.kind ?? null,
+      host_binding: {
+        mode: hostBindingMode,
+        profile_bound: Boolean(args.expandedProfileInputPath),
+        host_session_id: args.expandedProfileHostSessionId ?? null,
+      },
+    },
+    receive: receiveCapability,
+    conversations: conversationsSummary,
   };
   if (args.has("json")) {
     printJson(output);
@@ -10862,7 +11033,7 @@ async function runChannelJoin(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `conversation_join failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, "conversation_join");
   }
   if (args.has("json")) {
     printJson(res.body);
@@ -10893,7 +11064,7 @@ async function runChannelLeave(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, String(cmd.kind));
   }
   if (args.has("json")) {
     printJson(res.body);
@@ -10924,7 +11095,7 @@ async function runChannelInvite(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, String(cmd.kind));
   }
   if (args.has("json")) {
     printJson(res.body);
@@ -10955,7 +11126,7 @@ async function runChannelRemove(args: Arguments): Promise<void> {
     { fetcher: selected.fetcher },
   );
   if (res.status !== 200) {
-    throw new Error(typeof res.body.message === "string" ? res.body.message : `${String(cmd.kind)} failed (HTTP ${res.status})`);
+    throw conversationCommandRefused(res.status, res.body, String(cmd.kind));
   }
   if (args.has("json")) {
     printJson(res.body);
@@ -11566,7 +11737,7 @@ const setupVariants = {
   guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"]),
 };
 const checkVariants = {
-  messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]"]),
+  messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--after <cursor>] [--force] [--full] [--json]"]),
   message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]"]),
   hook: commandVariant("hook", runCheckHook, ["cswarm check --profile <absolute-path> --host-session-id <id> --hook"]),
 };
@@ -11998,7 +12169,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     ...selectedVariants(checkVariants, (args) => args.has(CHECK_MESSAGES_SELECTOR_FLAGS[1]) ? "hook" : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[0]) ? "message" : "messages"),
     description: "Read new directed messages for this agent.",
     mutates: true,
-    flags: ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"],
+    flags: ["profile", "host-session-id", "force", "full", "message-id", "after", "json", "hook"],
     transports: ALL_TRANSPORTS,
     ...NATIVE_PROFILE,
     profileListOrder: 25,
@@ -12148,7 +12319,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   conversations: commandEntry({ ...noTool("local MCP exposes conversations_list"), handler: traced("runConversationsList", runConversationsList), description: "List conversations (#general, channels, DMs, and group DMs) with unread and mention counts.", mutates: false, flags: [...agentFlags, "archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 30, visible: true, help: ["cswarm conversations [--archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   conversation: group({
-    read: commandEntry({ ...noTool("local MCP exposes conversation_read"), handler: traced("runConversationRead", runConversationRead), description: "Read paged history for one conversation.", mutates: false, flags: [...agentFlags, "limit", "before-created-at", "before-id", "after-created-at", "after-id"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation read <conversation-id> [--limit <1-100>] [--before-created-at <iso> --before-id <uuid> | --after-created-at <iso> --after-id <uuid>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    read: commandEntry({ ...noTool("local MCP exposes conversation_read"), handler: traced("runConversationRead", runConversationRead), description: "Read paged history for one conversation.", mutates: false, flags: [...agentFlags, "limit", "after", "before-created-at", "before-id", "after-created-at", "after-id"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation read <conversation-id> [--limit <1-100>] [--after <cursor> | --before-created-at <iso> --before-id <uuid> | --after-created-at <iso> --after-id <uuid>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     open: commandEntry({ ...noTool("local MCP exposes conversation_open"), handler: traced("runConversationOpen", runConversationOpen), description: "Find or open a 1:1 DM or group DM.", mutates: true, flags: [...agentFlags, "new-group"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation open <user|agent>:<uuid>... [--new-group] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     join: commandEntry({ ...noTool("local MCP exposes conversation_join"), handler: traced("runConversationJoin", (args) => runConversationMembershipAction(args, "conversation_join")), description: "Join a public channel conversation.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation join <conversation-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     leave: commandEntry({ ...noTool("local MCP exposes conversation_leave"), handler: traced("runConversationLeave", (args) => runConversationMembershipAction(args, "conversation_leave")), description: "Leave a public channel or group DM.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm conversation leave <conversation-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
@@ -12561,18 +12732,66 @@ export function mcpFailureMessage(error: unknown, subcommand: string | undefined
   return safeError(error);
 }
 
+function safeOptionalFlag(args: Arguments | undefined, name: string): string | undefined {
+  if (!args) return undefined;
+  try {
+    return args.optional(name);
+  } catch {
+    return undefined;
+  }
+}
+
+const SUBCOMMAND_VERBS = new Set([
+  "conversation", "channel", "receive", "setup", "file", "brain", "todo", "session",
+  "listen", "admin", "profile", "target", "member", "workspace", "invite", "grant",
+  "link", "token", "principal", "alert", "memory", "hook", "object",
+]);
+
+function buildCliErrorContext(
+  selected: typeof selectedCommandContext,
+  error: unknown,
+): CliErrorContext {
+  const args = selected?.args;
+  const verb = args?.positionals[0];
+  const subcommand = verb && SUBCOMMAND_VERBS.has(verb) ? args?.positionals[1] : undefined;
+  const profilePath = args?.expandedProfileInputPath ?? safeOptionalFlag(args, "profile");
+  const hostSessionId = args?.expandedProfileHostSessionId ?? safeOptionalFlag(args, "host-session-id");
+  const workspaceId = safeOptionalFlag(args, "workspace-id");
+  const conversationId = verb === "conversation" ? args?.positionals[2] : undefined;
+  const channelSelector = verb === "channel" ? args?.positionals[2] : safeOptionalFlag(args, "channel");
+  return {
+    verb,
+    subcommand,
+    profilePath,
+    hostSessionId,
+    workspaceId,
+    conversationId,
+    channelSelector,
+    isUsageError: error instanceof UsageError || error instanceof ReplyStatusUsageError,
+  };
+}
+
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
+    const errorCtx = buildCliErrorContext(selected, error);
+    const jsonRejected = error instanceof Error && error.message.includes("unknown option: --json");
+    const wantsJson = !jsonRejected &&
+      selected !== null &&
+      selected.entry.flags.includes("json") &&
+      selected.args.has("json");
     if (selected?.args.positionals[0] === "mcp") {
       process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${mcpFailureMessage(error, selected.args.positionals[1])}\n`);
       process.exitCode = 1;
       return;
     }
     if (selected?.entry.errorMode === "onboarding" && selected.args.has("json")) {
-      process.stdout.write(`${JSON.stringify({ ok: false, error: {
-        code: error instanceof AgentSetupError ? error.code : "onboarding_failed", message: safeError(error),
-      } })}\n`);
+      const code = error instanceof AgentSetupError
+        ? error.code
+        : error instanceof InvalidCursorError
+        ? error.code
+        : "onboarding_failed";
+      process.stdout.write(`${JSON.stringify(buildOnboardingErrorEnvelope(error, code, safeError(error), errorCtx))}\n`);
       process.exitCode = 1;
       return;
     }
@@ -12584,7 +12803,8 @@ if (isCliMain()) {
       return;
     }
     if (error instanceof RequestIdConflict && selected?.args.has("json") && selected.args.has("request-id")) {
-      process.stdout.write(`${JSON.stringify({ error: error.code, code: error.code, message: safeError(error) })}\n`);
+      const envelope = buildCliErrorEnvelope(error, errorCtx, safeError(error));
+      process.stdout.write(`${JSON.stringify({ ...envelope, error: error.code, code: error.code })}\n`);
       process.exitCode = 1;
       return;
     }
@@ -12593,16 +12813,25 @@ if (isCliMain()) {
       error instanceof RenewalRevoked ||
       error instanceof RenewalSuspended
     ) {
-      process.stderr.write(`${safeParagraph(error.message)}\n`);
+      if (wantsJson) {
+        process.stderr.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeParagraph(error.message)))}\n`);
+      } else {
+        process.stderr.write(`${safeParagraph(error.message)}\n`);
+      }
       process.exitCode = 1;
       return;
     }
     if (error instanceof WorkspaceCliError) {
       const structured = error.structured();
-      const json = selected?.entry.workspaceErrorJson === true &&
-        selected.args.has("json");
+      const json = (selected?.entry.workspaceErrorJson === true && selected.args.has("json")) || wantsJson;
       if (json) {
-        process.stdout.write(`${JSON.stringify(structured, null, 2)}\n`);
+        const classified = classifyCliError(error, errorCtx);
+        process.stdout.write(`${JSON.stringify({
+          ok: false,
+          ...structured,
+          reason: classified.reason,
+          next: classified.next.map(scrubCliSecrets),
+        }, null, 2)}\n`);
       } else {
         process.stderr.write(`cswarm: ${error.message}\n`);
         const projects = structured.projects;
@@ -12632,19 +12861,18 @@ if (isCliMain()) {
       process.exitCode = error.exitCode;
       return;
     }
-    if (error instanceof UsageError) {
-      process.stderr.write(`cswarm: ${safeError(error)}\n${usage()}\n`);
-      process.exitCode = 1;
-      return;
-    }
     if (error instanceof FileCommandRefused) {
       if (selected?.args.has("json")) {
+        const classified = classifyCliError(error, errorCtx);
         process.stdout.write(
           `${JSON.stringify(
             {
+              ok: false,
               error: error.code,
               code: error.code,
-              message: safeError(error),
+              reason: classified.reason,
+              message: scrubCliSecrets(safeError(error)),
+              next: classified.next.map(scrubCliSecrets),
               status: error.status,
               scope: error.scope,
               limit: error.limit,
@@ -12668,6 +12896,16 @@ if (isCliMain()) {
         : "";
       process.stderr.write(`cswarm: ${safeError(error)}${extra}\n`);
       process.exitCode = exitCodeFor(error);
+      return;
+    }
+    if (wantsJson) {
+      process.stderr.write(`${JSON.stringify(buildCliErrorEnvelope(error, errorCtx, safeError(error)))}\n`);
+      process.exitCode = error instanceof UsageError ? 1 : exitCodeFor(error);
+      return;
+    }
+    if (error instanceof UsageError) {
+      process.stderr.write(`cswarm: ${safeError(error)}\n${usage()}\n`);
+      process.exitCode = 1;
       return;
     }
     process.stderr.write(`cswarm: ${safeError(error)}\n`);

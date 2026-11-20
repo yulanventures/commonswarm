@@ -23,6 +23,7 @@ import { DeliveryCommandClient } from "./delivery.js";
 import { observeUnclaimedDeliveries } from "./delivery-observation.js";
 import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 import { reportSeenReactions, seenAckTargets } from "./agent-signal-receipts.js";
+import { buildCheckNext, encodeOpaqueCursor } from "../cli/ax.js";
 
 export {
   AGENT_CHECK_DIRECT_TIMEOUT_MS,
@@ -72,6 +73,8 @@ export interface AgentCheckResult {
   messages: AgentCheckMessage[];
   has_more: boolean;
   next_action: string | null;
+  next_cursor?: string | null;
+  next?: string[];
   workspace_id: string;
   workspace_name: string | null;
 }
@@ -203,6 +206,7 @@ export async function checkAgentMessages(options: {
   workspaceId?: string;
   hostSessionId?: string;
   full?: boolean;
+  afterCursor?: SignalCursor;
   fetcher?: typeof fetch;
   timeoutMs?: number;
   deadlineAtMs?: number;
@@ -250,12 +254,13 @@ export async function checkAgentMessages(options: {
             }).catch(() => undefined);
           }
         } catch { /* Presence is advisory and must not change a check. */ }
+        const startCursor = options.afterCursor ?? state.cursor;
         const [directory, page] = await Promise.all([
           readAgentSignalDirectory(target, token, profile.workspace_id, { fetcher, signal, deadlineMs }),
           readAgentSignalPage(target, { kind: "agent", token }, {
             workspaceId: profile.workspace_id, inbox: true, ascending: true,
             limit: AGENT_CHECK_PAGE_SIZE,
-            ...(state.cursor === null ? {} : { after: state.cursor }),
+            ...(startCursor === null ? {} : { after: startCursor }),
           }, { fetcher, signal, deadlineMs }),
         ]);
         assertProfileIdentity(profile, directory);
@@ -265,7 +270,7 @@ export async function checkAgentMessages(options: {
         const messages: AgentCheckMessage[] = [];
         const presented: SignalRecord[] = [];
         let budget = AGENT_CHECK_BODY_BUDGET;
-        let cursor = state.cursor;
+        let cursor = startCursor;
         let consumed = 0;
         for (const row of page.signals) {
           if (row.workspace_id !== profile.workspace_id || !signalReachesAgent(row, profile.principal_id)) {
@@ -294,11 +299,22 @@ export async function checkAgentMessages(options: {
         }
         const hasMore = consumed < page.signals.length || page.rawCount >= AGENT_CHECK_PAGE_SIZE;
         const rawName = directory.identity?.workspace_name;
+        const nextCursor = cursor ? encodeOpaqueCursor(cursor) : null;
+        const next = nextCursor
+          ? [buildCheckNext({
+              profilePath,
+              workspaceId: profile.workspace_id,
+              hostSessionId: options.hostSessionId,
+              afterCursor: nextCursor,
+            })]
+          : [];
         const result: AgentCheckResult = {
           checked: true, cached: false, messages, has_more: hasMore,
           workspace_id: profile.workspace_id,
           workspace_name: rawName == null || rawName.trim() === "" ? null : rawName,
           next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)} --workspace-id ${profile.workspace_id}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
+          next_cursor: nextCursor,
+          next,
         };
         if (signal.aborted) throw checkTimeoutError();
         // Save the full bodies before showing a preview with its retrieval command. Failure
@@ -427,7 +443,10 @@ export async function checkAgentMessages(options: {
                 : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1));
             }));
           } else {
-            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds,
+            const persistedCursor = cursor && (!state.cursor || compareSignalCursor(cursor, state.cursor) > 0)
+              ? cursor
+              : state.cursor;
+            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor: persistedCursor, pending_observed_ids: pendingIds,
               pending_observed_retries: queuedRetries(cached, pendingIds) }));
             await replaceTurnContext();
             ackAfterCommit = async () => {

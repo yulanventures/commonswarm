@@ -1,6 +1,12 @@
 import type { CommandResult } from "../command/contract.d.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { HOSTED_TOOL_TABLE, type HostedToolName, validSeatName, validUuid } from "./tools.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
+import { reasonForErrorCode, type AxErrorReason } from "../../../src/protocol/error-catalog.ts";
+
+export function hostedToolErrorReason(code: string | null | undefined): AxErrorReason {
+  return reasonForErrorCode(code) ?? "command_failed";
+}
 
 const ACCESS_MESSAGE = "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.";
 const SEAT_MESSAGE = "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.";
