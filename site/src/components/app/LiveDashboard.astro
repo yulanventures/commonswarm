@@ -14176,6 +14176,7 @@ import "../../styles/kylon-image-viewer.css";
       channelsLoaded = false;
       channelUnreadRows = null;
       if (typeof resetConversationsState === "function") resetConversationsState();
+      if (typeof resetWaitingPanelState === "function") resetWaitingPanelState();
       activeChannelId = null;
       unknownChannelId = null;
       postedSinceReset.clear();

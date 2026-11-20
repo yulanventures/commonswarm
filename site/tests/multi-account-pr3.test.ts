@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import {
   MULTI_ACCOUNT_ENABLED,
@@ -747,12 +749,13 @@ test("PR3 4: LiveDashboard teardown isolation contract & MULTI_ACCOUNT_ENABLED r
   assert.match(teardownMatch[0], /resetWaitingPanelState\(\)/, "teardownActiveAccountView must reset waiting panel state");
   assert.match(teardownMatch[0], /resetWorkspaceSessionState\(\)/, "teardownActiveAccountView must reset workspace session state");
 
-  // resetWaitingPanelState clears DOM, surface, timer, caches, and generations.
+  // resetWaitingPanelState clears DOM, surface, timer, caches, waitingInFlight, and generations.
   const waitingResetMatch = liveDashboard.match(/const resetWaitingPanelState = \(\): void => \{[\s\S]*?\n    \};/);
   assert.ok(waitingResetMatch, "resetWaitingPanelState block must exist");
   for (const snippet of [
     "waitingGeneration += 1",
     "waitingOpenEpoch += 1",
+    "waitingInFlight = false",
     "waitingPanelViewer = \"\"",
     "waitingPanelAsks.clear()",
     "waitingPanelTodos.clear()",
@@ -763,6 +766,11 @@ test("PR3 4: LiveDashboard teardown isolation contract & MULTI_ACCOUNT_ENABLED r
   ]) {
     assert.ok(waitingResetMatch[0].includes(snippet), `resetWaitingPanelState must include ${snippet}`);
   }
+
+  // resetWorkspaceSessionState calls resetWaitingPanelState so queueAuthReload & boot(!session) also retire waiting state.
+  const wsResetMatch = liveDashboard.match(/const resetWorkspaceSessionState = \(\): void => \{[\s\S]*?\n    \};/);
+  assert.ok(wsResetMatch, "resetWorkspaceSessionState block must exist");
+  assert.match(wsResetMatch[0], /resetWaitingPanelState\(\)/, "resetWorkspaceSessionState must call resetWaitingPanelState()");
 
   // resetConversationsState aborts controllers, clears DM/directHistory/directory/dialogs/preview.
   const convResetMatch = liveDashboard.match(/const resetConversationsState = \(\): void => \{[\s\S]*?\n    \};/);
@@ -955,4 +963,139 @@ test("PR3 5: cross-workspace Waiting on you answers (answerChoice + accountRoute
     setMultiAccountEnabledForTesting(false);
     resetAccountManagerForTesting();
   }
+});
+
+test("PR3 6: Lead review witness — real resetWaitingPanelState + refreshWaitingCounts across A->B switch never drops or clobbers Account B Waiting counts", async () => {
+  const liveDashboard = readFileSync(new URL("../src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const start = liveDashboard.indexOf("    const resetWaitingPanelState = (): void => {");
+  const end = liveDashboard.indexOf("    /** Soon, once: after an answer", start);
+  assert.ok(start > 0 && end > start, "must locate real resetWaitingPanelState and refreshWaitingCounts in LiveDashboard.astro");
+  const slice = liveDashboard.slice(start, end);
+  const transpiled = ts.transpile(
+    `${slice}\nreturn { resetWaitingPanelState, refreshWaitingCounts, getState: () => ({ waitingGeneration, waitingInFlight, waitingAgain, waitingPanelViewer, homeOverviewCounts: [...homeOverviewCounts.entries()] }) };`,
+    { target: ts.ScriptTarget.ES2022 },
+  );
+
+  const WS_A = "aaaa1111-1111-4111-8111-111111111111";
+  const WS_B = "bbbb2222-2222-4222-8222-222222222222";
+  const overviewA = deferred<unknown>();
+  const overviewB = deferred<unknown>();
+  const overviewCalls: string[] = [];
+
+  let activeUser = USER_A;
+  let viewGen = 1;
+  let activeWorkspaces = [{ id: WS_A, name: "Workspace A" }];
+  let activeWorkspaceId = WS_A;
+  const homeOverviewCounts = new Map<string, number | null>();
+
+  const sandbox = {
+    window: { clearTimeout: () => {} },
+    one: () => ({ replaceChildren: () => {} }),
+    sampleMode: false,
+    get session() { return { user: { id: activeUser } }; },
+    homeRoute: { view: "chat" },
+    get workspaces() { return activeWorkspaces; },
+    get activeWorkspaceId() { return activeWorkspaceId; },
+    homeViewerId: () => activeUser,
+    isMultiAccountEnabled: () => true,
+    pinAccountContext: ({ userId }: { userId?: string } = {}) => {
+      const capturedUser = userId ?? activeUser;
+      const capturedGen = viewGen;
+      return {
+        userId: capturedUser,
+        runtime: { userId: capturedUser },
+        isCurrent: () => activeUser === capturedUser && viewGen === capturedGen,
+      };
+    },
+    homeOverview: (rt: { userId?: string } | null) => {
+      const uid = rt?.userId ?? activeUser;
+      overviewCalls.push(uid);
+      return uid === USER_A ? overviewA.promise : overviewB.promise;
+    },
+    catchUpDetailFromOverview: () => ({ needsYou: [] }),
+    homeNeedsYouCount: () => 0,
+    homeOverviewCounts,
+    waitingGeneration: 0,
+    waitingOpenEpoch: 0,
+    waitingInFlight: false,
+    waitingAgain: false,
+    waitingTimer: undefined as number | undefined,
+    waitingPanelViewer: "",
+    waitingPanelOverviewFailed: false,
+    waitingPanelAsks: new Map(),
+    waitingPanelTodos: new Map(),
+    waitingPanelLoadedWorkspaces: new Set(),
+    waitingPanelFailedWorkspaces: new Set(),
+    waitingPanelTruncatedWorkspaces: new Set(),
+    waitingWorkspaceChannels: new Map(),
+    waitingPanelTickets: new Map(),
+    waitingPanelErrors: new Map(),
+    waitingPanelLastSubmissions: new Map(),
+    waitingTodoTickets: new Map(),
+    waitingTodoErrors: new Map(),
+    waitingSurface: { close: () => {}, setEnabled: () => {} },
+    renderHomeRail: () => {},
+    renderWaitingPanelView: () => {},
+    Promise,
+    Map,
+    Set,
+    Array,
+    Date,
+    Math,
+  };
+
+  const factory = runInNewContext(`(function() {\n${transpiled}\n})`, sandbox) as () => {
+    resetWaitingPanelState: () => void;
+    refreshWaitingCounts: () => Promise<void>;
+    getState: () => {
+      waitingGeneration: number;
+      waitingInFlight: boolean;
+      waitingAgain: boolean;
+      waitingPanelViewer: string;
+      homeOverviewCounts: Array<[string, number | null]>;
+    };
+  };
+  const { resetWaitingPanelState, refreshWaitingCounts, getState } = factory();
+
+  // 1. Account A starts refreshWaitingCounts; homeOverview for A is held in flight.
+  const runA = refreshWaitingCounts();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(overviewCalls, [USER_A]);
+  assert.equal(getState().waitingInFlight, true);
+
+  // 2. Switch A -> B: teardown calls resetWaitingPanelState(), clearing waitingInFlight and advancing waitingGeneration.
+  activeUser = USER_B;
+  viewGen += 1;
+  activeWorkspaces = [{ id: WS_B, name: "Workspace B" }];
+  activeWorkspaceId = WS_B;
+  homeOverviewCounts.clear();
+  resetWaitingPanelState();
+  assert.equal(getState().waitingInFlight, false, "resetWaitingPanelState must release waitingInFlight so Account B can start immediately");
+
+  // 3. Account B starts refreshWaitingCounts while Account A's old overview is still pending.
+  const runB = refreshWaitingCounts();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(overviewCalls, [USER_A, USER_B], "Account B must dispatch homeOverview immediately instead of queuing behind A");
+  assert.equal(getState().waitingInFlight, true);
+
+  // 4. Account A's stale overview resolves and runs its finally while Account B is STILL in flight.
+  overviewA.resolve({
+    viewer_user_id: USER_A,
+    generated_at: "2026-11-19T20:00:00.000Z",
+    workspaces: [{ workspace_id: WS_A, needs_you: { asks: [], assigned: [], waiting: [] } }],
+  });
+  await runA;
+  assert.equal(getState().waitingInFlight, true, "Account A finally must NOT clobber Account B's active waitingInFlight lock");
+  assert.deepEqual([...homeOverviewCounts.entries()], [], "Account A stale overview must NOT write into Account B's counts");
+
+  // 5. Account B's overview resolves cleanly and populates Account B's Waiting counts.
+  overviewB.resolve({
+    viewer_user_id: USER_B,
+    generated_at: "2026-11-19T20:01:00.000Z",
+    workspaces: [{ workspace_id: WS_B, needs_you: { asks: [], assigned: [], waiting: [] } }],
+  });
+  await runB;
+  assert.equal(getState().waitingInFlight, false);
+  assert.equal(getState().waitingPanelViewer, USER_B);
+  assert.deepEqual([...homeOverviewCounts.entries()], [[WS_B, 0]], "Account B Waiting counts must populate cleanly");
 });
