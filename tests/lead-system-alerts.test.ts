@@ -90,7 +90,9 @@ test("migration enforces FORCE RLS, narrow reader grant, scope locks, pg_cron sc
   for (const kind of SYSTEM_ALERT_KINDS) {
     assert.match(combinedMigrations, new RegExp(`'${kind}'`));
   }
-  assert.match(unseenMigration, /CREATE UNIQUE INDEX IF NOT EXISTS system_alerts_agent_unseen_open_seat_unique/);
+  assert.match(unseenMigration, /CREATE UNIQUE INDEX IF NOT EXISTS system_alerts_agent_unseen_open_scope_unique/);
+  assert.match(unseenMigration, /CREATE FUNCTION swarm\.system_alert_scope_accessible\(/);
+  assert.match(unseenMigration, /CREATE TRIGGER system_alerts_scope_immutable/);
   assert.match(unseenMigration, /FOR UPDATE SKIP LOCKED/);
   assert.match(unseenMigration, /swarm-sync-agent-unseen-alerts/);
   assert.doesNotMatch(unseenMigration, /GRANT EXECUTE[^;]*sync_agent_unseen_alerts[^;]*TO\s+(authenticated|swarm_read|swarm_command)/);

@@ -1678,14 +1678,15 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   `;
   assert.equal(afterPlain.length, 0, "plain unmentioned note must NOT trigger agent_unseen");
 
-  // 2. Queued ask (ack_outcome = 'queued') AND unacked todo notice older than 10 min -> ONE deduplicated alert per seat!
+  // 2. Queued ask (ack_outcome = 'queued') AND unacked todo notice in the SAME public scope (#general)
+  // -> ONE deduplicated alert for that scope!
   const queuedAskId = randomUUID();
   const todoNoticeId = randomUUID();
   await sql`
     INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, about, to_agent_principal_id, until, created_at)
     VALUES
-      (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes'),
-      (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes')
+      (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes'),
+      (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, NULL, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes')
   `;
   const queuedLeaseId = randomUUID();
   await sql`
@@ -1726,7 +1727,7 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
     FROM swarm.system_alerts
     WHERE workspace_id = ${workspace}::uuid AND kind = 'agent_unseen' AND affected_principal_id = ${unseenSeat.principal}::uuid AND resolved_at IS NULL
   `;
-  assert.equal(openAlerts.length, 1, "must deduplicate to exactly ONE open agent_unseen alert per seat");
+  assert.equal(openAlerts.length, 1, "must deduplicate to exactly ONE open agent_unseen alert per seat+scope");
   assert.equal(Number(openAlerts[0]!.waiting_count), 2);
   assert.equal(openAlerts[0]!.routed_lead_principal_id, wsLead.principal);
   assert.equal(openAlerts[0]!.sender_kind, "agent");
@@ -1778,4 +1779,246 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   assert.ok(cleared!.resolved_at !== null, "agent_unseen alert must clear automatically once the seat views all unseen asks/notices");
   assert.equal(cleared!.resolved_by_kind, "agent");
   assert.equal(cleared!.resolved_by_id, unseenSeat.principal);
+});
+
+test("C1a audience isolation: DM, private channel, mixed audiences, and public-to-private rollover never leak across boundaries", { timeout: 90_000 }, async () => {
+  const unseenSeat = await agentOf(owner.id, "c1a-iso-seat");
+  const pubSender = await agentOf(owner.id, "c1a-pub-sender");
+  const privMember = await person("C1aPrivMember", "member");
+  const dmMember = await person("C1aDmMember", "member");
+  await setPresence(wsLead, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(pubSender, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+  await setPresence(unseenSeat, { watcherAgoSec: 5, lastCommandAgoSec: 5 });
+
+  // Private channel with privMember + unseenSeat ONLY (owner, wsAdmin, wsLead, pubSender, dmMember NOT members).
+  const privCh = await createChannel(privMember, "c1a-priv-iso", {
+    visibility: "private",
+    members: [{ kind: "agent", id: unseenSeat.principal }],
+  });
+
+  // 1:1 DM between dmMember and unseenSeat ONLY (owner, wsAdmin, wsLead, pubSender, privMember NOT members).
+  const dmOpen = await send(dmMember.jwt, {
+    kind: "conversation_open",
+    members: [{ kind: "agent", id: unseenSeat.principal }],
+    new_group: false,
+  });
+  assert.equal(dmOpen.status, 200, JSON.stringify(dmOpen.body));
+  const dmId = String((dmOpen.body.conversation as Row).conversation_id);
+
+  // Public #general ask (oldest, 25m ago), private channel ask (20m ago), and 1:1 DM ask (15m ago).
+  const pubAskPost = await send(pubSender.token, {
+    kind: "post_signal",
+    signal_kind: "ask",
+    body: "Public ask in general",
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
+    about: null,
+  });
+  assert.equal(pubAskPost.status, 200, JSON.stringify(pubAskPost.body));
+  const pubAskId = String((pubAskPost.body.signal as Row).id);
+
+  const privAskPost = await send(privMember.jwt, {
+    kind: "post_signal",
+    signal_kind: "ask",
+    conversation_id: privCh.id,
+    body: "Secret ask in private channel",
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
+    about: null,
+  });
+  assert.equal(privAskPost.status, 200, JSON.stringify(privAskPost.body));
+  const privAskId = String((privAskPost.body.signal as Row).id);
+
+  const dmAskPost = await send(dmMember.jwt, {
+    kind: "post_signal",
+    signal_kind: "ask",
+    conversation_id: dmId,
+    body: "Secret DM ask",
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
+    about: null,
+  });
+  assert.equal(dmAskPost.status, 200, JSON.stringify(dmAskPost.body));
+  const dmAskId = String((dmAskPost.body.signal as Row).id);
+
+  // Backdate deliveries for unseenSeat past the 10-minute threshold.
+  for (const [sigId, ageMin] of [[pubAskId, 25], [privAskId, 20], [dmAskId, 15]] as const) {
+    await sql`
+      INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
+      VALUES (${workspace}::uuid, ${sigId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - (${ageMin}::int * interval '1 minute'))
+      ON CONFLICT (signal_id, recipient_agent_principal_id)
+      DO UPDATE SET enqueued_at = EXCLUDED.enqueued_at, acked_at = NULL, ack_outcome = NULL
+    `;
+  }
+
+  // Subscribe to wsLead wake socket to confirm DM & private channel alerts NEVER wake wsLead.
+  const [syncMixed] = await sql<{ res: Row }[]>`
+    SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '0 seconds') AS res
+  `;
+  assert.ok(Number(syncMixed!.res.synced) >= 3);
+
+  const seatAlerts = await sql<Row[]>`
+    SELECT alert_id, channel_id, conversation_id, source_audience, scope_key, waiting_count,
+           routed_lead_principal_id, sender_kind, sender_id, escalated_at, resolved_at
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid
+      AND kind = 'agent_unseen'
+      AND affected_principal_id = ${unseenSeat.principal}::uuid
+      AND resolved_at IS NULL
+  `;
+  assert.equal(seatAlerts.length, 3, "must partition into 3 isolated alerts (general, private channel, DM)");
+  const pubAlert = seatAlerts.find((a) => a.channel_id === null && a.conversation_id !== dmId);
+  const privAlert = seatAlerts.find((a) => a.channel_id === privCh.id);
+  const dmAlert = seatAlerts.find((a) => a.conversation_id === dmId);
+  assert.ok(pubAlert && privAlert && dmAlert, "all 3 distinct scoped alerts must exist");
+  assert.equal(Number(pubAlert!.waiting_count), 1, "public alert must count ONLY public messages, never private or DM");
+  assert.equal(Number(privAlert!.waiting_count), 1);
+  assert.equal(Number(dmAlert!.waiting_count), 1);
+  assert.equal(pubAlert!.routed_lead_principal_id, wsLead.principal);
+  assert.equal(privAlert!.routed_lead_principal_id, null, "non-member wsLead must NOT be routed private channel alert");
+  assert.equal(dmAlert!.routed_lead_principal_id, null, "non-member wsLead must NOT be routed DM alert");
+
+  // Force escalation on all 3 to verify owner_alert_inbox + system_alerts NEVER leak DM or hidden private channel to owner!
+  await sql`
+    UPDATE swarm.system_alerts
+    SET escalated_at = GREATEST(opened_at, clock_timestamp())
+    WHERE alert_id IN (${String(pubAlert!.alert_id)}::uuid, ${String(privAlert!.alert_id)}::uuid, ${String(dmAlert!.alert_id)}::uuid)
+  `;
+
+  // Owner (not in privCh or dmId) sees ONLY pubAlert in BOTH swarm_read.system_alerts AND owner_alert_inbox!
+  const ownerAlerts = (await alertsViewAs(owner.id, workspace, undefined, "authenticated"))
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.deepEqual(ownerAlerts.map((a) => a.alert_id), [pubAlert!.alert_id]);
+  const ownerInbox = await ownerAlertInboxAs(owner.id, workspace, undefined, "authenticated");
+  const ownerInboxIds = ((ownerInbox?.alerts ?? []) as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(ownerInboxIds, [pubAlert!.alert_id], "owner_alert_inbox must NEVER disclose hidden DM or private-channel agent_unseen alerts");
+
+  // wsLead sees ONLY pubAlert; pubSender sees ONLY pubAlert; privMember sees ONLY privAlert; dmMember sees ONLY dmAlert!
+  const leadIds = ((await readResource(wsLead.token, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(leadIds, [pubAlert!.alert_id]);
+
+  const pubSenderIds = ((await readResource(pubSender.token, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(pubSenderIds, [pubAlert!.alert_id]);
+
+  const privMemberIds = ((await readResource(privMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(privMemberIds, [privAlert!.alert_id]);
+
+  const dmMemberIds = ((await readResource(dmMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen")
+    .map((a) => a.alert_id);
+  assert.deepEqual(dmMemberIds, [dmAlert!.alert_id]);
+
+  // Non-member owner cannot resolve the hidden DM or private channel alert (uniform 404).
+  assert.equal((await send(owner.jwt, { kind: "resolve_system_alert", alert_id: dmAlert!.alert_id, note: "probe" })).status, 404);
+  assert.equal((await send(owner.jwt, { kind: "resolve_system_alert", alert_id: privAlert!.alert_id, note: "probe" })).status, 404);
+
+  // Public-to-private rollover: unseenSeat observes ONLY the public ask while privCh and DM remain unseen!
+  await sql`
+    UPDATE swarm.signal_deliveries
+    SET delivered_at = clock_timestamp(), acked_at = clock_timestamp(), ack_outcome = 'observed',
+        attempt_count = 1, last_lease_id = ${randomUUID()}::uuid, last_leased_by = ${unseenSeat.principal}::uuid
+    WHERE workspace_id = ${workspace}::uuid AND signal_id = ${pubAskId}::uuid AND recipient_agent_principal_id = ${unseenSeat.principal}::uuid
+  `;
+  // Re-run sync to verify the retired public row is NOT reused or overwritten with private/DM sender.
+  await sql`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes')`;
+
+  const [pubAfterRollover] = await sql<Row[]>`
+    SELECT resolved_at, sender_id FROM swarm.system_alerts WHERE alert_id = ${String(pubAlert!.alert_id)}::uuid
+  `;
+  assert.ok(pubAfterRollover!.resolved_at !== null, "public alert must immediately retire when public messages are viewed");
+  assert.equal(pubAfterRollover!.sender_id, pubSender.principal, "retired public alert must never reveal next private sender");
+
+  const leadAfterRollover = ((await readResource(wsLead.token, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.equal(leadAfterRollover.length, 0, "wsLead must see ZERO alerts after public rollover while private/DM remain");
+
+  const ownerAfterRollover = (await alertsViewAs(owner.id, workspace, undefined, "authenticated"))
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.equal(ownerAfterRollover.length, 0, "non-member owner must see ZERO alerts after public rollover");
+
+  // Private and DM alerts remain open strictly for their own authorized senders until observed.
+  const dmStillOpen = ((await readResource(dmMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.deepEqual(dmStillOpen.map((a) => a.alert_id), [dmAlert!.alert_id]);
+
+  // Wake-target negative control: DM and private-channel alerts MUST NOT target non-member wsLead or non-member owner.
+  const dmWakeTargets = await sql<{ topic: string; event: string }[]>`
+    SELECT topic, event FROM swarm.system_alert_wake_targets_v2(
+      ${workspace}::uuid, NULL::uuid, ${dmId}::uuid, ${dmAskId}::uuid, 'conversation',
+      ${unseenSeat.principal}::uuid, ${wsLead.principal}::uuid, true, 'user', ${dmMember.id}::uuid
+    )
+  `;
+  assert.deepEqual(
+    dmWakeTargets.map((t) => t.topic),
+    [`cswarm-member:${workspace}:${dmMember.id}`],
+    "DM alert wake targets must include ONLY authorized DM sender, never non-member wsLead or non-member owner",
+  );
+
+  // Addressed ask inside a public channel: audience='addressed' must hide from non-addressed owner & wsLead!
+  const openCh = await createChannel(owner, "c1a-open-addr");
+  const addrAskPost = await send(dmMember.jwt, {
+    kind: "post_signal",
+    signal_kind: "ask",
+    conversation_id: openCh.id,
+    body: "Private addressed ask inside public channel",
+    to_user_id: null,
+    to_agent_principal_id: unseenSeat.principal,
+    in_reply_to: null,
+    about: null,
+  });
+  assert.equal(addrAskPost.status, 200, JSON.stringify(addrAskPost.body));
+  const addrAskId = String((addrAskPost.body.signal as Row).id);
+  await sql`
+    INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
+    VALUES (${workspace}::uuid, ${addrAskId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '15 minutes')
+    ON CONFLICT (signal_id, recipient_agent_principal_id)
+    DO UPDATE SET enqueued_at = EXCLUDED.enqueued_at, acked_at = NULL, ack_outcome = NULL
+  `;
+  await sql`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '0 seconds')`;
+
+  const [addrAlert] = await sql<Row[]>`
+    SELECT alert_id, source_audience, routed_lead_principal_id
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid
+      AND kind = 'agent_unseen'
+      AND affected_principal_id = ${unseenSeat.principal}::uuid
+      AND source_signal_id = ${addrAskId}::uuid
+      AND resolved_at IS NULL
+  `;
+  assert.ok(addrAlert, "addressed ask in public channel must create an addressed-scoped alert");
+  assert.equal(addrAlert!.source_audience, "addressed");
+  assert.equal(addrAlert!.routed_lead_principal_id, null, "non-addressed wsLead must not be routed an addressed ask alert");
+
+  const ownerSeesAddr = (await alertsViewAs(owner.id, workspace, undefined, "authenticated"))
+    .some((a) => a.alert_id === addrAlert!.alert_id);
+  assert.equal(ownerSeesAddr, false, "non-addressed owner must NOT see addressed ask alert in public channel");
+  const dmMemberSeesAddr = ((await readResource(dmMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .some((a) => a.alert_id === addrAlert!.alert_id);
+  assert.equal(dmMemberSeesAddr, true, "sender of addressed ask in public channel MUST see its alert");
+
+  // Observing privCh, DM, and addressed asks clears all remaining scoped alerts cleanly.
+  for (const sigId of [privAskId, dmAskId, addrAskId]) {
+    await sql`
+      UPDATE swarm.signal_deliveries
+      SET delivered_at = clock_timestamp(), acked_at = clock_timestamp(), ack_outcome = 'observed',
+          attempt_count = 1, last_lease_id = ${randomUUID()}::uuid, last_leased_by = ${unseenSeat.principal}::uuid
+      WHERE workspace_id = ${workspace}::uuid AND signal_id = ${sigId}::uuid AND recipient_agent_principal_id = ${unseenSeat.principal}::uuid
+    `;
+  }
+  const remaining = await sql<Row[]>`
+    SELECT alert_id FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid AND kind = 'agent_unseen' AND affected_principal_id = ${unseenSeat.principal}::uuid AND resolved_at IS NULL
+  `;
+  assert.equal(remaining.length, 0, "all remaining scoped alerts must clear once observed");
 });
