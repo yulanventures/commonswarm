@@ -269,9 +269,30 @@ export function buildWaitNextCommand(
   return parts.join(" ");
 }
 
-function compareCursor(a: ConversationCursorWire, b: ConversationCursorWire): number {
-  const ta = Math.trunc(Date.parse(a.created_at));
-  const tb = Math.trunc(Date.parse(b.created_at));
+function timestampNs(iso: string): bigint {
+  const match = WAIT_ISO_TIMESTAMP_RE.exec(iso);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    const fracNs = BigInt((match[7] ?? "").padEnd(9, "0"));
+    let wholeSec = Math.floor(Date.UTC(year, month - 1, day, hour, minute, second) / 1000);
+    if (match[8] !== "Z") {
+      const sign = match[9] === "+" ? 1 : -1;
+      const offsetSec = (Number(match[10]) * 60 + Number(match[11])) * 60;
+      wholeSec -= sign * offsetSec;
+    }
+    return BigInt(wholeSec) * 1_000_000_000n + fracNs;
+  }
+  return BigInt(Math.trunc(Date.parse(iso))) * 1_000_000n;
+}
+
+export function compareCursor(a: ConversationCursorWire, b: ConversationCursorWire): number {
+  const ta = timestampNs(a.created_at);
+  const tb = timestampNs(b.created_at);
   if (ta !== tb) return ta < tb ? -1 : 1;
   const ia = a.id.toLowerCase();
   const ib = b.id.toLowerCase();
@@ -1148,7 +1169,7 @@ export async function runWaitCli(params: RunWaitCliArgs): Promise<number> {
   }
 }
 
-function classifySetupError(error: unknown, json: boolean): WaitCommandError {
+export function classifySetupError(error: unknown, json: boolean): WaitCommandError {
   const jsonFlag = json ? " --json" : "";
   const message = sanitizeWaitText(error instanceof Error ? error.message : "Failed to initialize cswarm wait.");
   const name = error instanceof Error ? error.name : "";
@@ -1156,6 +1177,19 @@ function classifySetupError(error: unknown, json: boolean): WaitCommandError {
     ? (error as { code: string }).code
     : null;
 
+  if (
+    code === "profile_session_mismatch" ||
+    code === "profile_other_session" ||
+    message.includes("This profile belongs to another session")
+  ) {
+    return new WaitCommandError({
+      ok: false,
+      error: "profile_session_mismatch",
+      reason: "profile_session_mismatch",
+      message,
+      next: ["cswarm setup guide"],
+    });
+  }
   if (code === "human_session_missing" || message.includes("not logged in") || message.includes("not signed in")) {
     return new WaitCommandError({
       ok: false,

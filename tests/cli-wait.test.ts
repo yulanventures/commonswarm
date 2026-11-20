@@ -6,6 +6,8 @@ import {
   WAIT_SIGINT_EXIT_CODE,
   WAIT_SIGTERM_EXIT_CODE,
   WaitCommandError,
+  classifySetupError,
+  compareCursor,
   decodeConversationCursor,
   encodeConversationCursor,
   executeWait,
@@ -500,6 +502,64 @@ test("executeWait stops immediately on 401/403/404 access loss without leaking s
       },
     );
     assert.equal(calls, 1, `status ${status} must stop after 1 request`);
+  }
+});
+
+test("compareCursor preserves sub-millisecond Postgres timestamps and classifySetupError maps profile_session_mismatch", async () => {
+  const HIGH_UUID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const LOW_UUID = "00000000-0000-4000-8000-000000000001";
+  const msg1 = { created_at: "2026-11-20T10:00:00.123456Z", id: HIGH_UUID };
+  const msg2 = { created_at: "2026-11-20T10:00:00.123789Z", id: LOW_UUID };
+  // Same millisecond with reversed UUID order: msg2 must sort strictly AFTER msg1.
+  assert.equal(compareCursor(msg1, msg2), -1);
+  assert.equal(compareCursor(msg2, msg1), 1);
+  // Timezone offsets representing the same microsecond instant must compare equal on timestamp.
+  assert.equal(
+    compareCursor(
+      { created_at: "2026-11-20T12:00:00.123456+02:00", id: LOW_UUID },
+      { created_at: "2026-11-20T10:00:00.123456Z", id: LOW_UUID },
+    ),
+    0,
+  );
+
+  // Full executeWait witness: anchoring at msg1 (.123456Z, ffff...) must NOT drop msg2 (.123789Z, 0000...).
+  const afterMsg1 = encodeConversationCursor(msg1);
+  const res = await executeWait({
+    target: TARGET,
+    workspaceId: WS,
+    credentialKind: "agent",
+    getBearer: async () => SECRET_BEARER,
+    options: parseWaitOptions({ conversation: GEN_CONV, after: afterMsg1, timeout: "30s", json: true }),
+    fetcher: async () =>
+      jsonResponse(200, {
+        conversation: summary({ conversation_id: GEN_CONV, kind: "general" }),
+        messages: [
+          { id: HIGH_UUID, created_at: msg1.created_at, body: "first in ms" },
+          { id: LOW_UUID, created_at: msg2.created_at, body: "second in same ms" },
+        ],
+        has_more: false,
+        next_after: msg2,
+      }),
+    now: () => 6_000_000,
+    sleep: async () => {},
+  });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.event.id, LOW_UUID);
+    assert.equal(res.cursor, encodeConversationCursor(msg2));
+  }
+
+  // classifySetupError maps profile_session_mismatch / profile_other_session / canonical message to V1 taxonomy.
+  for (const input of [
+    Object.assign(new Error("profile mismatch"), { code: "profile_session_mismatch" }),
+    Object.assign(new Error("other session"), { code: "profile_other_session" }),
+    new Error("This profile belongs to another session. Stop and tell the operator."),
+  ]) {
+    const mapped = classifySetupError(input, true);
+    assert.equal(mapped.payload.ok, false);
+    assert.equal(mapped.payload.error, "profile_session_mismatch");
+    assert.equal(mapped.payload.reason, "profile_session_mismatch");
+    assert.deepEqual(mapped.payload.next, ["cswarm setup guide"]);
   }
 });
 
