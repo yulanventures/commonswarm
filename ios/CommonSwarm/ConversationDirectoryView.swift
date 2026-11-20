@@ -17,12 +17,16 @@ struct DirectoryView: View {
     @SwiftUI.State private var selected: ThreadRoute?
 
 
+    private enum ActionScreen: Equatable { case directory, allChannels, conversation(UUID) }
+
     private struct ActionTarget: Identifiable {
         let id: UUID
         let row: ConversationSummary
         let action: ConversationAction
+        let screen: ActionScreen
     }
-    @SwiftUI.State private var leaveTarget: ConversationSummary?
+    @SwiftUI.State private var leaveTarget: ActionTarget?
+    @SwiftUI.State private var errorScreen: ActionScreen?
     @SwiftUI.State private var editing = Set<UUID>()
     @SwiftUI.State private var retryAction: ActionTarget?
     @SwiftUI.State private var actionError: String?
@@ -33,19 +37,22 @@ struct DirectoryView: View {
             case .loading: ProgressView()
             case .failed: RetryView(text: "Couldn’t load conversations", action: refresh)
             case .legacy: LegacyDirectoryView(api: api, workspace: workspace)
-            case .ready(let rows): list(rows)
+            case .ready(let rows): presentingActions(list(rows), on: .directory)
             }
         }.navigationTitle(workspace.name).task { await refresh() }
-        .confirmationDialog(leaveTarget.map { "Leave " + $0.item(viewer: api.session.userID, labels: labels).name + "?" } ?? "Leave conversation?",
-                            isPresented: Binding(get: { leaveTarget != nil }, set: { if !$0 { leaveTarget = nil } }),
-                            titleVisibility: .visible, presenting: leaveTarget) { row in
-            Button("Leave", role: .destructive) { start(.leave, row) }
+    }
+
+    private func presentingActions(_ content: some View, on screen: ActionScreen) -> some View {
+        content.alert(leaveTarget.map { "Leave " + $0.row.item(viewer: api.session.userID, labels: labels).name + "?" } ?? "Leave conversation?",
+                      isPresented: Binding(get: { leaveTarget?.screen == screen }, set: { if !$0 && leaveTarget?.screen == screen { leaveTarget = nil } }),
+                      presenting: leaveTarget) { target in
+            Button("Leave", role: .destructive) { Task { await perform(target) } }
             Button("Cancel", role: .cancel) {}
-        } message: { row in
-            if row.kind == .group { Text("You’ll lose access to this group’s history. A current member must start a new group to include you again.") }
-            else if row.kind == .privateChannel { Text("You’ll need a new invitation to return.") }
+        } message: { target in
+            if target.row.kind == .group { Text("You’ll lose access to this group’s history. A current member must start a new group to include you again.") }
+            else if target.row.kind == .privateChannel { Text("You’ll need a new invitation to return.") }
         }
-        .alert(actionError ?? "", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+        .alert(actionError ?? "", isPresented: Binding(get: { actionError != nil && errorScreen == screen }, set: { if !$0 && errorScreen == screen { actionError = nil } })) {
             if let target = retryAction { Button("Retry " + target.row.item(viewer: api.session.userID, labels: labels).name) { Task { await perform(target) } } }
             Button("Cancel", role: .cancel) { retryAction = nil }
         }
@@ -94,15 +101,15 @@ struct DirectoryView: View {
              WorkspaceFilesView(api: api, workspace: workspace)
          }
          .navigationDestination(for: ChannelDirectoryRoute.self) { _ in
-             List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
+             presentingActions(List(rows.filter { !$0.kind.direct && $0.archived_at == nil && ($0.joined || $0.kind == .publicChannel) }) { row in
                  VStack(alignment: .leading) {
-                     link(row)
+                     link(row, on: .allChannels)
                      if let description = row.description, !description.isEmpty {
                          Text(description).font(.subheadline).foregroundStyle(.secondary)
                      }
                      if !row.joined { joinButton(row) }
                  }
-             }.navigationTitle("All channels")
+             }.navigationTitle("All channels"), on: .allChannels)
          }
          .toolbar {
              Button { composing = true } label: { Label("New message", systemImage: "square.and.pencil") }
@@ -117,8 +124,8 @@ struct DirectoryView: View {
                  composing = false
              }
          }
-         .navigationDestination(for: ThreadRoute.self) { route in detail(route, rows: rows) }
-         .navigationDestination(item: $selected) { route in detail(route, rows: rows) }
+         .navigationDestination(for: ThreadRoute.self) { route in presentingActions(detail(route, rows: rows), on: .conversation(route.id)) }
+         .navigationDestination(item: $selected) { route in presentingActions(detail(route, rows: rows), on: .conversation(route.id)) }
     }
 
     @ViewBuilder private func detail(_ route: ThreadRoute, rows: [ConversationSummary]) -> some View {
@@ -137,7 +144,7 @@ struct DirectoryView: View {
                              }, waitingChannelID: row.channel_id).id(row.id)
                      .toolbar {
                          if row.joined {
-                             ConversationOptionsButton(draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { actions(row) }
+                             ConversationOptionsButton(draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { actions(row, on: .conversation(row.id)) }
                                  .disabled(editing.contains(row.id))
                          }
                          MembersButton(api: api, workspace: workspace.id, row: row,
@@ -169,7 +176,7 @@ struct DirectoryView: View {
         } catch { if !Task.isCancelled { joinErrors.insert(row.id) } }
     }
 
-    private func link(_ row: ConversationSummary) -> some View {
+    private func link(_ row: ConversationSummary, on screen: ActionScreen = .directory) -> some View {
         let item = row.item(viewer: api.session.userID, labels: labels)
         let mentions = row.notify_level == "muted" ? 0 : row.mention_count ?? 0
         return NavigationLink(value: ThreadRoute(id: row.id)) {
@@ -192,29 +199,29 @@ struct DirectoryView: View {
                     Image(systemName: "bell.slash").accessibilityLabel("Muted")
                 }
             }.accessibilityElement(children: .combine)
-        }.contextMenu { if row.joined { actions(row) } }
+        }.contextMenu { if row.joined { actions(row, on: screen) } }
     }
 
-    @ViewBuilder private func actions(_ row: ConversationSummary) -> some View {
+    @ViewBuilder private func actions(_ row: ConversationSummary, on screen: ActionScreen) -> some View {
         if let through = row.last_message_id, (row.unread_count ?? 0) > 0 || (row.mention_count ?? 0) > 0 {
-            Button("Mark as read") { start(.markRead(through: through), row) }
+            Button("Mark as read") { start(.markRead(through: through), row, on: screen) }
         }
-        Button(row.starred == true ? "Unstar" : "Star") { start(.star(row.starred != true), row) }
+        Button(row.starred == true ? "Unstar" : "Star") { start(.star(row.starred != true), row, on: screen) }
         let muted = row.notify_level == "muted"
-        Button(muted ? "Unmute" : "Mute") { start(.notify(muted ? "everything" : "muted"), row) }
+        Button(muted ? "Unmute" : "Mute") { start(.notify(muted ? "everything" : "muted"), row, on: screen) }
         if !muted {
             let mentionsOnly = row.notify_level == "mentions"
             Button(mentionsOnly ? "Notify for all messages" : "Notify for mentions only") {
-                start(.notify(mentionsOnly ? "everything" : "mentions"), row)
+                start(.notify(mentionsOnly ? "everything" : "mentions"), row, on: screen)
             }
         }
         if row.kind.canLeave {
-            Button("Leave…", role: .destructive) { leaveTarget = row }
+            Button("Leave…", role: .destructive) { leaveTarget = .init(id: UUID(), row: row, action: .leave, screen: screen) }
         }
     }
 
-    private func start(_ action: ConversationAction, _ row: ConversationSummary) {
-        Task { await perform(.init(id: UUID(), row: row, action: action)) }
+    private func start(_ action: ConversationAction, _ row: ConversationSummary, on screen: ActionScreen) {
+        Task { await perform(.init(id: UUID(), row: row, action: action, screen: screen)) }
     }
 
     private func perform(_ target: ActionTarget) async {
@@ -244,6 +251,7 @@ struct DirectoryView: View {
             retryAction = nil
         } catch {
             guard !Task.isCancelled else { return }
+            errorScreen = target.screen
             retryAction = target
             if let refusal = error as? ConversationRefusal, refusal.error == "channel_last_manager" {
                 actionError = "Add another channel manager before leaving."
