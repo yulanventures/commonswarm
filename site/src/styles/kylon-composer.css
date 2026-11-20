@@ -350,6 +350,30 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-
  * wrapping are changed; no new visibility rules affect runtime [hidden]. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-feedback {
   flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-status[data-state="error"],
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-count[data-state="firm"] {
+  color: var(--k-shell-danger);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-retry {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 6px 12px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  border: 1px solid var(--k-shell-control);
+  border-radius: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-retry:hover:not(:disabled) {
+  background: var(--k-shell-hover);
+}
+@media (width <= 40rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer [data-composer-move-to-conversation] {
+    white-space: normal;
+    text-align: end;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
   .dashboard__composer-to-note, .dashboard__composer-status,

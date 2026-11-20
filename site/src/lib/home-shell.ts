@@ -424,7 +424,7 @@ function conversationMembersButton(
   const button = node(doc, "button", "hm-channel-settings hm-channel-members");
   button.type = "button";
   button.dataset.conversationMembersOpen = "";
-  const aria = info.count > 0 ? `${info.label} (${info.count})` : info.label;
+  const aria = info.count > 0 ? `${info.label}, ${info.count}` : info.label;
   button.setAttribute("aria-label", aria);
   button.title = aria;
   button.setAttribute("aria-haspopup", "dialog");
