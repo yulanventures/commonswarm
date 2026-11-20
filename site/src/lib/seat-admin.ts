@@ -8,7 +8,7 @@
  */
 import { parseWorkspaceAdminGrants, workspaceAdminGrantsNotDeployed, workspaceAdminGrantsRefused, WorkspaceAdminGrantsRefused, type PeopleAdminGrant } from "./people/admins";
 import type { Session } from "@supabase/supabase-js";
-import { deployment, postCommand } from "./commonswarm";
+import { deployment, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from "./commonswarm";
 import { buildSeatAdminEndConfirmation } from "./seat-admin-view";
 import type {
   SeatAdminAccess,
@@ -398,8 +398,13 @@ export function buildGrantSeatAdminCommand(draft: SeatAdminGrantDraft): Record<s
 
 export async function readSeatAdminStatus(
   session: Session,
+  pinned?: PinnedAccountContext | null,
 ): Promise<{ ok: true; status: SeatAdminStatusResponse } | { ok: false; code: string; message: string; httpStatus?: number }> {
-  const d = deployment();
+  const bound = isMultiAccountEnabled() ? (pinned ?? pinAccountContext({ userId: session.user.id })) : null;
+  if (isMultiAccountEnabled() && (!bound || !bound.isCurrent())) {
+    return { ok: false, code: "account_changed", message: "Active account changed." };
+  }
+  const d = bound ? bound.runtime.deployment : deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
     const response = await fetch(`${d.url}/functions/v1/read`, {
@@ -411,6 +416,9 @@ export async function readSeatAdminStatus(
       },
       body: JSON.stringify({ resource: "seat_admin_status" }),
     });
+    if (bound && !bound.isCurrent()) {
+      return { ok: false, code: "account_changed", message: "Active account changed." };
+    }
     const raw = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
       const code = isRecord(raw) && typeof raw.error === "string" ? raw.error : `http_${response.status}`;
@@ -432,8 +440,18 @@ export async function readSeatAdminStatus(
 
 /** Every agent admin grant on record for a workspace, for one of its owners. Null: the server says the viewer is not
  * a live owner there. Throws when the read fails or its answer is not what the read promises. */
-export async function readWorkspaceAdminGrants(session: Session, workspaceId: string): Promise<PeopleAdminGrant[] | null> {
-  const d = deployment();
+export async function readWorkspaceAdminGrants(
+  session: Session,
+  workspaceId: string,
+  pinned?: PinnedAccountContext | null,
+): Promise<PeopleAdminGrant[] | null> {
+  const bound = isMultiAccountEnabled()
+    ? (pinned ?? pinAccountContext({ userId: session.user.id, workspaceId }))
+    : null;
+  if (isMultiAccountEnabled() && (!bound || !bound.isCurrent(workspaceId))) {
+    throw new WorkspaceAdminGrantsRefused("Admin access could not load.");
+  }
+  const d = bound ? bound.runtime.deployment : deployment();
   if (!d) throw new Error("No CommonSwarm deployment is configured.");
   const response = await fetch(`${d.url}/rest/v1/rpc/workspace_seat_admin_grants`, {
     method: "POST",
@@ -447,6 +465,9 @@ export async function readWorkspaceAdminGrants(session: Session, workspaceId: st
     },
     body: JSON.stringify({ p_workspace_id: workspaceId }),
   });
+  if (bound && !bound.isCurrent(workspaceId)) {
+    throw new WorkspaceAdminGrantsRefused("Admin access could not load.");
+  }
   if (!response.ok) {
     const raw = (await response.json().catch(() => null)) as unknown;
     // Before the read's migration is live, the page falls back to the viewer's own grants, as for a non-owner.
@@ -460,8 +481,13 @@ export async function readWorkspaceAdminGrants(session: Session, workspaceId: st
 
 export async function readMySeatAdminGrants(
   session: Session,
+  pinned?: PinnedAccountContext | null,
 ): Promise<{ ok: true; grants: SeatAdminGrantRow[] } | { ok: false; code: string; message: string; httpStatus?: number }> {
-  const d = deployment();
+  const bound = isMultiAccountEnabled() ? (pinned ?? pinAccountContext({ userId: session.user.id })) : null;
+  if (isMultiAccountEnabled() && (!bound || !bound.isCurrent())) {
+    return { ok: false, code: "account_changed", message: "Active account changed." };
+  }
+  const d = bound ? bound.runtime.deployment : deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
     const response = await fetch(`${d.url}/rest/v1/rpc/my_seat_admin_grants`, {
@@ -476,6 +502,9 @@ export async function readMySeatAdminGrants(
       },
       body: "{}",
     });
+    if (bound && !bound.isCurrent()) {
+      return { ok: false, code: "account_changed", message: "Active account changed." };
+    }
     const raw = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
       const code = isRecord(raw) && typeof raw.error === "string" ? raw.error : `http_${response.status}`;
@@ -528,12 +557,17 @@ export async function grantSeatAdmin(
   session: Session,
   commandId: string,
   draft: SeatAdminGrantDraft,
+  pinned?: PinnedAccountContext | null,
 ): Promise<SeatAdminMutationOutcome> {
+  const bound = isMultiAccountEnabled() ? (pinned ?? pinAccountContext({ userId: session.user.id })) : null;
+  if (isMultiAccountEnabled() && (!bound || !bound.isCurrent())) {
+    return { kind: "refused", commandId, code: "account_changed", message: "Active account changed. Refresh before trying again." };
+  }
   try {
     const res = await postCommand(session, commandId, buildGrantSeatAdminCommand(draft), {
       stream: { kind: "account" },
       resource: SEAT_ADMIN_RESOURCE,
-    });
+    }, undefined, bound);
     const body = res.body;
     if (res.status === 401 && body.error === "human_confirmation_required") {
       return {
@@ -586,13 +620,20 @@ export async function endSeatAdmin(
   session: Session,
   commandId: string,
   grantId: string,
+  pinned?: PinnedAccountContext | null,
 ): Promise<SeatAdminEndOutcome> {
+  const bound = isMultiAccountEnabled() ? (pinned ?? pinAccountContext({ userId: session.user.id })) : null;
+  if (isMultiAccountEnabled() && (!bound || !bound.isCurrent())) {
+    return { kind: "refused", commandId, code: "account_changed", message: "Active account changed. Refresh before trying again." };
+  }
   try {
     const res = await postCommand(
       session,
       commandId,
       { kind: "end_seat_admin", grant_id: grantId },
       { stream: { kind: "account" }, resource: SEAT_ADMIN_RESOURCE },
+      undefined,
+      bound,
     );
     const body = res.body;
     if (res.status === 200 && body.status === "accepted" && isRecord(body.seat_admin_grant)) {

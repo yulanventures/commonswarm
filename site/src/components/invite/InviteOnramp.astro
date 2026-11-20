@@ -78,6 +78,16 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <button class="invite-onramp__button" type="submit" data-password-signin>Sign in</button>
       <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-email-link>Email me a sign-in link</button>
     </form>
+    <form class="invite-onramp__auth invite-onramp__otp" method="post" data-invite-otp-form hidden>
+      <p class="invite-onramp__otp-lead">
+        Enter the sign-in code sent to <strong data-invite-otp-email></strong>.
+      </p>
+      <label for="invite-otp">Email sign-in code</label>
+      <input id="invite-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" required />
+      <button class="invite-onramp__button" type="submit" data-invite-otp-verify>Verify code</button>
+      <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-invite-otp-resend>Send new code</button>
+      <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-invite-otp-change>Change email</button>
+    </form>
     <p class="invite-onramp__status" data-auth-status role="status" aria-live="polite"></p>
     <p class="invite-onramp__error" data-auth-error role="alert" hidden></p>
   </section>
@@ -97,6 +107,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <span class="invite-onramp__face invite-onramp__face--you" data-viewer-initial></span>
     </div>
     <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>a workspace</span>.</h1>
+    <p class="invite-onramp__identity-notice" data-review-identity-notice role="status" aria-live="polite" hidden></p>
     <p class="invite-onramp__intro">A shared workspace for the people in it and the assistants they each already use.</p>
 
     <fieldset class="invite-onramp__choices invite-onramp__choices--assistant">
@@ -236,13 +247,20 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   import {
     EmailAddressRejected,
     EmailRateLimited,
+    bootstrapMultiAccountAuth,
     currentSession,
+    isMultiAccountEnabled,
+    onAccountForcedTeardown,
+    onAuthChange,
+    pinAccountContext,
     client,
     deployment,
     myWorkspaces,
     signInWithEmail,
     signInWithPassword,
     signInWithProvider,
+    verifyEmailOtpSignIn,
+    accountManager,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
   import {
@@ -282,6 +300,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     let authGeneration = 0;
     let authUser: string | null = null;
     let authEmail: string | null = null;
+    let identityChangedForReview = false;
     let preview: HumanInvitePreview | null = null;
     let prepared: ReturnType<ReturnType<typeof browserHumanInvitations>['prepareAcceptance']> | null = null;
 
@@ -333,8 +352,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
     };
 
-    const unusable = (message?: string): void => {
-      if (resumeId) forgetInvite(resumeId, localStorage);
+    const unusable = (message?: string, keepInvite = false): void => {
+      if (resumeId && !keepInvite) forgetInvite(resumeId, localStorage);
       const node = one<HTMLElement>("[data-unusable-message]");
       if (node && message) node.textContent = message;
       show("unusable");
@@ -607,8 +626,9 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     const accept = async (confirmed = false): Promise<void> => {
       if (!payload) return unusable();
       const sender = payload.inviter_display_name;
+      const pinned = isMultiAccountEnabled() ? pinAccountContext() : null;
       const session = await currentSession();
-      if (!session) return show("auth");
+      if (!session || (pinned && !pinned.isCurrent())) return show("auth");
       authUser = session.user.id;
       authEmail = session.user.email ?? null;
       const generation = authGeneration;
@@ -621,17 +641,17 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         const existing = (await myWorkspaces()).find(
           (workspace) => workspace.id === payload?.workspace_id,
         );
-        if (generation !== authGeneration) return;
+        if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
         if (existing) {
           forgetInvite(resumeId, localStorage);
           continueToAgent(existing.id, existing.name);
           return;
         }
-        const invitations = browserHumanInvitations();
+        const invitations = browserHumanInvitations({ pinned });
         if (!confirmed) {
           prepared = null;
           const value = await invitations.preview({source:'link',token:payload.invitation_token});
-          if (generation !== authGeneration) return;
+          if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
           if (value.status === 'joined') return continueToAgent(value.workspace_id, value.workspace_name);
           preview = value;
           const you = one<HTMLElement>("[data-viewer-initial]");
@@ -645,6 +665,17 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           one<HTMLElement>('[data-review-audience]')!.textContent = value.audience.map(m => `${m.display_name} (${m.role})`).join(', ');
           showDisclosure(one<HTMLElement>('[data-review-disclosure]')!, value.disclosure);
           one<HTMLElement>('[data-review-expiry]')!.textContent = 'This invitation expires ' + new Date(value.expires_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) + '.';
+          const identityNotice = one<HTMLElement>("[data-review-identity-notice]");
+          if (identityNotice) {
+            if (identityChangedForReview) {
+              identityNotice.textContent = `You’re now joining as ${authEmail || "this account"}. Review this invitation again.`;
+              identityNotice.hidden = false;
+              identityChangedForReview = false;
+            } else {
+              identityNotice.textContent = "";
+              identityNotice.hidden = true;
+            }
+          }
           resetReview();
           return show('review');
         }
@@ -653,7 +684,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         lockReview(true);
         prepared ??= invitations.prepareAcceptance({source:'link',token:payload.invitation_token},preview,role);
         const accepted = await prepared.send();
-        if (generation !== authGeneration) return;
+        if (generation !== authGeneration || (pinned && !pinned.isCurrent())) return;
         const workspaceId = String(accepted.workspace_id);
         const workspaceName = String(accepted.workspace_name);
         forgetInvite(resumeId, localStorage);
@@ -686,6 +717,16 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       const target = deployment();
       if (!target) {
         return unusable("This saved page is not connected to a CommonSwarm deployment.");
+      }
+      if (isMultiAccountEnabled()) {
+        const emailLinkBtn = one<HTMLButtonElement>("[data-email-link]");
+        if (emailLinkBtn) emailLinkBtn.textContent = "Email me a sign-in code";
+        // C1: Scrub callback params & run direct PKCE bootstrap BEFORE reading resume/app state!
+        const bootRes = await bootstrapMultiAccountAuth(window.location, window.history);
+        if (bootRes?.callback.kind === "refused") {
+          const errEl = one<HTMLElement>("[data-auth-error]");
+          if (errEl) { errEl.textContent = bootRes.callback.message; errEl.hidden = false; }
+        }
       }
       const url = new URL(window.location.href);
       const encoded = url.hash.startsWith("#invite=")
@@ -732,20 +773,67 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       await accept();
     };
 
-    /* The email link reads only the address, so an empty password never blocks it. */
-    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async () => {
-      const input = one<HTMLInputElement>("#invite-email");
+    let inviteOtpAttemptId: string | null = null;
+    let inviteOtpEmail = "";
+    let inviteOtpIntentGen = 0;
+    const showInviteAuthStep = (step: "entry" | "code"): void => {
+      const emailForm = one<HTMLFormElement>("[data-email-form]");
+      const otpForm = one<HTMLFormElement>("[data-invite-otp-form]");
+      if (emailForm) emailForm.hidden = step !== "entry";
+      if (otpForm) otpForm.hidden = step !== "code";
+    };
+    const resetInviteOtp = (cancelAttempt = false): void => {
+      inviteOtpIntentGen += 1;
+      if (cancelAttempt && inviteOtpAttemptId) {
+        accountManager()?.cancelAttempt(inviteOtpAttemptId);
+      }
+      inviteOtpAttemptId = null;
+      inviteOtpEmail = "";
+      const otpInput = one<HTMLInputElement>("#invite-otp");
+      const otpEmailEl = one<HTMLElement>("[data-invite-otp-email]");
+      const verifyBtn = one<HTMLButtonElement>("[data-invite-otp-verify]");
+      if (otpInput) otpInput.value = "";
+      if (otpEmailEl) otpEmailEl.textContent = "";
+      if (verifyBtn) verifyBtn.disabled = false;
+      showInviteAuthStep("entry");
+    };
+
+    const sendInviteEmailCodeOrLink = async (requestedEmail: string, trigger: HTMLButtonElement | null): Promise<void> => {
       const error = one<HTMLElement>("[data-auth-error]");
       const status = one<HTMLElement>("[data-auth-status]");
-      if (!input || !resumeId) return;
-      if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+      const otpEmailEl = one<HTMLElement>("[data-invite-otp-email]");
+      const otpInput = one<HTMLInputElement>("#invite-otp");
+      const verifyBtn = one<HTMLButtonElement>("[data-invite-otp-verify]");
+      if (!resumeId) return;
+      const myGen = ++inviteOtpIntentGen;
+      const myAuthGen = authGeneration;
       if (error) error.hidden = true;
+      if (trigger) trigger.disabled = true;
       try {
         const redirect = new URL("/invite", window.location.origin);
         redirect.searchParams.set("resume", resumeId);
-        await signInWithEmail(input.value.trim(), redirect.href);
-        if (status) status.textContent = `Check ${input.value.trim()} for your sign-in link.`;
+        const started = await signInWithEmail(requestedEmail, redirect.href);
+        if (myGen !== inviteOtpIntentGen || myAuthGen !== authGeneration) {
+          if (started && typeof started === "object" && started.attemptId) {
+            accountManager()?.cancelAttempt(started.attemptId);
+          }
+          return;
+        }
+        if (isMultiAccountEnabled() && started && typeof started === "object" && started.attemptId) {
+          inviteOtpAttemptId = started.attemptId;
+          inviteOtpEmail = requestedEmail;
+          if (otpEmailEl) otpEmailEl.textContent = requestedEmail;
+          if (verifyBtn) verifyBtn.disabled = false;
+          if (status) status.textContent = "";
+          showInviteAuthStep("code");
+          if (otpInput) { otpInput.value = ""; otpInput.focus(); }
+        } else {
+          resetInviteOtp(false);
+          if (status) status.textContent = `Check ${requestedEmail} for your sign-in link.`;
+        }
       } catch (caught) {
+        if (myGen !== inviteOtpIntentGen || myAuthGen !== authGeneration) return;
+        if (!inviteOtpEmail) resetInviteOtp(false);
         const choices = listSentence(renderedProviderNames());
         if (error) {
           error.textContent = caught instanceof EmailRateLimited
@@ -759,6 +847,94 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
             : "CommonSwarm could not send the sign-in link.";
           error.hidden = false;
         }
+      } finally {
+        if (trigger) trigger.disabled = false;
+      }
+    };
+
+    /* The email link reads only the address, so an empty password never blocks it. */
+    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async (event) => {
+      const input = one<HTMLInputElement>("#invite-email");
+      if (!input || !resumeId) return;
+      const requestedEmail = input.value.trim();
+      if (!requestedEmail || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+      await sendInviteEmailCodeOrLink(requestedEmail, event.currentTarget as HTMLButtonElement);
+    });
+
+    one<HTMLButtonElement>("[data-invite-otp-resend]")?.addEventListener("click", async (event) => {
+      const requestedEmail = inviteOtpEmail || one<HTMLInputElement>("#invite-email")?.value.trim() || "";
+      if (!requestedEmail) {
+        resetInviteOtp(true);
+        one<HTMLInputElement>("#invite-email")?.focus();
+        return;
+      }
+      if (inviteOtpAttemptId) {
+        accountManager()?.cancelAttempt(inviteOtpAttemptId);
+        inviteOtpAttemptId = null;
+      }
+      await sendInviteEmailCodeOrLink(requestedEmail, event.currentTarget as HTMLButtonElement);
+    });
+
+    one<HTMLButtonElement>("[data-invite-otp-change]")?.addEventListener("click", () => {
+      resetInviteOtp(true);
+      const error = one<HTMLElement>("[data-auth-error]");
+      if (error) error.hidden = true;
+      one<HTMLInputElement>("#invite-email")?.focus();
+    });
+
+    one<HTMLFormElement>("[data-invite-otp-form]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const otpInput = one<HTMLInputElement>("#invite-otp");
+      const verifyBtn = one<HTMLButtonElement>("[data-invite-otp-verify]");
+      const resendBtn = one<HTMLButtonElement>("[data-invite-otp-resend]");
+      const error = one<HTMLElement>("[data-auth-error]");
+      const status = one<HTMLElement>("[data-auth-status]");
+      if (!otpInput || !resumeId) return;
+      if (!inviteOtpAttemptId) {
+        if (error) { error.textContent = "That sign-in code is no longer active. Send a new code."; error.hidden = false; }
+        resendBtn?.focus();
+        return;
+      }
+      const code = otpInput.value.trim();
+      if (!code) {
+        if (error) { error.textContent = "Enter the emailed sign-in code."; error.hidden = false; }
+        otpInput.focus();
+        return;
+      }
+      if (error) error.hidden = true;
+      if (verifyBtn) verifyBtn.disabled = true;
+      const myGen = inviteOtpIntentGen;
+      const myAuthGen = authGeneration;
+      const attemptId = inviteOtpAttemptId;
+      const isCurrentVerify = (): boolean =>
+        myGen === inviteOtpIntentGen && myAuthGen === authGeneration && inviteOtpAttemptId === attemptId;
+      try {
+        const outcome = await verifyEmailOtpSignIn(attemptId, code);
+        if (outcome.kind === "promoted" || outcome.kind === "kept-existing") {
+          if (isCurrentVerify()) resetInviteOtp(false);
+          if (status) status.textContent = "";
+          await boot();
+        } else {
+          if (!isCurrentVerify()) return;
+          inviteOtpAttemptId = null;
+          if (verifyBtn) verifyBtn.disabled = true;
+          if (error) {
+            error.textContent = outcome.message || "That sign-in code did not work or expired. Send a new code.";
+            error.hidden = false;
+          }
+          resendBtn?.focus();
+        }
+      } catch (caught) {
+        if (!isCurrentVerify()) return;
+        inviteOtpAttemptId = null;
+        if (verifyBtn) verifyBtn.disabled = true;
+        if (error) {
+          error.textContent = caught instanceof Error ? caught.message : "Sign-in could not be completed.";
+          error.hidden = false;
+        }
+        resendBtn?.focus();
+      } finally {
+        if (verifyBtn && isCurrentVerify()) verifyBtn.disabled = false;
       }
     });
 
@@ -885,14 +1061,64 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       show("complete");
     });
 
-    client()?.auth.onAuthStateChange((event, session) => {
+    onAuthChange((event, session) => {
       const user = session?.user.id ?? null;
-      if (event === 'SIGNED_OUT' || authUser !== null && user !== authUser) {
-        ++authGeneration; preview = null; prepared = null; payload = null;
+      if (event === 'SIGNED_OUT' || (authUser !== null && user !== authUser)) {
+        ++authGeneration;
+        preview = null;
+        prepared = null;
+        const hadSignedInUser = authUser !== null;
+        authUser = user;
+        authEmail = session?.user.email ?? null;
+        // Rev 4 §3 & C3: Retire old preview, consent, and prepared command immediately WITHOUT forgetting
+        // the stored invitation while a verified successor or fresh sign-in can still review & confirm it.
+        if (isMultiAccountEnabled() && payload && resumeId) {
+          if (hadSignedInUser) identityChangedForReview = true;
+          resetReview();
+          if (session) {
+            void accept(false);
+          } else if (accountManager()?.activeAccount()) {
+            show("loading");
+          } else {
+            show("auth");
+          }
+          return;
+        }
+        payload = null;
         unusable('Sign in as the invited person and reopen the invitation.');
+        return;
+      }
+      if (isMultiAccountEnabled() && payload && resumeId && session && authUser === null) {
+        ++authGeneration;
+        authUser = user;
+        authEmail = session.user.email ?? null;
+        resetReview();
+        void accept(false);
+        return;
       }
       authUser = user;
       authEmail = session?.user.email ?? null;
+    });
+    onAccountForcedTeardown(() => {
+      ++authGeneration;
+      resetInviteOtp(true);
+      if (authUser !== null) identityChangedForReview = true;
+      preview = null;
+      prepared = null;
+      authUser = null;
+      authEmail = null;
+      resetReview();
+      if (!payload || !resumeId) {
+        if (host.dataset.state !== "unusable") {
+          unusable("Sign in as the invited person and reopen the invitation.", true);
+        }
+        return;
+      }
+      if (accountManager()?.activeAccount()) {
+        show("loading");
+      } else {
+        show("auth");
+      }
     });
     void boot();
   }
@@ -988,8 +1214,27 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__panel[hidden],
-  .invite-onramp__connect[hidden] {
+  .invite-onramp__connect[hidden],
+  .invite-onramp__auth[hidden],
+  .invite-onramp__identity-notice[hidden] {
     display: none;
+  }
+
+  .invite-onramp__identity-notice {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--home-rail-raised);
+    color: var(--home-rail-strong);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .invite-onramp__otp-lead {
+    margin: 0;
+    color: var(--home-rail-strong);
+    font-size: 15px;
+    line-height: 1.4;
   }
 
   /* The card is the page: no surface of its own. */

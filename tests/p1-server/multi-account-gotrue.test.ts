@@ -20,6 +20,7 @@ import {
   AccountManager,
   attemptStorageKey,
   deploymentOriginHash,
+  scrubCallbackUrlImmediate,
   slotStorageKey,
   type BroadcastChannelLike,
   type HistoryLike,
@@ -343,4 +344,157 @@ test("multi-account core against real pinned GoTrue: 2 accounts, pinned OTP, ref
   assert.equal(reloaded.listAccounts().length, 0);
 
   reloaded.destroy();
+});
+
+test("PR 2 HezSec C6 witness against real pinned GoTrue: /invite?resume= S256 PKCE redirect, pre-init scrub, provider_token stripping, and peer sign-out fallback", async () => {
+  const admin = createClient(env.API_URL, env.SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const suffix = randomUUID().slice(0, 8);
+  const emailA = `multi-c6-a-${suffix}@example.test`;
+  const emailB = `multi-c6-b-${suffix}@example.test`;
+  const password = `Correct-Horse-${suffix}-C6!`;
+
+  const userARes = await admin.auth.admin.createUser({ email: emailA, password, email_confirm: true, user_metadata: { full_name: "C6 User A" } });
+  const userBRes = await admin.auth.admin.createUser({ email: emailB, password, email_confirm: true, user_metadata: { full_name: "C6 User B" } });
+  assert.equal(userARes.error, null);
+  assert.equal(userBRes.error, null);
+  const userAId = userARes.data.user.id;
+  const userBId = userBRes.data.user.id;
+  createdUserIds.push(userAId, userBId);
+
+  const ls = new MemoryStorage();
+  const ss = new MemoryStorage();
+  const locks = createMemoryLocks();
+  const originHash = deploymentOriginHash(env.API_URL);
+  const noopCh = (): BroadcastChannelLike => ({
+    postMessage() {},
+    addEventListener() {},
+    removeEventListener() {},
+    close() {},
+  });
+
+  // Wrap real GoTrue fetch to inject a synthetic provider_token into the real GoTrue PKCE token response
+  // so we verify stripping on the real pinned GoTrue exchange path!
+  const providerTokenWrappedFetch: typeof fetch = async (input, init) => {
+    const resp = await fetch(input, init);
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.pathname.endsWith("/auth/v1/token") && u.searchParams.get("grant_type") === "pkce" && resp.ok) {
+      const json = await resp.json() as Record<string, unknown>;
+      json.provider_token = "synthetic-provider-secret-must-strip";
+      json.provider_refresh_token = "synthetic-provider-refresh-must-strip";
+      return Response.json(json, { status: resp.status });
+    }
+    return resp;
+  };
+
+  const tabBefore = new AccountManager(
+    { url: env.API_URL, anonKey: env.ANON_KEY },
+    { localStorage: ls, sessionStorage: ss, fetcher: fetch, webLocks: locks, createBroadcastChannel: noopCh },
+  );
+  await tabBefore.initialize();
+  const firstB = await tabBefore.signInWithPasswordStaging({ email: emailB, password });
+  assert.equal(firstB.kind, "promoted");
+
+  // Start /invite?resume= S256 PKCE attempt against real GoTrue!
+  const inviteAttempt = await tabBefore.startOAuthAttempt({
+    provider: "google",
+    purpose: "add-account",
+    returnRoute: "/invite",
+    origin: "http://127.0.0.1:3000",
+    resume: "invite_res_gotrue_1",
+  });
+  const authUrl = new URL(inviteAttempt.authorizeUrl);
+  const redirectTo = authUrl.searchParams.get("redirect_to")!;
+  const challenge = authUrl.searchParams.get("code_challenge")!;
+  assert.equal(new URL(redirectTo).pathname, "/invite");
+  assert.equal(new URL(redirectTo).searchParams.get("resume"), "invite_res_gotrue_1");
+
+  // Drive real pinned GoTrue S256 PKCE code issuance via /auth/v1/otp -> Mailpit -> /auth/v1/verify 302 redirect!
+  const otpResp = await fetch(
+    `${env.API_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(redirectTo)}`,
+    {
+      method: "POST",
+      headers: { apikey: env.ANON_KEY, "content-type": "application/json" },
+      body: JSON.stringify({
+        email: emailA,
+        data: {},
+        create_user: false,
+        code_challenge: challenge,
+        code_challenge_method: "s256",
+      }),
+    },
+  );
+  assert.equal(otpResp.status, 200, await otpResp.text());
+  const verifyLinks = await confirmationLinks(env, emailA);
+  const verifyResp = await fetch(verifyLinks.at(-1)!, { redirect: "manual" });
+  const finalLocation = verifyResp.headers.get("location");
+  assert.ok(finalLocation, "real GoTrue must redirect back to /invite with ?resume=, cs_attempt, and code");
+  const finalUrl = new URL(finalLocation);
+  assert.equal(finalUrl.pathname, "/invite");
+  assert.equal(finalUrl.searchParams.get("resume"), "invite_res_gotrue_1");
+  assert.equal(finalUrl.searchParams.get("cs_attempt"), inviteAttempt.attemptId);
+  assert.ok(finalUrl.searchParams.get("code"));
+
+  // Reload tab -> scrub URL SYNCHRONOUSLY BEFORE initialize(), then exchange real GoTrue PKCE code!
+  tabBefore.destroy();
+  const navUrl = new URL(finalLocation);
+  const navLocation: LocationLike = {
+    get origin() { return navUrl.origin; },
+    get pathname() { return navUrl.pathname; },
+    get search() { return navUrl.search; },
+    get hash() { return navUrl.hash; },
+    get href() { return navUrl.href; },
+  };
+  const navHistory: HistoryLike = {
+    replaceState(_d, _u, next) {
+      if (next) {
+        const parsed = new URL(String(next), navUrl.origin);
+        navUrl.pathname = parsed.pathname;
+        navUrl.search = parsed.search;
+        navUrl.hash = parsed.hash;
+      }
+    },
+  };
+  const preScrubbed = scrubCallbackUrlImmediate(navLocation, navHistory);
+  assert.equal(preScrubbed.scrubbed, true);
+  assert.equal(navLocation.search, "?resume=invite_res_gotrue_1", "URL scrubbed synchronously BEFORE initialize() while keeping ?resume=");
+
+  const teardowns: Array<{ reason: string; userId?: string; loginId?: string }> = [];
+  const tabAfter = new AccountManager(
+    { url: env.API_URL, anonKey: env.ANON_KEY },
+    {
+      localStorage: ls,
+      sessionStorage: ss,
+      fetcher: providerTokenWrappedFetch,
+      webLocks: locks,
+      createBroadcastChannel: noopCh,
+      onForcedTeardown: (d) => teardowns.push(d),
+    },
+  );
+  await tabAfter.initialize();
+  const promotedA = await tabAfter.consumeAuthCallbackBootstrap(navLocation, navHistory, preScrubbed);
+  assert.equal(promotedA.kind, "promoted");
+  assert.equal(promotedA.account.userId, userAId);
+  const slotA = ls.getItem(slotStorageKey(originHash, promotedA.account.loginId)) ?? "";
+  assert.equal(slotA.includes("synthetic-provider-secret-must-strip"), false, "provider_token stripped before storage write");
+  assert.equal(slotA.includes("synthetic-provider-refresh-must-strip"), false, "provider_refresh_token stripped before storage write");
+
+  // Peer Tab 2 signs out Account A on real GoTrue -> Tab 1 triggers forced teardown for A before activating fallback B!
+  const peerTab = new AccountManager(
+    { url: env.API_URL, anonKey: env.ANON_KEY },
+    { localStorage: ls, sessionStorage: new MemoryStorage(), fetcher: fetch, webLocks: locks, createBroadcastChannel: noopCh },
+  );
+  await peerTab.initialize();
+  await peerTab.signOutAccount(userAId, promotedA.account.loginId);
+  const fallback = tabAfter.activeAccount();
+  assert.equal(teardowns.length, 1, "forced teardown fires for departed Account A before fallback activates");
+  assert.equal(teardowns[0]!.userId, userAId);
+  assert.equal(fallback?.userId, userBId);
+  const verifiedB = await tabAfter.runtimeFor(userBId)!.verifySession();
+  assert.equal(verifiedB?.user.id, userBId, "fallback Account B verifies live on real GoTrue for fresh invite confirmation");
+
+  await peerTab.signOutAllAccounts();
+  tabAfter.destroy();
+  peerTab.destroy();
 });

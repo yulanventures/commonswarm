@@ -1,6 +1,6 @@
-import type { Session } from '@supabase/supabase-js';
+import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../../src/protocol/household-tool-registry.ts';
-import { client, postCommand } from '../commonswarm.ts';
+import { client, isMultiAccountEnabled, pinAccountContext, postCommand, type PinnedAccountContext } from '../commonswarm.ts';
 import type {
   ActivityItem,
   AgentQueue,
@@ -139,6 +139,12 @@ async function householdTool(
   unknownOutcome: string,
   write = false,
 ): Promise<Record<string, unknown>> {
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   const toolArgs: Record<string, unknown> = { seat: HOUSEHOLD_LOCAL_SEAT, ...args };
   if (write) toolArgs.request_id = requestId;
   const { status, body } = await deps.postCommand(
@@ -147,7 +153,11 @@ async function householdTool(
     { kind: 'household_tool', tool, arguments: toolArgs },
     workspaceExtra(workspaceId),
     unknownOutcome,
+    pinned,
   );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 
@@ -159,7 +169,23 @@ async function householdSurface(
   command: Record<string, unknown>,
   unknownOutcome: string,
 ): Promise<Record<string, unknown>> {
-  const { status, body } = await deps.postCommand(session, requestId, command, workspaceExtra(workspaceId), unknownOutcome);
+  const pinned = isMultiAccountEnabled()
+    ? pinAccountContext({ userId: session.user.id, workspaceId })
+    : null;
+  if (isMultiAccountEnabled() && (!pinned || !pinned.isCurrent(workspaceId))) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
+  const { status, body } = await deps.postCommand(
+    session,
+    requestId,
+    command,
+    workspaceExtra(workspaceId),
+    unknownOutcome,
+    pinned,
+  );
+  if (pinned && !pinned.isCurrent(workspaceId)) {
+    throw new HomeCommandRefused('workspace_access_refused');
+  }
   return checkedCommandBody(status, body);
 }
 
@@ -255,14 +281,28 @@ function checkedCommandBody(status: number, body: Record<string, unknown>): Reco
   return body;
 }
 
-export function createHomeServer(session: Session, deps: Partial<HomeServerDeps> = {}): HomeServer {
+export function createHomeServer(
+  session: Session,
+  deps: Partial<HomeServerDeps> = {},
+  pinnedOverride?: PinnedAccountContext | null,
+): HomeServer {
   const resolved = { ...defaultDeps(), ...deps };
+  const resolvePinnedClient = (): { c: SupabaseClient; pinned: PinnedAccountContext | null } => {
+    if (isMultiAccountEnabled()) {
+      const pinned = pinnedOverride ?? pinAccountContext({ userId: session.user.id });
+      if (!pinned || !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+      return { c: pinned.runtime.client, pinned };
+    }
+    const c = resolved.client();
+    if (!c) throw new Error('home_no_deployment');
+    return { c, pinned: null };
+  };
 
   return {
     async overview(): Promise<HomeOverview> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('home_overview');
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_overview_failed');
       if (!record(data) || typeof data.viewer_user_id !== 'string' || typeof data.generated_at !== 'string' || !Array.isArray(data.workspaces)) throw new Error('home_overview_malformed');
@@ -270,9 +310,9 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
     },
 
     async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
-      const c = resolved.client();
-      if (!c) throw new Error('home_no_deployment');
+      const { c, pinned } = resolvePinnedClient();
       const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_decision_queue_failed');
       const first = parseDecisionQueue(data, workspaceId);
@@ -287,20 +327,25 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
       let pages = 1;
       const MAX_PAGES = 20;
       while (truncated && pages < MAX_PAGES && page.asks.length > 0) {
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
         const last = page.asks[page.asks.length - 1]!;
         let next: DecisionQueue | null = null;
+        let pageFailed = false;
         try {
           const paged = await c.schema('swarm_read').rpc('decision_queue_page', {
             p_workspace_id: workspaceId,
             p_after_created_at: last.created_at,
             p_after_id: last.signal_id,
           });
-          if (paged.error) break;
-          next = parseDecisionQueue(paged.data, workspaceId);
+          if (paged.error) pageFailed = true;
+          else next = parseDecisionQueue(paged.data, workspaceId);
         } catch {
-          break;
+          pageFailed = true;
         }
-        if (!next) break;
+        // C2: Guard after every page OUTSIDE the partial-queue catch so a view change
+        // throws and drops prior-account rows instead of returning a stale partial queue.
+        if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
+        if (pageFailed || !next) break;
         let added = 0;
         for (const ask of next.asks) {
           if (seen.has(ask.signal_id)) continue;
@@ -316,6 +361,7 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
         }
         if (added === 0) break;
       }
+      if (pinned && !pinned.isCurrent()) throw new HomeCommandRefused('workspace_access_refused');
       return {
         workspace_id: workspaceId,
         generated_at: page.generated_at,

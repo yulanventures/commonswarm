@@ -370,6 +370,19 @@ export function homeNeedsYouCount(entry: CatchUpData): number | null {
   if (entry.detail.needsYou === undefined || entry.detail.needsYouComplete === false) return null;
   return detailNeeds(entry).length;
 }
+/** Total waiting items (open asks, assigned to-dos, waiting items) directly from a HomeOverview RPC payload. */
+export function overviewNeedsYouTotal(overview: HomeOverview | null): number | null {
+  if (!overview || !Array.isArray(overview.workspaces)) return null;
+  let total = 0;
+  for (const row of overview.workspaces) {
+    const needs = row?.needs_you;
+    if (!needs) continue;
+    total += (Array.isArray(needs.asks) ? needs.asks.length : 0)
+      + (Array.isArray(needs.assigned) ? needs.assigned.length : 0)
+      + (Array.isArray(needs.waiting) ? needs.waiting.length : 0);
+  }
+  return total;
+}
 /** The frozen builder cannot express an incomplete needs-you read independently of card detail. */
 export interface HomeCatchUpVM extends CatchUpVM { emptySummary: string | null }
 export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | null, viewerName: string, now: number, sample: boolean, expanded = false): HomeCatchUpVM {

@@ -171,12 +171,13 @@ export function openImageViewer(host: HTMLElement, sources: readonly PictureSour
 
   // The picture is painted only once it has loaded, as in the conversation. One failed link is replaced; after that, Retry.
   let failures = 0;
+  let disposed = false;
   const show = (state: "loading" | "failed" | ""): void => { dialog.dataset.state = state; note.hidden = state !== "failed"; };
   const load = async (): Promise<void> => {
     const asked = source;
     show("loading");
-    // A link that arrives after the reader has moved to another picture belongs to nobody.
-    try { const link = await asked.link(); if (asked === source) image.src = link; } catch { if (asked === source) show("failed"); }
+    // A link that arrives after the reader has moved to another picture or closed belongs to nobody.
+    try { const link = await asked.link(); if (!disposed && asked === source) image.src = link; } catch { if (!disposed && asked === source) show("failed"); }
   };
   /** Show `sources[to]`: named, fitted, and loading from its own link. */
   const present = (to: number): void => {
@@ -333,6 +334,11 @@ export function openImageViewer(host: HTMLElement, sources: readonly PictureSour
   close.addEventListener("click", () => dialog.close());
   win.addEventListener("resize", layout);
   dialog.addEventListener("close", () => {
+    disposed = true;
+    image.removeAttribute("src");
+    image.alt = "";
+    title.textContent = "";
+    position.textContent = "";
     win.removeEventListener("resize", layout);
     dialog.remove();
     closed(index);
