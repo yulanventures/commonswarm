@@ -390,20 +390,68 @@ async function observeStep3BA11y() {
       await wait("group dm menu open", () => visible(one(".cs-context-menu")));
       await click('.cs-context-menu__item:has-text("Leave group")');
       await wait("group leave confirm open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+      // Witness detached-opener focus return: replace rail conversation menu triggers while the
+      // Leave dialog is open (simulating a background renderHomeRail() refresh), then press Escape ->
+      // focus must land on the re-rendered trigger, never #hm-ws-title or <body>.
+      const originalTriggers = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]`),
+      );
+      for (const trigger of originalTriggers) {
+        trigger.replaceWith(trigger.cloneNode(true));
+      }
       await key("Escape");
       await wait("group leave confirm closed", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === false);
       const active = document.activeElement;
-      const okReturn = !!active && active !== document.body && (
-        active.getAttribute("data-rail-conversation-menu") === f.ids.dmGroupConv ||
-        active.getAttribute("data-rail-conversation") === f.ids.dmGroupConv ||
-        active.getAttribute("aria-label") === "Open navigation"
-      );
+      const okReturn = !!active && active !== document.body &&
+        !originalTriggers.includes(active as HTMLButtonElement) && (
+          active.getAttribute("data-rail-conversation-menu") === f.ids.dmGroupConv ||
+          active.getAttribute("data-rail-conversation") === f.ids.dmGroupConv
+        );
       document.documentElement.dataset.step3bA11y = JSON.stringify({
         ok: okReturn && f.convCommands.length === 0,
         scene: f.scene,
         returnedTo: active?.outerHTML.slice(0, 180) ?? null,
         commands: f.convCommands.length,
         error: okReturn ? undefined : `Escape from Group leave dialog left focus on ${active?.outerHTML.slice(0, 160)}`,
+      });
+      return;
+    }
+
+    if (f.scene === "group-leave-escape-removed") {
+      const openedDrawer = !visible(shown("[data-home-all-channels]"));
+      await openDrawerIfPhone();
+      await click(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]:visible`);
+      await wait("group dm menu open", () => visible(one(".cs-context-menu")));
+      await click('.cs-context-menu__item:has-text("Leave group")');
+      await wait("group leave confirm open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+      // Remove the originating group row while the Leave dialog is open, then cancel with Escape:
+      // desktop (no drawer) falls back to #hm-ws-title; phone (reopened drawer) focuses the
+      // visible Direct messages heading inside the drawer instead of Close navigation.
+      for (const trigger of Array.from(
+        document.querySelectorAll<HTMLButtonElement>(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]`),
+      )) {
+        (trigger.closest("li") ?? trigger).remove();
+      }
+      await key("Escape");
+      await wait("group leave confirm closed", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === false);
+      if (openedDrawer) {
+        await wait("phone drawer reopened on DM heading", () => {
+          const active = document.activeElement as HTMLElement | null;
+          return !!active && visible(active) && active.id === "hm-rail-dms-title" && !!active.closest("dialog.cs-org-drawer[open]");
+        });
+      } else {
+        await wait("desktop fallback heading focused", () => document.activeElement?.id === "hm-ws-title");
+      }
+      const active = document.activeElement as HTMLElement | null;
+      const okReturn = openedDrawer
+        ? !!active && visible(active) && active.id === "hm-rail-dms-title" && !!active.closest("dialog.cs-org-drawer[open]")
+        : !!active && active.id === "hm-ws-title";
+      document.documentElement.dataset.step3bA11y = JSON.stringify({
+        ok: okReturn && f.convCommands.length === 0,
+        scene: f.scene,
+        returnedTo: active?.outerHTML.slice(0, 180) ?? null,
+        commands: f.convCommands.length,
+        error: okReturn ? undefined : `Escape after row removal left focus on ${active?.outerHTML.slice(0, 160)}`,
       });
       return;
     }
@@ -479,6 +527,8 @@ test("Step 3B accessibility, Escape focus-return, 44 px target, and light/dark p
       { name: "360x740-directory-escape", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&scene=directory-escape` },
       { name: "1024x768-group-leave-escape", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&scene=group-leave-escape` },
       { name: "360x740-group-leave-escape", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&scene=group-leave-escape` },
+      { name: "1024x768-group-leave-escape-removed", width: 1024, height: 768, query: `w=${ws}&c=general&theme=light&scene=group-leave-escape-removed` },
+      { name: "360x740-group-leave-escape-removed", width: 360, height: 740, query: `w=${ws}&c=general&theme=light&scene=group-leave-escape-removed` },
     ];
     const report: Record<string, any> = {};
     for (const item of cases) {
