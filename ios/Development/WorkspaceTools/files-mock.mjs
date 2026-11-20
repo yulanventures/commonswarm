@@ -63,6 +63,8 @@ const files = [
 
 let filesAccessRefused = false;
 let expireNextStorageDownload = false;
+let holdNextStorageDownload = false;
+let heldStorageResolver = null;
 let badDownloadPathOnce = null;
 const receivedDownloadCommands = [];
 let tokenCounter = 0;
@@ -89,6 +91,31 @@ const server = createServer(async (req, res) => {
       expireNextStorageDownload = true;
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-next-storage") {
+      holdNextStorageDownload = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/storage-held") {
+      return reply(200, { held: heldStorageResolver !== null });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-held-storage") {
+      if (heldStorageResolver) {
+        const resolve = heldStorageResolver;
+        heldStorageResolver = null;
+        resolve();
+      }
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/bump-version") {
+      const targetId = url.searchParams.get("file_id") || "file_budget_pdf";
+      const file = files.find((f) => f.file_id === targetId);
+      if (file) {
+        file.current_version += 1;
+        file.committed_at = new Date().toISOString();
+        file.payload = Buffer.from(`%PDF-1.4\n% CommonSwarm fixture Q4 budget PDF v${file.current_version}\n`, "utf8");
+      }
+      return reply(200, { ok: true, version: file?.current_version ?? null });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/bad-download-path") {
       badDownloadPathOnce = url.searchParams.get("path") || "https://evil.example/storage/v1/steal";
       return reply(200, { ok: true });
@@ -99,6 +126,10 @@ const server = createServer(async (req, res) => {
 
     // Signed storage download route (does not require apikey/Bearer; authenticated by signed token)
     if (req.method === "GET" && url.pathname.startsWith("/storage/v1/object/sign/")) {
+      if (holdNextStorageDownload) {
+        holdNextStorageDownload = false;
+        await new Promise((resolve) => { heldStorageResolver = resolve; });
+      }
       if (expireNextStorageDownload) {
         expireNextStorageDownload = false;
         return reply(410, { error: "link_expired" });

@@ -38,6 +38,11 @@ struct WorkspaceFileItem: Hashable, Identifiable, Sendable {
     }
 }
 
+struct WorkspaceFileVersionKey: Hashable, Sendable {
+    let fileID: String
+    let version: Int
+}
+
 struct WorkspaceFileDownloadGrant: Equatable, Sendable {
     let url: URL
     let contentWarning: String
@@ -196,12 +201,34 @@ enum WorkspaceFilesRules {
             case .invalidDownloadPath:
                 return "The server returned an unusable download link."
             case .linkExpired:
-                return "This download link expired. Tap Download to fetch a fresh link."
+                return "This download link expired."
             case .downloadFailed:
                 return "Couldn’t download the file. Tap Download to try again."
             }
         }
         return "Couldn’t download the file. Tap Download to try again."
+    }
+
+    static func downloadButtonTitle(for state: WorkspaceFileDownloadState) -> String {
+        switch state {
+        case .failed: "Retry download"
+        case .ready: "Download again"
+        case .idle, .preparing: "Download"
+        }
+    }
+
+    static func downloadButtonAccessibilityLabel(
+        state: WorkspaceFileDownloadState,
+        fileName: String,
+        version: Int
+    ) -> String {
+        let action: String
+        if case .preparing = state {
+            action = "Preparing download"
+        } else {
+            action = downloadButtonTitle(for: state)
+        }
+        return "\(action) \(fileName), version \(version)"
     }
 }
 
@@ -211,7 +238,7 @@ final class WorkspaceFilesStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var loadFailed = false
     @Published private(set) var accessUnavailable = false
-    @Published private(set) var downloadStates: [String: WorkspaceFileDownloadState] = [:]
+    @Published private(set) var downloadStates: [WorkspaceFileVersionKey: WorkspaceFileDownloadState] = [:]
     @Published var activeShareItem: DownloadedFileShare?
 
     let workspaceID: UUID
@@ -219,6 +246,14 @@ final class WorkspaceFilesStore: ObservableObject {
 
     init(workspaceID: UUID) {
         self.workspaceID = workspaceID
+    }
+
+    func downloadState(for file: WorkspaceFileItem) -> WorkspaceFileDownloadState {
+        downloadStates[WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)] ?? .idle
+    }
+
+    private func isCurrentLiveVersion(fileID: String, version: Int) -> Bool {
+        files.contains { $0.fileID == fileID && $0.currentVersion == version && !$0.isRemoved }
     }
 
     func load(api: WorkspaceFilesAPI) async {
@@ -232,9 +267,23 @@ final class WorkspaceFilesStore: ObservableObject {
             files = loaded
             accessUnavailable = false
             loadFailed = false
-            // Prune download states for files no longer present or now removed
-            let liveIDs = Set(loaded.filter { !$0.isRemoved }.map(\.fileID))
-            downloadStates = downloadStates.filter { liveIDs.contains($0.key) }
+
+            // Prune download states for files removed or superseded by a newer version
+            let liveKeys = Set(
+                loaded
+                    .filter { !$0.isRemoved }
+                    .map { WorkspaceFileVersionKey(fileID: $0.fileID, version: $0.currentVersion) }
+            )
+            for (key, state) in downloadStates where !liveKeys.contains(key) {
+                if case .ready(let share) = state {
+                    try? FileManager.default.removeItem(at: share.fileURL.deletingLastPathComponent())
+                }
+            }
+            downloadStates = downloadStates.filter { liveKeys.contains($0.key) }
+            if let active = activeShareItem,
+               !liveKeys.contains(WorkspaceFileVersionKey(fileID: active.fileID, version: active.version)) {
+                activeShareItem = nil
+            }
         } catch WorkspaceFilesError.accessRefused {
             guard !Task.isCancelled, generation == loadGeneration else { return }
             applyAccessUnavailable()
@@ -248,10 +297,11 @@ final class WorkspaceFilesStore: ObservableObject {
     }
 
     func download(_ file: WorkspaceFileItem, api: WorkspaceFilesAPI) async {
-        guard !file.isRemoved else { return }
-        if case .preparing = downloadStates[file.fileID] { return }
+        guard !file.isRemoved, isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) else { return }
+        let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
+        if case .preparing = downloadStates[key] { return }
 
-        downloadStates[file.fileID] = .preparing
+        downloadStates[key] = .preparing
         do {
             let grant = try await api.requestDownloadGrant(
                 workspaceID: workspaceID,
@@ -260,7 +310,11 @@ final class WorkspaceFilesStore: ObservableObject {
                 commandID: UUID()
             )
             guard !Task.isCancelled else {
-                downloadStates[file.fileID] = .idle
+                downloadStates[key] = nil
+                return
+            }
+            guard isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) else {
+                downloadStates[key] = nil
                 return
             }
             if let expiresAt = grant.expiresAt, expiresAt <= Date() {
@@ -272,9 +326,9 @@ final class WorkspaceFilesStore: ObservableObject {
                 fileID: file.fileID,
                 version: file.currentVersion
             )
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) else {
                 try? FileManager.default.removeItem(at: localURL.deletingLastPathComponent())
-                downloadStates[file.fileID] = .idle
+                downloadStates[key] = nil
                 return
             }
             let share = DownloadedFileShare(
@@ -284,7 +338,7 @@ final class WorkspaceFilesStore: ObservableObject {
                 fileURL: localURL,
                 contentWarning: grant.contentWarning
             )
-            downloadStates[file.fileID] = .ready(share)
+            downloadStates[key] = .ready(share)
             activeShareItem = share
         } catch WorkspaceFilesError.accessRefused {
             if !Task.isCancelled {
@@ -292,18 +346,29 @@ final class WorkspaceFilesStore: ObservableObject {
             }
         } catch {
             if !Task.isCancelled {
-                downloadStates[file.fileID] = .failed(message: WorkspaceFilesRules.downloadErrorMessage(error))
+                if isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) {
+                    downloadStates[key] = .failed(message: WorkspaceFilesRules.downloadErrorMessage(error))
+                } else {
+                    downloadStates[key] = nil
+                }
             }
         }
     }
 
-    func openReadyDownload(for fileID: String) {
-        if case .ready(let share) = downloadStates[fileID] {
+    func openReadyDownload(for file: WorkspaceFileItem) {
+        guard isCurrentLiveVersion(fileID: file.fileID, version: file.currentVersion) else { return }
+        let key = WorkspaceFileVersionKey(fileID: file.fileID, version: file.currentVersion)
+        if case .ready(let share) = downloadStates[key], share.version == file.currentVersion {
             activeShareItem = share
         }
     }
 
     private func applyAccessUnavailable() {
+        for (_, state) in downloadStates {
+            if case .ready(let share) = state {
+                try? FileManager.default.removeItem(at: share.fileURL.deletingLastPathComponent())
+            }
+        }
         files = []
         downloadStates = [:]
         activeShareItem = nil

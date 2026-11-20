@@ -152,7 +152,7 @@ struct WorkspaceFilesView: View {
     }
 
     private func fileCard(_ file: WorkspaceFileItem) -> some View {
-        let state = store.downloadStates[file.fileID] ?? .idle
+        let state = store.downloadState(for: file)
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
@@ -244,7 +244,7 @@ struct WorkspaceFilesView: View {
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.white)
                                     .accessibilityHidden(true)
-                                Text(downloadButtonTitle(state))
+                                Text(WorkspaceFilesRules.downloadButtonTitle(for: state))
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.white)
                             }
@@ -255,12 +255,18 @@ struct WorkspaceFilesView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isPreparing(state))
-                    .accessibilityLabel("Download \(file.name), version \(file.currentVersion)")
+                    .accessibilityLabel(
+                        WorkspaceFilesRules.downloadButtonAccessibilityLabel(
+                            state: state,
+                            fileName: file.name,
+                            version: file.currentVersion
+                        )
+                    )
                     .accessibilityIdentifier("workspace-file-download-\(file.fileID)")
 
                     if case .ready = state {
                         Button {
-                            store.openReadyDownload(for: file.fileID)
+                            store.openReadyDownload(for: file)
                         } label: {
                             Text("Share / Save")
                                 .font(.subheadline.weight(.semibold))
@@ -270,6 +276,7 @@ struct WorkspaceFilesView: View {
                                 .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Share or save \(file.name), version \(file.currentVersion)")
                         .accessibilityIdentifier("workspace-file-share-\(file.fileID)")
                     }
                 }
@@ -285,14 +292,6 @@ struct WorkspaceFilesView: View {
     private func isPreparing(_ state: WorkspaceFileDownloadState) -> Bool {
         if case .preparing = state { return true }
         return false
-    }
-
-    private func downloadButtonTitle(_ state: WorkspaceFileDownloadState) -> String {
-        switch state {
-        case .failed: "Retry download"
-        case .ready: "Download again"
-        case .idle, .preparing: "Download"
-        }
     }
 }
 
