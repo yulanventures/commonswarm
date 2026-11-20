@@ -19,15 +19,83 @@ export function closeContextMenu(): void {
   closeOpen?.();
 }
 
+const STABLE_ANCHOR_ATTRS = [
+  "data-rail-conversation-menu",
+  "data-rail-channel-menu",
+  "data-rail-conversation",
+  "data-rail-channel",
+  "data-menu-key",
+  "data-channel-id",
+  "data-home-focus-key",
+] as const;
+
+function escapeAttrValue(value: string): string {
+  return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(value)
+    : value.replace(/["\\]/g, "\\$&");
+}
+
+function stableAnchorSelector(anchor: HTMLElement): string | null {
+  for (const attr of STABLE_ANCHOR_ATTRS) {
+    const value = anchor.getAttribute(attr);
+    if (value !== null && value !== "") return `[${attr}="${escapeAttrValue(value)}"]`;
+  }
+  if (anchor.hasAttribute("data-channel-notify")) return "[data-channel-notify]";
+  if (anchor.id) return `#${escapeAttrValue(anchor.id)}`;
+  return null;
+}
+
+function isFocusableElement(el: HTMLElement | null): el is HTMLElement {
+  if (!el || !el.isConnected) return false;
+  if (el.closest("[hidden], [inert]")) return false;
+  if (typeof el.getClientRects === "function" && el.getClientRects().length === 0) return false;
+  return true;
+}
+
+/**
+ * Resolves where keyboard focus should return when a context menu closes via Escape/Tab.
+ * If a background re-render (e.g. `renderHomeRail()`) detached the original trigger, re-finds
+ * the re-rendered equivalent trigger by its stable attribute or falls back to the rail/view
+ * heading so focus never drops to `<body>`.
+ */
+export function resolveContextMenuReturnTarget(
+  anchor: HTMLElement,
+  selector: string | null,
+  scope: ParentNode,
+): HTMLElement | null {
+  if (isFocusableElement(anchor)) return anchor;
+  if (selector) {
+    const matches = Array.from(scope.querySelectorAll<HTMLElement>(selector));
+    const visibleMatch = matches.find(isFocusableElement);
+    if (visibleMatch) return visibleMatch;
+    const connectedMatch = matches.find((el) => el.isConnected && !el.closest("[hidden], [inert]"));
+    if (connectedMatch) return connectedMatch;
+  }
+  const fallbacks = Array.from(
+    scope.querySelectorAll<HTMLElement>(
+      ".hm-rail h1, .hm-rail h2, [data-home-rail] h2, [data-home-workspace-shell] h1, h1[tabindex], .hm-rail button:not([disabled])",
+    ),
+  );
+  const fallback = fallbacks.find(isFocusableElement) ??
+    fallbacks.find((el) => el.isConnected && !el.closest("[hidden], [inert]")) ??
+    null;
+  if (fallback && fallback.tabIndex < 0 && !fallback.hasAttribute("tabindex")) {
+    fallback.setAttribute("tabindex", "-1");
+  }
+  return fallback;
+}
+
 /** Opens a menu for `anchor`. A keyboard-opened contextmenu event (Shift+F10, the Menu key) has no pointer
- *  position, so the menu sits under the anchor instead. Focus returns to `anchor` when the menu closes without
- *  running an item. */
+ *  position, so the menu sits under the anchor instead. Focus returns to `anchor` (or its re-rendered
+ *  equivalent / rail heading if detached) when the menu closes without running an item. */
 export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries: ContextMenuEntries, label: string): void {
   const items = entries.filter((entry): entry is ContextMenuItem => entry !== null);
   if (!items.length) return;
   event.preventDefault();
   closeContextMenu();
   const doc = anchor.ownerDocument;
+  const scope = anchor.closest<HTMLElement>("dialog[open]") ?? anchor.closest<HTMLElement>("live-dashboard") ?? doc.body;
+  const returnSelector = stableAnchorSelector(anchor);
   const menu = doc.createElement("div");
   menu.className = "cs-context-menu";
   menu.setAttribute("role", "menu");
@@ -44,7 +112,10 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
     doc.defaultView?.removeEventListener("resize", onDismiss);
     doc.defaultView?.removeEventListener("blur", onDismiss);
     anchor.removeAttribute("data-context-open");
-    if (refocus && anchor.isConnected) anchor.focus({ preventScroll: true });
+    if (refocus) {
+      const target = resolveContextMenuReturnTarget(anchor, returnSelector, scope);
+      target?.focus({ preventScroll: true });
+    }
   };
   const close = (): void => finish(false);
   const onOutside = (pointer: Event): void => { if (!menu.contains(pointer.target as Node)) finish(false); };
@@ -54,6 +125,7 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
   // menu's own list, or a scroll event that arrives a frame late for a scroll made before opening (bringing the
   // row into view on a short screen) leaves it open where it belongs.
   const onScroll = (scroll: Event): void => {
+    if (!anchor.isConnected) return;
     const target = scroll.target;
     if (!(target === doc || target === doc.documentElement || target === doc.body ||
       (target instanceof Node && target !== menu && target.contains(anchor)))) return;
@@ -102,7 +174,7 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
   menu.addEventListener("contextmenu", inner => inner.preventDefault());
   /* Inside an open modal (the phone navigation drawer) the menu must live in that dialog: everything
      outside a modal dialog is inert. */
-  (anchor.closest<HTMLElement>("dialog[open]") ?? anchor.closest("live-dashboard") ?? doc.body).append(menu);
+  scope.append(menu);
   closeOpen = close;
   anchor.dataset.contextOpen = "";
   const view = doc.defaultView;
