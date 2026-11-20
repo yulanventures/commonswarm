@@ -6570,6 +6570,7 @@ import "../../styles/kylon-image-viewer.css";
       autoPages: number;
     };
     const waitingArchivedByWorkspace = new Map<string, WaitingArchivedWorkspaceState>();
+    const waitingArchivedChannels = new Map<string, Map<string, string>>();
     const waitingPanelLoadedWorkspaces = new Set<string>();
     const waitingPanelFailedWorkspaces = new Set<string>();
     const waitingPanelTruncatedWorkspaces = new Set<string>();
@@ -6817,6 +6818,10 @@ import "../../styles/kylon-image-viewer.css";
       entry: Pick<WaitingArchivedEntry, "placement" | "channel_id" | "conversation_id">,
     ): string => {
       if (entry.placement === "redacted" || entry.placement === "workspace") return "";
+      if (entry.placement === "channel" && entry.channel_id && workspaceId !== activeWorkspaceId) {
+        const slug = waitingArchivedChannels.get(workspaceId)?.get(entry.channel_id);
+        if (slug) return `#${slug}`;
+      }
       return waitingTodoChannelLabel(workspaceId, entry.placement, entry.channel_id, entry.conversation_id);
     };
 
@@ -6863,14 +6868,14 @@ import "../../styles/kylon-image-viewer.css";
         const st = waitingArchivedByWorkspace.get(workspaceId);
         if (st) st.requestSeq += 1;
         waitingArchivedByWorkspace.delete(workspaceId);
-        waitingWorkspaceChannels.delete(workspaceId);
+        waitingArchivedChannels.delete(workspaceId);
         return;
       }
       waitingArchivedEpoch += 1;
       waitingArchivedAutoPlaceKey = "";
       for (const st of waitingArchivedByWorkspace.values()) st.requestSeq += 1;
       waitingArchivedByWorkspace.clear();
-      waitingWorkspaceChannels.clear();
+      waitingArchivedChannels.clear();
     };
 
     const pruneRetiredWaitingArchivedScopes = (keepIds?: ReadonlySet<string>): void => {
@@ -6879,7 +6884,7 @@ import "../../styles/kylon-image-viewer.css";
         if (!liveIds.has(wsId)) {
           st.requestSeq += 1;
           waitingArchivedByWorkspace.delete(wsId);
-          waitingWorkspaceChannels.delete(wsId);
+          waitingArchivedChannels.delete(wsId);
         }
       }
     };
@@ -6964,14 +6969,14 @@ import "../../styles/kylon-image-viewer.css";
           state.stale = false;
           state.denied = true;
           state.failed = true;
-          waitingWorkspaceChannels.delete(workspace.id);
+          waitingArchivedChannels.delete(workspace.id);
           return;
         }
         const hasNamedChannel = page.items.some(entry => entry.placement === "channel" && entry.channel_id);
-        if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
+        if (hasNamedChannel && workspace.id !== activeWorkspaceId && !waitingArchivedChannels.has(workspace.id)) {
           const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
           if (!isCurrent()) return;
-          waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
+          waitingArchivedChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
         }
         if (mode === "initial") {
           state.entries = page.items;
@@ -7013,7 +7018,7 @@ import "../../styles/kylon-image-viewer.css";
           state.stale = false;
           state.denied = true;
           state.failed = true;
-          waitingWorkspaceChannels.delete(workspace.id);
+          waitingArchivedChannels.delete(workspace.id);
         } else {
           if (mode === "initial") {
             state.entries = [];
@@ -7984,6 +7989,7 @@ import "../../styles/kylon-image-viewer.css";
       waitingSurveyErrors.clear();
       waitingSurvey = { active: false, mode: "step", index: 0, itemIds: [], placeKey: "", sending: false };
       clearWaitingArchivedCache();
+      waitingWorkspaceChannels.clear();
       waitingPanelOverviewFailed = false;
     };
     /** Synchronously retire every Waiting on you read, draft, ticket, and rendered card when login changes. */

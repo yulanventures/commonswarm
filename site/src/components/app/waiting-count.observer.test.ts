@@ -1421,7 +1421,7 @@ async function observeWaitingCount() {
       check(f.archivedPages >= 2, "must have paged through page 1 and page 2: " + f.archivedPages);
       if (!f.phone) {
         // Switch to #quiet (0 matches on page 1 AND page 2): empty state appears ONLY after exhausting page 2.
-        const quietLink = () => document.querySelector<HTMLElement>(`[data-channel-item="${f.chReno}"]`);
+        const quietLink = () => document.querySelector<HTMLElement>(`[data-rail-channel="${f.chReno}"]`);
         await wait(() => shown(quietLink()), "#quiet channel link rendered in rail");
         const pagesBeforeQuiet = f.archivedPages;
         quietLink()!.click();
