@@ -1687,16 +1687,35 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
       (${queuedAskId}::uuid, ${workspace}::uuid, ${senderAgent.principal}::uuid, 'agent', 'ask', 'Please review PR', NULL, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '15 minutes'),
       (${todoNoticeId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Added a to-do to your queue.', ${`todo:${randomUUID()}`}, ${unseenSeat.principal}::uuid, statement_timestamp() + interval '1 day', statement_timestamp() - interval '12 minutes')
   `;
+  const queuedLeaseId = randomUUID();
   await sql`
-    INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, acked_at, ack_outcome)
+    INSERT INTO swarm.signal_deliveries (
+      workspace_id, signal_id, recipient_agent_principal_id,
+      enqueued_at, delivered_at, acked_at, ack_outcome,
+      attempt_count, last_lease_id, last_leased_by
+    )
     VALUES
-      (${workspace}::uuid, ${queuedAskId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '15 minutes', statement_timestamp() - interval '14 minutes', 'queued'),
-      (${workspace}::uuid, ${todoNoticeId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '12 minutes', NULL, NULL)
+      (
+        ${workspace}::uuid, ${queuedAskId}::uuid, ${unseenSeat.principal}::uuid,
+        statement_timestamp() - interval '15 minutes',
+        statement_timestamp() - interval '14 minutes',
+        statement_timestamp() - interval '14 minutes',
+        'queued', 1, ${queuedLeaseId}::uuid, ${unseenSeat.principal}::uuid
+      ),
+      (
+        ${workspace}::uuid, ${todoNoticeId}::uuid, ${unseenSeat.principal}::uuid,
+        statement_timestamp() - interval '12 minutes',
+        NULL, NULL, NULL, 0, NULL, NULL
+      )
     ON CONFLICT (signal_id, recipient_agent_principal_id)
     DO UPDATE SET
       enqueued_at = EXCLUDED.enqueued_at,
+      delivered_at = EXCLUDED.delivered_at,
       acked_at = EXCLUDED.acked_at,
-      ack_outcome = EXCLUDED.ack_outcome
+      ack_outcome = EXCLUDED.ack_outcome,
+      attempt_count = EXCLUDED.attempt_count,
+      last_lease_id = EXCLUDED.last_lease_id,
+      last_leased_by = EXCLUDED.last_leased_by
   `;
 
   const [sync1] = await sql<{ res: Row }[]>`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '30 minutes') AS res`;
@@ -1723,8 +1742,11 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   assert.equal(senderRead.status, 200);
   assert.ok((senderRead.body.alerts as Row[]).some((a) => a.alert_id === alertId), "sender agent must read its own agent_unseen alert");
 
-  const senderInbox = await readResource(senderAgent.token, { resource: "signals", workspace_id: workspace, inbox: true });
-  assert.equal(senderInbox.status, 200);
+  const senderInbox = await readResource(senderAgent.token, {
+    resource: "signals", workspace_id: workspace, inbox: true, about: null, kind: null, since: null,
+    limit: 20, include_stale: false,
+  });
+  assert.equal(senderInbox.status, 200, JSON.stringify(senderInbox.body));
   assert.ok((senderInbox.body.signals as Row[]).some((s) => s.id === alertId && s.about === "system_alert:agent_unseen"), "sender agent must receive agent_unseen in inbox");
 
   const bystanderRead = await readResource(bystanderAgent.token, { resource: "system_alerts", workspace_id: workspace });
@@ -1741,9 +1763,15 @@ test("C1a: agent_unseen raises 1 deduplicated alert per seat for unseen asks/men
   assert.equal(stillOpen!.resolved_at, null, "alert stays open while a second unseen notice remains");
 
   // 5. Observing the last remaining unseen message IMMEDIATELY auto-clears the alert!
+  const todoLeaseId = randomUUID();
   await sql`
     UPDATE swarm.signal_deliveries
-    SET acked_at = clock_timestamp(), ack_outcome = 'observed'
+    SET delivered_at = clock_timestamp(),
+        acked_at = clock_timestamp(),
+        ack_outcome = 'observed',
+        attempt_count = 1,
+        last_lease_id = ${todoLeaseId}::uuid,
+        last_leased_by = ${unseenSeat.principal}::uuid
     WHERE workspace_id = ${workspace}::uuid AND signal_id = ${todoNoticeId}::uuid AND recipient_agent_principal_id = ${unseenSeat.principal}::uuid
   `;
   const [cleared] = await sql<Row[]>`SELECT resolved_at, resolved_by_kind, resolved_by_id, resolution_note FROM swarm.system_alerts WHERE alert_id = ${alertId}::uuid`;
