@@ -271,10 +271,23 @@ final class HumanSession {
         return draft
     }
 
+    private var signOutCleanups: [() -> Void] = []
+
+    func onSignOut(_ cleanup: @escaping () -> Void) {
+        guard isActive else {
+            cleanup()
+            return
+        }
+        signOutCleanups.append(cleanup)
+    }
+
     func signOut() {
         drafts.removeAll()
+        let cleanups = signOutCleanups
+        signOutCleanups.removeAll()
         bearer = nil
         transport.invalidateAndCancel()
+        for cleanup in cleanups { cleanup() }
     }
 
     deinit { transport.invalidateAndCancel() }

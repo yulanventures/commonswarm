@@ -604,7 +604,7 @@ struct TodoPendingDetailRetry: Identifiable, Equatable, Sendable {
 }
 
 /// Live-session in-memory store for unresolved write command IDs so Back/reopen in the same login
-/// recovers the exact original command ID and payload, while retiring or switching logins wipes it.
+/// recovers the exact original command ID and payload, while retiring or switching logins wipes it immediately.
 @MainActor
 final class TodoPendingWriteStore {
     static let shared = TodoPendingWriteStore()
@@ -630,22 +630,44 @@ final class TodoPendingWriteStore {
         weak var session: HumanSession?
         var creates: [UUID: TodoListViewModel.PendingCreate] = [:]
         var details: [DetailKey: DetailBucket] = [:]
+
+        var isEmpty: Bool {
+            creates.isEmpty && details.isEmpty
+        }
     }
 
     private var entries: [ObjectIdentifier: SessionEntry] = [:]
+    private var signOutRegistered: Set<ObjectIdentifier> = []
 
     private init() {}
 
     private func pruneInactive() {
-        entries = entries.filter { _, entry in
-            guard let session = entry.session else { return false }
-            return session.isActive
+        entries = entries.filter { sid, entry in
+            guard let session = entry.session, session.isActive else {
+                signOutRegistered.remove(sid)
+                return false
+            }
+            return !entry.isEmpty
+        }
+    }
+
+    private func ensureSignOutHook(for session: HumanSession, sid: ObjectIdentifier) {
+        guard !signOutRegistered.contains(sid) else { return }
+        signOutRegistered.insert(sid)
+        session.onSignOut { [weak self] in
+            self?.clearSession(sid)
         }
     }
 
     func clearSession(_ sessionID: ObjectIdentifier) {
         entries.removeValue(forKey: sessionID)
-        pruneInactive()
+        signOutRegistered.remove(sessionID)
+    }
+
+    /// Direct inspection without lazy pruning — verifies `HumanSession.signOut()` eagerly erased payloads.
+    func hasStoredEntriesUnpruned(for sessionID: ObjectIdentifier) -> Bool {
+        guard let entry = entries[sessionID] else { return false }
+        return !entry.isEmpty
     }
 
     func pendingCreate(for session: HumanSession, workspaceID: UUID) -> TodoListViewModel.PendingCreate? {
@@ -654,22 +676,34 @@ final class TodoPendingWriteStore {
         return entries[ObjectIdentifier(session)]?.creates[workspaceID]
     }
 
-    func setPendingCreate(_ value: TodoListViewModel.PendingCreate?, for session: HumanSession?, workspaceID: UUID?) {
+    func updatePendingCreate(
+        for session: HumanSession?,
+        workspaceID: UUID?,
+        mutate: (inout TodoListViewModel.PendingCreate?) -> Void
+    ) -> TodoListViewModel.PendingCreate? {
         pruneInactive()
-        guard let session, let workspaceID else { return }
+        guard let session, let workspaceID else { return nil }
         let sid = ObjectIdentifier(session)
         guard session.isActive else {
-            entries.removeValue(forKey: sid)
-            return
+            clearSession(sid)
+            return nil
         }
         var entry = entries[sid] ?? SessionEntry(session: session)
         entry.session = session
-        if let value {
-            entry.creates[workspaceID] = value
+        var current = entry.creates[workspaceID]
+        mutate(&current)
+        if let updated = current {
+            ensureSignOutHook(for: session, sid: sid)
+            entry.creates[workspaceID] = updated
         } else {
             entry.creates.removeValue(forKey: workspaceID)
         }
-        entries[sid] = entry
+        if entry.isEmpty {
+            entries.removeValue(forKey: sid)
+        } else {
+            entries[sid] = entry
+        }
+        return current
     }
 
     func detailBucket(for session: HumanSession, workspaceID: UUID, todoID: UUID) -> DetailBucket {
@@ -678,18 +712,19 @@ final class TodoPendingWriteStore {
         return entries[ObjectIdentifier(session)]?.details[DetailKey(workspaceID: workspaceID, todoID: todoID)] ?? DetailBucket()
     }
 
+    @discardableResult
     func updateDetailBucket(
         for session: HumanSession?,
         workspaceID: UUID?,
         todoID: UUID?,
         mutate: (inout DetailBucket) -> Void
-    ) {
+    ) -> DetailBucket {
         pruneInactive()
-        guard let session, let workspaceID, let todoID else { return }
+        guard let session, let workspaceID, let todoID else { return DetailBucket() }
         let sid = ObjectIdentifier(session)
         guard session.isActive else {
-            entries.removeValue(forKey: sid)
-            return
+            clearSession(sid)
+            return DetailBucket()
         }
         var entry = entries[sid] ?? SessionEntry(session: session)
         entry.session = session
@@ -699,9 +734,15 @@ final class TodoPendingWriteStore {
         if bucket.isEmpty {
             entry.details.removeValue(forKey: key)
         } else {
+            ensureSignOutHook(for: session, sid: sid)
             entry.details[key] = bucket
         }
-        entries[sid] = entry
+        if entry.isEmpty {
+            entries.removeValue(forKey: sid)
+        } else {
+            entries[sid] = entry
+        }
+        return bucket
     }
 }
 
@@ -726,6 +767,7 @@ final class TodoListViewModel: ObservableObject {
         let dueOn: String?
         let assignee: TodoParty?
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -803,9 +845,111 @@ final class TodoListViewModel: ObservableObject {
         }
     }
 
-    private func savePendingCreate(_ value: PendingCreate?) {
-        pendingCreate = value
-        TodoPendingWriteStore.shared.setPendingCreate(value, for: activeSession, workspaceID: activeWorkspaceID)
+    private func claimPendingCreate(
+        session: HumanSession,
+        workspaceID: UUID,
+        title: String,
+        notes: String,
+        dueOn: String?,
+        assignee: TodoParty?,
+        ownerToken: UUID
+    ) -> PendingCreate? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingCreate?
+        let latest = TodoPendingWriteStore.shared.updatePendingCreate(for: session, workspaceID: workspaceID) { current in
+            if let existing = current, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.title == title && existing.notes == notes && existing.dueOn == dueOn && existing.assignee == assignee {
+                    let next = PendingCreate(
+                        sessionID: sid,
+                        workspaceID: workspaceID,
+                        title: title,
+                        notes: notes,
+                        dueOn: dueOn,
+                        assignee: assignee,
+                        commandID: existing.commandID,
+                        ownerToken: ownerToken,
+                        outcomeUnknown: existing.outcomeUnknown
+                    )
+                    current = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingCreate(
+                        sessionID: sid,
+                        workspaceID: workspaceID,
+                        title: title,
+                        notes: notes,
+                        dueOn: dueOn,
+                        assignee: assignee,
+                        commandID: UUID(),
+                        ownerToken: ownerToken,
+                        outcomeUnknown: false
+                    )
+                    current = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingCreate(
+                    sessionID: sid,
+                    workspaceID: workspaceID,
+                    title: title,
+                    notes: notes,
+                    dueOn: dueOn,
+                    assignee: assignee,
+                    commandID: UUID(),
+                    ownerToken: ownerToken,
+                    outcomeUnknown: false
+                )
+                current = next
+                claimed = next
+            }
+        }
+        pendingCreate = latest
+        return claimed
+    }
+
+    private func markPendingCreateUnknown(session: HumanSession, workspaceID: UUID, commandID: UUID, ownerToken: UUID) {
+        pendingCreate = TodoPendingWriteStore.shared.updatePendingCreate(for: session, workspaceID: workspaceID) { current in
+            guard let existing = current, existing.commandID == commandID else { return }
+            current = PendingCreate(
+                sessionID: existing.sessionID,
+                workspaceID: existing.workspaceID,
+                title: existing.title,
+                notes: existing.notes,
+                dueOn: existing.dueOn,
+                assignee: existing.assignee,
+                commandID: existing.commandID,
+                ownerToken: ownerToken,
+                outcomeUnknown: true
+            )
+        }
+    }
+
+    private func clearPreDispatchPendingCreate(session: HumanSession, workspaceID: UUID, commandID: UUID, ownerToken: UUID) {
+        pendingCreate = TodoPendingWriteStore.shared.updatePendingCreate(for: session, workspaceID: workspaceID) { current in
+            guard let existing = current,
+                  existing.commandID == commandID,
+                  existing.ownerToken == ownerToken,
+                  !existing.outcomeUnknown else { return }
+            current = nil
+        }
+    }
+
+    private func resolvePendingCreate(session: HumanSession, workspaceID: UUID, commandID: UUID) {
+        pendingCreate = TodoPendingWriteStore.shared.updatePendingCreate(for: session, workspaceID: workspaceID) { current in
+            guard current?.commandID == commandID else { return }
+            current = nil
+        }
+    }
+
+    private func clearOwnedPendingCreate(session: HumanSession, workspaceID: UUID, commandID: UUID, ownerToken: UUID) {
+        pendingCreate = TodoPendingWriteStore.shared.updatePendingCreate(for: session, workspaceID: workspaceID) { current in
+            guard let existing = current,
+                  existing.commandID == commandID,
+                  existing.ownerToken == ownerToken else { return }
+            current = nil
+        }
     }
 
     private func bindContext(session: HumanSession, workspaceID: UUID) -> Bool {
@@ -980,21 +1124,21 @@ final class TodoListViewModel: ObservableObject {
         let capturedSession = api.session
         let sessionID = ObjectIdentifier(capturedSession)
         let capturedAccessGen = accessGeneration
+        let attemptToken = UUID()
 
-        let record: PendingCreate
-        if let existing = pendingCreate, existing.sessionID == sessionID, existing.workspaceID == workspaceID {
-            if existing.title == title && existing.notes == notes && existing.dueOn == dueOn && existing.assignee == assignee {
-                record = existing
-            } else if existing.outcomeUnknown {
+        guard let record = claimPendingCreate(
+            session: capturedSession,
+            workspaceID: workspaceID,
+            title: title,
+            notes: notes,
+            dueOn: dueOn,
+            assignee: assignee,
+            ownerToken: attemptToken
+        ) else {
+            if let existing = pendingCreate {
                 createError = "An earlier add for “\(existing.title)” has an unknown outcome. Retry it unchanged to confirm its status before adding a different to-do."
-                return nil
-            } else {
-                record = PendingCreate(sessionID: sessionID, workspaceID: workspaceID, title: title, notes: notes, dueOn: dueOn, assignee: assignee, commandID: UUID(), outcomeUnknown: false)
-                savePendingCreate(record)
             }
-        } else {
-            record = PendingCreate(sessionID: sessionID, workspaceID: workspaceID, title: title, notes: notes, dueOn: dueOn, assignee: assignee, commandID: UUID(), outcomeUnknown: false)
-            savePendingCreate(record)
+            return nil
         }
 
         let wasAlreadyUnknown = record.outcomeUnknown
@@ -1012,10 +1156,12 @@ final class TodoListViewModel: ObservableObject {
                 return false
             }
             dispatchFlag.entered = true
-            if var current = self.pendingCreate, current.commandID == record.commandID {
-                current.outcomeUnknown = true
-                self.savePendingCreate(current)
-            }
+            self.markPendingCreateUnknown(
+                session: capturedSession,
+                workspaceID: workspaceID,
+                commandID: record.commandID,
+                ownerToken: attemptToken
+            )
             return true
         }
 
@@ -1033,8 +1179,13 @@ final class TodoListViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingCreate?.commandID == record.commandID {
-                savePendingCreate(nil)
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingCreate(
+                    session: capturedSession,
+                    workspaceID: workspaceID,
+                    commandID: record.commandID,
+                    ownerToken: attemptToken
+                )
             }
             if !capturedSession.isActive {
                 clearOnAccessLoss(reason: "unauthorized", clearPending: true)
@@ -1050,12 +1201,12 @@ final class TodoListViewModel: ObservableObject {
 
         switch outcome {
         case .committed(let created, _):
-            savePendingCreate(nil)
+            resolvePendingCreate(session: capturedSession, workspaceID: workspaceID, commandID: record.commandID)
             activeCreateSession = nil
             await load(api: api, workspaceID: workspaceID)
             return created
         case .conflict(_, let message):
-            savePendingCreate(nil)
+            resolvePendingCreate(session: capturedSession, workspaceID: workspaceID, commandID: record.commandID)
             createError = message
             await load(api: api, workspaceID: workspaceID)
             return nil
@@ -1064,7 +1215,14 @@ final class TodoListViewModel: ObservableObject {
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: "add", refusalMessage: message)
                 : message
-            if !keepUnknown { savePendingCreate(nil) }
+            if !keepUnknown {
+                clearOwnedPendingCreate(
+                    session: capturedSession,
+                    workspaceID: workspaceID,
+                    commandID: record.commandID,
+                    ownerToken: attemptToken
+                )
+            }
             if TodoRules.isAccessLossReason(reason) {
                 clearOnAccessLoss(reason: reason, clearPending: !capturedSession.isActive)
             } else if reason == "content_read_only" {
@@ -1115,6 +1273,7 @@ final class TodoDetailViewModel: ObservableObject {
         let version: Int
         let state: TodoState
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -1125,6 +1284,7 @@ final class TodoDetailViewModel: ObservableObject {
         let version: Int
         let to: TodoParty?
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -1135,6 +1295,7 @@ final class TodoDetailViewModel: ObservableObject {
         let offerID: UUID
         let answer: TodoOfferAnswer
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -1147,6 +1308,7 @@ final class TodoDetailViewModel: ObservableObject {
         let notes: String
         let dueOn: String?
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -1157,6 +1319,7 @@ final class TodoDetailViewModel: ObservableObject {
         let body: String
         let mentions: [TodoParty]
         let commandID: UUID
+        let ownerToken: UUID
         var outcomeUnknown: Bool
     }
 
@@ -1238,7 +1401,7 @@ final class TodoDetailViewModel: ObservableObject {
               let liveOffer = current.offer,
               liveOffer.offer_id == pending.offerID else { return }
         if !offerRolePermitted(liveOffer, answer: pending.answer, viewerUserID: viewerUserID) {
-            savePendingOffer(nil)
+            resolvePendingOffer(session: activeSession, workspaceID: activeWorkspaceID, todoID: pending.todoID, commandID: pending.commandID)
         }
     }
 
@@ -1286,11 +1449,13 @@ final class TodoDetailViewModel: ObservableObject {
                   pending.todoID == todoID,
                   pending.offerID == offerID,
                   pending.answer == answer else { return false }
+            let attemptToken = UUID()
             return await executeAnswerOffer(
                 todoID: todoID,
                 offerID: offerID,
                 answer: answer,
                 commandID: item.commandID,
+                ownerToken: attemptToken,
                 wasAlreadyUnknown: true,
                 requireDisplayedOffer: false,
                 api: api,
@@ -1303,11 +1468,13 @@ final class TodoDetailViewModel: ObservableObject {
                   pending.todoID == todoID,
                   pending.version == baseVersion,
                   pending.state == state else { return false }
+            let attemptToken = UUID()
             return await executeSetState(
                 todoID: todoID,
                 baseVersion: baseVersion,
                 target: state,
                 commandID: item.commandID,
+                ownerToken: attemptToken,
                 wasAlreadyUnknown: true,
                 requireCurrentMatch: false,
                 api: api,
@@ -1320,11 +1487,13 @@ final class TodoDetailViewModel: ObservableObject {
                   pending.todoID == todoID,
                   pending.version == baseVersion,
                   pending.to == to else { return false }
+            let attemptToken = UUID()
             return await executeAssign(
                 todoID: todoID,
                 baseVersion: baseVersion,
                 to: to,
                 commandID: item.commandID,
+                ownerToken: attemptToken,
                 wasAlreadyUnknown: true,
                 boundAssignSessionID: nil,
                 api: api,
@@ -1339,6 +1508,7 @@ final class TodoDetailViewModel: ObservableObject {
                   pending.title == title,
                   pending.notes == notes,
                   pending.dueOn == dueOn else { return false }
+            let attemptToken = UUID()
             return await executeUpdate(
                 todoID: todoID,
                 baseVersion: baseVersion,
@@ -1346,6 +1516,7 @@ final class TodoDetailViewModel: ObservableObject {
                 notes: notes,
                 dueOn: dueOn,
                 commandID: item.commandID,
+                ownerToken: attemptToken,
                 wasAlreadyUnknown: true,
                 boundEditSessionID: nil,
                 api: api,
@@ -1425,48 +1596,308 @@ final class TodoDetailViewModel: ObservableObject {
         }
     }
 
-    private func savePendingState(_ value: PendingState?) {
-        pendingState = value
-        TodoPendingWriteStore.shared.updateDetailBucket(for: activeSession, workspaceID: activeWorkspaceID, todoID: activeTodoID) {
-            $0.state = value
-        }
-    }
+    // MARK: - Live-store-guarded pending write helpers (owner-token fenced)
 
-    private func savePendingAssign(_ value: PendingAssign?) {
-        pendingAssign = value
-        TodoPendingWriteStore.shared.updateDetailBucket(for: activeSession, workspaceID: activeWorkspaceID, todoID: activeTodoID) {
-            $0.assign = value
-        }
-    }
-
-    private func savePendingOffer(_ value: PendingOffer?) {
-        pendingOffer = value
-        TodoPendingWriteStore.shared.updateDetailBucket(for: activeSession, workspaceID: activeWorkspaceID, todoID: activeTodoID) {
-            $0.offer = value
-        }
-    }
-
-    private func savePendingUpdate(_ value: PendingUpdate?) {
-        pendingUpdate = value
-        TodoPendingWriteStore.shared.updateDetailBucket(for: activeSession, workspaceID: activeWorkspaceID, todoID: activeTodoID) {
-            $0.update = value
-        }
-    }
-
-    private func savePendingComment(_ value: PendingComment?) {
-        pendingComment = value
-        TodoPendingWriteStore.shared.updateDetailBucket(for: activeSession, workspaceID: activeWorkspaceID, todoID: activeTodoID) {
-            $0.comment = value
-        }
-    }
-
-    private func hydratePending(session: HumanSession, workspaceID: UUID, todoID: UUID) {
-        let bucket = TodoPendingWriteStore.shared.detailBucket(for: session, workspaceID: workspaceID, todoID: todoID)
+    private func syncBucket(_ bucket: TodoPendingWriteStore.DetailBucket) {
         pendingState = bucket.state
         pendingAssign = bucket.assign
         pendingOffer = bucket.offer
         pendingUpdate = bucket.update
         pendingComment = bucket.comment
+    }
+
+    private func claimPendingState(session: HumanSession, workspaceID: UUID, todoID: UUID, baseVersion: Int, target: TodoState, ownerToken: UUID) -> PendingState? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingState?
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            if let existing = b.state, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.todoID == todoID && existing.version == baseVersion && existing.state == target {
+                    let next = PendingState(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, state: target, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    b.state = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingState(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, state: target, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    b.state = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingState(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, state: target, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                b.state = next
+                claimed = next
+            }
+        }
+        syncBucket(bucket)
+        return claimed
+    }
+
+    private func markPendingStateUnknown(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.state, existing.commandID == commandID else { return }
+            b.state = PendingState(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, version: existing.version, state: existing.state, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearPreDispatchPendingState(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.state, existing.commandID == commandID, existing.ownerToken == ownerToken, !existing.outcomeUnknown else { return }
+            b.state = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func resolvePendingState(session: HumanSession?, workspaceID: UUID?, todoID: UUID?, commandID: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard b.state?.commandID == commandID else { return }
+            b.state = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearOwnedPendingState(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.state, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
+            b.state = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func claimPendingAssign(session: HumanSession, workspaceID: UUID, todoID: UUID, baseVersion: Int, to: TodoParty?, ownerToken: UUID) -> PendingAssign? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingAssign?
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            if let existing = b.assign, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.todoID == todoID && existing.version == baseVersion && existing.to == to {
+                    let next = PendingAssign(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, to: to, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    b.assign = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingAssign(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, to: to, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    b.assign = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingAssign(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, to: to, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                b.assign = next
+                claimed = next
+            }
+        }
+        syncBucket(bucket)
+        return claimed
+    }
+
+    private func markPendingAssignUnknown(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.assign, existing.commandID == commandID else { return }
+            b.assign = PendingAssign(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, version: existing.version, to: existing.to, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearPreDispatchPendingAssign(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.assign, existing.commandID == commandID, existing.ownerToken == ownerToken, !existing.outcomeUnknown else { return }
+            b.assign = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func resolvePendingAssign(session: HumanSession?, workspaceID: UUID?, todoID: UUID?, commandID: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard b.assign?.commandID == commandID else { return }
+            b.assign = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearOwnedPendingAssign(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.assign, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
+            b.assign = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func claimPendingOffer(session: HumanSession, workspaceID: UUID, todoID: UUID, offerID: UUID, answer: TodoOfferAnswer, ownerToken: UUID) -> PendingOffer? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingOffer?
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            if let existing = b.offer, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.todoID == todoID && existing.offerID == offerID && existing.answer == answer {
+                    let next = PendingOffer(sessionID: sid, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    b.offer = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingOffer(sessionID: sid, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    b.offer = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingOffer(sessionID: sid, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                b.offer = next
+                claimed = next
+            }
+        }
+        syncBucket(bucket)
+        return claimed
+    }
+
+    private func markPendingOfferUnknown(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.offer, existing.commandID == commandID else { return }
+            b.offer = PendingOffer(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, offerID: existing.offerID, answer: existing.answer, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearPreDispatchPendingOffer(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.offer, existing.commandID == commandID, existing.ownerToken == ownerToken, !existing.outcomeUnknown else { return }
+            b.offer = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func resolvePendingOffer(session: HumanSession?, workspaceID: UUID?, todoID: UUID?, commandID: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard b.offer?.commandID == commandID else { return }
+            b.offer = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearOwnedPendingOffer(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.offer, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
+            b.offer = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func claimPendingUpdate(session: HumanSession, workspaceID: UUID, todoID: UUID, baseVersion: Int, title: String, notes: String, dueOn: String?, ownerToken: UUID) -> PendingUpdate? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingUpdate?
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            if let existing = b.update, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.todoID == todoID && existing.version == baseVersion && existing.title == title && existing.notes == notes && existing.dueOn == dueOn {
+                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    b.update = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    b.update = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                b.update = next
+                claimed = next
+            }
+        }
+        syncBucket(bucket)
+        return claimed
+    }
+
+    private func markPendingUpdateUnknown(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.update, existing.commandID == commandID else { return }
+            b.update = PendingUpdate(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, version: existing.version, title: existing.title, notes: existing.notes, dueOn: existing.dueOn, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearPreDispatchPendingUpdate(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.update, existing.commandID == commandID, existing.ownerToken == ownerToken, !existing.outcomeUnknown else { return }
+            b.update = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func resolvePendingUpdate(session: HumanSession?, workspaceID: UUID?, todoID: UUID?, commandID: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard b.update?.commandID == commandID else { return }
+            b.update = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearOwnedPendingUpdate(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.update, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
+            b.update = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func claimPendingComment(session: HumanSession, workspaceID: UUID, todoID: UUID, body: String, mentions: [TodoParty], ownerToken: UUID) -> PendingComment? {
+        let sid = ObjectIdentifier(session)
+        var claimed: PendingComment?
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            if let existing = b.comment, existing.sessionID == sid, existing.workspaceID == workspaceID {
+                if existing.todoID == todoID && existing.body == body && existing.mentions == mentions {
+                    let next = PendingComment(sessionID: sid, workspaceID: workspaceID, todoID: todoID, body: body, mentions: mentions, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: existing.outcomeUnknown)
+                    b.comment = next
+                    claimed = next
+                } else if existing.outcomeUnknown {
+                    claimed = nil
+                } else {
+                    let next = PendingComment(sessionID: sid, workspaceID: workspaceID, todoID: todoID, body: body, mentions: mentions, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                    b.comment = next
+                    claimed = next
+                }
+            } else {
+                let next = PendingComment(sessionID: sid, workspaceID: workspaceID, todoID: todoID, body: body, mentions: mentions, commandID: UUID(), ownerToken: ownerToken, outcomeUnknown: false)
+                b.comment = next
+                claimed = next
+            }
+        }
+        syncBucket(bucket)
+        return claimed
+    }
+
+    private func markPendingCommentUnknown(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.comment, existing.commandID == commandID else { return }
+            b.comment = PendingComment(sessionID: existing.sessionID, workspaceID: existing.workspaceID, todoID: existing.todoID, body: existing.body, mentions: existing.mentions, commandID: existing.commandID, ownerToken: ownerToken, outcomeUnknown: true)
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearPreDispatchPendingComment(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.comment, existing.commandID == commandID, existing.ownerToken == ownerToken, !existing.outcomeUnknown else { return }
+            b.comment = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func resolvePendingComment(session: HumanSession?, workspaceID: UUID?, todoID: UUID?, commandID: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard b.comment?.commandID == commandID else { return }
+            b.comment = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func clearOwnedPendingComment(session: HumanSession, workspaceID: UUID, todoID: UUID, commandID: UUID, ownerToken: UUID) {
+        let bucket = TodoPendingWriteStore.shared.updateDetailBucket(for: session, workspaceID: workspaceID, todoID: todoID) { b in
+            guard let existing = b.comment, existing.commandID == commandID, existing.ownerToken == ownerToken else { return }
+            b.comment = nil
+        }
+        syncBucket(bucket)
+    }
+
+    private func hydratePending(session: HumanSession, workspaceID: UUID, todoID: UUID) {
+        syncBucket(TodoPendingWriteStore.shared.detailBucket(for: session, workspaceID: workspaceID, todoID: todoID))
     }
 
     private func bindContext(session: HumanSession, workspaceID: UUID, todoID: UUID) -> Bool {
@@ -1675,32 +2106,18 @@ final class TodoDetailViewModel: ObservableObject {
             actionError = "This to-do changed since you loaded it. Review the latest version and try again."
             return false
         }
-        let sid = ObjectIdentifier(api.session)
-        let commandID: UUID
-        let wasAlreadyUnknown: Bool
-        if let existing = pendingState, existing.sessionID == sid, existing.workspaceID == workspaceID {
-            if existing.todoID == todoID && existing.version == baseVersion && existing.state == target {
-                commandID = existing.commandID
-                wasAlreadyUnknown = existing.outcomeUnknown
-            } else if existing.outcomeUnknown {
-                actionError = "An earlier state change has an unknown outcome. Retry it unchanged to check before making another change."
-                return false
-            } else {
-                commandID = UUID()
-                wasAlreadyUnknown = false
-                savePendingState(PendingState(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, state: target, commandID: commandID, outcomeUnknown: false))
-            }
-        } else {
-            commandID = UUID()
-            wasAlreadyUnknown = false
-            savePendingState(PendingState(sessionID: sid, workspaceID: workspaceID, todoID: todoID, version: baseVersion, state: target, commandID: commandID, outcomeUnknown: false))
+        let attemptToken = UUID()
+        guard let claimed = claimPendingState(session: api.session, workspaceID: workspaceID, todoID: todoID, baseVersion: baseVersion, target: target, ownerToken: attemptToken) else {
+            actionError = "An earlier state change has an unknown outcome. Retry it unchanged to check before making another change."
+            return false
         }
         return await executeSetState(
             todoID: todoID,
             baseVersion: baseVersion,
             target: target,
-            commandID: commandID,
-            wasAlreadyUnknown: wasAlreadyUnknown,
+            commandID: claimed.commandID,
+            ownerToken: attemptToken,
+            wasAlreadyUnknown: claimed.outcomeUnknown,
             requireCurrentMatch: true,
             api: api,
             workspaceID: workspaceID
@@ -1712,6 +2129,7 @@ final class TodoDetailViewModel: ObservableObject {
         baseVersion: Int,
         target: TodoState,
         commandID: UUID,
+        ownerToken: UUID,
         wasAlreadyUnknown: Bool,
         requireCurrentMatch: Bool,
         api: TodoAPI,
@@ -1733,10 +2151,7 @@ final class TodoDetailViewModel: ObservableObject {
                 guard self.detail?.todo_id == todoID, self.detail?.version == baseVersion else { return false }
             }
             dispatchFlag.entered = true
-            if var current = self.pendingState, current.commandID == commandID {
-                current.outcomeUnknown = true
-                self.savePendingState(current)
-            }
+            self.markPendingStateUnknown(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
             return true
         }
 
@@ -1754,7 +2169,9 @@ final class TodoDetailViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingState?.commandID == commandID { savePendingState(nil) }
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingState(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
+            }
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
@@ -1768,7 +2185,8 @@ final class TodoDetailViewModel: ObservableObject {
             workspaceID: workspaceID,
             actionName: "state change",
             wasAlreadyUnknown: wasAlreadyUnknown,
-            clearPending: { self.savePendingState(nil) },
+            resolvePending: { self.resolvePendingState(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID) },
+            clearOwnedPending: { self.clearOwnedPendingState(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken) },
             successMessage: { _ in self.stateMessage(for: target) }
         )
     }
@@ -1798,32 +2216,18 @@ final class TodoDetailViewModel: ObservableObject {
             actionError = "This to-do changed since you opened assignment. Review the latest version and try again."
             return false
         }
-        let sid = ObjectIdentifier(api.session)
-        let commandID: UUID
-        let wasAlreadyUnknown: Bool
-        if let existing = pendingAssign, existing.sessionID == sid, existing.workspaceID == workspaceID {
-            if existing.todoID == assignSession.todoID && existing.version == assignSession.baseVersion && existing.to == party {
-                commandID = existing.commandID
-                wasAlreadyUnknown = existing.outcomeUnknown
-            } else if existing.outcomeUnknown {
-                actionError = "An earlier assignment change has an unknown outcome. Retry it unchanged to check before changing it again."
-                return false
-            } else {
-                commandID = UUID()
-                wasAlreadyUnknown = false
-                savePendingAssign(PendingAssign(sessionID: sid, workspaceID: workspaceID, todoID: assignSession.todoID, version: assignSession.baseVersion, to: party, commandID: commandID, outcomeUnknown: false))
-            }
-        } else {
-            commandID = UUID()
-            wasAlreadyUnknown = false
-            savePendingAssign(PendingAssign(sessionID: sid, workspaceID: workspaceID, todoID: assignSession.todoID, version: assignSession.baseVersion, to: party, commandID: commandID, outcomeUnknown: false))
+        let attemptToken = UUID()
+        guard let claimed = claimPendingAssign(session: api.session, workspaceID: workspaceID, todoID: assignSession.todoID, baseVersion: assignSession.baseVersion, to: party, ownerToken: attemptToken) else {
+            actionError = "An earlier assignment change has an unknown outcome. Retry it unchanged to check before changing it again."
+            return false
         }
         return await executeAssign(
             todoID: assignSession.todoID,
             baseVersion: assignSession.baseVersion,
             to: party,
-            commandID: commandID,
-            wasAlreadyUnknown: wasAlreadyUnknown,
+            commandID: claimed.commandID,
+            ownerToken: attemptToken,
+            wasAlreadyUnknown: claimed.outcomeUnknown,
             boundAssignSessionID: assignSession.id,
             api: api,
             workspaceID: workspaceID
@@ -1835,6 +2239,7 @@ final class TodoDetailViewModel: ObservableObject {
         baseVersion: Int,
         to party: TodoParty?,
         commandID: UUID,
+        ownerToken: UUID,
         wasAlreadyUnknown: Bool,
         boundAssignSessionID: UUID?,
         api: TodoAPI,
@@ -1858,10 +2263,7 @@ final class TodoDetailViewModel: ObservableObject {
                       self.detail?.version == baseVersion else { return false }
             }
             dispatchFlag.entered = true
-            if var current = self.pendingAssign, current.commandID == commandID {
-                current.outcomeUnknown = true
-                self.savePendingAssign(current)
-            }
+            self.markPendingAssignUnknown(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
             return true
         }
 
@@ -1879,7 +2281,9 @@ final class TodoDetailViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingAssign?.commandID == commandID { savePendingAssign(nil) }
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingAssign(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
+            }
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
@@ -1893,7 +2297,8 @@ final class TodoDetailViewModel: ObservableObject {
             workspaceID: workspaceID,
             actionName: "assignment",
             wasAlreadyUnknown: wasAlreadyUnknown,
-            clearPending: { self.savePendingAssign(nil) },
+            resolvePending: { self.resolvePendingAssign(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID) },
+            clearOwnedPending: { self.clearOwnedPendingAssign(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken) },
             successMessage: { receipt in
                 if receipt.offer != nil {
                     return "Work request sent."
@@ -1940,32 +2345,18 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
 
-        let sid = ObjectIdentifier(api.session)
-        let commandID: UUID
-        let wasAlreadyUnknown: Bool
-        if let existing = pendingOffer, existing.sessionID == sid, existing.workspaceID == workspaceID {
-            if existing.todoID == todoID && existing.offerID == offerID && existing.answer == answer {
-                commandID = existing.commandID
-                wasAlreadyUnknown = existing.outcomeUnknown
-            } else if existing.outcomeUnknown {
-                actionError = "An earlier response to this request has an unknown outcome. Retry it unchanged to check first."
-                return false
-            } else {
-                commandID = UUID()
-                wasAlreadyUnknown = false
-                savePendingOffer(PendingOffer(sessionID: sid, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, commandID: commandID, outcomeUnknown: false))
-            }
-        } else {
-            commandID = UUID()
-            wasAlreadyUnknown = false
-            savePendingOffer(PendingOffer(sessionID: sid, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, commandID: commandID, outcomeUnknown: false))
+        let attemptToken = UUID()
+        guard let claimed = claimPendingOffer(session: api.session, workspaceID: workspaceID, todoID: todoID, offerID: offerID, answer: answer, ownerToken: attemptToken) else {
+            actionError = "An earlier response to this request has an unknown outcome. Retry it unchanged to check first."
+            return false
         }
         return await executeAnswerOffer(
             todoID: todoID,
             offerID: offerID,
             answer: answer,
-            commandID: commandID,
-            wasAlreadyUnknown: wasAlreadyUnknown,
+            commandID: claimed.commandID,
+            ownerToken: attemptToken,
+            wasAlreadyUnknown: claimed.outcomeUnknown,
             requireDisplayedOffer: true,
             api: api,
             workspaceID: workspaceID
@@ -1977,6 +2368,7 @@ final class TodoDetailViewModel: ObservableObject {
         offerID: UUID,
         answer: TodoOfferAnswer,
         commandID: UUID,
+        ownerToken: UUID,
         wasAlreadyUnknown: Bool,
         requireDisplayedOffer: Bool,
         api: TodoAPI,
@@ -1985,6 +2377,7 @@ final class TodoDetailViewModel: ObservableObject {
         guard !isRetired else { return false }
         guard bindContext(session: api.session, workspaceID: workspaceID, todoID: todoID) else { return false }
         guard !isMutating, canUpdate else { return false }
+        let capturedSession = api.session
         let viewerID = api.viewerUserID
         if !requireDisplayedOffer,
            let current = detail,
@@ -1994,12 +2387,11 @@ final class TodoDetailViewModel: ObservableObject {
            !offerRolePermitted(liveOffer, answer: answer, viewerUserID: viewerID) {
             // Original offer is still live on screen and the viewer lost role authority:
             // the prior attempt could not have committed, so drop the pending retry with zero sends.
-            savePendingOffer(nil)
+            resolvePendingOffer(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID)
             actionError = TodoRules.refusalMessage("not_decider")
             return false
         }
 
-        let capturedSession = api.session
         let sid = ObjectIdentifier(capturedSession)
         let capturedAccessGen = accessGeneration
         let dispatchFlag = TodoDispatchFlag()
@@ -2019,15 +2411,12 @@ final class TodoDetailViewModel: ObservableObject {
                       let liveOffer = current.offer,
                       liveOffer.offer_id == offerID {
                 guard self.offerRolePermitted(liveOffer, answer: answer, viewerUserID: viewerID) else {
-                    self.savePendingOffer(nil)
+                    self.resolvePendingOffer(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID)
                     return false
                 }
             }
             dispatchFlag.entered = true
-            if var current = self.pendingOffer, current.commandID == commandID {
-                current.outcomeUnknown = true
-                self.savePendingOffer(current)
-            }
+            self.markPendingOfferUnknown(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
             return true
         }
 
@@ -2045,7 +2434,9 @@ final class TodoDetailViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingOffer?.commandID == commandID { savePendingOffer(nil) }
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingOffer(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
+            }
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
@@ -2065,7 +2456,8 @@ final class TodoDetailViewModel: ObservableObject {
             workspaceID: workspaceID,
             actionName: "request response",
             wasAlreadyUnknown: wasAlreadyUnknown,
-            clearPending: { self.savePendingOffer(nil) },
+            resolvePending: { self.resolvePendingOffer(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID) },
+            clearOwnedPending: { self.clearOwnedPendingOffer(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken) },
             successMessage: { _ in msg }
         )
     }
@@ -2113,29 +2505,10 @@ final class TodoDetailViewModel: ObservableObject {
             return false
         }
 
-        let sid = ObjectIdentifier(api.session)
-        let commandID: UUID
-        let wasAlreadyUnknown: Bool
-        if let existing = pendingUpdate, existing.sessionID == sid, existing.workspaceID == workspaceID {
-            if existing.todoID == editSession.todoID
-                && existing.version == editSession.baseVersion
-                && existing.title == title
-                && existing.notes == notes
-                && existing.dueOn == dueOn {
-                commandID = existing.commandID
-                wasAlreadyUnknown = existing.outcomeUnknown
-            } else if existing.outcomeUnknown {
-                actionError = "An earlier edit has an unknown outcome. Retry it unchanged to check before saving different changes."
-                return false
-            } else {
-                commandID = UUID()
-                wasAlreadyUnknown = false
-                savePendingUpdate(PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: editSession.todoID, version: editSession.baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: commandID, outcomeUnknown: false))
-            }
-        } else {
-            commandID = UUID()
-            wasAlreadyUnknown = false
-            savePendingUpdate(PendingUpdate(sessionID: sid, workspaceID: workspaceID, todoID: editSession.todoID, version: editSession.baseVersion, title: title, notes: notes, dueOn: dueOn, commandID: commandID, outcomeUnknown: false))
+        let attemptToken = UUID()
+        guard let claimed = claimPendingUpdate(session: api.session, workspaceID: workspaceID, todoID: editSession.todoID, baseVersion: editSession.baseVersion, title: title, notes: notes, dueOn: dueOn, ownerToken: attemptToken) else {
+            actionError = "An earlier edit has an unknown outcome. Retry it unchanged to check before saving different changes."
+            return false
         }
         return await executeUpdate(
             todoID: editSession.todoID,
@@ -2143,8 +2516,9 @@ final class TodoDetailViewModel: ObservableObject {
             title: title,
             notes: notes,
             dueOn: dueOn,
-            commandID: commandID,
-            wasAlreadyUnknown: wasAlreadyUnknown,
+            commandID: claimed.commandID,
+            ownerToken: attemptToken,
+            wasAlreadyUnknown: claimed.outcomeUnknown,
             boundEditSessionID: editSession.id,
             api: api,
             workspaceID: workspaceID
@@ -2158,6 +2532,7 @@ final class TodoDetailViewModel: ObservableObject {
         notes: String,
         dueOn: String?,
         commandID: UUID,
+        ownerToken: UUID,
         wasAlreadyUnknown: Bool,
         boundEditSessionID: UUID?,
         api: TodoAPI,
@@ -2181,10 +2556,7 @@ final class TodoDetailViewModel: ObservableObject {
                       self.detail?.version == baseVersion else { return false }
             }
             dispatchFlag.entered = true
-            if var current = self.pendingUpdate, current.commandID == commandID {
-                current.outcomeUnknown = true
-                self.savePendingUpdate(current)
-            }
+            self.markPendingUpdateUnknown(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
             return true
         }
 
@@ -2204,7 +2576,9 @@ final class TodoDetailViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingUpdate?.commandID == commandID { savePendingUpdate(nil) }
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingUpdate(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken)
+            }
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
@@ -2218,7 +2592,8 @@ final class TodoDetailViewModel: ObservableObject {
             workspaceID: workspaceID,
             actionName: "edit",
             wasAlreadyUnknown: wasAlreadyUnknown,
-            clearPending: { self.savePendingUpdate(nil) },
+            resolvePending: { self.resolvePendingUpdate(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID) },
+            clearOwnedPending: { self.clearOwnedPendingUpdate(session: capturedSession, workspaceID: workspaceID, todoID: todoID, commandID: commandID, ownerToken: ownerToken) },
             successMessage: { _ in "Saved." }
         )
         if ok { activeEditSession = nil }
@@ -2252,25 +2627,13 @@ final class TodoDetailViewModel: ObservableObject {
         let capturedSession = api.session
         let sid = ObjectIdentifier(capturedSession)
         let capturedAccessGen = accessGeneration
-        let commandID: UUID
-        let wasAlreadyUnknown: Bool
-        if let existing = pendingComment, existing.sessionID == sid, existing.workspaceID == workspaceID {
-            if existing.todoID == current.todo_id && existing.body == body && existing.mentions == canonical {
-                commandID = existing.commandID
-                wasAlreadyUnknown = existing.outcomeUnknown
-            } else if existing.outcomeUnknown {
-                actionError = "An earlier comment has an unknown outcome. Retry it unchanged to check first."
-                return false
-            } else {
-                commandID = UUID()
-                wasAlreadyUnknown = false
-                savePendingComment(PendingComment(sessionID: sid, workspaceID: workspaceID, todoID: current.todo_id, body: body, mentions: canonical, commandID: commandID, outcomeUnknown: false))
-            }
-        } else {
-            commandID = UUID()
-            wasAlreadyUnknown = false
-            savePendingComment(PendingComment(sessionID: sid, workspaceID: workspaceID, todoID: current.todo_id, body: body, mentions: canonical, commandID: commandID, outcomeUnknown: false))
+        let attemptToken = UUID()
+        guard let claimed = claimPendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, body: body, mentions: canonical, ownerToken: attemptToken) else {
+            actionError = "An earlier comment has an unknown outcome. Retry it unchanged to check first."
+            return false
         }
+        let commandID = claimed.commandID
+        let wasAlreadyUnknown = claimed.outcomeUnknown
 
         let dispatchFlag = TodoDispatchFlag()
         let writeGate: @MainActor @Sendable () -> Bool = { [weak self] in
@@ -2278,10 +2641,7 @@ final class TodoDetailViewModel: ObservableObject {
             guard !self.isRetired, capturedSession.isActive, self.activeSessionID == sid,
                   self.accessGeneration == capturedAccessGen, self.canCreateComment else { return false }
             dispatchFlag.entered = true
-            if var existingPending = self.pendingComment, existingPending.commandID == commandID {
-                existingPending.outcomeUnknown = true
-                self.savePendingComment(existingPending)
-            }
+            self.markPendingCommentUnknown(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID, ownerToken: attemptToken)
             return true
         }
 
@@ -2299,7 +2659,9 @@ final class TodoDetailViewModel: ObservableObject {
             canDispatch: writeGate
         )
         if !dispatchFlag.entered {
-            if !wasAlreadyUnknown, pendingComment?.commandID == commandID { savePendingComment(nil) }
+            if !wasAlreadyUnknown {
+                clearPreDispatchPendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID, ownerToken: attemptToken)
+            }
             if !capturedSession.isActive { clearOnAccessLoss(reason: "unauthorized", clearPending: true) }
             return false
         }
@@ -2309,14 +2671,14 @@ final class TodoDetailViewModel: ObservableObject {
         }
         switch outcome {
         case .committed(let comment, _):
-            savePendingComment(nil)
+            resolvePendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID)
             if !comments.contains(where: { $0.comment_id == comment.comment_id }) {
                 comments.append(comment)
             }
             statusMessage = "Comment posted."
             return true
         case .conflict(let latest, let message):
-            savePendingComment(nil)
+            resolvePendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID)
             if let latest, latest.version >= (detail?.version ?? 0) {
                 detail = latest.toDetail(preserving: detail)
             }
@@ -2327,7 +2689,9 @@ final class TodoDetailViewModel: ObservableObject {
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: "comment", refusalMessage: message)
                 : message
-            if !keepUnknown { savePendingComment(nil) }
+            if !keepUnknown {
+                clearOwnedPendingComment(session: capturedSession, workspaceID: workspaceID, todoID: current.todo_id, commandID: commandID, ownerToken: attemptToken)
+            }
             applyRefusal(reason: reason, message: display, session: capturedSession)
             return false
         case .unconfirmed(let message):
@@ -2354,12 +2718,13 @@ final class TodoDetailViewModel: ObservableObject {
         workspaceID: UUID,
         actionName: String,
         wasAlreadyUnknown: Bool,
-        clearPending: () -> Void,
+        resolvePending: () -> Void,
+        clearOwnedPending: () -> Void,
         successMessage: (TodoWriteRecord) -> String
     ) async -> Bool {
         switch outcome {
         case .committed(let receipt, let replayed):
-            clearPending()
+            resolvePending()
             // Authoritative receipt never regresses displayed state if a replayed older receipt arrives after a newer refresh.
             let regressed: Bool
             if let existing = detail {
@@ -2382,7 +2747,7 @@ final class TodoDetailViewModel: ObservableObject {
         case .conflict(let latest, let message):
             activeEditSession = nil
             activeAssignSession = nil
-            clearPending()
+            resolvePending()
             if let latest, latest.version >= (detail?.version ?? 0) {
                 detail = latest.toDetail(preserving: detail)
             }
@@ -2397,7 +2762,7 @@ final class TodoDetailViewModel: ObservableObject {
             let display = keepUnknown
                 ? TodoRules.unknownOutcomeAfterRefusalMessage(action: actionName, refusalMessage: message)
                 : message
-            if !keepUnknown { clearPending() }
+            if !keepUnknown { clearOwnedPending() }
             applyRefusal(reason: reason, message: display, session: api.session)
             return false
         case .unconfirmed(let message):

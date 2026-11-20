@@ -650,6 +650,132 @@ struct VerifyTodoActions {
         expect(replayedCreate != nil && mutAfterReopenCreate == mutBeforeReopenCreate + 1, "Reopened list store retry must replay with EXACTLY 1 server mutation")
 
         // =========================================================================
+        // 5e. C3: Held-before-Back late cleanup from retired view MUST NOT erase
+        //         a reopened view's unresolved comment or create (EXACTLY 1 mutation)
+        // =========================================================================
+        // 5e-1. Comment held-before-Back race (exact 3-view overlap)
+        let mutBeforeOverlapComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let overlapDetail1 = await MainActor.run { TodoDetailViewModel() }
+        await overlapDetail1.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        await MainActor.run { bearer.holdNext(1) }
+        let overlapCommentTask1 = Task {
+            await overlapDetail1.postComment(body: "Held before Back comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        }
+        await bearer.waitUntilHeld()
+        // User taps Back while view 1's bearer lookup is still suspended
+        await MainActor.run { overlapDetail1.retire() }
+
+        // User reopens detail (view 2) in same login, posts same comment -> commits on server then gets 503
+        let overlapDetail2 = await MainActor.run { TodoDetailViewModel() }
+        await overlapDetail2.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let overlapComment2 = await overlapDetail2.postComment(body: "Held before Back comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        let overlapCommentID = await MainActor.run { overlapDetail2.pendingComment?.commandID }
+        let overlap2Unknown = await MainActor.run { overlapDetail2.hasUnknownPendingComment }
+        expect(!overlapComment2 && overlap2Unknown && overlapCommentID != nil, "View 2 must mark committed-then-503 comment as unknown")
+
+        // NOW release view 1's held bearer so view 1 runs its late pre-dispatch cleanup!
+        await MainActor.run { bearer.release() }
+        let overlapComment1Result = await overlapCommentTask1.value
+        expect(!overlapComment1Result, "Retired view 1 must abort before transport")
+
+        // Open view 3 in same login -> MUST still recover view 2's unknown commandID and replay with EXACTLY 1 mutation!
+        let overlapDetail3 = await MainActor.run { TodoDetailViewModel() }
+        await overlapDetail3.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let overlap3Recovered = await MainActor.run {
+            overlapDetail3.hasUnknownPendingComment && overlapDetail3.pendingComment?.commandID == overlapCommentID
+        }
+        expect(overlap3Recovered, "Late pre-dispatch cleanup from retired view 1 must NOT erase view 2's unknown comment")
+        let overlapComment3Replay = await overlapDetail3.postComment(body: "Held before Back comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        let mutAfterOverlapComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        expect(
+            overlapComment3Replay && mutAfterOverlapComment == mutBeforeOverlapComment + 1,
+            "View 3 must replay original commandID with EXACTLY 1 server mutation (never 2)"
+        )
+
+        // 5e-2. Create held-before-Back race (exact 3-view overlap)
+        let mutBeforeOverlapCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        let overlapList1 = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await overlapList1.load(api: todoAPI, workspaceID: ws.id)
+        let overlapCreateSess1 = await MainActor.run { overlapList1.openCreateSheet() }!
+        await MainActor.run { bearer.holdNext(1) }
+        let overlapCreateTask1 = Task {
+            await overlapList1.createTodo(session: overlapCreateSess1, title: "Held before Back create", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        }
+        await bearer.waitUntilHeld()
+        await MainActor.run { overlapList1.retire() }
+
+        let overlapList2 = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await overlapList2.load(api: todoAPI, workspaceID: ws.id)
+        let overlapCreateSess2 = await MainActor.run { overlapList2.openCreateSheet() }!
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let overlapCreate2 = await overlapList2.createTodo(session: overlapCreateSess2, title: "Held before Back create", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        let overlapCreateID = await MainActor.run { overlapList2.pendingCreate?.commandID }
+        let overlapList2Unknown = await MainActor.run { overlapList2.hasUnknownPendingCreate }
+        expect(overlapCreate2 == nil && overlapList2Unknown && overlapCreateID != nil, "List view 2 must mark committed-then-503 create as unknown")
+
+        // Release list view 1's held bearer so its late cleanup runs
+        await MainActor.run { bearer.release() }
+        let overlapCreate1Result = await overlapCreateTask1.value
+        expect(overlapCreate1Result == nil, "Retired list view 1 must abort before transport")
+
+        // Open list view 3 -> MUST still recover view 2's unknown create commandID and replay with EXACTLY 1 mutation!
+        let overlapList3 = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await overlapList3.load(api: todoAPI, workspaceID: ws.id)
+        let overlapList3Retry = await MainActor.run { overlapList3.eligiblePendingCreateRetry }
+        expect(overlapList3Retry?.commandID == overlapCreateID, "Late pre-dispatch cleanup from retired list view 1 must NOT erase view 2's unknown create")
+        let overlapCreate3Replay = await overlapList3.retryPendingCreate(overlapList3Retry!, api: todoAPI, workspaceID: ws.id)
+        let mutAfterOverlapCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        expect(overlapCreate3Replay != nil && mutAfterOverlapCreate == mutBeforeOverlapCreate + 1, "List view 3 must replay create with EXACTLY 1 server mutation")
+
+        // =========================================================================
+        // 5f. C3: HumanSession.signOut() eagerly clears TodoPendingWriteStore (no lazy retention)
+        //         and account switch clears prior login's bucket immediately
+        // =========================================================================
+        let signOutSession = await MainActor.run { HumanSession(userID: tokens.userID) { tokens.accessToken } }
+        let signOutSID = ObjectIdentifier(signOutSession)
+        let signOutAPI = TodoAPI(api: ConversationAPI(origin: origin, publicKey: publicKey, session: signOutSession))
+        let signOutList = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        let signOutDetail = await MainActor.run { TodoDetailViewModel() }
+        await signOutList.load(api: signOutAPI, workspaceID: ws.id)
+        await signOutDetail.load(api: signOutAPI, workspaceID: ws.id, todoID: todoID)
+
+        try await postFixture("\(base)/fixture/fail-next-write")
+        _ = await signOutDetail.postComment(body: "Sensitive comment cleared on sign-out", mentions: [], api: signOutAPI, workspaceID: ws.id)
+        try await postFixture("\(base)/fixture/fail-next-write")
+        let signOutCreateSess = await MainActor.run { signOutList.openCreateSheet() }!
+        _ = await signOutList.createTodo(session: signOutCreateSess, title: "Sensitive create cleared on sign-out", notes: "", dueOn: nil, assignee: nil, api: signOutAPI, workspaceID: ws.id)
+
+        let storedBeforeSignOut = await MainActor.run { TodoPendingWriteStore.shared.hasStoredEntriesUnpruned(for: signOutSID) }
+        expect(storedBeforeSignOut, "Expected pending comment and create stored before sign-out")
+
+        // Sign out WITHOUT calling any Todo store method -> store must be eagerly empty immediately!
+        await MainActor.run { signOutSession.signOut() }
+        let storedImmediatelyAfterSignOut = await MainActor.run { TodoPendingWriteStore.shared.hasStoredEntriesUnpruned(for: signOutSID) }
+        expect(!storedImmediatelyAfterSignOut, "HumanSession.signOut() must eagerly clear TodoPendingWriteStore without waiting for a later store call")
+
+        // Account switch on a live view model clears the previous session's bucket immediately
+        let acctASession = await MainActor.run { HumanSession(userID: tokens.userID) { tokens.accessToken } }
+        let acctASID = ObjectIdentifier(acctASession)
+        let acctAAPI = TodoAPI(api: ConversationAPI(origin: origin, publicKey: publicKey, session: acctASession))
+        let switchedDetail = await MainActor.run { TodoDetailViewModel() }
+        await switchedDetail.load(api: acctAAPI, workspaceID: ws.id, todoID: todoID)
+        try await postFixture("\(base)/fixture/fail-next-write")
+        _ = await switchedDetail.postComment(body: "Account A pending comment", mentions: [], api: acctAAPI, workspaceID: ws.id)
+        let acctAStored = await MainActor.run { TodoPendingWriteStore.shared.hasStoredEntriesUnpruned(for: acctASID) }
+        expect(acctAStored, "Expected Account A pending comment stored before switch")
+
+        let acctBSession = await MainActor.run { HumanSession(userID: tokens.userID) { tokens.accessToken } }
+        let acctBAPI = TodoAPI(api: ConversationAPI(origin: origin, publicKey: publicKey, session: acctBSession))
+        await switchedDetail.load(api: acctBAPI, workspaceID: ws.id, todoID: todoID)
+        let switchedClean = await MainActor.run {
+            !TodoPendingWriteStore.shared.hasStoredEntriesUnpruned(for: acctASID)
+                && !switchedDetail.hasUnknownPendingComment
+                && switchedDetail.eligiblePendingRetries(viewerUserID: tokens.userID).isEmpty
+        }
+        expect(switchedClean, "Account switch must immediately clear prior session bucket and expose zero prior retries")
+
+        // =========================================================================
         // 6. C1: Refusal clears named directory, closes mention picker & sheets, and drops older held comment page errors
         // =========================================================================
         await listVM.load(api: todoAPI, workspaceID: ws.id)
