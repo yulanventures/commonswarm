@@ -757,6 +757,7 @@ export const KNOWN_FLAGS = new Set([
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
+  "wake-profile", "wake-host-session-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
   "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
@@ -8790,6 +8791,7 @@ async function runListenStart(args: Arguments): Promise<void> {
      * an earlier run in this config-hash-keyed directory, whatever pid it carries. Taking it
      * after the spawn would race the child's own first write and could discard a real failure. */
     const startedAtFloorMs = Date.now();
+    const detachedWakeHostSessionId = args.expandedProfileHostSessionId ?? args.optional("host-session-id");
     const child = await spawnDetachedListener({
       spec: {
         entrypoint,
@@ -8803,6 +8805,12 @@ async function runListenStart(args: Arguments): Promise<void> {
         nodeExecArgv: process.execArgv,
         route: routing.routeMode,
         ...(stateDirectory ? { stateDirectory } : {}),
+        ...(args.expandedProfilePath && detachedWakeHostSessionId
+          ? {
+            wakeProfilePath: args.expandedProfilePath,
+            wakeHostSessionId: detachedWakeHostSessionId,
+          }
+          : {}),
         ...(args.optional("model") ? { model: args.required("model") } : {}),
         ...(args.optional("effort") ? { effort: args.required("effort") } : {}),
         ...(args.optional("turn-budget")
@@ -8951,6 +8959,8 @@ export const RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS = [
     "poll-interval",
     "route",
     "defer-over",
+    "wake-profile",
+    "wake-host-session-id",
     ...SESSION_CONTEXT_FLAGS,
   ] as const;
 
@@ -8976,6 +8986,14 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
   assertDurableListenerCredential(agent, principalId);
   const cwd = args.required("cwd");
   if (!isAbsolute(cwd)) throw new Error("--cwd must be an absolute path");
+  const wakeProfile = args.optional("wake-profile");
+  const wakeHostSessionId = args.optional("wake-host-session-id");
+  if ((wakeProfile === undefined) !== (wakeHostSessionId === undefined)) {
+    throw new Error("--wake-profile and --wake-host-session-id must be paired");
+  }
+  if (wakeProfile !== undefined && !isAbsolute(wakeProfile)) {
+    throw new Error("--wake-profile must be an absolute path");
+  }
   const status = await runConfiguredListener({
     cloud,
     workspaceId,
@@ -9003,6 +9021,9 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
       : {}),
     ...(listenerStateDirectory(args)
       ? { stateDirectory: listenerStateDirectory(args) }
+      : {}),
+    ...(wakeProfile && wakeHostSessionId
+      ? { profilePath: wakeProfile, hostSessionId: wakeHostSessionId }
       : {}),
   });
   if (status.state === "failed") {
@@ -12259,7 +12280,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalErrorMode: "onboarding",
   }),
 
-  "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
+  "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over", "wake-profile", "wake-host-session-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
   hook: group({
     check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id", "message-status"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>] [--message-status]"], errorMode: "hook-check" }),
     status: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message-status hook.", mutates: true, flags: ["principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook status --principal-id <uuid>"], errorMode: "hook-check" }),

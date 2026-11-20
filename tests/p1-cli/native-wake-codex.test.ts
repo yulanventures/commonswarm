@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1053,6 +1053,148 @@ test("serveCodexWakeBridge coalesces bursts, sends fixed-text wake, and verifies
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     await new Promise<void>((done) => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("detached cswarm listen start forwards wake profile and host-session-id to supervisor and dispatches fixed-text codex queue", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-detached-"));
+  const stateDir = await mkdtemp("/tmp/cw-d-");
+  const previousHome = process.env.HOME;
+  const previousState = process.env.SWARM_AGENT_STATE_DIR;
+  process.env.HOME = root;
+  process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
+  const callsLog = join(root, "codex-calls.ndjson");
+  const fakeCodex = join(root, "fake-codex.mjs");
+  await writeFile(
+    fakeCodex,
+    `#!${process.execPath}\nimport { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(callsLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("queued\\n");\n`,
+    { mode: 0o755 },
+  );
+  await chmod(fakeCodex, 0o755);
+
+  const LEASE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  let served = false;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      if (req.method !== "POST" || !raw.trim()) {
+        res.writeHead(404).end();
+        return;
+      }
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      if (body.resource === "members") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          members: [{ user_id: OWNER, display_name: "Owner" }],
+          agents: [{ principal_id: AGENT, name: "CodexSeat", owner_user_id: OWNER }],
+          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER, workspace_name: "TestWS" },
+        }));
+        return;
+      }
+      if (body.resource === "signals") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          signals: [],
+          pending_delivery_count: served ? 0 : 1,
+          capabilities: { cursor_after: 1, delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        }));
+        return;
+      }
+      if (body.resource === "renewal_grants") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+        return;
+      }
+      const cmd = body.command as Record<string, unknown> | undefined;
+      if (cmd?.kind === "claim_agent_inbox") {
+        const deliveries = served ? [] : [{
+          signal: {
+            id: SIGNAL_1, workspace_id: WS, from: OWNER, from_kind: "user", to: null, to_agent: AGENT,
+            in_reply_to: null, about: null, kind: "ask", body: "DETACHED_SECRET_DM_BODY",
+            created_at: new Date().toISOString(), until: "2099-01-01T00:00:00.000Z",
+            sender_owner_relation: "same_owner",
+          },
+          lease_id: LEASE,
+          leased_until: new Date(Date.now() + 60_000).toISOString(),
+          sender_owner_relation: "same_owner",
+        }];
+        served = true;
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          ok: true, status: "accepted", event_ids: [], events: [],
+          capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+          deliveries,
+          pending_delivery_count: deliveries.length,
+          terminal_delivery_failure_count: 0,
+        }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, status: "accepted", event_ids: [] }));
+    });
+  });
+
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const childEnv = {
+    ...process.env,
+    HOME: root,
+    SWARM_AGENT_STATE_DIR: join(root, "renewal"),
+    XDG_CONFIG_HOME: join(root, "config"),
+  };
+  let profilePathForStop = "";
+  try {
+    const port = (server.address() as { port: number }).port;
+    const { cwd, profile } = await setupBoundCodexSeat(root, `http://127.0.0.1:${port}`);
+    profilePathForStop = profile;
+
+    const startRes = await promisify(execFile)(
+      process.execPath,
+      [
+        resolve("dist/cli.js"), "listen", "start",
+        "--profile", profile,
+        "--host-session-id", THREAD,
+        "--provider", "codex",
+        "--codex-executable", fakeCodex,
+        "--cwd", cwd,
+        "--state-dir", stateDir,
+        "--poll-interval", "1s",
+        "--allow-unattended",
+        "--json",
+      ],
+      { env: childEnv, timeout: 15_000 },
+    );
+    const started = JSON.parse(startRes.stdout) as { state?: string; pid?: number };
+    assert.equal(started.state, "ready");
+
+    // Wait for the detached supervisor's 5s debounce + 1s timer to invoke fake-codex.
+    await eventually(async () => {
+      const content = await readFile(callsLog, "utf8").catch(() => "");
+      return content.trim().length > 0;
+    }, 15_000);
+
+    const lines = (await readFile(callsLog, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+    assert.equal(lines.length, 1);
+    assert.deepEqual(lines[0], [
+      "queue", "--thread", THREAD, "--message", "New CommonSwarm messages (batch 1): run cswarm check",
+    ]);
+    assert.equal(lines[0]!.join(" ").includes("DETACHED_SECRET_DM_BODY"), false);
+  } finally {
+    if (profilePathForStop) {
+      await promisify(execFile)(
+        process.execPath,
+        [
+          resolve("dist/cli.js"), "listen", "stop",
+          "--profile", profilePathForStop,
+          "--host-session-id", THREAD,
+          "--state-dir", stateDir,
+          "--wait",
+        ],
+        { env: childEnv, timeout: 10_000 },
+      ).catch(() => undefined);
+    }
+    if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+    else process.env.SWARM_AGENT_STATE_DIR = previousState;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await new Promise<void>((done) => server.close(() => done()));
+    await rm(stateDir, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });

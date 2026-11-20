@@ -208,6 +208,42 @@ test("codex detached argv pins the resolved bridge and rejects unmapped flags", 
       }),
     /absolute --codex-executable/i,
   );
+  const withWake = buildListenerChildArgs({
+    ...SPEC,
+    provider: "codex",
+    effort: undefined,
+    model: undefined,
+    wakeProfilePath: "/home/u/.cswarm/agent/profile.json",
+    wakeHostSessionId: "01a1d5ac-1111-4222-8333-444444444444",
+  });
+  assert.ok(withWake.includes("--wake-profile"));
+  assert.ok(withWake.includes("/home/u/.cswarm/agent/profile.json"));
+  assert.ok(withWake.includes("--wake-host-session-id"));
+  assert.ok(withWake.includes("01a1d5ac-1111-4222-8333-444444444444"));
+  assert.equal(withWake.includes("--profile"), false, "detached child must not pass --profile alongside stdin credential");
+  assert.throws(
+    () =>
+      buildListenerChildArgs({
+        ...SPEC,
+        provider: "codex",
+        effort: undefined,
+        model: undefined,
+        wakeProfilePath: "/home/u/.cswarm/agent/profile.json",
+      }),
+    /paired/i,
+  );
+  assert.throws(
+    () =>
+      buildListenerChildArgs({
+        ...SPEC,
+        provider: "codex",
+        effort: undefined,
+        model: undefined,
+        wakeProfilePath: "relative/profile.json",
+        wakeHostSessionId: "01a1d5ac-1111-4222-8333-444444444444",
+      }),
+    /absolute --wake-profile/i,
+  );
 });
 
 test("credential travels only over child stdin, never argv or env", async () => {
