@@ -9,6 +9,18 @@ struct PeopleDirectorySnapshot: Sendable {
     let adminGrantsLoaded: Bool
 }
 
+struct PeopleDirectoryPartialUpdate: Sendable {
+    let people: [WorkspacePerson]?
+    let agents: [WorkspaceAgent]?
+    let invites: [WorkspacePendingInvite]?
+    let adminGrants: [WorkspaceAgentAdminGrant]?
+}
+
+enum PeopleDirectoryLoadResult: Sendable {
+    case complete(PeopleDirectorySnapshot)
+    case coreFailed(PeopleDirectoryPartialUpdate)
+}
+
 struct PeopleDirectoryAPI: Sendable {
     let api: ConversationAPI
 
@@ -133,7 +145,7 @@ struct PeopleDirectoryAPI: Sendable {
     func loadDirectory(
         workspaceID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
-    ) async throws -> PeopleDirectorySnapshot {
+    ) async throws -> PeopleDirectoryLoadResult {
         let wsFilter = "eq." + workspaceID.uuidString.lowercased()
         let viewerID = await MainActor.run { api.session.userID }
 
@@ -236,8 +248,46 @@ struct PeopleDirectoryAPI: Sendable {
             throw PeopleDirectoryError.accessRefused
         }
 
-        let memberRows = try membersResult.get()
-        let agentRows = try agentsResult.get()
+        // `swarm_read.member_profiles` is gated by live workspace membership, so a removed viewer
+        // receives an authoritative HTTP 200 `[]`. Treat that as access loss before checking peer
+        // transient failures (e.g. `agent_principals` 503) so stale rows and detail IDs clear.
+        let decodedPeople: [WorkspacePerson]?
+        switch membersResult {
+        case .success(let memberRows):
+            let parsed: [WorkspacePerson] = memberRows.compactMap { row in
+                guard let userID = row.user_id,
+                      let rawName = row.display_name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rawName.isEmpty,
+                      let rawRole = row.role,
+                      let role = WorkspaceMemberRole(rawValue: rawRole) else {
+                    return nil
+                }
+                return WorkspacePerson(
+                    userID: userID,
+                    name: rawName,
+                    role: role,
+                    isViewer: userID == viewerID
+                )
+            }.sorted { lhs, rhs in
+                if lhs.role.sortOrder != rhs.role.sortOrder {
+                    return lhs.role.sortOrder < rhs.role.sortOrder
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            if memberRows.isEmpty || parsed.isEmpty {
+                throw PeopleDirectoryError.accessRefused
+            }
+            decodedPeople = parsed
+        case .failure(let error):
+            if error is CancellationError {
+                throw error
+            }
+            decodedPeople = nil
+        }
+
+        if case .failure(let error) = agentsResult, error is CancellationError {
+            throw error
+        }
 
         let presenceRows: [PresenceWire]?
         if case .success(let rows) = presenceResult {
@@ -246,28 +296,7 @@ struct PeopleDirectoryAPI: Sendable {
             presenceRows = nil
         }
 
-        let people: [WorkspacePerson] = memberRows.compactMap { row in
-            guard let userID = row.user_id,
-                  let rawName = row.display_name?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !rawName.isEmpty,
-                  let rawRole = row.role,
-                  let role = WorkspaceMemberRole(rawValue: rawRole) else {
-                return nil
-            }
-            return WorkspacePerson(
-                userID: userID,
-                name: rawName,
-                role: role,
-                isViewer: userID == viewerID
-            )
-        }.sorted { lhs, rhs in
-            if lhs.role.sortOrder != rhs.role.sortOrder {
-                return lhs.role.sortOrder < rhs.role.sortOrder
-            }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
-
-        let namesByUserID = Dictionary(people.map { ($0.userID, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let namesByUserID = Dictionary((decodedPeople ?? []).map { ($0.userID, $0.name) }, uniquingKeysWith: { first, _ in first })
         let presenceByAgentID: [UUID: PresenceWire] = Dictionary(
             (presenceRows ?? []).compactMap { row in
                 guard let id = row.principal_id else { return nil }
@@ -277,40 +306,44 @@ struct PeopleDirectoryAPI: Sendable {
         )
         let presenceAvailable = presenceRows != nil
 
-        let agents: [WorkspaceAgent] = agentRows.compactMap { row in
-            guard row.revoked_at == nil,
-                  let principalID = row.principal_id,
-                  let ownerUserID = row.owner_user_id else {
-                return nil
+        let decodedAgents: [WorkspaceAgent]?
+        switch agentsResult {
+        case .success(let agentRows):
+            decodedAgents = agentRows.compactMap { row in
+                guard row.revoked_at == nil,
+                      let principalID = row.principal_id,
+                      let ownerUserID = row.owner_user_id else {
+                    return nil
+                }
+                let rawName = row.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let displayName = rawName.isEmpty ? "Agent" : rawName
+                let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let presence = presenceByAgentID[principalID]
+                return WorkspaceAgent(
+                    principalID: principalID,
+                    name: displayName,
+                    model: (model?.isEmpty == false) ? model : nil,
+                    transport: row.transport,
+                    turnOnly: row.turn_only ?? false,
+                    ownerUserID: ownerUserID,
+                    ownerName: ownerUserID == viewerID ? "You" : namesByUserID[ownerUserID],
+                    isOwnedByViewer: ownerUserID == viewerID,
+                    presenceAvailable: presenceAvailable,
+                    lastCommandAt: PeopleDirectoryRules.parseISO8601(presence?.last_command_at),
+                    clientBuild: presence?.client_build,
+                    lastAckVia: presence?.last_ack_via
+                )
             }
-            let rawName = row.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let displayName = rawName.isEmpty ? "Agent" : rawName
-            let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let presence = presenceByAgentID[principalID]
-            return WorkspaceAgent(
-                principalID: principalID,
-                name: displayName,
-                model: (model?.isEmpty == false) ? model : nil,
-                transport: row.transport,
-                turnOnly: row.turn_only ?? false,
-                ownerUserID: ownerUserID,
-                ownerName: ownerUserID == viewerID ? "You" : namesByUserID[ownerUserID],
-                isOwnedByViewer: ownerUserID == viewerID,
-                presenceAvailable: presenceAvailable,
-                lastCommandAt: PeopleDirectoryRules.parseISO8601(presence?.last_command_at),
-                clientBuild: presence?.client_build,
-                lastAckVia: presence?.last_ack_via
-            )
+        case .failure:
+            decodedAgents = nil
         }
 
-        let agentNamesByID = Dictionary(agents.map { ($0.principalID, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let agentNamesByID = Dictionary((decodedAgents ?? []).map { ($0.principalID, $0.name) }, uniquingKeysWith: { first, _ in first })
 
-        let invitesLoaded: Bool
-        let invites: [WorkspacePendingInvite]
+        let decodedInvites: [WorkspacePendingInvite]?
         switch invitesResult {
         case .success(let rows):
-            invitesLoaded = true
-            invites = rows.compactMap { row in
+            decodedInvites = rows.compactMap { row in
                 guard let id = row.invitation_id, !id.isEmpty else { return nil }
                 let email = row.email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Teammate"
                 let creatorName: String? = row.created_by.map { uid in
@@ -326,18 +359,15 @@ struct PeopleDirectoryAPI: Sendable {
                 )
             }
         case .failure:
-            invitesLoaded = false
-            invites = []
+            decodedInvites = nil
         }
 
-        let adminGrantsLoaded: Bool
-        let adminGrants: [WorkspaceAgentAdminGrant]
+        let decodedAdminGrants: [WorkspaceAgentAdminGrant]?
         switch grantsResult {
         case .success(let maybeRows):
             // Both live owners ({ grants: [...] }) and non-owners (null -> []) complete cleanly.
-            adminGrantsLoaded = true
             let rows = maybeRows ?? []
-            adminGrants = rows.compactMap { row in
+            decodedAdminGrants = rows.compactMap { row in
                 guard let grantID = row.grant_id, !grantID.isEmpty,
                       let principalID = row.principal_id else {
                     return nil
@@ -366,17 +396,29 @@ struct PeopleDirectoryAPI: Sendable {
                 )
             }
         case .failure:
-            adminGrantsLoaded = false
-            adminGrants = []
+            decodedAdminGrants = nil
         }
 
-        return PeopleDirectorySnapshot(
-            people: people,
-            agents: agents,
-            invites: invites,
-            invitesLoaded: invitesLoaded,
-            adminGrants: adminGrants,
-            adminGrantsLoaded: adminGrantsLoaded
+        if let people = decodedPeople, let agents = decodedAgents {
+            return .complete(
+                PeopleDirectorySnapshot(
+                    people: people,
+                    agents: agents,
+                    invites: decodedInvites ?? [],
+                    invitesLoaded: decodedInvites != nil,
+                    adminGrants: decodedAdminGrants ?? [],
+                    adminGrantsLoaded: decodedAdminGrants != nil
+                )
+            )
+        }
+
+        return .coreFailed(
+            PeopleDirectoryPartialUpdate(
+                people: decodedPeople,
+                agents: decodedAgents,
+                invites: decodedInvites,
+                adminGrants: decodedAdminGrants
+            )
         )
     }
 }

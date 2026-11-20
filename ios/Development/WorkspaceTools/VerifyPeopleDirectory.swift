@@ -265,6 +265,32 @@ struct VerifyPeopleDirectory {
         try await postFixture("\(base)/fixture/fail-members?on=0")
         try await postFixture("\(base)/fixture/refuse-admin-grants?on=0")
 
+        // 9c. Demoted viewer mixed HTTP 200 empty responses alongside core 503:
+        //     member_profiles 503 + pending_invitations 200 [] + workspace_seat_admin_grants 200 null
+        //     must CLEAR cached invite emails and cached owner grants immediately.
+        await store.load(api: directoryAPI)
+        let hadCachedPrivileged = await MainActor.run {
+            store.invites.count == 1 && store.adminGrants.count == 1 && !store.accessUnavailable
+        }
+        expect(hadCachedPrivileged, "Expected cached invite email and owner grant before demoted-empty-with-503 witness")
+        try await postFixture("\(base)/fixture/fail-members?on=1")
+        try await postFixture("\(base)/fixture/empty-invites?on=1")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=1")
+        await store.load(api: directoryAPI)
+        let demotedEmptyCleared = await MainActor.run {
+            store.invites.isEmpty
+                && store.invitesReady
+                && !store.invitesFailed
+                && store.adminGrants.isEmpty
+                && store.adminGrantsReady
+                && store.loadFailed
+                && !store.accessUnavailable
+        }
+        expect(demotedEmptyCleared, "Authoritative 200 [] invites and 200 null grants must clear cached privileged rows even when member_profiles returns 503")
+        try await postFixture("\(base)/fixture/fail-members?on=0")
+        try await postFixture("\(base)/fixture/empty-invites?on=0")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=0")
+
         // 10. Detail routes bound to authorized directory IDs:
         //     live-member control, omission clearing, and opening detail across a held refusal.
         await store.load(api: directoryAPI)
@@ -352,8 +378,48 @@ struct VerifyPeopleDirectory {
         }
         expect(clearedAcrossHeldPush2, "Detail recheck must clear person/agent detail even if list disappearance retired the earlier refresh")
 
-        // Leaving detail when list is already gone must retire the store (0 sends on held bearer)
+        // 10e. Removed viewer empty member_profiles (200 []) alongside agent_principals 503:
+        //      must treat empty member_profiles as access loss and clear shared roster + both person and agent detail IDs.
         try await postFixture("\(base)/fixture/access-refused?on=0")
+        await store.load(api: directoryAPI)
+        let detailResolvedBeforeRemoval = await MainActor.run {
+            store.authorizedPerson(id: mayaID)?.name == "Maya Chen"
+                && store.authorizedAgent(id: beaconID)?.name == "Beacon"
+        }
+        expect(detailResolvedBeforeRemoval, "Expected Maya and Beacon resolved before removed-viewer 200 [] + 503 witness")
+        try await postFixture("\(base)/fixture/empty-members?on=1")
+        try await postFixture("\(base)/fixture/fail-agents?on=1")
+        await store.load(api: directoryAPI)
+        let clearedOnEmptyMembersWithAgents503 = await MainActor.run {
+            store.accessUnavailable
+                && store.people.isEmpty
+                && store.agents.isEmpty
+                && store.invites.isEmpty
+                && store.adminGrants.isEmpty
+                && store.authorizedPerson(id: mayaID) == nil
+                && store.authorizedAgent(id: beaconID) == nil
+                && store.agentsOwned(by: mayaID).isEmpty
+        }
+        expect(clearedOnEmptyMembersWithAgents503, "HTTP 200 [] member_profiles + 503 agent_principals must clear roster and detail resolution as access loss")
+        try await postFixture("\(base)/fixture/empty-members?on=0")
+        try await postFixture("\(base)/fixture/fail-agents?on=0")
+
+        // 10f. Omitted target person alongside peer 503 (member_profiles 200 without Maya + agent_principals 503)
+        await store.load(api: directoryAPI)
+        try await postFixture("\(base)/fixture/omit-maya?on=1")
+        try await postFixture("\(base)/fixture/fail-agents?on=1")
+        await store.load(api: directoryAPI)
+        let omittedPersonWithAgents503Cleared = await MainActor.run {
+            !store.accessUnavailable
+                && store.loadFailed
+                && store.authorizedPerson(id: mayaID) == nil
+                && store.authorizedPerson(id: tokens.userID)?.name == "Alex Rivera"
+        }
+        expect(omittedPersonWithAgents503Cleared, "Authoritative member_profiles omitting target person must clear person detail even when agent_principals returns 503")
+        try await postFixture("\(base)/fixture/omit-maya?on=0")
+        try await postFixture("\(base)/fixture/fail-agents?on=0")
+
+        // Leaving detail when list is already gone must retire the store (0 sends on held bearer)
         await MainActor.run { bearer.holdAll() }
         let readsBeforeLeaveAll = try await readCount(origin)
         let leaveAllTask = Task { await store.load(api: directoryAPI) }
@@ -366,6 +432,6 @@ struct VerifyPeopleDirectory {
         let readsAfterLeaveAll = try await readCount(origin)
         expect(readsBeforeLeaveAll == readsAfterLeaveAll, "Leaving detail with no visible list must retire store with ZERO sends")
 
-        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants RPC owner & null non-owner, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, mixed 503+403 refusal precedence, ID-bound detail routes with held-refusal/omission/live-control)")
+        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants RPC owner & null non-owner, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, mixed 503+403 refusal precedence, authoritative empty 200 []/null clearing under peer 503, ID-bound detail routes with held-refusal/omission/live-control)")
     }
 }

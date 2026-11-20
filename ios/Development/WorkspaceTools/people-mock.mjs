@@ -20,7 +20,10 @@ let accessRefused = false;
 let edge401 = false;
 let edge404 = false;
 let failMembers = false;
+let emptyMembers = false;
+let failAgents = false;
 let failInvites = false;
+let emptyInvites = false;
 let refuseInvites = false;
 let failAdminGrants = false;
 let refuseAdminGrants = false;
@@ -58,9 +61,21 @@ const server = createServer(async (req, res) => {
       failMembers = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failMembers });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/empty-members") {
+      emptyMembers = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, emptyMembers });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-agents") {
+      failAgents = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, failAgents });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/fail-invites") {
       failInvites = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failInvites });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/empty-invites") {
+      emptyInvites = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, emptyInvites });
     }
     if (req.method === "POST" && url.pathname === "/fixture/refuse-invites") {
       refuseInvites = url.searchParams.get("on") !== "0";
@@ -199,6 +214,7 @@ const server = createServer(async (req, res) => {
     switch (url.pathname) {
       case "/rest/v1/member_profiles": {
         if (failMembers) return reply(503, { error: "unavailable" });
+        if (emptyMembers) return reply(200, []);
         const rows = [
           { user_id: me, display_name: "Alex Rivera", role: "owner" },
           ...(omitMaya ? [] : [{ user_id: maya, display_name: "Maya Chen", role: "admin" }]),
@@ -208,6 +224,7 @@ const server = createServer(async (req, res) => {
         return reply(200, rows);
       }
       case "/rest/v1/agent_principals": {
+        if (failAgents) return reply(503, { error: "unavailable" });
         const rows = [
           {
             principal_id: atlas,
@@ -258,6 +275,7 @@ const server = createServer(async (req, res) => {
       case "/rest/v1/pending_invitations":
         if (refuseInvites) return reply(403, { error: "forbidden" });
         if (failInvites) return reply(503, { error: "unavailable" });
+        if (emptyInvites) return reply(200, []);
         return reply(200, [
           {
             workspace_id: wsMain,

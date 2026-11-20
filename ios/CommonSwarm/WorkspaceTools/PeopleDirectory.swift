@@ -448,19 +448,44 @@ final class PeopleDirectoryStore: ObservableObject {
         }
 
         do {
-            let snapshot = try await api.loadDirectory(workspaceID: workspaceID, canDispatch: readGate)
+            let result = try await api.loadDirectory(workspaceID: workspaceID, canDispatch: readGate)
             guard !Task.isCancelled, !isRetired, capturedSession.isActive,
                   activeSessionID == sessionID, generation == loadGeneration else { return }
-            people = snapshot.people
-            agents = snapshot.agents
-            invites = snapshot.invites
-            adminGrants = snapshot.adminGrants
-            coreReady = true
-            invitesReady = snapshot.invitesLoaded
-            invitesFailed = !snapshot.invitesLoaded
-            adminGrantsReady = snapshot.adminGrantsLoaded
-            accessUnavailable = false
-            loadFailed = false
+            switch result {
+            case .complete(let snapshot):
+                people = snapshot.people
+                agents = snapshot.agents
+                invites = snapshot.invites
+                adminGrants = snapshot.adminGrants
+                coreReady = true
+                invitesReady = snapshot.invitesLoaded
+                invitesFailed = !snapshot.invitesLoaded
+                adminGrantsReady = snapshot.adminGrantsLoaded
+                accessUnavailable = false
+                loadFailed = false
+            case .coreFailed(let partial):
+                if let updatedPeople = partial.people {
+                    people = updatedPeople
+                }
+                if let updatedAgents = partial.agents {
+                    agents = updatedAgents
+                }
+                if let updatedInvites = partial.invites {
+                    invites = updatedInvites
+                    invitesReady = true
+                    invitesFailed = false
+                } else {
+                    invitesReady = false
+                    invitesFailed = true
+                }
+                if let updatedAdminGrants = partial.adminGrants {
+                    adminGrants = updatedAdminGrants
+                    adminGrantsReady = true
+                } else {
+                    adminGrantsReady = false
+                }
+                loadFailed = true
+            }
         } catch PeopleDirectoryError.accessRefused {
             guard !Task.isCancelled, !isRetired,
                   activeSessionID == sessionID, generation == loadGeneration else { return }
