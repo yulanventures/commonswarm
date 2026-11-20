@@ -110,13 +110,28 @@ test('hosted inventory and unchanged local catalog match independently built pre
     let bytes = ''; const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText() === name) bytes = node.initializer!.getText(); ts.forEachChild(node, visit); };
     visit(ts.createSourceFile('registry.ts', source, ts.ScriptTarget.Latest, true)); assert.ok(bytes); return bytes;
   };
-  assert.equal(arraySource(readFileSync('src/protocol/household-tool-registry.ts', 'utf8'), 'BASE_HOUSEHOLD_TOOL_REGISTRY'), arraySource(snapshot, 'HOUSEHOLD_TOOL_REGISTRY'));
+  // #655 intentionally adds optional origin_placement and origin_channel_id to todo_create; every other base tool stays byte-identical.
+  const todoCreatePre655 = '    properties: { title: text(1, TODO_TITLE_LIMIT), notes: text(0, TODO_NOTES_LIMIT), due_on: due, assign: object({ to: party, start, gate }, [\'start\', \'gate\']) }, optional: ["notes", "due_on", "assign"],';
+  const todoCreateWithOrigin = [
+    '    properties: {',
+    '      title: text(1, TODO_TITLE_LIMIT),',
+    '      notes: text(0, TODO_NOTES_LIMIT),',
+    '      due_on: due,',
+    "      assign: object({ to: party, start, gate }, ['start', 'gate']),",
+    "      origin_placement: { type: 'string', enum: ['workspace', 'general', 'channel'] },",
+    "      origin_channel_id: { oneOf: [uuid, { type: 'null' }] },",
+    '    },',
+    '    optional: ["notes", "due_on", "assign", "origin_placement", "origin_channel_id"],',
+  ].join('\n');
+  assert.ok(snapshot.includes(todoCreatePre655));
+  const expectedSnapshot = snapshot.replace(todoCreatePre655, todoCreateWithOrigin);
+  assert.equal(arraySource(readFileSync('src/protocol/household-tool-registry.ts', 'utf8'), 'BASE_HOUSEHOLD_TOOL_REGISTRY'), arraySource(expectedSnapshot, 'HOUSEHOLD_TOOL_REGISTRY'));
   const built = await build({ entryPoints: ['src/mcp/tools.ts'], bundle: true, write: false, platform: 'node', format: 'esm',
     // The snapshot predates the definition tools (C2b); they are appended after the unchanged bytes.
-    plugins: [{ name: 'main-snapshot', setup(builder) { builder.onLoad({ filter: /household-tool-registry\.ts$/ }, () => ({ contents: `${snapshot}\nexport const HOUSEHOLD_DEFINITION_TOOLS = [];`, loader: 'ts', resolveDir: resolve('src/protocol') })); } }] });
+    plugins: [{ name: 'main-snapshot', setup(builder) { builder.onLoad({ filter: /household-tool-registry\.ts$/ }, () => ({ contents: `${expectedSnapshot}\nexport const HOUSEHOLD_DEFINITION_TOOLS = [];`, loader: 'ts', resolveDir: resolve('src/protocol') })); } }] });
   const baseline = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0]!.text).toString('base64')}`);
   assert.equal(JSON.stringify(MCP_TOOLS), JSON.stringify([...baseline.MCP_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS]));
-  // 41: the core table gained the local file_get (#366); 42: the local react. The household slice below is unchanged.
+  // 41: the core table gained the local file_get (#366); 42: the local react. The household slice below is unchanged except #655's optional todo_create origin fields.
   assert.equal(MCP_TOOLS.length, 42);
   assert.equal(JSON.stringify(HOUSEHOLD_TOOLS), JSON.stringify(baseline.MCP_TOOLS.slice(-18)));
   assert.deepEqual(HOSTED_TODO_LIST_TOOLS.map(t => t.name), [...HOUSEHOLD_TOOLS.filter(t => t.name.startsWith('todo_') || t.name === 'comment_list').map(t => t.name), ...HOUSEHOLD_LIST_TOOL_REGISTRY.map(t => t.name),
