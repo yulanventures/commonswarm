@@ -688,6 +688,53 @@ test("a defaulted reply horizon is clamped to the thread; a named one is refused
   assert.equal(fitsUntil - created, 30_000, "stored exactly as named");
 });
 
+test("C6 permanence: defaulted notes and asks are permanent, threads stay open, and working-on keeps 24h expiry", async () => {
+  const PERMANENT_UNTIL_MS = Date.parse("9999-12-31T23:59:59.000Z");
+
+  // 1. Defaulted note is permanent, and a defaulted thread reply to it is also permanent.
+  const permNote = await send(f.ownerJwt, installedPost({ body: "Permanent thread root" }));
+  assert.equal(permNote.status, 200, JSON.stringify(permNote.body));
+  const permNoteId = String(signalOf(permNote.body).id);
+  assert.equal(
+    Date.parse(String(signalOf(permNote.body).until)),
+    PERMANENT_UNTIL_MS,
+    "defaulted note must be permanent (9999-12-31T23:59:59.000Z)",
+  );
+
+  const permReply = await send(f.ownerJwt, installedPost({ thread_root_id: permNoteId, body: "Permanent reply" }));
+  assert.equal(permReply.status, 200, JSON.stringify(permReply.body));
+  assert.equal(
+    Date.parse(String(signalOf(permReply.body).until)),
+    PERMANENT_UNTIL_MS,
+    "defaulted thread reply to a permanent root must also be permanent",
+  );
+
+  // Explicit short horizon on a permanent root is stored exactly as named.
+  const explicitReply = await send(f.ownerJwt, installedPost({ thread_root_id: permNoteId, until_ms: 45_000 }));
+  assert.equal(explicitReply.status, 200, JSON.stringify(explicitReply.body));
+  assert.equal(
+    Date.parse(String(signalOf(explicitReply.body).until)) - Date.parse(String(signalOf(explicitReply.body).created_at)),
+    45_000,
+    "explicit until_ms on permanent root stores exact requested horizon",
+  );
+
+  // 2. Defaulted ask is permanent.
+  const permAsk = await send(f.ownerJwt, installedPost({ signal_kind: "ask", body: "Permanent ask?" }));
+  assert.equal(permAsk.status, 200, JSON.stringify(permAsk.body));
+  assert.equal(
+    Date.parse(String(signalOf(permAsk.body).until)),
+    PERMANENT_UNTIL_MS,
+    "defaulted ask must be permanent (9999-12-31T23:59:59.000Z)",
+  );
+
+  // 3. Defaulted working-on STILL expires after 24 hours.
+  const workingOn = await send(f.ownerJwt, installedPost({ signal_kind: "working-on", body: "Checking migration" }));
+  assert.equal(workingOn.status, 200, JSON.stringify(workingOn.body));
+  const workingHorizon =
+    Date.parse(String(signalOf(workingOn.body).until)) - Date.parse(String(signalOf(workingOn.body).created_at));
+  assert.equal(workingHorizon, 24 * 60 * 60 * 1000, "defaulted working-on must keep its 24-hour expiry");
+});
+
 test("a channel post wakes nobody, and a directed note to an agent still does", async () => {
   const slug = `wake-${randomBytes(4).toString("hex")}`;
   await send(f.ownerJwt, { kind: "channel_create", slug });

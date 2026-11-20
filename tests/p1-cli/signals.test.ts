@@ -20,12 +20,14 @@ import { cloudTarget } from "../../src/cloud/config.js";
 import {
   CommandHttpError,
   CommandTransportError,
+  type SignalRecord,
 } from "../../src/cloud/command-client.js";
 import {
   sendSignalWithPending,
   SIGNAL_PENDING_RECOVERY_MS,
 } from "../../src/cloud/pending-command.js";
 import {
+  renderSignals,
   resolveSignalRecipient,
 } from "../../src/cloud/signals.js";
 import type {
@@ -671,4 +673,29 @@ test("ask --wait rejects broadcast asks without a direct --to recipient", async 
   assert.equal(result.code, 1);
   assert.match(result.stderr, /ask --wait requires --to/);
   assert.doesNotMatch(result.stderr, /ECONNREFUSED|signal request failed/);
+});
+
+test("renderSignals omits expiry text for permanent C6 asks/notes while keeping working-on expiry", () => {
+  const now = Date.parse("2026-11-20T12:00:00.000Z");
+  const rendered = renderSignals([
+    signal({
+      kind: "ask",
+      body: "Permanent question?",
+      created_at: "2026-11-20T11:55:00.000Z",
+      until: "9999-12-31T23:59:59.000Z",
+    }) as unknown as SignalRecord,
+    signal({
+      kind: "working-on",
+      body: "Running checks",
+      created_at: "2026-11-20T11:55:00.000Z",
+      until: "2026-11-20T13:00:00.000Z",
+    }) as unknown as SignalRecord,
+  ], { inbox: false, includeStale: false, now });
+  const lines = rendered.split("\n");
+  const askLine = lines.find((line) => line.includes("Permanent question?"));
+  const workingLine = lines.find((line) => line.includes("Running checks"));
+  assert.ok(askLine, rendered);
+  assert.doesNotMatch(askLine, /expires in|expired/i, "permanent ask must not print bogus multi-millennium expiry");
+  assert.ok(workingLine, rendered);
+  assert.match(workingLine, /expires in 1h/, "working-on keeps its expiry display");
 });

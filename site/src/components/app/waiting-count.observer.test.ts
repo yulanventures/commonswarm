@@ -57,8 +57,26 @@ function installWaitingFixture() {
   const askPeerB = askIdAt(99);
   const askWs2A = askIdAt(98);
   const surveyAsks = [askIdAt(1), askIdAt(2), askIdAt(3)];
-  const dmConvCase = scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-");
+  const dmConvCase = scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("archived-");
   const dmAmbiguousCase = scenario.startsWith("dm-ambiguous-incomplete-");
+  const archivedCase = scenario.startsWith("archived-");
+  const archivedAfterReload = scenario.startsWith("archived-after-reload-");
+  const archivedUnavailable = scenario.startsWith("archived-unavailable-");
+  const archivedPage2Case = scenario.startsWith("archived-channel-page2-");
+  const archivedCacheDenyCase = scenario.startsWith("archived-cache-revalidate-and-deny-");
+  const archivedConvLossCase = scenario.startsWith("archived-conversation-loss-");
+  const archivedMembersPreflightCase = scenario.startsWith("archived-members-preflight-loss-");
+  const archivedHistory404Case = scenario.startsWith("archived-history-404-eviction-");
+  const archivedBucket = archivedUnavailable ? "unavailable" : scenario.endsWith("-phone") ? "phone" : "desktop";
+  const convGarden = "eeeeeeee-eeee-4eee-8eee-000000000006";
+  const gardenArchivedAskId = askIdAt(76);
+  const privLossAskId = askIdAt(75);
+  const unchangedWsAskId = askIdAt(74);
+  const heldPage2AskId = askIdAt(73);
+  const reviewOfferId = "99999999-9999-4999-8999-000000000001";
+  const reviewTodoId = todoIdAt(91);
+  const olderArchivedAskId = askIdAt(77);
+  const redactedArchivedAskId = askIdAt(78);
   const plainCleanupCase = scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-");
   const plain401RetireCase = scenario.startsWith("plain-401-retire-");
   const plain401ControlCase = scenario.startsWith("plain-401-refresh-control-");
@@ -85,12 +103,24 @@ function installWaitingFixture() {
   let releaseRefresh: (() => void) | null = null;
   let releaseWs9ChannelsA: (() => void) | null = null;
   let releaseWs2QueueA: (() => void) | null = null;
-  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
-    todoId, todoGroupId, todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
-    convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, dmAsks, question,
+  let releaseArchivedHeld: (() => void) | null = null;
+  const f = w.waitingFixture = { scenario, phone: scenario.endsWith("-phone"), owner, maya, peerUserB, ids, ask, askPeerB, askWs2A, ask51, ask101,
+    todoId, todoGroupId, reviewOfferId, reviewTodoId, olderArchivedAskId, redactedArchivedAskId, gardenArchivedAskId,
+    privLossAskId, unchangedWsAskId, heldPage2AskId,
+    todo1: todoIdAt(1), todo21: todoIdAt(21), chBoiler, chReno, surveyAsks, plainAsks,
+    convGeneral, convDmScout, convDmMaya, convGroupSM, convGroupSM2, convGarden, dmAsks, question,
     asked: !scenario.startsWith("uncounted-none") && !multiBatch && !todoCase && !surveyCase && !dmConvCase && !plainCleanupCase,
     uncounted: scenario.startsWith("uncounted-"), answered: false, answeredIds: [] as string[],
     ambiguousResolved: false,
+    archivedPages: 0,
+    archivedMode: "ok" as "ok" | "null" | "deny403" | "hold",
+    archivedHeld: false,
+    archivedHoldNext: false,
+    dropGroupSM: false,
+    history404GroupSM: false,
+    history404Reads: 0,
+    conversationsRefreshes: 0,
+    archivedPostChangeInitialReads: 0,
     todoDone: false, todoFailOnce: todoCase && !todo21Case && !todoTruncatedCase, todoWrites: [] as any[],
     todoPages: 0,
     surveyFailOnceId: surveyCase && !surveyAuthRetireCase ? surveyAsks[2]! : "",
@@ -111,6 +141,7 @@ function installWaitingFixture() {
     releaseRefresh: () => { releaseRefresh?.(); releaseRefresh = null; },
     releaseWs9ChannelsA: () => { releaseWs9ChannelsA?.(); releaseWs9ChannelsA = null; },
     releaseWs2QueueA: () => { releaseWs2QueueA?.(); releaseWs2QueueA = null; },
+    releaseArchivedHeld: () => { releaseArchivedHeld?.(); releaseArchivedHeld = null; },
     choiceBatchSizes: [] as number[],
     overviewReads: 0, answers: [] as any[], log: [] as string[], unexpected: [] as string[] };
   const ws1Todos21 = () => {
@@ -128,7 +159,33 @@ function installWaitingFixture() {
     }));
   };
   const open = (id: unknown) => id === ids[8] && f.asked && !f.answered;
+  const archivedSyncState = async (action?: Record<string, unknown>) => {
+    const res = await network("/__archived-state?bucket=" + encodeURIComponent(archivedBucket), action
+      ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) }
+      : undefined);
+    return await res.json();
+  };
   const ws1Asks = () => {
+    if (archivedCase) {
+      const baseMs = Date.now() - 600_000;
+      const rows = [
+        { signal_id: dmAsks.groupSM, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Group question with Scout and Maya?", offset: 0, conversation_id: convGroupSM, conversation_kind: "group_dm" as const },
+        { signal_id: dmAsks.dmScout, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Direct question from Scout?", offset: 1, conversation_id: convDmScout, conversation_kind: "dm" as const },
+        { signal_id: plainAsks[0]!, from: { kind: "agent" as const, id: agent, name: "Scout" }, body: "Should we schedule Tuesday?", offset: 2, conversation_id: convGeneral, conversation_kind: "general" as const },
+      ];
+      return rows
+        .filter(r => !f.answeredIds.includes(r.signal_id))
+        .map(r => ({
+          signal_id: r.signal_id,
+          from: r.from,
+          body: r.body,
+          created_at: new Date(baseMs + r.offset * 1000).toISOString(),
+          until,
+          conversation_id: r.conversation_id,
+          conversation_kind: r.conversation_kind,
+          reraised: null,
+        }));
+    }
     if (dmConvCase) {
       const baseMs = Date.now() - 600_000;
       const rows = dmAmbiguousCase
@@ -263,6 +320,11 @@ function installWaitingFixture() {
         });
       }
       f.overviewReads++; f.log.push("overview");
+      if (archivedCase) {
+        const persisted = await archivedSyncState();
+        f.answeredIds = Array.isArray(persisted.answeredIds) ? [...persisted.answeredIds] : [];
+        f.todoDone = Boolean(persisted.todoDone);
+      }
       return Response.json({ viewer_user_id: owner, generated_at: new Date().toISOString(),
         workspaces: ids.filter(id => !(f.uncounted && id === ids[4])).map(id => {
           const asks = id === ids[0] && (multiBatch || surveyCase || dmConvCase || plainCleanupCase)
@@ -272,6 +334,8 @@ function installWaitingFixture() {
               : open(id) ? [{ signal_id: ask, from: { kind: "agent", id: agent }, created_at: recent, until }] : [];
           const assigned = id === ids[0] && (todo21Case || todoTruncatedCase)
             ? ws1Todos21().slice(0, 20).map(t => ({ todo_id: t.todo_id, title: t.title, state: t.state, due_on: t.due_on }))
+            : id === ids[0] && archivedCase
+              ? (f.todoDone ? [] : [{ todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23" }])
             : id === ids[0] && dmConvCase && !dmAmbiguousCase
               ? [
                   { todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23" },
@@ -355,6 +419,13 @@ function installWaitingFixture() {
           todos: page,
         });
       }
+      if (id === ids[0] && archivedCase) {
+        const list = f.todoDone ? [] : [{
+          todo_id: todoGroupId, title: "Confirm group walkthrough", state: "open", due_on: "2026-11-23",
+          reason: "assigned", agent_id: null, state_at: recent, placement: "group_dm", channel_id: null, conversation_id: convGroupSM,
+        }];
+        return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: list.length, truncated: false, todos: list });
+      }
       if (id === ids[0] && dmConvCase && !dmAmbiguousCase) {
         const list = [
           {
@@ -377,11 +448,206 @@ function installWaitingFixture() {
       }
       return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), total: 0, truncated: false, todos: [] });
     }
+    if (url.pathname === "/rest/v1/rpc/waiting_archived_page") {
+      const id = body?.p_workspace_id;
+      f.log.push("archived:" + number(id));
+      if (archivedUnavailable) {
+        return Response.json({ code: "PGRST202", message: "function not found" }, { status: 404 });
+      }
+      if (id === ids[0] && (archivedConvLossCase || archivedMembersPreflightCase || archivedHistory404Case)) {
+        f.archivedPages += 1;
+        const baseMs = Date.now() - 3600_000;
+        const hasCursor = typeof body?.p_after_item_key === "string" && body.p_after_item_key.length > 0;
+        if (f.archivedHoldNext) {
+          f.archivedHoldNext = false;
+          f.archivedHeld = true;
+          f.log.push("archived-conv-loss-held");
+          await new Promise<void>(resolve => { releaseArchivedHeld = resolve; });
+          f.log.push("archived-conv-loss-released");
+          return Response.json({
+            workspace_id: id,
+            generated_at: new Date().toISOString(),
+            untrusted_content: true,
+            total: 3,
+            truncated: false,
+            items: [
+              {
+                item_key: `ask:${heldPage2AskId}`,
+                kind: "ask",
+                id: heldPage2AskId,
+                todo_id: null,
+                ask_kind: "plain",
+                title: "Held pre-change private page-2 secret?",
+                from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered",
+                outcome_text: "Held pre-change private page-2 secret",
+                archived_at: new Date(baseMs + 50 * 1000).toISOString(),
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "group_dm",
+                channel_id: null,
+                conversation_id: convGroupSM,
+                conversation_kind: "group_dm",
+              },
+            ],
+          });
+        }
+        const unchangedItem = {
+          item_key: `ask:${unchangedWsAskId}`,
+          kind: "ask",
+          id: unchangedWsAskId,
+          todo_id: null,
+          ask_kind: "choice",
+          title: "General unchanged question?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "answered",
+          outcome_text: "Still authorized",
+          archived_at: new Date(baseMs + 200 * 1000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        };
+        if (f.dropGroupSM || f.history404GroupSM) {
+          if (!hasCursor) f.archivedPostChangeInitialReads += 1;
+          return Response.json({
+            workspace_id: id,
+            generated_at: new Date().toISOString(),
+            untrusted_content: true,
+            total: 1,
+            truncated: false,
+            items: [unchangedItem],
+          });
+        }
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: 3,
+          truncated: true,
+          items: [
+            {
+              item_key: `ask:${privLossAskId}`,
+              kind: "ask",
+              id: privLossAskId,
+              todo_id: null,
+              ask_kind: "plain",
+              title: "Private group secret question?",
+              from: { kind: "agent", id: agent, name: "Scout" },
+              outcome_kind: "answered",
+              outcome_text: "Private group secret answer",
+              archived_at: new Date(baseMs + 300 * 1000).toISOString(),
+              answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+              placement: "group_dm",
+              channel_id: null,
+              conversation_id: convGroupSM,
+              conversation_kind: "group_dm",
+            },
+            unchangedItem,
+          ],
+        });
+      }
+      if (id === ids[0] && (archivedPage2Case || archivedCacheDenyCase)) {
+        f.archivedPages += 1;
+        if (f.archivedMode === "hold") {
+          f.archivedHeld = true;
+          f.log.push("archived-held");
+          await new Promise<void>(resolve => { releaseArchivedHeld = resolve; });
+          f.log.push("archived-released");
+        }
+        if (f.archivedMode === "null") {
+          return Response.json(null);
+        }
+        if (f.archivedMode === "deny403") {
+          return Response.json({ code: "42501", message: "permission denied" }, { status: 403 });
+        }
+        const baseMs = Date.now() - 3600_000;
+        const all = [
+          ...Array.from({ length: 5 }, (_, idx) => ({
+            item_key: `ask:${askIdAt(60 + idx)}`,
+            kind: "ask",
+            id: askIdAt(60 + idx),
+            todo_id: null,
+            ask_kind: "choice",
+            title: `General archived item #${idx + 1}?`,
+            from: { kind: "agent", id: agent, name: "Scout" },
+            outcome_kind: "answered",
+            outcome_text: `General answer ${idx + 1}`,
+            archived_at: new Date(baseMs + (500 - idx * 10) * 1000).toISOString(),
+            answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+            placement: "general",
+            channel_id: null,
+            conversation_id: convGeneral,
+            conversation_kind: "general",
+          })),
+          {
+            item_key: `ask:${gardenArchivedAskId}`,
+            kind: "ask",
+            id: gardenArchivedAskId,
+            todo_id: null,
+            ask_kind: "choice",
+            title: "Plant lavender by the fence?",
+            from: { kind: "agent", id: agent, name: "Scout" },
+            outcome_kind: "answered",
+            outcome_text: "Yes, spring",
+            archived_at: new Date(baseMs + 100 * 1000).toISOString(),
+            answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+            placement: "channel",
+            channel_id: chBoiler,
+            conversation_id: null,
+            conversation_kind: null,
+          },
+        ];
+        const afterAt = typeof body?.p_after_archived_at === "string" ? body.p_after_archived_at : null;
+        const afterKey = typeof body?.p_after_item_key === "string" ? body.p_after_item_key.toLowerCase() : null;
+        const rest = afterAt && afterKey
+          ? all.filter(item => Date.parse(item.archived_at) < Date.parse(afterAt) || (Date.parse(item.archived_at) === Date.parse(afterAt) && item.item_key > afterKey))
+          : all;
+        const pageSize = 5;
+        const page = rest.slice(0, pageSize);
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: all.length,
+          truncated: rest.length > pageSize,
+          items: page,
+        });
+      }
+      if (id === ids[0] && archivedCase) {
+        f.archivedPages += 1;
+        const persisted = await archivedSyncState();
+        const all: any[] = Array.isArray(persisted.archivedItems) ? [...persisted.archivedItems] : [];
+        all.sort((a, b) => Date.parse(b.archived_at) - Date.parse(a.archived_at) || a.item_key.localeCompare(b.item_key));
+        const afterAt = typeof body?.p_after_archived_at === "string" ? body.p_after_archived_at : null;
+        const afterKey = typeof body?.p_after_item_key === "string" ? body.p_after_item_key.toLowerCase() : null;
+        const rest = afterAt && afterKey
+          ? all.filter(item => Date.parse(item.archived_at) < Date.parse(afterAt) || (Date.parse(item.archived_at) === Date.parse(afterAt) && item.item_key > afterKey))
+          : all;
+        const pageSize = 5;
+        const page = rest.slice(0, pageSize);
+        return Response.json({
+          workspace_id: id,
+          generated_at: new Date().toISOString(),
+          untrusted_content: true,
+          total: all.length,
+          truncated: rest.length > pageSize,
+          items: page,
+        });
+      }
+      return Response.json({ workspace_id: id, generated_at: new Date().toISOString(), untrusted_content: true, total: 0, truncated: false, items: [] });
+    }
     if (url.pathname === "/rest/v1/rpc/ask_choices") {
       f.log.push("choices:" + number(body?.p_workspace_id));
       const reqIds: string[] = Array.isArray(body?.p_signal_ids) ? body.p_signal_ids : [];
       if (body?.p_workspace_id === ids[0] && plainCleanupCase) {
         return Response.json({ asks: [] });
+      }
+      if (body?.p_workspace_id === ids[0] && archivedCase) {
+        const choiceOnly = reqIds.filter(sigId => sigId === dmAsks.groupSM || sigId === dmAsks.dmScout);
+        return Response.json({ asks: choiceOnly.map(sigId => ({ signal_id: sigId, multi: false,
+          options: [{ id: "yes", label: "Approve", recommended: true }, { id: "no", label: "Hold" }],
+          answer: f.answeredIds.includes(sigId) ? { option_id: "yes", by_viewer: true } : null })) });
       }
       if (body?.p_workspace_id === ids[0] && (multiBatch || surveyCase || dmConvCase)) {
         f.choiceBatchSizes.push(reqIds.length);
@@ -442,10 +708,12 @@ function installWaitingFixture() {
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "household_tool" && body?.command?.tool === "todo_read") {
       f.log.push("todo_read");
+      const targetTodoId = body?.command?.arguments?.todo_id ?? todoId;
+      const targetTitle = targetTodoId === todoGroupId ? "Confirm group walkthrough" : "Confirm boiler visit time";
       return Response.json({
         status: "ok",
         todo: {
-          workspace_id: ids[0], todo_id: todoId, version: 3, title: "Confirm boiler visit time", notes: "",
+          workspace_id: ids[0], todo_id: targetTodoId, version: 3, title: targetTitle, notes: "",
           state: f.todoDone ? "done" : "open", due_on: "2026-11-22",
           created_by: { user_id: owner, principal_id: null }, created_at: recent,
           assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
@@ -464,10 +732,21 @@ function installWaitingFixture() {
         return Response.json({ status: "refused", reason: "not_permitted" });
       }
       f.todoDone = true;
+      const targetTodoId = body?.command?.arguments?.todo_id ?? todoId;
+      const targetTitle = targetTodoId === todoGroupId ? "Confirm group walkthrough" : "Confirm boiler visit time";
+      if (archivedCase) {
+        await archivedSyncState({
+          type: "todo_done",
+          todo_id: targetTodoId,
+          title: targetTitle,
+          conversation_id: convGroupSM,
+          archived_at: new Date().toISOString(),
+        });
+      }
       return Response.json({
         status: "committed",
         value: {
-          workspace_id: ids[0], todo_id: todoId, version: 4, title: "Confirm boiler visit time", notes: "",
+          workspace_id: ids[0], todo_id: targetTodoId, version: 4, title: targetTitle, notes: "",
           state: "done", due_on: "2026-11-22",
           created_by: { user_id: owner, principal_id: null }, created_at: recent,
           assignee: { kind: "user", id: owner }, assigned_by: null, assigned_at: recent,
@@ -496,6 +775,15 @@ function installWaitingFixture() {
       }
       f.plainReplies.push(body);
       f.answeredIds.push(replyTarget);
+      if (archivedCase) {
+        await archivedSyncState({
+          type: "plain_answer",
+          signal_id: replyTarget,
+          title: "Should we schedule Tuesday?",
+          outcome_text: String(body.command.body ?? ""),
+          archived_at: new Date().toISOString(),
+        });
+      }
       f.log.push("plain-reply");
       return Response.json({
         status: "accepted",
@@ -519,6 +807,18 @@ function installWaitingFixture() {
       // From here on the answered ask is no longer waiting.
       f.answers.push(body); f.answered = true;
       if (typeof body.command.signal_id === "string") f.answeredIds.push(body.command.signal_id);
+      if (archivedCase && typeof body.command.signal_id === "string") {
+        const isScoutDm = body.command.signal_id === dmAsks.dmScout;
+        await archivedSyncState({
+          type: "choice_answer",
+          signal_id: body.command.signal_id,
+          title: isScoutDm ? "Direct question from Scout?" : "Group question with Scout and Maya?",
+          outcome_text: body.command.option_id === "yes" ? "Approve" : "Hold",
+          placement: isScoutDm ? "dm" : "group_dm",
+          conversation_id: isScoutDm ? convDmScout : convGroupSM,
+          archived_at: new Date().toISOString(),
+        });
+      }
       f.log.push("answer");
       return Response.json({ status: "accepted", choice_answer: { option_id: body.command.option_id, other_text: body.command.other_text ?? null } });
     }
@@ -533,7 +833,13 @@ function installWaitingFixture() {
       }
       return Response.json([{ channel_id: otherChannel, slug: "shared-b-channel", title: "Shared B", kind: "public", archived_at: null }]);
     }
-    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case)) {
+    if (url.pathname === "/rest/v1/channels" && url.searchParams.get("workspace_id") === "eq." + ids[0] && (multiBatch || todo21Case || archivedPage2Case || archivedMembersPreflightCase)) {
+      if (archivedPage2Case || archivedMembersPreflightCase) {
+        return Response.json([
+          { channel_id: chBoiler, slug: "garden", title: "Garden", kind: "public", archived_at: null },
+          { channel_id: chReno, slug: "quiet", title: "Quiet", kind: "public", archived_at: null },
+        ]);
+      }
       if (todo21Case) {
         return Response.json([
           { channel_id: chBoiler, slug: "boiler-quotes", title: "Boiler quotes", kind: "public", archived_at: null },
@@ -543,11 +849,11 @@ function installWaitingFixture() {
       return Response.json([{ channel_id: otherChannel, slug: "other", title: "Other", kind: "public", archived_at: null }]);
     }
     if (url.pathname === "/rest/v1/rpc/channel_unread") return Response.json({ workspace_id: body?.p_workspace_id ?? ids[0],
-      generated_at: new Date().toISOString(), channels: todo21Case && body?.p_workspace_id === ids[0]
+      generated_at: new Date().toISOString(), channels: (todo21Case || archivedPage2Case || archivedMembersPreflightCase) && body?.p_workspace_id === ids[0]
         ? [
             { channel_id: null, slug: "general", unread: null },
-            { channel_id: chBoiler, slug: "boiler-quotes", unread: null },
-            { channel_id: chReno, slug: "renovation", unread: null },
+            { channel_id: chBoiler, slug: (archivedPage2Case || archivedMembersPreflightCase) ? "garden" : "boiler-quotes", unread: null },
+            { channel_id: chReno, slug: (archivedPage2Case || archivedMembersPreflightCase) ? "quiet" : "renovation", unread: null },
           ]
         : [{ channel_id: null, slug: "general", unread: null }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json(ids.map(id => (
@@ -562,61 +868,111 @@ function installWaitingFixture() {
     if (url.pathname === "/functions/v1/read") {
       if (body?.resource === "conversations") {
         if (dmConvCase && body?.workspace_id === ids[0]) {
-          return Response.json({
-            conversations: [
-              {
-                conversation_id: convGeneral, kind: "general", channel_id: null, slug: "general", description: null,
-                archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
-                starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convDmScout, kind: "dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-              {
-                conversation_id: convGroupSM2, kind: "group_dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 2,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "agent", id: agent, name: "Scout", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: before, last_message_id: null,
-              },
-              {
-                conversation_id: convDmMaya, kind: "dm", channel_id: null, slug: null, description: null,
-                archived_at: null, joined: true, generation: 1,
-                members: [
-                  { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
-                  { kind: "user", id: maya, name: "Maya", left_at: null },
-                ],
-                notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
-                last_message_at: recent, last_message_id: null,
-              },
-            ],
-          });
+          f.conversationsRefreshes += 1;
+          const convList = [
+            {
+              conversation_id: convGeneral, kind: "general", channel_id: null, slug: "general", description: null,
+              archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
+              starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
+            },
+            ...((archivedPage2Case || archivedMembersPreflightCase) ? [{
+              conversation_id: convGarden, kind: "public_channel", channel_id: chBoiler, slug: "garden", description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            }, {
+              conversation_id: "eeeeeeee-eeee-4eee-8eee-000000000007", kind: "public_channel", channel_id: chReno, slug: "quiet", description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            }] : []),
+            {
+              conversation_id: convDmScout, kind: "dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            },
+            ...(f.dropGroupSM ? [] : [{
+              conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            }]),
+            {
+              conversation_id: convGroupSM2, kind: "group_dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 2,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "agent", id: agent, name: "Scout", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: before, last_message_id: null,
+            },
+            {
+              conversation_id: convDmMaya, kind: "dm", channel_id: null, slug: null, description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+                { kind: "user", id: maya, name: "Maya", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            },
+          ];
+          return Response.json({ conversations: convList });
         }
         return Response.json({ error: "unsupported_resource" }, { status: 400 });
       }
+      if (body?.resource === "conversation_history" && archivedHistory404Case && body?.workspace_id === ids[0] && body?.conversation_id === convGroupSM) {
+        if (f.history404GroupSM) {
+          f.history404Reads += 1;
+          f.log.push("conv-history-404");
+          return Response.json({ error: "conversation_not_found", message: "This conversation isn't available in this workspace." }, { status: 404 });
+        }
+        const msgId = "99999999-9999-4999-8999-000000000088";
+        return Response.json({
+          conversation: {
+            conversation_id: convGroupSM, kind: "group_dm", channel_id: null, slug: null, description: null,
+            archived_at: null, joined: true, generation: 1,
+            members: [
+              { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+              { kind: "agent", id: agent, name: "Scout", left_at: null },
+              { kind: "user", id: maya, name: "Maya", left_at: null },
+            ],
+            notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+            last_message_at: recent, last_message_id: msgId,
+          },
+          messages: [{
+            id: msgId, from: agent, from_kind: "agent", to: null, to_agent: null,
+            kind: "note", body: "Private group update", attachments: [], about: null, until: null,
+            created_at: recent, channel_id: null, thread_root_id: null, in_reply_to: null,
+            broadcast_to_channel: false, conversation_id: convGroupSM,
+          }],
+          has_more: true,
+          next_before: { created_at: before, id: msgId },
+          next_after: { created_at: recent, id: msgId },
+        });
+      }
       return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "channel_preference_set") {
+      return Response.json({ status: "accepted", ok: true });
     }
     if (url.pathname === "/functions/v1/command") return Response.json({ status: "refused", reason: "content_consent_required" });
     f.unexpected.push(request.method + " " + url.pathname);
@@ -1047,6 +1403,378 @@ async function observeWaitingCount() {
       document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
+    if (f.scenario.startsWith("archived-history-404-eviction-")) {
+      const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
+      const loadOlderFeed = () => document.querySelector<HTMLButtonElement>("[data-load-older]");
+      await wait(() => shown(control()) && shown(groupSMLink()), "mounted with readable private group DM in rail");
+      groupSMLink()!.click();
+      await wait(() => groupSMLink()?.getAttribute("aria-current") === "page" &&
+        shown(loadOlderFeed()) && !loadOlderFeed()!.disabled,
+        "opened private group DM with conversation_history page 1 and Load older updates ready");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "desktop Archived panel opened");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "Archived scope selector ready");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(card(`ask:${f.privLossAskId}`)) && shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        shown(panel()?.querySelector("[data-waiting-archived-more]")) &&
+        scope()!.options[1]!.textContent === "All channels (3)",
+        "workspace-scope Archived loaded private group DM item, unchanged #general item, count (3), and Load older");
+      check(panel()!.textContent!.includes("Private group secret answer"), "private answer initially present");
+      // Hold a pre-change Load older archived page in flight while viewing the private group DM.
+      f.archivedHoldNext = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedHeld, "pre-change Archived Load older response held in flight");
+      // Trigger a conversation_history masked 404 eviction with NO conversations list refresh.
+      const convReadsBefore = f.conversationsRefreshes;
+      f.history404GroupSM = true;
+      loadOlderFeed()!.click();
+      await wait(() => f.history404Reads >= 1 &&
+        !document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`) &&
+        f.archivedPostChangeInitialReads >= 1 &&
+        !card(`ask:${f.privLossAskId}`) &&
+        shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        scope()!.options[1]!.textContent === "All channels (1)",
+        "conversation_history 404 eviction retired private Archived row, updated count to (1), and revalidated from page 1");
+      check(f.conversationsRefreshes === convReadsBefore,
+        `expected zero conversations refreshes on history 404 eviction (before=${convReadsBefore}, after=${f.conversationsRefreshes})`);
+      // Release the held pre-change Load older response: it MUST be discarded and never repopulate Archived.
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      check(!card(`ask:${f.privLossAskId}`), "private group DM row must stay absent after held release");
+      check(!card(`ask:${f.heldPage2AskId}`), "held pre-change page-2 row must never appear");
+      const panelText = panel()!.textContent ?? "";
+      check(!panelText.includes("Private group secret question?") && !panelText.includes("Private group secret answer"),
+        "private title/answer leaked in panel: " + panelText);
+      check(!panelText.includes("Held pre-change private page-2 secret"),
+        "held pre-change page-2 text leaked in panel: " + panelText);
+      check(shown(card(`ask:${f.unchangedWsAskId}`)) && card(`ask:${f.unchangedWsAskId}`)!.textContent!.includes("Still authorized"),
+        "unchanged workspace item must remain visible after revalidation");
+      check(scope()!.options[1]!.textContent === "All channels (1)",
+        "expected All channels (1) after revalidation, got " + scope()!.options[1]!.textContent);
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-members-preflight-loss-")) {
+      await wait(() => shown(control()) &&
+        Boolean(document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`)) &&
+        Boolean(document.querySelector("[data-conversation-members-open]")),
+        "mounted in #garden with readable private group DM and Members button");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "desktop Archived panel opened");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "Archived scope selector ready");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(card(`ask:${f.privLossAskId}`)) && shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        shown(panel()?.querySelector("[data-waiting-archived-more]")) &&
+        scope()!.options[1]!.textContent === "All channels (3)",
+        "workspace-scope Archived loaded private group DM item, unchanged #general item, count (3), and Load older");
+      // Hold a pre-change Load older response in flight while desktop Archived stays open.
+      f.archivedHoldNext = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedHeld, "pre-change Load older response held in flight");
+      // Open Members dialog on #garden (desktop Archived stays open beside it).
+      document.querySelector<HTMLButtonElement>("[data-conversation-members-open]")!.click();
+      const dialog = () => document.querySelector<HTMLDialogElement>("[data-conversation-members-dialog]");
+      await wait(() => Boolean(dialog()?.open) && shown(dialog()?.querySelector("[data-conversation-members-add-toggle]")),
+        "Members dialog opened with Add control");
+      dialog()!.querySelector<HTMLButtonElement>("[data-conversation-members-add-toggle]")!.click();
+      await wait(() => shown(dialog()?.querySelector(`[data-conversation-members-candidate="user:${f.maya}"]`)),
+        "Maya candidate rendered in Members add list");
+      dialog()!.querySelector<HTMLButtonElement>(`[data-conversation-members-candidate="user:${f.maya}"]`)!.click();
+      // Drop unrelated private group DM before Members mutation preflight commits its authoritative conversations read.
+      // The follow-up member-add command is refused so onChanged/refreshConversations NEVER runs: retirement comes purely from commitConversationsRead!
+      const convReadsBefore = f.conversationsRefreshes;
+      f.dropGroupSM = true;
+      dialog()!.querySelector<HTMLButtonElement>("[data-conversation-members-add-submit]")!.click();
+      await wait(() => f.conversationsRefreshes > convReadsBefore &&
+        !document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`) &&
+        f.archivedPostChangeInitialReads >= 1 &&
+        !card(`ask:${f.privLossAskId}`) &&
+        shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        scope()!.options[1]!.textContent === "All channels (1)",
+        "Members preflight commit retired private row, updated count to (1), and revalidated from page 1");
+      // Release the held pre-change Load older response: it MUST be discarded and never repopulate Archived.
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      check(!card(`ask:${f.privLossAskId}`), "private group DM row must stay absent after held release");
+      check(!card(`ask:${f.heldPage2AskId}`), "held pre-change page-2 row must never appear");
+      const panelText = panel()!.textContent ?? "";
+      check(!panelText.includes("Private group secret question?") && !panelText.includes("Private group secret answer"),
+        "private title/answer leaked in panel: " + panelText);
+      check(!panelText.includes("Held pre-change private page-2 secret"),
+        "held pre-change page-2 text leaked in panel: " + panelText);
+      check(shown(card(`ask:${f.unchangedWsAskId}`)) && card(`ask:${f.unchangedWsAskId}`)!.textContent!.includes("Still authorized"),
+        "unchanged workspace item must remain visible after revalidation");
+      check(scope()!.options[1]!.textContent === "All channels (1)",
+        "expected All channels (1) after revalidation, got " + scope()!.options[1]!.textContent);
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-conversation-loss-")) {
+      await wait(() => shown(control()) && Boolean(document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`)),
+        "mounted in #general with readable private group DM in rail");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened in #general");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "Archived scope selector ready");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      // 1. Page 1 in All channels (workspace scope) shows BOTH the private group DM item and the unchanged #general item, count (3).
+      await wait(() => shown(card(`ask:${f.privLossAskId}`)) && shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        shown(panel()?.querySelector("[data-waiting-archived-more]")) &&
+        scope()!.options[1]!.textContent === "All channels (3)",
+        "workspace-scope Archived loaded private group DM item, unchanged #general item, count (3), and Load older");
+      check(panel()!.textContent!.includes("Private group secret answer"), "private answer initially present");
+      // 2. Start a Load older request and hold it in flight before the conversations refresh drops convGroupSM.
+      f.archivedHoldNext = true;
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedHeld, "pre-change Load older response held in flight");
+      // 3. Authoritative conversations refresh omits convGroupSM while #general and workspace membership stay unchanged.
+      const convReadsBefore = f.conversationsRefreshes;
+      f.dropGroupSM = true;
+      const starBtn = document.querySelector<HTMLButtonElement>("[data-home-workspace-header] [data-channel-star]");
+      check(Boolean(starBtn), "#general header star control missing");
+      starBtn!.click();
+      await wait(() => f.conversationsRefreshes > convReadsBefore &&
+        !document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`) &&
+        f.archivedPostChangeInitialReads >= 1 &&
+        !card(`ask:${f.privLossAskId}`) &&
+        shown(card(`ask:${f.unchangedWsAskId}`)) &&
+        scope()!.options[1]!.textContent === "All channels (1)",
+        "authoritative conversations loss invalidated archive, revalidated from page 1, dropped private row/count, and kept unchanged item");
+      // 4. Release the held pre-change Load older response: it MUST be discarded and never enter the DOM or count.
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      check(!card(`ask:${f.privLossAskId}`), "private group DM row must stay absent after held release");
+      check(!card(`ask:${f.heldPage2AskId}`), "held pre-change page-2 row must never appear");
+      const panelText = panel()!.textContent ?? "";
+      check(!panelText.includes("Private group secret question?") && !panelText.includes("Private group secret answer"),
+        "private title/answer leaked in panel: " + panelText);
+      check(!panelText.includes("Held pre-change private page-2 secret"),
+        "held pre-change page-2 text leaked in panel: " + panelText);
+      check(shown(card(`ask:${f.unchangedWsAskId}`)) && card(`ask:${f.unchangedWsAskId}`)!.textContent!.includes("Still authorized"),
+        "unchanged workspace item must remain visible after revalidation");
+      check(scope()!.options[1]!.textContent === "All channels (1)",
+        "expected All channels (1) after revalidation, got " + scope()!.options[1]!.textContent);
+      check(route("c") === "general", "viewer stayed in #general throughout: " + route("c"));
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-channel-page2-")) {
+      await wait(() => shown(control()), "Waiting control ready on #garden");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened in #garden");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      // Page 1 has only #general items; #garden answer sits on page 2 -> MUST appear without changing scope!
+      await wait(() => shown(card(`ask:${f.gardenArchivedAskId}`)),
+        "#garden answer from page 2 appeared in default channel scope without switching scope");
+      check(scope()!.value === "channel", "scope must remain channel (#garden): " + scope()!.value);
+      check(card(`ask:${f.gardenArchivedAskId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Yes, spring",
+        "unexpected #garden archived answer text");
+      check(f.archivedPages >= 2, "must have paged through page 1 and page 2: " + f.archivedPages);
+      if (!f.phone) {
+        // Switch to #quiet (0 matches on page 1 AND page 2): empty state appears ONLY after exhausting page 2.
+        const quietLink = () => document.querySelector<HTMLElement>(`[data-rail-channel="${f.chReno}"]`);
+        await wait(() => shown(quietLink()), "#quiet channel link rendered in rail");
+        const pagesBeforeQuiet = f.archivedPages;
+        quietLink()!.click();
+        await wait(() => quietLink()?.getAttribute("aria-current") === "page" &&
+          shown(panel()?.querySelector('[data-waiting-archived-state="empty"]')),
+          "#quiet showed empty state after exhausting all archive pages");
+        check(panel()!.querySelector(".cs-waiting-panel__state-text")!.textContent === "No archived items in #quiet.",
+          "unexpected #quiet empty text: " + panel()!.querySelector(".cs-waiting-panel__state-text")!.textContent);
+        check(f.archivedPages >= pagesBeforeQuiet + 2,
+          `#quiet must exhaust both pages before showing empty (before=${pagesBeforeQuiet}, after=${f.archivedPages})`);
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-cache-revalidate-and-deny-")) {
+      await wait(() => shown(control()), "Waiting control ready");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const archivedCards = () => Array.from(panel()?.querySelectorAll<HTMLElement>("[data-waiting-archived-item]") ?? []);
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "panel opened");
+      // 1. Initial load populates page 1 with 5 #general cards + Load older.
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => archivedCards().length === 5 && shown(panel()?.querySelector("[data-waiting-archived-more]")),
+        "initial Archived page 1 loaded 5 cards");
+      check(f.archivedPages === 1, "expected 1 initial archived read, got " + f.archivedPages);
+      // 2. Close & reopen: MUST revalidate (never skip read on warm cache!).
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed");
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 2 && archivedCards().length === 5,
+        "reopening Archived revalidated from server");
+      // 3. Explicit NULL refusal on reopen: previously cached rows MUST be cleared immediately.
+      f.archivedMode = "null";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed before NULL refusal");
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 3 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "NULL refusal cleared all previously cached rows immediately");
+      // 4. Restore ok + Retry -> page 1 loads -> then HTTP 403 on Load older MUST immediately clear page 1 rows!
+      f.archivedMode = "ok";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-retry]")!.click();
+      await wait(() => f.archivedPages === 4 && archivedCards().length === 5 && shown(panel()?.querySelector("[data-waiting-archived-more]")),
+        "Retry reloaded page 1 cleanly");
+      f.archivedMode = "deny403";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => f.archivedPages === 5 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "403 authorization error on Load older immediately cleared previously cached page-1 rows");
+      // 5. Held request retirement: start slow request, close panel, release held response -> discarded (never repopulates DOM).
+      f.archivedMode = "hold";
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-retry]")!.click();
+      await wait(() => f.archivedHeld, "held archived request in flight");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-close]")!.click();
+      await wait(() => !shown(panel()), "panel closed while archived request held");
+      f.archivedMode = "ok";
+      f.releaseArchivedHeld();
+      await new Promise(resolve => setTimeout(resolve, 40));
+      // Switch to null before reopening so we prove the released held response never warmed the cache!
+      f.archivedMode = "null";
+      control()!.click();
+      await wait(() => shown(panel()) && f.archivedPages === 7 &&
+        shown(panel()?.querySelector('[data-waiting-archived-state="failed"]')) &&
+        archivedCards().length === 0,
+        "retired held request was discarded and never repopulated Archived");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-unavailable-")) {
+      await wait(() => shown(control()) && count() === "4", "4 active items counted before checking unavailable Archived");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "Waiting panel and Archived tab rendered");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => shown(panel()?.querySelector('[data-waiting-archived-state="unavailable"]')), "PGRST202 unavailable fallback rendered");
+      check(panel()!.querySelector('[data-waiting-archived-state="unavailable"]')!.textContent === "Archived history is unavailable on this server.",
+        "unexpected unavailable copy: " + panel()!.querySelector('[data-waiting-archived-state="unavailable"]')!.textContent);
+      // Switching back to Waiting keeps the active queue working cleanly.
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="active"]')!.click();
+      await wait(() => shown(panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)), "Waiting tab still works after PGRST202");
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-after-reload-")) {
+      await wait(() => shown(control()) && count() === "0", "reloaded browser still shows 0 active Waiting items");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector('[data-waiting-tab="archived"]')), "reloaded panel opened");
+      panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!.click();
+      await wait(() => scope() !== null, "scope control ready in Archived tab");
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`ask:${f.dmAsks.dmScout}`)) &&
+        shown(card(`ask:${f.plainAsks[0]}`)) && shown(card(`todo:${f.todoGroupId}`)) && shown(card(`review:${f.reviewOfferId}`)),
+        "all survey-answered asks, plain ask, completed to-do, and answered review persisted across full browser reload");
+      check(card(`ask:${f.dmAsks.groupSM}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Approve", "group choice answer outcome mismatch after reload");
+      check(card(`ask:${f.dmAsks.dmScout}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Hold", "DM survey answer outcome mismatch after reload");
+      check(card(`ask:${f.plainAsks[0]}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Tuesday 9am", "plain answer outcome mismatch after reload");
+      check(card(`todo:${f.todoGroupId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Done", "todo outcome mismatch after reload");
+      check(card(`review:${f.reviewOfferId}`)!.querySelector(".cs-waiting-archived__answer")!.textContent === "Accepted", "review outcome mismatch after reload");
+      const openGroupAsk = card(`ask:${f.dmAsks.groupSM}`)!.querySelector<HTMLAnchorElement>(`[data-waiting-archived-open="ask:${f.dmAsks.groupSM}"]`);
+      check(Boolean(openGroupAsk) && openGroupAsk!.getAttribute("href")!.includes(`dm=${f.convGroupSM}`) && openGroupAsk!.getAttribute("href")!.includes(`m=${f.dmAsks.groupSM}`),
+        "visible archived ask missing source link: " + openGroupAsk?.getAttribute("href"));
+      for (const k of [`ask:${f.dmAsks.groupSM}`, `ask:${f.dmAsks.dmScout}`, `ask:${f.plainAsks[0]}`, `todo:${f.todoGroupId}`, `review:${f.reviewOfferId}`]) {
+        const dt = card(k)!.querySelector<HTMLTimeElement>(".cs-waiting-archived__meta")?.dateTime ?? "";
+        check(Number.isFinite(Date.parse(dt)), `missing archived_at datetime on ${k}: ${dt}`);
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario.startsWith("archived-reload-")) {
+      await wait(() => shown(control()) && count() === "4", "4 active items counted before answering");
+      control()!.click();
+      const panel = () => document.querySelector<HTMLElement>("#cs-waiting-panel");
+      const scope = () => panel()?.querySelector<HTMLSelectElement>("[data-waiting-scope]") ?? null;
+      await wait(() => shown(panel()) && shown(panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)), "panel opened on #general showing plain ask");
+      // 1. Answer plain-text ask in #general.
+      const plainCard = panel()!.querySelector<HTMLElement>(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`)!;
+      const plainInput = plainCard.querySelector<HTMLInputElement>("[data-waiting-plain-input]")!;
+      plainInput.value = "Tuesday 9am";
+      plainInput.dispatchEvent(new Event("input", { bubbles: true }));
+      plainCard.querySelector<HTMLButtonElement>("[data-waiting-plain-send]")!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-plain-ask="${f.plainAsks[0]}"]`), "plain ask left active Waiting column");
+      // 2. Switch scope to All channels and submit both choice asks through survey review (Review questions).
+      scope()!.value = "workspace";
+      scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+      await wait(() => shown(panel()?.querySelector("[data-waiting-review-start]")) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`)) &&
+        shown(panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`)) &&
+        shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`)), "both choice asks, Review questions, and group to-do visible in All channels");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-review-start]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 1 of 2", "survey review opened on Q1");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="yes"]')!.click();
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => panel()?.querySelector("[data-waiting-survey-progress]")?.textContent === "Question 2 of 2", "survey review stepped to Q2");
+      panel()!.querySelector<HTMLButtonElement>('[data-survey-option="no"]')!.click();
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-next]")!.click();
+      await wait(() => shown(panel()?.querySelector("[data-waiting-survey-send]")) &&
+        panel()?.querySelector("[data-waiting-survey-send]")?.textContent === "Send 2 answers", "survey review ready to send 2 answers");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-survey-send]")!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-card="${f.dmAsks.groupSM}"]`) &&
+        !panel()?.querySelector(`[data-waiting-card="${f.dmAsks.dmScout}"]`) &&
+        shown(panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`)), "submitted survey answers removed both choice asks from active Waiting");
+      // 3. Mark group to-do done -> top bar reaches 0.
+      panel()!.querySelector<HTMLButtonElement>(`[data-waiting-todo-done="${f.todoGroupId}"]`)!.click();
+      await wait(() => !panel()?.querySelector(`[data-waiting-todo="${f.todoGroupId}"]`) && count() === "0", "completed to-do left active Waiting column and top bar reached 0");
+      // 4. Switch to Archived tab: verify outcomes, timestamps, source links, Load older pagination, and desktop Gen 1 vs Gen 2 scoping.
+      const archTab = panel()!.querySelector<HTMLButtonElement>('[data-waiting-tab="archived"]')!;
+      check(archTab.getBoundingClientRect().height >= 44, "Archived tab must meet 44px touch target");
+      archTab.click();
+      const card = (key: string) => panel()?.querySelector<HTMLElement>(`[data-waiting-archived-item="${key}"]`) ?? null;
+      await wait(() => shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`ask:${f.dmAsks.dmScout}`)) &&
+        shown(card(`ask:${f.plainAsks[0]}`)) && shown(card(`todo:${f.todoGroupId}`)) && shown(card(`review:${f.reviewOfferId}`)),
+        "Archived page 1 rendered both survey-answered asks, plain ask, completed to-do, and answered review");
+      // Load older page 2 via keyset cursor (redacted left-group ask + earlier page-2 question).
+      await wait(() => shown(panel()?.querySelector("[data-waiting-archived-more]")), "Load older button shown for truncated archive");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-archived-more]")!.click();
+      await wait(() => shown(card(`ask:${f.redactedArchivedAskId}`)) && shown(card(`ask:${f.olderArchivedAskId}`)) &&
+        !panel()?.querySelector("[data-waiting-archived-more]"),
+        "Load older keyset-paged remaining items cleanly");
+      check(!card(`ask:${f.redactedArchivedAskId}`)!.querySelector("[data-waiting-archived-open]"), "redacted archived ask must not render an Open source link");
+      if (!f.phone) {
+        // Desktop conversation isolation: Gen 1 shows only its 2 archived items; restarted Gen 2 shows 0 (zero bleed!).
+        const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
+        const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
+        await wait(() => shown(groupSMLink()) && shown(groupSM2Link()), "group DM generations rendered in rail");
+        scope()!.value = "channel";
+        scope()!.dispatchEvent(new Event("change", { bubbles: true }));
+        groupSMLink()!.click();
+        await wait(() => groupSMLink()?.getAttribute("aria-current") === "page" &&
+          shown(card(`ask:${f.dmAsks.groupSM}`)) && shown(card(`todo:${f.todoGroupId}`)) &&
+          !card(`ask:${f.dmAsks.dmScout}`) && !card(`ask:${f.plainAsks[0]}`) && !card(`ask:${f.redactedArchivedAskId}`),
+          "Gen 1 Archived scopes strictly to Gen 1 items");
+        groupSM2Link()!.click();
+        await wait(() => groupSM2Link()?.getAttribute("aria-current") === "page" &&
+          shown(panel()?.querySelector('[data-waiting-archived-state="empty"]')),
+          "restarted Gen 2 Archived shows empty with zero Gen 1 or redacted bleed");
+      }
+      document.documentElement.dataset.waitingObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario.startsWith("dm-ambiguous-incomplete-")) {
       const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
       const groupSM2Link = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM2}"]`);
@@ -1293,7 +2021,139 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixture("installWaitingFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixture("observeWaitingCount") + "</script></body></html>";
+  const makeArchivedBucket = () => {
+    const baseMs = Date.now() - 3600_000;
+    const owner = "33333333-3333-4333-8333-333333333333";
+    const agent = "22222222-2222-4222-8222-222222222222";
+    const maya = "44444444-4444-4444-8444-444444444444";
+    const reviewOfferId = "99999999-9999-4999-8999-000000000001";
+    const reviewTodoId = "dddddddd-dddd-4ddd-8ddd-000000000091";
+    const olderArchivedAskId = "99999999-9999-4999-8999-000000000077";
+    const redactedArchivedAskId = "99999999-9999-4999-8999-000000000078";
+    const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
+    return {
+      answeredIds: [] as string[],
+      todoDone: false,
+      archivedItems: [
+        {
+          item_key: `review:${reviewOfferId}`,
+          kind: "review",
+          id: reviewOfferId,
+          todo_id: reviewTodoId,
+          ask_kind: null,
+          title: "Review draft proposal",
+          from: { kind: "user", id: maya, name: "Maya" },
+          outcome_kind: "accepted",
+          outcome_text: "Accepted",
+          archived_at: new Date(baseMs + 300_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        },
+        {
+          item_key: `ask:${redactedArchivedAskId}`,
+          kind: "ask",
+          id: redactedArchivedAskId,
+          todo_id: null,
+          ask_kind: "plain",
+          title: "Left group historical ask?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "cleared_stale",
+          outcome_text: "Cleared as stale",
+          archived_at: new Date(baseMs + 200_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "redacted",
+          channel_id: null,
+          conversation_id: null,
+          conversation_kind: null,
+        },
+        {
+          item_key: `ask:${olderArchivedAskId}`,
+          kind: "ask",
+          id: olderArchivedAskId,
+          todo_id: null,
+          ask_kind: "choice",
+          title: "Earlier page-2 archived question?",
+          from: { kind: "agent", id: agent, name: "Scout" },
+          outcome_kind: "answered",
+          outcome_text: "Ship it",
+          archived_at: new Date(baseMs + 100_000).toISOString(),
+          answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+          placement: "general",
+          channel_id: null,
+          conversation_id: convGeneral,
+          conversation_kind: "general",
+        },
+      ] as any[],
+    };
+  };
+  const archivedStore = new Map<string, ReturnType<typeof makeArchivedBucket>>();
+  const getArchivedBucket = (name: string) => {
+    let b = archivedStore.get(name);
+    if (!b) { b = makeArchivedBucket(); archivedStore.set(name, b); }
+    return b;
+  };
   const server = createServer((request, response) => {
+    if (request.url?.startsWith("/__archived-state")) {
+      const u = new URL(request.url, "http://127.0.0.1");
+      const bucket = getArchivedBucket(u.searchParams.get("bucket") || "desktop");
+      if (request.method === "POST") {
+        let raw = "";
+        request.on("data", chunk => { raw += String(chunk); });
+        request.on("end", () => {
+          const ev = JSON.parse(raw || "{}");
+          const owner = "33333333-3333-4333-8333-333333333333";
+          const agent = "22222222-2222-4222-8222-222222222222";
+          const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
+          if (ev.type === "choice_answer" && ev.signal_id) {
+            if (!bucket.answeredIds.includes(ev.signal_id)) bucket.answeredIds.push(ev.signal_id);
+            const key = `ask:${ev.signal_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              const placement = ev.placement === "dm" ? "dm" : "group_dm";
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "ask", id: ev.signal_id, todo_id: null, ask_kind: "choice",
+                title: ev.title, from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered", outcome_text: ev.outcome_text, archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement, channel_id: null, conversation_id: ev.conversation_id, conversation_kind: placement,
+              });
+            }
+          } else if (ev.type === "plain_answer" && ev.signal_id) {
+            if (!bucket.answeredIds.includes(ev.signal_id)) bucket.answeredIds.push(ev.signal_id);
+            const key = `ask:${ev.signal_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "ask", id: ev.signal_id, todo_id: null, ask_kind: "plain",
+                title: ev.title, from: { kind: "agent", id: agent, name: "Scout" },
+                outcome_kind: "answered", outcome_text: ev.outcome_text, archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "general", channel_id: null, conversation_id: convGeneral, conversation_kind: "general",
+              });
+            }
+          } else if (ev.type === "todo_done" && ev.todo_id) {
+            bucket.todoDone = true;
+            const key = `todo:${ev.todo_id}`;
+            if (!bucket.archivedItems.some(i => i.item_key === key)) {
+              bucket.archivedItems.unshift({
+                item_key: key, kind: "todo", id: ev.todo_id, todo_id: ev.todo_id, ask_kind: null,
+                title: ev.title, from: { kind: "user", id: owner, name: "Synthetic owner" },
+                outcome_kind: "done", outcome_text: "Done", archived_at: ev.archived_at,
+                answered_by: { kind: "user", id: owner, name: "Synthetic owner", by_viewer: true },
+                placement: "group_dm", channel_id: null, conversation_id: ev.conversation_id, conversation_kind: "group_dm",
+              });
+            }
+          }
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify(bucket));
+        });
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(bucket));
+      return;
+    }
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
     if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
     if (request.url === "/peer-switch") { response.writeHead(200, { "Content-Type": "text/html" }); response.end(peerSwitchPage); return; }
@@ -1308,9 +2168,9 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     for (const scenario of scenarios) {
       // A phone (390 x 844) draws the control in the shell's top bar; a desktop (1280 x 800) in the workspace header.
       const size = scenario.endsWith("-phone") ? "390,844" : "1280,800";
-      const channelParam = scenario.startsWith("todos-21-")
+      const channelParam = (scenario.startsWith("todos-21-") || scenario.startsWith("archived-channel-page2-") || scenario.startsWith("archived-members-preflight-loss-"))
         ? "&c=cccccccc-cccc-4ccc-8ccc-000000000001"
-        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
+        : (scenario.startsWith("batch-51") || scenario.startsWith("batch-101") || scenario.startsWith("truncated-queue") || scenario.startsWith("todos-") || scenario.startsWith("survey-") || scenario.startsWith("dm-convergence-") || scenario.startsWith("dm-ambiguous-incomplete-") || scenario.startsWith("archived-") || scenario.startsWith("historical-cleanup-") || scenario.startsWith("plain-401-") || scenario.startsWith("waiting-read-retire-"))
           ? "&c=general"
           : "";
       const { stdout } = await launchChrome(chrome, [`--window-size=${size}`, "--virtual-time-budget=120000", "--dump-dom",
@@ -1365,5 +2225,22 @@ test("Waiting on you: Check F historical plain-text asks answer inline or clear 
 
 test("Waiting on you: retires survey batch, background reads, and historical 401 retry immediately when login changes, while preserving unchanged-login token refresh", { timeout: 180_000 }, async () => {
   const outcomes = await runWaitingScenarios(["survey-auth-retire-desktop", "waiting-read-retire-desktop", "plain-401-retire-desktop", "plain-401-refresh-control-desktop"]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting on you: Archived view shows answered asks, completed to-dos, and answered reviews with outcomes & timestamps across reload, pagination, and PGRST202 fallback", { timeout: 180_000 }, async () => {
+  const outcomes = await runWaitingScenarios([
+    "archived-reload-desktop",
+    "archived-after-reload-desktop",
+    "archived-reload-phone",
+    "archived-after-reload-phone",
+    "archived-unavailable-desktop",
+    "archived-channel-page2-desktop",
+    "archived-channel-page2-phone",
+    "archived-cache-revalidate-and-deny-desktop",
+    "archived-conversation-loss-desktop",
+    "archived-members-preflight-loss-desktop",
+    "archived-history-404-eviction-desktop",
+  ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
