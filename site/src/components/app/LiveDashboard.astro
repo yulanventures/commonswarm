@@ -15536,7 +15536,7 @@ import "../../styles/kylon-image-viewer.css";
      * from a transient failure (5xx/network/timeout -> `"failed"`, which shows Retry and never exposes the composer).
      */
     const refreshConversations = async (workspaceId: string, force: boolean, render = true): Promise<void> => {
-      if (sampleMode || !session || !workspaceId) return;
+      if (sampleMode || !session || !workspaceId || conversationsReadState === "unsupported") return;
       const now = Date.now();
       if (!force && now - conversationsReadAt < 15_000) return;
       conversationsReadAt = now;
@@ -15556,7 +15556,7 @@ import "../../styles/kylon-image-viewer.css";
           if (render) renderChannelBlocked();
           return;
         }
-        if (workspaceConversations === null) {
+        if (workspaceConversations === null && conversationsReadState !== "unsupported") {
           conversationsReadState = "failed";
           conversationsReadError = readableError(error) || "Couldn't check channel membership.";
           if (render) renderChannelBlocked();
