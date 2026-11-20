@@ -20,12 +20,78 @@ import {
   classifySeatStatus,
   type SeatIndicator,
   type SeatStatus,
+  type SeatStatusKind,
   type SeatWakeInput,
 } from "../../../src/protocol/seat-status";
 import { wakePathMark } from "./wake-path";
 import { connectionPolicyState, renewalGrantEnded, type GrantRiskInput, type ConnectionPolicy } from "./standing-grants";
 import type { AgentStateVM } from "./home-types";
 import { formatWhen } from "./home-names";
+
+export { classifySeatStatus, type SeatIndicator, type SeatStatus, type SeatStatusKind, type SeatWakeInput };
+
+export interface DmAgentSeatStatusInput {
+  transport?: "local" | "hosted_mcp";
+  turnOnly?: boolean;
+  connection?: "live" | "removed" | "connection_off" | "key_off" | "key_ended" | "paused";
+  revoked?: boolean;
+  suspended?: boolean;
+  presence?: AgentPresenceRow | null;
+  wake?: SeatWakeInput | null;
+  lastActivityAt?: string | null;
+  workingOn?: { at?: string; createdAt?: string; since?: string | null; until?: string | null } | null;
+  doingTodo?: { since?: string | null; startedAt?: string | null } | null;
+  serverWork?: "working" | "idle" | "disconnected";
+  oldestUnobservedAt?: string | null;
+  unseenCount?: number | null;
+  locale?: string;
+  timeZone?: string;
+}
+
+export interface DmAgentSeatStatus {
+  kind: SeatStatusKind;
+  line: string;
+  indicator: SeatIndicator;
+  attention: boolean;
+}
+
+/** Single live status line for an agent 1:1 DM header, powered by the shared C2 classifier. */
+export function dmAgentSeatStatus(input: DmAgentSeatStatusInput, now = Date.now()): DmAgentSeatStatus {
+  const status = classifySeatStatus({
+    transport: input.transport,
+    turnOnly: input.turnOnly,
+    connection: input.connection,
+    revoked: input.revoked,
+    suspended: input.suspended,
+    presence: input.presence,
+    wake: input.wake,
+    lastActivityAt: input.lastActivityAt,
+    workingOn: input.workingOn
+      ? {
+          since: input.workingOn.since ?? input.workingOn.at ?? input.workingOn.createdAt ?? null,
+          until: input.workingOn.until ?? null,
+          // DM header never surfaces private channel or DM work titles from other audiences.
+          text: null,
+          scope: "private_channel",
+        }
+      : null,
+    doingTodo: input.doingTodo
+      ? { since: input.doingTodo.since ?? input.doingTodo.startedAt ?? null }
+      : null,
+    serverWork: input.serverWork,
+    waitingSince: input.oldestUnobservedAt,
+    unseenCount: input.unseenCount,
+    locale: input.locale,
+    timeZone: input.timeZone,
+    viewerInPrivateAudience: false,
+  }, now);
+  return {
+    kind: status.kind,
+    line: status.line,
+    indicator: status.indicator,
+    attention: status.attention,
+  };
+}
 
 export type AgentStatusKind = "removed" | "suspended" | "inactive" | "active" | "idle" | "connected";
 

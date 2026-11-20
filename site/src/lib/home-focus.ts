@@ -10,6 +10,8 @@ export function homeStructureKey(vm: RailVM | WorkspaceShellVM | CatchUpVM): str
     // Detail can also change its measured sentence; the rail updates it in place.
     if (key === "detail" && "word" in this && "fix" in this) return undefined;
     if (key === "what" && this.kind === "agent-fix") return undefined;
+    // Live seat status ticks update in place so the DM header never detaches open menus or focus.
+    if (key === "dmSeatStatus" && value && typeof value === "object") return { present: true };
     return value;
   });
 }
@@ -102,6 +104,22 @@ export function replaceHomeRegion(slot: HTMLElement, region: string, children: H
   // Focusing a field can move its caret; put the kept one back.
   const kept = drafts.get(target.dataset.homeFocusKey ?? "");
   if (kept && "setSelectionRange" in target) (target as HTMLInputElement).setSelectionRange(kept.start, kept.end);
+}
+
+/** Update a 1:1 agent DM header seat-status line in place so live ticks never rebuild header controls. */
+export function refreshHomeShellSeatStatus(slot: HTMLElement, vm: WorkspaceShellVM): void {
+  const seat = vm.dmSeatStatus;
+  if (!seat) return;
+  for (const el of slot.querySelectorAll<HTMLElement>("[data-dm-seat-status]")) {
+    el.dataset.dmSeatStatus = seat.kind;
+    el.dataset.indicator = seat.indicator;
+    el.dataset.attention = String(seat.attention);
+    el.title = seat.line;
+    const shape = el.querySelector<HTMLElement>(".hm-dm-seat-status__shape");
+    if (shape) shape.dataset.shape = seat.indicator;
+    const text = el.querySelector<HTMLElement>(".hm-dm-seat-status__text");
+    if (text && text.textContent !== seat.line) text.textContent = seat.line;
+  }
 }
 
 /** Polls keep current measured details in titles and accessible names without replacing buttons. */

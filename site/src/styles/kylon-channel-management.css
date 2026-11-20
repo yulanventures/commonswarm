@@ -18,6 +18,26 @@ live-dashboard.dashboard[data-kylon-shell] .hm-channel-description {
 }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description { min-block-size: 44px; cursor: pointer; }
 live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description:hover { color: var(--k-shell-ink); text-decoration: underline; text-underline-offset: 3px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__text {
+  min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape {
+  flex: none; inline-size: 8px; block-size: 8px; border-radius: 999px;
+  border: 1.5px solid currentColor; box-sizing: border-box;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape[data-shape="dot"] {
+  border: 0; background: var(--home-blue-deep, var(--k-shell-accent));
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status__shape[data-shape="diamond"] {
+  inline-size: 7px; block-size: 7px; border: 0; border-radius: 2px;
+  transform: rotate(45deg); background: currentColor;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-dm-seat-status[data-attention="true"] {
+  color: var(--k-shell-danger, var(--k-shell-ink));
+}
 live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory], [data-group-leave-dialog], [data-conversation-picker-dialog], [data-conversation-members-dialog]) .cm-dialog-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none;
 }
