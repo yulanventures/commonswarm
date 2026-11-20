@@ -565,6 +565,7 @@ export interface LocalAuthLockPlan {
   parentsLocked?: boolean;
   readonly actor?: string;
   readonly userKeyShareIds?: readonly string[];
+  readonly userUpdateIds?: readonly string[];
   readonly hostedMode?: LocalLockMode;
 }
 const sortedIds = (ids: Array<string | null>) => [...new Set(ids.filter((id): id is string => id !== null))].sort();
@@ -671,7 +672,8 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
   }
   if (!plan.parentsLocked) {
   for (const id of s.users) {
-    if (plan.userKeyShareIds?.includes(id) || (plan.actor && id !== plan.actor)) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR KEY SHARE`;
+    if (plan.userUpdateIds?.includes(id)) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR UPDATE`;
+    else if (plan.userKeyShareIds?.includes(id) || (plan.actor && id !== plan.actor)) await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR KEY SHARE`;
     else await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR NO KEY UPDATE`;
   }
   for (const id of s.adminAccounts ?? []) await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${id}::uuid FOR UPDATE`;
@@ -781,6 +783,10 @@ export async function planLocalOperation(tx: Sql, options: {
   revocation?: {user:string}|{principal:string}|{token:string};
   /** Seat admin (2b): lock the presenting agent's owner admin account and the agent's active seat admin grants. */
   seatAdmin?: boolean;
+  /** Lock mode for the actor's swarm.users row. Defaults to "keyShare" for local agent/join callers
+   * (which never mutate swarm.users) so sibling agents owned by the same user never serialize on the
+   * single owner row, and "noKeyUpdate" for human/admin callers. */
+  actorUserMode?: "keyShare" | "noKeyUpdate" | "update";
 }): Promise<LocalAuthLockPlan | null> {
   const credential = options.hash ? await discoverLocalCredential(tx, options.hash) : null;
   if (options.hash && !credential) return null;
@@ -939,7 +945,11 @@ export async function planLocalOperation(tx: Sql, options: {
       parentUpdates};
   };
   const snapshot = await discover();
-  return {snapshot,rediscover:discover,connectionOnly:options.connectionOnly,targetWorkspace:workspace ?? undefined,actor:options.actor ?? credential?.owner_user_id ?? joinRows[0]?.owner_user_id,
+  const planActor = options.actor ?? credential?.owner_user_id ?? joinRows[0]?.owner_user_id;
+  const actorUserMode = options.actorUserMode ?? (!options.actor && !options.admin ? "keyShare" : "noKeyUpdate");
+  return {snapshot,rediscover:discover,connectionOnly:options.connectionOnly,targetWorkspace:workspace ?? undefined,actor:planActor,
+    ...(actorUserMode === "keyShare" ? { userKeyShareIds: snapshot.users }
+      : actorUserMode === "update" && planActor ? { userUpdateIds: [planActor] } : {}),
     workspaces:sortedIds([workspace ?? null,...(snapshot.adminWorkspaces ?? []),...(options.memberMutation ? snapshot.workspaceRows ?? [] : [])]).map(id=>({id,mode: options.workspaceMode ?? (options.allWorkspace || options.household || options.revocation || options.join || options.admin ? 'update' as const:'share' as const)})),
     principalMode:options.principalMode ?? 'share',sessionMode:options.sessionMode ?? 'share',hostedMode:options.hostedMode,
     streamIds:sortedIds([...(snapshot.routeStreams ?? []).map(r=>r.id),...joinRows.map(r=>r.stream_id)]),locked:false};
