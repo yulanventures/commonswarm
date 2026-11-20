@@ -342,6 +342,9 @@ BEGIN
   WHERE cs.workspace_id = p_workspace_id AND cs.signal_id = p_signal_id;
 
   IF v_cs.conversation_id IS NOT NULL THEN
+    IF v_cs.audience NOT IN ('conversation', 'addressed') THEN
+      RETURN;
+    END IF;
     SELECT c.conversation_id, c.kind, c.channel_id, c.archived_at
     INTO v_conv
     FROM swarm.conversations AS c
@@ -354,6 +357,10 @@ BEGIN
       WHEN v_conv.kind IN ('public_channel', 'private_channel') THEN v_conv.channel_id
       ELSE NULL
     END;
+  ELSIF v_sig.thread_root_id IS NOT NULL THEN
+    -- Fail closed: suppress unfiled thread replies (matching the canonical frame reader),
+    -- so a reply without conversation placement can never fall back to a general alert.
+    RETURN;
   ELSE
     conversation_id := NULL;
     effective_channel_id := v_sig.channel_id;
@@ -391,25 +398,23 @@ BEGIN
     INTO v_root
     FROM swarm.signals AS r
     WHERE r.workspace_id = p_workspace_id AND r.id = v_sig.thread_root_id;
-    IF FOUND THEN
-      SELECT rcs.audience INTO v_rcs
-      FROM swarm.conversation_signals AS rcs
-      WHERE rcs.workspace_id = p_workspace_id AND rcs.signal_id = v_root.id;
-      v_root_addressed := (
-        v_rcs.audience = 'addressed'
-        OR v_root.to_user_id IS NOT NULL
-        OR v_root.to_agent_principal_id IS NOT NULL
-        OR EXISTS (
-          SELECT 1 FROM swarm.signal_recipients AS rr
-          WHERE rr.workspace_id = p_workspace_id AND rr.signal_id = v_root.id
-        )
-      );
-    ELSE
-      -- Orphaned thread reply: fail closed.
+    IF NOT FOUND THEN
       conversation_id := NULL;
       effective_channel_id := NULL;
       RETURN;
     END IF;
+    SELECT rcs.conversation_id, rcs.audience INTO v_rcs
+    FROM swarm.conversation_signals AS rcs
+    WHERE rcs.workspace_id = p_workspace_id AND rcs.signal_id = v_root.id;
+    IF v_rcs.conversation_id IS NULL
+      OR v_rcs.conversation_id IS DISTINCT FROM v_cs.conversation_id
+      OR v_rcs.audience NOT IN ('conversation', 'addressed') THEN
+      -- Fail closed: exclude replies whose root lacks matching canonical placement/audience.
+      conversation_id := NULL;
+      effective_channel_id := NULL;
+      RETURN;
+    END IF;
+    v_root_addressed := (v_rcs.audience = 'addressed');
   END IF;
 
   IF NOT v_sig_addressed AND NOT v_root_addressed THEN
@@ -487,8 +492,10 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
   v_sig record;
+  v_cs_conv uuid;
   v_cs_aud text;
   v_root record;
+  v_rcs_conv uuid;
   v_rcs_aud text;
   v_sig_addressed boolean;
   v_root_addressed boolean;
@@ -544,6 +551,12 @@ BEGIN
     END IF;
 
     IF v_sig.thread_root_id IS NOT NULL THEN
+      SELECT cs.conversation_id INTO v_cs_conv
+      FROM swarm.conversation_signals AS cs
+      WHERE cs.workspace_id = p_workspace AND cs.signal_id = v_sig.id;
+      IF v_cs_conv IS NULL OR v_cs_aud NOT IN ('conversation', 'addressed') THEN
+        RETURN false;
+      END IF;
       SELECT
         r.id, r.from_kind, r.from_principal, r.to_user_id, r.to_agent_principal_id
       INTO v_root
@@ -552,18 +565,15 @@ BEGIN
       IF NOT FOUND THEN
         RETURN false;
       END IF;
-      SELECT rcs.audience INTO v_rcs_aud
+      SELECT rcs.conversation_id, rcs.audience INTO v_rcs_conv, v_rcs_aud
       FROM swarm.conversation_signals AS rcs
       WHERE rcs.workspace_id = p_workspace AND rcs.signal_id = v_root.id;
-      v_root_addressed := (
-        v_rcs_aud = 'addressed'
-        OR v_root.to_user_id IS NOT NULL
-        OR v_root.to_agent_principal_id IS NOT NULL
-        OR EXISTS (
-          SELECT 1 FROM swarm.signal_recipients AS rr
-          WHERE rr.workspace_id = p_workspace AND rr.signal_id = v_root.id
-        )
-      );
+      IF v_rcs_conv IS NULL
+        OR v_rcs_conv IS DISTINCT FROM v_cs_conv
+        OR v_rcs_aud NOT IN ('conversation', 'addressed') THEN
+        RETURN false;
+      END IF;
+      v_root_addressed := (v_rcs_aud = 'addressed');
       IF v_root_addressed AND NOT swarm.conversation_signal_visible_to(
         p_workspace, v_root.id, 'addressed',
         v_root.from_kind::text, v_root.from_principal,

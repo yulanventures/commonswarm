@@ -2026,4 +2026,82 @@ test("C1a audience isolation: DM, private channel, mixed audiences, and public-t
     WHERE workspace_id = ${workspace}::uuid AND kind = 'agent_unseen' AND affected_principal_id = ${unseenSeat.principal}::uuid AND resolved_at IS NULL
   `;
   assert.equal(remaining.length, 0, "all remaining scoped alerts must clear once observed");
+
+  // Unmapped-thread refusal witness with a mapped control (closes legacy thread fallback).
+  const threadPrivCh = await createChannel(privMember, "c1a-unmapped-thread", {
+    visibility: "private",
+    members: [{ kind: "agent", id: unseenSeat.principal }],
+  });
+  const mappedRootPost = await send(privMember.jwt, {
+    kind: "post_signal",
+    signal_kind: "note",
+    conversation_id: threadPrivCh.id,
+    body: "Mapped private thread root",
+    to_user_id: null,
+    to_agent_principal_id: null,
+    in_reply_to: null,
+    about: null,
+  });
+  assert.equal(mappedRootPost.status, 200, JSON.stringify(mappedRootPost.body));
+  const mappedRootId = String((mappedRootPost.body.signal as Row).id);
+
+  const mappedReplyId = randomUUID();
+  const unfiledReplyId = randomUUID();
+  const unmappedRootId = randomUUID();
+  const unmappedRootReplyId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at, channel_id, thread_root_id)
+      VALUES
+        (${mappedReplyId}::uuid, ${workspace}::uuid, ${privMember.id}::uuid, 'user', ${unseenSeat.principal}::uuid, 'ask', 'Mapped control reply', statement_timestamp() + interval '1 day', statement_timestamp(), ${threadPrivCh.id}::uuid, ${mappedRootId}::uuid),
+        (${unfiledReplyId}::uuid, ${workspace}::uuid, ${privMember.id}::uuid, 'user', ${unseenSeat.principal}::uuid, 'ask', 'Unfiled legacy reply with NULL channel', statement_timestamp() + interval '1 day', statement_timestamp(), NULL, ${mappedRootId}::uuid),
+        (${unmappedRootId}::uuid, ${workspace}::uuid, ${privMember.id}::uuid, 'user', NULL, 'note', 'Unmapped root', statement_timestamp() + interval '1 day', statement_timestamp(), ${threadPrivCh.id}::uuid, NULL),
+        (${unmappedRootReplyId}::uuid, ${workspace}::uuid, ${privMember.id}::uuid, 'user', ${unseenSeat.principal}::uuid, 'ask', 'Reply to unmapped root', statement_timestamp() + interval '1 day', statement_timestamp(), ${threadPrivCh.id}::uuid, ${unmappedRootId}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience, created_at)
+      VALUES
+        (${workspace}::uuid, ${threadPrivCh.id}::uuid, ${mappedReplyId}::uuid, 'conversation', statement_timestamp()),
+        (${workspace}::uuid, ${threadPrivCh.id}::uuid, ${unmappedRootReplyId}::uuid, 'conversation', statement_timestamp())
+    `;
+  });
+
+  // Classifier must fail closed (NULL scope_key) on both unfiled reply and unmapped-root reply, while accepting mapped control.
+  const [unfiledScope] = await sql<Row[]>`SELECT * FROM swarm.agent_unseen_signal_scope(${workspace}::uuid, ${unfiledReplyId}::uuid)`;
+  const [unmappedRootScope] = await sql<Row[]>`SELECT * FROM swarm.agent_unseen_signal_scope(${workspace}::uuid, ${unmappedRootReplyId}::uuid)`;
+  const [mappedScope] = await sql<Row[]>`SELECT * FROM swarm.agent_unseen_signal_scope(${workspace}::uuid, ${mappedReplyId}::uuid)`;
+  assert.equal(unfiledScope!.scope_key, null, "unfiled thread reply must be excluded from unseen aggregation");
+  assert.equal(unmappedRootScope!.scope_key, null, "reply to unmapped root must be excluded from unseen aggregation");
+  assert.equal(mappedScope!.scope_key, `conv:${threadPrivCh.id}`, "mapped control reply must retain canonical private-channel scope");
+
+  for (const sigId of [unfiledReplyId, unmappedRootReplyId, mappedReplyId]) {
+    await sql`
+      INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at)
+      VALUES (${workspace}::uuid, ${sigId}::uuid, ${unseenSeat.principal}::uuid, statement_timestamp() - interval '20 minutes')
+      ON CONFLICT (signal_id, recipient_agent_principal_id)
+      DO UPDATE SET enqueued_at = EXCLUDED.enqueued_at, acked_at = NULL, ack_outcome = NULL
+    `;
+  }
+  await sql`SELECT swarm.sync_agent_unseen_alerts(interval '10 minutes', interval '0 seconds')`;
+
+  const threadSyncAlerts = await sql<Row[]>`
+    SELECT alert_id, channel_id, conversation_id, source_signal_id, waiting_count, routed_lead_principal_id
+    FROM swarm.system_alerts
+    WHERE workspace_id = ${workspace}::uuid
+      AND kind = 'agent_unseen'
+      AND affected_principal_id = ${unseenSeat.principal}::uuid
+      AND resolved_at IS NULL
+  `;
+  assert.equal(threadSyncAlerts.length, 1, "ONLY the mapped control reply may open an alert; unmapped/unfiled replies must be excluded");
+  assert.equal(threadSyncAlerts[0]!.source_signal_id, mappedReplyId);
+  assert.equal(threadSyncAlerts[0]!.channel_id, threadPrivCh.id);
+  assert.equal(Number(threadSyncAlerts[0]!.waiting_count), 1);
+  assert.equal(threadSyncAlerts[0]!.routed_lead_principal_id, null, "non-member wsLead must not be routed private mapped control alert");
+  const leadSeesUnmapped = ((await readResource(wsLead.token, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.equal(leadSeesUnmapped.length, 0, "wsLead must see ZERO alerts from unfiled or private thread replies");
+  const privMemberSeesControl = ((await readResource(privMember.jwt, { resource: "system_alerts", workspace_id: workspace })).body.alerts as Row[])
+    .filter((a) => a.affected_principal_id === unseenSeat.principal && a.kind === "agent_unseen");
+  assert.equal(privMemberSeesControl.length, 1, "authorized private channel member must see the mapped control alert");
 });
