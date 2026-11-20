@@ -17894,7 +17894,7 @@ async function handleTransaction(
       if (command.conversation_id !== undefined) {
         const conversationId = command.conversation_id;
         const routed = await routeConversationPost(tx, route.workspaceId, authActorIdentity(auth), conversationId,
-          (command.to ?? []) as ConversationMember[]);
+          (command.to ?? []) as ConversationMember[], command.body);
         const direct = routed.ok && (routed.kind === "dm" || routed.kind === "group_dm");
         const problem = !routed.ok
           ? routed

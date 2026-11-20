@@ -6,6 +6,12 @@
  * exactly as an unknown id does.
  */
 import type postgres from "postgres";
+import {
+  bodyMayMention,
+  prefilterMentionCandidateAgents,
+  resolveGroupDmAgentMentions,
+  type GroupDmAgentMember,
+} from "../../../src/protocol/mention-address.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -329,8 +335,9 @@ export type ConversationPostRoute =
 /**
  * Where a post_signal with conversation_id goes. #general and channels post as today's `channel`
  * does. A 1:1 or group is addressed by the route rule: a person's post to every other live member; an
- * agent's group post to the live people and only the live agents it named in `to`. Takes the
- * conversation FOR SHARE until commit, as the deferred check at commit does.
+ * agent's group post to the live people and only the live agents it names in `to` or `@Agent` tags in
+ * `body` (strictly scoped to live peer agents of that group DM). Takes the conversation FOR SHARE
+ * until commit, as the deferred check at commit does.
  */
 export async function routeConversationPost(
   tx: Sql,
@@ -338,14 +345,78 @@ export async function routeConversationPost(
   actor: ConversationActor,
   conversationId: string,
   named: readonly ConversationMember[],
+  body?: string,
 ): Promise<ConversationPostRoute> {
   const { users, agents } = split(named);
-  const [row] = await tx<Row[]>`
-    SELECT swarm.conversation_post_route(${workspaceId}::uuid, ${actor.kind}, ${actor.id}::uuid,
-      ${conversationId}::uuid, ${users}::uuid[], ${agents}::uuid[]) AS result`;
-  if (row === undefined) throw new Error("conversation_post_route returned no result");
-  const result = row.result;
-  const status = String(result.status);
+  const runRoute = async (routeUsers: string[], routeAgents: string[]): Promise<Record<string, unknown>> => {
+    const [row] = await tx<Row[]>`
+      SELECT swarm.conversation_post_route(${workspaceId}::uuid, ${actor.kind}, ${actor.id}::uuid,
+        ${conversationId}::uuid, ${routeUsers}::uuid[], ${routeAgents}::uuid[]) AS result`;
+    if (row === undefined) throw new Error("conversation_post_route returned no result");
+    return row.result;
+  };
+  let result = await runRoute(users, agents);
+  let status = String(result.status);
+  if (
+    actor.kind === "agent" &&
+    body !== undefined &&
+    bodyMayMention(body) &&
+    result.kind === "group_dm" &&
+    (status === "ok" || status === "no_recipients")
+  ) {
+    const wsAgents = await tx<GroupDmAgentMember[]>`
+      SELECT p.principal_id::text AS id, p.name
+      FROM swarm.agent_principals AS p
+      JOIN swarm.memberships AS owner
+        ON owner.workspace_id = ${workspaceId}::uuid
+       AND owner.user_id = p.owner_user_id
+       AND owner.revoked_at IS NULL
+      WHERE EXISTS (
+        SELECT 1 FROM swarm.agent_workspace_memberships AS am
+        WHERE am.principal_id = p.principal_id
+          AND am.workspace_id = ${workspaceId}::uuid
+          AND am.revoked_at IS NULL
+      )
+        AND p.revoked_at IS NULL
+        AND p.principal_id <> ${actor.id}::uuid
+      ORDER BY p.principal_id`;
+    const candidates = prefilterMentionCandidateAgents(body, wsAgents);
+    if (candidates.length > 0) {
+      const candidateIds = candidates.map((c) => c.id);
+      const memberRows = await tx<{ id: string }[]>`
+        SELECT c.id::text AS id
+        FROM unnest(${candidateIds}::uuid[]) AS c(id)
+        WHERE (swarm.conversation_post_route(
+          ${workspaceId}::uuid, ${actor.kind}, ${actor.id}::uuid,
+          ${conversationId}::uuid, '{}'::uuid[], ARRAY[c.id]
+        )->>'status') = 'ok'`;
+      const memberIds = new Set(memberRows.map((r) => r.id.toLowerCase()));
+      const groupPeerAgents = candidates.filter((c) => memberIds.has(c.id.toLowerCase()));
+      if (groupPeerAgents.length > 0) {
+        const resolved = resolveGroupDmAgentMentions({
+          body,
+          peerAgents: groupPeerAgents,
+          explicitTo: named,
+        });
+        if (!resolved.ok) {
+          // Keep the detailed mention_ambiguous error for the posting member only; write a general
+          // audit reason so owners/admins outside a private group cannot infer same-name peer structure.
+          return {
+            ok: false,
+            status: 400,
+            error: resolved.error,
+            message: resolved.message,
+            reason: "invalid_request",
+          };
+        }
+        if (resolved.agents.length > 0) {
+          const mergedAgents = [...new Set([...agents, ...resolved.agents.map((a) => a.id)])];
+          result = await runRoute(users, mergedAgents);
+          status = String(result.status);
+        }
+      }
+    }
+  }
   if (status === "not_found") return { ok: false, ...NOT_FOUND, reason: status };
   if (status === "not_in_conversation") {
     return { ok: false, status: 409, error: "conversation_not_member",
@@ -356,7 +427,7 @@ export async function routeConversationPost(
       ? { ok: false, status: 409, error: "conversation_no_recipients",
         message: `${String(result.name ?? "The other person")} is no longer in this workspace.`, reason: status }
       : { ok: false, status: 409, error: "conversation_no_recipients",
-        message: "Nobody in this group would receive it. Name an agent in to.", reason: status };
+        message: "Nobody in this group would receive it. Mention an @Agent in the body or name one in to.", reason: status };
   }
   if (status !== "ok") throw new Error(`conversation_post_route returned an unknown status: ${status}`);
   if (result.kind === "general") return { ok: true, kind: "general" };
