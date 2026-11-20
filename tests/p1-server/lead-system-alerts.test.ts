@@ -410,13 +410,14 @@ test("Conditions 1 & 3: reader grants (authenticated + swarm_read + ordinary inb
   await enqueueWaitingDelivery({ senderUserId: member.id, recipientAgent: quietSeat, channelId: null, ageMinutes: 50, directToAgent: true, body: "SECRET_DM_BODY" });
 
   const [synced] = await sql<{ res: Row }[]>`SELECT swarm.sync_quiet_agent_alerts(interval '30 minutes') AS res`;
-  assert.equal(Number(synced!.res.synced), 4, "exactly 4 scoped alerts; DM and addressed thread excluded");
+  assert.ok(Number(synced!.res.synced) >= 4, `expected at least 4 synced alerts, got ${synced!.res.synced}`);
 
   const rawRows = await sql<Row[]>`
     SELECT alert_id, channel_id, waiting_count, routed_lead_principal_id
     FROM swarm.system_alerts
     WHERE workspace_id = ${workspace}::uuid AND affected_principal_id = ${quietSeat.principal}::uuid
   `;
+  assert.equal(rawRows.length, 4, "exactly 4 scoped alerts for quietSeat; DM and addressed thread excluded");
   const byScope = new Map(rawRows.map((r) => [r.channel_id ?? "general", r]));
   assert.equal(byScope.get("general")!.waiting_count, 2, "inherited #priv-a reply must NOT inflate #general");
   assert.equal(byScope.get(openCh.id)!.waiting_count, 1, "addressed root & reply must NOT inflate #open-ch");
