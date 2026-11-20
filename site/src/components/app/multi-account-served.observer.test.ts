@@ -729,15 +729,18 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
       p: Awaited<ReturnType<typeof context.newPage>>,
       selector: string,
     ): Promise<void> => {
-      await openAccountMenu(p);
-      await p.waitForSelector(`${selector}:visible`, { timeout: 10_000 });
-      try {
-        await p.click(selector, { timeout: 5_000 });
-      } catch {
-        await openAccountMenu(p);
-        await p.waitForSelector(`${selector}:visible`, { timeout: 10_000 });
-        await p.click(selector, { timeout: 5_000 });
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await openAccountMenu(p);
+          await p.waitForSelector(`${selector}:visible`, { timeout: 3_000 });
+          await p.click(selector, { timeout: 3_000 });
+          return;
+        } catch (error) {
+          lastError = error;
+        }
       }
+      throw lastError instanceof Error ? lastError : new Error(`Could not click account menu item ${selector}`);
     };
 
     const waitForServerCondition = async (
@@ -1015,6 +1018,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(putCount, 0, "held named-channel visibility read across A->B must issue 0 PUTs");
 
     // Case 3a1: Unchanged #ops ("open") control reaches upload & post after that exact same visibility response!
+    await waitForAppReady(page, userB.email);
     await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
     await waitForAppReady(page, userA.email);
     await page.goto(`${origin}/app?w=${sharedWs}&c=${opsChannelId}`);
@@ -1073,6 +1077,7 @@ test("served /app and /invite browser witness: provider PKCE callback, sync clos
     assert.equal(commandsSent.some((c) => c.kind === "file_version_commit" || c.kind === "post_signal"), false);
 
     // Case 3b: Hold file_version_create across same-workspace A -> B -> A!
+    await waitForAppReady(page, userB.email);
     await clickAccountMenuItem(page, `[data-account-switch="${userA.id}"]`);
     await waitForAppReady(page, userA.email);
     await page.goto(`${origin}/app?w=${sharedWs}`);
