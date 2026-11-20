@@ -103,7 +103,7 @@ struct DirectoryView: View {
                                  guard row.kind.direct, member.left_at == nil,
                                        let id = labels[MemberRef(kind: member.kind, id: member.id)] else { return nil }
                                  return member.contact.name + " · " + id
-                             }).id(row.id)
+                             }, waitingChannelID: row.channel_id).id(row.id)
                      .toolbar {
                          MembersButton(api: api, workspace: workspace.id, row: row,
                                        draft: api.session.composer(workspace: workspace.id, conversation: item.id)) { state = .ready($0) }

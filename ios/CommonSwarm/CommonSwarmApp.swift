@@ -220,6 +220,7 @@ struct HistoryView: View {
     @ObservedObject var draft: Composer
     var previewBar: AnyView? = nil
     var recipientDetails: [String] = []
+    var waitingChannelID: UUID? = nil
     @StateObject private var history = MessageHistory()
     @ViewState private var readingAnchor: HistoryAnchor?
     @ViewState private var restoreAnchor: HistoryAnchor?
@@ -335,6 +336,7 @@ struct HistoryView: View {
                 }
             }
         }.navigationTitle(draft.access == .unavailable ? "Conversation unavailable" : item.name).navigationBarTitleDisplayMode(.inline)
+            .waitingOnYouToolbar(api: api, workspace: workspace, conversation: item, directory: directory, channelID: waitingChannelID)
             .task { await load() }
     }
 
