@@ -1023,9 +1023,9 @@ test("7. C5 cswarm wait aligns with real Postgres ms-bucket+UUID pagination and 
   const nowMs = Date.now();
   const baseSec = new Date(nowMs - 60_000).toISOString().slice(0, 19);
   const anchorSec = new Date(nowMs - 65_000).toISOString().slice(0, 19);
-  const anchorTs = `${anchorSec}.000000+00`;
-  const highTs = `${baseSec}.123111+00`;
-  const lowTs = `${baseSec}.123888+00`;
+  const anchorTs = `${anchorSec}.000000Z`;
+  const highTs = `${baseSec}.123111Z`;
+  const lowTs = `${baseSec}.123888Z`;
 
   await sql.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role = replica`;
@@ -1033,18 +1033,18 @@ test("7. C5 cswarm wait aligns with real Postgres ms-bucket+UUID pagination and 
       INSERT INTO swarm.signals (id, workspace_id, from_kind, from_principal, to_agent_principal_id, kind, body, until, created_at)
       VALUES
         (${anchorId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
-         'note', 'c5 wait anchor', statement_timestamp() + interval '1 day', ${anchorTs}::timestamptz),
+         'note', 'c5 wait anchor', statement_timestamp() + interval '1 day', (${anchorTs}::text)::timestamptz),
         (${highId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
-         'note', 'c5 same-ms higher uuid earlier microsecond', statement_timestamp() + interval '1 day', ${highTs}::timestamptz),
+         'note', 'c5 same-ms higher uuid earlier microsecond', statement_timestamp() + interval '1 day', (${highTs}::text)::timestamptz),
         (${lowId}::uuid, ${workspace}::uuid, 'user', ${ann.id}::uuid, ${waitBot.id}::uuid,
-         'note', 'c5 same-ms lower uuid later microsecond', statement_timestamp() + interval '1 day', ${lowTs}::timestamptz)
+         'note', 'c5 same-ms lower uuid later microsecond', statement_timestamp() + interval '1 day', (${lowTs}::text)::timestamptz)
     `;
     await tx`
       INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
       VALUES
-        (${anchorId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${anchorTs}::timestamptz, 'conversation'),
-        (${highId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${highTs}::timestamptz, 'conversation'),
-        (${lowId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, ${lowTs}::timestamptz, 'conversation')
+        (${anchorId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, (${anchorTs}::text)::timestamptz, 'conversation'),
+        (${highId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, (${highTs}::text)::timestamptz, 'conversation'),
+        (${lowId}::uuid, ${workspace}::uuid, ${dmWait}::uuid, (${lowTs}::text)::timestamptz, 'conversation')
     `;
   });
 
