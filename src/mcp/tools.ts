@@ -330,6 +330,89 @@ export function fitStdioConversationsList(
 }
 
 /** Fit stdio conversation_read under MCP_RESULT_MAX_BYTES with lossless pagination cursors. */
+function truncateStdioUtf16Safe(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let cut = maxChars;
+  const code = text.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return cut > 0 ? text.slice(0, cut) : "";
+}
+
+function compactStdioConversationMeta(conversation: unknown): unknown {
+  if (!conversation || typeof conversation !== "object" || Array.isArray(conversation)) return {};
+  const rec = conversation as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (typeof rec.conversation_id === "string") out.conversation_id = rec.conversation_id;
+  if (typeof rec.kind === "string") out.kind = rec.kind;
+  if (typeof rec.slug === "string") out.slug = rec.slug;
+  return out;
+}
+
+function compactSingleStdioMessage(
+  row: Record<string, unknown>,
+  fits: (candidate: Record<string, unknown>) => boolean,
+): Record<string, unknown> | null {
+  if (fits(row)) return row;
+  let current: Record<string, unknown> = { ...row };
+
+  if (Array.isArray(current.reactions) && current.reactions.length > 0) {
+    const compactReactions = current.reactions.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      const rec = entry as Record<string, unknown>;
+      return {
+        ...(rec.emoji !== undefined ? { emoji: rec.emoji } : {}),
+        ...(rec.count !== undefined ? { count: rec.count } : {}),
+      };
+    });
+    current = { ...current, reactions: compactReactions, reactions_actors_omitted: true };
+    if (fits(current)) return current;
+
+    const { reactions_actors_omitted: _ignored, ...rest } = current;
+    current = { ...rest, reactions: [], reactions_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (Array.isArray(current.attachments) && current.attachments.length > 0) {
+    current = { ...current, attachments: [], attachments_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (Array.isArray(current.mentions) && current.mentions.length > 0) {
+    current = { ...current, mentions: [], mentions_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (typeof current.body === "string" && current.body.length > 0) {
+    const originalBody = current.body;
+    const emptyBodyCandidate = { ...current, body: "", body_truncated: true };
+    if (fits(emptyBodyCandidate)) {
+      let lo = 0;
+      let hi = originalBody.length;
+      let best = emptyBodyCandidate;
+      while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const suffix = mid < originalBody.length ? "..." : "";
+        const candidate = {
+          ...current,
+          body: `${truncateStdioUtf16Safe(originalBody, mid)}${suffix}`,
+          body_truncated: true,
+        };
+        if (fits(candidate)) {
+          best = candidate;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best;
+    }
+    current = emptyBodyCandidate;
+  }
+
+  return fits(current) ? current : null;
+}
+
 export function fitStdioConversationHistory(
   data: {
     conversation: unknown;
@@ -339,8 +422,9 @@ export function fitStdioConversationHistory(
     next_after: { created_at: string; id: string } | null;
   },
   direction: "forward" | "backward",
+  maxBytes: number = MCP_RESULT_MAX_BYTES,
 ): object {
-  const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= MCP_RESULT_MAX_BYTES;
+  const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= maxBytes;
   const cursorOf = (row: Record<string, unknown> | undefined) =>
     row && typeof row.created_at === "string" && typeof row.id === "string"
       ? { created_at: row.created_at, id: row.id.toLowerCase() }
@@ -348,23 +432,59 @@ export function fitStdioConversationHistory(
   let start = 0;
   let end = data.messages.length;
   let trimmed = false;
-  const shape = () => {
-    const kept = data.messages.slice(start, end);
+  const build = (
+    kept: Record<string, unknown>[],
+    conversation: unknown,
+    wasTrimmed: boolean,
+    omittedRow?: Record<string, unknown>,
+  ) => {
+    const hasMore = wasTrimmed || omittedRow !== undefined ? true : data.has_more;
+    const anchor = omittedRow ?? (direction === "backward" ? kept[0] : kept[kept.length - 1]);
     return {
-      conversation: data.conversation,
+      conversation,
       messages: kept,
-      has_more: trimmed ? true : data.has_more,
-      next_before: trimmed && direction === "backward" ? cursorOf(kept[0]) : data.next_before,
-      next_after: trimmed && direction === "forward" ? cursorOf(kept[kept.length - 1]) : data.next_after,
+      has_more: hasMore,
+      next_before: (wasTrimmed || omittedRow !== undefined) && direction === "backward" ? cursorOf(anchor) : data.next_before,
+      next_after: (wasTrimmed || omittedRow !== undefined) && direction === "forward" ? cursorOf(anchor) : data.next_after,
+      ...(omittedRow !== undefined ? { oversized_omitted: true } : {}),
       untrusted: STDIO_CONVERSATION_UNTRUSTED_NOTE,
     };
   };
+  const shape = () => build(data.messages.slice(start, end), data.conversation, trimmed);
   while (end - start > 1 && !fits(shape())) {
     if (direction === "forward") end -= 1;
     else start += 1;
     trimmed = true;
   }
-  const fitted = shape();
+
+  let fitted = shape();
+  if (!fits(fitted)) {
+    if (end - start === 1) {
+      const single = data.messages[start]!;
+      const compacted = compactSingleStdioMessage(
+        single,
+        (candidate) => fits(build([candidate], data.conversation, trimmed)),
+      );
+      if (compacted !== null) {
+        fitted = build([compacted], data.conversation, trimmed);
+      } else {
+        const slimConv = compactStdioConversationMeta(data.conversation);
+        const compactedSlim = compactSingleStdioMessage(
+          single,
+          (candidate) => fits(build([candidate], slimConv, trimmed)),
+        );
+        if (compactedSlim !== null) {
+          fitted = build([compactedSlim], slimConv, trimmed);
+        } else {
+          const emptyFull = build([], data.conversation, true, single);
+          fitted = fits(emptyFull) ? emptyFull : build([], slimConv, true, single);
+        }
+      }
+    } else {
+      fitted = build([], compactStdioConversationMeta(data.conversation), trimmed);
+    }
+  }
+
   return withReadProvenance(
     fitted,
     messageReadProvenance(

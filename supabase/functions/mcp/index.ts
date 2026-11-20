@@ -6,6 +6,7 @@ import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   authenticateHostedSeatCapability,
+  HOSTED_SEAT_READ_TOOLS,
   type HostedCapability,
   type HostedSeatCapability,
   type ProviderGrantStatus,
@@ -42,6 +43,7 @@ import {
   dmOpenCommandId,
   fitHostedConversationHistoryPage,
   fitHostedConversationsList,
+  isDirectConversationKind,
 } from "./conversation-tools.ts";
 import { fitMemoryRows, memorySaveCommand, memoryWriteOutput } from "./memory-tools.ts";
 import { reactionCommand, reactionOutput } from "./reaction-tools.ts";
@@ -236,12 +238,9 @@ async function seatCapability(
   binding: SeatBinding,
   tool: Exclude<HostedToolName, "claim_seat">,
 ): Promise<HostedSeatCapability | null> {
-  const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
-  // file_get resolves its version through the command path (live-state checks under
-  // the hosted locks), so only file_ls joins the read-role tools.
-  const use = tool === "whoami" || tool === "members" || tool === "roster" || tool === "file_ls" ||
-    tool === "channel_ls" || tool === "channel_read" || tool === "memory_search" || tool === "memory_get" ||
-    content?.effect === "read" ? "read" : "command";
+  // Single source of truth: HOSTED_SEAT_READ_TOOLS classifies read-role tools
+  // (file_get stays on command because it checks live state under hosted locks).
+  const use = (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(tool) ? "read" : "command";
   return await authDb.begin("isolation level read committed", async (tx) => {
     await setRole(tx, use === "read" ? "swarm_read" : "swarm_command");
     return await authenticateHostedSeatCapability(tx, {
@@ -454,9 +453,31 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     };
   }
   if (call.name === "thread") {
+    const conversationId = String(args.conversation_id).toLowerCase();
+    const convReader = await seatCapability(call.token, binding, "conversation_read");
+    if (convReader === null) throw new HostedToolFailure("hosted_seat_forbidden");
+    const convOutput = readOutput(await handleHostedRead({
+      resource: "conversation_history",
+      workspace_id: binding.workspaceId,
+      conversation_id: conversationId,
+      before_created_at: null,
+      before_id: null,
+      after_created_at: null,
+      after_id: null,
+      limit: 1,
+      include_mentions: false,
+      include_reactions: false,
+    }, convReader));
+    const convMeta = (convOutput.conversation ?? {}) as Record<string, unknown>;
+    const isDirect = isDirectConversationKind(convMeta.kind);
     const selectors = Array.isArray(args.mentions) ? (args.mentions as unknown[]).map(String) : [];
     let resolvedMentions: WireMention[] = [];
-    if (selectors.length > 0 || bodyMayMention(String(args.body ?? ""))) {
+    if (isDirect) {
+      if (selectors.length > 0) {
+        throw new HostedToolFailure("conversation_mentions");
+      }
+      // Keep inline @tags as plain body text for canonical DM/group-DM routing.
+    } else if (selectors.length > 0 || bodyMayMention(String(args.body ?? ""))) {
       const reader = await seatCapability(call.token, binding, "members");
       if (reader === null) throw new HostedToolFailure("hosted_seat_forbidden");
       const roster = hostedRoster(readOutput(await handleHostedRead({ resource: "members", workspace_id: binding.workspaceId }, reader)));

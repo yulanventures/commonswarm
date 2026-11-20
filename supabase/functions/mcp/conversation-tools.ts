@@ -32,7 +32,99 @@ export interface HostedConversationHistoryOutput {
   has_more: boolean;
   next_before: ConversationCursorLike | null;
   next_after: ConversationCursorLike | null;
+  oversized_omitted?: boolean;
   untrusted: string;
+}
+
+export function isDirectConversationKind(kind: unknown): boolean {
+  return kind === "dm" || kind === "group_dm";
+}
+
+function compactConversationMeta(conversation: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (typeof conversation.conversation_id === "string") out.conversation_id = conversation.conversation_id;
+  if (typeof conversation.kind === "string") out.kind = conversation.kind;
+  if (typeof conversation.slug === "string") out.slug = conversation.slug;
+  return out;
+}
+
+function truncateUtf16Safe(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let cut = maxChars;
+  // Avoid splitting a UTF-16 surrogate pair.
+  const code = text.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return cut > 0 ? text.slice(0, cut) : "";
+}
+
+/**
+ * Bound a single oversized message row so it fits within `fits()` without dropping cursors.
+ * Sheds optional expansions first (`reactions[].actors`, `reactions`, `attachments`, `mentions`),
+ * then binary-searches `body` truncation while preserving row identity and cursor fields.
+ */
+export function compactSingleMessageToFit(
+  row: Record<string, unknown>,
+  fits: (candidate: Record<string, unknown>) => boolean,
+): Record<string, unknown> | null {
+  if (fits(row)) return row;
+  let current: Record<string, unknown> = { ...row };
+
+  if (Array.isArray(current.reactions) && current.reactions.length > 0) {
+    const compactReactions = current.reactions.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      const rec = entry as Record<string, unknown>;
+      return {
+        ...(rec.emoji !== undefined ? { emoji: rec.emoji } : {}),
+        ...(rec.count !== undefined ? { count: rec.count } : {}),
+      };
+    });
+    current = { ...current, reactions: compactReactions, reactions_actors_omitted: true };
+    if (fits(current)) return current;
+
+    const { reactions_actors_omitted: _ignored, ...rest } = current;
+    current = { ...rest, reactions: [], reactions_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (Array.isArray(current.attachments) && current.attachments.length > 0) {
+    current = { ...current, attachments: [], attachments_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (Array.isArray(current.mentions) && current.mentions.length > 0) {
+    current = { ...current, mentions: [], mentions_omitted: true };
+    if (fits(current)) return current;
+  }
+
+  if (typeof current.body === "string" && current.body.length > 0) {
+    const originalBody = current.body;
+    const emptyBodyCandidate = { ...current, body: "", body_truncated: true };
+    if (fits(emptyBodyCandidate)) {
+      let lo = 0;
+      let hi = originalBody.length;
+      let best = emptyBodyCandidate;
+      while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const suffix = mid < originalBody.length ? "..." : "";
+        const candidate = {
+          ...current,
+          body: `${truncateUtf16Safe(originalBody, mid)}${suffix}`,
+          body_truncated: true,
+        };
+        if (fits(candidate)) {
+          best = candidate;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best;
+    }
+    current = emptyBodyCandidate;
+  }
+
+  return fits(current) ? current : null;
 }
 
 function cursorFromRow(row: Record<string, unknown> | undefined): ConversationCursorLike | null {
@@ -104,24 +196,34 @@ export function fitHostedConversationHistoryPage(
   let end = page.messages.length;
   let trimmed = false;
 
-  const shape = (): HostedConversationHistoryOutput => {
-    const kept = page.messages.slice(start, end);
-    const hasMore = trimmed ? true : page.has_more;
-    const nextBefore = trimmed && direction === "backward"
-      ? cursorFromRow(kept[0])
+  const build = (
+    kept: Array<Record<string, unknown>>,
+    conversation: Record<string, unknown>,
+    wasTrimmed: boolean,
+    omittedRow?: Record<string, unknown>,
+  ): HostedConversationHistoryOutput => {
+    const hasMore = wasTrimmed || omittedRow !== undefined ? true : page.has_more;
+    const anchor = omittedRow ?? (direction === "backward" ? kept[0] : kept[kept.length - 1]);
+    const nextBefore = (wasTrimmed || omittedRow !== undefined) && direction === "backward"
+      ? cursorFromRow(anchor)
       : page.next_before;
-    const nextAfter = trimmed && direction === "forward"
-      ? cursorFromRow(kept[kept.length - 1])
+    const nextAfter = (wasTrimmed || omittedRow !== undefined) && direction === "forward"
+      ? cursorFromRow(anchor)
       : page.next_after;
     return {
       ...page,
+      conversation,
       messages: kept,
       has_more: hasMore,
       next_before: nextBefore,
       next_after: nextAfter,
+      ...(omittedRow !== undefined ? { oversized_omitted: true } : {}),
       untrusted: CONVERSATION_UNTRUSTED_NOTE,
     };
   };
+
+  const shape = (): HostedConversationHistoryOutput =>
+    build(page.messages.slice(start, end), page.conversation, trimmed);
 
   while (end - start > 1 && channelPageWireBytes(shape()) > budget) {
     if (direction === "forward") {
@@ -131,7 +233,37 @@ export function fitHostedConversationHistoryPage(
     }
     trimmed = true;
   }
-  return shape();
+
+  let current = shape();
+  if (channelPageWireBytes(current) <= budget) return current;
+
+  if (end - start === 1) {
+    const single = page.messages[start]!;
+    const compacted = compactSingleMessageToFit(
+      single,
+      (candidate) => channelPageWireBytes(build([candidate], page.conversation, trimmed)) <= budget,
+    );
+    if (compacted !== null) {
+      return build([compacted], page.conversation, trimmed);
+    }
+    const slimConv = compactConversationMeta(page.conversation);
+    const compactedSlim = compactSingleMessageToFit(
+      single,
+      (candidate) => channelPageWireBytes(build([candidate], slimConv, trimmed)) <= budget,
+    );
+    if (compactedSlim !== null) {
+      return build([compactedSlim], slimConv, trimmed);
+    }
+    // Last resort: return a bounded, navigable page pointing past the oversized row.
+    const emptyFull = build([], page.conversation, true, single);
+    if (channelPageWireBytes(emptyFull) <= budget) return emptyFull;
+    return build([], slimConv, true, single);
+  }
+
+  // Zero-row page whose conversation metadata alone exceeds the budget.
+  const slimConv = compactConversationMeta(page.conversation);
+  current = build([], slimConv, trimmed);
+  return current;
 }
 
 export function buildDmPostCommand(

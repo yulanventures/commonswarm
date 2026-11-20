@@ -548,9 +548,34 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         if (args.mentions !== undefined && (!Array.isArray(args.mentions) || args.mentions.length < 1 || args.mentions.some((m) => typeof m !== "string" || !m.trim()))) {
           throw new McpError(ErrorCode.InvalidParams, "mentions must be a non-empty array of names or UUIDs.");
         }
+        const conversationId = args.conversation_id.toLowerCase();
+        const convCheck = await readConversationHistory(
+          target, auth.token, profile.workspace_id, conversationId,
+          { limit: 1, includeMentions: false, includeReactions: false },
+          { fetcher: auth.fetcher, signal: extra.signal },
+        );
+        if (!convCheck.ok) {
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: convCheck.error, message: convCheck.message }) }] };
+        }
+        const convKind = convCheck.data.conversation.kind;
+        const isDirect = convKind === "dm" || convKind === "group_dm";
         const selectors = Array.isArray(args.mentions) ? (args.mentions as string[]) : [];
         let resolvedMentions: WireMention[] = [];
-        if (selectors.length > 0 || bodyMayMention(args.body)) {
+        if (isDirect) {
+          if (selectors.length > 0) {
+            return {
+              isError: true,
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "conversation_mentions",
+                  message: "A message in a direct message or group is for its members, so it takes no mentions.",
+                }),
+              }],
+            };
+          }
+          // Keep inline @tags as plain body text for canonical DM/group-DM routing.
+        } else if (selectors.length > 0 || bodyMayMention(args.body)) {
           const dir = await directory();
           try {
             resolvedMentions = resolveMentions({ body: args.body, selectors, roster: mentionRosterFromDirectory(dir) });
@@ -567,7 +592,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             kind: "post_signal",
             signal_kind: args.kind === "ask" ? "ask" : "note",
             body: args.body,
-            conversation_id: args.conversation_id.toLowerCase(),
+            conversation_id: conversationId,
             thread_root_id: args.thread_root_id.toLowerCase(),
             to_user_id: null,
             to_agent_principal_id: null,

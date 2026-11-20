@@ -4,6 +4,7 @@
  * deterministic dm command_id derivation, error catalog mapping, and stdio parity.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   HOSTED_TOOL_TABLE,
@@ -236,6 +237,119 @@ test("stdio conversation fitters respect MCP_RESULT_MAX_BYTES and dmOpenCommandI
   const err404 = hostedToolError(new HostedToolFailure("conversation_not_found"), "conversation_read");
   assert.equal(err404.error, "conversation_not_found");
   assert.match(err404.message, /conversations/);
+  const errMentions = hostedToolError(new HostedToolFailure("conversation_mentions"), "thread");
+  assert.equal(errMentions.error, "conversation_mentions");
   const errNested = hostedToolError(new HostedToolFailure("thread_root_is_a_reply"), "thread");
   assert.equal(errNested.error, "thread_root_is_a_reply");
+});
+
+test("HezSec C1: hosted seatCapability uses shared HOSTED_SEAT_READ_TOOLS including conversations and conversation_read", () => {
+  assert.ok((HOSTED_SEAT_READ_TOOLS as readonly string[]).includes("conversations"));
+  assert.ok((HOSTED_SEAT_READ_TOOLS as readonly string[]).includes("conversation_read"));
+  assert.ok((HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes("dm"));
+  assert.ok((HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes("thread"));
+  assert.ok((HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes("mark_read"));
+
+  const mcpIndexSource = readFileSync(new URL("../supabase/functions/mcp/index.ts", import.meta.url), "utf8");
+  assert.match(mcpIndexSource, /\(HOSTED_SEAT_READ_TOOLS as readonly string\[\]\)\.includes\(tool\)/);
+});
+
+test("HezSec C2: both hosted and stdio history fitters strictly bound single rows with huge reaction metadata and keep cursors navigable", () => {
+  const hugeReactions = Array.from({ length: 40 }, (_, i) => ({
+    emoji: `emoji_${i}`,
+    count: 100,
+    actors: Array.from({ length: 60 }, (_, j) => ({
+      kind: "agent",
+      id: `88888888-8888-4888-8888-${String(i * 100 + j).padStart(12, "0")}`,
+    })),
+  }));
+  const giantRow = {
+    id: "99999999-9999-4999-8999-000000000001",
+    created_at: "2026-11-20T12:10:00.000Z",
+    kind: "note",
+    from: USER_A,
+    from_kind: "user",
+    body: "Normal body with oversized reactions",
+    reactions: hugeReactions,
+  };
+
+  // Hosted single oversized row: fits strictly within wire budget and preserves cursor + row identity.
+  const hostedMax = 8192;
+  const hostedBudget = hostedMax - CONVERSATION_READ_MARGIN_BYTES;
+  const hostedFitted = fitHostedConversationHistoryPage({
+    context: { workspace_id: WS },
+    workspace_id: WS,
+    conversation: { conversation_id: CONV, kind: "dm" },
+    messages: [giantRow],
+    has_more: false,
+    next_before: { created_at: giantRow.created_at, id: giantRow.id },
+    next_after: { created_at: giantRow.created_at, id: giantRow.id },
+  }, "backward", hostedMax);
+  assert.ok(channelPageWireBytes(hostedFitted) <= hostedBudget, "hosted fitted single row must fit wire budget");
+  assert.equal(hostedFitted.messages.length, 1);
+  assert.equal(hostedFitted.messages[0]!.id, giantRow.id);
+  assert.equal(hostedFitted.messages[0]!.reactions_actors_omitted, true);
+  assert.deepEqual(hostedFitted.next_before, { created_at: giantRow.created_at, id: giantRow.id });
+
+  // Hosted tight budget where even the compacted row does not fit -> navigable empty page with cursor.
+  // Note: channelPageWireBytes reserves 1,536 bytes for the worst-case JSON-RPC request id alone.
+  const tinyMax = 3200;
+  const tinyBudget = tinyMax - CONVERSATION_READ_MARGIN_BYTES;
+  const tinyFitted = fitHostedConversationHistoryPage({
+    context: { workspace_id: WS },
+    workspace_id: WS,
+    conversation: { conversation_id: CONV, kind: "dm", members: Array.from({ length: 20 }, (_, i) => ({ id: i, name: "m".repeat(80) })) },
+    messages: [{ ...giantRow, body: "x".repeat(5000) }],
+    has_more: false,
+    next_before: null,
+    next_after: null,
+  }, "forward", tinyMax);
+  assert.ok(channelPageWireBytes(tinyFitted) <= tinyBudget, "hosted tight budget must still fit wire budget");
+  assert.equal(tinyFitted.has_more, true);
+  assert.equal(tinyFitted.oversized_omitted, true);
+  assert.deepEqual(tinyFitted.next_after, { created_at: giantRow.created_at, id: giantRow.id });
+
+  // Stdio single oversized row: fits strictly within MCP_RESULT_MAX_BYTES even with >100 KiB reaction metadata.
+  const stdioFitted = fitStdioConversationHistory({
+    conversation: { conversation_id: CONV, kind: "dm" },
+    messages: [giantRow],
+    has_more: false,
+    next_before: { created_at: giantRow.created_at, id: giantRow.id },
+    next_after: { created_at: giantRow.created_at, id: giantRow.id },
+  }, "backward") as {
+    messages: Array<Record<string, unknown>>;
+    next_before: { created_at: string; id: string } | null;
+  };
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(stdioFitted)) <= MCP_RESULT_MAX_BYTES,
+    "stdio fitted single row must stay <= MCP_RESULT_MAX_BYTES",
+  );
+  assert.equal(stdioFitted.messages.length, 1);
+  assert.equal(stdioFitted.messages[0]!.id, giantRow.id);
+  assert.equal(stdioFitted.messages[0]!.reactions_actors_omitted, true);
+  assert.deepEqual(stdioFitted.next_before, { created_at: giantRow.created_at, id: giantRow.id });
+
+  // Stdio tight cap -> first compacts body & expansions, then falls back to a navigable bounded empty page.
+  const stdioCompacted = fitStdioConversationHistory({
+    conversation: { conversation_id: CONV, kind: "dm", members: Array.from({ length: 30 }, (_, i) => ({ id: i, name: "n".repeat(120) })) },
+    messages: [{ ...giantRow, body: "y".repeat(6000) }],
+    has_more: false,
+    next_before: null,
+    next_after: null,
+  }, "backward", 600) as { messages: Array<Record<string, unknown>> };
+  assert.ok(Buffer.byteLength(JSON.stringify(stdioCompacted)) <= 600);
+  assert.equal(stdioCompacted.messages.length, 1);
+  assert.equal(stdioCompacted.messages[0]!.body_truncated, true);
+
+  const stdioTight = fitStdioConversationHistory({
+    conversation: { conversation_id: CONV, kind: "dm", members: Array.from({ length: 30 }, (_, i) => ({ id: i, name: "n".repeat(120) })) },
+    messages: [{ ...giantRow, body: "y".repeat(6000) }],
+    has_more: false,
+    next_before: null,
+    next_after: null,
+  }, "backward", 380) as { messages: unknown[]; has_more: boolean; oversized_omitted?: boolean; next_before: { id: string } | null };
+  assert.ok(Buffer.byteLength(JSON.stringify(stdioTight)) <= 380);
+  assert.equal(stdioTight.has_more, true);
+  assert.equal(stdioTight.oversized_omitted, true);
+  assert.equal(stdioTight.next_before?.id, giantRow.id);
 });

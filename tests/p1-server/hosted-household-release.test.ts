@@ -83,7 +83,7 @@ function seed(owner: string, workspace: string, principal: string, other: string
     `INSERT INTO swarm.config(key,value) VALUES ('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value; INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic household','${owner}')`,
     `INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'); INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${stream}','${workspace}','workspace')`,
     `INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared'); INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at) VALUES ('${workspace}','${owner}','editor','${consent}',clock_timestamp())`,
-    `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES ('${principal}','${workspace}','${owner}','Synthetic hosted seat','hosted_mcp',true),('${other}','${workspace}','${owner}','Synthetic unapproved seat','hosted_mcp',true); INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','${MCP_RESOURCE}',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-consent','active',clock_timestamp(),clock_timestamp())`,
+    `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES ('${principal}','${workspace}','${owner}','Synthetic hosted seat','hosted_mcp',true),('${other}','${workspace}','${owner}','Synthetic unapproved seat','hosted_mcp',true); INSERT INTO swarm.agent_workspace_memberships(principal_id,workspace_id,owner_user_id,added_by) VALUES ('${principal}','${workspace}','${owner}','${owner}'),('${other}','${workspace}','${owner}','${owner}') ON CONFLICT DO NOTHING; INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at) VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','${MCP_RESOURCE}',ARRAY['${workspace}']::uuid[],decode(repeat('a',64),'hex'),'synthetic-consent','active',clock_timestamp(),clock_timestamp())`,
     `INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at) VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${receipt}',clock_timestamp())`,
     `INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at) VALUES ('${seat}','${grant}','${workspace}','${owner}','${principal}','Synthetic hosted seat',clock_timestamp()),('${otherSeat}','${grant}','${workspace}','${owner}','${other}','Synthetic unapproved seat',clock_timestamp()); INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at) VALUES ('${approved}','${seat}','${grant}','${workspace}','${principal}',clock_timestamp()),('${unapproved}','${otherSeat}','${grant}','${workspace}','${other}',clock_timestamp())`,
     `INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id) VALUES ('${seat}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${link}',NULL,'${grant}')`,
@@ -144,6 +144,79 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   assert.equal((await rpc(off, token, secret, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "h6", version: "0" } })).status, 200);
   const listed = await rpc(off, token, secret, "tools/list", {}); assert.deepEqual([listed.status, listed.json.result?.tools?.length, listed.json.result?.tools?.map((tool) => tool.name)], [200, coreNames.length, coreNames]);
   assert.equal((await call(off, token, "whoami", { seat: approved })).handle, approved);
+
+  // C7 live served-endpoint witness (HezSec C1 + C3): hosted conversations, conversation_read,
+  // dm, thread (with inline @tag matching a live workspace agent kept as DM body text), and mark_read
+  // succeed for a live DM member while an outsider seat gets uniform conversation_not_found refusals.
+  const dmOpened = await call(off, token, "dm", {
+    seat: approved,
+    members: [{ kind: "user", id: owner }],
+    body: "Hosted C7 live DM root",
+    request_id: "c7dmopen01",
+  });
+  const dmConvId = String((dmOpened.conversation as { conversation_id?: string }).conversation_id ?? "");
+  const dmRootId = String((dmOpened.signal as { id?: string }).id ?? "");
+  assert.ok(dmConvId.length > 0 && dmRootId.length > 0, "hosted dm opens conversation and posts root signal");
+  const memberConvs = await call(off, token, "conversations", { seat: approved });
+  assert.equal(
+    (memberConvs.conversations as Array<{ conversation_id?: string }>).some((c) => c.conversation_id === dmConvId),
+    true,
+    "hosted conversations lists live DM for member seat",
+  );
+  const memberRead = await call(off, token, "conversation_read", { seat: approved, conversation_id: dmConvId, limit: 10 });
+  assert.equal(
+    (memberRead.messages as Array<{ id?: string }>).some((m) => m.id === dmRootId),
+    true,
+    "hosted conversation_read returns live DM history for member seat",
+  );
+  // Inline @tag matching another workspace member in a DM thread must stay plain body text (not rejected as mentions).
+  const dmThreadReply = await call(off, token, "thread", {
+    seat: approved,
+    conversation_id: dmConvId,
+    thread_root_id: dmRootId,
+    body: "Mentioning @Synthetic unapproved seat inside DM thread",
+    request_id: "c7dmthr01",
+  });
+  assert.ok(dmThreadReply.signal, "hosted DM thread with inline @tag succeeds");
+  const dmMarkRead = await call(off, token, "mark_read", {
+    seat: approved,
+    conversation_id: dmConvId,
+    through_signal_id: dmRootId,
+    request_id: "c7dmmrk01",
+  });
+  assert.equal(dmMarkRead.status, "accepted");
+  // Outsider seat (unapproved) in the same workspace cannot list or read the DM and receives uniform 404.
+  const outsiderConvs = await call(off, token, "conversations", { seat: unapproved });
+  assert.equal(
+    (outsiderConvs.conversations as Array<{ conversation_id?: string }>).some((c) => c.conversation_id === dmConvId),
+    false,
+    "outsider seat must not see another seat's DM in conversations",
+  );
+  const unknownConvId = randomUUID();
+  const callError = async (name: string, args: Record<string, unknown>) => {
+    const res = await rpc(off, token, secret, "tools/call", { name, arguments: args });
+    assert.equal(res.status, 200, name);
+    assert.equal(res.json.result?.isError, true, `${name} should return tool error`);
+    return JSON.parse(res.json.result?.content?.[0]?.text ?? "{}") as Record<string, unknown>;
+  };
+  const outsiderReadDm = await callError("conversation_read", { seat: unapproved, conversation_id: dmConvId, limit: 10 });
+  const outsiderReadUnknown = await callError("conversation_read", { seat: unapproved, conversation_id: unknownConvId, limit: 10 });
+  assert.equal(outsiderReadDm.error, "conversation_not_found");
+  assert.deepEqual(outsiderReadDm, outsiderReadUnknown, "outsider DM read must match unknown conversation refusal");
+  const outsiderThreadDm = await callError("thread", {
+    seat: unapproved, conversation_id: dmConvId, thread_root_id: dmRootId, body: "nope", request_id: "c7outthr01",
+  });
+  const outsiderThreadUnknown = await callError("thread", {
+    seat: unapproved, conversation_id: unknownConvId, thread_root_id: dmRootId, body: "nope", request_id: "c7outthr02",
+  });
+  assert.equal(outsiderThreadDm.error, "conversation_not_found");
+  assert.deepEqual(outsiderThreadDm, outsiderThreadUnknown, "outsider DM thread must match unknown conversation refusal");
+  const dmExplicitMention = await callError("thread", {
+    seat: approved, conversation_id: dmConvId, thread_root_id: dmRootId,
+    body: "Explicit mentions refused in DM", mentions: ["Synthetic unapproved seat"], request_id: "c7dmthr02",
+  });
+  assert.equal(dmExplicitMention.error, "conversation_mentions");
+
   const unknown = await rpc(off, token, secret, "tools/call", { name: "todo_read", arguments: { seat: approved, todo_id: randomUUID() } }); assert.equal(unknown.status, 400); assert.equal(unknown.json.error?.code, -32602);
   const on = await boot(true), live = await issue(owner, grantId);
   await probe(on, "mcp", secret, true, "1"); await probe(on, "h0", secret, false); await probe(on, "read", secret, true);
