@@ -292,7 +292,7 @@ test("workspace header and ⋯ menu expose conversation members only when Step 2
   });
   const btn = flat(header).find(n => Object.hasOwn(n.dataset, "conversationMembersOpen"));
   assert.ok(btn, "desktop header should render conversationMembers button");
-  assert.equal(btn.attrs["aria-label"], "#ops members (3)");
+  assert.equal(btn.attrs["aria-label"], "#ops members, 3");
   btn.listeners.click();
   assert.equal(openedWith, btn);
 

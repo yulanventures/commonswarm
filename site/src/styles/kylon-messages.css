@@ -905,7 +905,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__jump-present-bu
   gap: 6px;
   min-block-size: 32px;
   padding: 0 12px 0 10px;
-  border: 1px solid var(--carbon-line, var(--k-shell-line));
+  border: 1px solid var(--k-shell-control);
   border-radius: 999px;
   background: var(--k-shell-surface);
   box-shadow: var(--k-shell-shadow);
@@ -913,6 +913,33 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__jump-present-bu
   font: 600 13px/1.4 var(--k-shell-font);
   white-space: nowrap;
   cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.dashboard__channel-unavailable, .dashboard__channel-archived) .dashboard__button--secondary {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.dashboard__channel-unavailable, .dashboard__channel-archived) .dashboard__button--secondary:hover:not(:disabled) {
+  background: var(--k-shell-hover);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.dashboard__channel-unavailable, .dashboard__channel-archived) .dashboard__button--secondary:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed-more .dashboard__button:focus-visible,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__inline-retry:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed-more-error {
+  color: var(--k-shell-danger);
+}
+@media (width <= 64rem), (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.dashboard__feed-more .dashboard__button, .dashboard__inline-retry) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__jump-present-button svg {
   flex: none;

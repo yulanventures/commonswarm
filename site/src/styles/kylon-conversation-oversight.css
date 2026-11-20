@@ -59,7 +59,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-oversight__error-box {
 
 live-dashboard.dashboard[data-kylon-shell] .cs-oversight__error {
   margin: 0;
-  color: var(--danger, var(--k-shell-ink));
+  color: var(--k-shell-danger, var(--k-shell-ink));
   font: 500 13px/1.4 var(--k-shell-font);
 }
 
