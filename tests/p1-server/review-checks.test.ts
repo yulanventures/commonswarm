@@ -175,7 +175,7 @@ test("C3 lifecycle: open, own-seat stamp, once-only satisfied thread note, head 
   const rootPost = await send(seatLead.token, {
     kind: "post_signal",
     signal_kind: "note",
-    channel_id: channelId,
+    conversation_id: channelId,
     to_user_id: null,
     to_agent_principal_id: null,
     in_reply_to: null,

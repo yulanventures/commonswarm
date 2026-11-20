@@ -249,6 +249,9 @@ test("C3 migration invariants and stdio MCP tool catalog registration", () => {
   assert.match(sql, /satisfied_head_sha IS DISTINCT FROM v_check\.head_sha/);
   assert.match(sql, /FOR UPDATE;/);
 
+  const commandIndex = readFileSync("supabase/functions/command/index.ts", "utf8");
+  assert.match(commandIndex, /\.\.\.REVIEW_CHECK_COMMAND_KINDS,/);
+
   const toolNames = STDIO_MCP_TOOLS.map((tool) => tool.name);
   assert.ok(toolNames.includes("review_check_open"), "STDIO_MCP_TOOLS includes review_check_open");
   assert.ok(toolNames.includes("review_check_stamp"), "STDIO_MCP_TOOLS includes review_check_stamp");
