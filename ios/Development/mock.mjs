@@ -34,6 +34,7 @@ const codes = new Map();
 let emailCodePending = false;
 const emailWire = {};
 const conversationWire = new Map();
+let threadReplyWire;
 // Record the actual Swift request, with stable key order for the CI fixture.
 function recordEmailRequest(url, body) {
   if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
@@ -328,10 +329,12 @@ const server = createServer(async (req, res) => {
           return reply(404, { error: "thread_root_not_found" });
         }
       }
+      if (verify && cmd.body === "Thread receipt lost") threadReplyWire = cmd;
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments, thread_root_id: cmd.thread_root_id ?? null,
+        const id = verify && cmd.body === "Canonical DM" ? "00000000-0000-4000-8000-000000000092" : randomUUID();
+        messages.unshift({ id, from: me, from_kind: "user", body: body.command.body, attachments, thread_root_id: cmd.thread_root_id ?? null,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
         receipts.set(body.command_id, { command: body.command, signal: messages[0] });
         if (review && cmd.body === "Thread receipt lost") return reply(503, {});
@@ -387,6 +390,7 @@ server.listen(verify ? 0 : 8765, "127.0.0.1", () => {
       writeFileSync(join(dirname(process.argv[4]), "email-code.json"), JSON.stringify(emailWire, null, 2) + "\n");
       const sortedKeys = (_, value) => value && typeof value === "object" && !Array.isArray(value)
         ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value;
+      writeFileSync(join(dirname(process.argv[4]), "thread-reply.json"), JSON.stringify(threadReplyWire, sortedKeys, 2) + "\n");
       writeFileSync(join(dirname(process.argv[4]), "conversation-commands.json"),
         JSON.stringify([...conversationWire.values()], sortedKeys, 2) + "\n");
     }

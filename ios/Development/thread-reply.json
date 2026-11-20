@@ -1,0 +1,11 @@
+{
+  "about": null,
+  "body": "Thread receipt lost",
+  "conversation_id": "00000000-0000-4000-8000-000000000024",
+  "in_reply_to": null,
+  "kind": "post_signal",
+  "signal_kind": "note",
+  "thread_root_id": "00000000-0000-4000-8000-000000000092",
+  "to_agent_principal_id": null,
+  "to_user_id": null
+}
