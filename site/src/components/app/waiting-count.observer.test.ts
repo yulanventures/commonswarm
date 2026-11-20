@@ -872,8 +872,16 @@ function installWaitingFixture() {
               archived_at: null, joined: true, generation: 1, members: [], notify_level: "everything",
               starred: false, star_rank: null, unread_count: 0, mention_count: 0, last_message_at: recent, last_message_id: null,
             },
-            ...(archivedMembersPreflightCase ? [{
+            ...((archivedPage2Case || archivedMembersPreflightCase) ? [{
               conversation_id: convGarden, kind: "public_channel", channel_id: chBoiler, slug: "garden", description: null,
+              archived_at: null, joined: true, generation: 1,
+              members: [
+                { kind: "user", id: owner, name: "Synthetic owner", left_at: null },
+              ],
+              notify_level: "everything", starred: false, star_rank: null, unread_count: 0, mention_count: 0,
+              last_message_at: recent, last_message_id: null,
+            }, {
+              conversation_id: "eeeeeeee-eeee-4eee-8eee-000000000007", kind: "public_channel", channel_id: chReno, slug: "quiet", description: null,
               archived_at: null, joined: true, generation: 1,
               members: [
                 { kind: "user", id: owner, name: "Synthetic owner", left_at: null },

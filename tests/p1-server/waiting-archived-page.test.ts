@@ -315,8 +315,6 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
           (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, NULL, 0),
           (${gen1PostLeaveReplyId}::uuid, ${wsId}::uuid, NULL, ${scoutAgentId}::uuid, 1)
       `;
-      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1MayaReplyId}::uuid, ${convGroupGen1}::uuid)`;
-      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1PostLeaveReplyId}::uuid, ${convGroupGen1}::uuid)`;
       await tx`
         INSERT INTO swarm.ui_actions (
           action_id, workspace_id, signal_id, actor_user_id, option_id, option_ids, other_text,
@@ -724,8 +722,6 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
           (${crossUiReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_UI_ACTION_DM_ANSWER', NULL, ${crossUiAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(132)}::timestamptz),
           (${legacyRevokedAgentReplyId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'SECRET_LEGACY_AGENT_ONLY_ANSWER', NULL, ${legacyRevokedAgentAskId}::uuid, '9999-12-31T23:59:59Z'::timestamptz, ${ts(133)}::timestamptz)
       `;
-      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${crossDmReplyId}::uuid, ${convMayaScoutDm}::uuid)`;
-      await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${crossUiReplyId}::uuid, ${convMayaScoutDm}::uuid)`;
       await tx`
         INSERT INTO swarm.ui_actions (
           action_id, workspace_id, signal_id, actor_user_id, option_id, state, reply_signal_id, created_at, completed_at
