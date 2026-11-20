@@ -435,7 +435,18 @@ test("C2 dmAgentSeatStatus mirrors shared classifier for agent DM header and nev
     presence: row({ last_command_at: at(2 * 3_600_000), watcher_at: at(10 * 60_000) }),
   }, NOW);
   assert.equal(notListening.kind, "not_listening");
-  assert.equal(notListening.line, "Not listening · 2 h ago");
+  assert.equal(notListening.line, "Not listening · last active 2 h ago");
   assert.equal(notListening.indicator, "ring");
   assert.equal(notListening.attention, false);
+
+  const unavailable = dmAgentSeatStatus({
+    transport: "local",
+    connection: "live",
+    presence: undefined,
+    statusUnavailable: true,
+  }, NOW);
+  assert.equal(unavailable.kind, "unknown");
+  assert.equal(unavailable.line, "Status unavailable");
+  assert.equal(unavailable.indicator, "ring");
+  assert.equal(unavailable.attention, false);
 });

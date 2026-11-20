@@ -8120,6 +8120,7 @@ import "../../styles/kylon-image-viewer.css";
               serverWork: dmAgent.work?.work,
               oldestUnobservedAt: waitingSince,
               unseenCount: waitingCount,
+              statusUnavailable: dmAgent.presence === undefined && !dmAgent.work,
             });
           })()
         : undefined;

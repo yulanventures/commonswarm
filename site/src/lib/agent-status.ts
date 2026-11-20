@@ -44,6 +44,7 @@ export interface DmAgentSeatStatusInput {
   serverWork?: "working" | "idle" | "disconnected";
   oldestUnobservedAt?: string | null;
   unseenCount?: number | null;
+  statusUnavailable?: boolean;
   locale?: string;
   timeZone?: string;
 }
@@ -81,6 +82,7 @@ export function dmAgentSeatStatus(input: DmAgentSeatStatusInput, now = Date.now(
     serverWork: input.serverWork,
     waitingSince: input.oldestUnobservedAt,
     unseenCount: input.unseenCount,
+    statusUnavailable: input.statusUnavailable,
     locale: input.locale,
     timeZone: input.timeZone,
     viewerInPrivateAudience: false,

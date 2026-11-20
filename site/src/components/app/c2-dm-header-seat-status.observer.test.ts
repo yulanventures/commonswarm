@@ -281,7 +281,7 @@ async function observeC2DmHeader() {
       working: { kind: "working", indicator: "dot", attention: "false", substring: "Working · 3 min" },
       waiting: { kind: "waiting", indicator: "diamond", attention: "true", substring: "2 unseen" },
       "turn-only": { kind: "turn_only", indicator: "ring", attention: "false", substring: "Turn-only, checks when opened · 5 min ago" },
-      "not-listening": { kind: "not_listening", indicator: "ring", attention: "false", substring: "Not listening · 2 h ago" },
+      "not-listening": { kind: "not_listening", indicator: "ring", attention: "false", substring: "Not listening · last active 2 h ago" },
     };
     const want = expected[f.stateMode]!;
 
