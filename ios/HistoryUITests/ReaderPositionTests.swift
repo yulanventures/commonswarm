@@ -108,7 +108,10 @@ final class ReaderPositionTests: XCTestCase {
         try tap("Photos and videos")
         let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 10), "Seed one photo in the test simulator")
-        photo.tap()
+        // Photos exposes each thumbnail as an image and handles touches in the grid.
+        let thumbnail = photo.frame
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: thumbnail.midX - app.frame.minX, dy: thumbnail.midY - app.frame.minY)).tap()
         try tap("Done")
         let attachment = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove ")).firstMatch
         XCTAssertTrue(attachment.waitForExistence(timeout: 10))
