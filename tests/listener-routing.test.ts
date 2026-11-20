@@ -36,7 +36,7 @@ function entry(index: number): PendingMainEntry {
   };
 }
 
-test("the pending-main queue drops its oldest entry at 200 and emits a warning event", async () => {
+test("the pending-main queue refuses new entries at 200 without dropping older entries", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-main-route-"));
   try {
     const paths = listenerPaths({
@@ -46,21 +46,38 @@ test("the pending-main queue drops its oldest entry at 200 and emits a warning e
       stateDirectory: root,
     });
     const queue = new FilePendingMainQueue(paths.instanceDirectory);
-    let last = { count: 0, added: false, droppedOldest: false, droppedCount: 0 };
+    let last: { count: number; added: boolean; droppedOldest: boolean; droppedCount: number; queueFull?: boolean } = {
+      count: 0,
+      added: false,
+      droppedOldest: false,
+      droppedCount: 0,
+      queueFull: false,
+    };
     for (let index = 1; index <= 201; index += 1) {
       last = await queue.enqueue(entry(index));
     }
     assert.deepEqual(last, {
       count: 200,
-      added: true,
-      droppedOldest: true,
-      droppedCount: 1,
+      added: false,
+      droppedOldest: false,
+      droppedCount: 0,
+      queueFull: true,
     });
-    assert.deepEqual(await queue.stats(), { count: 200, droppedCount: 1 });
+    assert.deepEqual(await queue.stats(), { count: 200, droppedCount: 0 });
     const stored = await queue.read();
     assert.equal(stored.length, 200);
-    assert.equal(stored[0]?.signalId, entry(2).signalId);
-    assert.equal(stored.at(-1)?.signalId, entry(201).signalId);
+    assert.equal(stored[0]?.signalId, entry(1).signalId);
+    assert.equal(stored.at(-1)?.signalId, entry(200).signalId);
+
+    // Duplicate of an already-queued signal at cap stays idempotent (not queueFull).
+    const duplicate = await queue.enqueue(entry(1));
+    assert.deepEqual(duplicate, {
+      count: 200,
+      added: false,
+      droppedOldest: false,
+      droppedCount: 0,
+      queueFull: false,
+    });
 
     await appendListenerEvent(paths, {
       ts: "2026-08-26T00:00:01.000Z",
@@ -73,15 +90,13 @@ test("the pending-main queue drops its oldest entry at 200 and emits a warning e
     });
     await appendListenerEvent(paths, {
       ts: "2026-08-26T00:00:02.000Z",
-      event: "listener_main_queue_oldest_dropped",
-      signal_id: entry(201).signalId,
+      event: "listener_main_queue_full",
       pending_main_count: 200,
-      dropped_count: 1,
     });
     const log = await readFile(paths.logPath, "utf8");
     assert.match(log, /"defer_over_chars":12,"body_length":13/);
-    assert.match(log, /"event":"listener_main_queue_oldest_dropped"/);
-    assert.match(log, /"dropped_count":1/);
+    assert.match(log, /"event":"listener_main_queue_full"/);
+    assert.match(log, /"pending_main_count":200/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

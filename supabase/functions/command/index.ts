@@ -18393,31 +18393,68 @@ async function handleTransaction(
        * REFUSED by the validator (chatSignalShapeProblem), not silently
        * ignored here, so this line only ever chooses between an inherited
        * value and a top-level post's own channel. */
+      let agentThreadHopCapped = false;
+      if (threadResolution.threadRootId !== null && auth.credentialKind !== "user") {
+        const recent = await tx<{ from_kind: string }[]>`
+          SELECT s.from_kind::text AS from_kind
+          FROM swarm.signals AS s
+          WHERE s.workspace_id = ${route.workspaceId}::uuid
+            AND (s.id = ${threadResolution.threadRootId}::uuid
+              OR s.thread_root_id = ${threadResolution.threadRootId}::uuid)
+          ORDER BY s.created_at DESC, s.id DESC
+          LIMIT ${MENTION_AGENT_HOP_MAX}
+        `;
+        agentThreadHopCapped = recent.length >= MENTION_AGENT_HOP_MAX && recent.every((row) => row.from_kind === "agent");
+        if (agentThreadHopCapped && signalMentions.some((m) => m.kind === "agent")) {
+          await insertAudit(tx, {
+            auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+            outcome: "domain", reason: "agent mention hop limit reached in this thread", hash,
+            channelIds: postAuditChannelIds,
+          });
+          return decided({ status: 409, body: {
+            error: "mention_hop_limit",
+            message: `Agents have exchanged ${MENTION_AGENT_HOP_MAX} messages in a row in this thread. Reply without a mention, or wait for a person to post.`,
+          } });
+        }
+      }
+      const hasExplicitRecipient = (command.to?.length ?? 0) > 0 ||
+        signalTarget.toUserId !== null ||
+        signalTarget.toAgentPrincipalId !== null;
       if (
         chatMentionsEnabled &&
         conversationPrefile === null &&
+        !hasExplicitRecipient &&
         threadResolution.threadRootId !== null &&
-        auth.credentialKind === "user"
+        !agentThreadHopCapped
       ) {
-        /* A person's reply in a thread also reaches the agents already in it:
-         * the root's author when that is an agent, and the agents the root
-         * mentioned. Ones that are gone are skipped, not refused. */
+        /* A reply in a thread (by a person or an agent) reaches the other agents
+         * already in it: the root's author when that is an agent, the agents the
+         * root mentioned, and prior agent authors in the thread. The author itself
+         * is excluded, gone/unauthorized agents are skipped, and consecutive agent
+         * exchanges stop auto-waking once MENTION_AGENT_HOP_MAX is reached. */
+        const authorPrincipalId = auth.credentialKind === "user" ? null : canonicalPrincipal(auth.actor);
         const inThread = await tx<{ principal_id: string }[]>`
           SELECT t.principal_id FROM (
-            SELECT s.from_principal AS principal_id, -1 AS ord
+            SELECT s.from_principal AS principal_id, -1 AS ord, s.created_at AS sort_at, s.id AS sort_id
             FROM swarm.signals AS s
             WHERE s.id = ${threadResolution.threadRootId}::uuid
               AND s.workspace_id = ${route.workspaceId}::uuid AND s.from_kind = 'agent'
             UNION ALL
-            SELECT m.mentioned_agent_principal_id, m.position
+            SELECT m.mentioned_agent_principal_id AS principal_id, m.position AS ord, NULL::timestamptz AS sort_at, NULL::uuid AS sort_id
             FROM swarm.signal_mentions AS m
             WHERE m.signal_id = ${threadResolution.threadRootId}::uuid
               AND m.workspace_id = ${route.workspaceId}::uuid
               AND m.mentioned_agent_principal_id IS NOT NULL
-          ) AS t ORDER BY t.ord
+            UNION ALL
+            SELECT r.from_principal AS principal_id, 100000 AS ord, r.created_at AS sort_at, r.id AS sort_id
+            FROM swarm.signals AS r
+            WHERE r.thread_root_id = ${threadResolution.threadRootId}::uuid
+              AND r.workspace_id = ${route.workspaceId}::uuid AND r.from_kind = 'agent'
+          ) AS t ORDER BY t.ord, t.sort_at NULLS FIRST, t.sort_id NULLS FIRST
         `;
         for (const row of inThread) {
           if (signalMentions.length >= SIGNAL_MENTION_MAX) break;
+          if (authorPrincipalId !== null && row.principal_id.toLowerCase() === authorPrincipalId) continue;
           if (signalMentions.some((m) => m.kind === "agent" && m.id === row.principal_id)) continue;
           if (!await signalAgentTargetIsLive(tx, route, row.principal_id)) continue;
           if (
@@ -18433,32 +18470,6 @@ async function handleTransaction(
             continue;
           }
           signalMentions.push({ kind: "agent", id: row.principal_id, source: "thread" });
-        }
-      }
-      if (
-        threadResolution.threadRootId !== null && auth.credentialKind !== "user" &&
-        signalMentions.some((m) => m.kind === "agent")
-      ) {
-        const recent = await tx<{ from_kind: string }[]>`
-          SELECT s.from_kind::text AS from_kind
-          FROM swarm.signals AS s
-          WHERE s.workspace_id = ${route.workspaceId}::uuid
-            AND (s.id = ${threadResolution.threadRootId}::uuid
-              OR s.thread_root_id = ${threadResolution.threadRootId}::uuid)
-          ORDER BY s.created_at DESC, s.id DESC
-          LIMIT ${MENTION_AGENT_HOP_MAX}
-        `;
-        const capped = recent.length >= MENTION_AGENT_HOP_MAX && recent.every((row) => row.from_kind === "agent");
-        if (capped) {
-          await insertAudit(tx, {
-            auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
-            outcome: "domain", reason: "agent mention hop limit reached in this thread", hash,
-            channelIds: postAuditChannelIds,
-          });
-          return decided({ status: 409, body: {
-            error: "mention_hop_limit",
-            message: `Agents have exchanged ${MENTION_AGENT_HOP_MAX} messages in a row in this thread. Reply without a mention, or wait for a person to post.`,
-          } });
         }
       }
       const postOutcome = await postSignal(

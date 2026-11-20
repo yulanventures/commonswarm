@@ -7386,3 +7386,150 @@ test("a process holding a predecessor adopts a newer generation another process 
   assert.equal(await session.bearer(), "swm_agt_" + "B".repeat(43), "another lineage's record is ignored");
   assert.equal(fetches, 0, "no network call was needed");
 });
+
+test("C1b: durable_claim stops claiming at the 200 pending-main cap, leaves work on the server, and resumes once drained", async () => {
+  const journal = new MemoryDeliveryJournal();
+  const store = new MemoryStore();
+  const controller = new AbortController();
+  const model = new FakeModel();
+  const claimedAsk = ask(
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaad01",
+    "2026-07-30T00:00:01.000Z",
+  );
+  let pendingCount = 200;
+  let claims = 0;
+  let acks = 0;
+  let sleeps = 0;
+  const queuedIds: string[] = [];
+  const runtimeEvents: ListenerRuntimeEvent[] = [];
+
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        return claimResult([{
+          signal: claimedAsk,
+          leaseId: "55555555-5555-4555-8555-555555555d01",
+          leasedUntil: "2026-07-30T00:15:00.000Z",
+          senderOwnerRelation: "same_owner",
+          recipientPosition: null,
+          recipientCount: null,
+        }], 1);
+      },
+      async ackAgentDelivery(request) {
+        acks += 1;
+        controller.abort();
+        return { httpStatus: 200, signalId: request.signalId, outcome: request.outcome };
+      },
+    },
+    credentialSession: { async bearer() { return "token"; } },
+    store,
+    model,
+    routeMode: "main",
+    deferOverChars: null,
+    pendingMainQueue: {
+      async count() {
+        return pendingCount;
+      },
+      async enqueue(entry) {
+        if (pendingCount >= 200) {
+          return { count: pendingCount, added: false, droppedOldest: false, droppedCount: 0, queueFull: true };
+        }
+        pendingCount += 1;
+        queuedIds.push(entry.signalId);
+        return { count: pendingCount, added: true, droppedOldest: false, droppedCount: 0, queueFull: false };
+      },
+    },
+    onEvent(event) {
+      runtimeEvents.push(event);
+    },
+    signal: controller.signal,
+    now: () => Date.parse("2026-07-30T00:00:00.000Z"),
+    sleep: async () => {
+      sleeps += 1;
+      if (sleeps === 2) {
+        assert.equal(claims, 0, "must not claim while queue is at 200");
+        assert.equal(acks, 0, "must not ack while queue is at 200");
+        // Session drains 1 entry below cap.
+        pendingCount = 199;
+      }
+    },
+    readPage: async () => durablePage([], 1),
+    poster: { async post() { throw new Error("main route must not post a worker reply"); } },
+  });
+
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(runtimeEvents.some((event) => event.type === "main_queue_full" && event.pendingCount === 200 && event.limit === 200));
+  assert.equal(claims, 1, "resumes claiming once queue drops below 200");
+  assert.equal(acks, 1);
+  assert.deepEqual(queuedIds, [claimedAsk.id]);
+});
+
+test("C1b: already-leased delivery is left unacknowledged when enqueue reports queueFull", async () => {
+  const claimedAsk = ask(
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaad02",
+    "2026-07-30T00:00:01.000Z",
+  );
+  const journal = new MemoryDeliveryJournal();
+  const store = new MemoryStore();
+  const controller = new AbortController();
+  const model = new FakeModel();
+  let acks = 0;
+  const runtimeEvents: ListenerRuntimeEvent[] = [];
+
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    deliveryClient: {
+      async claimAgentInbox() {
+        return claimResult([{
+          signal: claimedAsk,
+          leaseId: "55555555-5555-4555-8555-555555555d02",
+          leasedUntil: "2026-07-30T00:15:00.000Z",
+          senderOwnerRelation: "same_owner",
+          recipientPosition: null,
+          recipientCount: null,
+        }], 1);
+      },
+      async ackAgentDelivery(request) {
+        acks += 1;
+        return { httpStatus: 200, signalId: request.signalId, outcome: request.outcome };
+      },
+    },
+    credentialSession: { async bearer() { return "token"; } },
+    store,
+    model,
+    routeMode: "main",
+    deferOverChars: null,
+    pendingMainQueue: {
+      async count() {
+        return 199; // Race: queue fills between pre-claim check and enqueue.
+      },
+      async enqueue() {
+        return { count: 200, added: false, droppedOldest: false, droppedCount: 0, queueFull: true };
+      },
+    },
+    onEvent(event) {
+      runtimeEvents.push(event);
+      if (event.type === "main_queue_full") controller.abort();
+    },
+    signal: controller.signal,
+    now: () => Date.parse("2026-07-30T00:00:00.000Z"),
+    sleep: async () => undefined,
+    readPage: async () => durablePage([], 1),
+    poster: { async post() { throw new Error("main route must not post a worker reply"); } },
+  });
+
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(acks, 0, "un-enqueued delivery must not be ACKed");
+  assert.equal(await store.read(claimedAsk.id), null, "must not record routed_main when queue is full");
+  assert.ok(runtimeEvents.some((event) => event.type === "main_queue_full" && event.pendingCount === 200));
+});

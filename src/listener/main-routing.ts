@@ -330,6 +330,7 @@ export class FilePendingMainQueue {
     added: boolean;
     droppedOldest: boolean;
     droppedCount: number;
+    queueFull?: boolean;
   }> {
     const checked = parseEntry(entry, true);
     return await withFileLock(this.directory, QUEUE_LOCK, async () => {
@@ -340,20 +341,26 @@ export class FilePendingMainQueue {
           added: false,
           droppedOldest: false,
           droppedCount: file.droppedCount,
+          queueFull: false,
+        };
+      }
+      if (file.entries.length >= LISTENER_MAIN_QUEUE_MAX) {
+        return {
+          count: file.entries.length,
+          added: false,
+          droppedOldest: false,
+          droppedCount: file.droppedCount,
+          queueFull: true,
         };
       }
       file.entries.push(checked);
-      const droppedOldest = file.entries.length > LISTENER_MAIN_QUEUE_MAX;
-      if (droppedOldest) {
-        file.entries.shift();
-        file.droppedCount += 1;
-      }
       await this.writeUnlocked(file);
       return {
         count: file.entries.length,
         added: true,
-        droppedOldest,
+        droppedOldest: false,
         droppedCount: file.droppedCount,
+        queueFull: false,
       };
     });
   }
