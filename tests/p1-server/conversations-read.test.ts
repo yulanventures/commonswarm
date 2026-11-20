@@ -937,22 +937,22 @@ test("5. HezSec C1-C3 witnesses: NULL-total DM thread gates, DM human-to-agent t
   assert.ok(parseOversightListResponse(seatedOversight).some((c) => c.conversationId === dmAnnBot && c.readOnly === true));
 });
 
-test("8. Zero server-side DM / group-DM / DM-thread leakage into #general or outsider legacy signals reads", { timeout: 60_000 }, async () => {
+test("6. Zero server-side DM / group-DM / DM-thread leakage into #general or outsider legacy signals reads", { timeout: 60_000 }, async () => {
   // Post a 1:1 DM (ann <-> ben), a DM thread reply, and a group DM (ann, ben, annBotA) — all with channel_id NULL.
   const dmId = String(((ok(await send(ann.jwt, {
     kind: "conversation_open", members: [uRef(ben)],
   }), "open ann-ben DM")).conversation as Row).conversation_id);
-  const dmRootId = await posted(ann.jwt, { conversation_id: dmId, body: "private 1:1 DM root" });
-  const dmThreadReplyId = await posted(ben.jwt, {
+  const dmRootId = String((await posted(ann.jwt, { conversation_id: dmId, body: "private 1:1 DM root" })).id);
+  const dmThreadReplyId = String((await posted(ben.jwt, {
     conversation_id: dmId,
     thread_root_id: dmRootId,
     body: "private 1:1 DM thread reply",
-  });
+  })).id);
 
   const grpId = String(((ok(await send(ann.jwt, {
     kind: "conversation_open", members: [uRef(ben), aRef(annBotA)],
   }), "open ann-ben-annBotA group")).conversation as Row).conversation_id);
-  const grpMsgId = await posted(ann.jwt, { conversation_id: grpId, body: "private group DM message" });
+  const grpMsgId = String((await posted(ann.jwt, { conversation_id: grpId, body: "private group DM message" })).id);
   const dmIds = new Set([dmRootId, dmThreadReplyId, grpMsgId]);
 
   // 1. Step 2b conversation_history on #general must NOT include any DM, group DM, or DM thread reply (even for participants).
