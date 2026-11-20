@@ -3338,8 +3338,53 @@ export async function postPinnedCommand(
     clientVersion?: string;
     extra?: Record<string, unknown>;
     fetcher?: typeof fetch;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
   },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  const isCancelled = (): boolean =>
+    Boolean((options.isAlive && !options.isAlive()) || options.signal?.aborted);
+  const retiredResult = (): { status: number; body: Record<string, unknown> } => ({
+    status: 0,
+    body: { error: "operation_retired", message: "Action cancelled." },
+  });
+  const awaitCancelable = async <T>(
+    promise: Promise<T>,
+  ): Promise<{ cancelled: true } | { cancelled: false; value: T }> => {
+    const signal = options.signal;
+    if (!signal) {
+      try {
+        const value = await promise;
+        return isCancelled() ? { cancelled: true } : { cancelled: false, value };
+      } catch (error) {
+        if (isCancelled()) return { cancelled: true };
+        throw error;
+      }
+    }
+    if (signal.aborted || isCancelled()) {
+      void promise.catch(() => {});
+      return { cancelled: true };
+    }
+    return await new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        void promise.catch(() => {});
+        resolve({ cancelled: true });
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(isCancelled() ? { cancelled: true } : { cancelled: false, value });
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          if (isCancelled()) resolve({ cancelled: true });
+          else reject(error);
+        },
+      );
+    });
+  };
+
   const verifiedDeployment = ctx.runtime.deployment;
   if (options.expectedDeployment && !sameDeployment(options.expectedDeployment, verifiedDeployment)) {
     throw new MultiAccountDeploymentMismatch();
@@ -3423,8 +3468,11 @@ export async function postPinnedCommand(
     throw new MultiAccountWorkspaceMismatch();
   }
 
+  if (isCancelled()) return retiredResult();
   if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
-  const initial = await ctx.runtime.verifySession();
+  const initialRes = await awaitCancelable(ctx.runtime.verifySession());
+  if (initialRes.cancelled || isCancelled()) return retiredResult();
+  const initial = initialRes.value;
   if (!initial || !isPinnedScopeCurrent(ctx, options.scope) || initial.user.id !== ctx.userId) {
     throw new MultiAccountAuthRecoveryRequired();
   }
@@ -3432,17 +3480,25 @@ export async function postPinnedCommand(
   const endpoint = `${verifiedDeployment.url.replace(/\/+$/, "")}/functions/v1/command`;
   let credential = initial;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (isCancelled()) return retiredResult();
     if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
-    const response = await fetcher(endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${credential.access_token}`,
-        apikey: verifiedDeployment.anonKey,
-        "content-type": "application/json",
-      },
-      body: wireBody,
-    });
-    const text = await response.text();
+    const fetchRes = await awaitCancelable(
+      fetcher(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential.access_token}`,
+          apikey: verifiedDeployment.anonKey,
+          "content-type": "application/json",
+        },
+        body: wireBody,
+        ...(options.signal ? { signal: options.signal } : {}),
+      }),
+    );
+    if (fetchRes.cancelled || isCancelled()) return retiredResult();
+    const response = fetchRes.value;
+    const textRes = await awaitCancelable(response.text());
+    if (textRes.cancelled || isCancelled()) return retiredResult();
+    const text = textRes.value;
     // C2: Recheck initiating pin AFTER response arrives (even on HTTP 200) so a held
     // signed-download URL or command result can never reach a switched/signed-out view!
     if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
@@ -3450,8 +3506,11 @@ export async function postPinnedCommand(
     try { body = text ? (JSON.parse(text) as Record<string, unknown>) : {}; } catch { body = { error: "unreadable_response" }; }
 
     if (response.status === 401 && body.error === "unauthenticated") {
+      if (isCancelled()) return retiredResult();
       if (attempt !== 0 || !isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
-      const recovered = await ctx.runtime.client.auth.getSession();
+      const recoveredRes = await awaitCancelable(ctx.runtime.client.auth.getSession());
+      if (recoveredRes.cancelled || isCancelled()) return retiredResult();
+      const recovered = recoveredRes.value;
       if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
       if (recovered.error || !recovered.data.session || recovered.data.session.user.id !== ctx.userId) {
         throw new MultiAccountSessionExpired();
@@ -3459,13 +3518,17 @@ export async function postPinnedCommand(
       if (!sameCredentials(recovered.data.session, credential)) {
         credential = recovered.data.session;
       } else {
-        const refreshed = await ctx.runtime.client.auth.refreshSession();
+        if (isCancelled()) return retiredResult();
+        const refreshedRes = await awaitCancelable(ctx.runtime.client.auth.refreshSession());
+        if (refreshedRes.cancelled || isCancelled()) return retiredResult();
+        const refreshed = refreshedRes.value;
         if (!isPinnedScopeCurrent(ctx, options.scope)) throw new MultiAccountAuthRecoveryRequired();
         if (refreshed.error || !refreshed.data.session || refreshed.data.session.user.id !== ctx.userId) {
           throw new MultiAccountAuthRecoveryRequired();
         }
         credential = refreshed.data.session;
       }
+      if (isCancelled()) return retiredResult();
       continue;
     }
     return { status: response.status, body };

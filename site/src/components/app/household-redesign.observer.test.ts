@@ -260,7 +260,7 @@ test("history reads removed identities separately and leaves the live roster unc
   assert.match(removed, /\.not\("revoked_at", "is", null\)/);
   assert.match(removed, /offset < 200/);
   const open = section(script, "const openWorkspace =", "const syncCreatePurposeWarning =");
-  assert.match(open, /const removedAgentsRead = removedAgentNames\(selected.id\)/);
+  assert.match(open, /const removedAgentsRead = removedAgentNames\(selected\.id(?:,\s*openPinned)?\)/);
   assert.match(open, /const nextRemovedAgents = await removedAgentsRead;/);
   assert.match(open, /removedAgents = nextRemovedAgents/);
   assert.match(script, /removedAgentLabel\(name\)/);

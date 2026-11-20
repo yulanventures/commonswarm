@@ -22,6 +22,7 @@ import {
   openConversation,
   removeChannelMember,
   removeFromConversation,
+  type PinnedAccountContext,
 } from "./commonswarm.js";
 import type { ConversationKind, ConversationMemberRef, ConversationSummary } from "./conversations.js";
 import {
@@ -98,13 +99,19 @@ export function buildConversationCandidates(roster: DialogWorkspaceRoster): Conv
 export interface OperationLifetime {
   isAlive: () => boolean;
   retire: () => void;
+  signal: AbortSignal;
 }
 
 export function createOperationLifetime(isHostAlive: () => boolean): OperationLifetime {
   let retired = false;
+  const controller = new AbortController();
   return {
-    isAlive: () => !retired && isHostAlive(),
-    retire: () => { retired = true; },
+    signal: controller.signal,
+    isAlive: () => !retired && !controller.signal.aborted && isHostAlive(),
+    retire: () => {
+      retired = true;
+      if (!controller.signal.aborted) controller.abort();
+    },
   };
 }
 
@@ -113,6 +120,7 @@ export interface ConversationDialogsBridge {
     dialog: HTMLDialogElement;
     workspaceId: string;
     pinnedUserId: string;
+    pinned?: PinnedAccountContext | null;
     roster: DialogWorkspaceRoster;
     lookupName: (ref: ConversationMemberRef) => string | null;
     getSession: () => Session | null;
@@ -125,6 +133,7 @@ export interface ConversationDialogsBridge {
     dialog: HTMLDialogElement;
     workspaceId: string;
     pinnedUserId: string;
+    pinned?: PinnedAccountContext | null;
     requestedConvId: string;
     resolveActiveConversation: () => ConversationSummary | null;
     resolveManageContext: (channelId: string | null) => ChannelManageContext;
@@ -146,7 +155,12 @@ export interface ConversationDialogsBridge {
     manageContext: ChannelManageContext;
     isPromotedPrivateManager?: boolean;
   }) => ChannelMembersPermissions;
-  checkPromotedPrivateManager: (workspaceId: string, channelId: string, userId: string) => Promise<boolean>;
+  checkPromotedPrivateManager: (
+    workspaceId: string,
+    channelId: string,
+    userId: string,
+    options?: { pinned?: PinnedAccountContext | null; signal?: AbortSignal },
+  ) => Promise<boolean>;
   closeMembers: (restoreFocus?: boolean) => void;
   closeAll: () => void;
 }
@@ -154,6 +168,8 @@ export interface ConversationDialogsBridge {
 export function createConversationDialogsBridge(): ConversationDialogsBridge {
   let pickerCtrl: ConversationPickerController | null = null;
   let membersCtrl: ChannelMembersDialogController | null = null;
+  let pickerLifetime: OperationLifetime | null = null;
+  let membersLifetime: OperationLifetime | null = null;
 
   const computePermissions: ConversationDialogsBridge["computePermissions"] = ({
     conv,
@@ -176,8 +192,13 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
     computePermissions,
     checkPromotedPrivateManager: isPromotedPrivateChannelManager,
     openNewMessage(args) {
+      pickerLifetime?.retire();
       const lifetime = createOperationLifetime(args.isHostAlive);
-      if (!lifetime.isAlive()) return;
+      pickerLifetime = lifetime;
+      if (!lifetime.isAlive()) {
+        lifetime.retire();
+        return;
+      }
       pickerCtrl ??= createConversationPickerController(args.dialog);
       pickerCtrl.open({
         viewerUserId: args.pinnedUserId,
@@ -190,6 +211,8 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
           }
           return await openConversation(session, commandId, args.workspaceId, picked, newGroup, {
             isAlive: lifetime.isAlive,
+            signal: lifetime.signal,
+            pinned: args.pinned,
           });
         },
         onOpened: (opened) => {
@@ -218,15 +241,26 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
             lastMessageId: null,
           }, lifetime.isAlive);
         },
-        onRetire: lifetime.retire,
+        onRetire: () => {
+          lifetime.retire();
+          if (pickerLifetime === lifetime) pickerLifetime = null;
+        },
         restoreFocus: args.restoreFocus,
       });
     },
     async openMembers(args) {
+      membersLifetime?.retire();
       const lifetime = createOperationLifetime(args.isHostAlive);
-      if (!lifetime.isAlive()) return;
+      membersLifetime = lifetime;
+      if (!lifetime.isAlive()) {
+        lifetime.retire();
+        return;
+      }
       const resolvedInitial = args.resolveActiveConversation();
-      if (!resolvedInitial || resolvedInitial.conversationId !== args.requestedConvId) return;
+      if (!resolvedInitial || resolvedInitial.conversationId !== args.requestedConvId) {
+        lifetime.retire();
+        return;
+      }
 
       const manageCtxInitial = args.resolveManageContext(resolvedInitial.channelId);
       let promotedManager = false;
@@ -243,6 +277,7 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
             args.workspaceId,
             resolvedInitial.channelId,
             args.pinnedUserId,
+            { pinned: args.pinned, signal: lifetime.signal },
           );
           if (!lifetime.isAlive()) return;
         }
@@ -250,7 +285,10 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
 
       // Re-resolve active conversation after any await (C2).
       const conv = args.resolveActiveConversation();
-      if (!conv || conv.conversationId !== args.requestedConvId) return;
+      if (!conv || conv.conversationId !== args.requestedConvId) {
+        lifetime.retire();
+        return;
+      }
       const manageCtx = args.resolveManageContext(conv.channelId);
       const permissions = computePermissions({
         conv,
@@ -292,10 +330,17 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
         const readGen = args.beginConversationsRead();
         let freshRows: ConversationSummary[];
         try {
-          freshRows = await listConversations(args.workspaceId, true, args.pinnedUserId, lifetime.isAlive);
+          freshRows = await listConversations(args.workspaceId, true, {
+            pinned: args.pinned,
+            signal: lifetime.signal,
+            expectedUserId: args.pinnedUserId,
+            isAlive: lifetime.isAlive,
+          });
         } catch {
-          if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
-          return { ok: false, message: "Couldn't verify channel access. Try again." };
+          return {
+            ok: false,
+            message: !lifetime.isAlive() ? "Action cancelled." : "Couldn't verify channel access. Try again.",
+          };
         }
         if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
         if (!args.commitConversationsRead(readGen, freshRows)) {
@@ -334,6 +379,7 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
               args.workspaceId,
               freshConv.channelId,
               args.pinnedUserId,
+              { pinned: args.pinned, signal: lifetime.signal },
             );
             if (!lifetime.isAlive()) return { ok: false, message: "Action cancelled." };
           }
@@ -382,10 +428,14 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
             if (gate.perms.route === "private_channel" && gate.freshConv.channelId) {
               return await addChannelMembers(session, commandId, args.workspaceId, gate.freshConv.channelId, added, {
                 isAlive: lifetime.isAlive,
+                signal: lifetime.signal,
+                pinned: args.pinned,
               });
             }
             return await inviteToConversation(session, commandId, args.workspaceId, convId, added, {
               isAlive: lifetime.isAlive,
+              signal: lifetime.signal,
+              pinned: args.pinned,
             });
           }
           : undefined,
@@ -400,10 +450,14 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
             if (gate.perms.route === "private_channel" && gate.freshConv.channelId) {
               return await removeChannelMember(session, commandId, args.workspaceId, gate.freshConv.channelId, removed, {
                 isAlive: lifetime.isAlive,
+                signal: lifetime.signal,
+                pinned: args.pinned,
               });
             }
             return await removeFromConversation(session, commandId, args.workspaceId, convId, removed, {
               isAlive: lifetime.isAlive,
+              signal: lifetime.signal,
+              pinned: args.pinned,
             });
           }
           : undefined,
@@ -413,15 +467,22 @@ export function createConversationDialogsBridge(): ConversationDialogsBridge {
         },
         onRetire: () => {
           lifetime.retire();
+          if (membersLifetime === lifetime) membersLifetime = null;
           args.onClosed();
         },
         restoreFocus: args.restoreFocus,
       });
     },
     closeMembers(restoreFocus = false) {
+      membersLifetime?.retire();
+      membersLifetime = null;
       membersCtrl?.close(restoreFocus);
     },
     closeAll() {
+      pickerLifetime?.retire();
+      pickerLifetime = null;
+      membersLifetime?.retire();
+      membersLifetime = null;
       pickerCtrl?.close(false);
       membersCtrl?.close(false);
     },
