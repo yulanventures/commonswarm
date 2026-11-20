@@ -1,5 +1,7 @@
 import SwiftUI
 
+struct TodosRoute: Hashable {}
+
 struct WorkspaceToolsRootView: View {
     let api: ConversationAPI
     let workspace: Workspace
