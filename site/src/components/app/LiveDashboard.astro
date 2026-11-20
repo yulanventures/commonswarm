@@ -6776,16 +6776,15 @@ import "../../styles/kylon-image-viewer.css";
         waitingPanelViewer = viewer;
         clearWaitingData();
       }
+      const isAlive = waitingActionGuard(viewer, authGen);
       const live = (): boolean =>
         generation === waitingGeneration &&
-        authGen === waitingAuthGeneration &&
-        renderedAuthUserId === viewer &&
-        session?.user.id === viewer &&
+        isAlive() &&
         homeRoute.view !== "catchup";
       try {
         const overview = await homeOverview();
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
-        if (!overview || !live()) return;
+        if (!overview || !live() || overview.viewer_user_id !== viewer) return;
         waitingPanelOverviewFailed = false;
         const now = Date.parse(overview.generated_at);
         const rows = new Map(overview.workspaces.map(row => [row.workspace_id, row]));
@@ -6818,6 +6817,7 @@ import "../../styles/kylon-image-viewer.css";
         let next = 0;
         await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
           for (;;) {
+            if (!live()) return;
             const workspace = toRead[next++]; if (!workspace) return;
             const row = rows.get(workspace.id)!;
             const hasAsks = row.needs_you.asks.length > 0;
@@ -6826,6 +6826,7 @@ import "../../styles/kylon-image-viewer.css";
             let queue: DecisionQueue | null = hasAsks
               ? await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null)
               : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
+            if (!live()) return;
             if (!queue) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
@@ -6835,6 +6836,7 @@ import "../../styles/kylon-image-viewer.css";
             }
             const ids = queue.asks.map(ask => ask.signal_id);
             const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : [];
+            if (!live()) return;
             if (choices === null) {
               // A failed choices read must never become an exact zero or an empty channel.
               counted.set(workspace.id, null);
@@ -6889,8 +6891,10 @@ import "../../styles/kylon-image-viewer.css";
             if (missingIds.length) {
               try {
                 const fetched = await signalLocations(workspace.id, missingIds);
+                if (!live()) return;
                 for (const [sigId, loc] of fetched) locations.set(sigId, loc);
               } catch {
+                if (!live()) return;
                 locationReadFailed = true;
               }
             }
@@ -6911,8 +6915,10 @@ import "../../styles/kylon-image-viewer.css";
             if (hasTodos) {
               try {
                 todosQueue = await homeServer()?.waitingTodos(workspace.id) ?? null;
+                if (!live()) return;
                 if (!todosQueue) todosReadFailed = true;
               } catch (err) {
+                if (!live()) return;
                 if (err instanceof HomeToolsUnavailable) {
                   todosFallback = true;
                 } else {
@@ -6925,6 +6931,7 @@ import "../../styles/kylon-image-viewer.css";
             const hasNamedTodoChannel = Boolean(todosQueue?.todos.some(todo => todo.placement === "channel" && todo.channel_id));
             if ((hasNamedAskChannel || hasNamedTodoChannel) && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
               const wsChannels = await workspaceChannels(workspace.id).catch(() => []);
+              if (!live()) return;
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
             const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
