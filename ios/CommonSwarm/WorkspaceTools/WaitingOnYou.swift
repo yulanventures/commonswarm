@@ -207,8 +207,152 @@ struct WaitingPromptSplit: Equatable, Sendable {
 struct WaitingWorkspaceLoad: Sendable {
     let workspaceID: UUID
     let items: [WaitingAskItem]
+    let todos: [WaitingTodoItem]
     let complete: Bool
     let failed: Bool
+}
+
+enum WaitingTodoReason: String, Decodable, Hashable, Sendable {
+    case assigned
+    case request
+    case after
+    case hold
+    case agentRemoved = "agent_removed"
+
+    var label: String {
+        switch self {
+        case .request: "To-do · Waiting for your answer"
+        case .hold: "To-do · On hold"
+        case .after: "To-do · Waiting"
+        case .agentRemoved: "To-do · Agent removed"
+        case .assigned: "To-do · Assigned to you"
+        }
+    }
+}
+
+enum WaitingTodoPlacement: String, Decodable, Hashable, Sendable {
+    case channel
+    case general
+    case workspace
+}
+
+struct WaitingTodoItem: Hashable, Identifiable, Sendable {
+    let id: UUID
+    let workspaceID: UUID
+    let workspaceName: String
+    let title: String
+    let state: String
+    let dueOn: String?
+    let reason: WaitingTodoReason
+    let agentID: UUID?
+    let stateAt: String
+    let placement: WaitingTodoPlacement
+    let channelID: UUID?
+    let channelLabel: String
+
+    var canMarkDone: Bool { reason == .assigned }
+
+    var formattedDue: String? {
+        WaitingChoiceRules.formatLocalDueDate(dueOn)
+    }
+
+    func locationText(for scope: WaitingScope) -> String? {
+        switch scope {
+        case .channel:
+            return nil
+        case .workspace:
+            return channelLabel.isEmpty ? nil : channelLabel
+        case .all:
+            return channelLabel.isEmpty ? workspaceName : "\(workspaceName) · \(channelLabel)"
+        }
+    }
+}
+
+struct WaitingTodoFailure: Equatable, Sendable {
+    let message: String
+    let retryable: Bool
+}
+
+struct WaitingTodoComment: Hashable, Identifiable, Sendable {
+    let id: UUID
+    let authorName: String
+    let authorIsAgent: Bool
+    let body: String
+    let createdAt: String
+}
+
+struct WaitingTodoDetail: Hashable, Sendable {
+    let id: UUID
+    let workspaceID: UUID
+    let title: String
+    let state: String
+    let version: Int
+    let notes: String?
+    let dueOn: String?
+    let assigneeName: String
+    let assigneeIsAgent: Bool
+    let comments: [WaitingTodoComment]
+    let nextCommentOffset: Int?
+
+    var formattedDue: String? {
+        WaitingChoiceRules.formatLocalDueDate(dueOn)
+    }
+
+    func withState(_ newState: String) -> WaitingTodoDetail {
+        WaitingTodoDetail(
+            id: id,
+            workspaceID: workspaceID,
+            title: title,
+            state: newState,
+            version: version,
+            notes: notes,
+            dueOn: dueOn,
+            assigneeName: assigneeName,
+            assigneeIsAgent: assigneeIsAgent,
+            comments: comments,
+            nextCommentOffset: nextCommentOffset
+        )
+    }
+
+    func appendingComments(_ more: [WaitingTodoComment], nextOffset: Int?) -> WaitingTodoDetail {
+        var merged = comments
+        let existing = Set(comments.map(\.id))
+        for comment in more where !existing.contains(comment.id) {
+            merged.append(comment)
+        }
+        return WaitingTodoDetail(
+            id: id,
+            workspaceID: workspaceID,
+            title: title,
+            state: state,
+            version: version,
+            notes: notes,
+            dueOn: dueOn,
+            assigneeName: assigneeName,
+            assigneeIsAgent: assigneeIsAgent,
+            comments: merged,
+            nextCommentOffset: nextOffset
+        )
+    }
+}
+
+enum WaitingBannerKind: Equatable, Sendable {
+    case sent
+    case done
+    case dropped
+}
+
+struct WaitingStatusBanner: Equatable, Sendable {
+    let kind: WaitingBannerKind
+    let text: String
+
+    var accessibilityLabel: String {
+        switch kind {
+        case .sent: return text == "Sent" ? "Answer sent" : text
+        case .done: return "To-do marked done"
+        case .dropped: return text
+        }
+    }
 }
 
 enum WaitingChoiceRules {
@@ -333,6 +477,48 @@ enum WaitingChoiceRules {
         }
     }
 
+    /// Mirrors filterWaitingTodos in site/src/lib/waiting-panel.ts.
+    /// Channel-origin and #general-origin to-dos appear in their authoritative channel's This channel queue;
+    /// workspace-only to-dos stay in All channels and All workspaces so they never clutter a channel or DM.
+    static func filterTodos(
+        _ todos: [WaitingTodoItem],
+        scope: WaitingScope,
+        place: WaitingPlace
+    ) -> [WaitingTodoItem] {
+        switch scope {
+        case .all:
+            return todos
+        case .workspace:
+            return todos.filter { $0.workspaceID == place.workspaceID }
+        case .channel:
+            return todos.filter { todo in
+                guard todo.workspaceID == place.workspaceID else { return false }
+                switch place.conversation {
+                case .channel(let channelID):
+                    return todo.placement == .channel && todo.channelID == channelID
+                case .general:
+                    return todo.placement == .general
+                case .dm, .group, .unknown:
+                    return false
+                }
+            }
+        }
+    }
+
+    static func formatLocalDueDate(_ dueOn: String?) -> String? {
+        guard let dueOn, !dueOn.isEmpty else { return nil }
+        let parts = dueOn.split(separator: "-")
+        guard parts.count == 3,
+              let month = Int(parts[1]),
+              let day = Int(parts[2]),
+              (1...12).contains(month),
+              (1...31).contains(day) else {
+            return "Due \(dueOn)"
+        }
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return "Due \(months[month - 1]) \(day)"
+    }
+
     static func formatRelativeTime(_ iso: String) -> String {
         let date = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(iso))
             ?? (try? Date.ISO8601FormatStyle().parse(iso))
@@ -352,6 +538,7 @@ struct WaitingCardFailure: Equatable, Sendable {
 final class WaitingOnYouStore: ObservableObject {
     @Published var scope: WaitingScope = .channel
     @Published private(set) var items: [WaitingAskItem] = []
+    @Published private(set) var todos: [WaitingTodoItem] = []
     @Published private(set) var workspaceComplete: [UUID: Bool] = [:]
     @Published private(set) var workspaceFailed: [UUID: Bool] = [:]
     @Published private(set) var allWorkspacesEnumerated = false
@@ -361,7 +548,11 @@ final class WaitingOnYouStore: ObservableObject {
     @Published private(set) var pendingBySignal: Set<UUID> = []
     @Published private(set) var failuresBySignal: [UUID: WaitingCardFailure] = [:]
     @Published var draftsBySignal: [UUID: WaitingChoiceDraft] = [:]
-    @Published private(set) var sentBanner: String?
+    @Published private(set) var pendingByTodo: Set<UUID> = []
+    @Published private(set) var failuresByTodo: [UUID: WaitingTodoFailure] = [:]
+    @Published private(set) var statusBanner: WaitingStatusBanner?
+
+    var sentBanner: String? { statusBanner?.text }
 
     let place: WaitingPlace
     private var bannerTask: Task<Void, Never>?
@@ -372,6 +563,10 @@ final class WaitingOnYouStore: ObservableObject {
 
     var visibleItems: [WaitingAskItem] {
         WaitingChoiceRules.filterItems(items, scope: scope, place: place)
+    }
+
+    var visibleTodos: [WaitingTodoItem] {
+        WaitingChoiceRules.filterTodos(todos, scope: scope, place: place)
     }
 
     var scopeComplete: Bool {
@@ -395,12 +590,14 @@ final class WaitingOnYouStore: ObservableObject {
     var counts: WaitingPanelCounts {
         let channelItems = WaitingChoiceRules.filterItems(items, scope: .channel, place: place)
         let workspaceItems = WaitingChoiceRules.filterItems(items, scope: .workspace, place: place)
+        let channelTodos = WaitingChoiceRules.filterTodos(todos, scope: .channel, place: place)
+        let workspaceTodos = WaitingChoiceRules.filterTodos(todos, scope: .workspace, place: place)
         let currentComplete = workspaceComplete[place.workspaceID] ?? false
         let everyComplete = allWorkspacesEnumerated && !workspaceComplete.isEmpty && workspaceComplete.values.allSatisfy { $0 }
         return WaitingPanelCounts(
-            channel: WaitingScopeCount(min: channelItems.count, complete: currentComplete),
-            workspace: WaitingScopeCount(min: workspaceItems.count, complete: currentComplete),
-            all: WaitingScopeCount(min: items.count, complete: everyComplete)
+            channel: WaitingScopeCount(min: channelItems.count + channelTodos.count, complete: currentComplete),
+            workspace: WaitingScopeCount(min: workspaceItems.count + workspaceTodos.count, complete: currentComplete),
+            all: WaitingScopeCount(min: items.count + todos.count, complete: everyComplete)
         )
     }
 
@@ -435,8 +632,9 @@ final class WaitingOnYouStore: ObservableObject {
         workspaceComplete = result.workspaceComplete
         workspaceFailed = result.workspaceFailed
         items = result.items
+        todos = result.todos
         hasLoadedOnce = true
-        loadFailed = (!result.enumeratedAllWorkspaces || result.workspaceFailed.values.contains(true)) && result.items.isEmpty
+        loadFailed = (!result.enumeratedAllWorkspaces || result.workspaceFailed.values.contains(true)) && result.items.isEmpty && result.todos.isEmpty
         isLoading = false
     }
 
@@ -456,6 +654,42 @@ final class WaitingOnYouStore: ObservableObject {
     func retry(for item: WaitingAskItem, api: WaitingOnYouAPI) async {
         guard let failure = failuresBySignal[item.id] else { return }
         await submit(failure.submission, for: item, api: api, commandID: failure.commandID)
+    }
+
+    func markTodoDone(_ item: WaitingTodoItem, api: WaitingOnYouAPI) async {
+        guard item.canMarkDone, !pendingByTodo.contains(item.id) else { return }
+        pendingByTodo.insert(item.id)
+        failuresByTodo[item.id] = nil
+
+        let outcome = await api.markTodoDone(workspaceID: item.workspaceID, todoID: item.id)
+        pendingByTodo.remove(item.id)
+
+        switch outcome {
+        case .done:
+            todos.removeAll { $0.id == item.id }
+            failuresByTodo[item.id] = nil
+            showStatusBanner(.done, "Done")
+        case .dropped:
+            todos.removeAll { $0.id == item.id }
+            failuresByTodo[item.id] = nil
+            showStatusBanner(.dropped, "This to-do was dropped.")
+        case .failed(let message, let retryable):
+            failuresByTodo[item.id] = WaitingTodoFailure(message: message, retryable: retryable)
+        }
+    }
+
+    func removeCompletedTodo(_ todoID: UUID) {
+        todos.removeAll { $0.id == todoID }
+        failuresByTodo[todoID] = nil
+        showStatusBanner(.done, "Done")
+    }
+
+    func removeDroppedTodo(_ todoID: UUID, announce: Bool = true) {
+        todos.removeAll { $0.id == todoID }
+        failuresByTodo[todoID] = nil
+        if announce {
+            showStatusBanner(.dropped, "This to-do was dropped.")
+        }
     }
 
     private func submit(
@@ -482,7 +716,7 @@ final class WaitingOnYouStore: ObservableObject {
             items.removeAll { $0.id == item.id }
             draftsBySignal[item.id] = nil
             failuresBySignal[item.id] = nil
-            showSentBanner()
+            showStatusBanner(.sent, "Sent")
         case .failed(let message, let retryable):
             failuresBySignal[item.id] = WaitingCardFailure(
                 commandID: commandID,
@@ -493,13 +727,13 @@ final class WaitingOnYouStore: ObservableObject {
         }
     }
 
-    private func showSentBanner() {
-        sentBanner = "Sent"
+    private func showStatusBanner(_ kind: WaitingBannerKind, _ text: String) {
+        statusBanner = WaitingStatusBanner(kind: kind, text: text)
         bannerTask?.cancel()
         bannerTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            self?.sentBanner = nil
+            self?.statusBanner = nil
         }
     }
 }

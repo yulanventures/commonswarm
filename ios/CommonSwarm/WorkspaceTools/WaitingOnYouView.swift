@@ -112,8 +112,33 @@ struct WaitingOnYouSheetView: View {
     @ObservedObject var store: WaitingOnYouStore
     let api: WaitingOnYouAPI
     let onDismiss: () -> Void
+    @State private var openedTodo: WaitingTodoItem?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+
+    private var bannerForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.68, green: 0.96, blue: 0.75)
+            : Color(red: 0.06, green: 0.34, blue: 0.14)
+    }
+
+    private var bannerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.09, green: 0.24, blue: 0.14)
+            : Color(red: 0.86, green: 0.96, blue: 0.89)
+    }
+
+    private var neutralBannerForeground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.90, green: 0.91, blue: 0.94)
+            : Color(red: 0.15, green: 0.17, blue: 0.21)
+    }
+
+    private var neutralBannerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.20, green: 0.21, blue: 0.24)
+            : Color(red: 0.90, green: 0.91, blue: 0.94)
+    }
 
     var body: some View {
         NavigationStack {
@@ -122,21 +147,22 @@ struct WaitingOnYouSheetView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 10)
 
-                if let banner = store.sentBanner {
+                if let banner = store.statusBanner {
+                    let isDropped = banner.kind == .dropped
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                        Image(systemName: isDropped ? "info.circle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(isDropped ? neutralBannerForeground : bannerForeground)
                             .accessibilityHidden(true)
-                        Text(banner)
+                        Text(banner.text)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(isDropped ? neutralBannerForeground : bannerForeground)
                         Spacer()
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(Color.green.opacity(0.14))
+                    .background(isDropped ? neutralBannerBackground : bannerBackground)
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Answer sent")
+                    .accessibilityLabel(banner.accessibilityLabel)
                 }
 
                 content
@@ -151,13 +177,25 @@ struct WaitingOnYouSheetView: View {
                         .frame(minWidth: 44, minHeight: 44)
                 }
             }
+            .navigationDestination(item: $openedTodo) { todo in
+                WaitingTodoDetailView(
+                    item: todo,
+                    api: api,
+                    onMarkedDone: { completedID in
+                        store.removeCompletedTodo(completedID)
+                    },
+                    onDropped: { droppedID, announce in
+                        store.removeDroppedTodo(droppedID, announce: announce)
+                    }
+                )
+            }
         }
         .task {
             await store.load(api: api)
         }
-        .onChange(of: store.sentBanner) { _, newValue in
+        .onChange(of: store.statusBanner) { _, newValue in
             if let newValue {
-                UIAccessibility.post(notification: .announcement, argument: newValue)
+                UIAccessibility.post(notification: .announcement, argument: newValue.text)
             }
         }
     }
@@ -223,21 +261,23 @@ struct WaitingOnYouSheetView: View {
 
     @ViewBuilder
     private var content: some View {
-        let visible = store.visibleItems
+        let visibleAsks = store.visibleItems
+        let visibleTodos = store.visibleTodos
+        let isEmpty = visibleAsks.isEmpty && visibleTodos.isEmpty
         let counts = store.counts
         let incomplete = store.scopeFailed || (store.hasLoadedOnce && !store.scopeComplete)
 
-        if visible.isEmpty && incomplete && !store.isLoading {
+        if isEmpty && incomplete && !store.isLoading {
             incompleteEmptyState(counts: counts)
-        } else if store.isLoading && visible.isEmpty && !store.scopeComplete {
-            ProgressView("Checking questions…")
+        } else if store.isLoading && isEmpty && !store.scopeComplete {
+            ProgressView("Checking waiting items…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if visible.isEmpty {
+        } else if isEmpty {
             emptyState(counts: counts)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(visible) { item in
+                    ForEach(visibleAsks) { item in
                         WaitingAskCardView(
                             item: item,
                             scope: store.scope,
@@ -269,9 +309,31 @@ struct WaitingOnYouSheetView: View {
                         )
                     }
 
+                    ForEach(visibleTodos) { todo in
+                        WaitingTodoCardView(
+                            item: todo,
+                            scope: store.scope,
+                            isPending: store.pendingByTodo.contains(todo.id),
+                            failure: store.failuresByTodo[todo.id],
+                            onMarkDone: {
+                                Task {
+                                    await store.markTodoDone(todo, api: api)
+                                }
+                            },
+                            onRetry: {
+                                Task {
+                                    await store.markTodoDone(todo, api: api)
+                                }
+                            },
+                            onOpen: {
+                                openedTodo = todo
+                            }
+                        )
+                    }
+
                     if incomplete && !store.isLoading {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Some waiting questions couldn’t be loaded.")
+                            Text("Some waiting items couldn’t be loaded.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -287,7 +349,10 @@ struct WaitingOnYouSheetView: View {
                     }
                 }
                 .padding()
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: visible.map(\.id))
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.2),
+                    value: visibleAsks.map(\.id) + visibleTodos.map(\.id)
+                )
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
@@ -299,7 +364,7 @@ struct WaitingOnYouSheetView: View {
     @ViewBuilder
     private func incompleteEmptyState(counts: WaitingPanelCounts) -> some View {
         VStack(spacing: 14) {
-            Text("Couldn’t check all waiting questions")
+            Text("Couldn’t check all waiting items")
                 .font(.headline)
                 .multilineTextAlignment(.center)
             Button {
