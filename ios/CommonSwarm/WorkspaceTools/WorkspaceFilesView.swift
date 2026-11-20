@@ -8,7 +8,6 @@ struct WorkspaceFilesView: View {
     let workspace: Workspace
 
     @StateObject private var store: WorkspaceFilesStore
-    @State private var presentedShare: DownloadedFileShare?
     @Environment(\.colorScheme) private var colorScheme
     private let autoLoad: Bool
 
@@ -25,24 +24,6 @@ struct WorkspaceFilesView: View {
     }
 
     private var filesAPI: WorkspaceFilesAPI { WorkspaceFilesAPI(api: api) }
-
-    private var shareSheetBinding: Binding<DownloadedFileShare?> {
-        Binding(
-            get: { store.activeShareItem },
-            set: { next in
-                let previous = store.activeShareItem
-                if let previous, previous.id != next?.id {
-                    if presentedShare?.id == previous.id {
-                        presentedShare = nil
-                    }
-                    store.finishShare(previous)
-                }
-                if store.activeShareItem?.id != next?.id {
-                    store.activeShareItem = next
-                }
-            }
-        )
-    }
 
     private var primaryBackground: Color {
         colorScheme == .dark
@@ -152,41 +133,17 @@ struct WorkspaceFilesView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Files")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(
-            item: shareSheetBinding,
-            onDismiss: {
-                if let closed = presentedShare {
-                    presentedShare = nil
-                    store.finishShare(closed)
-                }
+        .background(
+            ShareSheetPresenter(share: store.activeShareItem) { finishedShare in
+                store.finishShare(finishedShare)
             }
-        ) { item in
-            FileActivityShareSheet(fileURL: item.fileURL) {
-                if presentedShare?.id == item.id {
-                    presentedShare = nil
-                }
-                store.finishShare(item)
-            }
-            .onAppear {
-                presentedShare = item
-            }
-            .onDisappear {
-                if presentedShare?.id == item.id {
-                    presentedShare = nil
-                }
-                store.finishShare(item)
-            }
-        }
+        )
         .task {
             if autoLoad {
                 await store.load(api: filesAPI)
             }
         }
         .onDisappear {
-            if let closed = presentedShare {
-                presentedShare = nil
-                store.finishShare(closed)
-            }
             store.retire()
         }
     }
@@ -360,23 +317,164 @@ struct WorkspaceFilesView: View {
     }
 }
 
-private struct FileActivityShareSheet: UIViewControllerRepresentable {
-    let fileURL: URL
-    let onFinish: @MainActor () -> Void
+/// Presents `UIActivityViewController` directly so every dismissal path (completion, cancel, error,
+/// interactive swipe-down, programmatic dismissal, or replacement) passes the exact immutable
+/// `DownloadedFileShare` captured when that sheet was presented — never reading mutable current state.
+private struct ShareSheetPresenter: UIViewControllerRepresentable {
+    let share: DownloadedFileShare?
+    let onFinish: @MainActor (DownloadedFileShare) -> Void
 
     @MainActor
-    final class Coordinator {
-        private var finished = false
-        var onFinish: @MainActor () -> Void
+    final class Coordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+        var onFinish: @MainActor (DownloadedFileShare) -> Void
+        weak var hostController: UIViewController?
+        private var desiredShare: DownloadedFileShare?
+        private var presented: (item: DownloadedFileShare, controller: ManagedActivityViewController)?
+        private var controllerItems: [ObjectIdentifier: DownloadedFileShare] = [:]
+        private var finishedIDs: Set<UUID> = []
+        private var isTransitioning = false
 
-        init(onFinish: @escaping @MainActor () -> Void) {
+        init(onFinish: @escaping @MainActor (DownloadedFileShare) -> Void) {
             self.onFinish = onFinish
         }
 
-        func finishOnce() {
-            guard !finished else { return }
-            finished = true
-            onFinish()
+        func sync(desired: DownloadedFileShare?, on host: UIViewController) {
+            hostController = host
+            desiredShare = desired
+            guard !isTransitioning else { return }
+
+            if let current = presented {
+                if current.item.id == desired?.id {
+                    return
+                }
+                let outgoing = current.item
+                let outgoingVC = current.controller
+                presented = nil
+                if outgoingVC.presentingViewController != nil {
+                    isTransitioning = true
+                    outgoingVC.dismiss(animated: false) { [weak self, weak host] in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.finishOnce(outgoing, controllerID: ObjectIdentifier(outgoingVC), dismissController: false)
+                            self.isTransitioning = false
+                            if let host {
+                                self.sync(desired: self.desiredShare, on: host)
+                            }
+                        }
+                    }
+                    return
+                } else {
+                    finishOnce(outgoing, controllerID: ObjectIdentifier(outgoingVC), dismissController: false)
+                }
+            }
+
+            if let lingeringVC = host.presentedViewController as? ManagedActivityViewController,
+               lingeringVC.presentedShare.id != desired?.id {
+                let outgoing = lingeringVC.presentedShare
+                isTransitioning = true
+                lingeringVC.dismiss(animated: false) { [weak self, weak host] in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.finishOnce(outgoing, controllerID: ObjectIdentifier(lingeringVC), dismissController: false)
+                        self.isTransitioning = false
+                        if let host {
+                            self.sync(desired: self.desiredShare, on: host)
+                        }
+                    }
+                }
+                return
+            }
+
+            guard let incoming = desired,
+                  !finishedIDs.contains(incoming.id),
+                  host.view.window != nil,
+                  host.presentedViewController == nil else {
+                return
+            }
+
+            let controller = ManagedActivityViewController(item: incoming) { [weak self] closedItem, controllerID in
+                self?.finishOnce(closedItem, controllerID: controllerID, dismissController: true)
+            }
+            let controllerID = ObjectIdentifier(controller)
+            controllerItems[controllerID] = incoming
+            controller.presentationController?.delegate = self
+            if let popover = controller.popoverPresentationController {
+                popover.sourceView = host.view
+                popover.sourceRect = CGRect(x: host.view.bounds.midX, y: host.view.bounds.midY, width: 1, height: 1)
+                popover.permittedArrowDirections = []
+            }
+
+            presented = (incoming, controller)
+            isTransitioning = true
+            host.present(controller, animated: true) { [weak self, weak host] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isTransitioning = false
+                    if let host {
+                        self.sync(desired: self.desiredShare, on: host)
+                    }
+                }
+            }
+        }
+
+        func dismantle() {
+            desiredShare = nil
+            if let current = presented {
+                let outgoing = current.item
+                let outgoingVC = current.controller
+                presented = nil
+                if outgoingVC.presentingViewController != nil {
+                    outgoingVC.dismiss(animated: false)
+                }
+                finishOnce(outgoing, controllerID: ObjectIdentifier(outgoingVC), dismissController: false)
+            }
+            for (controllerID, item) in controllerItems {
+                finishOnce(item, controllerID: controllerID, dismissController: false)
+            }
+            controllerItems.removeAll()
+        }
+
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            let controllerID = ObjectIdentifier(presentationController.presentedViewController)
+            guard let item = controllerItems[controllerID] else { return }
+            finishOnce(item, controllerID: controllerID, dismissController: false)
+        }
+
+        private func finishOnce(
+            _ item: DownloadedFileShare,
+            controllerID: ObjectIdentifier,
+            dismissController: Bool
+        ) {
+            controllerItems.removeValue(forKey: controllerID)
+            let controllerToDismiss: ManagedActivityViewController?
+            if presented?.item.id == item.id {
+                controllerToDismiss = presented?.controller
+                presented = nil
+            } else {
+                controllerToDismiss = nil
+            }
+            let newlyFinished = finishedIDs.insert(item.id).inserted
+            if newlyFinished {
+                onFinish(item)
+            }
+            guard !isTransitioning else { return }
+            if dismissController,
+               let controllerToDismiss,
+               controllerToDismiss.presentingViewController != nil,
+               !controllerToDismiss.isBeingDismissed {
+                isTransitioning = true
+                controllerToDismiss.dismiss(animated: false) { [weak self] in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.isTransitioning = false
+                        if let host = self.hostController {
+                            self.sync(desired: self.desiredShare, on: host)
+                        }
+                    }
+                }
+            } else if let host = hostController, desiredShare?.id != nil {
+                sync(desired: desiredShare, on: host)
+            }
         }
     }
 
@@ -384,23 +482,69 @@ private struct FileActivityShareSheet: UIViewControllerRepresentable {
         Coordinator(onFinish: onFinish)
     }
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        let coordinator = context.coordinator
-        controller.completionWithItemsHandler = { _, _, _, _ in
+    func makeUIViewController(context: Context) -> HostController {
+        let host = HostController()
+        host.onDidMoveToWindow = { [weak coordinator = context.coordinator, weak host] in
+            guard let coordinator, let host else { return }
+            coordinator.sync(desired: share, on: host)
+        }
+        return host
+    }
+
+    func updateUIViewController(_ uiViewController: HostController, context: Context) {
+        context.coordinator.onFinish = onFinish
+        uiViewController.onDidMoveToWindow = { [weak coordinator = context.coordinator, weak uiViewController] in
+            guard let coordinator, let uiViewController else { return }
+            coordinator.sync(desired: share, on: uiViewController)
+        }
+        context.coordinator.sync(desired: share, on: uiViewController)
+    }
+
+    static func dismantleUIViewController(_ uiViewController: HostController, coordinator: Coordinator) {
+        uiViewController.onDidMoveToWindow = nil
+        coordinator.dismantle()
+    }
+
+    final class HostController: UIViewController {
+        var onDidMoveToWindow: (() -> Void)?
+
+        override func viewDidLoad() {
+            super.viewDidLoad()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            onDidMoveToWindow?()
+        }
+    }
+}
+
+private final class ManagedActivityViewController: UIActivityViewController {
+    let presentedShare: DownloadedFileShare
+    private let onFinished: @MainActor (DownloadedFileShare, ObjectIdentifier) -> Void
+
+    init(
+        item: DownloadedFileShare,
+        onFinished: @escaping @MainActor (DownloadedFileShare, ObjectIdentifier) -> Void
+    ) {
+        self.presentedShare = item
+        self.onFinished = onFinished
+        super.init(activityItems: [item.fileURL], applicationActivities: nil)
+        let capturedItem = item
+        let controllerID = ObjectIdentifier(self)
+        self.completionWithItemsHandler = { [weak self] _, _, _, _ in
             Task { @MainActor in
-                coordinator.finishOnce()
+                self?.onFinished(capturedItem, controllerID)
             }
         }
-        return controller
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
-        context.coordinator.onFinish = onFinish
-    }
-
-    static func dismantleUIViewController(_ uiViewController: UIActivityViewController, coordinator: Coordinator) {
-        uiViewController.completionWithItemsHandler = nil
-        coordinator.finishOnce()
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || (presentingViewController == nil && parent == nil) {
+            onFinished(presentedShare, ObjectIdentifier(self))
+        }
     }
 }

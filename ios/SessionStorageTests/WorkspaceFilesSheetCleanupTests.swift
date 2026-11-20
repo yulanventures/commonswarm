@@ -176,33 +176,60 @@ final class WorkspaceFilesSheetCleanupTests: XCTestCase {
 
         let shareA = try makeTempShare(fileID: "file_budget_pdf", fileName: "budget.pdf", version: 3)
         let dirA = shareA.fileURL.deletingLastPathComponent()
+        let keyA = WorkspaceFileVersionKey(fileID: shareA.fileID, version: shareA.version)
         store.acceptDownloadedShare(shareA)
-        let presentedA = await waitUntil { host.presentedViewController != nil }
-        XCTAssertTrue(presentedA, "Expected initial sheet to present")
 
+        let presentedA = await waitUntil { self.findActivityViewController(from: host) != nil }
+        XCTAssertTrue(presentedA, "Expected initial UIActivityViewController for shareA")
+        let activityA = try XCTUnwrap(findActivityViewController(from: host))
+        let delegateA = activityA.presentationController?.delegate
+        let presentationA = activityA.presentationController
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shareA.fileURL.path))
+
+        // Assign replacement shareB while activityA is still mounted on screen.
         let shareB = try makeTempShare(fileID: "file_agent_report", fileName: "report.md", version: 1)
         let dirB = shareB.fileURL.deletingLastPathComponent()
+        let keyB = WorkspaceFileVersionKey(fileID: shareB.fileID, version: shareB.version)
         store.acceptDownloadedShare(shareB)
+        XCTAssertEqual(store.activeShareItem?.id, shareB.id, "Newer shareB must already be assigned before old sheet settles")
 
-        // Wait for old sheet teardown; even if a delayed callback fires for shareA, only dirA is removed and shareB stays intact.
+        // Drive real late dismissal callbacks on the OLD sheet (activityA) while newer shareB is assigned.
+        activityA.completionWithItemsHandler?(nil, false, nil, nil)
+        if let presentationA {
+            delegateA?.presentationControllerDidDismiss?(presentationA)
+        }
+
+        // Wait for old sheet A to settle and replacement sheet B to mount.
         let replaced = await waitUntil {
             !FileManager.default.fileExists(atPath: dirA.path)
                 && store.activeShareItem?.id == shareB.id
-                && host.presentedViewController != nil
+                && store.downloadStates[keyB] == .ready(shareB)
+                && self.findActivityViewController(from: host) != nil
+                && self.findActivityViewController(from: host) !== activityA
         }
-        XCTAssertTrue(replaced, "Replacing the active sheet must delete only the previous sheet's temp file")
-        store.finishShare(shareA)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: shareB.fileURL.path), "Stale callback for older sheet must not delete newer sheet's temp file")
-        XCTAssertEqual(store.activeShareItem?.id, shareB.id)
+        XCTAssertTrue(replaced, "Late dismissal callbacks on old sheet A must delete only dirA and allow shareB to mount intact")
+        XCTAssertEqual(store.downloadStates[keyA], .downloaded)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shareB.fileURL.path), "Newer shareB temp file must remain intact on disk")
 
-        // Dismissing the replacement sheet deletes shareB's temp file too.
+        // Even a second delayed delivery from old sheet A after sheet B is mounted must leave shareB untouched.
+        activityA.completionWithItemsHandler?(nil, false, nil, nil)
+        if let presentationA {
+            delegateA?.presentationControllerDidDismiss?(presentationA)
+        }
+        try? await Task.sleep(for: .milliseconds(80))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shareB.fileURL.path), "Repeated late callback from sheet A must not delete sheet B's file")
+        XCTAssertEqual(store.activeShareItem?.id, shareB.id)
+        XCTAssertEqual(store.downloadStates[keyB], .ready(shareB))
+
+        // Dismissing the replacement sheet B deletes shareB's temp file and directory.
         host.dismiss(animated: false)
         let cleanedB = await waitUntil {
             host.presentedViewController == nil
                 && !FileManager.default.fileExists(atPath: shareB.fileURL.path)
                 && !FileManager.default.fileExists(atPath: dirB.path)
         }
-        XCTAssertTrue(cleanedB, "Dismissing replacement sheet must delete its temp file")
+        XCTAssertTrue(cleanedB, "Dismissing replacement sheet B must delete its temp file and directory")
         XCTAssertNil(store.activeShareItem)
+        XCTAssertEqual(store.downloadStates[keyB], .downloaded)
     }
 }
