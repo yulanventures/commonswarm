@@ -24,6 +24,14 @@ import {
   type ConversationMemberRef,
 } from "../cloud/conversations.js";
 import {
+  openReviewCheck,
+  readReviewChecks,
+  ReviewCheckError,
+  stampReviewCheck,
+  type ReviewCheckSeat,
+  type ReviewCheckVerdict,
+} from "../cloud/review-checks.js";
+import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
   type MemoryKind, type MemorySaveInput,
 } from "../cloud/memory.js";
@@ -227,6 +235,112 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         signal: extra.signal,
       });
       return { content: [{ type: "text", text: JSON.stringify(capMcpResult(sent.response.alert)) }] };
+    }
+    if (
+      request.params.name === "review_check_open" ||
+      request.params.name === "review_check_stamp" ||
+      request.params.name === "review_check_status"
+    ) {
+      const args = selected.arguments;
+      const auth = await authenticated();
+      const target = profileTarget(profile);
+      try {
+        if (request.params.name === "review_check_open") {
+          for (const k of Object.keys(args)) {
+            if (!["subject_repo", "subject_ref", "head_sha", "required_seats", "conversation_id", "thread_root_id", "request_id"].includes(k)) {
+              throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+            }
+          }
+          if (
+            typeof args.subject_repo !== "string" ||
+            typeof args.subject_ref !== "string" ||
+            typeof args.head_sha !== "string" ||
+            !Array.isArray(args.required_seats) ||
+            args.required_seats.length < 1 ||
+            args.required_seats.length > 20
+          ) {
+            throw new McpError(ErrorCode.InvalidParams, "review_check_open requires subject_repo, subject_ref, head_sha, and required_seats.");
+          }
+          const seats: ReviewCheckSeat[] = args.required_seats.map((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+              throw new McpError(ErrorCode.InvalidParams, "Each required seat must be {kind, id}.");
+            }
+            const row = entry as Record<string, unknown>;
+            if ((row.kind !== "user" && row.kind !== "agent") || typeof row.id !== "string") {
+              throw new McpError(ErrorCode.InvalidParams, "Each required seat must have kind ('user'|'agent') and UUID id.");
+            }
+            return { kind: row.kind, id: row.id };
+          });
+          const res = await openReviewCheck(target, auth.token, profile.workspace_id, {
+            repo: args.subject_repo,
+            ref: args.subject_ref,
+            headSha: args.head_sha,
+            requiredSeats: seats,
+            conversationId: typeof args.conversation_id === "string" ? args.conversation_id : null,
+            threadRootId: typeof args.thread_root_id === "string" ? args.thread_root_id : null,
+            ...(typeof args.request_id === "string" ? { commandId: args.request_id } : {}),
+            fetcher: auth.fetcher,
+            signal: extra.signal,
+          });
+          return { content: [{ type: "text", text: JSON.stringify(capMcpResult(res)) }] };
+        }
+        if (request.params.name === "review_check_stamp") {
+          for (const k of Object.keys(args)) {
+            if (!["check_id", "head_sha", "verdict", "note", "request_id"].includes(k)) {
+              throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+            }
+          }
+          if (
+            typeof args.check_id !== "string" ||
+            typeof args.head_sha !== "string" ||
+            (args.verdict !== "pass" && args.verdict !== "hold")
+          ) {
+            throw new McpError(ErrorCode.InvalidParams, 'review_check_stamp requires check_id, head_sha, and verdict ("pass"|"hold").');
+          }
+          const res = await stampReviewCheck(target, auth.token, profile.workspace_id, {
+            checkId: args.check_id,
+            headSha: args.head_sha,
+            verdict: args.verdict as ReviewCheckVerdict,
+            note: typeof args.note === "string" ? args.note : null,
+            ...(typeof args.request_id === "string" ? { commandId: args.request_id } : {}),
+            fetcher: auth.fetcher,
+            signal: extra.signal,
+          });
+          return { content: [{ type: "text", text: JSON.stringify(capMcpResult(res)) }] };
+        }
+        for (const k of Object.keys(args)) {
+          if (!["check_id", "subject_repo", "subject_ref", "thread_root_id", "conversation_id", "limit"].includes(k)) {
+            throw new McpError(ErrorCode.InvalidParams, `Unknown argument: ${k}`);
+          }
+        }
+        const res = await readReviewChecks(target, auth.token, profile.workspace_id, {
+          ...(typeof args.check_id === "string" ? { checkId: args.check_id } : {}),
+          ...(typeof args.subject_repo === "string" ? { repo: args.subject_repo } : {}),
+          ...(typeof args.subject_ref === "string" ? { ref: args.subject_ref } : {}),
+          ...(typeof args.thread_root_id === "string" ? { threadRootId: args.thread_root_id } : {}),
+          ...(typeof args.conversation_id === "string" ? { conversationId: args.conversation_id } : {}),
+          ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+          fetcher: auth.fetcher,
+          signal: extra.signal,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(capMcpResult(res)) }] };
+      } catch (error) {
+        if (error instanceof McpError) throw error;
+        if (error instanceof ReviewCheckError) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: error.code,
+                message: error.message,
+                ...(error.currentHeadSha ? { current_head_sha: error.currentHeadSha } : {}),
+              }),
+            }],
+          };
+        }
+        throw error;
+      }
     }
     if (
       request.params.name === "conversations_list" ||

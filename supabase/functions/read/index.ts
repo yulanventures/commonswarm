@@ -40,6 +40,13 @@ import {
   type ConversationReadRequest,
 } from "./conversations.ts";
 import {
+  executeReviewCheckRead,
+  isReviewCheckReadRequest,
+  isReviewCheckReadResource,
+  parseReviewCheckReadRequest,
+  type ReviewCheckReadRequest,
+} from "./review-checks.ts";
+import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
   resolveHostedConnectionContext,
@@ -468,7 +475,7 @@ function parseBody(
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | SystemAlertsReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
-  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | ConversationReadRequest | null {
+  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | ConversationReadRequest | ReviewCheckReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -515,6 +522,7 @@ function parseBody(
   if (body.resource === "channel_messages") return parseChannelMessages(body);
   if (body.resource === "memory_search" || body.resource === "memory_get") return parseMemoryRead(body);
   if (isConversationReadResource(body.resource)) return parseConversationReadRequest(body);
+  if (isReviewCheckReadResource(body.resource)) return parseReviewCheckReadRequest(body);
   if (
     body.resource === "channels" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -858,13 +866,14 @@ async function handle(
   const agentCredential = AGENT_TOKEN_RE.test(token);
   const adminRecovery = isAdminRecoveryRequest(body);
   const conversationRead = isConversationReadResource(body.resource);
+  const reviewCheckRead = isReviewCheckReadResource(body.resource);
   const conversationOversight = isConversationOversightResource(body.resource);
   if ((adminRecovery || conversationOversight) && agentCredential) {
     return json(403, { error: "credential_kind_forbidden" });
   }
   if (!agentCredential && body.resource !== "renewal_grants" &&
     body.resource !== "pending_access" && body.resource !== "system_alerts" &&
-    !adminRecovery && !conversationRead) {
+    !adminRecovery && !conversationRead && !reviewCheckRead) {
     return json(401, { error: "unauthenticated" });
   }
   let humanUserId: string | null = null;
@@ -915,6 +924,11 @@ async function handle(
       if (isConversationReadRequest(body)) {
         setPhase("query");
         const result = await executeConversationRead(tx, body);
+        return json(result.status, result.body);
+      }
+      if (isReviewCheckReadRequest(body)) {
+        setPhase("query");
+        const result = await executeReviewCheckRead(tx, body, { kind: "user", id: humanUserId });
         return json(result.status, result.body);
       }
       if (body.resource === "pending_access") {
@@ -1066,6 +1080,12 @@ async function handle(
       if (body.resource === "conversation_history") {
         return json(404, { ...CONVERSATION_NOT_FOUND_BODY });
       }
+      if (isReviewCheckReadRequest(body)) {
+        if (body.check_id !== null || (body.subject_repo !== null && body.subject_ref !== null)) {
+          return json(404, { error: "not_found", message: "Review check not found." });
+        }
+        return json(200, { review_checks: [] });
+      }
       if (body.resource === "agent_wake_lease") return json(200, { lease: null });
       return json(200, {
         signals: [],
@@ -1203,6 +1223,10 @@ async function handle(
     }
     if (isConversationReadRequest(body)) {
       const result = await executeConversationRead(tx, body);
+      return json(result.status, result.body);
+    }
+    if (isReviewCheckReadRequest(body)) {
+      const result = await executeReviewCheckRead(tx, body, { kind: "agent", id: agent.principal_id });
       return json(result.status, result.body);
     }
     if (body.resource === "channels") {

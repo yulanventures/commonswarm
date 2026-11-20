@@ -144,6 +144,7 @@ tests/reply-placement.test.ts
 tests/channel-general.test.ts
 tests/todo-cli.test.ts
 tests/lead-system-alerts.test.ts
+tests/review-checks.test.ts
 tests/local-auth-users-concurrency.test.ts
 tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts

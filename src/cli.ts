@@ -86,6 +86,12 @@ import {
   runSetupVersion,
   writeOnboardingOutput,
 } from "./onboarding-cli.js";
+import {
+  executeCheckOpenCli,
+  executeCheckStampCli,
+  executeCheckStatusCli,
+} from "./cli/review-checks.js";
+import { ReviewCheckError } from "./cloud/review-checks.js";
 import { spawnSync } from "node:child_process";
 import {
   findProfileReceiveBinding,
@@ -761,6 +767,7 @@ export const KNOWN_FLAGS = new Set([
   "workspace", "none",
   "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
   "conversation", "mentions", "after", "after-created-at", "after-id", "timeout",
+  "check-id", "subject-repo", "pr", "seat", "verdict", "note", "conversation-id", "thread-root-id",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -11825,10 +11832,98 @@ const setupVariants = {
   version: commandVariant("version", runSetupVersion, ["cswarm setup --check-version"]),
   guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"]),
 };
+const CHECK_REVIEW_AUTH_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "profile",
+  "host-session-id",
+  "json",
+  ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export const RUN_CHECK_OPEN_ACCEPTED_FLAGS = [
+  ...CHECK_REVIEW_AUTH_FLAGS,
+  "subject-repo",
+  "pr",
+  "head-sha",
+  "seat",
+  "conversation-id",
+  "thread-root-id",
+] as const;
+
+export const RUN_CHECK_STAMP_ACCEPTED_FLAGS = [
+  ...CHECK_REVIEW_AUTH_FLAGS,
+  "check-id",
+  "subject-repo",
+  "pr",
+  "head-sha",
+  "verdict",
+  "note",
+] as const;
+
+export const RUN_CHECK_STATUS_ACCEPTED_FLAGS = [
+  ...CHECK_REVIEW_AUTH_FLAGS,
+  "check-id",
+  "subject-repo",
+  "pr",
+  "conversation-id",
+  "thread-root-id",
+  "limit",
+] as const;
+
+async function resolveReviewCheckCliAuth(args: Arguments) {
+  const profileFlag = args.optional("profile");
+  if (profileFlag) {
+    const profilePath = privatePath(profileFlag);
+    const hostSessionId = args.optional("host-session-id");
+    const profile = await selectAgentWorkspace(
+      await readAgentProfile(profilePath, hostSessionId),
+      args.optional("workspace-id"),
+    );
+    const bearer = await (await openProfileCredential(profile)).bearer();
+    return {
+      target: profileTarget(profile),
+      bearer,
+      workspaceId: profile.workspace_id,
+      fetcher: fetch,
+    };
+  }
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  return {
+    target: cloud,
+    bearer: selected.bearer,
+    workspaceId: selected.selectedWorkspace,
+    fetcher: selected.fetcher,
+  };
+}
+
+async function runCheckOpen(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CHECK_OPEN_ACCEPTED_FLAGS, args.positionals.length >= 3 ? 3 : 2);
+  const auth = await resolveReviewCheckCliAuth(args);
+  process.stdout.write(await executeCheckOpenCli(args, auth));
+}
+
+async function runCheckStamp(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CHECK_STAMP_ACCEPTED_FLAGS, args.positionals.length >= 3 ? 3 : 2);
+  const auth = await resolveReviewCheckCliAuth(args);
+  process.stdout.write(await executeCheckStampCli(args, auth));
+}
+
+async function runCheckStatus(args: Arguments): Promise<void> {
+  args.assertShape(RUN_CHECK_STATUS_ACCEPTED_FLAGS, args.positionals.length >= 3 ? 3 : 2);
+  const auth = await resolveReviewCheckCliAuth(args);
+  process.stdout.write(await executeCheckStatusCli(args, auth));
+}
+
 const checkVariants = {
   messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--after <cursor>] [--force] [--full] [--json]"]),
   message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]"]),
   hook: commandVariant("hook", runCheckHook, ["cswarm check --profile <absolute-path> --host-session-id <id> --hook"]),
+  open: commandVariant("open", runCheckOpen, ["cswarm check open <owner/repo>#<pr> --head-sha <sha> --seat <name|uuid> [--seat ...] [--subject-repo <repo> --pr <ref>] [--conversation-id <uuid>] [--thread-root-id <uuid>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
+  stamp: commandVariant("stamp", runCheckStamp, ["cswarm check stamp <check-id|owner/repo#pr> --head-sha <sha> --verdict <pass|hold> [--note <text>] [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
+  status: commandVariant("status", runCheckStatus, ["cswarm check status [<check-id|owner/repo#pr>] [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--conversation-id <uuid>] [--thread-root-id <uuid>] [--limit <n>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
 };
 const resumeVariants = {
   inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
@@ -12255,10 +12350,26 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   check: commandEntry({
     tool: "check", mcp: true,
-    ...selectedVariants(checkVariants, (args) => args.has(CHECK_MESSAGES_SELECTOR_FLAGS[1]) ? "hook" : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[0]) ? "message" : "messages"),
-    description: "Read new directed messages for this agent.",
+    ...selectedVariants(checkVariants, (args) =>
+      args.positionals[1] === "open"
+        ? "open"
+        : args.positionals[1] === "stamp"
+        ? "stamp"
+        : args.positionals[1] === "status"
+        ? "status"
+        : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[1])
+        ? "hook"
+        : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[0])
+        ? "message"
+        : "messages"),
+    description: "Read new directed messages, or open/stamp/inspect revision-bound review checks.",
     mutates: true,
-    flags: ["profile", "host-session-id", "force", "full", "message-id", "after", "json", "hook"],
+    flags: [
+      "profile", "host-session-id", "force", "full", "message-id", "after", "json", "hook",
+      ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, ...SESSION_CONTEXT_FLAGS,
+      "check-id", "subject-repo", "pr", "head-sha", "seat", "verdict", "note",
+      "conversation-id", "thread-root-id", "limit",
+    ],
     transports: ALL_TRANSPORTS,
     ...NATIVE_PROFILE,
     profileListOrder: 25,
@@ -12594,6 +12705,9 @@ export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   get "check.messages"() { return CHECK_FLAGS.filter(flag => !(CHECK_MESSAGES_SELECTOR_FLAGS as readonly string[]).includes(flag)); },
   get "check.message"() { return CHECK_FLAGS.filter(flag => flag !== CHECK_MESSAGES_SELECTOR_FLAGS[1] && !(CHECK_MESSAGE_HIDDEN_FLAGS as readonly string[]).includes(flag) && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   get "check.hook"() { return CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  "check.open": RUN_CHECK_OPEN_ACCEPTED_FLAGS,
+  "check.stamp": RUN_CHECK_STAMP_ACCEPTED_FLAGS,
+  "check.status": RUN_CHECK_STATUS_ACCEPTED_FLAGS,
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   get "inbox.read"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_READ_SELECTOR_FLAGS as readonly string[]).includes(flag)); },
@@ -12875,12 +12989,16 @@ if (isCliMain()) {
       return;
     }
     if (selected?.entry.errorMode === "onboarding" && selected.args.has("json")) {
-      const code = error instanceof AgentSetupError
+      const code = error instanceof AgentSetupError || error instanceof ReviewCheckError
         ? error.code
         : error instanceof InvalidCursorError
         ? error.code
         : "onboarding_failed";
-      process.stdout.write(`${JSON.stringify(buildOnboardingErrorEnvelope(error, code, safeError(error), errorCtx))}\n`);
+      const envelope = buildOnboardingErrorEnvelope(error, code, safeError(error), errorCtx);
+      const output = error instanceof ReviewCheckError && error.currentHeadSha
+        ? { ...envelope, error: { ...envelope.error, current_head_sha: error.currentHeadSha } }
+        : envelope;
+      process.stdout.write(`${JSON.stringify(output)}\n`);
       process.exitCode = 1;
       return;
     }

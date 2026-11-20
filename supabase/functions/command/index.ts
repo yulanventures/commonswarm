@@ -234,6 +234,14 @@ import {
   routeConversationPost,
   storedConversationId,
 } from "./conversations.ts";
+import {
+  applyReviewCheckCommand,
+  isReviewCheckCommandKind,
+  parseReviewCheckCommand,
+  type ReviewCheckCommand,
+  reviewCheckReplayFields,
+  storedReviewCheckConversationId,
+} from "./review-checks.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -628,6 +636,7 @@ type ValidatedCommand =
   | ReactionCommand
   | MarkChannelReadCommand
   | ConversationCommand
+  | ReviewCheckCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -2352,6 +2361,10 @@ function validateCommand(
 
   if (isConversationCommandKind(cmd.kind)) {
     return parseConversationCommand(cmd);
+  }
+
+  if (isReviewCheckCommandKind(cmd.kind)) {
+    return parseReviewCheckCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -4267,6 +4280,8 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.alert) !== null ? { alert: record(response.alert)! } : {}),
     // Conversations (step 2a): a conversation command's answer replays exactly as it was given.
     ...conversationReplayFields(response),
+    // Revision-bound review checks (C3): preserve review_check replay fields.
+    ...reviewCheckReplayFields(response),
   };
 }
 
@@ -17071,6 +17086,7 @@ async function handleTransaction(
       );
     // Conversation commands likewise: membership and read marks grant nothing a scope would gate.
     const isConversationCommand = isConversationCommandKind(validation.command.kind);
+    const isReviewCheckCommand = isReviewCheckCommandKind(validation.command.kind);
     const isTouchPresence = validation.command.kind === TOUCH_PRESENCE_KIND;
     if (isTouchPresence && auth.agent === null) {
       return { status: 403, body: { error: "forbidden" } };
@@ -17141,6 +17157,7 @@ async function handleTransaction(
       !isFeedback &&
       !isChannelCommand &&
       !isConversationCommand &&
+      !isReviewCheckCommand &&
       !isDeliveryCommand &&
       !isSeenCommand &&
       !isFileCommand &&
@@ -17427,6 +17444,8 @@ async function handleTransaction(
           ? undefined
           : isConversationCommandKind(kind)
           ? storedConversationId(record(existing.response) ?? {})
+          : isReviewCheckCommandKind(kind)
+          ? storedReviewCheckConversationId(record(existing.response) ?? {})
           : command.kind === "post_signal"
           ? command.conversation_id
           : undefined;
@@ -17777,6 +17796,49 @@ async function handleTransaction(
         outcome: "accepted", detail: ignoredIdentity, hash, channelIds: outcome.audit_channel_ids,
       });
       // The body a replay answers too (replayResult): nothing beside the stored response.
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
+
+    if (isReviewCheckCommandKind(command.kind)) {
+      const outcome = await applyReviewCheckCommand(
+        tx, route.workspaceId, authActorIdentity(auth), command as ReviewCheckCommand,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
+          reason: outcome.reason, detail: ignoredIdentity, hash,
+        });
+        const refusal: HttpResult = {
+          status: outcome.status,
+          body: { error: outcome.error, message: outcome.message, ...(outcome.extra ?? {}) },
+        };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const response: StoredResponse = { ok: true, event_ids: [], ...outcome.response };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash,
+      });
       return { status: 200, body: { status: "accepted", ...response } };
     }
 
