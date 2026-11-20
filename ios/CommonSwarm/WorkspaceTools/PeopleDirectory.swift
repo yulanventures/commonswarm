@@ -65,19 +65,309 @@ struct WorkspacePerson: Hashable, Identifiable, Sendable {
     var id: UUID { userID }
 }
 
-enum AgentActivityStatus: Equatable, Hashable, Sendable {
-    case active
-    case idle
-    case notActiveYet
-    case notReported
+enum SeatIndicator: String, Equatable, Hashable, Sendable {
+    case dot
+    case ring
+    case diamond
 
-    var label: String {
+    var symbolName: String {
         switch self {
-        case .active: "Active"
-        case .idle: "Idle"
-        case .notActiveYet: "Not active yet"
-        case .notReported: "Not reported"
+        case .dot: "circle.fill"
+        case .ring: "circle"
+        case .diamond: "diamond.fill"
         }
+    }
+}
+
+enum SeatStatusKind: String, Equatable, Hashable, Sendable {
+    case removed
+    case connectionOff = "connection_off"
+    case keyOff = "key_off"
+    case keyEnded = "key_ended"
+    case paused
+    case waiting
+    case working
+    case turnOnly = "turn_only"
+    case listening
+    case notListening = "not_listening"
+    case unknown
+}
+
+struct SeatWakeTimestamps: Equatable, Hashable, Sendable {
+    let watcherAt: Date?
+    let channelAt: Date?
+    let listenerAt: Date?
+    let turnAt: Date?
+
+    var isEmpty: Bool {
+        watcherAt == nil && channelAt == nil && listenerAt == nil && turnAt == nil
+    }
+}
+
+struct SeatStatus: Equatable, Hashable, Sendable {
+    let kind: SeatStatusKind
+    let line: String
+    let indicator: SeatIndicator
+    let attention: Bool
+    let staleWaiting: Bool
+    let wakeKind: String
+    let since: Date?
+    let ageSeconds: TimeInterval?
+    let lastActivityAt: Date?
+    let unseenCount: Int
+}
+
+/// Swift parity port of `src/protocol/seat-status.ts` (`classifySeatStatus`).
+/// Truth rules:
+/// - Always show age or clock time when a timestamp exists.
+/// - Never fake a live dot: `.dot` ONLY for verified recent working or verified live push lease (<= 3 min).
+/// - People & agents never renders private work titles in seat status lines.
+enum SeatStatusClassifier {
+    static let workRecentInterval: TimeInterval = 30 * 60
+    static let waitingStaleInterval: TimeInterval = 3 * 60
+    static let wakeLeaseStaleInterval: TimeInterval = 3 * 60
+
+    static func formatElapsed(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, seconds)
+        let minutes = Int(floor(clamped / 60))
+        if minutes < 1 { return "just now" }
+        if minutes < 60 { return "\(minutes) min" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) h" }
+        return "\(hours / 24) d"
+    }
+
+    static func formatAgo(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, seconds)
+        let minutes = Int(floor(clamped / 60))
+        if minutes < 1 { return "just now" }
+        if minutes < 60 { return "\(minutes) min ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) h ago" }
+        return "\(hours / 24) d ago"
+    }
+
+    static func formatClock(_ date: Date, now: Date, calendar: Calendar = .current) -> String {
+        let timeFmt = DateFormatter()
+        timeFmt.calendar = calendar
+        timeFmt.timeZone = calendar.timeZone
+        timeFmt.locale = Locale(identifier: "en_US_POSIX")
+        timeFmt.dateFormat = "HH:mm"
+        let hhmm = timeFmt.string(from: date)
+
+        let startDate = calendar.startOfDay(for: date)
+        let startNow = calendar.startOfDay(for: now)
+        let dayDiff = calendar.dateComponents([.day], from: startDate, to: startNow).day ?? 0
+        if dayDiff == 0 {
+            return hhmm
+        }
+        if dayDiff == 1 {
+            return "Yesterday \(hhmm)"
+        }
+        let dateFmt = DateFormatter()
+        dateFmt.calendar = calendar
+        dateFmt.timeZone = calendar.timeZone
+        dateFmt.locale = Locale(identifier: "en_US_POSIX")
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        dateFmt.dateFormat = sameYear ? "MMM d" : "MMM d, yyyy"
+        return "\(dateFmt.string(from: date)), \(hhmm)"
+    }
+
+    static func classify(
+        transport: String?,
+        turnOnly: Bool,
+        connection: String?,
+        presenceProvided: Bool,
+        wake: SeatWakeTimestamps?,
+        lastCommandAt: Date?,
+        lastActivityAt: Date?,
+        workingOnSince: Date?,
+        workingOnUntil: Date?,
+        doingSince: Date?,
+        serverWork: String?,
+        waitingSince: Date?,
+        unseenCount: Int?,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> SeatStatus {
+        let hosted = transport == "hosted_mcp"
+        let isTurnOnly = hosted || turnOnly
+
+        let pushCandidates: [(route: String, date: Date, age: TimeInterval)] = [
+            ("watcher", wake?.watcherAt),
+            ("channel", wake?.channelAt),
+            ("listener", wake?.listenerAt),
+        ].compactMap { route, date in
+            guard let date else { return nil }
+            return (route, date, max(0, now.timeIntervalSince(date)))
+        }.sorted { $0.age < $1.age }
+
+        let wakeKind: String
+        let wakeAge: TimeInterval?
+        if hosted {
+            wakeKind = "turn"
+            wakeAge = wake?.turnAt.map { max(0, now.timeIntervalSince($0)) }
+        } else if presenceProvided {
+            if let push = pushCandidates.first {
+                let state = push.age <= wakeLeaseStaleInterval ? "live" : "stale"
+                wakeKind = "\(state) \(push.route)"
+                wakeAge = push.age
+            } else if let turnAt = wake?.turnAt {
+                wakeKind = "turn"
+                wakeAge = max(0, now.timeIntervalSince(turnAt))
+            } else {
+                wakeKind = "none"
+                wakeAge = nil
+            }
+        } else {
+            wakeKind = isTurnOnly ? "turn" : "none"
+            wakeAge = nil
+        }
+
+        let hasLiveListener = !hosted && wakeKind.hasPrefix("live ")
+        let isTurnSeat = isTurnOnly || (!hasLiveListener && wakeKind == "turn")
+
+        let workingActive: Bool
+        if workingOnSince != nil {
+            if let workingOnUntil {
+                workingActive = workingOnUntil > now
+            } else {
+                workingActive = true
+            }
+        } else {
+            workingActive = false
+        }
+
+        let activityCandidates: [Date] = [
+            lastActivityAt,
+            lastCommandAt,
+            workingActive ? workingOnSince : nil,
+            doingSince,
+        ].compactMap { date in
+            guard let date, date <= now else { return nil }
+            return date
+        }.sorted(by: >)
+
+        let resolvedLastActivity = activityCandidates.first
+        let lastActivityAge = resolvedLastActivity.map { max(0, now.timeIntervalSince($0)) }
+
+        let wakeReference: Date? = [wake?.watcherAt, wake?.channelAt, wake?.listenerAt, wake?.turnAt]
+            .compactMap { date in
+                guard let date, date <= now else { return nil }
+                return date
+            }
+            .sorted(by: >)
+            .first
+
+        let effectiveUnseenCount: Int? = unseenCount.flatMap { $0 >= 0 ? $0 : nil }
+        let hasWaitingRow = waitingSince != nil
+            && (waitingSince! <= now)
+            && (effectiveUnseenCount == nil || effectiveUnseenCount! > 0)
+        let waitingAge: TimeInterval? = hasWaitingRow ? max(0, now.timeIntervalSince(waitingSince!)) : nil
+        let staleWaiting = (waitingAge ?? -1) >= waitingStaleInterval
+        let reportedUnseenCount = hasWaitingRow ? (effectiveUnseenCount ?? 1) : 0
+
+        func build(
+            _ kind: SeatStatusKind,
+            _ line: String,
+            _ indicator: SeatIndicator,
+            attention: Bool,
+            since: Date?,
+            age: TimeInterval?
+        ) -> SeatStatus {
+            SeatStatus(
+                kind: kind,
+                line: line,
+                indicator: indicator,
+                attention: attention,
+                staleWaiting: staleWaiting,
+                wakeKind: wakeKind,
+                since: since,
+                ageSeconds: age,
+                lastActivityAt: resolvedLastActivity,
+                unseenCount: reportedUnseenCount
+            )
+        }
+
+        // 1. Disconnected / credential / access faults always outrank activity.
+        switch connection {
+        case "removed":
+            return build(.removed, "Removed", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        case "connection_off":
+            return build(.connectionOff, "Connection turned off", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        case "key_off":
+            return build(.keyOff, "Key turned off", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        case "paused":
+            return build(.paused, "Access suspended", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        case "key_ended":
+            return build(.keyEnded, "Key ended", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        default:
+            break
+        }
+        if serverWork == "disconnected" {
+            return build(.connectionOff, "Needs reconnecting", .diamond, attention: true, since: resolvedLastActivity, age: lastActivityAge)
+        }
+
+        let recentActivity = lastActivityAge.map { $0 <= workRecentInterval } ?? false
+        let hasWorkClaim = doingSince != nil || workingActive
+        let isWorking = serverWork == "working" || (serverWork != "idle" && hasWorkClaim && recentActivity)
+
+        // 2. Waiting messages: stale outranks working/listening/turn-only; non-stale surfaces when idle and not push-listening.
+        let showWaiting = hasWaitingRow && (staleWaiting || (!isWorking && !hasLiveListener))
+        if showWaiting, let waitingSince, let waitingAge {
+            let clock = formatClock(waitingSince, now: now, calendar: calendar)
+            let suffix = (effectiveUnseenCount ?? 0) > 0 ? " · \(effectiveUnseenCount!) unseen" : ""
+            return build(
+                .waiting,
+                "Waiting since \(clock)\(suffix)",
+                staleWaiting ? .diamond : .ring,
+                attention: staleWaiting && !isTurnSeat,
+                since: waitingSince,
+                age: waitingAge
+            )
+        }
+
+        // 3. Verified recent work ("Working · 3 min").
+        if isWorking {
+            let refDate: Date?
+            if let doingSince, doingSince <= now {
+                refDate = doingSince
+            } else if workingActive, let workingOnSince, workingOnSince <= now {
+                refDate = workingOnSince
+            } else {
+                refDate = resolvedLastActivity
+            }
+            let workAge = refDate.map { max(0, now.timeIntervalSince($0)) } ?? lastActivityAge
+            let line = workAge.map { "Working · \(formatElapsed($0))" } ?? "Working"
+            return build(.working, line, .dot, attention: false, since: refDate, age: workAge)
+        }
+
+        // 4. Turn-only seats (hosted MCP or turn-only local seat) — never fake a live dot.
+        if isTurnSeat {
+            let line = lastActivityAge.map { "Turn-only, checks when opened · \(formatAgo($0))" }
+                ?? "Turn-only, checks when opened"
+            return build(.turnOnly, line, .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
+        }
+
+        // 5. Verified live push listener lease (<= 3 min).
+        if hasLiveListener {
+            let refDate = resolvedLastActivity ?? wakeReference
+            let refAge = refDate.map { max(0, now.timeIntervalSince($0)) } ?? wakeAge
+            let line = refAge.map { "Listening · \(formatAgo($0))" } ?? "Listening"
+            return build(.listening, line, .dot, attention: false, since: refDate, age: refAge)
+        }
+
+        // 6. Local push-capable seat with presence/wake reported, and no live push lease.
+        if presenceProvided {
+            let refDate = resolvedLastActivity ?? wakeReference
+            let refAge = refDate.map { max(0, now.timeIntervalSince($0)) }
+            let line = refAge.map { "Not listening · \(formatAgo($0))" } ?? "Not listening"
+            return build(.notListening, line, .ring, attention: false, since: refDate, age: refAge)
+        }
+
+        // 7. Presence/wake unavailable — honest fallback, never a live dot.
+        let line = lastActivityAge.map { "Last active \(formatAgo($0))" } ?? "Connected"
+        return build(.unknown, line, .ring, attention: false, since: resolvedLastActivity, age: lastActivityAge)
     }
 }
 
@@ -94,6 +384,61 @@ struct WorkspaceAgent: Hashable, Identifiable, Sendable {
     let lastCommandAt: Date?
     let clientBuild: String?
     let lastAckVia: String?
+    let connection: String?
+    let wake: SeatWakeTimestamps?
+    let lastActivityAt: Date?
+    let workingOnSince: Date?
+    let workingOnUntil: Date?
+    let doingSince: Date?
+    let serverWork: String?
+    let waitingSince: Date?
+    let unseenCount: Int?
+
+    init(
+        principalID: UUID,
+        name: String,
+        model: String?,
+        transport: String?,
+        turnOnly: Bool,
+        ownerUserID: UUID,
+        ownerName: String?,
+        isOwnedByViewer: Bool,
+        presenceAvailable: Bool,
+        lastCommandAt: Date?,
+        clientBuild: String?,
+        lastAckVia: String?,
+        connection: String? = nil,
+        wake: SeatWakeTimestamps? = nil,
+        lastActivityAt: Date? = nil,
+        workingOnSince: Date? = nil,
+        workingOnUntil: Date? = nil,
+        doingSince: Date? = nil,
+        serverWork: String? = nil,
+        waitingSince: Date? = nil,
+        unseenCount: Int? = nil
+    ) {
+        self.principalID = principalID
+        self.name = name
+        self.model = model
+        self.transport = transport
+        self.turnOnly = turnOnly
+        self.ownerUserID = ownerUserID
+        self.ownerName = ownerName
+        self.isOwnedByViewer = isOwnedByViewer
+        self.presenceAvailable = presenceAvailable
+        self.lastCommandAt = lastCommandAt
+        self.clientBuild = clientBuild
+        self.lastAckVia = lastAckVia
+        self.connection = connection
+        self.wake = wake
+        self.lastActivityAt = lastActivityAt
+        self.workingOnSince = workingOnSince
+        self.workingOnUntil = workingOnUntil
+        self.doingSince = doingSince
+        self.serverWork = serverWork
+        self.waitingSince = waitingSince
+        self.unseenCount = unseenCount
+    }
 
     var id: UUID { principalID }
 
@@ -111,7 +456,7 @@ struct WorkspaceAgent: Hashable, Identifiable, Sendable {
     var deliveryDescription: String {
         switch transport {
         case "hosted_mcp":
-            return "Hosted MCP · OAuth connector"
+            return "Hosted MCP · checks when opened"
         case "local":
             return turnOnly ? "Local · checks in on its own turn" : "Local · live listener"
         default:
@@ -125,19 +470,31 @@ struct WorkspaceAgent: Hashable, Identifiable, Sendable {
         return "Workspace agent"
     }
 
-    func activityStatus(now: Date = Date()) -> AgentActivityStatus {
-        guard presenceAvailable else { return .notReported }
-        guard let lastCommandAt else { return .notActiveYet }
-        let elapsed = now.timeIntervalSince(lastCommandAt)
-        return elapsed <= 15 * 60 ? .active : .idle
+    func seatStatus(now: Date = Date(), calendar: Calendar = .current) -> SeatStatus {
+        SeatStatusClassifier.classify(
+            transport: transport,
+            turnOnly: turnOnly,
+            connection: connection,
+            presenceProvided: presenceAvailable,
+            wake: wake,
+            lastCommandAt: lastCommandAt,
+            lastActivityAt: lastActivityAt,
+            workingOnSince: workingOnSince,
+            workingOnUntil: workingOnUntil,
+            doingSince: doingSince,
+            serverWork: serverWork,
+            waitingSince: waitingSince,
+            unseenCount: unseenCount,
+            now: now,
+            calendar: calendar
+        )
     }
 
     func lastActiveLabel(now: Date = Date()) -> String {
         guard presenceAvailable else { return "Not reported" }
-        guard let lastCommandAt else { return "Not active yet" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: lastCommandAt, relativeTo: now)
+        let latest = [lastActivityAt, lastCommandAt].compactMap { $0 }.max()
+        guard let latest else { return "Not active yet" }
+        return SeatStatusClassifier.formatAgo(max(0, now.timeIntervalSince(latest)))
     }
 }
 
@@ -398,6 +755,7 @@ final class PeopleDirectoryStore: ObservableObject {
                 || ($0.model?.lowercased().contains(needle) ?? false)
                 || ($0.ownerName?.lowercased().contains(needle) ?? false)
                 || $0.hostLabel.lowercased().contains(needle)
+                || $0.seatStatus().line.lowercased().contains(needle)
         }
     }
 

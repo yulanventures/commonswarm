@@ -46,7 +46,70 @@ struct PeopleDirectoryAPI: Sendable {
         let principal_id: UUID?
         let last_command_at: String?
         let client_build: String?
+        let watcher_at: String?
+        let channel_at: String?
+        let listener_at: String?
+        let turn_at: String?
         let last_ack_via: String?
+        let last_ack_at: String?
+        let current_client_build: String?
+    }
+
+    private struct WakePathWire: Decodable {
+        let principal_id: UUID?
+        let oldest_unobserved_at: String?
+        let unseen_count: Int?
+    }
+
+    private struct HomeOverviewWire: Decodable {
+        let workspaces: [HomeOverviewWorkspaceWire]?
+    }
+
+    private struct HomeOverviewWorkspaceWire: Decodable {
+        let workspace_id: UUID?
+        let people: [HomeOverviewPersonWire]?
+    }
+
+    private struct HomeOverviewPersonWire: Decodable {
+        let agents: [HomeOverviewAgentWire]?
+    }
+
+    private struct HomeOverviewAgentWire: Decodable {
+        let principal_id: UUID?
+        let status: HomeOverviewAgentStatusWire?
+    }
+
+    private struct HomeOverviewAgentStatusWire: Decodable {
+        let work: String?
+        let facts: HomeOverviewAgentFactsWire?
+    }
+
+    private struct HomeOverviewWakeWire: Decodable {
+        let watcher_at: String?
+        let channel_at: String?
+        let listener_at: String?
+        let turn_at: String?
+    }
+
+    private struct HomeOverviewDoingWire: Decodable {
+        let since: String?
+    }
+
+    private struct HomeOverviewWorkingOnWire: Decodable {
+        let at: String?
+        let until: String?
+    }
+
+    /// Deliberately omits private work titles (`doing.title` / `working_on.body`) so People & agents
+    /// never holds or renders private titles across audiences.
+    private struct HomeOverviewAgentFactsWire: Decodable {
+        let connection: String?
+        let last_activity_at: String?
+        let messages_waiting_since: String?
+        let messages_waiting_count: Int?
+        let wake: HomeOverviewWakeWire?
+        let doing: HomeOverviewDoingWire?
+        let working_on: HomeOverviewWorkingOnWire?
     }
 
     private struct InviteWire: Decodable {
@@ -142,6 +205,83 @@ struct PeopleDirectoryAPI: Sendable {
         return grants
     }
 
+    /// Reads `swarm_read.agent_wake_path` with `unseen_count`, falling back to `oldest_unobserved_at`
+    /// only when an older server returns HTTP 400 (column not yet deployed).
+    private func fetchWakePath(
+        wsFilter: String,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [WakePathWire] {
+        do {
+            return try await fetchView(
+                "agent_wake_path",
+                query: [
+                    "select": "principal_id,oldest_unobserved_at,unseen_count",
+                    "workspace_id": wsFilter,
+                    "limit": "500",
+                ],
+                canDispatch: canDispatch
+            )
+        } catch APIError.refused(400) {
+            return try await fetchView(
+                "agent_wake_path",
+                query: [
+                    "select": "principal_id,oldest_unobserved_at",
+                    "workspace_id": wsFilter,
+                    "limit": "500",
+                ],
+                canDispatch: canDispatch
+            )
+        }
+    }
+
+    /// Calls `POST rest/v1/rpc/home_overview` for C2 live seat status facts (`work`, `connection`,
+    /// `last_activity_at`, `messages_waiting_*`, `wake`, `doing.since`, `working_on`).
+    /// Returns `nil` when not deployed (`404`/`PGRST202`/`42883`); throws `accessRefused` on `401`/`403`.
+    private func fetchHomeOverviewAgents(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [UUID: HomeOverviewAgentStatusWire]? {
+        var request = api.request("rest/v1/rpc/home_overview")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        request.setValue("swarm_read", forHTTPHeaderField: "Content-Profile")
+        request.httpBody = Data("{}".utf8)
+        let (data, response) = try await api.session.data(for: request, canDispatch: canDispatch)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else {
+            throw APIError.invalidResponse
+        }
+        if status == 401 || status == 403 {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if status != 200 {
+            let errWire = try? JSONDecoder().decode(PostgrestErrorWire.self, from: data)
+            if status == 404 || errWire?.code == "PGRST202" || errWire?.code == "42883" {
+                return nil
+            }
+            throw APIError.refused(status)
+        }
+        let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "null" {
+            return nil
+        }
+        let overview = try JSONDecoder().decode(HomeOverviewWire.self, from: data)
+        guard let workspace = overview.workspaces?.first(where: { $0.workspace_id == workspaceID }) else {
+            return nil
+        }
+        var byAgent: [UUID: HomeOverviewAgentStatusWire] = [:]
+        for person in workspace.people ?? [] {
+            for agent in person.agents ?? [] {
+                guard let id = agent.principal_id, let agentStatus = agent.status else { continue }
+                if byAgent[id] == nil {
+                    byAgent[id] = agentStatus
+                }
+            }
+        }
+        return byAgent
+    }
+
     func loadDirectory(
         workspaceID: UUID,
         canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
@@ -188,13 +328,27 @@ struct PeopleDirectoryAPI: Sendable {
                 let rows: [PresenceWire] = try await fetchView(
                     "agent_presence",
                     query: [
-                        "select": "principal_id,last_command_at,client_build,last_ack_via",
+                        "select": "principal_id,last_command_at,client_build,watcher_at,channel_at,listener_at,turn_at,last_ack_via,last_ack_at,current_client_build",
                         "workspace_id": wsFilter,
                         "limit": "500",
                     ],
                     canDispatch: canDispatch
                 )
                 return .success(rows)
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let wakePathTask: Result<[WakePathWire], Error> = {
+            do {
+                return .success(try await fetchWakePath(wsFilter: wsFilter, canDispatch: canDispatch))
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let overviewTask: Result<[UUID: HomeOverviewAgentStatusWire]?, Error> = {
+            do {
+                return .success(try await fetchHomeOverviewAgents(workspaceID: workspaceID, canDispatch: canDispatch))
             } catch {
                 return .failure(error)
             }
@@ -227,6 +381,8 @@ struct PeopleDirectoryAPI: Sendable {
         let membersResult = await membersTask
         let agentsResult = await agentsTask
         let presenceResult = await presenceTask
+        let wakePathResult = await wakePathTask
+        let overviewResult = await overviewTask
         let invitesResult = await invitesTask
         let grantsResult = await adminGrantsTask
 
@@ -239,6 +395,12 @@ struct PeopleDirectoryAPI: Sendable {
             throw PeopleDirectoryError.accessRefused
         }
         if case .failure(PeopleDirectoryError.accessRefused) = presenceResult {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if case .failure(PeopleDirectoryError.accessRefused) = wakePathResult {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if case .failure(PeopleDirectoryError.accessRefused) = overviewResult {
             throw PeopleDirectoryError.accessRefused
         }
         if case .failure(PeopleDirectoryError.accessRefused) = invitesResult {
@@ -296,6 +458,20 @@ struct PeopleDirectoryAPI: Sendable {
             presenceRows = nil
         }
 
+        let wakePathRows: [WakePathWire]?
+        if case .success(let rows) = wakePathResult {
+            wakePathRows = rows
+        } else {
+            wakePathRows = nil
+        }
+
+        let overviewByAgent: [UUID: HomeOverviewAgentStatusWire]?
+        if case .success(let map) = overviewResult {
+            overviewByAgent = map
+        } else {
+            overviewByAgent = nil
+        }
+
         let namesByUserID = Dictionary((decodedPeople ?? []).map { ($0.userID, $0.name) }, uniquingKeysWith: { first, _ in first })
         let presenceByAgentID: [UUID: PresenceWire] = Dictionary(
             (presenceRows ?? []).compactMap { row in
@@ -304,7 +480,14 @@ struct PeopleDirectoryAPI: Sendable {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let presenceAvailable = presenceRows != nil
+        let wakePathByAgentID: [UUID: WakePathWire] = Dictionary(
+            (wakePathRows ?? []).compactMap { row in
+                guard let id = row.principal_id else { return nil }
+                return (id, row)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let presenceAvailable = presenceRows != nil || overviewByAgent != nil
 
         let decodedAgents: [WorkspaceAgent]?
         switch agentsResult {
@@ -319,6 +502,26 @@ struct PeopleDirectoryAPI: Sendable {
                 let displayName = rawName.isEmpty ? "Agent" : rawName
                 let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let presence = presenceByAgentID[principalID]
+                let wakeRow = wakePathByAgentID[principalID]
+                let overview = overviewByAgent?[principalID]
+                let overviewFacts = overview?.facts
+
+                let watcherAt = PeopleDirectoryRules.parseISO8601(presence?.watcher_at ?? overviewFacts?.wake?.watcher_at)
+                let channelAt = PeopleDirectoryRules.parseISO8601(presence?.channel_at ?? overviewFacts?.wake?.channel_at)
+                let listenerAt = PeopleDirectoryRules.parseISO8601(presence?.listener_at ?? overviewFacts?.wake?.listener_at)
+                let turnAt = PeopleDirectoryRules.parseISO8601(presence?.turn_at ?? overviewFacts?.wake?.turn_at)
+                let wakeTimestamps = SeatWakeTimestamps(
+                    watcherAt: watcherAt,
+                    channelAt: channelAt,
+                    listenerAt: listenerAt,
+                    turnAt: turnAt
+                )
+
+                let waitingSince = PeopleDirectoryRules.parseISO8601(
+                    overviewFacts?.messages_waiting_since ?? wakeRow?.oldest_unobserved_at
+                )
+                let unseenCount = overviewFacts?.messages_waiting_count ?? wakeRow?.unseen_count
+
                 return WorkspaceAgent(
                     principalID: principalID,
                     name: displayName,
@@ -331,7 +534,16 @@ struct PeopleDirectoryAPI: Sendable {
                     presenceAvailable: presenceAvailable,
                     lastCommandAt: PeopleDirectoryRules.parseISO8601(presence?.last_command_at),
                     clientBuild: presence?.client_build,
-                    lastAckVia: presence?.last_ack_via
+                    lastAckVia: presence?.last_ack_via,
+                    connection: overviewFacts?.connection,
+                    wake: presenceAvailable ? wakeTimestamps : nil,
+                    lastActivityAt: PeopleDirectoryRules.parseISO8601(overviewFacts?.last_activity_at),
+                    workingOnSince: PeopleDirectoryRules.parseISO8601(overviewFacts?.working_on?.at),
+                    workingOnUntil: PeopleDirectoryRules.parseISO8601(overviewFacts?.working_on?.until),
+                    doingSince: PeopleDirectoryRules.parseISO8601(overviewFacts?.doing?.since),
+                    serverWork: overview?.work,
+                    waitingSince: waitingSince,
+                    unseenCount: unseenCount
                 )
             }
         case .failure:

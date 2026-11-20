@@ -143,8 +143,166 @@ struct VerifyPeopleDirectory {
         let agents = await MainActor.run { store.agents }
         let atlas = agents.first { $0.name == "Atlas" }!
         let beacon = agents.first { $0.name == "Beacon" }!
-        expect(atlas.isOwnedByViewer && atlas.activityStatus() == .active && atlas.hostLabel == "Local", "Expected Atlas active local owned by viewer")
-        expect(!beacon.isOwnedByViewer && beacon.ownerName == "Maya Chen" && beacon.hostLabel == "Hosted MCP", "Expected Beacon hosted MCP owned by Maya Chen")
+        let atlasSeat = atlas.seatStatus()
+        let beaconSeat = beacon.seatStatus()
+        expect(
+            atlas.isOwnedByViewer
+                && atlasSeat.kind == .working
+                && atlasSeat.indicator == .dot
+                && atlasSeat.line == "Working · 3 min"
+                && !atlasSeat.line.contains("SECRET PRIVATE TITLE")
+                && atlas.hostLabel == "Local",
+            "Expected Atlas C2 status 'Working · 3 min' with live dot and zero private title leakage; got '\(atlasSeat.line)'"
+        )
+        expect(
+            !beacon.isOwnedByViewer
+                && beacon.ownerName == "Maya Chen"
+                && beacon.hostLabel == "Hosted MCP"
+                && beaconSeat.kind == .turnOnly
+                && beaconSeat.indicator == .ring
+                && beaconSeat.line == "Turn-only, checks when opened · 5 min ago",
+            "Expected Beacon hosted MCP C2 status 'Turn-only, checks when opened · 5 min ago' with ring (never live dot); got '\(beaconSeat.line)'"
+        )
+
+        // 1b. C2 SeatStatusClassifier pure truth rules (fixed clock & UTC calendar)
+        var utcCal = Calendar(identifier: .gregorian)
+        utcCal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let fixedNow = PeopleDirectoryRules.parseISO8601("2026-11-20T10:50:00Z")!
+        let wait1042 = PeopleDirectoryRules.parseISO8601("2026-11-20T10:42:00Z")!
+        let staleWaitingStatus = SeatStatusClassifier.classify(
+            transport: "local",
+            turnOnly: false,
+            connection: "live",
+            presenceProvided: true,
+            wake: SeatWakeTimestamps(watcherAt: fixedNow.addingTimeInterval(-600), channelAt: nil, listenerAt: nil, turnAt: nil),
+            lastCommandAt: fixedNow.addingTimeInterval(-600),
+            lastActivityAt: fixedNow.addingTimeInterval(-600),
+            workingOnSince: nil,
+            workingOnUntil: nil,
+            doingSince: nil,
+            serverWork: "idle",
+            waitingSince: wait1042,
+            unseenCount: 2,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            staleWaitingStatus.kind == .waiting
+                && staleWaitingStatus.line == "Waiting since 10:42 · 2 unseen"
+                && staleWaitingStatus.indicator == .diamond
+                && staleWaitingStatus.attention
+                && staleWaitingStatus.staleWaiting,
+            "Stale waiting must format 'Waiting since 10:42 · 2 unseen' with diamond & attention; got '\(staleWaitingStatus.line)'"
+        )
+
+        let freshTurnOnly = SeatStatusClassifier.classify(
+            transport: "hosted_mcp",
+            turnOnly: true,
+            connection: "live",
+            presenceProvided: true,
+            wake: nil,
+            lastCommandAt: nil,
+            lastActivityAt: nil,
+            workingOnSince: nil,
+            workingOnUntil: nil,
+            doingSince: nil,
+            serverWork: "idle",
+            waitingSince: nil,
+            unseenCount: 0,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            freshTurnOnly.kind == .turnOnly
+                && freshTurnOnly.line == "Turn-only, checks when opened"
+                && freshTurnOnly.indicator == .ring,
+            "Never-active hosted MCP seat must say 'Turn-only, checks when opened' with ring (never dot)"
+        )
+
+        let liveListening = SeatStatusClassifier.classify(
+            transport: "local",
+            turnOnly: false,
+            connection: "live",
+            presenceProvided: true,
+            wake: SeatWakeTimestamps(watcherAt: fixedNow.addingTimeInterval(-60), channelAt: nil, listenerAt: nil, turnAt: nil),
+            lastCommandAt: fixedNow.addingTimeInterval(-240),
+            lastActivityAt: fixedNow.addingTimeInterval(-240),
+            workingOnSince: nil,
+            workingOnUntil: nil,
+            doingSince: nil,
+            serverWork: "idle",
+            waitingSince: fixedNow.addingTimeInterval(-30), // < 3 min tolerated on live push listener
+            unseenCount: 1,
+            now: fixedNow,
+            calendar: utcCal
+        )
+        expect(
+            liveListening.kind == .listening
+                && liveListening.line == "Listening · 4 min ago"
+                && liveListening.indicator == .dot,
+            "Live push listener with < 3 min waiting must stay 'Listening · 4 min ago' with dot; got '\(liveListening.line)'"
+        )
+
+        // 1c. Live loopback scenarios: waiting_stale, not_listening, fault, legacy fallback, and 403 refusal precedence
+        try await postFixture("\(base)/fixture/seat-scenario?mode=waiting_stale")
+        await store.load(api: directoryAPI)
+        let atlasWaiting = await MainActor.run { store.agents.first { $0.name == "Atlas" }!.seatStatus() }
+        expect(
+            atlasWaiting.kind == .waiting
+                && atlasWaiting.indicator == .diamond
+                && atlasWaiting.attention
+                && atlasWaiting.line.hasPrefix("Waiting since ")
+                && atlasWaiting.line.hasSuffix(" · 2 unseen"),
+            "Loopback waiting_stale must surface 'Waiting since HH:MM · 2 unseen' with diamond; got '\(atlasWaiting.line)'"
+        )
+
+        try await postFixture("\(base)/fixture/seat-scenario?mode=not_listening")
+        await store.load(api: directoryAPI)
+        let atlasNotListening = await MainActor.run { store.agents.first { $0.name == "Atlas" }!.seatStatus() }
+        expect(
+            atlasNotListening.kind == .notListening
+                && atlasNotListening.indicator == .ring
+                && atlasNotListening.line == "Not listening · 2 h ago",
+            "Loopback not_listening must surface 'Not listening · 2 h ago' with ring (never live dot); got '\(atlasNotListening.line)'"
+        )
+
+        try await postFixture("\(base)/fixture/seat-scenario?mode=fault")
+        await store.load(api: directoryAPI)
+        let atlasFault = await MainActor.run { store.agents.first { $0.name == "Atlas" }!.seatStatus() }
+        expect(
+            atlasFault.kind == .keyOff && atlasFault.indicator == .diamond && atlasFault.attention && atlasFault.line == "Key turned off",
+            "Connection/key fault must outrank live watcher with diamond + attention; got '\(atlasFault.line)'"
+        )
+
+        // Legacy server fallback: agent_wake_path rejects unseen_count (400 -> retries without it) + home_overview 404
+        try await postFixture("\(base)/fixture/seat-scenario?mode=waiting_stale")
+        try await postFixture("\(base)/fixture/legacy-wake-path?on=1")
+        try await postFixture("\(base)/fixture/omit-home-overview?on=1")
+        await store.load(api: directoryAPI)
+        let atlasLegacy = await MainActor.run { store.agents.first { $0.name == "Atlas" }!.seatStatus() }
+        expect(
+            atlasLegacy.kind == .waiting
+                && atlasLegacy.indicator == .diamond
+                && atlasLegacy.line.hasPrefix("Waiting since ")
+                && !atlasLegacy.line.contains("unseen"),
+            "Legacy fallback (no unseen_count, no home_overview) must still classify stale waiting cleanly without crashing; got '\(atlasLegacy.line)'"
+        )
+        try await postFixture("\(base)/fixture/legacy-wake-path?on=0")
+        try await postFixture("\(base)/fixture/omit-home-overview?on=0")
+        try await postFixture("\(base)/fixture/seat-scenario?mode=default")
+
+        // Secondary refusal precedence: member_profiles 503 + home_overview 403 must refuse and clear roster
+        await store.load(api: directoryAPI)
+        try await postFixture("\(base)/fixture/fail-members?on=1")
+        try await postFixture("\(base)/fixture/refuse-home-overview?on=1")
+        await store.load(api: directoryAPI)
+        let overviewRefusalCleared = await MainActor.run {
+            store.accessUnavailable && store.people.isEmpty && store.agents.isEmpty && store.adminGrants.isEmpty
+        }
+        expect(overviewRefusalCleared, "Core 503 + home_overview 403 must refuse and clear cached roster")
+        try await postFixture("\(base)/fixture/fail-members?on=0")
+        try await postFixture("\(base)/fixture/refuse-home-overview?on=0")
+        await store.load(api: directoryAPI)
 
         // 2. Non-owner RPC returning JSON null must still complete Admins cleanly (count == 2 managers, grants == [])
         try await postFixture("\(base)/fixture/non-owner-grants?on=1")

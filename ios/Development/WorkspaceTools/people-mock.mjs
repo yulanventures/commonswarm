@@ -37,6 +37,11 @@ let releaseGrantsResponse = null;
 let holdMembersRequestOnce = false;
 let membersRequestHeld = false;
 let releaseMembersRequest = null;
+let legacyWakePathMode = false;
+let omitHomeOverview = false;
+let refuseWakePath = false;
+let refuseHomeOverview = false;
+let seatStatusScenario = "default"; // default | waiting_stale | not_listening | fault
 let readRequestCount = 0;
 
 let emailCodePending = false;
@@ -138,6 +143,26 @@ const server = createServer(async (req, res) => {
       if (releaseGrants) releaseGrants();
       return reply(200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/legacy-wake-path") {
+      legacyWakePathMode = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, legacyWakePathMode });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/omit-home-overview") {
+      omitHomeOverview = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, omitHomeOverview });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/refuse-wake-path") {
+      refuseWakePath = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, refuseWakePath });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/refuse-home-overview") {
+      refuseHomeOverview = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, refuseHomeOverview });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/seat-scenario") {
+      seatStatusScenario = url.searchParams.get("mode") || "default";
+      return reply(200, { ok: true, seatStatusScenario });
+    }
     if (req.method === "GET" && url.pathname === "/fixture/requests") {
       return reply(200, { reads: readRequestCount });
     }
@@ -206,6 +231,136 @@ const server = createServer(async (req, res) => {
       if (body.resource === "conversations") return reply(200, { conversations: [convGeneral] });
       if (body.resource === "conversation_history") return reply(200, { conversation: convGeneral, messages: [] });
       return reply(400, { error: "invalid_request" });
+    }
+
+    // Production RPC: POST /rest/v1/rpc/home_overview (C2 live seat status facts)
+    if (req.method === "POST" && url.pathname === "/rest/v1/rpc/home_overview") {
+      readRequestCount += 1;
+      if (req.headers["accept-profile"] !== "swarm_read" || req.headers["content-profile"] !== "swarm_read") {
+        return reply(400, { error: "missing_profile" });
+      }
+      if (edge401) return reply(401, {});
+      if (accessRefused || refuseHomeOverview) return reply(403, { error: "forbidden" });
+      if (omitHomeOverview) return reply(404, { code: "PGRST202", message: "not deployed" });
+
+      const now = Date.now();
+      const atlasWorkingSince = new Date(now - 3 * 60 * 1000).toISOString();
+      const atlasUntil = new Date(now + 30 * 60 * 1000).toISOString();
+      const beaconLastAct = new Date(now - 5 * 60 * 1000).toISOString();
+      const staleWaitSince = new Date(now - 10 * 60 * 1000).toISOString();
+
+      let atlasStatus = {
+        work: "working",
+        facts: {
+          transport: "local",
+          turn_only: false,
+          connection: "live",
+          last_activity_at: new Date(now - 60 * 1000).toISOString(),
+          messages_waiting_since: null,
+          messages_waiting_count: 0,
+          wake: {
+            watcher_at: new Date(now - 30 * 1000).toISOString(),
+            channel_at: null,
+            listener_at: null,
+            turn_at: null,
+          },
+          doing: { todo_id: "50000000-0000-4000-8000-000000000099", title: "SECRET PRIVATE TITLE", since: atlasWorkingSince },
+          working_on: { signal_id: "50000000-0000-4000-8000-000000000098", at: atlasWorkingSince, until: atlasUntil },
+        },
+      };
+      if (seatStatusScenario === "waiting_stale") {
+        atlasStatus = {
+          work: "idle",
+          facts: {
+            transport: "local",
+            turn_only: false,
+            connection: "live",
+            last_activity_at: new Date(now - 15 * 60 * 1000).toISOString(),
+            messages_waiting_since: staleWaitSince,
+            messages_waiting_count: 2,
+            wake: { watcher_at: new Date(now - 20 * 60 * 1000).toISOString(), channel_at: null, listener_at: null, turn_at: null },
+            doing: null,
+            working_on: null,
+          },
+        };
+      } else if (seatStatusScenario === "not_listening") {
+        atlasStatus = {
+          work: "idle",
+          facts: {
+            transport: "local",
+            turn_only: false,
+            connection: "live",
+            last_activity_at: new Date(now - 2 * 3600 * 1000).toISOString(),
+            messages_waiting_since: null,
+            messages_waiting_count: 0,
+            wake: { watcher_at: new Date(now - 2 * 3600 * 1000).toISOString(), channel_at: null, listener_at: null, turn_at: null },
+            doing: null,
+            working_on: null,
+          },
+        };
+      } else if (seatStatusScenario === "fault") {
+        atlasStatus = {
+          work: "disconnected",
+          facts: {
+            transport: "local",
+            turn_only: false,
+            connection: "key_off",
+            last_activity_at: new Date(now - 60 * 1000).toISOString(),
+            messages_waiting_since: null,
+            messages_waiting_count: 0,
+            wake: { watcher_at: new Date(now - 30 * 1000).toISOString(), channel_at: null, listener_at: null, turn_at: null },
+            doing: null,
+            working_on: null,
+          },
+        };
+      }
+
+      const beaconStatus = {
+        work: "idle",
+        facts: {
+          transport: "hosted_mcp",
+          turn_only: true,
+          connection: "live",
+          last_activity_at: beaconLastAct,
+          messages_waiting_since: null,
+          messages_waiting_count: 0,
+          wake: { watcher_at: null, channel_at: null, listener_at: null, turn_at: beaconLastAct },
+          doing: null,
+          working_on: null,
+        },
+      };
+
+      return reply(200, {
+        viewer_user_id: me,
+        generated_at: new Date(now).toISOString(),
+        workspaces: [
+          {
+            workspace_id: wsMain,
+            name: "Simulator workspace",
+            role: viewerRole,
+            people: [
+              {
+                user_id: me,
+                display_name: "Alex Rivera",
+                role: viewerRole,
+                is_viewer: true,
+                agents: [{ principal_id: atlas, name: "Atlas", status: atlasStatus }],
+              },
+              ...(omitMaya
+                ? []
+                : [
+                    {
+                      user_id: maya,
+                      display_name: "Maya Chen",
+                      role: "admin",
+                      is_viewer: false,
+                      agents: [{ principal_id: beacon, name: "Beacon", status: beaconStatus }],
+                    },
+                  ]),
+            ],
+          },
+        ],
+      });
     }
 
     // Production RPC: POST /rest/v1/rpc/workspace_seat_admin_grants
@@ -307,22 +462,60 @@ const server = createServer(async (req, res) => {
         return reply(200, rows);
       }
       case "/rest/v1/agent_presence": {
+        const now = Date.now();
+        const watcherIso =
+          seatStatusScenario === "not_listening"
+            ? new Date(now - 2 * 3600 * 1000).toISOString()
+            : seatStatusScenario === "waiting_stale"
+              ? new Date(now - 20 * 60 * 1000).toISOString()
+              : new Date(now - 30 * 1000).toISOString();
         const rows = [
           {
             principal_id: atlas,
-            last_command_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
-            client_build: "cswarm 0.14.2",
-            last_ack_via: "listener",
+            last_command_at:
+              seatStatusScenario === "not_listening"
+                ? new Date(now - 2 * 3600 * 1000).toISOString()
+                : new Date(now - 3 * 60 * 1000).toISOString(),
+            client_build: "cswarm 0.1.107",
+            watcher_at: watcherIso,
+            channel_at: null,
+            listener_at: null,
+            turn_at: null,
+            last_ack_via: "leased",
+            last_ack_at: watcherIso,
+            current_client_build: "cswarm 0.1.107",
           },
           {
             principal_id: beacon,
-            last_command_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+            last_command_at: new Date(now - 5 * 60 * 1000).toISOString(),
             client_build: "mcp-hosted 1.2",
-            last_ack_via: "turn",
+            watcher_at: null,
+            channel_at: null,
+            listener_at: null,
+            turn_at: new Date(now - 5 * 60 * 1000).toISOString(),
+            last_ack_via: "unclaimed",
+            last_ack_at: new Date(now - 5 * 60 * 1000).toISOString(),
+            current_client_build: null,
           },
         ];
         if (duplicateRows) rows.push({ ...rows[0] });
         return reply(200, rows);
+      }
+      case "/rest/v1/agent_wake_path": {
+        if (refuseWakePath) return reply(403, { error: "forbidden" });
+        const select = url.searchParams.get("select") || "";
+        if (legacyWakePathMode && select.includes("unseen_count")) {
+          return reply(400, { code: "42703", message: "column unseen_count does not exist" });
+        }
+        if (seatStatusScenario === "waiting_stale") {
+          const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+          return reply(200, [
+            legacyWakePathMode
+              ? { principal_id: atlas, oldest_unobserved_at: since }
+              : { principal_id: atlas, oldest_unobserved_at: since, unseen_count: 2 },
+          ]);
+        }
+        return reply(200, []);
       }
       case "/rest/v1/pending_invitations":
         if (refuseInvites) return reply(403, { error: "forbidden" });

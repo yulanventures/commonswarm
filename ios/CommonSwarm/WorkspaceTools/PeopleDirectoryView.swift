@@ -378,12 +378,34 @@ struct PeopleDirectoryView: View {
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
+    private func seatStatusForeground(for seat: SeatStatus) -> Color {
+        switch seat.indicator {
+        case .dot:
+            return activeForeground
+        case .diamond:
+            return warnForeground
+        case .ring:
+            return secondaryForeground
+        }
+    }
+
+    private func seatStatusBackground(for seat: SeatStatus) -> Color {
+        switch seat.indicator {
+        case .dot:
+            return activeBackground
+        case .diamond:
+            return warnBackground
+        case .ring:
+            return secondaryBackground
+        }
+    }
+
     private func agentCard(_ agent: WorkspaceAgent) -> some View {
-        let status = agent.activityStatus()
+        let seat = agent.seatStatus()
         return HStack(alignment: .top, spacing: 12) {
             Image(systemName: "cpu")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(status == .active ? activeForeground : mutedForeground)
+                .foregroundStyle(seat.indicator == .dot ? activeForeground : (seat.indicator == .diamond ? warnForeground : mutedForeground))
                 .padding(.top, 2)
                 .accessibilityHidden(true)
 
@@ -393,23 +415,21 @@ struct PeopleDirectoryView: View {
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 6) {
-                    Text(status.label)
+                HStack(alignment: .center, spacing: 6) {
+                    Image(systemName: seat.indicator.symbolName)
+                        .font(.system(size: 8, weight: .bold))
+                        .accessibilityHidden(true)
+                    Text(verbatim: seat.line)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(status == .active ? activeForeground : secondaryForeground)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(status == .active ? activeBackground : secondaryBackground, in: Capsule())
-
-                    Text(agent.hostLabel)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(secondaryForeground)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(secondaryBackground, in: Capsule())
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .foregroundStyle(seatStatusForeground(for: seat))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(seatStatusBackground(for: seat), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityIdentifier("agent-status-\(agent.principalID.uuidString.lowercased())")
 
-                let metaParts = [agent.ownerLabel, agent.model, agent.lastActiveLabel()].compactMap { value -> String? in
+                let metaParts = [agent.ownerLabel, agent.hostLabel, agent.model].compactMap { value -> String? in
                     guard let value, !value.isEmpty else { return nil }
                     return value
                 }
@@ -536,13 +556,20 @@ private struct WorkspacePersonDetailView: View {
                                     .foregroundStyle(mutedForeground)
                             } else {
                                 ForEach(ownedAgents) { agent in
+                                    let seat = agent.seatStatus()
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(verbatim: agent.name)
                                             .font(.subheadline.weight(.semibold))
                                             .foregroundStyle(.primary)
-                                        Text(verbatim: "\(agent.hostLabel) · \(agent.lastActiveLabel())")
-                                            .font(.caption)
-                                            .foregroundStyle(mutedForeground)
+                                        HStack(spacing: 5) {
+                                            Image(systemName: seat.indicator.symbolName)
+                                                .font(.system(size: 7, weight: .bold))
+                                                .accessibilityHidden(true)
+                                            Text(verbatim: seat.line)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                        .font(.caption)
+                                        .foregroundStyle(mutedForeground)
                                     }
                                     .padding(10)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -638,8 +665,22 @@ private struct WorkspaceAgentDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
+                        let seat = agent.seatStatus()
                         VStack(alignment: .leading, spacing: 10) {
-                            detailRow(label: "Status", value: agent.activityStatus().label)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Status")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(mutedForeground)
+                                HStack(spacing: 6) {
+                                    Image(systemName: seat.indicator.symbolName)
+                                        .font(.system(size: 8, weight: .bold))
+                                        .accessibilityHidden(true)
+                                    Text(verbatim: seat.line)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                             detailRow(label: "Last active", value: agent.lastActiveLabel())
                             detailRow(label: "Connection", value: agent.deliveryDescription)
                             if let model = agent.model {
@@ -676,6 +717,9 @@ private struct WorkspaceAgentDetailView: View {
                                         .font(.caption.monospaced())
                                         .foregroundStyle(mutedForeground)
                                         .textSelection(.enabled)
+                                    Text(verbatim: "Wake route: \(seat.wakeKind)")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(mutedForeground)
                                     if let build = agent.clientBuild, !build.isEmpty {
                                         Text(verbatim: "Client build: \(build)")
                                             .font(.caption.monospaced())
