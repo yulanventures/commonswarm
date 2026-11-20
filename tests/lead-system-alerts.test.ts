@@ -427,3 +427,26 @@ test("runArrivalWatch retains reconciliation cursor across the 50-page per-cycle
   assert.equal(new Set(emitted.map((r) => r.id)).size, totalRoutes, "all 51 unique route IDs including page 51 must be reached");
   assert.equal(emitted[totalRoutes - 1]!.id, routes[totalRoutes - 1]!.id, "route 51 must be delivered after resuming across the 50-page budget");
 });
+
+test("best-effort access_lost alert writes run post-tx with 250ms lock_timeout and deterministic workspace order", () => {
+  const agentAuth = readFileSync(new URL("../supabase/functions/_shared/agent-auth.ts", import.meta.url), "utf8");
+  const commandEdge = readFileSync(new URL("../supabase/functions/command/index.ts", import.meta.url), "utf8");
+  const activityEdge = readFileSync(new URL("../supabase/functions/activity/index.ts", import.meta.url), "utf8");
+  const mcpEdge = readFileSync(new URL("../supabase/functions/mcp/index.ts", import.meta.url), "utf8");
+
+  assert.match(agentAuth, /BEST_EFFORT_ALERT_LOCK_TIMEOUT\s*=\s*"250ms"/);
+  assert.match(agentAuth, /export async function recordBestEffortSystemAlert\(/);
+  assert.match(agentAuth, /ORDER BY am\.workspace_id ASC/);
+
+  // insertAudit must NOT call swarm.record_system_alert inline while holding outer command/users locks.
+  const insertAuditStart = commandEdge.indexOf("async function insertAudit(");
+  const insertAuditBody = commandEdge.slice(insertAuditStart, insertAuditStart + 2000);
+  assert.doesNotMatch(insertAuditBody, /swarm\.record_system_alert/, "insertAudit must defer renewal-superseded alert post-transaction");
+  assert.match(insertAuditBody, /pendingRenewalSupersededHooks\.get\(tx\)/);
+  assert.match(commandEdge, /withBestEffortAlertTransaction/);
+  assert.match(commandEdge, /recordBestEffortSystemAlert\(/);
+
+  // activity/index.ts and mcp/index.ts must bound best-effort alert lock wait to 250ms.
+  assert.match(activityEdge, /set_config\('lock_timeout',\s*'250ms',\s*true\)/);
+  assert.match(mcpEdge, /set_config\('lock_timeout',\s*'250ms',\s*true\)/);
+});

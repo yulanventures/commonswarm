@@ -138,3 +138,52 @@ test("unknown, live or failing lookups never emit or throw", async () => {
   assert.deepEqual(short, []);
   assert.equal(statements.length, 2, "a malformed hash is never looked up");
 });
+
+test("revoked multi-workspace credential records one bounded 250ms tx per workspace and isolates contention", async () => {
+  const principal2 = "12345678-2222-4333-8444-555555555555";
+  const ws1 = "11111111-1111-4111-8111-111111111111";
+  const ws2 = "22222222-2222-4222-8222-222222222222";
+  const txLog: Array<{ txIndex: number; sql: string; values: unknown[] }> = [];
+  let txCount = 0;
+  let activeTx = 0;
+
+  const withTx = async <T>(run: (tx: never) => Promise<T>): Promise<T> => {
+    assert.equal(activeTx, 0, "transactions must never overlap across workspaces");
+    activeTx += 1;
+    const txIndex = ++txCount;
+    try {
+      const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sqlText = strings.join("?");
+        txLog.push({ txIndex, sql: sqlText, values });
+        if (txIndex === 1) {
+          return Promise.resolve([
+            { principal_id: principal2, owner_user_id: OWNER, revoked: true, workspace_ids: [ws1, ws2] },
+          ]);
+        }
+        if (txIndex === 2 && sqlText.includes("record_system_alert")) {
+          return Promise.reject(Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" }));
+        }
+        return Promise.resolve([]);
+      };
+      return await run(tx as never);
+    } finally {
+      activeTx -= 1;
+    }
+  };
+
+  const { lines } = await captureStderr(() => reportRevokedLocalCredential(withTx, hash(99), AT));
+  assert.equal(txCount, 3, "1 read-only lookup tx + 1 bounded tx per workspace");
+  assert.equal(lines.length, 1, "access_lost still logs even when one workspace times out");
+
+  // Tx 2 (ws1) sets 250ms lock_timeout and attempts ws1; tx 3 (ws2) still runs cleanly after tx 2 aborts.
+  const tx2 = txLog.filter((entry) => entry.txIndex === 2);
+  const tx3 = txLog.filter((entry) => entry.txIndex === 3);
+  assert.equal(tx2.length, 2);
+  assert.match(tx2[0]!.sql, /set_config\('lock_timeout', \?, true\)/u);
+  assert.equal(tx2[0]!.values[0], "250ms");
+  assert.equal(tx2[1]!.values[0], ws1);
+  assert.equal(tx3.length, 2);
+  assert.match(tx3[0]!.sql, /set_config\('lock_timeout', \?, true\)/u);
+  assert.equal(tx3[0]!.values[0], "250ms");
+  assert.equal(tx3[1]!.values[0], ws2);
+});

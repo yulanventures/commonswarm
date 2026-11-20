@@ -254,6 +254,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
         try {
           await authDb.begin("isolation level read committed", async (tx) => {
             await setRole(tx, "swarm_command");
+            await tx`SELECT set_config('lock_timeout', '250ms', true)`;
             await tx`
               SELECT swarm.record_hosted_seat_refused_alerts(
                 ${call.token.providerGrantId},
