@@ -1,7 +1,7 @@
 export const AGENT_CONNECTION_VERSION = 1 as const;
 export const RECEIVE_MODES = ["wake", "turn"] as const;
 export type ReceiveMode = (typeof RECEIVE_MODES)[number];
-export const RECEIVE_PROVIDERS = ["claude", "codex", "instructions", "grok-bot"] as const;
+export const RECEIVE_PROVIDERS = ["claude", "codex", "gemini", "instructions", "grok-bot"] as const;
 export type ReceiveProvider = (typeof RECEIVE_PROVIDERS)[number];
 export const RECEIVE_WAKE_PROVIDER = "claude" as const;
 export const RECEIVE_WAKE_PROVIDERS = ["claude", "grok-bot"] as const;

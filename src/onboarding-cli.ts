@@ -20,9 +20,10 @@ import { cloudTarget } from "./cloud/config.js";
 import { agentCredentialStore, credentialLineageKey } from "./cloud/agent-credential.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
-  checkedHostSessionId, configureAgentReceive, readReceiveBinding,
-  receiveHookEvent, receiveStatus, requestReceiveCanary,
+  checkedHostSessionId, configureAgentReceive, formatTurnHookOutput, readReceiveBinding,
+  receiveHookEvent, receiveStatus, recordStopDrainContinuation, requestReceiveCanary,
 } from "./cloud/agent-receive.js";
+import type { ReceiveProvider } from "./cloud/agent-onboarding-contract.js";
 import { readSecureJsonFileIfPresent, writeSecureJsonFile } from "./cloud/storage.js";
 
 export interface OnboardingArguments {
@@ -96,9 +97,20 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   let hardExitStarted = false;
   let failureText: string | undefined;
   let boundHostSessionId: string | undefined;
+  let hookProvider: ReceiveProvider | null = null;
+  let isStopDrain = false;
+  let hookEventName: string | undefined;
   const hardExit = setTimeout(() => {
     hardExitStarted = true;
-    void exitTurnHookProcess(turnHookFailureText(profile, "check_timeout", boundHostSessionId));
+    const timeoutText = isStopDrain
+      ? undefined
+      : formatTurnHookOutput({
+          provider: hookProvider ?? "claude",
+          stopDrain: false,
+          eventName: hookEventName,
+          text: turnHookFailureText(profile, "check_timeout", boundHostSessionId),
+        });
+    void exitTurnHookProcess(timeoutText);
   }, processDeadlineDelayMs(HOST_HOOK_PROCESS_DEADLINE_MS));
   try {
     const event = await hookInput();
@@ -110,13 +122,32 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
     if (stdinSessionId !== host) return;
     boundHostSessionId = (await readAgentProfile(profile, host)).host_session_id;
     const result = await receiveHookEvent(profile, host, event);
+    hookProvider = result.provider;
+    isStopDrain = result.stop_drain === true;
+    hookEventName = result.event_name;
     if (!result.check) return;
-    await checkAgentMessages({ profilePath: profile, workspaceId:args.optional("workspace-id"), hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
-      const text = renderAgentCheck(result);
-      if (text) await writeOnboardingOutput(text);
-    } });
     const previous = await readSecureJsonFileIfPresent(diagnostic, 4096);
-    if (previous !== null && previous !== '"ok"') await writeOnboardingOutput("CommonSwarm message checks are working again.\n");
+    const provider: ReceiveProvider = hookProvider ?? "claude";
+    await checkAgentMessages({ profilePath: profile, workspaceId:args.optional("workspace-id"), hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async checkResult => {
+      const rendered = renderAgentCheck(checkResult);
+      if (isStopDrain) {
+        if (!rendered) return;
+        const payload = formatTurnHookOutput({ provider, stopDrain: true, eventName: hookEventName, text: rendered });
+        if (payload) {
+          await writeOnboardingOutput(payload);
+          await recordStopDrainContinuation(profile, host).catch(() => undefined);
+        }
+        return;
+      }
+      const recovery = previous !== null && previous !== '"ok"' ? "CommonSwarm message checks are working again.\n" : "";
+      const combined = rendered && recovery
+        ? `${rendered}${rendered.endsWith("\n") ? "" : "\n"}${recovery}`
+        : (rendered || recovery);
+      if (combined) {
+        const payload = formatTurnHookOutput({ provider, stopDrain: false, eventName: hookEventName, text: combined });
+        if (payload) await writeOnboardingOutput(payload);
+      }
+    } });
     if (previous !== '"ok"') await writeSecureJsonFile(diagnostic, '"ok"');
   } catch (error) {
     const code = error instanceof AgentSetupError ? error.code : "check_failed";
@@ -125,7 +156,14 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
       changed = await readSecureJsonFileIfPresent(diagnostic, 4096) !== JSON.stringify(code);
       if (changed) await writeSecureJsonFile(diagnostic, JSON.stringify(code));
     } catch { /* A broken state directory cannot hold a diagnostic. */ }
-    if (changed) failureText = turnHookFailureText(profile, code, boundHostSessionId);
+    if (changed && !isStopDrain) {
+      failureText = formatTurnHookOutput({
+        provider: hookProvider ?? "claude",
+        stopDrain: false,
+        eventName: hookEventName,
+        text: turnHookFailureText(profile, code, boundHostSessionId),
+      });
+    }
     // A coordination outage must not block the user's host turn.
   } finally {
     clearTimeout(hardExit);

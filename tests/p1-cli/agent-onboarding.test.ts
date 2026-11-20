@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -10,7 +10,7 @@ import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contr
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { AGENT_CHECK_ACK_RETRY_BASE_MS, AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_DIRECT_TIMEOUT_MS, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
-import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
+import { configureAgentReceive, formatTurnHookOutput, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus, recordStopDrainContinuation } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import type { DeliveryRow } from "../../src/cloud/delivery.js";
@@ -456,7 +456,17 @@ test("hook merge keeps unrelated handlers and repeated install does not duplicat
   const first = mergeReceiveHooks(base, "my-check", null, false);
   assert.deepEqual(mergeReceiveHooks(first, "my-check", "my-check", false), first);
   assert.equal(JSON.stringify(first).includes("other-agent"), true);
-  assert.equal(JSON.stringify(first).includes("Stop"), false);
+  assert.equal(JSON.stringify(first).includes("Stop"), true);
+  const gemini = mergeReceiveHooks(
+    { other: true, hooks: { BeforeAgent: [{ matcher: "*", hooks: [{ type: "command", command: "other-gemini" }] }] } },
+    "my-check",
+    null,
+    false,
+    "gemini",
+  );
+  assert.deepEqual(mergeReceiveHooks(gemini, "my-check", "my-check", false, "gemini"), gemini);
+  assert.equal(JSON.stringify(gemini).includes("other-gemini"), true);
+  assert.equal(JSON.stringify(gemini).includes("AfterAgent"), true);
 });
 
 test("Claude wake settings add only the receipt permission and turn removes only it", async () => {
@@ -500,7 +510,7 @@ test("Claude receive refuses malformed permissions without changing settings", a
   assert.equal(await readFile(settingsPath, "utf8"), before);
 });
 
-test("Claude hook verifies only the configured session; Stop records idle without reading messages", async () => {
+test("Claude hook verifies only the configured session; turn-mode Stop drains once per turn and wake-mode Stop stays passive", async () => {
   const { profilePath } = await setup();
   const cwd = await mkdtemp(join(root, "project-"));
   const result = await configureAgentReceive({ profilePath, mode: "turn", provider: "claude", hostSessionId: "session-one", cwd, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } });
@@ -509,7 +519,24 @@ test("Claude hook verifies only the configured session; Stop records idle withou
   assert.equal((await readReceiveBinding(profilePath, "session-one"))!.turn_verified_at, null);
   assert.equal((await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "UserPromptSubmit" })).check, true);
   assert.equal(receiveStatus(await readReceiveBinding(profilePath, "session-one")).turn_check, "verified");
+  const firstStop = await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "Stop" });
+  assert.equal(firstStop.check, true);
+  assert.equal(firstStop.stop_drain, true);
+  assert.equal((await readReceiveBinding(profilePath, "session-one"))!.idle, true);
+  // Active stop continuation never loops.
+  const activeStop = await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "Stop", stop_hook_active: true });
+  assert.equal(activeStop.check, false);
+  assert.equal(activeStop.stop_drain, false);
+  // Per-turn drain cap prevents loops even if a host omits stop_hook_active.
+  await recordStopDrainContinuation(profilePath, "session-one");
   assert.equal((await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "Stop" })).check, false);
+  // A fresh turn resets the drain cap.
+  assert.equal((await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "UserPromptSubmit" })).check, true);
+  assert.equal((await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "Stop" })).check, true);
+  // Wake mode leaves Stop passive so idle channel delivery and canaries stay untouched.
+  await configureAgentReceive({ profilePath, mode: "wake", provider: "claude", hostSessionId: "session-one", cwd, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } });
+  const wakeStop = await receiveHookEvent(profilePath, "session-one", { session_id: "session-one", cwd, hook_event_name: "Stop" });
+  assert.equal(wakeStop.check, false);
   assert.equal((await readReceiveBinding(profilePath, "session-one"))!.idle, true);
 });
 
@@ -699,4 +726,137 @@ test("Grok Bot env detection applies unless a foreign CLI host bounds the walk",
   assert.equal(await detectAgentHost(async () => ({ parent: 1, executable: "sand-exit-watch" }), 10, {}, () => false), "unknown");
   assert.equal(await detectAgentHost(pass, 10, {}, p => p === "/home/box/sand-data/gateway.json"), "grok-bot");
   assert.equal(await detectAgentHost(async pid => ({ parent: pid + 1, executable: "node" }), 10, { CURSOR_AGENT: "1" }, () => false), "grok-bot");
+});
+
+function runHookCli(args: string[], stdinPayload: unknown): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((done, reject) => {
+    const child = spawn(process.execPath, [process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"), ...args], {
+      env: { ...process.env, HOME: root },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => { stdout += String(chunk); });
+    child.stderr.on("data", chunk => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", code => done({ code: code ?? 1, stdout, stderr }));
+    child.stdin.end(JSON.stringify(stdinPayload));
+  });
+}
+
+test("C1c: turn-mode Stop hook drains undelivered messages for Claude Code, Codex, and Gemini without looping", { timeout: 25_000 }, async () => {
+  // Pure output formatter contract check across all three hosts.
+  assert.equal(formatTurnHookOutput({ provider: "claude", stopDrain: true, eventName: "Stop", text: "msg\n" }), '{"decision":"block","reason":"msg"}\n');
+  assert.equal(formatTurnHookOutput({ provider: "codex", stopDrain: true, eventName: "Stop", text: "msg\n" }), '{"decision":"block","reason":"msg"}\n');
+  assert.equal(formatTurnHookOutput({ provider: "gemini", stopDrain: true, eventName: "AfterAgent", text: "msg\n" }), '{"decision":"deny","reason":"msg","continue":true}\n');
+  assert.equal(formatTurnHookOutput({ provider: "gemini", stopDrain: false, eventName: "BeforeAgent", text: "msg\n" }), '{"hookSpecificOutput":{"hookEventName":"BeforeAgent","additionalContext":"msg"}}\n');
+  assert.equal(formatTurnHookOutput({ provider: "gemini", stopDrain: true, eventName: "AfterAgent", text: "" }), "");
+
+  let liveRows: SignalRecord[] = [];
+  let failServer = false;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", data => raw += data);
+    req.on("end", () => {
+      if (failServer) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "temporarily_unavailable" }));
+        return;
+      }
+      const fake = fixture(liveRows);
+      void (async () => {
+        const response = await fake.fetcher("http://fixture", { body: raw, headers: req.headers as Record<string, string>, redirect: "error" });
+        res.writeHead(response.status, { "content-type": "application/json" });
+        res.end(await response.text());
+      })().catch(() => res.writeHead(500).end());
+    });
+  });
+  await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const execution = { command: process.execPath, args: [process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js")] };
+
+    for (const hostCase of [
+      { provider: "claude" as const, startEvent: "UserPromptSubmit", stopEvent: "Stop", hookRel: [".claude", "settings.local.json"] },
+      { provider: "codex" as const, startEvent: "UserPromptSubmit", stopEvent: "Stop", hookRel: [".codex", "hooks.json"] },
+      { provider: "gemini" as const, startEvent: "BeforeAgent", stopEvent: "AfterAgent", hookRel: [".gemini", "settings.json"] },
+    ]) {
+      liveRows = [];
+      failServer = false;
+      const input = await saveInput(connection(url));
+      const profilePath = join(dirname(input), `agent-${hostCase.provider}`, "profile.json");
+      const sessionId = `c1c-${hostCase.provider}-session`;
+      await setupAgent({ hostSessionId: sessionId, connectionFile: input, profilePath, fetcher: fixture([]).fetcher });
+      const cwd = await realpath(await mkdtemp(join(root, `c1c-${hostCase.provider}-`)));
+      if (hostCase.provider === "gemini") {
+        await assert.rejects(
+          configureAgentReceive({ profilePath, mode: "wake", provider: "gemini", hostSessionId: sessionId, cwd, execution }),
+          { code: "wake_host_unsupported" },
+        );
+      }
+      const configured = await configureAgentReceive({ profilePath, mode: "turn", provider: hostCase.provider, hostSessionId: sessionId, cwd, execution });
+      assert.equal(configured.hook_file, join(cwd, ...hostCase.hookRel));
+      const hookJson = JSON.parse(await readFile(configured.hook_file!, "utf8")) as { hooks: Record<string, unknown[]> };
+      assert.ok(Array.isArray(hookJson.hooks[hostCase.startEvent]), `${hostCase.provider} installs ${hostCase.startEvent}`);
+      assert.ok(Array.isArray(hookJson.hooks[hostCase.stopEvent]), `${hostCase.provider} installs ${hostCase.stopEvent}`);
+
+      // 1. Start of turn: no messages yet -> empty stdout.
+      const startRun = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.startEvent,
+      });
+      assert.equal(startRun.code, 0, startRun.stderr);
+      assert.equal(startRun.stdout, "");
+
+      // 2. Message arrives mid-turn; Stop/AfterAgent drains it with host-specific continuation JSON.
+      liveRows = [row(1, `arrived during ${hostCase.provider} turn`)];
+      const stopDrain = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.stopEvent, stop_hook_active: false,
+      });
+      assert.equal(stopDrain.code, 0, stopDrain.stderr);
+      const parsed = JSON.parse(stopDrain.stdout) as { decision: string; reason: string; continue?: boolean };
+      assert.equal(parsed.decision, hostCase.provider === "gemini" ? "deny" : "block");
+      if (hostCase.provider === "gemini") assert.equal(parsed.continue, true);
+      assert.match(parsed.reason, new RegExp(`arrived during ${hostCase.provider} turn`));
+      assert.equal((await readReceiveBinding(profilePath, sessionId))!.stop_drains_in_turn, 1);
+
+      // 3. Follow-up Stop with stop_hook_active=true does not loop even if another message arrives.
+      liveRows = [row(1, `arrived during ${hostCase.provider} turn`), row(2, "second message")];
+      const stopActive = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.stopEvent, stop_hook_active: true,
+      });
+      assert.equal(stopActive.code, 0);
+      assert.equal(stopActive.stdout, "");
+
+      // 4. Next turn start delivers message 2 (not message 1) in host-appropriate format.
+      const nextStart = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.startEvent,
+      });
+      assert.equal(nextStart.code, 0);
+      if (hostCase.provider === "gemini") {
+        const geminiStart = JSON.parse(nextStart.stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+        assert.equal(geminiStart.hookSpecificOutput.hookEventName, "BeforeAgent");
+        assert.match(geminiStart.hookSpecificOutput.additionalContext, /second message/);
+        assert.equal(geminiStart.hookSpecificOutput.additionalContext.includes(`arrived during ${hostCase.provider} turn`), false);
+      } else {
+        assert.match(nextStart.stdout, /second message/);
+        assert.equal(nextStart.stdout.includes(`arrived during ${hostCase.provider} turn`), false);
+      }
+
+      // 5. Stop with no new messages emits nothing and allows stop cleanly.
+      const emptyStop = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.stopEvent,
+      });
+      assert.equal(emptyStop.code, 0);
+      assert.equal(emptyStop.stdout, "");
+
+      // 6. Coordination outage during Stop exits 0 with empty stdout (never blocks stop or corrupts JSON).
+      failServer = true;
+      const outageStop = await runHookCli(["check", "--profile", profilePath, "--hook", "--host-session-id", sessionId], {
+        session_id: sessionId, cwd, hook_event_name: hostCase.stopEvent,
+      });
+      assert.equal(outageStop.code, 0);
+      assert.equal(outageStop.stdout, "");
+    }
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+  }
 });
