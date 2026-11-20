@@ -102,6 +102,9 @@ let conflictNextUpdate = false;
 let staleNextCertify = false;
 let holdNextList = false;
 let heldListResolver = null;
+let holdNextWrite = false;
+let heldWriteResolver = null;
+let omitObjectInSearchOnce = null;
 let writeMutations = 0;
 const receipts = new Map();
 const recordedCommands = [];
@@ -180,6 +183,25 @@ const server = createServer(async (req, res) => {
         heldListResolver = null;
         resolve();
       }
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-next-write") {
+      holdNextWrite = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/write-held") {
+      return reply(200, { held: heldWriteResolver !== null });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-held-write") {
+      if (heldWriteResolver) {
+        const resolve = heldWriteResolver;
+        heldWriteResolver = null;
+        resolve();
+      }
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/omit-in-search") {
+      omitObjectInSearchOnce = url.searchParams.get("object_id") || null;
       return reply(200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/fixture/commands") {
@@ -303,6 +325,10 @@ const server = createServer(async (req, res) => {
         writeMutations += 1;
         const committed = { status: "committed", object_id: entry.object_id, revision: entry.current.revision };
         receipts.set(body.command_id, committed);
+        if (holdNextWrite) {
+          holdNextWrite = false;
+          await new Promise((resolve) => { heldWriteResolver = resolve; });
+        }
         if (commitThen503NextWrite) {
           commitThen503NextWrite = false;
           return reply(503, { error: "gateway_timeout" });
@@ -317,9 +343,13 @@ const server = createServer(async (req, res) => {
 
         if (cmd.tool === "definitions_search") {
           if (unsupportedMode) return reply(400, { status: "refused", reason: "unknown_tool" });
-          const sorted = Array.from(definitions.values()).sort((a, b) =>
-            a.current.term.toLowerCase().localeCompare(b.current.term.toLowerCase()) || a.object_id.localeCompare(b.object_id)
-          );
+          const omitted = omitObjectInSearchOnce;
+          omitObjectInSearchOnce = null;
+          const sorted = Array.from(definitions.values())
+            .filter((entry) => entry.object_id !== omitted)
+            .sort((a, b) =>
+              a.current.term.toLowerCase().localeCompare(b.current.term.toLowerCase()) || a.object_id.localeCompare(b.object_id)
+            );
           const offset = Number(cmd.arguments?.offset ?? 0);
           const limit = Number(cmd.arguments?.limit ?? 100);
           const slice = sorted.slice(offset, offset + limit).map((entry) => ({
@@ -398,6 +428,10 @@ const server = createServer(async (req, res) => {
           writeMutations += 1;
           const committed = { status: "committed", object_id: args.object_id, revision: rev };
           receipts.set(body.command_id, committed);
+          if (holdNextWrite) {
+            holdNextWrite = false;
+            await new Promise((resolve) => { heldWriteResolver = resolve; });
+          }
           if (commitThen503NextWrite) {
             commitThen503NextWrite = false;
             return reply(503, { error: "gateway_timeout" });
@@ -456,6 +490,10 @@ const server = createServer(async (req, res) => {
           writeMutations += 1;
           const committed = { status: "committed", object_id: entry.object_id, revision: nextRev };
           receipts.set(body.command_id, committed);
+          if (holdNextWrite) {
+            holdNextWrite = false;
+            await new Promise((resolve) => { heldWriteResolver = resolve; });
+          }
           if (commitThen503NextWrite) {
             commitThen503NextWrite = false;
             return reply(503, { error: "gateway_timeout" });

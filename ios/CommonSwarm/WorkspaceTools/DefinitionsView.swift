@@ -130,6 +130,23 @@ struct DefinitionsListView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
+                    if store.canEdit && store.hasUnknownPendingCreate {
+                        Section {
+                            Button {
+                                Task {
+                                    if let createdID = await store.retryPendingCreate(api: definitionsAPI) {
+                                        createdRoute = DefinitionDetailRoute(objectID: createdID)
+                                    }
+                                }
+                            } label: {
+                                Text(store.isCreating ? "Checking…" : "Retry pending definition")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                            .disabled(store.isCreating)
+                            .accessibilityIdentifier("definitions-retry-pending-create")
+                        }
+                    }
                     if let status = store.statusMessage {
                         Section {
                             Text(verbatim: status)
@@ -296,6 +313,44 @@ struct DefinitionDetailView: View {
 
                         if detail.proposalPending, let certified = detail.certified {
                             comparisonSection(certified: certified, proposed: detail.current, palette: palette)
+                        }
+
+                        if store.canEdit && store.hasUnknownPendingUpdate {
+                            Button {
+                                Task {
+                                    if await store.retryPendingUpdate(api: definitionsAPI) {
+                                        await onChanged?()
+                                    }
+                                }
+                            } label: {
+                                Text(store.isSaving ? "Checking…" : "Retry pending edit")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(palette.primaryBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.isSaving)
+                            .accessibilityIdentifier("definition-retry-pending-update")
+                        }
+
+                        if store.canEdit && store.hasUnknownPendingCertify && !store.canCertify {
+                            Button {
+                                Task {
+                                    if await store.retryPendingCertify(api: definitionsAPI) {
+                                        await onChanged?()
+                                    }
+                                }
+                            } label: {
+                                Text(store.isSaving ? "Checking…" : "Retry pending certification")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(palette.primaryBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.isSaving)
+                            .accessibilityIdentifier("definition-retry-pending-certify")
                         }
 
                         if store.canCertify {

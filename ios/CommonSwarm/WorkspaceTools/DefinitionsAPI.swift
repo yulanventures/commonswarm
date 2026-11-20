@@ -215,7 +215,8 @@ struct DefinitionsAPI: Sendable {
     private func postCommand<Command: Encodable>(
         workspaceID: UUID,
         commandID: UUID,
-        command: Command
+        command: Command,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async throws -> (Data, Int) {
         var req = URLRequest(url: api.origin.appending(path: "functions/v1/command"))
         req.httpMethod = "POST"
@@ -227,16 +228,20 @@ struct DefinitionsAPI: Sendable {
             command: command
         )
         req.httpBody = try JSONEncoder().encode(envelope)
-        let (data, response) = try await api.session.data(for: req)
+        let (data, response) = try await api.session.data(for: req, canDispatch: canDispatch)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return (data, status)
     }
 
-    func access(workspaceID: UUID) async throws -> SharedAccessStatus {
+    func access(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> SharedAccessStatus {
         let (data, status) = try await postCommand(
             workspaceID: workspaceID,
             commandID: UUID(),
-            command: HouseholdAccessCommand()
+            command: HouseholdAccessCommand(),
+            canDispatch: canDispatch
         )
         let reply = try? JSONDecoder().decode(AccessReplyWire.self, from: data)
         if status == 401 {
@@ -265,12 +270,16 @@ struct DefinitionsAPI: Sendable {
         return .refused(reason: reason)
     }
 
-    func listDefinitions(workspaceID: UUID) async throws -> [DefinitionSummary] {
+    func listDefinitions(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> [DefinitionSummary] {
         var collected: [DefinitionSummary] = []
         var seenIDs = Set<String>()
         var offset = 0
 
         for _ in 0..<DefinitionsRules.maxListPages {
+            guard await canDispatch() else { throw CancellationError() }
             let (data, status) = try await postCommand(
                 workspaceID: workspaceID,
                 commandID: UUID(),
@@ -281,7 +290,8 @@ struct DefinitionsAPI: Sendable {
                         offset: offset,
                         limit: Self.pageLimit
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             let reply = try? JSONDecoder().decode(SearchReplyWire.self, from: data)
             if status == 401 {
@@ -354,7 +364,11 @@ struct DefinitionsAPI: Sendable {
         return collected
     }
 
-    func readDefinition(workspaceID: UUID, objectID: String) async throws -> DefinitionDetail {
+    func readDefinition(
+        workspaceID: UUID,
+        objectID: String,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> DefinitionDetail {
         let (data, status) = try await postCommand(
             workspaceID: workspaceID,
             commandID: UUID(),
@@ -364,7 +378,8 @@ struct DefinitionsAPI: Sendable {
                     seat: Self.householdLocalSeat,
                     object_id: objectID
                 )
-            )
+            ),
+            canDispatch: canDispatch
         )
         let reply = try? JSONDecoder().decode(ReadReplyWire.self, from: data)
         if status == 401 {
@@ -445,7 +460,8 @@ struct DefinitionsAPI: Sendable {
         workspaceID: UUID,
         objectID: String,
         fields: DefinitionFields,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> DefinitionMutationOutcome {
         do {
             let (data, status) = try await postCommand(
@@ -461,9 +477,12 @@ struct DefinitionsAPI: Sendable {
                         meaning: fields.meaning,
                         source: fields.source
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWriteOutcome(data: data, status: status, workspaceID: workspaceID, expectedObjectID: objectID)
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: Self.unconfirmedMessage)
         }
@@ -475,7 +494,8 @@ struct DefinitionsAPI: Sendable {
         base: SharedRevisionRef,
         before: DefinitionFields,
         after: DefinitionFields,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> DefinitionMutationOutcome {
         guard base.isBound(workspaceID: workspaceID, objectID: objectID) else {
             return .refused(reason: "invalid_request", message: DefinitionsRules.refusalMessage("invalid_request"))
@@ -494,9 +514,12 @@ struct DefinitionsAPI: Sendable {
                         before: FieldsWire(term: before.term, meaning: before.meaning, source: before.source),
                         after: FieldsWire(term: after.term, meaning: after.meaning, source: after.source)
                     )
-                )
+                ),
+                canDispatch: canDispatch
             )
             return decodeWriteOutcome(data: data, status: status, workspaceID: workspaceID, expectedObjectID: objectID)
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: Self.unconfirmedMessage)
         }
@@ -506,7 +529,8 @@ struct DefinitionsAPI: Sendable {
         workspaceID: UUID,
         objectID: String,
         revision: SharedRevisionRef,
-        requestID: UUID
+        requestID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
     ) async -> DefinitionMutationOutcome {
         guard revision.isBound(workspaceID: workspaceID, objectID: objectID) else {
             return .refused(reason: "invalid_request", message: DefinitionsRules.refusalMessage("invalid_request"))
@@ -515,7 +539,8 @@ struct DefinitionsAPI: Sendable {
             let (data, status) = try await postCommand(
                 workspaceID: workspaceID,
                 commandID: requestID,
-                command: CertifyCommand(object_id: objectID, revision: revision)
+                command: CertifyCommand(object_id: objectID, revision: revision),
+                canDispatch: canDispatch
             )
             return decodeWriteOutcome(
                 data: data,
@@ -524,6 +549,8 @@ struct DefinitionsAPI: Sendable {
                 expectedObjectID: objectID,
                 fallbackMessage: "Couldn’t certify definition."
             )
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .unconfirmed(message: Self.unconfirmedMessage)
         }
