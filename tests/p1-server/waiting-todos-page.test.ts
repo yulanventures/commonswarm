@@ -979,13 +979,16 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
         origin_conversation_id: convGroupGen1,
         assign: { to: { kind: "user", id: outsiderId } },
       }));
-      const groupMayaTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
+      const groupMayaWrite = await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
         kind: "todo_create",
         title: "Maya assigned group task",
         origin_placement: "group_dm",
         origin_conversation_id: convGroupGen1,
         assign: { to: { kind: "user", id: mayaId } },
-      }));
+      });
+      const groupMayaTodo = committedTodo(groupMayaWrite);
+      const mayaOfferNoticeId = groupMayaWrite.notices[0]?.signal_id ?? null;
+      assert.ok(mayaOfferNoticeId, "assigning a to-do to Maya posts a direct offer notice ask to Maya");
       const dmViewerTodo = committedTodo(await store.write(tx, wsId, viewerIdentity, `req-${randomUUID()}`, {
         kind: "todo_create",
         title: "Follow up with Scout",
@@ -1158,11 +1161,15 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
           undefined,
           `${label} must exclude mapped Gen 1 ask completely after member departure`,
         );
-        assert.equal(payload.total, 1, `${label} total must exclude departed Gen 1 ask and count only the legacy control`);
-        assert.equal(payload.asks.length, 1);
-        assert.equal(payload.asks[0]!.signal_id, legacyAskId, `${label} must retain eligible unmapped legacy ask control`);
-        assert.equal(payload.asks[0]!.conversation_id, null);
-        assert.equal(payload.asks[0]!.conversation_kind, null);
+        // Maya retains only her unmapped legacy control ask + the live direct offer notice ask (2 total, never gen1AskId).
+        assert.equal(payload.total, 2, `${label} total must exclude departed Gen 1 ask and count only legacy + offer notice`);
+        assert.equal(payload.asks.length, 2);
+        const leg = payload.asks.find((a) => a.signal_id === legacyAskId);
+        const offerNotice = payload.asks.find((a) => a.signal_id === mayaOfferNoticeId);
+        assert.ok(leg, `${label} must retain eligible unmapped legacy ask control`);
+        assert.equal(leg.conversation_id, null);
+        assert.equal(leg.conversation_kind, null);
+        assert.ok(offerNotice, `${label} must retain live direct offer notice ask`);
       }
 
       // Joined recipient control: viewerId still sees BOTH Gen 1 ask (with convGroupGen1) AND legacy ask!
@@ -1183,11 +1190,15 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
       }
       await tx`ROLLBACK TO SAVEPOINT sp_dm_left_read`;
 
-      // Pure departed-only control: answer legacyAskId so Maya has zero eligible asks -> total=0, asks=[]!
+      // Pure departed-only control: answer legacyAskId and mayaOfferNoticeId so gen1AskId is Maya's ONLY open ask -> total=0, asks=[]!
       await tx`SAVEPOINT sp_dm_departed_zero`;
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, in_reply_to, until, created_at)
         VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Answered legacy', ${legacyAskId}::uuid, now() + interval '1 day', statement_timestamp())
+      `;
+      await tx`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, in_reply_to, until, created_at)
+        VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 'user', ${viewerId}::uuid, 'note', 'Answered offer notice', ${mayaOfferNoticeId}::uuid, now() + interval '1 day', statement_timestamp())
       `;
       await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: mayaId })}, true)`;
       await tx`SET LOCAL ROLE authenticated`;
