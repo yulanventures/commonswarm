@@ -423,22 +423,28 @@ struct WikiAPI: Sendable {
                       let rawSlotVersionID = reply.version_id, let slotVersionID = UUID(uuidString: rawSlotVersionID),
                       slotVersionID == versionID,
                       let versionN = reply.version_n, versionN > 0,
-                      let uploadPath = reply.upload_path,
-                      WikiRules.validatedUploadURL(
-                          uploadPath: uploadPath,
-                          origin: api.origin,
-                          workspaceID: workspaceID,
-                          fileID: slotFileID,
-                          version: versionN
-                      ) != nil else {
+                      let uploadPath = reply.upload_path else {
                     if let reason = reply?.reason ?? reply?.error, !reason.isEmpty {
                         return .refused(reason: reason, message: WikiRules.refusalMessage(reason))
                     }
                     return .unconfirmed(message: unconfirmedMessage, slot: nil, uploaded: false)
                 }
-                resolvedSlot = WikiUploadSlot(fileID: slotFileID, versionID: slotVersionID, versionN: versionN, uploadPath: uploadPath)
+                if ifVersion > 0 && slotFileID != fileID {
+                    return .refused(reason: "file_replaced", message: WikiRules.refusalMessage("file_replaced"))
+                }
+                let expectedFileID = ifVersion > 0 ? fileID : slotFileID
+                guard WikiRules.validatedUploadURL(
+                    uploadPath: uploadPath,
+                    origin: api.origin,
+                    workspaceID: workspaceID,
+                    fileID: expectedFileID,
+                    version: versionN
+                ) != nil else {
+                    return .refused(reason: "invalid_upload_path", message: "The upload target could not be verified.")
+                }
+                resolvedSlot = WikiUploadSlot(fileID: expectedFileID, versionID: slotVersionID, versionN: versionN, uploadPath: uploadPath)
             } catch is CancellationError {
-                return .cancelled
+                return .cancelled(slot: nil, uploaded: false)
             } catch {
                 return .unconfirmed(message: unconfirmedMessage, slot: nil, uploaded: false)
             }
@@ -447,15 +453,19 @@ struct WikiAPI: Sendable {
         guard let slot = resolvedSlot else {
             return .unconfirmed(message: unconfirmedMessage, slot: nil, uploaded: false)
         }
+        if ifVersion > 0 && slot.fileID != fileID {
+            return .refused(reason: "file_replaced", message: WikiRules.refusalMessage("file_replaced"))
+        }
+        let targetFileID = ifVersion > 0 ? fileID : slot.fileID
 
         // Step 2: PUT bytes to validated signed upload path via HumanSession.putStorage
         if !uploaded {
-            guard await canDispatch() else { return .cancelled }
+            guard await canDispatch() else { return .cancelled(slot: slot, uploaded: false) }
             guard let uploadURL = WikiRules.validatedUploadURL(
                 uploadPath: slot.uploadPath,
                 origin: api.origin,
                 workspaceID: workspaceID,
-                fileID: slot.fileID,
+                fileID: targetFileID,
                 version: slot.versionN
             ) else {
                 return .refused(reason: "invalid_upload_path", message: "The upload target could not be verified.")
@@ -490,7 +500,7 @@ struct WikiAPI: Sendable {
                     return .unconfirmed(message: unconfirmedMessage, slot: slot, uploaded: false)
                 }
             } catch is CancellationError {
-                return .cancelled
+                return .cancelled(slot: slot, uploaded: false)
             } catch {
                 return .unconfirmed(message: unconfirmedMessage, slot: slot, uploaded: false)
             }
@@ -502,7 +512,7 @@ struct WikiAPI: Sendable {
                 workspaceID: workspaceID,
                 commandID: commitCommandID,
                 command: FileVersionCommitCommand(
-                    file_id: slot.fileID.uuidString.lowercased(),
+                    file_id: targetFileID.uuidString.lowercased(),
                     version_id: slot.versionID.uuidString.lowercased(),
                     sha256: digest
                 ),
@@ -540,6 +550,9 @@ struct WikiAPI: Sendable {
                 }
                 return .unconfirmed(message: unconfirmedMessage, slot: slot, uploaded: uploaded)
             }
+            if ifVersion > 0 && committedFileID != fileID {
+                return .refused(reason: "file_replaced", message: WikiRules.refusalMessage("file_replaced"))
+            }
             return .committed(
                 fileID: committedFileID,
                 version: committedVersion,
@@ -547,7 +560,7 @@ struct WikiAPI: Sendable {
                 replayed: reply.replayed == true
             )
         } catch is CancellationError {
-            return .cancelled
+            return .cancelled(slot: slot, uploaded: uploaded)
         } catch {
             return .unconfirmed(message: unconfirmedMessage, slot: slot, uploaded: uploaded)
         }

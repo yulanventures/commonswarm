@@ -112,12 +112,17 @@ enum WikiLoadFailure: Equatable, Sendable {
     }
 }
 
+struct WikiPresentationToken: Equatable, Hashable, Sendable {
+    let id: UUID
+    init(id: UUID = UUID()) { self.id = id }
+}
+
 enum WikiSaveOutcome: Sendable {
     case committed(fileID: UUID, version: Int, sizeBytes: Int, replayed: Bool)
     case conflict(currentVersion: Int?, message: String)
     case refused(reason: String, message: String)
     case unconfirmed(message: String, slot: WikiUploadSlot?, uploaded: Bool)
-    case cancelled
+    case cancelled(slot: WikiUploadSlot?, uploaded: Bool)
 }
 
 enum WikiReadContentResult: Sendable {
@@ -352,6 +357,8 @@ enum WikiRules {
             return "This wiki page is no longer available."
         case "file_tombstoned":
             return "This wiki page was removed."
+        case "file_replaced":
+            return "This wiki page was replaced by another page with the same name. Review the latest pages and edit again."
         default:
             return fallback
         }
@@ -397,6 +404,7 @@ final class WikiStore: ObservableObject {
     private var readGeneration = 0
     private var accessGeneration = 0
     private var isRetired = false
+    private var activePresentations: Set<WikiPresentationToken> = []
     private let sessionID: ObjectIdentifier
 
     init(api: WikiAPI, workspaceID: UUID) {
@@ -471,7 +479,20 @@ final class WikiStore: ObservableObject {
         }
     }
 
+    func beginPresentation(_ token: WikiPresentationToken) {
+        activePresentations.insert(token)
+        activate()
+    }
+
+    func endPresentation(_ token: WikiPresentationToken) {
+        activePresentations.remove(token)
+        if activePresentations.isEmpty {
+            retire()
+        }
+    }
+
     func retire() {
+        activePresentations.removeAll()
         isRetired = true
         listGeneration += 1
         readGeneration += 1
@@ -800,7 +821,8 @@ final class WikiStore: ObservableObject {
             ownerToken: attemptToken,
             wasAlreadyUnknown: claimed.outcomeUnknown,
             boundEditSessionID: editSession.id,
-            boundCreateSessionID: nil
+            boundCreateSessionID: nil,
+            boundPresentation: nil
         )
     }
 
@@ -860,15 +882,18 @@ final class WikiStore: ObservableObject {
             ownerToken: attemptToken,
             wasAlreadyUnknown: claimed.outcomeUnknown,
             boundEditSessionID: nil,
-            boundCreateSessionID: createSession.id
+            boundCreateSessionID: createSession.id,
+            boundPresentation: nil
         )
         guard ok else { return nil }
         return topics?.first(where: { $0.fileID == claimed.fileID || $0.topic == topic })
     }
 
-    /// Bound retry strictly tied to the named action's commandID, fileID, baseVersion, and markdown.
-    func retryPendingSave(_ item: WikiPendingSaveRetry) async -> Bool {
-        guard !isRetired else { return false }
+    /// Bound retry strictly tied to the named action's commandID, fileID, baseVersion, markdown,
+    /// and the initiating presentation (so navigating Back retires the retry before any phase sends,
+    /// while preserving frozen pending IDs for a later explicit retry).
+    func retryPendingSave(_ item: WikiPendingSaveRetry, presentation: WikiPresentationToken) async -> Bool {
+        guard !isRetired, activePresentations.contains(presentation) else { return false }
         guard api.session.isActive else {
             clearOnAccessLoss(reason: "unauthorized", clearPending: true)
             return false
@@ -906,7 +931,8 @@ final class WikiStore: ObservableObject {
             ownerToken: attemptToken,
             wasAlreadyUnknown: true,
             boundEditSessionID: nil,
-            boundCreateSessionID: nil
+            boundCreateSessionID: nil,
+            boundPresentation: presentation
         )
     }
 
@@ -967,7 +993,8 @@ final class WikiStore: ObservableObject {
         ownerToken: UUID,
         wasAlreadyUnknown: Bool,
         boundEditSessionID: UUID?,
-        boundCreateSessionID: UUID?
+        boundCreateSessionID: UUID?,
+        boundPresentation: WikiPresentationToken?
     ) async -> Bool {
         let capturedSession = api.session
         let capturedAccessGen = accessGeneration
@@ -978,6 +1005,9 @@ final class WikiStore: ObservableObject {
             guard !self.isRetired,
                   capturedSession.isActive,
                   self.accessGeneration == capturedAccessGen else { return false }
+            if let boundPresentation, !self.activePresentations.contains(boundPresentation) {
+                return false
+            }
             let permitted = record.baseVersion == 0 ? self.canCreate : self.canUpdate
             guard permitted else { return false }
             if let boundEditSessionID {
@@ -988,11 +1018,12 @@ final class WikiStore: ObservableObject {
             if let boundCreateSessionID {
                 guard self.activeCreateSession?.id == boundCreateSessionID else { return false }
             }
+            guard var current = self.pendingSaves[record.fileID],
+                  current.commitCommandID == record.commitCommandID,
+                  current.ownerToken == ownerToken else { return false }
+            current.outcomeUnknown = true
+            self.pendingSaves[record.fileID] = current
             dispatchFlag.entered = true
-            if var current = self.pendingSaves[record.fileID], current.commitCommandID == record.commitCommandID {
-                current.outcomeUnknown = true
-                self.pendingSaves[record.fileID] = current
-            }
             return true
         }
 
@@ -1015,6 +1046,14 @@ final class WikiStore: ObservableObject {
             canDispatch: writeGate
         )
 
+        if case .cancelled(let slot, let uploaded) = outcome,
+           var current = pendingSaves[record.fileID],
+           current.commitCommandID == record.commitCommandID {
+            current.slot = slot ?? current.slot
+            current.uploaded = current.uploaded || uploaded
+            pendingSaves[record.fileID] = current
+        }
+
         if !dispatchFlag.entered {
             if !wasAlreadyUnknown,
                let current = pendingSaves[record.fileID],
@@ -1029,7 +1068,9 @@ final class WikiStore: ObservableObject {
             return false
         }
 
-        guard !Task.isCancelled, !isRetired, capturedSession.isActive, accessGeneration == capturedAccessGen else {
+        let presentationStillActive = boundPresentation.map { activePresentations.contains($0) } ?? true
+        guard !Task.isCancelled, !isRetired, presentationStillActive,
+              capturedSession.isActive, accessGeneration == capturedAccessGen else {
             if !capturedSession.isActive {
                 clearOnAccessLoss(reason: "unauthorized", clearPending: true)
             }
@@ -1099,6 +1140,8 @@ final class WikiStore: ObservableObject {
                 accessGeneration += 1
                 access = WikiAccess(canRead: true, canCreate: false, canUpdate: false)
                 closeWriteSurfaces()
+            } else if reason == "file_replaced" {
+                activeEditSession = nil
             }
             actionError = display
             return false

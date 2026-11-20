@@ -103,9 +103,11 @@ let contentRole = "editor"; // editor | reader
 let edge403Mode = false;
 let edge401Mode = false;
 let commitThen503 = false;
+let create503Once = false;
 let preReceiptRefusalReason = null;
 let expireNextDownload = false;
 let duplicateDirectory = false;
+let putCount = 0;
 
 const operationsForRole = (role) => (role === "editor" ? ["read", "create", "update"] : ["read"]);
 
@@ -137,6 +139,34 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/commit-then-503") {
       commitThen503 = true;
       return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/create-503-once") {
+      create503Once = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/replace-topic") {
+      const fid = url.searchParams.get("file_id");
+      const replacementID = url.searchParams.get("replacement_id") || randomUUID();
+      const old = fid ? files.get(fid) : null;
+      if (!old) return reply(404, { ok: false });
+      const replacementBody = Buffer.from(`# Replacement ${old.name}\n\nFresh page at v${old.current_version}.\n`, "utf8");
+      files.delete(fid);
+      versionsByFile.delete(fid);
+      files.set(replacementID, {
+        file_id: replacementID,
+        name: old.name,
+        current_version: old.current_version,
+        size_bytes: replacementBody.length,
+        uploaded_by_kind: "user",
+        uploaded_by: maya,
+        committed_at: new Date().toISOString(),
+        tombstoned_at: null,
+      });
+      versionsByFile.set(
+        replacementID,
+        new Map([[old.current_version, { bytes: replacementBody, state: "live", sha256: sha256(replacementBody) }]]),
+      );
+      return reply(200, { ok: true, replacement_id: replacementID, version: old.current_version });
     }
     if (req.method === "POST" && url.pathname === "/fixture/pre-receipt-refusal") {
       const r = url.searchParams.get("reason");
@@ -176,11 +206,12 @@ const server = createServer(async (req, res) => {
       return reply(200, recordedCommands);
     }
     if (req.method === "GET" && url.pathname === "/fixture/mutations") {
-      return reply(200, { commits: commitMutations });
+      return reply(200, { commits: commitMutations, puts: putCount });
     }
 
     // Signed storage upload PUT (no apikey/bearer; token query authenticates)
     if (req.method === "PUT" && url.pathname.startsWith("/storage/v1/object/upload/sign/swarm-files/")) {
+      putCount += 1;
       const tokenParam = url.searchParams.get("token");
       if (!tokenParam || !pendingSlots.has(tokenParam)) return reply(403, { error: "invalid_upload_token" });
       const chunks = [];
@@ -272,6 +303,10 @@ const server = createServer(async (req, res) => {
 
       if (cmd?.kind === "file_version_create") {
         recordedCommands.push({ command_id: body.command_id, kind: cmd.kind, file_id: cmd.file_id, if_version: cmd.if_version });
+        if (create503Once) {
+          create503Once = false;
+          return reply(503, { error: "unavailable" });
+        }
         if (preReceiptRefusalReason) {
           const r = preReceiptRefusalReason;
           preReceiptRefusalReason = null;

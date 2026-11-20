@@ -8,6 +8,7 @@ struct WikiListView: View {
 
     @StateObject private var store: WikiStore
     @State private var selectedFileID: UUID?
+    @State private var presentation = WikiPresentationToken()
 
     init(api: ConversationAPI, workspace: Workspace) {
         self.api = api
@@ -54,18 +55,16 @@ struct WikiListView: View {
                 }
             }
             .task {
+                store.beginPresentation(presentation)
                 if store.topics == nil {
                     await store.loadTopics()
                 }
             }
             .onAppear {
-                store.activate()
+                store.beginPresentation(presentation)
             }
             .onDisappear {
-                // Only retire when leaving the Wiki hierarchy (not when pushing a detail view).
-                if selectedFileID == nil {
-                    store.retire()
-                }
+                store.endPresentation(presentation)
             }
     }
 
@@ -95,7 +94,7 @@ struct WikiListView: View {
                         Section {
                             ForEach(pendingRetries) { item in
                                 Button(item.label) {
-                                    Task { _ = await store.retryPendingSave(item) }
+                                    Task { _ = await store.retryPendingSave(item, presentation: presentation) }
                                 }
                                 .font(.subheadline.weight(.semibold))
                                 .disabled(store.isSaving)
@@ -170,6 +169,7 @@ struct WikiTopicDetailView: View {
     let initialFileID: UUID
 
     @State private var currentFileID: UUID
+    @State private var presentation = WikiPresentationToken()
     @State private var displayMode: DisplayMode = .formatted
     @State private var historyExpanded = false
     @Environment(\.colorScheme) private var colorScheme
@@ -249,10 +249,14 @@ struct WikiTopicDetailView: View {
             }
         }
         .task(id: currentFileID) {
+            store.beginPresentation(presentation)
             await store.openTopic(fileID: currentFileID)
         }
         .onAppear {
-            store.activate()
+            store.beginPresentation(presentation)
+        }
+        .onDisappear {
+            store.endPresentation(presentation)
         }
     }
 
@@ -317,7 +321,7 @@ struct WikiTopicDetailView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(pendingRetries) { item in
                                 Button(item.label) {
-                                    Task { _ = await store.retryPendingSave(item) }
+                                    Task { _ = await store.retryPendingSave(item, presentation: presentation) }
                                 }
                                 .font(.subheadline.weight(.semibold))
                                 .disabled(store.isSaving)
@@ -365,6 +369,13 @@ struct WikiTopicDetailView: View {
                             onSelectTopic: { linkedTopic in
                                 Task {
                                     if let opened = await store.followTopicLink(linkedTopic) {
+                                        if opened.fileID != currentFileID {
+                                            let oldPresentation = presentation
+                                            let nextPresentation = WikiPresentationToken()
+                                            presentation = nextPresentation
+                                            store.beginPresentation(nextPresentation)
+                                            store.endPresentation(oldPresentation)
+                                        }
                                         currentFileID = opened.fileID
                                         displayMode = .formatted
                                         historyExpanded = false

@@ -68,6 +68,7 @@ struct VerifyWiki {
 
     struct MutationCount: Decodable {
         let commits: Int
+        let puts: Int
     }
 
     static func recordedCommands(_ origin: URL) async throws -> [RecordedCommand] {
@@ -75,9 +76,13 @@ struct VerifyWiki {
         return try JSONDecoder().decode([RecordedCommand].self, from: data)
     }
 
-    static func commitMutations(_ origin: URL) async throws -> Int {
+    static func mutationStats(_ origin: URL) async throws -> MutationCount {
         let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/mutations"))
-        return try JSONDecoder().decode(MutationCount.self, from: data).commits
+        return try JSONDecoder().decode(MutationCount.self, from: data)
+    }
+
+    static func commitMutations(_ origin: URL) async throws -> Int {
+        try await mutationStats(origin).commits
     }
 
     static func main() async throws {
@@ -235,8 +240,15 @@ struct VerifyWiki {
 
         // =========================================================================
         // 4. C3 + C4: Committed-then-503 + same-login 401 + inconclusive refresh + pre-receipt refusal
-        //             + bound retry visibility after refresh + exact 1 commit + no stale replay regression
+        //             + bound retry visibility after refresh + detail Back presentation fence
+        //             + exact 1 commit + no stale replay regression
         // =========================================================================
+        let listPres = WikiPresentationToken()
+        let detailPres = WikiPresentationToken()
+        await MainActor.run {
+            store.beginPresentation(listPres)
+            store.beginPresentation(detailPres)
+        }
         await store.openTopic(fileID: checklist.fileID)
         let currentChecklistVer = await MainActor.run { store.activeTopic!.currentVersion }
         let commitsBefore = try await commitMutations(origin)
@@ -249,7 +261,7 @@ struct VerifyWiki {
 
         // Same-login 401 on retry preserves pending save & commandID (and hides retry button until access returns)
         try await postFixture("\(base)/fixture/edge-401?on=1")
-        let retry401 = await store.retryPendingSave(firstRetryItem!)
+        let retry401 = await store.retryPendingSave(firstRetryItem!, presentation: detailPres)
         let preserved401 = await MainActor.run {
             !retry401
                 && store.pendingSaves[checklist.fileID]?.commitCommandID == firstRetryItem?.commandID
@@ -268,7 +280,7 @@ struct VerifyWiki {
 
         // Unclassified pre-receipt refusal preserves pending save
         try await postFixture("\(base)/fixture/pre-receipt-refusal?reason=rate_limited")
-        let retryPreRefusal = await store.retryPendingSave(firstRetryItem!)
+        let retryPreRefusal = await store.retryPendingSave(firstRetryItem!, presentation: detailPres)
         let preservedPreRefusal = await MainActor.run {
             !retryPreRefusal && store.eligiblePendingRetries(for: checklist.fileID).first?.commandID == firstRetryItem?.commandID
         }
@@ -283,14 +295,51 @@ struct VerifyWiki {
         expect(!diffEditOK && cmdsBeforeDiffEdit == cmdsAfterDiffEdit, "Different edit while save outcome is unknown must send ZERO commands")
         await MainActor.run { store.dismissEditSession(diffEditSess.id) }
 
-        // Advance server past committed version (v+1 -> v+3), refresh, then retry -> replays v+1 with EXACTLY 1 commit & NO version regression!
+        // Detail-page retry presentation fence across Back while bearer lookup is held:
+        // listPres remains active (so store is NOT retired), detailPres leaves on Back ->
+        // ZERO write commands, ZERO PUTs, ZERO commits, AND frozen pending IDs stay intact!
+        let frozenBeforeBack = await MainActor.run { store.pendingSaves[checklist.fileID]! }
+        let cmdsBeforeBackRetry = try await recordedCommands(origin).filter { $0.kind.hasPrefix("file_version_") }.count
+        let statsBeforeBackRetry = try await mutationStats(origin)
+        await MainActor.run { bearer.holdNext(1) }
+        let backRetryTask = Task { await store.retryPendingSave(firstRetryItem!, presentation: detailPres) }
+        await bearer.waitUntilHeld()
+        await MainActor.run {
+            store.endPresentation(detailPres)
+            bearer.release()
+        }
+        let backRetryResult = await backRetryTask.value
+        let cmdsAfterBackRetry = try await recordedCommands(origin).filter { $0.kind.hasPrefix("file_version_") }.count
+        let statsAfterBackRetry = try await mutationStats(origin)
+        let frozenPreservedAfterBack = await MainActor.run {
+            guard let p = store.pendingSaves[checklist.fileID] else { return false }
+            return p.outcomeUnknown
+                && p.versionID == frozenBeforeBack.versionID
+                && p.createCommandID == frozenBeforeBack.createCommandID
+                && p.commitCommandID == frozenBeforeBack.commitCommandID
+                && p.slot == frozenBeforeBack.slot
+                && p.uploaded == frozenBeforeBack.uploaded
+        }
+        expect(
+            !backRetryResult
+                && cmdsAfterBackRetry == cmdsBeforeBackRetry
+                && statsAfterBackRetry.puts == statsBeforeBackRetry.puts
+                && statsAfterBackRetry.commits == statsBeforeBackRetry.commits
+                && frozenPreservedAfterBack,
+            "Navigating Back from detail during held bearer must retire detail retry with ZERO sends/PUTs/commits and keep frozen pending IDs"
+        )
+
+        // Advance server past committed version (v+1 -> v+3), refresh, then explicitly retry from a fresh active presentation
+        // -> replays v+1 with EXACTLY 1 commit & NO version regression!
         try await postFixture("\(base)/fixture/advance-version?file_id=\(checklist.fileID.uuidString.lowercased())")
         _ = await store.loadTopics()
+        let detailPres2 = WikiPresentationToken()
+        await MainActor.run { store.beginPresentation(detailPres2) }
         await store.openTopic(fileID: checklist.fileID)
         let newerVer = await MainActor.run { store.activeTopic!.currentVersion }
         expect(newerVer == currentChecklistVer + 3, "Expected server advanced to currentChecklistVer + 3")
 
-        let replayedOK = await store.retryPendingSave(firstRetryItem!)
+        let replayedOK = await store.retryPendingSave(firstRetryItem!, presentation: detailPres2)
         let replayClean = await MainActor.run {
             replayedOK
                 && store.eligiblePendingRetries(for: checklist.fileID).isEmpty
@@ -313,11 +362,61 @@ struct VerifyWiki {
         expect(conflictHandled, "409 file_version_precondition_failed must close stale editor and refresh to latest version")
 
         // =========================================================================
-        // 5. Create new topic (`if_version: 0`) + C1 production 403 refusal clears all state
+        // 5. Create new topic (`if_version: 0`) + same-name/same-version/different-UUID replacement witnesses
+        //    + C1 production 403 refusal clears all state
         // =========================================================================
         let createSess = await MainActor.run { store.openCreateSheet() }!
         let createdTopic = await store.createTopic(session: createSess, rawTopic: "deploy-runbook", markdown: "# Deploy Runbook\n\nFollow release-checklist.\n")
         expect(createdTopic != nil && createdTopic?.topic == "deploy-runbook" && createdTopic?.currentVersion == 1, "Creating a new wiki topic must commit v1 cleanly")
+
+        // 5a. Same-name, same-version, different-UUID witness on direct edit (ZERO PUTs, ZERO commits)
+        await store.openTopic(fileID: createdTopic!.fileID)
+        let replaceEditSess = await MainActor.run { store.beginEdit(fileID: createdTopic!.fileID) }!
+        let replacementUUID1 = UUID()
+        try await postFixture("\(base)/fixture/replace-topic?file_id=\(createdTopic!.fileID.uuidString.lowercased())&replacement_id=\(replacementUUID1.uuidString.lowercased())")
+        let statsBeforeReplaceEdit = try await mutationStats(origin)
+        let commitCmdsBeforeReplaceEdit = try await recordedCommands(origin).filter { $0.kind == "file_version_commit" }.count
+        let replaceEditOK = await store.saveEdit(session: replaceEditSess, markdown: "# Stale edit must not touch replacement UUID\n")
+        let statsAfterReplaceEdit = try await mutationStats(origin)
+        let commitCmdsAfterReplaceEdit = try await recordedCommands(origin).filter { $0.kind == "file_version_commit" }.count
+        let replaceEditClean = await MainActor.run {
+            !replaceEditOK
+                && store.activeEditSession == nil
+                && (store.actionError ?? "").lowercased().contains("replaced")
+        }
+        expect(
+            replaceEditClean
+                && statsAfterReplaceEdit.puts == statsBeforeReplaceEdit.puts
+                && statsAfterReplaceEdit.commits == statsBeforeReplaceEdit.commits
+                && commitCmdsAfterReplaceEdit == commitCmdsBeforeReplaceEdit,
+            "Same-name, same-version, different-UUID replacement on direct edit must execute ZERO PUTs and ZERO commits"
+        )
+
+        // 5b. Same-name, same-version, different-UUID witness on retry (ZERO PUTs, ZERO commits)
+        let retryCreateSess = await MainActor.run { store.openCreateSheet() }!
+        let retryTopic = await store.createTopic(session: retryCreateSess, rawTopic: "replace-retry-target", markdown: "# Retry Target\n\nOriginal v1.\n")
+        expect(retryTopic != nil && retryTopic?.currentVersion == 1, "Expected created topic for replacement-retry witness")
+        await store.openTopic(fileID: retryTopic!.fileID)
+        let retrySeedEdit = await MainActor.run { store.beginEdit(fileID: retryTopic!.fileID) }!
+        try await postFixture("\(base)/fixture/create-503-once")
+        let seededUnknownOK = await store.saveEdit(session: retrySeedEdit, markdown: "# Pending edit before replacement\n")
+        let replaceRetryItem = await MainActor.run { store.eligiblePendingRetries(for: retryTopic!.fileID).first }
+        expect(!seededUnknownOK && replaceRetryItem != nil, "503 on file_version_create must leave pending edit retry bound to opened UUID")
+
+        let replacementUUID2 = UUID()
+        try await postFixture("\(base)/fixture/replace-topic?file_id=\(retryTopic!.fileID.uuidString.lowercased())&replacement_id=\(replacementUUID2.uuidString.lowercased())")
+        let statsBeforeReplaceRetry = try await mutationStats(origin)
+        let commitCmdsBeforeReplaceRetry = try await recordedCommands(origin).filter { $0.kind == "file_version_commit" }.count
+        let replaceRetryOK = await store.retryPendingSave(replaceRetryItem!, presentation: detailPres2)
+        let statsAfterReplaceRetry = try await mutationStats(origin)
+        let commitCmdsAfterReplaceRetry = try await recordedCommands(origin).filter { $0.kind == "file_version_commit" }.count
+        expect(
+            !replaceRetryOK
+                && statsAfterReplaceRetry.puts == statsBeforeReplaceRetry.puts
+                && statsAfterReplaceRetry.commits == statsBeforeReplaceRetry.commits
+                && commitCmdsAfterReplaceRetry == commitCmdsBeforeReplaceRetry,
+            "Same-name, same-version, different-UUID replacement on retry must execute ZERO PUTs and ZERO commits"
+        )
 
         try await postFixture("\(base)/fixture/edge-403?on=1")
         _ = await store.loadTopics()
@@ -331,6 +430,6 @@ struct VerifyWiki {
         }
         expect(clearedOn403, "Production 403 {\"error\":\"forbidden\"} must clear wiki topics, open page, and edit sheets fail-closed")
 
-        print("PASS: VerifyWiki (topic/link rules, fail-closed Reader, v1 history, held-bearer zero-send, frozen edit session & deleted-link zero-download, committed-then-503+401+pre-receipt+refresh retry with exact 1 commit & no version regression, create topic, 403 fail-closed)")
+        print("PASS: VerifyWiki (topic/link rules, fail-closed Reader, v1 history, held-bearer zero-send, frozen edit session & deleted-link zero-download, committed-then-503+401+pre-receipt+refresh+detail-Back-presentation-fence retry, same-name/same-version/different-UUID zero-PUT/zero-commit edit & retry, create topic, 403 fail-closed)")
     }
 }
