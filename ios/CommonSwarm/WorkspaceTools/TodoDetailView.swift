@@ -162,17 +162,23 @@ struct TodoDetailView: View {
                             .foregroundStyle(errorForeground)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("todo-detail-error")
-                        if viewModel.hasAnyUnknownPendingWrite && (viewModel.canUpdate || viewModel.canCreateComment) {
-                            Button("Retry check") {
-                                Task {
-                                    if await viewModel.retryUnknownPendingWrite(api: api, workspaceID: workspaceID) {
-                                        await onChanged?()
+                    }
+
+                    let pendingRetries = viewModel.eligiblePendingRetries(viewerUserID: directory.viewerUserID)
+                    if !pendingRetries.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(pendingRetries) { item in
+                                Button(item.label) {
+                                    Task {
+                                        if await viewModel.retryPending(item, api: api, workspaceID: workspaceID) {
+                                            await onChanged?()
+                                        }
                                     }
                                 }
+                                .font(.subheadline.weight(.semibold))
+                                .disabled(viewModel.isMutating || viewModel.isPostingComment)
+                                .accessibilityIdentifier("todo-retry-\(item.commandID.uuidString.lowercased())")
                             }
-                            .font(.subheadline.weight(.semibold))
-                            .disabled(viewModel.isMutating || viewModel.isPostingComment)
-                            .accessibilityIdentifier("todo-retry-pending-button")
                         }
                     }
 

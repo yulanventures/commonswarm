@@ -468,6 +468,188 @@ struct VerifyTodoActions {
         expect(notRegressed, "Replayed older receipt (vStart+1) must NOT overwrite newer displayed state (vStart+3)")
 
         // =========================================================================
+        // 5b. C2: Role demotion drops still-pending offer retry with ZERO sends;
+        //         disappeared offer keeps explicit receipt reconciliation (EXACTLY 1 mutation)
+        // =========================================================================
+        try await postFixture("\(base)/fixture/workspace-role?role=admin")
+        try await postFixture("\(base)/fixture/set-offer?decider=other&by=maya&to=atlas")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let adminOnlyOffer = await MainActor.run { detailVM.detail!.offer! }
+        let adminCanWithdrawBeforeDemotion = await MainActor.run { detailVM.canWithdrawOffer(adminOnlyOffer, viewerUserID: tokens.userID) }
+        expect(adminCanWithdrawBeforeDemotion, "Admin must be allowed to withdraw someone else's offer")
+
+        // Fail BEFORE receipt lookup (offer remains live on server)
+        try await postFixture("\(base)/fixture/fail-next-write")
+        let failedWithdraw = await detailVM.answerOffer(.withdraw, todoID: todoID, offerID: adminOnlyOffer.offer_id, api: todoAPI, workspaceID: ws.id)
+        let capturedWithdrawRetry = await MainActor.run {
+            detailVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .offer(_, let oid, .withdraw) = $0.action { return oid == adminOnlyOffer.offer_id }
+                return false
+            }
+        }
+        expect(!failedWithdraw && capturedWithdrawRetry != nil, "Unconfirmed admin withdraw must expose bound retry item")
+
+        // Demote viewer from admin to ordinary workspace member (still Editor content role) while exact offer is still pending
+        try await postFixture("\(base)/fixture/workspace-role?role=member")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let demotedStateOK = await MainActor.run {
+            let live = detailVM.detail?.offer
+            let eligible = detailVM.eligiblePendingRetries(viewerUserID: tokens.userID)
+            return live?.offer_id == adminOnlyOffer.offer_id
+                && !detailVM.canWithdrawOffer(live!, viewerUserID: tokens.userID)
+                && !detailVM.hasUnknownPendingOffer
+                && eligible.isEmpty
+        }
+        expect(demotedStateOK, "Demotion while original offer is still pending must drop pending withdrawal and hide retry")
+        let cmdsBeforeDemotedRetry = try await recordedCommands(origin).count
+        let demotedRetrySent = await detailVM.retryPending(capturedWithdrawRetry!, api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterDemotedRetry = try await recordedCommands(origin).count
+        expect(!demotedRetrySent && cmdsBeforeDemotedRetry == cmdsAfterDemotedRetry, "Retrying captured withdrawal after demotion must send ZERO commands")
+
+        // Counter-case: admin Withdraw commits before 503 (offer disappears), then viewer is demoted -> receipt reconciliation still works with EXACTLY 1 mutation!
+        let mutBeforeAdminWithdraw = (try await mutationCounts(origin)).by_kind["household_todo_answer"] ?? 0
+        try await postFixture("\(base)/fixture/workspace-role?role=admin")
+        try await postFixture("\(base)/fixture/set-offer?decider=other&by=maya&to=atlas")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let committedWithdrawOffer = await MainActor.run { detailVM.detail!.offer! }
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let commit503Withdraw = await detailVM.answerOffer(.withdraw, todoID: todoID, offerID: committedWithdrawOffer.offer_id, api: todoAPI, workspaceID: ws.id)
+        let withdrawUnknownNow = await MainActor.run { detailVM.hasUnknownPendingOffer }
+        expect(!commit503Withdraw && withdrawUnknownNow, "Committed-then-503 withdraw must remain unknown")
+
+        try await postFixture("\(base)/fixture/workspace-role?role=member")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let reconcileRetryItem = await MainActor.run {
+            detailVM.eligiblePendingRetries(viewerUserID: tokens.userID).first {
+                if case .offer(_, let oid, .withdraw) = $0.action { return oid == committedWithdrawOffer.offer_id }
+                return false
+            }
+        }
+        let offerGoneOnScreen = await MainActor.run { detailVM.detail?.offer == nil }
+        expect(offerGoneOnScreen && reconcileRetryItem != nil, "Disappeared offer must preserve explicit receipt reconciliation retry even after demotion")
+        let reconciledOK = await detailVM.retryPending(reconcileRetryItem!, api: todoAPI, workspaceID: ws.id)
+        let mutAfterAdminWithdraw = (try await mutationCounts(origin)).by_kind["household_todo_answer"] ?? 0
+        let pendingOfferClearedAfterReconcile = await MainActor.run { !detailVM.hasUnknownPendingOffer }
+        expect(reconciledOK && pendingOfferClearedAfterReconcile && mutAfterAdminWithdraw == mutBeforeAdminWithdraw + 1, "Receipt reconciliation for disappeared offer must succeed with EXACTLY 1 mutation")
+
+        // =========================================================================
+        // 5c. C3: Two pending actions with different targets + retry visibility after refresh
+        //         (retrying comment must NEVER commit the earlier pending withdrawal!)
+        // =========================================================================
+        try await postFixture("\(base)/fixture/workspace-role?role=admin")
+        try await postFixture("\(base)/fixture/set-offer?decider=other&by=maya&to=atlas")
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let dualOffer = await MainActor.run { detailVM.detail!.offer! }
+        let mutBeforeDualComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+
+        // Pending action #1: unconfirmed Withdraw offer
+        try await postFixture("\(base)/fixture/fail-next-write")
+        let dualOfferFail = await detailVM.answerOffer(.withdraw, todoID: todoID, offerID: dualOffer.offer_id, api: todoAPI, workspaceID: ws.id)
+        expect(!dualOfferFail, "Pending action #1 (withdraw) should be unconfirmed")
+
+        // Pending action #2: committed-then-503 comment (failed last)
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let dualCommentFail = await detailVM.postComment(body: "Bound retry comment", mentions: [atlasParty], api: todoAPI, workspaceID: ws.id)
+        expect(!dualCommentFail, "Pending action #2 (comment) should be unconfirmed")
+
+        // Normal reload clears actionError, yet BOTH action-specific retry buttons MUST remain visible & eligible!
+        await detailVM.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let dualAfterRefresh = await MainActor.run {
+            let items = detailVM.eligiblePendingRetries(viewerUserID: tokens.userID)
+            let offerItem = items.first { if case .offer = $0.action { return true }; return false }
+            let commentItem = items.first { if case .comment = $0.action { return true }; return false }
+            return (detailVM.actionError == nil, items.count, offerItem, commentItem)
+        }
+        expect(
+            dualAfterRefresh.0 && dualAfterRefresh.1 == 2 && dualAfterRefresh.2 != nil && dualAfterRefresh.3 != nil,
+            "Normal refresh clearing actionError must keep BOTH action-specific retries visible and distinct"
+        )
+
+        // Tap ONLY the comment retry button -> MUST replay ONLY the comment, leaving the withdrawal pending & untouched (0 offer sends)!
+        let offerCmdsBeforeCommentRetry = try await recordedCommands(origin).filter { $0.kind == "household_todo_answer" }.count
+        let commentBoundRetryOK = await detailVM.retryPending(dualAfterRefresh.3!, api: todoAPI, workspaceID: ws.id)
+        let offerCmdsAfterCommentRetry = try await recordedCommands(origin).filter { $0.kind == "household_todo_answer" }.count
+        let mutAfterDualComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let dualIsolationOK = await MainActor.run {
+            commentBoundRetryOK
+                && !detailVM.hasUnknownPendingComment
+                && detailVM.hasUnknownPendingOffer
+                && detailVM.detail?.offer?.offer_id == dualOffer.offer_id
+        }
+        expect(
+            dualIsolationOK && offerCmdsBeforeCommentRetry == offerCmdsAfterCommentRetry && mutAfterDualComment == mutBeforeDualComment + 1,
+            "Retrying comment must ONLY replay the comment (1 mutation) and MUST NOT send or commit the earlier pending withdrawal"
+        )
+        // Now explicitly retry the bound withdrawal item to finish cleanly
+        let offerBoundRetryOK = await detailVM.retryPending(dualAfterRefresh.2!, api: todoAPI, workspaceID: ws.id)
+        let offerClearedAfterBoundRetry = await MainActor.run { offerBoundRetryOK && !detailVM.hasUnknownPendingOffer && detailVM.detail?.offer == nil }
+        expect(offerClearedAfterBoundRetry, "Explicit bound withdrawal retry must commit cleanly")
+        try await postFixture("\(base)/fixture/workspace-role?role=member")
+
+        // =========================================================================
+        // 5d. C3: Back / reopen with two successive stores in same login preserves commandID & payload
+        //         (EXACTLY 1 server mutation on comment AND create; fresh login sees nothing)
+        // =========================================================================
+        let mutBeforeReopenComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let firstDetailStore = await MainActor.run { TodoDetailViewModel() }
+        await firstDetailStore.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let lostCommentFirst = await firstDetailStore.postComment(body: "Survives Back and reopen", mentions: [mayaParty, atlasParty], api: todoAPI, workspaceID: ws.id)
+        let originalReopenCmdID = await MainActor.run { firstDetailStore.pendingComment?.commandID }
+        expect(!lostCommentFirst && originalReopenCmdID != nil, "First detail store must record unknown comment with commandID")
+        // Simulate Back navigation (retire first detail store)
+        await MainActor.run { firstDetailStore.retire() }
+
+        // Simulate Reopen: brand new TodoDetailViewModel in the SAME HumanSession!
+        let reopenedDetailStore = await MainActor.run { TodoDetailViewModel() }
+        await reopenedDetailStore.load(api: todoAPI, workspaceID: ws.id, todoID: todoID)
+        let recoveredComment = await MainActor.run {
+            (
+                reopenedDetailStore.hasUnknownPendingComment,
+                reopenedDetailStore.pendingComment?.commandID,
+                reopenedDetailStore.eligiblePendingRetries(viewerUserID: tokens.userID)
+            )
+        }
+        expect(
+            recoveredComment.0 && recoveredComment.1 == originalReopenCmdID && recoveredComment.2.count == 1,
+            "Reopening detail under the same login must recover original pending comment commandID and retry action"
+        )
+        // Posting a DIFFERENT comment in the reopened store must be blocked with ZERO network sends
+        let cmdsBeforeReopenDiff = try await recordedCommands(origin).count
+        let blockedDiffAfterReopen = await reopenedDetailStore.postComment(body: "Brand new unrelated comment", mentions: [], api: todoAPI, workspaceID: ws.id)
+        let cmdsAfterReopenDiff = try await recordedCommands(origin).count
+        expect(!blockedDiffAfterReopen && cmdsBeforeReopenDiff == cmdsAfterReopenDiff, "Reopened store must block a different comment with ZERO sends while original is unknown")
+
+        // Posting the same comment again (even with reversed mentions!) OR tapping Retry MUST reuse originalReopenCmdID -> EXACTLY 1 mutation!
+        let replayedAfterReopen = await reopenedDetailStore.postComment(body: "Survives Back and reopen", mentions: [atlasParty, mayaParty], api: todoAPI, workspaceID: ws.id)
+        let mutAfterReopenComment = (try await mutationCounts(origin)).by_kind["todo_comment"] ?? 0
+        let reopenCmds = try await recordedCommands(origin).filter { $0.command_id == originalReopenCmdID!.uuidString.lowercased() }
+        let reopenCleared = await MainActor.run { !reopenedDetailStore.hasUnknownPendingComment }
+        expect(
+            replayedAfterReopen && reopenCleared && mutAfterReopenComment == mutBeforeReopenComment + 1 && reopenCmds.count == 2,
+            "Reopened detail store must replay original commandID with EXACTLY 1 server mutation (never posting a second comment)"
+        )
+
+        // Same Back / reopen persistence witness for TodoListViewModel pendingCreate
+        let mutBeforeReopenCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        let firstListStore = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await firstListStore.load(api: todoAPI, workspaceID: ws.id)
+        try await postFixture("\(base)/fixture/commit-then-503")
+        let reopenCreateSess = await MainActor.run { firstListStore.openCreateSheet() }!
+        let lostCreate = await firstListStore.createTodo(session: reopenCreateSess, title: "Survives list reopen", notes: "", dueOn: nil, assignee: nil, api: todoAPI, workspaceID: ws.id)
+        let origCreateCmdID = await MainActor.run { firstListStore.pendingCreate?.commandID }
+        expect(lostCreate == nil && origCreateCmdID != nil, "First list store must record unknown create")
+        await MainActor.run { firstListStore.retire() }
+
+        let reopenedListStore = await MainActor.run { TodoListViewModel(viewerUserID: tokens.userID) }
+        await reopenedListStore.load(api: todoAPI, workspaceID: ws.id)
+        let recoveredCreateRetry = await MainActor.run { reopenedListStore.eligiblePendingCreateRetry }
+        expect(recoveredCreateRetry?.commandID == origCreateCmdID, "Reopened list store in same login must recover original create commandID")
+        let replayedCreate = await reopenedListStore.retryPendingCreate(recoveredCreateRetry!, api: todoAPI, workspaceID: ws.id)
+        let mutAfterReopenCreate = (try await mutationCounts(origin)).by_kind["todo_create"] ?? 0
+        expect(replayedCreate != nil && mutAfterReopenCreate == mutBeforeReopenCreate + 1, "Reopened list store retry must replay with EXACTLY 1 server mutation")
+
+        // =========================================================================
         // 6. C1: Refusal clears named directory, closes mention picker & sheets, and drops older held comment page errors
         // =========================================================================
         await listVM.load(api: todoAPI, workspaceID: ws.id)

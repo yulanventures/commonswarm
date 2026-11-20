@@ -201,6 +201,24 @@ struct TodoListView: View {
                 )
             } else {
                 List {
+                    if let pendingCreate = viewModel.eligiblePendingCreateRetry {
+                        Section {
+                            Button(pendingCreate.label) {
+                                Task {
+                                    if let created = await viewModel.retryPendingCreate(
+                                        pendingCreate,
+                                        api: api,
+                                        workspaceID: workspaceID
+                                    ) {
+                                        createdSummary = created.summary
+                                    }
+                                }
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .disabled(viewModel.isCreating)
+                            .accessibilityIdentifier("todo-retry-create-\(pendingCreate.commandID.uuidString.lowercased())")
+                        }
+                    }
                     if let failure = viewModel.failure {
                         Section {
                             RetryView(text: failure.message(subject: "to-dos"), action: load)
