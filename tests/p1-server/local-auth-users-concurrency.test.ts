@@ -225,6 +225,15 @@ before(async () => {
     diagnostics: () => `local command function was not ready\n${functionLogs.slice(-2000)}`,
     cliState,
   });
+  await awaitFunctionRunning({
+    url: `${local.API_URL}/functions/v1/activity`,
+    fetcher: fetch,
+    timeoutMs: 30_000,
+    sleep: (ms) => delay(ms),
+    now: () => Date.now(),
+    diagnostics: () => `local activity function was not ready\n${functionLogs.slice(-2000)}`,
+    cliState,
+  });
 
   owner = await createUser("lock-owner");
   workspace = randomUUID();
@@ -362,6 +371,7 @@ test(
         await tx`SELECT user_id FROM swarm.users WHERE user_id = ${owner.id}::uuid FOR NO KEY UPDATE`;
       });
 
+      const logStart = functionLogs.length;
       // Fire a production-concurrency burst across sibling agents + owner while
       // BOTH parkedAgent (mid-command) AND ownerLock (swarm.users FOR NO KEY UPDATE) are held.
       const burstStart = Date.now();
@@ -371,42 +381,42 @@ test(
             kind: "renew_wake_lease",
             watcher_id: a.watcherId,
             generation: a.generation,
-          }).then((r) => ({ label: `renew_wake_lease:${a.name}`, ...r })),
+          }).then((r) => ({ label: `renew_wake_lease:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.map((a) =>
           send(a.token, {
             kind: "signals_seen",
             signal_ids: [broadcastSignalId],
-          }).then((r) => ({ label: `agent_signals_seen:${a.name}`, ...r })),
+          }).then((r) => ({ label: `agent_signals_seen:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.slice(0, 3).map((a) =>
           send(a.token, {
             kind: "claim_agent_inbox",
             listener_instance_id: randomUUID(),
             limit: 5,
-          }).then((r) => ({ label: `claim_agent_inbox:${a.name}`, ...r })),
+          }).then((r) => ({ label: `claim_agent_inbox:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.slice(3, 5).map((a) =>
           send(a.token, { kind: "touch_presence" })
-            .then((r) => ({ label: `touch_presence:${a.name}`, ...r })),
+            .then((r) => ({ label: `touch_presence:${a.name}`, expected: 200, ...r })),
         ),
         ...siblings.slice(0, 3).map((a, i) =>
           sendActivity(a.token, i + 1)
-            .then((r) => ({ label: `activity:${a.name}`, ...r })),
+            .then((r) => ({ label: `activity:${a.name}`, expected: 202, ...r })),
         ),
         send(owner.jwt, { kind: "signals_seen", signal_ids: [broadcastSignalId] })
-          .then((r) => ({ label: "human_signals_seen:1", ...r })),
+          .then((r) => ({ label: "human_signals_seen:1", expected: 200, ...r })),
         send(owner.jwt, { kind: "signals_seen", signal_ids: [broadcastSignalId] })
-          .then((r) => ({ label: "human_signals_seen:2", ...r })),
+          .then((r) => ({ label: "human_signals_seen:2", expected: 200, ...r })),
       ]);
       const burstElapsedMs = Date.now() - burstStart;
 
       for (const r of burstResults) {
-        assert.equal(r.status, 200, `${r.label} failed (${r.status}): ${JSON.stringify(r.body)}`);
+        assert.equal(r.status, r.expected, `${r.label} failed (${r.status}): ${JSON.stringify(r.body)}`);
       }
       assert.equal(parkedAckSettled, false, "all 20 concurrent sibling/owner commands finished while parkedAgent was still held");
       assert.ok(burstElapsedMs < 4_500, `burst completed in ${burstElapsedMs}ms (must beat 5s lock_timeout)`);
-      assert.doesNotMatch(functionLogs, /55P03|40P01/u, `unexpected lock timeout or deadlock in logs:\n${functionLogs.slice(-2000)}`);
+      assert.doesNotMatch(functionLogs.slice(logStart), /55P03|40P01/u, `unexpected lock timeout or deadlock in logs:\n${functionLogs.slice(logStart)}`);
     } finally {
       ownerLock?.release();
       deliveryLock?.release();
@@ -423,6 +433,7 @@ test(
   "human invite_member concurrent with sibling agent burst completes with zero deadlocks and zero 503s",
   { timeout: 30_000 },
   async () => {
+    const logStart = functionLogs.length;
     const siblings = agents.slice(1);
     for (let wave = 0; wave < 3; wave++) {
       const results = await Promise.all([
@@ -448,7 +459,7 @@ test(
         assert.equal(r.status, 200, `${r.label} failed (${r.status}): ${JSON.stringify(r.body)}`);
       }
     }
-    assert.doesNotMatch(functionLogs, /55P03|40P01/u, `unexpected lock timeout or deadlock in logs:\n${functionLogs.slice(-2000)}`);
+    assert.doesNotMatch(functionLogs.slice(logStart), /55P03|40P01/u, `unexpected lock timeout or deadlock in logs:\n${functionLogs.slice(logStart)}`);
   },
 );
 
