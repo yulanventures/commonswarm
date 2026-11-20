@@ -983,6 +983,20 @@ export async function runListenerSupervisor(
       });
       return;
     }
+    if (event.type === "main_queue_full") {
+      status = {
+        ...status,
+        pendingForMainCount: event.pendingCount,
+        updatedAt: event.ts,
+      };
+      persist();
+      log({
+        ts: event.ts,
+        event: "listener_main_queue_full",
+        pending_main_count: event.pendingCount,
+      });
+      return;
+    }
     const unknown = event as unknown as { ts?: unknown };
     log({
       ts: typeof unknown.ts === "string" && Number.isFinite(Date.parse(unknown.ts))

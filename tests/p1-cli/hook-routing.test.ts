@@ -1537,16 +1537,27 @@ test("hook refuses a live listener credential state that is not mode 0600 and wa
   }
 });
 
-test("hook surfaces the overflow drop count with the inbox recovery path", async () => {
+test("hook surfaces a legacy overflow drop count with the inbox recovery path while C1b queue never drops at 200", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-hook-dropped-"));
   try {
     const { paths } = state(root);
     await writeStatus(paths);
     const queue = new FilePendingMainQueue(paths.instanceDirectory);
+    let lastResult = { count: 0, added: false, droppedOldest: false, droppedCount: 0, queueFull: false as boolean | undefined };
     for (let index = 0; index <= 200; index += 1) {
       const signalId = `aaaaaaaa-aaaa-4aaa-8aaa-${index.toString(16).padStart(12, "0")}`;
-      await queue.enqueue(pending(signalId, `ask ${index}`));
+      lastResult = await queue.enqueue(pending(signalId, `ask ${index}`));
     }
+    assert.equal(lastResult.added, false);
+    assert.equal(lastResult.queueFull, true);
+    assert.equal(lastResult.droppedCount, 0);
+    // Simulate a legacy pre-C1b queue file carrying droppedCount: 1 so hook recovery copy stays covered.
+    const legacyEntries = await queue.read();
+    await writeFile(
+      queue.path,
+      JSON.stringify({ version: 1, entries: legacyEntries, droppedCount: 1 }),
+      { mode: 0o600 },
+    );
     const controller = new AbortController();
     const output = await checkListenerHooks({
       stateDirectory: root,

@@ -61,6 +61,7 @@ import {
 } from "./file-store.js";
 import {
   decideListenerRoute,
+  LISTENER_MAIN_QUEUE_MAX,
   pendingMainEntry,
   type FilePendingMainQueue,
   type ListenerRouteDecision,
@@ -368,6 +369,12 @@ export type ListenerRuntimeEvent =
     ts: string;
   }
   | {
+    type: "main_queue_full";
+    pendingCount: number;
+    limit: number;
+    ts: string;
+  }
+  | {
     type: "wake";
     wake: ListenerWakeStatus;
     ts: string;
@@ -426,7 +433,7 @@ export interface ListenerRuntimeOptions {
   onBroadcastsConsumed?: (signalIds: readonly string[]) => Promise<void>;
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
-  pendingMainQueue?: Pick<FilePendingMainQueue, "enqueue">;
+  pendingMainQueue?: Pick<FilePendingMainQueue, "enqueue"> & Partial<Pick<FilePendingMainQueue, "count">>;
   /**
    * Bound on one delivery's hold of the worker seat, measured from the moment
    * the claim was RESERVED (the journal's claimCreatedAt), which precedes the
@@ -1052,7 +1059,7 @@ export async function runListenerRuntime(
   const warnedClaimCommands = new Set<string>();
   const routeSignalToMain = async (
     signal: SignalRecord,
-  ): Promise<ListenerEffectRecord> => {
+  ): Promise<ListenerEffectRecord | null> => {
     if (signal.kind !== "ask" && signal.kind !== "note") {
       throw new Error("only directed asks and notes can route to the main session");
     }
@@ -1073,12 +1080,22 @@ export async function runListenerRuntime(
     }
     // Load-bearing crash order: the atomic, fsynced local queue write must
     // finish before the terminal effect can prepare or send a queued ACK.
-    // If this throws, the journal stays leased and service redelivery recovers.
+    // If the queue is at capacity, leave the work unacknowledged on the server
+    // instead of dropping older entries.
     const queued = await options.pendingMainQueue!.enqueue(
       pendingMainEntry(signal, options.principalId, provenance, now(), {
         observationPending: deliveryMode === "durable_claim",
       }),
     );
+    if (queued.queueFull === true) {
+      options.onEvent?.({
+        type: "main_queue_full",
+        pendingCount: queued.count,
+        limit: LISTENER_MAIN_QUEUE_MAX,
+        ts: eventTime(now),
+      });
+      return null;
+    }
     options.onEvent?.({
       type: "main_queue",
       signalId: signal.id,
@@ -1771,6 +1788,25 @@ export async function runListenerRuntime(
         const journal = options.deliveryJournal!;
         const record = currentJournalRecord!;
         let active = record.active;
+        if (active === null && options.pendingMainQueue?.count !== undefined) {
+          let pendingCount: number;
+          try {
+            pendingCount = await options.pendingMainQueue.count();
+          } catch (error) {
+            stop = { reason: "fatal", error: asError(error) };
+            break;
+          }
+          if (pendingCount >= LISTENER_MAIN_QUEUE_MAX) {
+            options.onEvent?.({
+              type: "main_queue_full",
+              pendingCount,
+              limit: LISTENER_MAIN_QUEUE_MAX,
+              ts: eventTime(now),
+            });
+            await idleSleep(false);
+            continue;
+          }
+        }
         if (active === null) {
           try {
             active = await journal.reserveClaim(eventTime(now));
@@ -2030,13 +2066,15 @@ export async function runListenerRuntime(
             });
           } else {
             terminal = await routeSignalToMain(signal);
-            options.onEvent?.({
-              type: "effect",
-              signalId: signal.id,
-              status: "routed_main",
-              failureCode: null,
-              ts: eventTime(now),
-            });
+            if (terminal !== null) {
+              options.onEvent?.({
+                type: "effect",
+                signalId: signal.id,
+                status: "routed_main",
+                failureCode: null,
+                ts: eventTime(now),
+              });
+            }
           }
         } catch (error) {
           if (abort?.aborted) {
@@ -2066,7 +2104,10 @@ export async function runListenerRuntime(
           break;
         }
         if (stop) break;
-        if (terminal === null) continue;
+        if (terminal === null) {
+          await idleSleep(false);
+          continue;
+        }
 
         try {
           // Load-bearing order: terminal effect persistence and exact reread
@@ -2102,6 +2143,7 @@ export async function runListenerRuntime(
 
       if (page === null) continue;
 
+      let queueFullPaused = false;
       for (const signal of page.signals) {
         if (abort?.aborted) {
           stop = { reason: "cancelled" };
@@ -2143,7 +2185,11 @@ export async function runListenerRuntime(
             });
             continue;
           }
-          await routeSignalToMain(signal);
+          const routed = await routeSignalToMain(signal);
+          if (routed === null) {
+            queueFullPaused = true;
+            break;
+          }
           options.onEvent?.({
             type: "effect",
             signalId: signal.id,
@@ -2194,6 +2240,10 @@ export async function runListenerRuntime(
         continue;
       }
       if (stop) break;
+      if (queueFullPaused) {
+        await idleSleep(false);
+        continue;
+      }
 
       const fullPage = page.rawCount >= pageLimit;
       if (fullPage) {

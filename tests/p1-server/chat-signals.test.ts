@@ -2349,7 +2349,7 @@ test("a person's reply in a thread reaches the agents already in it, and a menti
   const namedId = String(signalOf(named.body).id);
   assert.deepEqual(await deliveriesOf(namedId), [first.principal, second.principal].sort());
   assert.deepEqual((await mentionsOf(namedId)).map((m) => [m.id, m.source]), [[second.principal, "author"], [first.principal, "thread"]]);
-  // An agent's own reply in the thread wakes nobody unless it mentions someone, and never itself.
+  // An agent's own reply in a thread never wakes itself.
   const agentReply = await send(first.token, installedPost({ thread_root_id: rootId, body: "done" }));
   assert.equal(agentReply.status, 200, JSON.stringify(agentReply.body));
   assert.deepEqual(await deliveriesOf(String(signalOf(agentReply.body).id)), []);
@@ -2358,6 +2358,57 @@ test("a person's reply in a thread reaches the agents already in it, and a menti
   }));
   assert.equal(selfMention.status, 200, JSON.stringify(selfMention.body) + functionLogs.slice(-3000));
   assert.deepEqual(await deliveriesOf(String(signalOf(selfMention.body).id)), [second.principal], "an agent is not woken by its own mention");
+});
+
+test("C1d: agent thread replies wake other thread participants excluding self, and stop auto-waking at MENTION_AGENT_HOP_MAX", async () => {
+  const one = await mentionAgent(f.ownerId, "c1d-one");
+  const two = await mentionAgent(f.ownerId, "c1d-two");
+  const three = await mentionAgent(f.ownerId, "c1d-three");
+
+  // Agent one starts the thread; agent two replies without explicit mention -> wakes one (never two).
+  const root = await send(one.token, installedPost({ body: "c1d agent root" }));
+  assert.equal(root.status, 200, JSON.stringify(root.body));
+  const rootId = String(signalOf(root.body).id);
+
+  const replyByTwo = await send(two.token, installedPost({ thread_root_id: rootId, body: "hop 1 from two" }));
+  assert.equal(replyByTwo.status, 200, JSON.stringify(replyByTwo.body));
+  const replyByTwoId = String(signalOf(replyByTwo.body).id);
+  assert.deepEqual(await deliveriesOf(replyByTwoId), [one.principal]);
+  assert.deepEqual(await mentionsOf(replyByTwoId), [{ position: 0, kind: "agent", id: one.principal, source: "thread" }]);
+
+  // Agent three replies without explicit mention -> wakes both root author (one) and prior reply author (two), never three.
+  const replyByThree = await send(three.token, installedPost({ thread_root_id: rootId, body: "hop 2 from three" }));
+  assert.equal(replyByThree.status, 200, JSON.stringify(replyByThree.body));
+  const replyByThreeId = String(signalOf(replyByThree.body).id);
+  assert.deepEqual(await deliveriesOf(replyByThreeId), [one.principal, two.principal].sort());
+
+  // Continue plain agent replies through the 6th consecutive agent message (root + 5 replies = 6).
+  for (let i = 3; i <= 5; i += 1) {
+    const sender = i % 2 === 1 ? one : two;
+    const hop = await send(sender.token, installedPost({ thread_root_id: rootId, body: `hop ${i}` }));
+    assert.equal(hop.status, 200, `hop ${i}: ${JSON.stringify(hop.body)}`);
+    assert.ok((await deliveriesOf(String(signalOf(hop.body).id))).length > 0, `hop ${i} still wakes participants`);
+  }
+
+  // At 6 consecutive agent messages: plain reply succeeds (200) with ZERO automatic thread wakeups (loop broken).
+  const plainAtCap = await send(one.token, installedPost({ thread_root_id: rootId, body: "hop 6 plain" }));
+  assert.equal(plainAtCap.status, 200, JSON.stringify(plainAtCap.body));
+  assert.deepEqual(await deliveriesOf(String(signalOf(plainAtCap.body).id)), []);
+  assert.deepEqual(await mentionsOf(String(signalOf(plainAtCap.body).id)), []);
+
+  // Explicit agent mention at cap is still refused with 409 mention_hop_limit.
+  const explicitAtCap = await send(one.token, installedPost({
+    thread_root_id: rootId, body: "hop 7 mention", mentions: [{ kind: "agent", id: two.principal }],
+  }));
+  assert.equal(explicitAtCap.status, 409, JSON.stringify(explicitAtCap.body));
+  assert.equal(explicitAtCap.body.error, "mention_hop_limit");
+
+  // A human post resets the consecutive-agent window so agent replies wake thread participants again.
+  const humanReset = await send(f.ownerJwt, installedPost({ thread_root_id: rootId, body: "human reset" }));
+  assert.equal(humanReset.status, 200, JSON.stringify(humanReset.body));
+  const resumed = await send(one.token, installedPost({ thread_root_id: rootId, body: "after human reset" }));
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.deepEqual(await deliveriesOf(String(signalOf(resumed.body).id)), [two.principal, three.principal].sort());
 });
 
 test("agents cannot keep waking each other in a thread: after six agent messages in a row a mention is refused", async () => {
