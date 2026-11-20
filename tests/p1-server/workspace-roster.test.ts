@@ -798,15 +798,19 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until, created_at, channel_id)
     VALUES (${privAsk}::uuid, ${ws}::uuid, ${owner}::uuid, 'user', ${secretWorker}::uuid, 'ask', 'SECRET-VAULT-ASK',
             statement_timestamp() + interval '1 hour', statement_timestamp() - interval '5 seconds', ${privCh}::uuid)`;
-  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome)
-    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '6 seconds', NULL, NULL, NULL, NULL),
-           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 seconds', NULL, NULL, NULL, NULL),
-           (${ws}::uuid, ${queuedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '4 seconds', NULL, statement_timestamp() - interval '4 seconds', 'queued'),
-           (${ws}::uuid, ${observedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '7 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', 'observed'),
-           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 seconds', NULL, NULL, NULL, NULL)
+  const queuedLeaseId = randomUUID();
+  const queuedListenerId = randomUUID();
+  await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome, ack_via, last_lease_id, last_leased_by)
+    VALUES (${ws}::uuid, ${pubAsk1}::uuid, ${worker}::uuid, statement_timestamp() - interval '6 seconds', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+           (${ws}::uuid, ${pubAsk2}::uuid, ${worker}::uuid, statement_timestamp() - interval '4 seconds', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+           (${ws}::uuid, ${queuedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '4 seconds', NULL, statement_timestamp() - interval '4 seconds', 'queued', 'leased', ${queuedLeaseId}::uuid, ${queuedListenerId}::uuid),
+           (${ws}::uuid, ${observedAsk}::uuid, ${worker}::uuid, statement_timestamp() - interval '7 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', statement_timestamp() - interval '6 seconds', 'observed', 'unclaimed', NULL, NULL),
+           (${ws}::uuid, ${privAsk}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '5 seconds', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
     ON CONFLICT (signal_id, recipient_agent_principal_id) DO UPDATE SET
       enqueued_at = EXCLUDED.enqueued_at, delivered_at = EXCLUDED.delivered_at,
-      surfaced_at = EXCLUDED.surfaced_at, acked_at = EXCLUDED.acked_at, ack_outcome = EXCLUDED.ack_outcome`;
+      surfaced_at = EXCLUDED.surfaced_at, acked_at = EXCLUDED.acked_at,
+      ack_outcome = EXCLUDED.ack_outcome, ack_via = EXCLUDED.ack_via,
+      last_lease_id = EXCLUDED.last_lease_id, last_leased_by = EXCLUDED.last_leased_by`;
   await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at, watcher_at)
     VALUES (${ws}::uuid, ${worker}::uuid, statement_timestamp() - interval '1 minute', statement_timestamp() - interval '10 seconds')`;
 
