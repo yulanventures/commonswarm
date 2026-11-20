@@ -390,14 +390,23 @@ async function observeStep3BA11y() {
       await wait("group dm menu open", () => visible(one(".cs-context-menu")));
       await click('.cs-context-menu__item:has-text("Leave group")');
       await wait("group leave confirm open", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === true);
+      // Witness detached-opener focus return: replace rail conversation menu triggers while the
+      // Leave dialog is open (simulating a background renderHomeRail() refresh), then press Escape ->
+      // focus must land on the re-rendered trigger, never #hm-ws-title or <body>.
+      const originalTriggers = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(`[data-rail-conversation-menu="${f.ids.dmGroupConv}"]`),
+      );
+      for (const trigger of originalTriggers) {
+        trigger.replaceWith(trigger.cloneNode(true));
+      }
       await key("Escape");
       await wait("group leave confirm closed", () => one<HTMLDialogElement>("[data-group-leave-dialog]")?.open === false);
       const active = document.activeElement;
-      const okReturn = !!active && active !== document.body && (
-        active.getAttribute("data-rail-conversation-menu") === f.ids.dmGroupConv ||
-        active.getAttribute("data-rail-conversation") === f.ids.dmGroupConv ||
-        active.getAttribute("aria-label") === "Open navigation"
-      );
+      const okReturn = !!active && active !== document.body &&
+        !originalTriggers.includes(active as HTMLButtonElement) && (
+          active.getAttribute("data-rail-conversation-menu") === f.ids.dmGroupConv ||
+          active.getAttribute("data-rail-conversation") === f.ids.dmGroupConv
+        );
       document.documentElement.dataset.step3bA11y = JSON.stringify({
         ok: okReturn && f.convCommands.length === 0,
         scene: f.scene,

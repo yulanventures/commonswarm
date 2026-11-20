@@ -16713,6 +16713,12 @@ import "../../styles/kylon-image-viewer.css";
       const element = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
       const selector = element?.dataset.railChannelMenu !== undefined
         ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
+        : element?.dataset.railConversationMenu !== undefined
+        ? `[data-rail-conversation-menu="${CSS.escape(element.dataset.railConversationMenu)}"]`
+        : element?.dataset.railConversation !== undefined
+        ? `[data-rail-conversation="${CSS.escape(element.dataset.railConversation)}"]`
+        : element?.dataset.railChannel !== undefined
+        ? `[data-rail-channel="${CSS.escape(element.dataset.railChannel)}"]`
         : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
         : element?.hasAttribute("data-conversation-members-open") ? "[data-conversation-members-open]"
         : element?.classList.contains("hm-menu__trigger") ? ".hm-menu__trigger"
@@ -16728,7 +16734,9 @@ import "../../styles/kylon-image-viewer.css";
       if (!back) return false;
       if (back.drawer) layout.openNavigation();
       const visible = (el: HTMLElement | null): el is HTMLElement => !!el?.isConnected && !!el.getClientRects().length && !el.closest("[hidden], [inert]");
-      const target = (back.selector ? all<HTMLElement>(back.selector).find(visible) : null) ?? back.element;
+      const target = visible(back.element)
+        ? back.element
+        : (back.selector ? all<HTMLElement>(back.selector).find(visible) ?? null : null);
       if (visible(target)) { target.focus({ preventScroll: true }); return true; }
       return false;
     };
