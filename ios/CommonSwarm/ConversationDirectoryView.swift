@@ -40,6 +40,9 @@ struct DirectoryView: View {
         }
         return List {
             Section("Workspace") {
+                NavigationLink(value: TodosRoute()) {
+                    Label("To-dos", systemImage: "checkmark.circle")
+                }
                 NavigationLink(value: SharedObjectsRoute()) {
                     Label("Lists & docs", systemImage: "list.bullet.rectangle")
                 }
@@ -53,6 +56,9 @@ struct DirectoryView: View {
                 ForEach(directs) { row in link(row) }
             }
         }.refreshable { await refresh() }
+         .navigationDestination(for: TodosRoute.self) { _ in
+             TodoListView(api: TodoAPI(api: api), workspaceID: workspace.id)
+         }
          .navigationDestination(for: SharedObjectsRoute.self) { _ in
              SharedObjectsListView(api: api, workspace: workspace)
          }

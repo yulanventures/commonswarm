@@ -126,6 +126,7 @@ struct LegacyDirectoryView: View {
 
     var body: some View {
         List {
+            WorkspaceToolsRootView(api: api, workspace: workspace)
             if failed { RetryView(text: "Couldn’t load conversations", action: load) }
             if let directory {
                 ForEach([false, true], id: \.self) { direct in
