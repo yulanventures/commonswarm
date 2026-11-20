@@ -325,13 +325,18 @@ export const RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"]
 export async function runReceiveServe(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-serve");
   args.assertShape(RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS, 2);
-  const { serveAgentChannel } = await import("./cloud/agent-channel.js");
   const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
   const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
-  if (binding?.provider === "grok-bot") {
+  if (binding?.provider === "codex") {
+    const { serveCodexWakeBridge } = await import("./cloud/native-wake-codex.js");
+    await serveCodexWakeBridge(options);
+  } else if (binding?.provider === "grok-bot") {
     const { serveGrokBotChannel } = await import("./cloud/agent-channel-grok-bot.js");
     await serveGrokBotChannel(options);
-  } else await serveAgentChannel(options);
+  } else {
+    const { serveAgentChannel } = await import("./cloud/agent-channel.js");
+    await serveAgentChannel(options);
+  }
 }
 
 export const RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "url", "json", "workspace-id"] as const;

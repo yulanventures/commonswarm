@@ -4,7 +4,7 @@ export type ReceiveMode = (typeof RECEIVE_MODES)[number];
 export const RECEIVE_PROVIDERS = ["claude", "codex", "gemini", "instructions", "grok-bot"] as const;
 export type ReceiveProvider = (typeof RECEIVE_PROVIDERS)[number];
 export const RECEIVE_WAKE_PROVIDER = "claude" as const;
-export const RECEIVE_WAKE_PROVIDERS = ["claude", "grok-bot"] as const;
+export const RECEIVE_WAKE_PROVIDERS = ["claude", "codex", "grok-bot"] as const;
 export const RECEIVE_CHOICE = {
   question: "How should I check CommonSwarm messages?",
   wake: "Wake this session when messages arrive. This can use model tokens while you are away; host support and approval are required.",

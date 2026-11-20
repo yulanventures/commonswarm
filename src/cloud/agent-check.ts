@@ -24,6 +24,7 @@ import { observeUnclaimedDeliveries } from "./delivery-observation.js";
 import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 import { reportSeenReactions, seenAckTargets } from "./agent-signal-receipts.js";
 import { buildCheckNext, encodeOpaqueCursor } from "../cli/ax.js";
+import { acknowledgeNativeWakeOnCheck } from "./native-wake.js";
 
 export {
   AGENT_CHECK_DIRECT_TIMEOUT_MS,
@@ -477,6 +478,13 @@ export async function checkAgentMessages(options: {
     if (checked.ackAfterCommit) {
       try { await checked.ackAfterCommit(); } catch { /* Check output and exit status are unchanged. */ }
     }
+    try {
+      await acknowledgeNativeWakeOnCheck({
+        profilePath,
+        ...(options.hostSessionId !== undefined ? { hostSessionId: options.hostSessionId } : {}),
+        surfacedSignalIds: checked.result.messages.map((m) => m.id),
+      });
+    } catch { /* Wake acknowledgement is best-effort and must not alter check output. */ }
     return checked.result;
   } catch (error) {
     if (error instanceof FileLockTimeoutError) {

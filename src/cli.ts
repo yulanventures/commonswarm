@@ -87,6 +87,14 @@ import {
   writeOnboardingOutput,
 } from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
+import {
+  findProfileReceiveBinding,
+  NativeWakeBridge,
+  wakeRouteForBinding,
+  type NativeWakeRoute,
+} from "./cloud/native-wake.js";
+import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
+import { receiveStatus } from "./cloud/agent-receive.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -5642,10 +5650,13 @@ async function runWhoami(args: Arguments): Promise<void> {
       conversationsSummary = unavailableWhoamiConversations();
     }
   }
+  let wakeRoute: NativeWakeRoute = "none";
+  let wakeVerified = false;
   let receiveCapability: {
     configured: boolean;
     requested_mode: "wake" | "turn" | null;
     effective_mode: "wake" | "turn" | "direct";
+    wake_route: NativeWakeRoute;
     turn_check: "verified" | "pending_host" | "instruction" | "none";
     wake_verified: boolean;
     channel_running: boolean;
@@ -5663,10 +5674,13 @@ async function runWhoami(args: Arguments): Promise<void> {
         args.expandedProfileHostSessionId,
         args.expandedProfileInputPath,
       );
+      wakeRoute = wakeRouteForBinding(binding);
+      wakeVerified = status.wake_verified;
       receiveCapability = {
         configured: binding !== null,
         requested_mode: status.requested_mode,
         effective_mode: status.effective_mode as "wake" | "turn",
+        wake_route: wakeRoute,
         turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
         wake_verified: status.wake_verified,
         channel_running: status.channel_running,
@@ -5677,6 +5691,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         configured: false,
         requested_mode: null,
         effective_mode: "turn",
+        wake_route: "none",
         turn_check: "instruction",
         wake_verified: false,
         channel_running: false,
@@ -5688,6 +5703,7 @@ async function runWhoami(args: Arguments): Promise<void> {
       configured: false,
       requested_mode: null,
       effective_mode: "direct",
+      wake_route: "none",
       turn_check: "none",
       wake_verified: false,
       channel_running: false,
@@ -5709,6 +5725,8 @@ async function runWhoami(args: Arguments): Promise<void> {
     owner_user_id: identity.owner_user_id,
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
+    wake_route: wakeRoute,
+    wake_verified: wakeVerified,
     renewal_grant: activeGrant,
     workspace: {
       workspace_id: identity.workspace_id,
@@ -5745,6 +5763,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         ? "Role: workspace lead (untagged channel messages route to you).\n"
         : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
+      `Wake route: ${wakeRoute}${wakeRoute !== "none" ? (wakeVerified ? " (verified)" : " (unverified)") : ""}.\n` +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"
         : `${describeRenewalGrant(output.renewal_grant).join("\n")}\n`),
@@ -8141,6 +8160,8 @@ async function runConfiguredListener(options: {
   pollMs?: number;
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
+  profilePath?: string;
+  hostSessionId?: string;
 }): Promise<ListenerStatus> {
   if (options.provider === "opencode" && options.effort) {
     throw new Error(
@@ -8417,6 +8438,23 @@ async function runConfiguredListener(options: {
   const routeMode = options.routeMode ?? "main";
   const deferOverChars = options.deferOverChars ?? null;
   const pendingMainQueue = new FilePendingMainQueue(paths.instanceDirectory);
+  let codexWakeBridge: NativeWakeBridge | null = null;
+  if (options.provider === "codex" && options.profilePath !== undefined) {
+    const wakeBinding = await findProfileReceiveBinding(
+      options.profilePath,
+      options.hostSessionId,
+    ).catch(() => null);
+    if (wakeBinding?.provider === "codex" && wakeBinding.requested_mode === "wake") {
+      codexWakeBridge = new NativeWakeBridge({
+        profilePath: options.profilePath,
+        hostSessionId: wakeBinding.host_session_id,
+        cwd: wakeBinding.cwd,
+        adapter: new CodexQueueAdapter({
+          ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
+        }),
+      });
+    }
+  }
   process.on("SIGINT", onProcessSignal);
   process.on("SIGTERM", onProcessSignal);
   try {
@@ -8508,6 +8546,11 @@ async function runConfiguredListener(options: {
         const instrumentedModel = activity.instrumentModel(
           await newModel(onCanaryAttempt, activity.events),
         );
+        const wakeBridgeTimer = codexWakeBridge === null
+          ? null
+          : setInterval(() => {
+            void codexWakeBridge.tick(signal).catch(() => undefined);
+          }, 1_000);
         try {
           return await runListenerRuntime({
             target: options.cloud,
@@ -8541,10 +8584,19 @@ async function runConfiguredListener(options: {
             deliveryHoldBudgetMs: turnBudgetMs,
             ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
             pendingMainQueue,
+            ...(codexWakeBridge === null
+              ? {}
+              : {
+                onMainArrival: () => {
+                  codexWakeBridge.notifyArrival();
+                  void codexWakeBridge.tick(signal).catch(() => undefined);
+                },
+              }),
             fetcher: boundFetch,
             signal: sessionManager === null ? signal : AbortSignal.any([signal, leaseAbort.signal]),
           });
         } finally {
+          if (wakeBridgeTimer !== null) clearInterval(wakeBridgeTimer);
           activity.close();
         }
       },
@@ -8688,6 +8740,8 @@ async function runListenStart(args: Arguments): Promise<void> {
         ? { codexExecutable: args.required("codex-executable") }
         : {}),
       ...(stateDirectory ? { stateDirectory } : {}),
+      ...(args.expandedProfilePath ? { profilePath: args.expandedProfilePath } : {}),
+      ...(args.optional("host-session-id") ? { hostSessionId: args.optional("host-session-id") } : {}),
     });
   } else {
     const entrypoint = process.argv[1];

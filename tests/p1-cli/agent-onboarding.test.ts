@@ -182,6 +182,7 @@ test("setup checks identity before saving and starts no receiver", async () => {
   assert.deepEqual(result.receive_capabilities.wake, { provider: "claude", preview: true, requires_idle_test: true });
   assert.deepEqual(result.receive_capabilities.wake_providers, [
     { provider: "claude", preview: true, requires_idle_test: true },
+    { provider: "codex", preview: false, requires_idle_test: true },
     { provider: "grok-bot", preview: false, requires_idle_test: true },
   ]);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
@@ -540,16 +541,24 @@ test("Claude hook verifies only the configured session; turn-mode Stop drains on
   assert.equal((await readReceiveBinding(profilePath, "session-one"))!.idle, true);
 });
 
-test("Claude wake is the default channel setup without a preview flag; Codex cannot claim wake", async () => {
+test("Claude and Codex wake setup; Codex requires a thread UUID and instructions cannot claim wake", async () => {
   const { profilePath } = await setup();
   const cwd = await mkdtemp(join(root, "claude-default-wake-"));
   const common = { profilePath, mode: "wake", hostSessionId: "session-one", cwd, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
-  await assert.rejects(configureAgentReceive({ ...common, provider: "codex" }), { code: "wake_host_unsupported" });
+  await assert.rejects(configureAgentReceive({ ...common, provider: "instructions" }), { code: "wake_host_unsupported" });
+  await assert.rejects(configureAgentReceive({ ...common, provider: "codex" }), { code: "codex_thread_id_required" });
+  const codexThread = "11111111-2222-4333-8444-555555555555";
+  const codex = await configureAgentReceive({ ...common, hostSessionId: codexThread, provider: "codex" });
+  assert.equal(codex.wake_route, "codex-queue");
+  assert.equal(codex.wake_verified, false);
+  assert.match(String(codex.host_step), /cswarm receive serve/);
   const claude = await configureAgentReceive({ ...common, provider: "claude" });
+  assert.equal(claude.wake_route, "channel");
   assert.match(String(claude.start_command), /--dangerously-load-development-channels server:cswarm/u);
   assert.match(String(claude.host_step), /approve the channel/u);
   await assert.rejects(configureAgentReceive({ ...common, provider: "codex", mode: "turn", grokBotAgentId: AGENT }), { code: "grok_bot_agent_id_unsupported" });
   assert.equal(receiveStatus(null).wake_verified, false);
+  assert.equal(receiveStatus(null).wake_route, "none");
 });
 
 test("channel receipt requires the pending challenge and the same session", () => {
