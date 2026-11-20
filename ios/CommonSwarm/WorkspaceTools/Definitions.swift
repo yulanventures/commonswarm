@@ -30,6 +30,12 @@ struct DefinitionFields: Equatable, Hashable, Sendable {
     let source: String
 }
 
+/// Presentation identity captured when the New definition sheet opens.
+/// Dismissing or replacing the sheet retires its session synchronously so a held-bearer submit cannot send.
+struct DefinitionCreateSession: Identifiable, Equatable, Sendable {
+    let id = UUID()
+}
+
 /// Frozen snapshot captured when the user explicitly opens the Edit sheet.
 /// Edits ALWAYS send this exact `baseRevision` and `beforeFields` — never re-reading mutable `detail.current`.
 struct DefinitionEditSession: Identifiable, Equatable, Sendable {
@@ -277,7 +283,7 @@ final class DefinitionsListStore: ObservableObject {
     @Published private(set) var isCreating = false
     @Published private(set) var createError: String?
     @Published private(set) var statusMessage: String?
-    @Published var showingCreateSheet = false
+    @Published var activeCreateSession: DefinitionCreateSession?
     @Published var searchQuery = ""
 
     let workspaceID: UUID
@@ -308,7 +314,7 @@ final class DefinitionsListStore: ObservableObject {
         loadGeneration += 1
         accessGeneration += 1
         isLoading = false
-        showingCreateSheet = false
+        activeCreateSession = nil
     }
 
     func activate() {
@@ -385,7 +391,7 @@ final class DefinitionsListStore: ObservableObject {
                     // Editor -> Reader refresh advances write fence so any in-flight write cannot dispatch or settle.
                     accessGeneration += 1
                     capturedAccessGen = accessGeneration
-                    showingCreateSheet = false
+                    activeCreateSession = nil
                 }
             }
 
@@ -436,17 +442,27 @@ final class DefinitionsListStore: ObservableObject {
         }
     }
 
-    func openCreateSheet() {
-        guard canEdit else { return }
+    @discardableResult
+    func openCreateSheet() -> DefinitionCreateSession? {
+        guard canEdit else { return nil }
         if pendingCreate?.outcomeUnknown != true {
             createError = nil
         }
-        showingCreateSheet = true
+        let session = DefinitionCreateSession()
+        activeCreateSession = session
+        return session
+    }
+
+    func dismissCreateSession(_ sessionID: UUID) {
+        if activeCreateSession?.id == sessionID {
+            activeCreateSession = nil
+        }
     }
 
     func retryPendingCreate(api: DefinitionsAPI) async -> String? {
         guard let pending = pendingCreate, pending.outcomeUnknown else { return nil }
         return await createDefinition(
+            session: nil,
             term: pending.fields.term,
             meaning: pending.fields.meaning,
             source: pending.fields.source,
@@ -454,9 +470,10 @@ final class DefinitionsListStore: ObservableObject {
         )
     }
 
-    /// Creates a new definition, gating dispatch right before transport and preserving unresolved command identity
-    /// across retired responses, sheet reopen, inconclusive reads, and pre-receipt refusals (including same-login 401).
+    /// Creates a new definition, gating dispatch right before transport (including sheet presentation identity when
+    /// submitted from New definition) and preserving unresolved command identity conservatively across any refusal.
     func createDefinition(
+        session createSession: DefinitionCreateSession? = nil,
         term rawTerm: String,
         meaning rawMeaning: String,
         source rawSource: String,
@@ -465,6 +482,9 @@ final class DefinitionsListStore: ObservableObject {
         guard !isRetired else { return nil }
         guard bindSession(api.session) else { return nil }
         guard canEdit, !isCreating else { return nil }
+        if let createSession, activeCreateSession?.id != createSession.id {
+            return nil
+        }
 
         let validated: DefinitionFields
         switch DefinitionsRules.validateFields(term: rawTerm, meaning: rawMeaning, source: rawSource) {
@@ -525,6 +545,9 @@ final class DefinitionsListStore: ObservableObject {
                   self.canEdit else {
                 return false
             }
+            if let createSession, self.activeCreateSession?.id != createSession.id {
+                return false
+            }
             // Record potential dispatch BEFORE transport sends so a retired first response still leaves outcomeUnknown == true.
             dispatchFlag.entered = true
             if var current = self.pendingCreate, current.commandID == record.commandID {
@@ -569,7 +592,7 @@ final class DefinitionsListStore: ObservableObject {
         switch outcome {
         case .committed(let committedID, _):
             pendingCreate = nil
-            showingCreateSheet = false
+            activeCreateSession = nil
             await load(api: api)
             return committedID
         case .conflict(let message):
@@ -578,8 +601,9 @@ final class DefinitionsListStore: ObservableObject {
             await load(api: api)
             return nil
         case .refused(let reason, let message):
-            let preReceipt = DefinitionsRules.isPreReceiptRefusal(reason)
-            let keepUnknown = wasAlreadyUnknown && preReceipt
+            // Conservative default: any refusal on an already-unknown write (including unclassified or pre-receipt
+            // refusals such as patch_base_mismatch) preserves command identity until receipt lookup confirms.
+            let keepUnknown = wasAlreadyUnknown
             let displayMessage = keepUnknown
                 ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "create", refusalMessage: message)
                 : message
@@ -617,7 +641,7 @@ final class DefinitionsListStore: ObservableObject {
         access = nil
         accessError = message
         needsConsent = consent
-        showingCreateSheet = false
+        activeCreateSession = nil
         if clearPending {
             pendingCreate = nil
         }
@@ -627,7 +651,7 @@ final class DefinitionsListStore: ObservableObject {
     private func downgradeToReader() {
         accessGeneration += 1
         access = SharedAccess(role: .reader, operations: ["read"])
-        showingCreateSheet = false
+        activeCreateSession = nil
     }
 }
 
@@ -942,8 +966,8 @@ final class DefinitionDetailStore: ObservableObject {
             await load(api: api, preserveNotice: true)
             return false
         case .refused(let reason, let message):
-            let preReceipt = DefinitionsRules.isPreReceiptRefusal(reason)
-            let keepUnknown = wasAlreadyUnknown && preReceipt
+            // Conservative default: any refusal on an already-unknown certification preserves command identity until receipt lookup confirms.
+            let keepUnknown = wasAlreadyUnknown
             let displayMessage = keepUnknown
                 ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "certification", refusalMessage: message)
                 : message
@@ -1135,8 +1159,9 @@ final class DefinitionDetailStore: ObservableObject {
             await load(api: api, preserveNotice: true)
             return false
         case .refused(let reason, let message):
-            let preReceipt = DefinitionsRules.isPreReceiptRefusal(reason)
-            let keepUnknown = wasAlreadyUnknown && preReceipt
+            // Conservative default: any refusal on an already-unknown edit (including patch_base_mismatch or
+            // unclassified pre-receipt reasons) preserves command identity until receipt lookup confirms.
+            let keepUnknown = wasAlreadyUnknown
             let displayMessage = keepUnknown
                 ? DefinitionsRules.unknownOutcomeAfterRefusalMessage(action: "edit", refusalMessage: message)
                 : message

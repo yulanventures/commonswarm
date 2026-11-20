@@ -210,7 +210,7 @@ struct DefinitionsListView: View {
                 onChanged: { await store.load(api: definitionsAPI) }
             )
         }
-        .sheet(isPresented: $store.showingCreateSheet) {
+        .sheet(item: $store.activeCreateSession) { createSession in
             let pending = store.pendingCreate?.outcomeUnknown == true ? store.pendingCreate?.fields : nil
             DefinitionEditorSheet(
                 title: "New definition",
@@ -222,6 +222,7 @@ struct DefinitionsListView: View {
                 errorMessage: store.createError
             ) { term, meaning, source in
                 if let createdID = await store.createDefinition(
+                    session: createSession,
                     term: term,
                     meaning: meaning,
                     source: source,
@@ -230,9 +231,15 @@ struct DefinitionsListView: View {
                     createdRoute = DefinitionDetailRoute(objectID: createdID)
                 }
             }
+            .onDisappear {
+                store.dismissCreateSession(createSession.id)
+            }
         }
         .task {
             await store.load(api: definitionsAPI)
+        }
+        .onAppear {
+            store.activate()
         }
         .onDisappear {
             store.retire()
@@ -334,7 +341,7 @@ struct DefinitionDetailView: View {
                             .accessibilityIdentifier("definition-retry-pending-update")
                         }
 
-                        if store.canEdit && store.hasUnknownPendingCertify && !store.canCertify {
+                        if store.canEdit && store.hasUnknownPendingCertify {
                             Button {
                                 Task {
                                     if await store.retryPendingCertify(api: definitionsAPI) {
@@ -353,7 +360,7 @@ struct DefinitionDetailView: View {
                             .accessibilityIdentifier("definition-retry-pending-certify")
                         }
 
-                        if store.canCertify {
+                        if store.canCertify && !store.hasUnknownPendingCertify {
                             Button {
                                 Task {
                                     if await store.certify(api: definitionsAPI) {
@@ -434,6 +441,9 @@ struct DefinitionDetailView: View {
         }
         .task {
             await store.load(api: definitionsAPI)
+        }
+        .onAppear {
+            store.activate()
         }
         .onDisappear {
             store.retire()

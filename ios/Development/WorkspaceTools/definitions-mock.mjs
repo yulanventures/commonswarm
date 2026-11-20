@@ -106,6 +106,7 @@ let holdNextWrite = false;
 let heldWriteResolver = null;
 let omitObjectInSearchOnce = null;
 let writeMutations = 0;
+let rosterReadCount = 0;
 const receipts = new Map();
 const recordedCommands = [];
 
@@ -209,6 +210,25 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/fixture/mutations") {
       return reply(200, { count: writeMutations });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/roster-reads") {
+      return reply(200, { count: rosterReadCount });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/advance-proposal") {
+      const targetId = url.searchParams.get("object_id") || "def-arr";
+      const entry = definitions.get(targetId);
+      if (entry) {
+        entry.seq += 1;
+        const nextRev = makeRev(entry.object_id, entry.seq);
+        entry.current = {
+          ...entry.current,
+          revision: nextRev,
+          meaning: `${entry.current.meaning} (later proposal v${entry.seq})`,
+          author: { user_id: maya, principal_id: atlas },
+          occurred_at_server: Date.now(),
+        };
+      }
+      return reply(200, { ok: true, seq: entry?.seq ?? null });
     }
 
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
@@ -512,11 +532,13 @@ const server = createServer(async (req, res) => {
 
     switch (url.pathname) {
       case "/rest/v1/member_profiles":
+        rosterReadCount += 1;
         return reply(200, [
           { user_id: me, display_name: "You" },
           { user_id: maya, display_name: "Maya Chen" },
         ]);
       case "/rest/v1/agent_principals":
+        rosterReadCount += 1;
         return reply(200, [{ principal_id: atlas, name: "Atlas" }]);
       default:
         return reply(404, {});

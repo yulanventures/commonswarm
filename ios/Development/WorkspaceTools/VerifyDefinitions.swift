@@ -3,8 +3,9 @@ import Foundation
 @MainActor
 final class ControllableBearer {
     private let token: String
-    private var holdNext = false
-    private var waitingContinuation: CheckedContinuation<Void, Never>?
+    private var holdAfterSkips: Int?
+    private var remainingHolds = 0
+    private var waitingContinuations: [CheckedContinuation<Void, Never>] = []
     private var arrivedContinuation: CheckedContinuation<Void, Never>?
     private var arrived = false
 
@@ -12,8 +13,9 @@ final class ControllableBearer {
         self.token = token
     }
 
-    func armHold() {
-        holdNext = true
+    func armHold(afterSkips skips: Int = 0, holdCount: Int = 1) {
+        holdAfterSkips = skips
+        remainingHolds = holdCount
         arrived = false
     }
 
@@ -25,21 +27,31 @@ final class ControllableBearer {
     }
 
     func release() {
-        holdNext = false
-        let cont = waitingContinuation
-        waitingContinuation = nil
-        cont?.resume()
+        holdAfterSkips = nil
+        remainingHolds = 0
+        let conts = waitingContinuations
+        waitingContinuations.removeAll()
+        for cont in conts {
+            cont.resume()
+        }
     }
 
     func fetch() async -> String {
-        if holdNext {
-            holdNext = false
-            arrived = true
-            let waiter = arrivedContinuation
-            arrivedContinuation = nil
-            waiter?.resume()
-            await withCheckedContinuation { cont in
-                waitingContinuation = cont
+        if let skips = holdAfterSkips {
+            if skips > 0 {
+                holdAfterSkips = skips - 1
+            } else if remainingHolds > 0 {
+                remainingHolds -= 1
+                if remainingHolds == 0 {
+                    holdAfterSkips = nil
+                }
+                arrived = true
+                let waiter = arrivedContinuation
+                arrivedContinuation = nil
+                waiter?.resume()
+                await withCheckedContinuation { cont in
+                    waitingContinuations.append(cont)
+                }
             }
         }
         return token
@@ -67,6 +79,7 @@ struct VerifyDefinitions {
         let object_id: String
         let request_id: String?
         let base_token: String?
+        let token: String?
     }
 
     struct MutationCount: Decodable {
@@ -80,6 +93,11 @@ struct VerifyDefinitions {
 
     static func mutationCount(_ origin: URL) async throws -> Int {
         let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/mutations"))
+        return try JSONDecoder().decode(MutationCount.self, from: data).count
+    }
+
+    static func rosterReadCount(_ origin: URL) async throws -> Int {
+        let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/roster-reads"))
         return try JSONDecoder().decode(MutationCount.self, from: data).count
     }
 
@@ -152,11 +170,12 @@ struct VerifyDefinitions {
         expect(arrDetail.status == .proposalPending && arrDetail.certified?.certifiedByLabel == "Maya Chen", "ARR proposalPending expected")
 
         // 2. HezSec C1 Held-Bearer Dispatch Witness (control + retire + editor-closed + Editor->Reader refresh)
-        // 2a. Control: held bearer without retirement dispatches & commits cleanly
+        // 2a. Control: held bearer from open New definition sheet dispatches & commits cleanly
+        let controlSheet = await MainActor.run { listStore.openCreateSheet() }!
         let cmdsBeforeControl = try await recordedCommands(origin).count
         await MainActor.run { bearerGate.armHold() }
         let controlTask = Task {
-            await listStore.createDefinition(term: "Payback Period", meaning: "Months to recover CAC.", source: "finance.cac", api: defsAPI)
+            await listStore.createDefinition(session: controlSheet, term: "Payback Period", meaning: "Months to recover CAC.", source: "finance.cac", api: defsAPI)
         }
         await bearerGate.waitUntilHeld()
         await MainActor.run { bearerGate.release() }
@@ -164,7 +183,23 @@ struct VerifyDefinitions {
         let cmdsAfterControl = try await recordedCommands(origin).count
         expect(controlCreated == "def-payback-period" && cmdsAfterControl == cmdsBeforeControl + 1, "Control held-bearer create must dispatch and commit")
 
-        // 2b. Retire store while bearer is held -> ZERO command requests hit the wire!
+        // 2b. Dismiss ONLY New definition sheet while bearer is held (parent list stays OPEN and live!) -> ZERO command requests!
+        let dismissedSheet = await MainActor.run { listStore.openCreateSheet() }!
+        let cmdsBeforeSheetDismiss = try await recordedCommands(origin).count
+        await MainActor.run { bearerGate.armHold() }
+        let dismissedSheetTask = Task {
+            await listStore.createDefinition(session: dismissedSheet, term: "Swiped Away", meaning: "Dismissed during bearer fetch.", source: "", api: defsAPI)
+        }
+        await bearerGate.waitUntilHeld()
+        await MainActor.run { listStore.dismissCreateSession(dismissedSheet.id) }
+        expect(await MainActor.run { listStore.canEdit && listStore.activeCreateSession == nil }, "Parent list store must remain live while sheet is dismissed")
+        await MainActor.run { bearerGate.release() }
+        let dismissedSheetRes = await dismissedSheetTask.value
+        let cmdsAfterSheetDismiss = try await recordedCommands(origin).count
+        expect(dismissedSheetRes == nil && cmdsAfterSheetDismiss == cmdsBeforeSheetDismiss, "Dismissing New definition sheet while bearer is held must send ZERO command requests")
+        expect(await MainActor.run { listStore.pendingCreate == nil }, "Never-dispatched sheet submit must not leave stale pendingCreate")
+
+        // 2b2. Retire entire store while bearer is held -> ZERO command requests!
         let cmdsBeforeRetiredDispatch = try await recordedCommands(origin).count
         await MainActor.run { bearerGate.armHold() }
         let retiredCreateTask = Task {
@@ -176,8 +211,20 @@ struct VerifyDefinitions {
         let retiredCreateRes = await retiredCreateTask.value
         let cmdsAfterRetiredDispatch = try await recordedCommands(origin).count
         expect(retiredCreateRes == nil && cmdsAfterRetiredDispatch == cmdsBeforeRetiredDispatch, "Retiring store while bearer is held must send ZERO command requests")
-        expect(await MainActor.run { listStore.pendingCreate == nil }, "Never-dispatched write must not leave stale pendingCreate")
         await listStore.load(api: defsAPI)
+
+        // 2b3. Attribution reads (member_profiles & agent_principals) carry canDispatch: retiring store while attribution bearer is held sends ZERO roster requests!
+        let rosterBeforeAttrHold = try await rosterReadCount(origin)
+        // Skip 2 bearer fetches (access + definition_read), then hold on both attribution roster fetches!
+        await MainActor.run { bearerGate.armHold(afterSkips: 2, holdCount: 2) }
+        let attrHoldTask = Task { await detailStore.load(api: defsAPI) }
+        await bearerGate.waitUntilHeld()
+        await MainActor.run { detailStore.retire() }
+        await MainActor.run { bearerGate.release() }
+        await attrHoldTask.value
+        let rosterAfterAttrHold = try await rosterReadCount(origin)
+        expect(rosterAfterAttrHold == rosterBeforeAttrHold, "Retiring detailStore while attribution bearer is held must send ZERO roster requests (got \(rosterAfterAttrHold - rosterBeforeAttrHold))")
+        await detailStore.load(api: defsAPI)
 
         // 2c. Close open editor while bearer is held -> ZERO command requests hit the wire!
         let editBeforeClose = await MainActor.run { detailStore.beginEdit() }!
@@ -273,17 +320,29 @@ struct VerifyDefinitions {
         }
         expect(after401Update.0 && after401Update.1 && after401Update.2 && after401Update.3.contains("unknown"), "Same-login 401 must retire display state while preserving pendingUpdate commandID & unknown warning")
 
-        // Restore token -> reload -> retryPendingUpdate hits receipt lookup with exact same commandID -> ZERO duplicate writes!
+        // Unclassified / patch_base_mismatch pre-receipt refusals MUST ALSO preserve pendingUpdate & commandID!
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/edge-401?on=0")!)
         await detailStore.load(api: defsAPI)
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/pre-receipt-refusal?reason=patch_base_mismatch")!)
+        let mismatchRetry = await detailStore.retryPendingUpdate(api: defsAPI)
+        let pendingAfterMismatch = await MainActor.run { detailStore.pendingUpdate?.commandID == heldUpdateCmdID && detailStore.hasUnknownPendingUpdate }
+        expect(!mismatchRetry && pendingAfterMismatch, "patch_base_mismatch before receipt lookup must preserve pendingUpdate & commandID")
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/pre-receipt-refusal?reason=unclassified_edge_refusal")!)
+        let unclassifiedRetry = await detailStore.retryPendingUpdate(api: defsAPI)
+        let pendingAfterUnclassified = await MainActor.run { detailStore.pendingUpdate?.commandID == heldUpdateCmdID && detailStore.hasUnknownPendingUpdate }
+        expect(!unclassifiedRetry && pendingAfterUnclassified, "Unclassified refusal before receipt lookup must conservatively preserve pendingUpdate & commandID")
+
+        // Final authorized retryPendingUpdate hits receipt lookup with exact same commandID -> ZERO duplicate writes!
         let replayedUpdate = await detailStore.retryPendingUpdate(api: defsAPI)
         expect(replayedUpdate, "Authorized retryPendingUpdate must confirm committed receipt")
         expect(try await mutationCount(origin) == mutsAfterHeldUpdate, "Update replay must execute AT MOST ONE write on server")
         expect(await MainActor.run { detailStore.pendingUpdate == nil }, "Confirmed receipt clears pendingUpdate")
         let updCmdsForID = try await recordedCommands(origin).filter { $0.command_id == heldUpdateCmdID.uuidString.lowercased() }
-        expect(updCmdsForID.count == 2, "Expected original + final replay with exact same command_id (401 blocked at edge before recorder)")
+        expect(updCmdsForID.count == 4, "Expected original + mismatch + unclassified + final replay with exact same command_id (got \(updCmdsForID.count))")
 
-        // 5. HezSec C3 Witness 2 (Certify): committed-then-503 -> same-login 401 -> inconclusive read -> pre-receipt rate_limited -> receipt replay (AT MOST ONE write)!
+        // 5. HezSec C3 Witness 2 (Certify): committed-then-503 -> LATER PROPOSAL ARRIVES -> normal Certify withheld while
+        //    retryPendingCertify stays reachable and replays the ORIGINAL revision & commandID -> AT MOST ONE write!
+        let origCertToken = await MainActor.run { detailStore.detail?.current.revision.token }!
         let mutsBeforeCert = try await mutationCount(origin)
         try await postFixture(origin.appending(path: "fixture/commit-then-503"))
         let unconfirmedCert = await detailStore.certify(api: defsAPI)
@@ -292,28 +351,46 @@ struct VerifyDefinitions {
         expect(mutsAfterCert503 == mutsBeforeCert + 1, "Certify committed once on server")
         let certCmdID = await MainActor.run { detailStore.pendingCertify?.commandID }!
 
-        // Same-login 401 preserves pendingCertify
+        // A newer proposal arrives on server while the earlier certify is still unresolved!
+        try await postFixture(URL(string: "\(origin.absoluteString)/fixture/advance-proposal?object_id=def-arr")!)
+        await detailStore.load(api: defsAPI)
+        let afterNewerProposal = await MainActor.run {
+            (
+                detailStore.detail?.current.revision.token ?? "",
+                detailStore.canCertify,
+                detailStore.hasUnknownPendingCertify,
+                detailStore.pendingCertify?.revision.token ?? ""
+            )
+        }
+        expect(afterNewerProposal.0 != origCertToken, "Server must have advanced to a newer proposal")
+        expect(afterNewerProposal.1 && afterNewerProposal.2 && afterNewerProposal.3 == origCertToken, "Pending certify retry must stay available alongside newer proposal")
+
+        // Normal certify() against the newer proposal must refuse locally (0 sends) until pending certify resolves
+        let cmdsBeforeBlockedFreshCert = try await recordedCommands(origin).count
+        let blockedFreshCert = await detailStore.certify(api: defsAPI)
+        let cmdsAfterBlockedFreshCert = try await recordedCommands(origin).count
+        expect(!blockedFreshCert && cmdsBeforeBlockedFreshCert == cmdsAfterBlockedFreshCert, "Normal certify for newer proposal must be blocked locally while older certify is unresolved")
+
+        // Same-login 401 and pre-receipt rate_limited refusal preserve pendingCertify
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/edge-401?on=1")!)
-        let cert401 = await detailStore.certify(api: defsAPI)
+        let cert401 = await detailStore.retryPendingCertify(api: defsAPI)
         expect(!cert401, "401 certify retry must fail")
         expect(await MainActor.run { detailStore.detail == nil && detailStore.pendingCertify?.commandID == certCmdID && detailStore.hasUnknownPendingCertify }, "Same-login 401 must preserve pendingCertify")
-
-        // Restore & inconclusive detail read MUST NOT clear pendingCertify
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/edge-401?on=0")!)
         await detailStore.load(api: defsAPI)
-        expect(await MainActor.run { detailStore.pendingCertify?.commandID == certCmdID && detailStore.hasUnknownPendingCertify }, "Detail read must NOT clear unresolved pendingCertify")
 
-        // Pre-receipt rate_limited refusal preserves pendingCertify
         try await postFixture(URL(string: "\(origin.absoluteString)/fixture/pre-receipt-refusal?reason=rate_limited")!)
         let certRateLimited = await detailStore.retryPendingCertify(api: defsAPI)
         let certStillPending = await MainActor.run { detailStore.pendingCertify?.commandID == certCmdID && detailStore.hasUnknownPendingCertify }
         expect(!certRateLimited && certStillPending, "rate_limited refusal must preserve pendingCertify")
 
-        // Definite receipt replay confirms certify with AT MOST ONE write!
+        // Definite receipt replay via retryPendingCertify sends the ORIGINAL revision token & commandID -> AT MOST ONE write!
         let certReplayed = await detailStore.retryPendingCertify(api: defsAPI)
         let certCleared = await MainActor.run { detailStore.pendingCertify == nil }
-        expect(certReplayed && certCleared, "Receipt replay must confirm & clear pendingCertify")
+        expect(certReplayed && certCleared, "Receipt replay must confirm & clear pendingCertify even after a newer proposal arrived")
         expect(try await mutationCount(origin) == mutsAfterCert503, "Certify replay must execute AT MOST ONE write on server")
+        let lastCertCmd = try await recordedCommands(origin).last { $0.kind == "household_definition_certify" }!
+        expect(lastCertCmd.command_id == certCmdID.uuidString.lowercased() && lastCertCmd.token == origCertToken, "Replayed certify must send original revision token and command_id")
 
         // 6. HezSec C3 Witness 3 (Create): committed-then-503 -> reopen New sheet -> inconclusive bounded search omitting target ->
         //    same-login 401 -> different payload blocked -> unchanged retry replays receipt with AT MOST ONE write!
@@ -326,7 +403,7 @@ struct VerifyDefinitions {
         let createCmdID = await MainActor.run { listStore.pendingCreate?.commandID }!
 
         // Reopening New sheet preserves pendingCreate
-        await MainActor.run { listStore.openCreateSheet() }
+        _ = await MainActor.run { listStore.openCreateSheet() }
         expect(await MainActor.run { listStore.pendingCreate?.commandID == createCmdID && listStore.hasUnknownPendingCreate }, "Reopening New sheet must preserve pendingCreate")
 
         // Inconclusive bounded search (omitting created item, then including it) MUST NOT clear pendingCreate!

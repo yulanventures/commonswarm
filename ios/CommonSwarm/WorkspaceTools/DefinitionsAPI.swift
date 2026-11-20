@@ -404,7 +404,7 @@ struct DefinitionsAPI: Sendable {
             throw APIError.invalidResponse
         }
 
-        let ctx = await loadAttributionContext(workspaceID: workspaceID)
+        let ctx = try await loadAttributionContext(workspaceID: workspaceID, canDispatch: canDispatch)
         let author = SharedObjectsRules.formatAttribution(
             rawCurrent.author,
             viewerID: ctx.viewerID,
@@ -595,26 +595,58 @@ struct DefinitionsAPI: Sendable {
         return .unconfirmed(message: Self.unconfirmedMessage)
     }
 
-    private func loadAttributionContext(workspaceID: UUID) async -> AttributionContext {
+    private func gatedRows<T: Decodable>(
+        _ table: String,
+        _ query: [String: String],
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> [T] {
+        var req = api.request("rest/v1/" + table, query)
+        req.setValue("swarm_read", forHTTPHeaderField: "Accept-Profile")
+        return try await api.send(req, canDispatch: canDispatch)
+    }
+
+    private func loadAttributionContext(
+        workspaceID: UUID,
+        canDispatch: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> AttributionContext {
+        guard await canDispatch() else { throw CancellationError() }
         let viewerID = await MainActor.run { api.session.userID }
         let wsFilter = "eq.\(workspaceID.uuidString.lowercased())"
-        async let membersFetch: [MemberProfileRow] = (try? await api.rows(
-            "member_profiles",
-            [
-                "select": "user_id,display_name",
-                "workspace_id": wsFilter,
-            ]
-        )) ?? []
-        async let agentsFetch: [AgentPrincipalRow] = (try? await api.rows(
-            "agent_principals",
-            [
-                "select": "principal_id,name",
-                "workspace_id": wsFilter,
-            ]
-        )) ?? []
+        async let membersFetch: [MemberProfileRow] = {
+            do {
+                return try await self.gatedRows(
+                    "member_profiles",
+                    [
+                        "select": "user_id,display_name",
+                        "workspace_id": wsFilter,
+                    ],
+                    canDispatch: canDispatch
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return []
+            }
+        }()
+        async let agentsFetch: [AgentPrincipalRow] = {
+            do {
+                return try await self.gatedRows(
+                    "agent_principals",
+                    [
+                        "select": "principal_id,name",
+                        "workspace_id": wsFilter,
+                    ],
+                    canDispatch: canDispatch
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return []
+            }
+        }()
 
-        let members = await membersFetch
-        let agents = await agentsFetch
+        let members = try await membersFetch
+        let agents = try await agentsFetch
 
         var userNames: [UUID: String] = [:]
         for m in members {
