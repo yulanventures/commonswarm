@@ -702,8 +702,28 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
           (${foreignWsId}::uuid, ${nonMemberId}::uuid, 'owner')
       `;
       await tx`
-        INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
-        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout')
+        INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
+        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout', 'hosted_mcp', true)
+      `;
+      await tx`
+        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id)
+        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid)
+      `;
+      const unseatedAgentId = randomUUID();
+      const revokedSeatAgentId = randomUUID();
+      const seatedNonMemberAgentId = randomUUID();
+      await tx`
+        INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
+        VALUES
+          (${unseatedAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'UnseatedAgent', 'hosted_mcp', true),
+          (${revokedSeatAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'RevokedSeatAgent', 'hosted_mcp', true),
+          (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'SeatedNonMember', 'hosted_mcp', true)
+      `;
+      await tx`
+        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, revoked_at)
+        VALUES
+          (${revokedSeatAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, now()),
+          (${seatedNonMemberAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, NULL)
       `;
       await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
@@ -780,6 +800,123 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
       await tx`SELECT swarm.conversation_prefile(${wsId}::uuid, ${gen1AskId}::uuid, ${convGroupGen1}::uuid)`;
       await tx`RESET ROLE`;
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+
+      // Add unseatedAgentId and revokedSeatAgentId as conversation_members of convGroupGen1 to test
+      // Condition 2: live, owner-matched workspace seat is strictly required (no registrar fallback!).
+      await tx`
+        INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_user_id, member_agent_principal_id)
+        VALUES
+          (${convGroupGen1}::uuid, ${wsId}::uuid, NULL, ${unseatedAgentId}::uuid),
+          (${convGroupGen1}::uuid, ${wsId}::uuid, NULL, ${revokedSeatAgentId}::uuid)
+      `;
+      await tx`SAVEPOINT sp_agent_seat_gate`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const [seatCheck] = await tx<{ seated: boolean; unseated: boolean; revoked: boolean; seated_outsider: boolean }[]>`
+        SELECT
+          swarm.actor_can_access_direct_conversation(${wsId}::uuid, ${convGroupGen1}::uuid, 'group_dm', 'agent', ${scoutAgentId}::uuid) AS seated,
+          swarm.actor_can_access_direct_conversation(${wsId}::uuid, ${convGroupGen1}::uuid, 'group_dm', 'agent', ${unseatedAgentId}::uuid) AS unseated,
+          swarm.actor_can_access_direct_conversation(${wsId}::uuid, ${convGroupGen1}::uuid, 'group_dm', 'agent', ${revokedSeatAgentId}::uuid) AS revoked,
+          swarm.actor_can_access_direct_conversation(${wsId}::uuid, ${convGroupGen1}::uuid, 'group_dm', 'agent', ${seatedNonMemberAgentId}::uuid) AS seated_outsider
+      `;
+      assert.equal(seatCheck!.seated, true, "seated live agent member must be admitted");
+      assert.equal(seatCheck!.unseated, false, "unseated agent (registrar workspace only, absent seat) must be refused");
+      assert.equal(seatCheck!.revoked, false, "revoked-seat agent must be refused");
+      assert.equal(seatCheck!.seated_outsider, false, "seated agent outside conversation must be refused");
+      await tx`ROLLBACK TO SAVEPOINT sp_agent_seat_gate`;
+
+      // Also verify todo_create end-to-end for seated member vs seated non-member vs revoked-seat vs absent-seat agents!
+      const grantScout = randomUUID(), connScout = randomUUID();
+      const grantRevoked = randomUUID(), connRevoked = randomUUID();
+      const grantOutsider = randomUUID(), connOutsider = randomUUID();
+      for (const [grantId, connId, agentId, label] of [
+        [grantScout, connScout, scoutAgentId, "Scout"],
+        [grantRevoked, connRevoked, revokedSeatAgentId, "Revoked"],
+        [grantOutsider, connOutsider, seatedNonMemberAgentId, "SeatedOutsider"],
+      ] as const) {
+        await tx`
+          INSERT INTO swarm.hosted_mcp_grants (
+            grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
+            selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at
+          ) VALUES (
+            ${grantId}::uuid, ${`syn-${grantId}`}, ${viewerId}::uuid, ${wsId}::uuid, 'syn-client',
+            'https://mcp.commonswarm.com/mcp', ARRAY[${wsId}]::uuid[], decode(repeat('a',64),'hex'),
+            'syn-consent', 'active', clock_timestamp(), clock_timestamp()
+          )
+        `;
+        await tx`
+          INSERT INTO swarm.hosted_mcp_grant_workspaces (
+            grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at
+          ) VALUES (
+            ${grantId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, decode(repeat('a',64),'hex'),
+            ${randomUUID()}::uuid, clock_timestamp()
+          )
+        `;
+        await tx`
+          INSERT INTO swarm.hosted_mcp_grant_agents (grant_id, principal_id, owner_user_id)
+          VALUES (${grantId}::uuid, ${agentId}::uuid, ${viewerId}::uuid)
+        `;
+        await tx`
+          INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+          VALUES (${connId}::uuid, ${grantId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${agentId}::uuid, ${label}, clock_timestamp())
+        `;
+        await tx`
+          INSERT INTO swarm.hosted_mcp_seat_handles (handle, seat_id, grant_id, workspace_id, principal_id, created_at)
+          VALUES (${`h-${connId.slice(0, 8)}`}, ${connId}::uuid, ${grantId}::uuid, ${wsId}::uuid, ${agentId}::uuid, clock_timestamp())
+        `;
+        await tx`
+          INSERT INTO swarm.household_content_connections (
+            connection_id, grant_id, workspace_id, principal_id, owner_user_id, purpose, operations,
+            consent_receipt_id, expires_at, hosted_grant_id
+          ) VALUES (
+            ${connId}::uuid, ${grantId}::uuid, ${wsId}::uuid, ${agentId}::uuid, ${viewerId}::uuid,
+            'shared', ARRAY['read','create','update'], ${randomUUID()}::uuid, NULL, ${grantId}::uuid
+          )
+        `;
+      }
+      const scoutIdentity: HouseholdIdentity = { user_id: viewerId, principal_id: scoutAgentId, run_id: null, connection: { connection_id: connScout, grant_id: grantScout } };
+      const unseatedIdentity: HouseholdIdentity = { user_id: viewerId, principal_id: unseatedAgentId, run_id: null, connection: { connection_id: randomUUID(), grant_id: randomUUID() } };
+      const revokedIdentity: HouseholdIdentity = { user_id: viewerId, principal_id: revokedSeatAgentId, run_id: null, connection: { connection_id: connRevoked, grant_id: grantRevoked } };
+      const seatedOutsiderIdentity: HouseholdIdentity = { user_id: viewerId, principal_id: seatedNonMemberAgentId, run_id: null, connection: { connection_id: connOutsider, grant_id: grantOutsider } };
+      await tx`SAVEPOINT sp_agent_todo_creates`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      const unseatedCreate = await store.write(tx, wsId, unseatedIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create", title: "Unseated agent group todo", origin_placement: "group_dm", origin_conversation_id: convGroupGen1,
+      });
+      assert.equal(unseatedCreate.outcome.status, "refused", "absent seat must refuse direct provenance");
+      const revokedCreate = await store.write(tx, wsId, revokedIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create", title: "Revoked seat group todo", origin_placement: "group_dm", origin_conversation_id: convGroupGen1,
+      });
+      assert.equal(revokedCreate.outcome.status, "refused", "revoked seat must refuse direct provenance");
+      const seatedOutsiderCreate = await store.write(tx, wsId, seatedOutsiderIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create", title: "Seated non-member group todo", origin_placement: "group_dm", origin_conversation_id: convGroupGen1,
+      });
+      assert.deepEqual(seatedOutsiderCreate.outcome, { status: "refused", reason: "target_not_found" }, "seated non-member must refuse target_not_found");
+      const seatedCreate = await store.write(tx, wsId, scoutIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create", title: "Seated agent group todo", origin_placement: "group_dm", origin_conversation_id: convGroupGen1,
+      });
+      assert.equal(seatedCreate.outcome.status, "committed", "live seated conversation member must succeed");
+      await tx`ROLLBACK TO SAVEPOINT sp_agent_todo_creates`;
+
+      // Seed an eligible unmapped legacy ask (no conversation_signals row) addressed to viewer & Maya as a control!
+      const legacyAskId = randomUUID();
+      await tx`ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation`;
+      await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_settle_conversation`;
+      await tx`
+        INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at
+        ) VALUES (
+          ${legacyAskId}::uuid, ${wsId}::uuid, ${scoutAgentId}::uuid, 'agent', ${viewerId}::uuid,
+          'ask', 'Legacy unmapped ask control?', statement_timestamp() + interval '1 day', statement_timestamp() - interval '5 seconds'
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES
+          (${legacyAskId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 0),
+          (${legacyAskId}::uuid, ${wsId}::uuid, ${mayaId}::uuid, 1)
+      `;
+      await tx`ALTER TABLE swarm.signal_recipients ENABLE TRIGGER signal_recipients_settle_conversation`;
+      await tx`ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation`;
 
       // 1. Write-time authz on todo_create for dm / group_dm origins.
       await tx`SAVEPOINT sp_dm_todo_writes`;
@@ -972,9 +1109,11 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
       assert.equal(outsiderTodos!.r!.todos[0]!.conversation_id, null);
       await tx`ROLLBACK TO SAVEPOINT sp_dm_outsider_read`;
 
-      // 4. Left-member redaction & write refusal: Maya leaves convGroupGen1 ->
+      // 4. Left-member gating & write refusal: Maya leaves convGroupGen1 ->
       //    todo_create refuses, waiting_todos_page redacts to workspace/null/null,
-      //    and decision_queue/decision_queue_page redact conversation_id & conversation_kind to null.
+      //    and decision_queue/decision_queue_page EXCLUDE the entire mapped Gen 1 ask row
+      //    (zero body, sender, timing, or count leaked) while preserving eligible legacy asks
+      //    and keeping the joined recipient control (viewerId) intact!
       await tx`
         UPDATE swarm.conversation_members
         SET left_at = statement_timestamp()
@@ -1011,13 +1150,56 @@ test("20261120000002: dm/group_dm to-do origin authz & redaction and authoritati
         SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
       `;
       for (const [label, payload] of [["decision_queue", mayaDq!.r], ["decision_queue_page", mayaDqp!.r]] as const) {
-        const ask = payload?.asks.find((a) => a.signal_id === gen1AskId);
-        if (ask) {
-          assert.equal(ask.conversation_id, null, `${label} must redact left-group conversation_id to null`);
-          assert.equal(ask.conversation_kind, null, `${label} must redact left-group conversation_kind to null`);
-        }
+        assert.ok(payload, `${label} should return payload for workspace member`);
+        assert.equal(
+          payload.asks.find((a) => a.signal_id === gen1AskId),
+          undefined,
+          `${label} must exclude mapped Gen 1 ask completely after member departure`,
+        );
+        assert.equal(payload.total, 1, `${label} total must exclude departed Gen 1 ask and count only the legacy control`);
+        assert.equal(payload.asks.length, 1);
+        assert.equal(payload.asks[0]!.signal_id, legacyAskId, `${label} must retain eligible unmapped legacy ask control`);
+        assert.equal(payload.asks[0]!.conversation_id, null);
+        assert.equal(payload.asks[0]!.conversation_kind, null);
+      }
+
+      // Joined recipient control: viewerId still sees BOTH Gen 1 ask (with convGroupGen1) AND legacy ask!
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: viewerId })}, true)`;
+      const [viewerDqAfter] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue(${wsId}::uuid) AS r
+      `;
+      const [viewerDqpAfter] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
+      `;
+      for (const [label, payload] of [["decision_queue", viewerDqAfter!.r], ["decision_queue_page", viewerDqpAfter!.r]] as const) {
+        assert.equal(payload!.total, 2, `${label} joined recipient control must still count both asks`);
+        const g1 = payload!.asks.find((a) => a.signal_id === gen1AskId);
+        const leg = payload!.asks.find((a) => a.signal_id === legacyAskId);
+        assert.equal(g1?.conversation_id, convGroupGen1);
+        assert.equal(g1?.conversation_kind, "group_dm");
+        assert.ok(leg && leg.conversation_id === null && leg.conversation_kind === null);
       }
       await tx`ROLLBACK TO SAVEPOINT sp_dm_left_read`;
+
+      // Pure departed-only control: answer legacyAskId so Maya has zero eligible asks -> total=0, asks=[]!
+      await tx`SAVEPOINT sp_dm_departed_zero`;
+      await tx`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, in_reply_to, until, created_at)
+        VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'user', ${scoutAgentId}::uuid, 'note', 'Answered legacy', ${legacyAskId}::uuid, now() + interval '1 day', statement_timestamp())
+      `;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: mayaId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [mayaZeroDq] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue(${wsId}::uuid) AS r
+      `;
+      const [mayaZeroDqp] = await tx<{ r: DecisionQueuePayload | null }[]>`
+        SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
+      `;
+      assert.equal(mayaZeroDq!.r!.total, 0, "departed member with no other asks gets total=0 in decision_queue");
+      assert.deepEqual(mayaZeroDq!.r!.asks, [], "departed member gets empty asks in decision_queue");
+      assert.equal(mayaZeroDqp!.r!.total, 0, "departed member with no other asks gets total=0 in decision_queue_page");
+      assert.deepEqual(mayaZeroDqp!.r!.asks, [], "departed member gets empty asks in decision_queue_page");
+      await tx`ROLLBACK TO SAVEPOINT sp_dm_departed_zero`;
 
       throw ROLLBACK_WITNESS;
     });

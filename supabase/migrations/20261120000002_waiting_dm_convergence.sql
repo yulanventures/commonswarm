@@ -78,50 +78,24 @@ BEGIN
    RETURN false;
   END IF;
  ELSE
-  IF to_regclass('swarm.agent_workspace_memberships') IS NOT NULL THEN
-   IF NOT EXISTS (
-    SELECT 1
-    FROM swarm.agent_principals p
-    JOIN swarm.memberships owner_m
-     ON owner_m.workspace_id = p_workspace_id
-     AND owner_m.user_id = p.owner_user_id
-     AND owner_m.revoked_at IS NULL
-    WHERE p.principal_id = p_actor_id
-     AND p.revoked_at IS NULL
-     AND (
-      EXISTS (
-       SELECT 1 FROM swarm.agent_workspace_memberships am
-       WHERE am.principal_id = p.principal_id
-        AND am.workspace_id = p_workspace_id
-        AND am.owner_user_id = p.owner_user_id
-        AND am.revoked_at IS NULL
-      )
-      OR (
-       p.workspace_id = p_workspace_id
-       AND NOT EXISTS (
-        SELECT 1 FROM swarm.agent_workspace_memberships any_am
-        WHERE any_am.principal_id = p.principal_id
-         AND any_am.workspace_id = p_workspace_id
-       )
-      )
-     )
-   ) THEN
-    RETURN false;
-   END IF;
-  ELSE
-   IF NOT EXISTS (
-    SELECT 1
-    FROM swarm.agent_principals p
-    JOIN swarm.memberships owner_m
-     ON owner_m.workspace_id = p_workspace_id
-     AND owner_m.user_id = p.owner_user_id
-     AND owner_m.revoked_at IS NULL
-    WHERE p.principal_id = p_actor_id
-     AND p.workspace_id = p_workspace_id
-     AND p.revoked_at IS NULL
-   ) THEN
-    RETURN false;
-   END IF;
+  -- Step 2b requires a live, owner-matched workspace seat in swarm.agent_workspace_memberships
+  -- (never fall back to the agent principal's registrar workspace when a seat is absent or revoked).
+  IF NOT EXISTS (
+   SELECT 1
+   FROM swarm.agent_principals p
+   JOIN swarm.memberships owner_m
+    ON owner_m.workspace_id = p_workspace_id
+    AND owner_m.user_id = p.owner_user_id
+    AND owner_m.revoked_at IS NULL
+   JOIN swarm.agent_workspace_memberships am
+    ON am.principal_id = p.principal_id
+    AND am.workspace_id = p_workspace_id
+    AND am.owner_user_id = p.owner_user_id
+    AND am.revoked_at IS NULL
+   WHERE p.principal_id = p_actor_id
+    AND p.revoked_at IS NULL
+  ) THEN
+   RETURN false;
   END IF;
  END IF;
 
@@ -324,14 +298,40 @@ BEGIN
  viewer := (claims->>'sub')::uuid;
  IF p_workspace_id IS NULL OR NOT swarm.is_member(p_workspace_id, viewer) THEN RETURN NULL; END IF;
  WITH open_asks AS MATERIALIZED (
-  -- swarm_read.signals applies the viewer's normal visibility gate.
-  SELECT s.id, s."from", s.from_kind, s.body, s.created_at, s.until
+  -- swarm_read.signals applies the viewer's legacy visibility gate; mapped direct conversations
+  -- additionally require live canonical membership and audience visibility before counting or paging.
+  SELECT s.id, s."from", s.from_kind, s.body, s.created_at, s.until,
+   c.conversation_id, c.kind AS conversation_kind
   FROM swarm_read.signals s
+  LEFT JOIN swarm.conversation_signals cs
+   ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+  LEFT JOIN swarm.conversations c
+   ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
   WHERE s.workspace_id = p_workspace_id AND s.kind = 'ask' AND s.until > read_at
    AND (s."to" = viewer OR EXISTS (
     SELECT 1 FROM swarm.signal_recipients r
     WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer))
    AND NOT swarm.ask_answered(s.workspace_id, s.id)
+   AND (
+    c.conversation_id IS NULL
+    OR c.kind IN ('general', 'public_channel')
+    OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
+    OR (
+     c.kind IN ('dm', 'group_dm')
+     AND EXISTS (
+      SELECT 1 FROM swarm.conversation_members cm
+      WHERE cm.workspace_id = c.workspace_id
+       AND cm.conversation_id = c.conversation_id
+       AND cm.member_user_id = viewer
+       AND cm.left_at IS NULL
+     )
+     AND swarm.conversation_signal_visible_to(
+      cs.workspace_id, cs.signal_id, cs.audience,
+      s.from_kind, s."from", s."to", s.to_agent,
+      'user', viewer
+     )
+    )
+   )
  ), page AS (
   SELECT * FROM open_asks ORDER BY created_at, id LIMIT 100
  )
@@ -346,26 +346,13 @@ BEGIN
    'body', left(p.body, 4000),
    'created_at', p.created_at,
    'until', p.until,
-   'conversation_id', c.conversation_id,
-   'conversation_kind', c.kind,
+   'conversation_id', p.conversation_id,
+   'conversation_kind', p.conversation_kind,
    'reraised', CASE WHEN x.signal_id IS NULL THEN NULL
      ELSE jsonb_build_object('count', x.raise_count, 'last_at', x.last_raised_at) END
   ) ORDER BY p.created_at, p.id), '[]'::jsonb)
  INTO total, rows
  FROM page p
- LEFT JOIN swarm.conversation_signals cs ON cs.workspace_id = p_workspace_id AND cs.signal_id = p.id
- LEFT JOIN swarm.conversations c ON c.workspace_id = p_workspace_id AND c.conversation_id = cs.conversation_id
-  AND (
-   c.kind IN ('general', 'public_channel')
-   OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
-   OR (c.kind IN ('dm', 'group_dm') AND EXISTS (
-    SELECT 1 FROM swarm.conversation_members cm
-    WHERE cm.workspace_id = c.workspace_id
-     AND cm.conversation_id = c.conversation_id
-     AND cm.member_user_id = viewer
-     AND cm.left_at IS NULL
-   ))
-  )
  LEFT JOIN swarm.ask_reraises x ON x.workspace_id = p_workspace_id AND x.signal_id = p.id;
  RETURN jsonb_build_object('workspace_id', p_workspace_id, 'generated_at', read_at,
   'total', total, 'truncated', total > 100, 'asks', rows);
@@ -401,25 +388,50 @@ BEGIN
  IF (p_after_created_at IS NULL) <> (p_after_id IS NULL) THEN
   RAISE EXCEPTION 'decision_queue_cursor_invalid' USING ERRCODE = '22023';
  END IF;
- IF p_after_id IS NOT NULL THEN
-  SELECT s.created_at INTO anchor_created_at
-  FROM swarm_read.signals s
-  WHERE s.workspace_id = p_workspace_id AND s.id = p_after_id;
-  anchor_created_at := coalesce(anchor_created_at, p_after_created_at);
- END IF;
  WITH open_asks AS MATERIALIZED (
-  SELECT s.id, s."from", s.from_kind, s.body, s.created_at, s.until
+  SELECT s.id, s."from", s.from_kind, s.body, s.created_at, s.until,
+   c.conversation_id, c.kind AS conversation_kind
   FROM swarm_read.signals s
+  LEFT JOIN swarm.conversation_signals cs
+   ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+  LEFT JOIN swarm.conversations c
+   ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
   WHERE s.workspace_id = p_workspace_id AND s.kind = 'ask' AND s.until > read_at
    AND (s."to" = viewer OR EXISTS (
     SELECT 1 FROM swarm.signal_recipients r
     WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer))
    AND NOT swarm.ask_answered(s.workspace_id, s.id)
+   AND (
+    c.conversation_id IS NULL
+    OR c.kind IN ('general', 'public_channel')
+    OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
+    OR (
+     c.kind IN ('dm', 'group_dm')
+     AND EXISTS (
+      SELECT 1 FROM swarm.conversation_members cm
+      WHERE cm.workspace_id = c.workspace_id
+       AND cm.conversation_id = c.conversation_id
+       AND cm.member_user_id = viewer
+       AND cm.left_at IS NULL
+     )
+     AND swarm.conversation_signal_visible_to(
+      cs.workspace_id, cs.signal_id, cs.audience,
+      s.from_kind, s."from", s."to", s.to_agent,
+      'user', viewer
+     )
+    )
+   )
+ ), anchor AS (
+  SELECT coalesce(
+   (SELECT oa.created_at FROM open_asks oa WHERE oa.id = p_after_id),
+   p_after_created_at
+  ) AS created_at
  ), page_probe AS MATERIALIZED (
-  SELECT * FROM open_asks
-  WHERE anchor_created_at IS NULL
-   OR (created_at, id) > (anchor_created_at, p_after_id)
-  ORDER BY created_at, id
+  SELECT oa.*
+  FROM open_asks oa, anchor a
+  WHERE p_after_id IS NULL
+   OR (oa.created_at, oa.id) > (a.created_at, p_after_id)
+  ORDER BY oa.created_at, oa.id
   LIMIT 101
  ), page AS (
   SELECT * FROM page_probe ORDER BY created_at, id LIMIT 100
@@ -436,26 +448,13 @@ BEGIN
    'body', left(p.body, 4000),
    'created_at', p.created_at,
    'until', p.until,
-   'conversation_id', c.conversation_id,
-   'conversation_kind', c.kind,
+   'conversation_id', p.conversation_id,
+   'conversation_kind', p.conversation_kind,
    'reraised', CASE WHEN x.signal_id IS NULL THEN NULL
      ELSE jsonb_build_object('count', x.raise_count, 'last_at', x.last_raised_at) END
   ) ORDER BY p.created_at, p.id), '[]'::jsonb)
  INTO total, has_more, rows
  FROM page p
- LEFT JOIN swarm.conversation_signals cs ON cs.workspace_id = p_workspace_id AND cs.signal_id = p.id
- LEFT JOIN swarm.conversations c ON c.workspace_id = p_workspace_id AND c.conversation_id = cs.conversation_id
-  AND (
-   c.kind IN ('general', 'public_channel')
-   OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
-   OR (c.kind IN ('dm', 'group_dm') AND EXISTS (
-    SELECT 1 FROM swarm.conversation_members cm
-    WHERE cm.workspace_id = c.workspace_id
-     AND cm.conversation_id = c.conversation_id
-     AND cm.member_user_id = viewer
-     AND cm.left_at IS NULL
-   ))
-  )
  LEFT JOIN swarm.ask_reraises x ON x.workspace_id = p_workspace_id AND x.signal_id = p.id;
  RETURN jsonb_build_object('workspace_id', p_workspace_id, 'generated_at', read_at,
   'total', total, 'truncated', has_more, 'asks', rows);
