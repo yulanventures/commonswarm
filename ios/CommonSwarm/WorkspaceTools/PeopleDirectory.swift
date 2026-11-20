@@ -351,6 +351,14 @@ final class PeopleDirectoryStore: ObservableObject {
         return agents.first { $0.principalID == id }
     }
 
+    var viewerRole: WorkspaceMemberRole? {
+        people.first(where: { $0.isViewer })?.role
+    }
+
+    var viewerIsOwner: Bool {
+        viewerRole == .owner
+    }
+
     var managers: [WorkspacePerson] {
         people.filter { $0.role.isManager }
     }
@@ -406,6 +414,7 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     var filteredAdminGrants: [WorkspaceAgentAdminGrant] {
+        guard !accessUnavailable, viewerIsOwner else { return [] }
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return adminGrants }
         return adminGrants.filter {
@@ -482,6 +491,11 @@ final class PeopleDirectoryStore: ObservableObject {
                     adminGrants = updatedAdminGrants
                     adminGrantsReady = true
                 } else {
+                    // Owner-only grants must clear immediately when a fresh roster shows
+                    // the viewer is no longer a workspace owner, even if the grant RPC failed.
+                    if partial.people != nil && !viewerIsOwner {
+                        adminGrants = []
+                    }
                     adminGrantsReady = false
                 }
                 loadFailed = true

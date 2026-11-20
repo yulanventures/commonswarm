@@ -291,6 +291,74 @@ struct VerifyPeopleDirectory {
         try await postFixture("\(base)/fixture/empty-invites?on=0")
         try await postFixture("\(base)/fixture/non-owner-grants?on=0")
 
+        // 9d. Fresh role-loss in member_profiles (200) while agent_principals (503) AND
+        //     workspace_seat_admin_grants (503) both fail:
+        //     - Live-owner control keeps cached owner grant details (with Admins count nil).
+        //     - Demoted viewer (admin or member) clears/hides cached owner-only grant rows immediately.
+        await store.load(api: directoryAPI)
+        let ownerLoadedBefore9d = await MainActor.run {
+            store.viewerIsOwner && store.adminGrants.count == 1 && store.filteredAdminGrants.count == 1
+        }
+        expect(ownerLoadedBefore9d, "Expected live owner with cached admin grant before 9d mixed role-loss witness")
+
+        // 9d-i. Live-owner control: member_profiles 200 (still owner) + agents 503 + grants 503
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/fail-agents?on=1")
+        try await postFixture("\(base)/fixture/fail-admin-grants?on=1")
+        await store.load(api: directoryAPI)
+        let liveOwnerControl9d = await MainActor.run {
+            !store.accessUnavailable
+                && store.loadFailed
+                && store.viewerIsOwner
+                && !store.adminGrantsReady
+                && store.tabs.first(where: { $0.tab == .admins })?.count == nil
+                && store.adminGrants.count == 1
+                && store.filteredAdminGrants.count == 1
+        }
+        expect(liveOwnerControl9d, "Live-owner control: transient agents+grants 503 while still owner must keep cached grants with Admins count nil")
+
+        // 9d-ii. Demoted to admin: member_profiles 200 (admin) + agents 503 + grants 503
+        try await postFixture("\(base)/fixture/viewer-role?role=admin")
+        await store.load(api: directoryAPI)
+        let demotedAdminCleared = await MainActor.run {
+            !store.accessUnavailable
+                && store.loadFailed
+                && store.viewerRole == .admin
+                && !store.viewerIsOwner
+                && !store.adminGrantsReady
+                && store.tabs.first(where: { $0.tab == .admins })?.count == nil
+                && store.adminGrants.isEmpty
+                && store.filteredAdminGrants.isEmpty
+        }
+        expect(demotedAdminCleared, "Fresh role demotion to admin must clear/hide cached owner-only grants even when agents and grants RPC both return 503")
+
+        // 9d-iii. Demoted to member: reload cached owner grants first, then member_profiles 200 (member) + agents 503 + grants 503
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/fail-agents?on=0")
+        try await postFixture("\(base)/fixture/fail-admin-grants?on=0")
+        await store.load(api: directoryAPI)
+        let ownerReloadedBeforeMemberDemotion = await MainActor.run {
+            store.viewerIsOwner && store.adminGrants.count == 1 && store.filteredAdminGrants.count == 1
+        }
+        expect(ownerReloadedBeforeMemberDemotion, "Expected cached owner grant before member-demotion 9d witness")
+        try await postFixture("\(base)/fixture/viewer-role?role=member")
+        try await postFixture("\(base)/fixture/fail-agents?on=1")
+        try await postFixture("\(base)/fixture/fail-admin-grants?on=1")
+        await store.load(api: directoryAPI)
+        let demotedMemberCleared = await MainActor.run {
+            !store.accessUnavailable
+                && store.loadFailed
+                && store.viewerRole == .member
+                && !store.viewerIsOwner
+                && !store.adminGrantsReady
+                && store.adminGrants.isEmpty
+                && store.filteredAdminGrants.isEmpty
+        }
+        expect(demotedMemberCleared, "Fresh role demotion to member must clear/hide cached owner-only grants even when agents and grants RPC both return 503")
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/fail-agents?on=0")
+        try await postFixture("\(base)/fixture/fail-admin-grants?on=0")
+
         // 10. Detail routes bound to authorized directory IDs:
         //     live-member control, omission clearing, and opening detail across a held refusal.
         await store.load(api: directoryAPI)
