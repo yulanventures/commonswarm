@@ -30,6 +30,7 @@ let refuseAdminGrants = false;
 let nonOwnerGrants = false;
 let duplicateRows = false;
 let omitMaya = false;
+let viewerRole = "owner";
 let readRequestCount = 0;
 
 let emailCodePending = false;
@@ -100,6 +101,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/fixture/duplicate-rows") {
       duplicateRows = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, duplicateRows });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/viewer-role") {
+      const role = url.searchParams.get("role");
+      if (role === "owner" || role === "admin" || role === "member") {
+        viewerRole = role;
+      }
+      return reply(200, { ok: true, viewerRole });
     }
     if (req.method === "GET" && url.pathname === "/fixture/requests") {
       return reply(200, { reads: readRequestCount });
@@ -216,7 +224,7 @@ const server = createServer(async (req, res) => {
         if (failMembers) return reply(503, { error: "unavailable" });
         if (emptyMembers) return reply(200, []);
         const rows = [
-          { user_id: me, display_name: "Alex Rivera", role: "owner" },
+          { user_id: me, display_name: "Alex Rivera", role: viewerRole },
           ...(omitMaya ? [] : [{ user_id: maya, display_name: "Maya Chen", role: "admin" }]),
           { user_id: devon, display_name: "Devon Park", role: "member" },
         ];
