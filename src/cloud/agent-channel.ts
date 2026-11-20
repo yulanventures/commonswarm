@@ -28,6 +28,7 @@ import { ASK_PARENT_CONTEXT_SENTENCE, appendHandledAsk, defaultAskParent } from 
 import { CHAIN_MAX_HOPS, isAskChainRefusalCode, printableAskRefusalMessage } from "./ask-chain-constants.js";
 import { mcpFileGet } from "../mcp/file-image.js";
 import { FileCommandRefused, FileTransportError } from "./files.js";
+import { assertFixedNativeWakePrompt, formatNativeWakePrompt } from "./native-wake.js";
 
 export const CHANNEL_RECEIPT_TOOL = "cswarm_received";
 export const CHANNEL_RECEIPT_FIELDS = ["signal_id", "receipt", "host_session_id"] as const;
@@ -65,14 +66,6 @@ export function channelNotice(sender: string, signalId: string, receipt: string,
   return `${channelNoticePrefix(sender, signalId, receipt, hostSessionId, chainHop, publicReply)}\n${ownerRelationLines(relation).join("\n")}\n\n${channelMessageBlock(body)}`;
 }
 
-function channelCanaryNotice(sender: string, signalId: string, receipt: string, hostSessionId: string): string {
-  return `CommonSwarm wake test from ${sender}. First call ${CHANNEL_RECEIPT_TOOL} with signal_id ${signalId}, receipt ${receipt}, host_session_id ${hostSessionId}. No reply or other work is needed.`;
-}
-
-function channelSelfNotice(sender: string, signalId: string, receipt: string, hostSessionId: string, body: string): string {
-  return `CommonSwarm self-addressed message from ${sender}. First call ${CHANNEL_RECEIPT_TOOL} with signal_id ${signalId}, receipt ${receipt}, host_session_id ${hostSessionId}. No reply or other work is needed.\n\n${channelMessageBlock(body)}`;
-}
-
 export interface ChannelPending {
   row: DeliveryRow;
   receipt: string;
@@ -92,7 +85,7 @@ export class ChannelReceiptGate {
   }
 }
 
-interface ChannelJournal { version: 1; listener_instance_id: string; pending: ChannelPending | null; notified?: boolean }
+interface ChannelJournal { version: 1; listener_instance_id: string; pending: ChannelPending | null; notified?: boolean; notification_batch?: number }
 
 export interface GatewayChannelTransport {
   send(pending: ChannelPending, signal: AbortSignal): Promise<void>;
@@ -206,6 +199,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   if (previous !== null) {
     try { journal = JSON.parse(previous); } catch { throw new AgentSetupError("channel_journal_invalid", "The channel journal is damaged. Preserve it for recovery before restarting."); }
     if (!journal || journal.version !== 1 || typeof journal.listener_instance_id !== "string" || !ONBOARDING_UUID.test(journal.listener_instance_id) ||
+        (journal.notification_batch !== undefined && (typeof journal.notification_batch !== "number" || !Number.isSafeInteger(journal.notification_batch) || journal.notification_batch < 0)) ||
         (journal.pending !== null && (!journal.pending || !journal.pending.row?.signal || journal.pending.row.signal.workspace_id !== profile.workspace_id ||
           !ONBOARDING_UUID.test(journal.pending.row.leaseId) || !Number.isFinite(Date.parse(journal.pending.row.leasedUntil)) ||
           typeof journal.pending.confirmed !== "boolean" || !ONBOARDING_UUID.test(journal.pending.receipt) ||
@@ -528,7 +522,6 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
             gate.pending = null; notified = false; await persist(); lastPoll = 0;
           } else if (!notified) {
             if ((await readReceiveBinding(profilePath, host))?.requested_mode !== "wake") break;
-            const isCanary = isOwnCanary(binding, pending.row, profile.principal_id);
             const isCurrentWakeTest = isCurrentCanary(binding, pending.row, profile.principal_id);
             const selfAddressed = isSelfAddressed(pending.row, profile.principal_id);
             if (selfAddressed) selfAddressedSignalIds.add(pending.row.signal.id);
@@ -540,32 +533,25 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
               await persist();
               try { await options.gateway.send(pending, abort.signal); }
               catch (error) { notified = false; await persist(); throw error; }
-            } else await server.notification({ method: "notifications/claude/channel", params: {
-              content: isCanary
-                ? channelCanaryNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host)
-                : selfAddressed
-                ? channelSelfNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host, pending.row.signal.body)
-                : channelNotice(
-                    pending.row.signal.from,
-                    pending.row.signal.id,
-                    pending.receipt,
-                    host,
-                    pending.row.signal.body,
-                    pending.row.senderOwnerRelation,
-                    pending.row.signal.chain_hop,
-                    publicReplyThreadRoot(pending.row.signal) === null
-                      ? false
-                      : pending.row.signal.channel_visibility === "private"
-                      ? "private"
-                      : "open",
-                  ),
-              meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
-                sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
-                sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
-                attachment_count: String(pending.row.signal.attachments?.length ?? 0),
-              },
-            } });
+            } else {
+              // Native Wake rule: channel notifications emit ONLY the fixed wake prompt (never
+              // teammate message text, sender text, or subject) to close prompt-injection paths.
+              const batch = (journal.notification_batch ?? 0) + 1;
+              journal.notification_batch = batch;
+              const content = formatNativeWakePrompt(batch);
+              assertFixedNativeWakePrompt(content);
+              await server.notification({ method: "notifications/claude/channel", params: {
+                content,
+                meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
+                  sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
+                  sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
+                  attachment_count: String(pending.row.signal.attachments?.length ?? 0),
+                  batch: String(batch),
+                },
+              } });
+            }
             notified = true;
+            await persist();
             if (pending.row.signal.kind === "ask") await appendHandledAsk(profilePath, host, pending.row.signal.id);
             await updateReceiveBinding(profilePath, host, b => ({ ...b, idle: false,
               canary: isCurrentCanary(binding, pending.row, profile.principal_id) && b.canary && b.canary.nonce === binding.canary?.nonce ? { ...b.canary, signal_id: pending.row.signal.id, emitted_while_idle: binding.idle } : b.canary,

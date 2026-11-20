@@ -4467,6 +4467,66 @@
             "removes": [],
             "reason": "Local filesystem lock timeout, not a network request timeout."
           }
+        },
+        "src/cloud/native-wake-claude.ts:CLAUDE_SOCKET_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-claude.ts:76",
+          "detail": "Local Unix domain socket connect/write timeout for Claude inbox wake.",
+          "operation": {
+            "name": "claude-socket-dispatch",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local Unix domain socket write, not a Cloud API request."
+          }
+        },
+        "src/cloud/native-wake-claude.ts:setInterval": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-claude.ts:940",
+          "detail": "Local Claude wake bridge heartbeat interval.",
+          "operation": {
+            "name": "claude-wake-heartbeat",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local heartbeat, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-claude.ts:signalRequestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/native-wake-claude.ts:819",
+          "detail": "ThinCommandClient signal request timeout on Claude wake canary send.",
+          "operation": {
+            "name": "claude-wake-canary-timeout",
+            "class": "not-run",
+            "writes": [
+              "canary signal"
+            ],
+            "removes": [],
+            "reason": "Wake canary commands write workspace state."
+          }
+        },
+        "src/cloud/native-wake-claude.ts:timeoutMs": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-claude.ts:442",
+          "detail": "Local receive-binding file lock timeout during Claude wake socket registration.",
+          "operation": {
+            "name": "claude-wake-register-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local file lock wait, not a network request timeout."
+          }
         }
       }
     }

@@ -128,7 +128,8 @@ test("each message addressed to this seat arrives as one event; a restart never 
     assert.equal(first.meta.message_id, FIRST);
     assert.equal(first.meta.signal_id, FIRST);
     assert.equal(first.meta.workspace_id, WS);
-    assert.match(first.content, /<teammate-message>\nfirst\n<\/teammate-message>/u);
+    assert.equal(first.content, "New CommonSwarm messages (batch 1): run cswarm check");
+    assert.equal(first.content.includes("first"), false, "no teammate message body in fixed-text channel prompt");
     assert.equal(JSON.stringify(first.meta).includes(TOKEN), false, "no credential in meta");
     await delay(500);
     assert.equal(one.events.length, 1, "one pending message at a time, not re-sent while unconfirmed");

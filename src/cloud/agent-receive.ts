@@ -21,6 +21,8 @@ export const RECEIVE_HOOK_EVENTS = ["UserPromptSubmit", "SessionStart", "Stop"] 
 export const GEMINI_RECEIVE_HOOK_EVENTS = ["SessionStart", "BeforeAgent", "AfterAgent"] as const;
 export type ReceiveHookProvider = "claude" | "codex" | "gemini";
 export const MAX_STOP_DRAINS_PER_TURN = 1;
+export const WAKE_TRANSPORTS = ["socket", "channel"] as const;
+export type WakeTransport = (typeof WAKE_TRANSPORTS)[number];
 const CLAUDE_CHANNEL_RECEIPT_PERMISSION = "mcp__cswarm__cswarm_received";
 
 export function isHookReceiveProvider(provider: ReceiveProvider): provider is ReceiveHookProvider {
@@ -50,6 +52,7 @@ export interface ReceiveBinding {
   host_session_id: string;
   provider: ReceiveProvider;
   requested_mode: ReceiveMode;
+  wake_transport?: WakeTransport;
   grok_bot_agent_id?: string;
   cwd: string;
   hook_file: string | null;
@@ -91,6 +94,7 @@ export async function readReceiveBinding(profile: string, hostSessionId?: string
   const nullableText = (value: unknown) => value === null || typeof value === "string";
   if (!binding || binding.version !== 1 || binding.profile !== profile || binding.host_session_id !== host ||
       !RECEIVE_MODES.includes(binding.requested_mode) || !RECEIVE_PROVIDERS.includes(binding.provider) ||
+      (binding.wake_transport !== undefined && !(WAKE_TRANSPORTS as readonly string[]).includes(binding.wake_transport)) ||
       (binding.grok_bot_agent_id !== undefined && (typeof binding.grok_bot_agent_id !== "string" || !ONBOARDING_UUID.test(binding.grok_bot_agent_id))) ||
       (binding.provider === "grok-bot" && binding.requested_mode === "wake" && !binding.grok_bot_agent_id) ||
       (binding.stop_drains_in_turn !== undefined && (!Number.isSafeInteger(binding.stop_drains_in_turn) || binding.stop_drains_in_turn < 0)) ||
@@ -133,7 +137,9 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
     ? "none"
     : binding.provider === "codex"
     ? "codex-queue"
-    : binding.provider === "claude" || binding.provider === "grok-bot"
+    : binding.provider === "claude"
+    ? binding.wake_transport === "socket" ? "claude-socket" : "channel"
+    : binding.provider === "grok-bot"
     ? "channel"
     : "none";
   return {
@@ -148,6 +154,7 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
       wakeVerified ? null : binding.requested_mode === "wake" ?
         binding.provider === "codex" ? "Wake is not verified. Start cswarm receive serve for this Codex thread, run cswarm receive test, end this turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         binding.provider === "grok-bot" ? "Wake is not verified. Start cswarm receive serve on this Bot computer, run cswarm receive test, then cswarm receive idle when the session is idle. Confirm with cswarm receive status. Use cswarm check meanwhile." :
+        binding.provider === "claude" && binding.wake_transport === "socket" ? "Wake is not verified. Run cswarm receive register-socket inside this Claude session, start cswarm receive serve, run cswarm receive test, end the turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         "Wake is not verified. Enable the configured Claude channel in this same session, run cswarm receive test, end the turn, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         channelLive ? "Turn mode is selected; the previous channel is stopping. Confirm channel_running is false with cswarm receive status." :
         binding.hook_file !== null && binding.turn_verified_at === null ?
@@ -271,14 +278,26 @@ export function parseReceiveProvider(value: string): (typeof RECEIVE_PROVIDERS)[
   return value as (typeof RECEIVE_PROVIDERS)[number];
 }
 
+export function parseWakeTransport(value: string): WakeTransport {
+  if (!(WAKE_TRANSPORTS as readonly string[]).includes(value)) {
+    throw new AgentSetupError("wake_transport_invalid", `--wake-transport must be ${WAKE_TRANSPORTS.join(" or ")}.`);
+  }
+  return value as WakeTransport;
+}
+
 export async function configureAgentReceive(options: {
   profilePath: string; mode: string; provider?: string; hostSessionId?: string; cwd?: string;
+  wakeTransport?: string;
   grokBotAgentId?: string; gatewayPaths?: readonly string[];
   previewChannel?: boolean; execution: { command: string; args: string[] };
 }) {
   const profile = privatePath(options.profilePath);
   parseReceiveMode(options.mode);
   const provider = parseReceiveProvider(options.provider ?? "instructions");
+  const wakeTransport = options.wakeTransport !== undefined ? parseWakeTransport(options.wakeTransport) : undefined;
+  if (wakeTransport !== undefined && (provider !== "claude" || options.mode !== "wake")) {
+    throw new AgentSetupError("wake_transport_unsupported", "Use --wake-transport only with --provider claude --mode wake.");
+  }
   if (options.grokBotAgentId !== undefined && !ONBOARDING_UUID.test(options.grokBotAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID.");
   if (options.grokBotAgentId !== undefined && provider !== "grok-bot") throw new AgentSetupError("grok_bot_agent_id_unsupported", "Use --grok-bot-agent-id only with --provider grok-bot.");
   const openedProfile = await readAgentProfile(profile, options.hostSessionId);
@@ -293,6 +312,14 @@ export async function configureAgentReceive(options: {
       throw new AgentSetupError(
         "profile_not_host_bound",
         "Codex wake requires a host-bound profile matching $CODEX_THREAD_ID. Bind this seat's profile with cswarm setup --host-session-id \"$CODEX_THREAD_ID\" first.",
+      );
+    }
+  }
+  if (provider === "claude" && options.mode === "wake" && wakeTransport === "socket") {
+    if (openedProfile.host_session_id === undefined || openedProfile.host_session_id !== host) {
+      throw new AgentSetupError(
+        "profile_not_host_bound",
+        "Claude inbox-socket wake requires a host-bound profile matching this session's ID. Bind this seat's profile with cswarm setup --host-session-id first.",
       );
     }
   }
@@ -313,8 +340,22 @@ export async function configureAgentReceive(options: {
       channel_config: null, channel_instance_id: null, channel_pid: null, channel_heartbeat_at: null,
       wake_verified_at: null, canary: null,
     };
-    const changed = binding.requested_mode !== options.mode;
-    binding = { ...binding, requested_mode: options.mode as ReceiveMode, ...(changed ? { wake_verified_at: null, canary: null } : {}) };
+    const nextTransport: WakeTransport | undefined =
+      provider === "claude" && options.mode === "wake"
+        ? (wakeTransport ?? (options.previewChannel ? "channel" : existing?.wake_transport))
+        : undefined;
+    const changed = binding.requested_mode !== options.mode || binding.wake_transport !== nextTransport;
+    const { wake_transport: _oldTransport, ...withoutTransport } = binding;
+    binding = {
+      ...withoutTransport,
+      requested_mode: options.mode as ReceiveMode,
+      ...(nextTransport !== undefined ? { wake_transport: nextTransport } : {}),
+      ...(changed ? { wake_verified_at: null, canary: null } : {}),
+    };
+    if (options.mode === "turn" && provider === "claude") {
+      const { clearClaudeWakeRegistration } = await import("./native-wake-claude.js");
+      await clearClaudeWakeRegistration(profile, host).catch(() => undefined);
+    }
     if (provider === "grok-bot" && grokAgentId) {
       if (existing?.grok_bot_agent_id && existing.grok_bot_agent_id !== grokAgentId) throw new AgentSetupError("receive_provider_conflict", "This session is bound to a different Bot agent UUID.");
       binding = { ...binding, grok_bot_agent_id: grokAgentId };
@@ -325,7 +366,11 @@ export async function configureAgentReceive(options: {
       binding = { ...binding, hook_file: hookFile, hook_command: command };
     }
     let startCommand: string | null = null;
-    if (options.mode === "wake" && provider === "claude") {
+    if (options.mode === "wake" && provider === "claude" && nextTransport === "socket") {
+      binding = { ...binding, channel_config: null };
+      const { refreshClaudeWakeSocketFromHookEnv } = await import("./native-wake-claude.js");
+      await refreshClaudeWakeSocketFromHookEnv({ profilePath: profile, hostSessionId: host, cwd });
+    } else if (options.mode === "wake" && provider === "claude") {
       const config = join(dirname(profile), `claude-channel-${profileScopeKey(host)}.json`);
       await writeSecureJsonFile(config, JSON.stringify({ mcpServers: {
         // Claude Code registers a channel only on an MCP revision before 2026-07-28. Our SDK never offers that revision;
@@ -341,6 +386,7 @@ export async function configureAgentReceive(options: {
       ...receiveStatus(binding, Date.now(), openedProfile.host_session_id), profile, hook_file: binding.hook_file,
       instruction: turnCheckInstruction(profile, host),
       ...(provider === "codex" && options.mode === "wake" ? { host_step: `Start the Codex native-wake bridge for this thread: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
+      ...(provider === "claude" && options.mode === "wake" && nextTransport === "socket" ? { host_step: `Run cswarm receive register-socket --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)} inside this Claude session (or let the SessionStart hook save the 0600 messaging token), then start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(provider === "grok-bot" && options.mode === "wake" ? { host_step: `On this Bot computer, with gateway.json present, start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(startCommand ? { start_command: startCommand, host_step: "Resume this same Claude session with this command and approve the channel when Claude asks. Organization policy still applies. This command does not start a separate worker." } : {}),
     };
@@ -381,6 +427,14 @@ export async function receiveHookEvent(profile: string, host: string, input: unk
     }
     return { ...b, turn_verified_at: now, last_turn_started_at: now, idle: false, stop_drains_in_turn: 0 };
   });
+  if (binding.provider === "claude" && binding.requested_mode === "wake" && binding.wake_transport === "socket") {
+    const { refreshClaudeWakeSocketFromHookEnv } = await import("./native-wake-claude.js");
+    await refreshClaudeWakeSocketFromHookEnv({
+      profilePath: profile,
+      hostSessionId: host,
+      cwd: binding.cwd,
+    }).catch(() => undefined);
+  }
   if (turnEnd) {
     return stopDrain
       ? { check: true, provider: binding.provider, stop_drain: true, event_name: event.hook_event_name }
@@ -440,6 +494,8 @@ export async function requestReceiveCanary(profile: string, host: string) {
     ? "End this Bot turn. From a separate terminal on this computer, run cswarm receive idle with this profile and host-session-id only after the chat is idle. After the woken session confirms the receipt, check cswarm receive status for wake_verified: true."
     : next.provider === "codex"
     ? "End this turn so the Codex session becomes idle. The wake bridge will queue a fixed-text wake via codex queue. After this same session runs cswarm check, run cswarm receive status to confirm wake_verified is true."
+    : next.provider === "claude" && next.wake_transport === "socket"
+    ? "End this turn so the Claude session becomes idle. The wake bridge will send a fixed-text wake to this session's inbox socket. After this same session runs cswarm check, run cswarm receive status to confirm wake_verified is true."
     : "End this turn so the session becomes idle. The channel will send a self-addressed test message. After this same session receives it, run cswarm receive status to confirm wake_verified is true.";
   const boundAction = next.provider === "grok-bot" ? action.replace(" with this profile and host-session-id", "") : action;
   return { state: "pending", next_action: boundProfileCommands(openedProfile.host_session_id ? boundAction : action, profile, openedProfile.host_session_id), host_session_id: next.host_session_id };
