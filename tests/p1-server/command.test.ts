@@ -17,6 +17,10 @@ import {
   type FunctionCliObserver,
 } from "../support/edge-readiness.js";
 import {
+  parseLocalEdgeJsonBody,
+  withLocalEdgeWorkerRetiredRetry,
+} from "../support/local-edge-retry.js";
+import {
   AGENT_TOKEN_DEFAULT_TTL_MS,
   AGENT_TOKEN_MAX_TTL_MS,
   reduceTask,
@@ -611,19 +615,27 @@ async function issue(
     command,
     ...extras,
   };
-  const response = await fetch(`${local.API_URL}/functions/v1/command`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-  const text = await response.text();
+  const payload = JSON.stringify(requestBody);
+  const raw = await withLocalEdgeWorkerRetiredRetry(async () => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: payload,
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      text,
+      body: parseLocalEdgeJsonBody(text),
+    };
+  }, () => functionLogs);
   return {
-    status: response.status,
-    text,
-    body: JSON.parse(text) as Record<string, unknown>,
+    status: raw.status,
+    text: raw.text,
+    body: raw.body ?? (JSON.parse(raw.text) as Record<string, unknown>),
   };
 }
 
@@ -856,19 +868,27 @@ async function issueConnect(
       }),
     command,
   };
-  const response = await fetch(`${local.API_URL}/functions/v1/command`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-  const text = await response.text();
+  const payload = JSON.stringify(requestBody);
+  const raw = await withLocalEdgeWorkerRetiredRetry(async () => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: payload,
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      text,
+      body: parseLocalEdgeJsonBody(text),
+    };
+  }, () => functionLogs);
   return {
-    status: response.status,
-    text,
-    body: JSON.parse(text) as Record<string, unknown>,
+    status: raw.status,
+    text: raw.text,
+    body: raw.body ?? (JSON.parse(raw.text) as Record<string, unknown>),
   };
 }
 
