@@ -1964,6 +1964,14 @@ import "../../styles/kylon-image-viewer.css";
     id: string;
   }
 
+  interface ComposerDraftThreadReply {
+    rootId: string;
+    conversationId: string;
+    conversationKind: "dm" | "group_dm";
+    author: string;
+    unavailable: boolean;
+  }
+
   interface ComposerDraft {
     body: string;
     hadAttachments?: boolean;
@@ -1980,6 +1988,7 @@ import "../../styles/kylon-image-viewer.css";
      */
     to?: StoredIdentityRef[];
     applied?: string[];
+    threadReply?: ComposerDraftThreadReply;
   }
 
   interface StagedComposerAttachment {
@@ -4722,6 +4731,25 @@ import "../../styles/kylon-image-viewer.css";
         if (!raw) return null;
         const value = JSON.parse(raw) as Partial<ComposerDraft>;
         if (typeof value.body !== "string") return null;
+        const rawThread = value.threadReply;
+        const parsedThread: ComposerDraftThreadReply | undefined =
+          rawThread &&
+          typeof rawThread === "object" &&
+          typeof rawThread.rootId === "string" &&
+          rawThread.rootId !== "" &&
+          typeof rawThread.conversationId === "string" &&
+          rawThread.conversationId !== "" &&
+          (rawThread.conversationKind === "dm" || rawThread.conversationKind === "group_dm") &&
+          typeof rawThread.author === "string" &&
+          typeof rawThread.unavailable === "boolean"
+            ? {
+                rootId: rawThread.rootId,
+                conversationId: rawThread.conversationId,
+                conversationKind: rawThread.conversationKind,
+                author: rawThread.author,
+                unavailable: rawThread.unavailable,
+              }
+            : undefined;
         return {
           body: value.body.slice(0, COMPOSER_DRAFT_STORAGE_MAX),
           ...(value.hadAttachments === true ? { hadAttachments: true } : {}),
@@ -4736,6 +4764,7 @@ import "../../styles/kylon-image-viewer.css";
           ...(Array.isArray(value.applied)
             ? { applied: value.applied.filter((key) => typeof key === "string") }
             : {}),
+          ...(parsedThread ? { threadReply: parsedThread } : {}),
         };
       } catch {
         return null;
@@ -4846,6 +4875,21 @@ import "../../styles/kylon-image-viewer.css";
         );
         const draftTo = address.to;
         const draftApplied = address.applied;
+        const activeDraftThreadReply: ComposerDraftThreadReply | null =
+          typeof threadReplyRoot !== "undefined" &&
+          threadReplyRoot !== null &&
+          threadReplyRoot.conversationId != null &&
+          (threadReplyRoot.conversationKind === "dm" || threadReplyRoot.conversationKind === "group_dm") &&
+          typeof activeDmConversationId !== "undefined" &&
+          activeDmConversationId === threadReplyRoot.conversationId
+            ? {
+                rootId: threadReplyRoot.id,
+                conversationId: threadReplyRoot.conversationId,
+                conversationKind: threadReplyRoot.conversationKind,
+                author: threadReplyRoot.author,
+                unavailable: typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable,
+              }
+            : null;
         composerDraftHeldKey = key;
         window.localStorage.setItem(
           key,
@@ -4854,6 +4898,7 @@ import "../../styles/kylon-image-viewer.css";
             ...(hadAttachments ? { hadAttachments: true } : {}),
             ...(draftTo === undefined ? {} : { to: draftTo }),
             ...(draftApplied.length === 0 ? {} : { applied: draftApplied }),
+            ...(activeDraftThreadReply ? { threadReply: activeDraftThreadReply } : {}),
           }),
         );
       } catch {
@@ -4906,6 +4951,31 @@ import "../../styles/kylon-image-viewer.css";
         persistComposerDraft(pinnedKey);
       }, COMPOSER_DRAFT_DEBOUNCE_MS);
     };
+    const restoreDraftThreadReply = (draft: ComposerDraft | null): void => {
+      const saved = draft?.threadReply;
+      if (
+        !saved ||
+        typeof activeDmConversationId === "undefined" ||
+        activeDmConversationId === null ||
+        saved.conversationId !== activeDmConversationId ||
+        (saved.conversationKind !== "dm" && saved.conversationKind !== "group_dm")
+      ) {
+        return;
+      }
+      const liveRoot = signals.find((signal) => signal.id === saved.rootId) ?? null;
+      threadReplyRoot = {
+        id: saved.rootId,
+        author: saved.author,
+        channelId: null,
+        conversationId: saved.conversationId,
+        conversationKind: saved.conversationKind,
+        until: liveRoot?.until ?? null,
+        expired: false,
+      };
+      threadReplyRootUnavailable = saved.unavailable;
+      if (typeof syncComposerPlacement === "function") syncComposerPlacement();
+      if (saved.unavailable) setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
+    };
     /** Swap the shared textarea cleanly whenever the draft scope changes (DM <-> DM or DM <-> channel). */
     const swapComposerDraftForScopeChange = (outgoingKey: string | null): void => {
       cancelComposerDraftTimer();
@@ -4916,6 +4986,7 @@ import "../../styles/kylon-image-viewer.css";
       composerIntent = null;
       const retryControl = one<HTMLButtonElement>("[data-composer-retry]");
       if (retryControl) retryControl.hidden = true;
+      setComposerStatus("", "idle");
       const incoming = incomingKey ? readComposerDraft(incomingKey) : null;
       restoredComposerKey = incomingKey;
       composerDraftHeldKey = incoming && incomingKey ? incomingKey : null;
@@ -4924,6 +4995,7 @@ import "../../styles/kylon-image-viewer.css";
       const warning = one<HTMLElement>("[data-composer-reload-warning]");
       composerAttachmentsMissingAfterReload = incoming?.hadAttachments === true;
       if (warning) warning.hidden = !composerAttachmentsMissingAfterReload;
+      restoreDraftThreadReply(incoming);
       resizeComposerInput(input, true);
       syncComposerControls();
     };
@@ -5165,6 +5237,7 @@ import "../../styles/kylon-image-viewer.css";
         const warning = one<HTMLElement>("[data-composer-reload-warning]");
         composerAttachmentsMissingAfterReload = draft.hadAttachments === true;
         if (warning) warning.hidden = !composerAttachmentsMissingAfterReload;
+        restoreDraftThreadReply(draft);
         resizeComposerInput(input);
       }
       /* AND THE ADDRESS THAT BELONGS TO THAT BODY. The pass reads the same stored draft this
@@ -21023,6 +21096,7 @@ import "../../styles/kylon-image-viewer.css";
       input.focus({ preventScroll: true });
       /** The posted row, or null while the one post has not landed. */
       let posted: Signal | null = null;
+      let persistUnavailableDraftAfterSettle = false;
       try {
         const attachmentRefs = sampleMode
           ? attachmentSnapshot.map((attachment) => ({
@@ -21300,6 +21374,7 @@ import "../../styles/kylon-image-viewer.css";
           composerIntent = null;
           if (sameDirectConversation && replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
             threadReplyRootUnavailable = true;
+            persistUnavailableDraftAfterSettle = true;
             input.value = rawBody;
             stagedAttachments = attachmentSnapshot;
             renderStagedAttachments();
@@ -21311,6 +21386,32 @@ import "../../styles/kylon-image-viewer.css";
             setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
             renderFeed("latest");
           } else {
+            if (
+              sendDraftKey &&
+              replyRoot !== null &&
+              placementConversationId !== null &&
+              (freshPlacementConversationKind === "dm" || freshPlacementConversationKind === "group_dm") &&
+              !evictedConversationIds.has(`${workspaceId}:${placementConversationId}`)
+            ) {
+              try {
+                window.localStorage.setItem(
+                  sendDraftKey,
+                  JSON.stringify({
+                    body: rawBody.slice(0, COMPOSER_DRAFT_STORAGE_MAX),
+                    ...(attachmentSnapshot.length > 0 ? { hadAttachments: true } : {}),
+                    threadReply: {
+                      rootId: replyRoot.id,
+                      conversationId: placementConversationId,
+                      conversationKind: freshPlacementConversationKind,
+                      author: replyRoot.author,
+                      unavailable: true,
+                    },
+                  }),
+                );
+              } catch {
+                // Storage unavailable.
+              }
+            }
             if (replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
               setThreadReplyRoot(null);
             }
@@ -21428,6 +21529,9 @@ import "../../styles/kylon-image-viewer.css";
            of the session. A review arm found it; it was pre-existing and this row widened it,
            because the derived pass holds while the flag is up. */
         if (composerSendToken === sendToken) setComposerSending(false);
+        if (persistUnavailableDraftAfterSettle && composerSendToken === sendToken) {
+          persistComposerDraft(sendDraftKey);
+        }
         /* AND WHAT IS RENDERED IS THE SCREEN'S. Same two facts the catch asks, for the same
            reason: the token says nobody tore the composer down, the workspace says the reader
            has not moved. */
@@ -21470,7 +21574,7 @@ import "../../styles/kylon-image-viewer.css";
       if (composerSending || !threadReplyRootUnavailable) return;
       setThreadReplyRoot(null);
       setComposerStatus("", "idle");
-      scheduleComposerDraft();
+      persistComposerDraft();
       syncComposerControls();
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });

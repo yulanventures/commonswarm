@@ -249,6 +249,107 @@ async function observeDmThreads() {
   };
 
   try {
+    if (f.capture === "missing-thread-reload") {
+      await wait("group DM loaded for missing-thread reload check", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM launch checklist root."));
+      await dismissEntityPanel();
+      const input = one<HTMLTextAreaElement>("[data-composer-input]")!;
+      const isPhone = window.innerWidth < 1024;
+      const phase = sessionStorage.getItem("step3d2ReloadPhase") ?? "setup";
+      if (phase === "setup") {
+        await openReply(f.ids.missingRootId);
+        await wait("missing-root reply bar open before reload", () => visible(one("[data-composer-reply]")));
+        input.value = "Draft for deleted root";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const cmdsBefore = f.signalCommands.length;
+        if (isPhone) {
+          await click("[data-composer-send]:visible");
+        } else {
+          input.focus();
+          await press("Enter");
+        }
+        await wait("404 thread_root_not_found before reload", () =>
+          f.signalCommands.length === cmdsBefore + 1 &&
+          visible(one("[data-composer-reply]")) &&
+          visible(one("[data-composer-move-to-conversation]")) &&
+          (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+        );
+        // Edit preserved draft, leave group DM to #general and return, then verify explicit Move survives leave/return.
+        input.value = "Draft for deleted root (edited before reload)";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        await openDrawerIfPhone();
+        await click('a[href*="c=general"]:visible');
+        await wait("left group DM to #general", () => location.search.includes("c=general") && !visible(one("[data-composer-reply]")));
+        check(input.value === "", "#general composer must not inherit unavailable DM thread draft");
+        await openDrawerIfPhone();
+        await click(`[data-rail-conversation="${f.ids.dmGroupConv}"]:visible`);
+        await wait("returned to group DM with Move draft to conversation restored", () =>
+          location.search.includes(`dm=${f.ids.dmGroupConv}`) &&
+          input.value === "Draft for deleted root (edited before reload)" &&
+          visible(one("[data-composer-reply]")) &&
+          visible(one("[data-composer-move-to-conversation]")) &&
+          (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+        );
+        if (isPhone) {
+          await click("[data-composer-send]:visible");
+        } else {
+          input.focus();
+          await press("Enter");
+        }
+        await new Promise((r) => setTimeout(r, 80));
+        check(f.signalCommands.length === cmdsBefore + 1, "Send/Enter after leave+return must still be blocked before Move draft to conversation");
+        sessionStorage.setItem("step3d2ReloadPhase", "verify");
+        document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
+          ok: true, capture: f.capture, phase: "setup", mode: isPhone ? "phone-send" : "desktop-enter",
+        });
+        return;
+      }
+      // Phase 2 (after real browser reload): unavailable thread state & Move action must be restored!
+      await wait("reloaded group DM restored editable draft and Move draft to conversation", () =>
+        input.value === "Draft for deleted root (edited before reload)" &&
+        visible(one("[data-composer-reply]")) &&
+        visible(one("[data-composer-move-to-conversation]")) &&
+        (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
+      );
+      check(!visible(one("[data-composer-reply-cancel]")), "reloaded unavailable bar must hide Cancel reply");
+      check(f.signalCommands.length === 0, "reload itself must emit 0 post_signal commands");
+      // Repeat Send (phone 360px) or Enter (desktop 1440px) after reload: MUST NOT post to main DM!
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await new Promise((r) => setTimeout(r, 80));
+      check(
+        f.signalCommands.length === 0,
+        `Designer reload: ${isPhone ? "phone Send" : "desktop Enter"} after reload must not post to main DM before Move draft to conversation`,
+      );
+      await press("Escape");
+      check(visible(one("[data-composer-move-to-conversation]")), "Escape after reload must not bypass Move draft to conversation");
+      await click("[data-composer-move-to-conversation]:visible");
+      await wait("Move draft to conversation closed reply bar after reload", () => !visible(one("[data-composer-reply]")));
+      check(input.value === "Draft for deleted root (edited before reload)", "Move draft to conversation after reload must keep edited draft");
+      if (isPhone) {
+        await click("[data-composer-send]:visible");
+      } else {
+        input.focus();
+        await press("Enter");
+      }
+      await wait("post after Move draft to conversation succeeded after reload", () => f.signalCommands.length === 1);
+      const movedAfterReload = f.signalCommands[0];
+      check(
+        movedAfterReload.conversation_id === f.ids.dmGroupConv &&
+        !("thread_root_id" in movedAfterReload) &&
+        !("channel" in movedAfterReload) &&
+        movedAfterReload.body === "Draft for deleted root (edited before reload)",
+        "Post after reload + explicit Move must target main group DM: " + JSON.stringify(movedAfterReload),
+      );
+      document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
+        ok: true, capture: f.capture, phase: "verify", mode: isPhone ? "phone-send" : "desktop-enter", commands: f.signalCommands.length,
+      });
+      return;
+    }
+
     if (f.capture === "missing-thread-capture" || f.capture === "missing-thread-flow") {
       await wait("group DM loaded for missing-thread check", () => (one("[data-feed-list]")?.textContent ?? "").includes("Group DM launch checklist root."));
       await dismissEntityPanel();
@@ -545,10 +646,12 @@ test("Step 3D-2 signed-in dashboard enables 1-level DM and group DM threads, hid
     const ws = "11111111-1111-4111-8111-111111111111";
     const dmAlex = "aaaa1111-1111-4111-8111-111111111111";
     const dmGroup = "bbbb2222-2222-4222-8222-222222222222";
-    const cases: { name: string; width: number; height: number; query: string; screenshot?: boolean }[] = [
+    const cases: { name: string; width: number; height: number; query: string; screenshot?: boolean; reload?: boolean }[] = [
       { name: "flow-1024-light", width: 1024, height: 1366, query: `w=${ws}&dm=${dmAlex}&theme=light&capture=flow` },
       { name: "missing-thread-360-send", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-flow` },
       { name: "missing-thread-1440-enter", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-flow` },
+      { name: "missing-thread-reload-360-send", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-reload`, reload: true },
+      { name: "missing-thread-reload-1440-enter", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-reload`, reload: true },
       { name: "360x740-light-dm-thread-missing", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-capture`, screenshot: true },
       { name: "360x740-dark-dm-thread-missing", width: 360, height: 740, query: `w=${ws}&dm=${dmGroup}&theme=dark&capture=missing-thread-capture`, screenshot: true },
       { name: "1440x900-light-dm-thread-missing", width: 1440, height: 900, query: `w=${ws}&dm=${dmGroup}&theme=light&capture=missing-thread-capture`, screenshot: true },
@@ -569,7 +672,13 @@ test("Step 3D-2 signed-in dashboard enables 1-level DM and group DM threads, hid
       try {
         await activePage.goto(`http://127.0.0.1:${address.port}/app?${item.query}`);
         await activePage.waitForFunction(() => !!document.documentElement.dataset.dmThreadsObservation, null, { timeout: 25_000 });
-        outcomes[item.name] = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.dmThreadsObservation!));
+        let result = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.dmThreadsObservation!));
+        if (item.reload && result.ok) {
+          await activePage.reload();
+          await activePage.waitForFunction(() => !!document.documentElement.dataset.dmThreadsObservation, null, { timeout: 25_000 });
+          result = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.dmThreadsObservation!));
+        }
+        outcomes[item.name] = result;
         if (item.screenshot) {
           await activePage.screenshot({ path: join(evidence, `${item.name}.png`), fullPage: false });
         }
