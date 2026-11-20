@@ -718,22 +718,17 @@ try {
     let firstPending,secondPending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
-      // Sole owned row gate; both concurrent recoveries serialize on the seat's
-      // renewal_grants FOR UPDATE lock without serializing on swarm.users.
+      // Sole owned row gate; with swarm.users downgraded to FOR KEY SHARE, the
+      // second concurrent recovery queues on the first's workspace FOR UPDATE lock.
       await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${concurrent.grant}::uuid FOR UPDATE`;
       firstPending=renew(concurrent.raw,id());
       const firstPid=await waitBlockedBy(pid,100);
       check('unused-root concurrency owned grant wait',firstPid>0
         && (await waitDetail(firstPid)).statement?.includes('swarm.renewal_grants'));
       secondPending=renew(concurrent.raw,id());
-      let secondPid=0;
-      for (let i=0; i<100 && !secondPid; i++) {
-        const queued=(await blockedBy(pid)).filter((p)=>p!==firstPid);
-        if (queued.length===1) secondPid=queued[0];
-        else await sleep(20);
-      }
+      const secondPid=firstPid ? await waitBlockedBy(firstPid,100):0;
       check('unused-root concurrency distinct PID waits on first recovery',secondPid>0 && secondPid!==firstPid
-        && (await waitDetail(secondPid)).statement?.includes('swarm.renewal_grants'));
+        && (await waitDetail(secondPid)).statement?.includes('swarm.workspaces'));
     });
     const replies=await Promise.all([firstPending,secondPending]);
     const children=await observer`SELECT token_id FROM swarm.agent_tokens WHERE predecessor_token_id=${concurrent.t0}::uuid AND revoked_at IS NULL`;
