@@ -20499,7 +20499,7 @@ import "../../styles/kylon-image-viewer.css";
     /* The draft write is debounced, and a debounced write must not be lost to the page ending.
      * These are the ways it ends — reload, close, navigation, and switching away on a phone —
      * and each one takes the pending write now instead of after the delay. */
-    window.addEventListener("pagehide", flushComposerDraft);
+    window.addEventListener("pagehide", () => flushComposerDraft());
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flushComposerDraft();
     });

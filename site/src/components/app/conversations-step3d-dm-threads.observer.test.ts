@@ -304,9 +304,18 @@ async function observeDmThreads() {
         });
         return;
       }
-      // Phase 2 (after real browser reload): unavailable thread state & Move action must be restored!
-      await wait("reloaded group DM restored editable draft and Move draft to conversation", () =>
-        input.value === "Draft for deleted root (edited before reload)" &&
+      // Phase 2 (after real browser reload inside the 300 ms autosave window):
+      // pagehide must flush the immediate final edit to the real draft key without writing any stray storage key,
+      // and restore the unavailable thread state & Move draft to conversation action.
+      const strayStorageKeys = Object.keys(localStorage).filter(
+        (key) => !key.startsWith("commonswarm:") && !key.startsWith("sb-"),
+      );
+      check(
+        strayStorageKeys.length === 0,
+        "pagehide reload must not write stray localStorage keys: " + JSON.stringify(strayStorageKeys),
+      );
+      await wait("reloaded group DM restored immediate edit and Move draft to conversation", () =>
+        input.value === "Draft for deleted root (edited before reload)!" &&
         visible(one("[data-composer-reply]")) &&
         visible(one("[data-composer-move-to-conversation]")) &&
         (one("[data-composer-status]")?.textContent ?? "").includes("That thread isn't available anymore."),
@@ -329,7 +338,7 @@ async function observeDmThreads() {
       check(visible(one("[data-composer-move-to-conversation]")), "Escape after reload must not bypass Move draft to conversation");
       await click("[data-composer-move-to-conversation]:visible");
       await wait("Move draft to conversation closed reply bar after reload", () => !visible(one("[data-composer-reply]")));
-      check(input.value === "Draft for deleted root (edited before reload)", "Move draft to conversation after reload must keep edited draft");
+      check(input.value === "Draft for deleted root (edited before reload)!", "Move draft to conversation after reload must keep edited draft");
       if (isPhone) {
         await click("[data-composer-send]:visible");
       } else {
@@ -342,7 +351,7 @@ async function observeDmThreads() {
         movedAfterReload.conversation_id === f.ids.dmGroupConv &&
         !("thread_root_id" in movedAfterReload) &&
         !("channel" in movedAfterReload) &&
-        movedAfterReload.body === "Draft for deleted root (edited before reload)",
+        movedAfterReload.body === "Draft for deleted root (edited before reload)!",
         "Post after reload + explicit Move must target main group DM: " + JSON.stringify(movedAfterReload),
       );
       document.documentElement.dataset.dmThreadsObservation = JSON.stringify({
@@ -675,6 +684,23 @@ test("Step 3D-2 signed-in dashboard enables 1-level DM and group DM threads, hid
         await activePage.waitForFunction(() => !!document.documentElement.dataset.dmThreadsObservation, null, { timeout: 25_000 });
         let result = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.dmThreadsObservation!));
         if (item.reload && result.ok) {
+          // Type one final character inside the 300 ms autosave debounce window and reload immediately
+          // so only pagehide can flush it to the active conversation's draft key (with zero stray keys).
+          await activePage.evaluate((groupConvId) => {
+            const input = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
+            if (!input) throw new Error("composer input missing before immediate reload");
+            input.focus({ preventScroll: true });
+            input.value = `${input.value}!`;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            const draftKey = Object.keys(localStorage).find(
+              (k) => k.startsWith("commonswarm:composer-draft:") && k.endsWith(`:conv:${groupConvId}`),
+            );
+            if (!draftKey) throw new Error("expected persisted DM draft key before immediate edit");
+            const beforeFlush = JSON.parse(localStorage.getItem(draftKey) ?? "{}");
+            if (beforeFlush.body === input.value) {
+              throw new Error("immediate edit must still be debounced (unflushed) before pagehide reload");
+            }
+          }, dmGroup);
           await activePage.reload();
           await activePage.waitForFunction(() => !!document.documentElement.dataset.dmThreadsObservation, null, { timeout: 25_000 });
           result = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.dmThreadsObservation!));
