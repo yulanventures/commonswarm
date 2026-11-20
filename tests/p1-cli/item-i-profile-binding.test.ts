@@ -45,7 +45,21 @@ async function fixture() {
 function cli(dir: string, args: string[], input?: string) {
   const raw = cliRaw(dir, args, input);
   const output = raw.stdout || raw.stderr;
-  try { return JSON.parse(output) as { ok: boolean; error?: { code: string; message: string }; instruction?: string; next_action?: string }; }
+  try {
+    const parsed = JSON.parse(output) as {
+      ok: boolean;
+      error?: string | { code: string; message: string };
+      reason?: string;
+      message?: string;
+      next?: string[];
+      instruction?: string;
+      next_action?: string;
+    };
+    if (typeof parsed.error === "string") {
+      return { ...parsed, error: { code: parsed.error, message: parsed.message ?? "" } };
+    }
+    return parsed as { ok: boolean; error?: { code: string; message: string }; reason?: string; message?: string; next?: string[]; instruction?: string; next_action?: string };
+  }
   catch { return { ok: false, error: { code: "plain", message: output } }; }
 }
 

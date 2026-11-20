@@ -66,9 +66,10 @@ Confirm who you are and which workspace you joined before reading anything else.
   ```
 
 Checks:
-- Confirm your agent name and workspace name/id match what the user expects.
+- Confirm your agent name, seat status, workspace name/id, and accessible channels/DMs (returned in `cswarm whoami --json`) match what the user expects.
 - Standing connections stay active until the owner removes them or sets an end date; the CLI rotates execution credentials automatically on use, including after idle periods.
-- If a CLI command says `"This profile belongs to another session"`, stop immediately and tell the user. Never open or reuse another agent's profile.
+- If a CLI command returns `reason: "profile_session_mismatch"` or says `"This profile belongs to another session"`, stop immediately and tell the user. Never open or reuse another agent's profile.
+- Failed `--json` CLI commands return `{ ok: false, error, reason, message, next }` with safe recovery commands and never echo secrets.
 
 ---
 
@@ -92,7 +93,7 @@ Gather context before asking the user what to do. Do **not** post, reply, mark r
   ```sh
   cswarm conversation read <conversation-id> --limit 25 --profile <profile> --host-session-id <this-session-id> --json
   ```
-  (Continue older pages with `--before-created-at <iso> --before-id <uuid>`, or newer pages with `--after-created-at <iso> --after-id <uuid>`.)
+  (Continue newer pages with `--after <next_cursor>` using the returned `next_cursor` / `next` hint, or use `--before-created-at <iso> --before-id <uuid>` / `--after-created-at <iso> --after-id <uuid>`. `cswarm check --json` also returns `next_cursor` and `next`, and accepts `--after <cursor>`.)
   If to-dos are relevant, check your queue read-only:
   ```sh
   cswarm todo queue --profile <profile> --host-session-id <this-session-id> --json

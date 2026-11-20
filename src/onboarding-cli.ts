@@ -25,6 +25,7 @@ import {
 } from "./cloud/agent-receive.js";
 import type { ReceiveProvider } from "./cloud/agent-onboarding-contract.js";
 import { readSecureJsonFileIfPresent, writeSecureJsonFile } from "./cloud/storage.js";
+import { decodeOpaqueCursor } from "./cli/ax.js";
 
 export interface OnboardingArguments {
   positionals: string[];
@@ -34,7 +35,7 @@ export interface OnboardingArguments {
   assertShape(flags: readonly string[], positionals: number): void;
 }
 
-export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt"] as const;
+export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt", "after"] as const;
 export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
 
 export function onboardingUsage(): string {
@@ -221,9 +222,9 @@ export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
   await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
 }
 
-export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook", "workspace-id"] as const;
-export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"] as const;
-export const CHECK_MESSAGE_REFUSED_FLAGS = ["full"] as const;
+export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "after", "json", "hook", "workspace-id"] as const;
+export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "after", "json"] as const;
+export const CHECK_MESSAGE_REFUSED_FLAGS = ["full", "after"] as const;
 
 export async function runCheckHook(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-hook");
@@ -244,8 +245,14 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
   recordDispatch("runOnboardingCommand:check-messages");
   args.assertShape(CHECK_FLAGS, 1);
   if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
+  const rawAfter = args.optional("after");
+  const afterCursor = rawAfter !== undefined ? decodeOpaqueCursor(rawAfter) : undefined;
   await checkAgentMessages({
-    profilePath: args.required("profile"), workspaceId:args.optional("workspace-id"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
+    profilePath: args.required("profile"),
+    workspaceId: args.optional("workspace-id"),
+    hostSessionId: args.optional("host-session-id"),
+    full: args.has("full"),
+    afterCursor,
     // No host hook times a direct check (--hook goes through runTurnHook and its process deadline).
     timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
     present: async result => args.has("json") ? output(result) : writeOnboardingOutput(renderAgentCheck(result)),

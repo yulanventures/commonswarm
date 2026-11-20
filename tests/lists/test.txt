@@ -135,6 +135,7 @@ tests/conversations-commands-parse.test.ts
 tests/conversations-read.test.ts
 tests/conversations-cli-ergonomics.test.ts
 tests/cli-wait.test.ts
+tests/cli-ax.test.ts
 tests/local-edge-retry.test.ts
 tests/interactive-replies-client.test.ts
 tests/api-md-contract.test.ts
