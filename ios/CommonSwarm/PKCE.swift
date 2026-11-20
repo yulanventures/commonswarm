@@ -234,8 +234,15 @@ final class HumanSession {
         return result
     }
 
-    func putStorage(_ request: URLRequest, from file: URL, delegate: URLSessionTaskDelegate) async throws -> Int {
+    func putStorage(
+        _ request: URLRequest,
+        from file: URL,
+        delegate: URLSessionTaskDelegate,
+        canDispatch: @MainActor @Sendable () -> Bool = { true }
+    ) async throws -> Int {
         guard isActive else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard canDispatch() else { throw CancellationError() }
         let (_, response) = try await transport.upload(for: request, fromFile: file, delegate: delegate)
         guard isActive else { throw CancellationError() }
         try Task.checkCancellation()

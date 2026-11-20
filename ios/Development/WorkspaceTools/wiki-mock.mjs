@@ -108,6 +108,9 @@ let preReceiptRefusalReason = null;
 let expireNextDownload = false;
 let duplicateDirectory = false;
 let putCount = 0;
+let holdCreateResponseOnce = false;
+let createResponseHeld = false;
+let releaseHeldCreateResponse = null;
 
 const operationsForRole = (role) => (role === "editor" ? ["read", "create", "update"] : ["read"]);
 
@@ -142,6 +145,22 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/fixture/create-503-once") {
       create503Once = true;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-create-response-once") {
+      holdCreateResponseOnce = true;
+      createResponseHeld = false;
+      releaseHeldCreateResponse = null;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/create-held") {
+      return reply(200, { held: createResponseHeld });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-create-response") {
+      const fn = releaseHeldCreateResponse;
+      releaseHeldCreateResponse = null;
+      createResponseHeld = false;
+      if (fn) fn();
       return reply(200, { ok: true });
     }
     if (req.method === "POST" && url.pathname === "/fixture/replace-topic") {
@@ -342,6 +361,13 @@ const server = createServer(async (req, res) => {
           upload_path: uploadPath,
         };
         createReceipts.set(body.command_id, receipt);
+        if (holdCreateResponseOnce) {
+          holdCreateResponseOnce = false;
+          createResponseHeld = true;
+          await new Promise((resolve) => {
+            releaseHeldCreateResponse = resolve;
+          });
+        }
         return reply(200, receipt);
       }
 

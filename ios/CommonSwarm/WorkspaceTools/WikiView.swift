@@ -9,11 +9,26 @@ struct WikiListView: View {
     @StateObject private var store: WikiStore
     @State private var selectedFileID: UUID?
     @State private var presentation = WikiPresentationToken()
+    @State private var hasActivePresentation = false
 
     init(api: ConversationAPI, workspace: Workspace) {
         self.api = api
         self.workspace = workspace
         _store = StateObject(wrappedValue: WikiStore(api: WikiAPI(api: api), workspaceID: workspace.id))
+    }
+
+    private func activateFreshPresentationIfNeeded() {
+        guard !hasActivePresentation else { return }
+        let fresh = WikiPresentationToken()
+        presentation = fresh
+        hasActivePresentation = true
+        store.beginPresentation(fresh)
+    }
+
+    private func retireCurrentPresentation() {
+        guard hasActivePresentation else { return }
+        hasActivePresentation = false
+        store.endPresentation(presentation)
     }
 
     var body: some View {
@@ -55,16 +70,16 @@ struct WikiListView: View {
                 }
             }
             .task {
-                store.beginPresentation(presentation)
+                activateFreshPresentationIfNeeded()
                 if store.topics == nil {
                     await store.loadTopics()
                 }
             }
             .onAppear {
-                store.beginPresentation(presentation)
+                activateFreshPresentationIfNeeded()
             }
             .onDisappear {
-                store.endPresentation(presentation)
+                retireCurrentPresentation()
             }
     }
 
@@ -94,7 +109,8 @@ struct WikiListView: View {
                         Section {
                             ForEach(pendingRetries) { item in
                                 Button(item.label) {
-                                    Task { _ = await store.retryPendingSave(item, presentation: presentation) }
+                                    let clickPresentation = presentation
+                                    Task { _ = await store.retryPendingSave(item, presentation: clickPresentation) }
                                 }
                                 .font(.subheadline.weight(.semibold))
                                 .disabled(store.isSaving)
@@ -170,6 +186,7 @@ struct WikiTopicDetailView: View {
 
     @State private var currentFileID: UUID
     @State private var presentation = WikiPresentationToken()
+    @State private var hasActivePresentation = false
     @State private var displayMode: DisplayMode = .formatted
     @State private var historyExpanded = false
     @Environment(\.colorScheme) private var colorScheme
@@ -184,6 +201,20 @@ struct WikiTopicDetailView: View {
         self.store = store
         self.initialFileID = initialFileID
         _currentFileID = State(initialValue: initialFileID)
+    }
+
+    private func activateFreshPresentationIfNeeded() {
+        guard !hasActivePresentation else { return }
+        let fresh = WikiPresentationToken()
+        presentation = fresh
+        hasActivePresentation = true
+        store.beginPresentation(fresh)
+    }
+
+    private func retireCurrentPresentation() {
+        guard hasActivePresentation else { return }
+        hasActivePresentation = false
+        store.endPresentation(presentation)
     }
 
     private var statusForeground: Color {
@@ -249,14 +280,14 @@ struct WikiTopicDetailView: View {
             }
         }
         .task(id: currentFileID) {
-            store.beginPresentation(presentation)
+            activateFreshPresentationIfNeeded()
             await store.openTopic(fileID: currentFileID)
         }
         .onAppear {
-            store.beginPresentation(presentation)
+            activateFreshPresentationIfNeeded()
         }
         .onDisappear {
-            store.endPresentation(presentation)
+            retireCurrentPresentation()
         }
     }
 
@@ -321,7 +352,8 @@ struct WikiTopicDetailView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(pendingRetries) { item in
                                 Button(item.label) {
-                                    Task { _ = await store.retryPendingSave(item, presentation: presentation) }
+                                    let clickPresentation = presentation
+                                    Task { _ = await store.retryPendingSave(item, presentation: clickPresentation) }
                                 }
                                 .font(.subheadline.weight(.semibold))
                                 .disabled(store.isSaving)
@@ -373,6 +405,7 @@ struct WikiTopicDetailView: View {
                                             let oldPresentation = presentation
                                             let nextPresentation = WikiPresentationToken()
                                             presentation = nextPresentation
+                                            hasActivePresentation = true
                                             store.beginPresentation(nextPresentation)
                                             store.endPresentation(oldPresentation)
                                         }

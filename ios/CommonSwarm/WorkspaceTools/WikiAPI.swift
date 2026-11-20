@@ -488,7 +488,8 @@ struct WikiAPI: Sendable {
                 let putStatus = try await api.session.putStorage(
                     putReq,
                     from: tempURL,
-                    delegate: WikiUploadNoRedirectDelegate()
+                    delegate: WikiUploadNoRedirectDelegate(),
+                    canDispatch: canDispatch
                 )
                 if (200..<300).contains(putStatus) {
                     uploaded = true

@@ -405,6 +405,7 @@ final class WikiStore: ObservableObject {
     private var accessGeneration = 0
     private var isRetired = false
     private var activePresentations: Set<WikiPresentationToken> = []
+    private var retiredPresentations: Set<WikiPresentationToken> = []
     private let sessionID: ObjectIdentifier
 
     init(api: WikiAPI, workspaceID: UUID) {
@@ -480,18 +481,21 @@ final class WikiStore: ObservableObject {
     }
 
     func beginPresentation(_ token: WikiPresentationToken) {
+        guard !retiredPresentations.contains(token) else { return }
         activePresentations.insert(token)
         activate()
     }
 
     func endPresentation(_ token: WikiPresentationToken) {
         activePresentations.remove(token)
+        retiredPresentations.insert(token)
         if activePresentations.isEmpty {
             retire()
         }
     }
 
     func retire() {
+        retiredPresentations.formUnion(activePresentations)
         activePresentations.removeAll()
         isRetired = true
         listGeneration += 1
@@ -893,7 +897,9 @@ final class WikiStore: ObservableObject {
     /// and the initiating presentation (so navigating Back retires the retry before any phase sends,
     /// while preserving frozen pending IDs for a later explicit retry).
     func retryPendingSave(_ item: WikiPendingSaveRetry, presentation: WikiPresentationToken) async -> Bool {
-        guard !isRetired, activePresentations.contains(presentation) else { return false }
+        guard !isRetired,
+              !retiredPresentations.contains(presentation),
+              activePresentations.contains(presentation) else { return false }
         guard api.session.isActive else {
             clearOnAccessLoss(reason: "unauthorized", clearPending: true)
             return false
@@ -1005,7 +1011,8 @@ final class WikiStore: ObservableObject {
             guard !self.isRetired,
                   capturedSession.isActive,
                   self.accessGeneration == capturedAccessGen else { return false }
-            if let boundPresentation, !self.activePresentations.contains(boundPresentation) {
+            if let boundPresentation,
+               self.retiredPresentations.contains(boundPresentation) || !self.activePresentations.contains(boundPresentation) {
                 return false
             }
             let permitted = record.baseVersion == 0 ? self.canCreate : self.canUpdate

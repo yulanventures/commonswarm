@@ -71,6 +71,21 @@ struct VerifyWiki {
         let puts: Int
     }
 
+    struct HeldStatus: Decodable {
+        let held: Bool
+    }
+
+    static func waitUntilCreateHeld(_ origin: URL) async throws {
+        for _ in 0..<200 {
+            let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/create-held"))
+            if try JSONDecoder().decode(HeldStatus.self, from: data).held {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        expect(false, "Timed out waiting for file_version_create response hold")
+    }
+
     static func recordedCommands(_ origin: URL) async throws -> [RecordedCommand] {
         let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/commands"))
         return try JSONDecoder().decode([RecordedCommand].self, from: data)
@@ -329,6 +344,43 @@ struct VerifyWiki {
             "Navigating Back from detail during held bearer must retire detail retry with ZERO sends/PUTs/commits and keep frozen pending IDs"
         )
 
+        // 4a. Permanent presentation retirement across list leave & return:
+        //     Start a list retry while bearer is held -> leave list (retire listPres) ->
+        //     attempt reusing retired listPres (must be ignored!) AND enter fresh listPres2 ->
+        //     release bearer -> ZERO file commands, ZERO PUTs, ZERO commits, frozen IDs preserved!
+        let cmdsBeforeListLeave = try await recordedCommands(origin).filter { $0.kind.hasPrefix("file_version_") }.count
+        let statsBeforeListLeave = try await mutationStats(origin)
+        await MainActor.run { bearer.holdNext(1) }
+        let listReturnTask = Task { await store.retryPendingSave(firstRetryItem!, presentation: listPres) }
+        await bearer.waitUntilHeld()
+        let listPres2 = WikiPresentationToken()
+        await MainActor.run {
+            store.endPresentation(listPres)
+            // Even attempting to re-register the retired token must be refused permanently.
+            store.beginPresentation(listPres)
+            // Returning to the list mints a fresh presentation token.
+            store.beginPresentation(listPres2)
+            bearer.release()
+        }
+        let listReturnResult = await listReturnTask.value
+        let cmdsAfterListLeave = try await recordedCommands(origin).filter { $0.kind.hasPrefix("file_version_") }.count
+        let statsAfterListLeave = try await mutationStats(origin)
+        let frozenPreservedAfterListLeave = await MainActor.run {
+            guard let p = store.pendingSaves[checklist.fileID] else { return false }
+            return p.outcomeUnknown
+                && p.versionID == frozenBeforeBack.versionID
+                && p.createCommandID == frozenBeforeBack.createCommandID
+                && p.commitCommandID == frozenBeforeBack.commitCommandID
+        }
+        expect(
+            !listReturnResult
+                && cmdsAfterListLeave == cmdsBeforeListLeave
+                && statsAfterListLeave.puts == statsBeforeListLeave.puts
+                && statsAfterListLeave.commits == statsBeforeListLeave.commits
+                && frozenPreservedAfterListLeave,
+            "Leaving and returning to the list must permanently retire the earlier list presentation with ZERO file commands/PUTs/commits and keep frozen IDs"
+        )
+
         // Advance server past committed version (v+1 -> v+3), refresh, then explicitly retry from a fresh active presentation
         // -> replays v+1 with EXACTLY 1 commit & NO version regression!
         try await postFixture("\(base)/fixture/advance-version?file_id=\(checklist.fileID.uuidString.lowercased())")
@@ -416,6 +468,91 @@ struct VerifyWiki {
                 && statsAfterReplaceRetry.commits == statsBeforeReplaceRetry.commits
                 && commitCmdsAfterReplaceRetry == commitCmdsBeforeReplaceRetry,
             "Same-name, same-version, different-UUID replacement on retry must execute ZERO PUTs and ZERO commits"
+        )
+
+        // 5c. Retirement between slot creation (file_version_create) and signed PUT dispatch:
+        //     Seed a fresh topic with an unknown edit whose file_version_create failed with 503 (slot == nil).
+        //     Start retry on slotPres1 while fixture holds the file_version_create response after creating the slot.
+        //     Retire slotPres1 BEFORE releasing the response -> putStorage's canDispatch gate cancels BEFORE upload ->
+        //     ZERO PUTs, ZERO commits, slot preserved with uploaded == false.
+        //     Then retry on fresh slotPres2 -> reconciles with EXACTLY 1 PUT and 1 commit using the frozen IDs!
+        let putGateCreateSess = await MainActor.run { store.openCreateSheet() }!
+        let putGateTopic = await store.createTopic(session: putGateCreateSess, rawTopic: "put-gate-target", markdown: "# Put Gate\n\nOriginal v1.\n")
+        expect(putGateTopic != nil && putGateTopic?.currentVersion == 1, "Expected created topic for slot-to-PUT retirement witness")
+        await store.openTopic(fileID: putGateTopic!.fileID)
+        let putGateSeedEdit = await MainActor.run { store.beginEdit(fileID: putGateTopic!.fileID) }!
+        try await postFixture("\(base)/fixture/create-503-once")
+        let putGateSeedOK = await store.saveEdit(session: putGateSeedEdit, markdown: "# Put Gate v2\n\nUpdated body.\n")
+        let putGateRetryItem = await MainActor.run { store.eligiblePendingRetries(for: putGateTopic!.fileID).first }
+        let putGatePendingBefore = await MainActor.run { store.pendingSaves[putGateTopic!.fileID] }
+        expect(
+            !putGateSeedOK && putGateRetryItem != nil && putGatePendingBefore?.slot == nil,
+            "503 on file_version_create must leave pending edit with slot == nil before slot-to-PUT witness"
+        )
+
+        let slotPres1 = WikiPresentationToken()
+        await MainActor.run { store.beginPresentation(slotPres1) }
+        try await postFixture("\(base)/fixture/hold-create-response-once")
+        let statsBeforeSlotRetire = try await mutationStats(origin)
+        let slotRetireTask = Task { await store.retryPendingSave(putGateRetryItem!, presentation: slotPres1) }
+        try await waitUntilCreateHeld(origin)
+        await MainActor.run { store.endPresentation(slotPres1) }
+        try await postFixture("\(base)/fixture/release-create-response")
+        let slotRetireOK = await slotRetireTask.value
+        let statsAfterSlotRetire = try await mutationStats(origin)
+        let pendingAfterSlotRetire = await MainActor.run { store.pendingSaves[putGateTopic!.fileID] }
+        expect(
+            !slotRetireOK
+                && statsAfterSlotRetire.puts == statsBeforeSlotRetire.puts
+                && statsAfterSlotRetire.commits == statsBeforeSlotRetire.commits
+                && pendingAfterSlotRetire?.slot != nil
+                && pendingAfterSlotRetire?.uploaded == false
+                && pendingAfterSlotRetire?.versionID == putGatePendingBefore?.versionID
+                && pendingAfterSlotRetire?.commitCommandID == putGatePendingBefore?.commitCommandID,
+            "Retiring presentation between slot creation and PUT must cancel at putStorage with ZERO PUTs and ZERO commits while keeping frozen IDs and slot"
+        )
+
+        // Direct transport-level putStorage canDispatch witness: even with an active login
+        // and a prepared temp file, putStorage must fail closed with CancellationError and ZERO PUTs
+        // when canDispatch() returns false at final signed PUT dispatch.
+        let directPutTemp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("commonswarm-verify-put-gate-\(UUID().uuidString.lowercased()).md")
+        try Data("# Blocked PUT\n".utf8).write(to: directPutTemp, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: directPutTemp) }
+        var blockedPutReq = URLRequest(
+            url: origin.appending(path: "storage/v1/object/upload/sign/swarm-files/\(ws.id.uuidString.lowercased())/\(putGateTopic!.fileID.uuidString.lowercased())/99")
+        )
+        blockedPutReq.httpMethod = "PUT"
+        final class DummyDelegate: NSObject, URLSessionTaskDelegate {}
+        let putsBeforeDirectGate = try await mutationStats(origin).puts
+        var directPutCancelled = false
+        do {
+            _ = try await session.putStorage(blockedPutReq, from: directPutTemp, delegate: DummyDelegate()) {
+                false
+            }
+        } catch is CancellationError {
+            directPutCancelled = true
+        }
+        let putsAfterDirectGate = try await mutationStats(origin).puts
+        expect(
+            directPutCancelled && putsAfterDirectGate == putsBeforeDirectGate,
+            "HumanSession.putStorage must check canDispatch right at transport dispatch and send ZERO PUTs when retired"
+        )
+
+        let slotPres2 = WikiPresentationToken()
+        await MainActor.run { store.beginPresentation(slotPres2) }
+        let freshSlotRetryOK = await store.retryPendingSave(putGateRetryItem!, presentation: slotPres2)
+        let statsAfterFreshSlotRetry = try await mutationStats(origin)
+        let settledPutGate = await MainActor.run {
+            freshSlotRetryOK
+                && store.eligiblePendingRetries(for: putGateTopic!.fileID).isEmpty
+                && store.topics?.first(where: { $0.fileID == putGateTopic!.fileID })?.currentVersion == 2
+        }
+        expect(
+            settledPutGate
+                && statsAfterFreshSlotRetry.puts == statsAfterSlotRetire.puts + 1
+                && statsAfterFreshSlotRetry.commits == statsAfterSlotRetire.commits + 1,
+            "Fresh presentation retry after slot-to-PUT retirement must complete with EXACTLY 1 PUT and 1 commit using frozen IDs"
         )
 
         try await postFixture("\(base)/fixture/edge-403?on=1")
