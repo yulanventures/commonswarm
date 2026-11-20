@@ -3,7 +3,7 @@
  * All visibility and workspace-membership checks live in swarm.review_check_read
  * (20261120000005_review_checks.sql).
  */
-import type postgres from "postgres";
+import type postgres from "npm:postgres@3.4.9";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
