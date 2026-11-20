@@ -1528,13 +1528,13 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
     "<script>" + await compileFixture("observeWaitingCount") + "</script></body></html>";
   const makeArchivedBucket = () => {
     const baseMs = Date.now() - 3600_000;
-    const owner = "22222222-2222-4222-8222-222222222222";
-    const agent = "33333333-3333-4333-8333-333333333333";
+    const owner = "33333333-3333-4333-8333-333333333333";
+    const agent = "22222222-2222-4222-8222-222222222222";
     const maya = "44444444-4444-4444-8444-444444444444";
     const reviewOfferId = "99999999-9999-4999-8999-000000000001";
     const reviewTodoId = "dddddddd-dddd-4ddd-8ddd-000000000091";
-    const olderArchivedAskId = "11111111-1111-4111-8111-000000000077";
-    const redactedArchivedAskId = "11111111-1111-4111-8111-000000000078";
+    const olderArchivedAskId = "99999999-9999-4999-8999-000000000077";
+    const redactedArchivedAskId = "99999999-9999-4999-8999-000000000078";
     const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
     return {
       answeredIds: [] as string[],
@@ -1609,8 +1609,8 @@ async function runWaitingScenarios(scenarios: readonly string[]): Promise<Record
         request.on("data", chunk => { raw += String(chunk); });
         request.on("end", () => {
           const ev = JSON.parse(raw || "{}");
-          const owner = "22222222-2222-4222-8222-222222222222";
-          const agent = "33333333-3333-4333-8333-333333333333";
+          const owner = "33333333-3333-4333-8333-333333333333";
+          const agent = "22222222-2222-4222-8222-222222222222";
           const convGeneral = "eeeeeeee-eeee-4eee-8eee-000000000001";
           if (ev.type === "choice_answer" && ev.signal_id) {
             if (!bucket.answeredIds.includes(ev.signal_id)) bucket.answeredIds.push(ev.signal_id);

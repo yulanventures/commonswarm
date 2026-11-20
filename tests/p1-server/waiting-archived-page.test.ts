@@ -180,10 +180,6 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, 'Scout')
       `;
       await tx`
-        INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
-        VALUES (${scoutAgentId}::uuid, ${wsId}::uuid, ${viewerId}::uuid, ${viewerId}::uuid)
-      `;
-      await tx`
         INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
         VALUES (${wsId}::uuid, 'shared')
       `;
