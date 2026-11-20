@@ -3678,7 +3678,12 @@ export function browserSignalCommand(
     ...(mentions === undefined ? {} : { mentions: toWireRecipients(mentions) }),
     ...(attachments.length === 0 ? {} : { attachments }),
     ...(conversationId !== null
-      ? { conversation_id: conversationId }
+      ? {
+        conversation_id: conversationId,
+        ...(placement.threadRootId === undefined || placement.threadRootId === null
+          ? {}
+          : { thread_root_id: placement.threadRootId }),
+      }
       : {
         ...(placement.channel === undefined || placement.channel === null
           ? {}
@@ -3704,6 +3709,15 @@ export class SendRetiredError extends Error {
   constructor() {
     super("Message send retired after destination or session change.");
     this.name = "SendRetiredError";
+  }
+}
+
+export const THREAD_ROOT_UNAVAILABLE_TEXT = "That thread isn't available anymore.";
+
+export class ThreadRootUnavailableError extends Error {
+  constructor(message = THREAD_ROOT_UNAVAILABLE_TEXT) {
+    super(message);
+    this.name = "ThreadRootUnavailableError";
   }
 }
 
@@ -3739,6 +3753,9 @@ export async function postBrowserSignal(
       throw new ConversationUnavailableError(
         typeof body.message === "string" && body.message ? body.message : undefined,
       );
+    }
+    if (status === 404 && body.error === "thread_root_not_found") {
+      throw new ThreadRootUnavailableError();
     }
     throw new Error(
       status === 403

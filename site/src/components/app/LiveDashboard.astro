@@ -825,6 +825,9 @@ import "../../styles/kylon-image-viewer.css";
                 <button class="dashboard__text-button" type="button" data-composer-reply-cancel>
                   {THREAD_REPLY_CANCEL_LABEL}
                 </button>
+                <button class="dashboard__text-button" type="button" data-composer-move-to-conversation hidden>
+                  Move draft to conversation
+                </button>
               </div>
               <div class="dashboard__composer-box">
                 {/* The visible name of the box (Space.dc.html "Message Home"). renderHomeShell writes
@@ -1582,6 +1585,8 @@ import "../../styles/kylon-image-viewer.css";
     ConversationUnavailableError,
     SendRetiredError,
     SessionIdentityMismatch,
+    THREAD_ROOT_UNAVAILABLE_TEXT,
+    ThreadRootUnavailableError,
     listConversations,
     OversightAuthRefusedError,
     OversightRequestRetiredError,
@@ -1959,6 +1964,14 @@ import "../../styles/kylon-image-viewer.css";
     id: string;
   }
 
+  interface ComposerDraftThreadReply {
+    rootId: string;
+    conversationId: string;
+    conversationKind: "dm" | "group_dm";
+    author: string;
+    unavailable: boolean;
+  }
+
   interface ComposerDraft {
     body: string;
     hadAttachments?: boolean;
@@ -1975,6 +1988,7 @@ import "../../styles/kylon-image-viewer.css";
      */
     to?: StoredIdentityRef[];
     applied?: string[];
+    threadReply?: ComposerDraftThreadReply;
   }
 
   interface StagedComposerAttachment {
@@ -2433,16 +2447,22 @@ import "../../styles/kylon-image-viewer.css";
      * slug-shaped version of it in the channels lane.
      */
     let threadReplyRoot: ThreadReplyRoot | null = null;
+    /** True after a canonical DM/group DM reply hits 404 thread_root_not_found: keeps the draft editable and
+     *  blocks Enter/Send until the reader explicitly chooses "Move draft to conversation". */
+    let threadReplyRootUnavailable = false;
+    /** Originating root id so Escape on an open thread reply returns keyboard focus to its control. */
+    let threadReplyOpenerSignalId: string | null = null;
     /** Thread roots the reader has opened. Replies are collapsed under their root until then. */
     let expandedThreadIds = new Set<string>();
     /** True while a reply is being written, which is the whole of what the To: row is locked by. */
     const composerIsReplying = (): boolean => threadReplyRoot !== null;
-    /* A PUBLIC PLACE: a channel, #general, All messages, and every thread. Anywhere that is
-       not a Direct Message. A message written there has no To: set and stays readable by
-       everyone in the place; an @tag in it is a MENTION, which tells the people and agents it
-       names. Only a Direct Message is addressed. */
+    /* A PUBLIC PLACE: a channel, #general, All messages, and every channel thread. Anywhere that is
+       not a Direct Message or a Direct Message thread. A message written there has no To: set and
+       stays readable by everyone in the place; an @tag in it is a MENTION, which tells the people
+       and agents it names. Only a Direct Message is addressed. */
     const composerIsPublic = (): boolean =>
       !(typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) &&
+      !(threadReplyRoot?.conversationId != null && (threadReplyRoot.conversationKind === "dm" || threadReplyRoot.conversationKind === "group_dm")) &&
       composerReach(typeof activeDm === "undefined" ? null : activeDm, composerIsReplying()) === "public";
     let mentionPickerIndex = 0;
     let composerIntent: {
@@ -4375,6 +4395,12 @@ import "../../styles/kylon-image-viewer.css";
       if (!row) return;
       /* A public place has no To: set. The row appears there only to explain a tag it could not honour. */
       if (composerIsPublic()) { row.hidden = composerToNotice === "" && !composerPrivateDraft.written; return; }
+      /* In a Step 2b DM or DM thread, the audience lock pill and reply bar already own the destination. */
+      if ((typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
+        (threadReplyRoot?.conversationId != null && (threadReplyRoot.conversationKind === "dm" || threadReplyRoot.conversationKind === "group_dm"))) {
+        row.hidden = true;
+        return;
+      }
       /* In a Direct Message the composer already says who it goes to; the row returns only for extra names. */
       if (typeof activeDm !== "undefined" && activeDm && !composerIsReplying() && composerRecipients().length <= 1) { row.hidden = true; return; }
       const picker = one<HTMLElement>("[data-mention-picker]");
@@ -4705,6 +4731,25 @@ import "../../styles/kylon-image-viewer.css";
         if (!raw) return null;
         const value = JSON.parse(raw) as Partial<ComposerDraft>;
         if (typeof value.body !== "string") return null;
+        const rawThread = value.threadReply;
+        const parsedThread: ComposerDraftThreadReply | undefined =
+          rawThread &&
+          typeof rawThread === "object" &&
+          typeof rawThread.rootId === "string" &&
+          rawThread.rootId !== "" &&
+          typeof rawThread.conversationId === "string" &&
+          rawThread.conversationId !== "" &&
+          (rawThread.conversationKind === "dm" || rawThread.conversationKind === "group_dm") &&
+          typeof rawThread.author === "string" &&
+          typeof rawThread.unavailable === "boolean"
+            ? {
+                rootId: rawThread.rootId,
+                conversationId: rawThread.conversationId,
+                conversationKind: rawThread.conversationKind,
+                author: rawThread.author,
+                unavailable: rawThread.unavailable,
+              }
+            : undefined;
         return {
           body: value.body.slice(0, COMPOSER_DRAFT_STORAGE_MAX),
           ...(value.hadAttachments === true ? { hadAttachments: true } : {}),
@@ -4719,6 +4764,7 @@ import "../../styles/kylon-image-viewer.css";
           ...(Array.isArray(value.applied)
             ? { applied: value.applied.filter((key) => typeof key === "string") }
             : {}),
+          ...(parsedThread ? { threadReply: parsedThread } : {}),
         };
       } catch {
         return null;
@@ -4829,6 +4875,21 @@ import "../../styles/kylon-image-viewer.css";
         );
         const draftTo = address.to;
         const draftApplied = address.applied;
+        const activeDraftThreadReply: ComposerDraftThreadReply | null =
+          typeof threadReplyRoot !== "undefined" &&
+          threadReplyRoot !== null &&
+          threadReplyRoot.conversationId != null &&
+          (threadReplyRoot.conversationKind === "dm" || threadReplyRoot.conversationKind === "group_dm") &&
+          typeof activeDmConversationId !== "undefined" &&
+          activeDmConversationId === threadReplyRoot.conversationId
+            ? {
+                rootId: threadReplyRoot.id,
+                conversationId: threadReplyRoot.conversationId,
+                conversationKind: threadReplyRoot.conversationKind,
+                author: threadReplyRoot.author,
+                unavailable: typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable,
+              }
+            : null;
         composerDraftHeldKey = key;
         window.localStorage.setItem(
           key,
@@ -4837,6 +4898,7 @@ import "../../styles/kylon-image-viewer.css";
             ...(hadAttachments ? { hadAttachments: true } : {}),
             ...(draftTo === undefined ? {} : { to: draftTo }),
             ...(draftApplied.length === 0 ? {} : { applied: draftApplied }),
+            ...(activeDraftThreadReply ? { threadReply: activeDraftThreadReply } : {}),
           }),
         );
       } catch {
@@ -4889,6 +4951,31 @@ import "../../styles/kylon-image-viewer.css";
         persistComposerDraft(pinnedKey);
       }, COMPOSER_DRAFT_DEBOUNCE_MS);
     };
+    const restoreDraftThreadReply = (draft: ComposerDraft | null): void => {
+      const saved = draft?.threadReply;
+      if (
+        !saved ||
+        typeof activeDmConversationId === "undefined" ||
+        activeDmConversationId === null ||
+        saved.conversationId !== activeDmConversationId ||
+        (saved.conversationKind !== "dm" && saved.conversationKind !== "group_dm")
+      ) {
+        return;
+      }
+      const liveRoot = signals.find((signal) => signal.id === saved.rootId) ?? null;
+      threadReplyRoot = {
+        id: saved.rootId,
+        author: saved.author,
+        channelId: null,
+        conversationId: saved.conversationId,
+        conversationKind: saved.conversationKind,
+        until: liveRoot?.until ?? null,
+        expired: false,
+      };
+      threadReplyRootUnavailable = saved.unavailable;
+      if (typeof syncComposerPlacement === "function") syncComposerPlacement();
+      if (saved.unavailable) setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
+    };
     /** Swap the shared textarea cleanly whenever the draft scope changes (DM <-> DM or DM <-> channel). */
     const swapComposerDraftForScopeChange = (outgoingKey: string | null): void => {
       cancelComposerDraftTimer();
@@ -4899,6 +4986,7 @@ import "../../styles/kylon-image-viewer.css";
       composerIntent = null;
       const retryControl = one<HTMLButtonElement>("[data-composer-retry]");
       if (retryControl) retryControl.hidden = true;
+      setComposerStatus("", "idle");
       const incoming = incomingKey ? readComposerDraft(incomingKey) : null;
       restoredComposerKey = incomingKey;
       composerDraftHeldKey = incoming && incomingKey ? incomingKey : null;
@@ -4907,6 +4995,7 @@ import "../../styles/kylon-image-viewer.css";
       const warning = one<HTMLElement>("[data-composer-reload-warning]");
       composerAttachmentsMissingAfterReload = incoming?.hadAttachments === true;
       if (warning) warning.hidden = !composerAttachmentsMissingAfterReload;
+      restoreDraftThreadReply(incoming);
       resizeComposerInput(input, true);
       syncComposerControls();
     };
@@ -4993,7 +5082,8 @@ import "../../styles/kylon-image-viewer.css";
        member, so a place that is not known to be open takes no files. */
     const composerFilesRefusal = (): string => {
       if ((typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
-        (typeof activeDm !== "undefined" && activeDm !== null)) {
+        (typeof activeDm !== "undefined" && activeDm !== null) ||
+        (threadReplyRoot?.conversationId != null && (threadReplyRoot.conversationKind === "dm" || threadReplyRoot.conversationKind === "group_dm"))) {
         return DM_ATTACHMENTS_REFUSAL_TEXT;
       }
       return attachmentsRefusal(placementVisibility(channels, sendDestination({
@@ -5147,6 +5237,7 @@ import "../../styles/kylon-image-viewer.css";
         const warning = one<HTMLElement>("[data-composer-reload-warning]");
         composerAttachmentsMissingAfterReload = draft.hadAttachments === true;
         if (warning) warning.hidden = !composerAttachmentsMissingAfterReload;
+        restoreDraftThreadReply(draft);
         resizeComposerInput(input);
       }
       /* AND THE ADDRESS THAT BELONGS TO THAT BODY. The pass reads the same stored draft this
@@ -5489,6 +5580,8 @@ import "../../styles/kylon-image-viewer.css";
          intent and syncs the pass, and both are done here already, in the order this teardown
          needs them. */
       threadReplyRoot = null;
+      threadReplyRootUnavailable = false;
+      threadReplyOpenerSignalId = null;
       expandedThreadIds = new Set<string>();
       syncComposerPlacement();
       composerTo = [];
@@ -8337,7 +8430,7 @@ import "../../styles/kylon-image-viewer.css";
          or leaves a public channel thread root underneath a private DM marker. */
       const outgoingDraftKey = typeof composerDraftKey === "function" ? composerDraftKey() : null;
       if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
-      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
+      if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
       if (typeof activeDm !== "undefined") activeDm = null;
       if (typeof activeDmConversationId !== "undefined") activeDmConversationId = null;
       if (typeof conversationSessionEpoch !== "undefined") conversationSessionEpoch += 1;
@@ -12703,7 +12796,11 @@ import "../../styles/kylon-image-viewer.css";
         /* The address decides how loud the row's target is (Space.dc.html): a message for an
            agent is a handoff and wears the lime pill, a message for one person is a quiet name,
            and a message to everyone says so to a screen reader only. The words are unchanged. */
-        target.dataset.targetKind = signal.toAgent !== null ? "agent" : signal.to !== null ? "person" : "everyone";
+        const hideDmReplyTarget = isReply && (
+          (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
+          signal.conversationKind === "dm" || signal.conversationKind === "group_dm"
+        );
+        target.dataset.targetKind = hideDmReplyTarget ? "everyone" : signal.toAgent !== null ? "agent" : signal.to !== null ? "person" : "everyone";
         target.append("→ ");
         if (signal.toAgent !== null && targetAgent) {
           target.append(entityControl(
@@ -12898,12 +12995,34 @@ import "../../styles/kylon-image-viewer.css";
           markdown.classList.add("dashboard__message-markdown--collapsed");
         }
         body.append(markdown);
+        const activeDmConvForRow = typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null
+          ? (typeof workspaceConversations !== "undefined" && workspaceConversations
+            ? workspaceConversations.find((c) => c.conversationId === activeDmConversationId) ?? null
+            : null) ?? (typeof conversationHistory !== "undefined" ? conversationHistory?.conversation ?? null : null)
+          : null;
+        const directThreadConvId = signal.conversationKind === "dm" || signal.conversationKind === "group_dm"
+          ? (signal.conversationId ?? (typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null))
+          : activeDmConvForRow && (activeDmConvForRow.kind === "dm" || activeDmConvForRow.kind === "group_dm")
+            ? (signal.conversationId ?? activeDmConvForRow.conversationId)
+            : null;
+        const directThreadConvKind: "dm" | "group_dm" | null = directThreadConvId === null
+          ? null
+          : signal.conversationKind === "group_dm" || activeDmConvForRow?.kind === "group_dm"
+            ? "group_dm"
+            : "dm";
         if (extras) {
           const decoration = buildStreamExtras(document, extras, () => {
             if (composerSending || sampleMode) return;
             const channel = channelById(channels, signal.channelId);
-            if (canStartThread(signal, now, channel?.archivedAt != null)) {
-              setThreadReplyRoot({ id: signal.id, author: authorName, channelId: signal.channelId, until: signal.until });
+            if (canStartThread(signal, now, channel?.archivedAt != null, directThreadConvId !== null ? { directConversation: true } : undefined)) {
+              if (typeof threadReplyOpenerSignalId !== "undefined") threadReplyOpenerSignalId = signal.id;
+              setThreadReplyRoot({
+                id: signal.id,
+                author: authorName,
+                channelId: directThreadConvId !== null ? null : signal.channelId,
+                until: signal.until,
+                ...(directThreadConvId !== null ? { conversationId: directThreadConvId, conversationKind: directThreadConvKind } : {}),
+              });
               expandedThreadIds.add(signal.id); renderFeed();
             } else {
               /* A message that cannot carry a thread is answered to its author. From a public
@@ -12984,7 +13103,12 @@ import "../../styles/kylon-image-viewer.css";
            on threads the server refuses. The question here is about the ROW's channel, so it
            is asked of the row's channel, in every view. */
         const rootChannel = channelById(channels, signal.channelId);
-        const canReply = !isReply && canStartThread(signal, now, rootChannel?.archivedAt != null);
+        const canReply = !isReply && canStartThread(
+          signal,
+          now,
+          rootChannel?.archivedAt != null,
+          directThreadConvId !== null ? { directConversation: true } : undefined,
+        );
         /* "Add reaction" shares the footer with "Reply in thread", so a row that cannot carry a thread still
            offers it there, quiet at rest like the rest of the footer. */
         const reactButton = reactionAddButton(signal);
@@ -13002,14 +13126,16 @@ import "../../styles/kylon-image-viewer.css";
                addressed, and the chips already refuse an edit for that reason; a reply opened
                mid-post would retire the intent of a send the server may already hold. */
             if (composerSending) return;
-            /* THE ROOT'S CHANNEL IS CAPTURED HERE, from the row the server sent. A signal is
-               immutable, so this cannot go stale, and reading it again at send time from a
-               live global is the shape of defect this file has found six times. */
+            /* THE ROOT'S CHANNEL OR CONVERSATION IS CAPTURED HERE, from the row the server sent.
+               A signal is immutable, so this cannot go stale, and reading it again at send time
+               from a live global is the shape of defect this file has found six times. */
+            if (typeof threadReplyOpenerSignalId !== "undefined") threadReplyOpenerSignalId = signal.id;
             setThreadReplyRoot({
               id: signal.id,
               author: authorName,
-              channelId: signal.channelId,
+              channelId: directThreadConvId !== null ? null : signal.channelId,
               until: signal.until,
+              ...(directThreadConvId !== null ? { conversationId: directThreadConvId, conversationKind: directThreadConvKind } : {}),
             });
             expandedThreadIds.add(signal.id);
             renderFeed();
@@ -16068,6 +16194,9 @@ import "../../styles/kylon-image-viewer.css";
       const viewingEvicted =
         activeDmConversationId === conversationId ||
         (conversationHistory !== null && conversationHistory.conversationId === conversationId);
+      if (threadReplyRoot !== null && (viewingEvicted || threadReplyRoot.conversationId === conversationId)) {
+        setThreadReplyRoot(null, { skipAddressSync: true });
+      }
       if (viewingEvicted) {
         conversationHistoryGeneration += 1;
         conversationSessionEpoch += 1;
@@ -16237,7 +16366,7 @@ import "../../styles/kylon-image-viewer.css";
         : null;
       const outgoingDraftKey = composerDraftKey(workspaceId);
       if (outgoingDraftKey) persistComposerDraft(outgoingDraftKey);
-      if (threadReplyRoot !== null) setThreadReplyRoot(null);
+      if (threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
       activeChannelId = null;
       unknownChannelId = null;
       unavailableDmConversationId = null;
@@ -16746,15 +16875,28 @@ import "../../styles/kylon-image-viewer.css";
      * rule nor true, because a reply names only its thread and the edge stamps the root's
      * channel itself. A review arm found the second half.
      */
-    const threadReplyPlaceOf = (root: ThreadReplyRoot | null): ThreadReplyPlace =>
-      root === null
-        ? { kind: "unfiled" }
-        : threadReplyPlace(
-          root.channelId,
-          root.channelId === null
-            ? null
-            : channelById(channels, root.channelId)?.slug ?? null,
-        );
+    const threadReplyPlaceOf = (root: ThreadReplyRoot | null): ThreadReplyPlace => {
+      if (root === null) return { kind: "unfiled" };
+      if (root.conversationId && (root.conversationKind === "dm" || root.conversationKind === "group_dm")) {
+        const conv =
+          (typeof workspaceConversations !== "undefined" && workspaceConversations
+            ? workspaceConversations.find((c) => c.conversationId === root.conversationId) ?? null
+            : null) ??
+          (typeof conversationHistory !== "undefined" && conversationHistory?.conversationId === root.conversationId
+            ? conversationHistory.conversation
+            : null);
+        const title = conv && typeof conversationTitle === "function" && typeof homeViewerId === "function"
+          ? conversationTitle(conv, homeViewerId(), lookupConversationMemberName)
+          : "Direct message";
+        return threadReplyPlace(null, null, title);
+      }
+      return threadReplyPlace(
+        root.channelId,
+        root.channelId === null
+          ? null
+          : channelById(channels, root.channelId)?.slug ?? null,
+      );
+    };
 
     /**
      * WHAT STOPS THIS REPLY, right now, or null. The captured root carries the two things that
@@ -16768,10 +16910,22 @@ import "../../styles/kylon-image-viewer.css";
       root === null
         ? null
         : threadRootBlock(
-          { to: null, toAgent: null, threadRootId: null, until: root.until },
+          {
+            to: null,
+            toAgent: null,
+            threadRootId: null,
+            until: root.until,
+            ...(root.conversationId ? { conversationId: root.conversationId } : {}),
+            ...(root.conversationKind ? { conversationKind: root.conversationKind } : {}),
+          },
           Date.now(),
-          root.channelId !== null &&
-            channelById(channels, root.channelId)?.archivedAt != null,
+          root.conversationId
+            ? false
+            : root.channelId !== null &&
+              channelById(channels, root.channelId)?.archivedAt != null,
+          root.conversationId && (root.conversationKind === "dm" || root.conversationKind === "group_dm")
+            ? { directConversation: true }
+            : undefined,
         );
 
     const markThreadReplyRoot = (row: HTMLElement): void => {
@@ -16840,8 +16994,27 @@ import "../../styles/kylon-image-viewer.css";
       const broadcastRow = one<HTMLElement>("[data-composer-reply-broadcast-row]");
       const broadcastLabel = one<HTMLElement>("[data-composer-reply-broadcast-label]");
       const broadcast = one<HTMLInputElement>("[data-composer-reply-broadcast]");
+      const cancelReply = one<HTMLButtonElement>("[data-composer-reply-cancel]");
+      const moveDraft = one<HTMLButtonElement>("[data-composer-move-to-conversation]");
+      const replyUnavailable = typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable;
       if (bar) bar.hidden = threadReplyRoot === null;
       if (threadReplyRoot !== null) {
+        if (replyUnavailable) {
+          if (targetText) targetText.textContent = "Thread unavailable";
+          if (windowText) windowText.textContent = "";
+          if (broadcastRow) broadcastRow.hidden = true;
+          if (broadcastLabel) broadcastLabel.textContent = "";
+          if (broadcast) broadcast.checked = false;
+          if (cancelReply) cancelReply.hidden = true;
+          if (moveDraft) moveDraft.hidden = false;
+          if (input) {
+            input.placeholder = "Reply…";
+            input.setAttribute("aria-label", "Thread reply");
+          }
+          return;
+        }
+        if (cancelReply) cancelReply.hidden = false;
+        if (moveDraft) moveDraft.hidden = true;
         const place = threadReplyPlaceOf(threadReplyRoot);
         const block = threadReplyBlock(threadReplyRoot);
         if (targetText) {
@@ -16884,6 +17057,8 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (broadcast) broadcast.checked = false;
       if (broadcastRow) broadcastRow.hidden = true;
+      if (cancelReply) cancelReply.hidden = false;
+      if (moveDraft) moveDraft.hidden = true;
       const channel = activeChannel();
       if (!input) return;
       const directPartner = typeof activeDm === "undefined" ? null : activeDm;
@@ -16933,10 +17108,11 @@ import "../../styles/kylon-image-viewer.css";
      * valid Retry for every reply read from anywhere but its own channel.
      */
     const composerAddressStillPromised = (
-      intent: { placementChannelId: string | null; placementThreadRootId: string | null },
+      intent: { placementChannelId: string | null; placementConversationId?: string | null; placementThreadRootId: string | null },
     ): boolean =>
       intent.placementThreadRootId !== null || threadReplyRoot !== null
-        ? intent.placementThreadRootId === (threadReplyRoot?.id ?? null)
+        ? intent.placementThreadRootId === (threadReplyRoot?.id ?? null) &&
+          (intent.placementConversationId ?? null) === (threadReplyRoot?.conversationId ?? null)
         : (intent.placementConversationId ?? null) !== null || (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null)
         ? (intent.placementConversationId ?? null) === (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null
           ? activeDmConversationId
@@ -16966,9 +17142,17 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     /** Open a reply on a root, or close the one that is open. One writer for both. */
-    const setThreadReplyRoot = (root: ThreadReplyRoot | null): void => {
-      if ((threadReplyRoot?.id ?? null) === (root?.id ?? null)) return;
+    const setThreadReplyRoot = (
+      root: ThreadReplyRoot | null,
+      options?: { skipAddressSync?: boolean },
+    ): void => {
+      const wasUnavailable = typeof threadReplyRootUnavailable !== "undefined" && threadReplyRootUnavailable;
+      if ((threadReplyRoot?.id ?? null) === (root?.id ?? null) && !wasUnavailable) return;
       threadReplyRoot = root;
+      if (typeof threadReplyRootUnavailable !== "undefined") threadReplyRootUnavailable = false;
+      if (root === null && typeof threadReplyOpenerSignalId !== "undefined") {
+        threadReplyOpenerSignalId = null;
+      }
       /* THE ADDRESS OF THE BOX JUST CHANGED, so an unfinished send addressed to the old one is
          retired by the same rule a channel move uses. Opening a reply while a top-level
          message is unsent, and cancelling a reply while the reply is unsent, are the same
@@ -16976,8 +17160,10 @@ import "../../styles/kylon-image-viewer.css";
       retireComposerIntentOnAddressMove();
       syncComposerPlacement();
       /* The pass HOLDS while replying and runs again when the reply closes, so the chips the
-         reader had before the reply come back from `composerTo` rather than from storage. */
-      syncComposerAddress();
+         reader had before the reply come back from `composerTo` rather than from storage.
+         Scope switches pass `skipAddressSync` because they just persisted the outgoing draft
+         (including any unavailable DM thread destination) and sync the new scope right after. */
+      if (!options?.skipAddressSync) syncComposerAddress();
     };
 
     const renderChannelHead = (): void => {
@@ -17174,7 +17360,7 @@ import "../../styles/kylon-image-viewer.css";
         return;
       }
       if ((requested === null || requested === "") && requestedDm !== null && requestedDm !== "") {
-        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null);
+        if (typeof setThreadReplyRoot === "function" && threadReplyRoot !== null) setThreadReplyRoot(null, { skipAddressSync: true });
         activeChannelId = null;
         unknownChannelId = null;
         if (typeof unavailableDmConversationId !== "undefined") unavailableDmConversationId = null;
@@ -17220,6 +17406,10 @@ import "../../styles/kylon-image-viewer.css";
       const outgoingDraftKey = leavingDm && typeof composerDraftKey === "function" ? composerDraftKey() : null;
       if (outgoingDraftKey && typeof persistComposerDraft === "function") persistComposerDraft(outgoingDraftKey);
       if (leavingDm) {
+        if (threadReplyRoot !== null) {
+          setThreadReplyRoot(null, { skipAddressSync: true });
+          threadReplyOpenerSignalId = null;
+        }
         activeDm = null;
         activeDmConversationId = null;
         unavailableDmConversationId = null;
@@ -17229,6 +17419,9 @@ import "../../styles/kylon-image-viewer.css";
         if (typeof swapComposerDraftForScopeChange === "function") swapComposerDraftForScopeChange(outgoingDraftKey);
         syncComposerAddress([]);
         closeEntityPanel(false);
+      } else if (threadReplyRoot?.conversationId != null) {
+        setThreadReplyRoot(null);
+        threadReplyOpenerSignalId = null;
       }
       const changed = next !== activeChannelId || unknownChannelId !== null || leavingDm;
       if (changed && !leavingDm && typeof conversationSessionEpoch !== "undefined") {
@@ -20306,7 +20499,7 @@ import "../../styles/kylon-image-viewer.css";
     /* The draft write is debounced, and a debounced write must not be lost to the page ending.
      * These are the ways it ends — reload, close, navigation, and switching away on a phone —
      * and each one takes the pending write now instead of after the delay. */
-    window.addEventListener("pagehide", flushComposerDraft);
+    window.addEventListener("pagehide", () => flushComposerDraft());
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") flushComposerDraft();
     });
@@ -20432,6 +20625,22 @@ import "../../styles/kylon-image-viewer.css";
             closeMentionPicker();
           }
         }
+        if (
+          event.key === "Escape" &&
+          !event.defaultPrevented &&
+          !event.isComposing &&
+          !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+          threadReplyRoot !== null &&
+          !threadReplyRootUnavailable &&
+          !composerSending
+        ) {
+          event.preventDefault();
+          const returnSignalId = (typeof threadReplyOpenerSignalId !== "undefined" ? threadReplyOpenerSignalId : null) ?? threadReplyRoot.id;
+          setThreadReplyRoot(null);
+          const opener = all<HTMLButtonElement>("[data-message-reply]").find((btn) => btn.dataset.messageReply === returnSignalId) ?? null;
+          (opener ?? one<HTMLTextAreaElement>("[data-composer-input]"))?.focus({ preventScroll: true });
+          return;
+        }
         if (confirmKey) {
           event.preventDefault();
           closeMentionPicker();
@@ -20514,8 +20723,20 @@ import "../../styles/kylon-image-viewer.css";
         setComposerStatus(dmSendProblem, "error");
         return;
       }
-      const isStep2bDmPost = !sampleMode && typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null;
-      if (isStep2bDmPost && threadReplyRoot !== null) {
+      const replyRoot = threadReplyRoot;
+      if (replyRoot !== null && threadReplyRootUnavailable) {
+        setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
+        return;
+      }
+      const isDirectReply = replyRoot?.conversationId != null &&
+        (replyRoot.conversationKind === "dm" || replyRoot.conversationKind === "group_dm");
+      const activeDmConvIdNow = typeof activeDmConversationId !== "undefined" ? activeDmConversationId : null;
+      const isStep2bDmPost = !sampleMode && (activeDmConvIdNow !== null || isDirectReply);
+      if (
+        isStep2bDmPost &&
+        replyRoot !== null &&
+        (!isDirectReply || activeDmConvIdNow === null || replyRoot.conversationId !== activeDmConvIdNow)
+      ) {
         setComposerStatus("Close the thread reply before sending in a direct message.", "error");
         return;
       }
@@ -20583,27 +20804,11 @@ import "../../styles/kylon-image-viewer.css";
        * empty set is not a second rule written here: the row said "no recipients" and the
        * wire carries none, from the same call. */
       const recipients: BrowserSignalAudience = sendPlan.recipients;
-      /* THE REPLY THIS SEND IS FOR, frozen with everything else the send captures. Reading
-         `threadReplyRoot` again after the first await would let a cancel or a second reply
-         opened mid-post change where the message on the wire is going. */
-      const replyRoot = threadReplyRoot;
-      /* WHERE THIS LANDS. A top-level post is stamped with the channel being read and
-         nothing else — no dropdown, and no `#` parsing of the body, because bodies contain
-         `#` legitimately and a parser could not tell a heading from an address. A reply
-         inherits its root's channel from the SERVER: the client may not file a reply
-         somewhere its thread is not, and the edge refuses a body that names both. */
-      /* A REPLY IS FILED WHERE ITS THREAD IS, and the browser does not get a say: the edge
-         refuses a body that names a channel alongside a thread root, and stamps the reply with
-         the root's channel itself. So the placement channel of a reply is its ROOT's, captured
-         when the reply was opened, and the channel the reader happens to be looking at is not
-         consulted. */
-      /* FROM WHAT IS OPEN, NEVER FROM A LOOKED-UP ROW. This used to read `activeChannel()?.channelId ?? null`,
-         and a channel whose row had left the list (the reader was removed from a private channel, or the list
-         had not loaded) came out as `null`: unfiled. The message, and its files, would have gone to #general.
-         The view's own id is kept instead, and a channel the list does not have stops the send. */
+      /* THE REPLY THIS SEND IS FOR, frozen at the top of submit so a cancel or second reply
+         opened mid-post cannot change where the message on the wire is going. */
       const destination = sendDestination({ activeChannelId, generalId: GENERAL_CHANNEL_ID,
         ...(replyRoot === null ? {} : { replyRootChannelId: replyRoot.channelId }) });
-      if (!sampleMode && destination.mustResolve && channelById(channels, destination.channelId) === null) {
+      if (!sampleMode && !isDirectReply && destination.mustResolve && channelById(channels, destination.channelId) === null) {
         setComposerStatus(`${CHANNEL_UNAVAILABLE_TITLE}. ${GO_TO_GENERAL_LABEL} to post.`, "error");
         return;
       }
@@ -20612,21 +20817,25 @@ import "../../styles/kylon-image-viewer.css";
         : { mode: "legacy" as const };
       // Lead #1: non-DM channels use conversation_id ONLY for public posts (recipients.length === 0),
       // because the server rejects !direct && to !== undefined with 400 conversation_address.
-      const freshPlacementConversationId = isStep2bDmPost
+      const freshPlacementConversationId = isDirectReply
+        ? replyRoot!.conversationId!
+        : isStep2bDmPost
         ? activeDmConversationId
         : freshConvTarget.mode === "conversation" && sendPlan.audience === "public"
           ? freshConvTarget.conversationId
           : null;
-      const freshPlacementConversationKind = isStep2bDmPost
+      const freshPlacementConversationKind = isDirectReply
+        ? (replyRoot!.conversationKind ?? null)
+        : isStep2bDmPost
         ? (activeDmConv?.kind ?? null)
         : freshConvTarget.mode === "conversation" && sendPlan.audience === "public"
           ? freshConvTarget.kind
           : null;
-      const freshPlacementChannelId = isStep2bDmPost ? null : destination.channelId;
-      const freshPlacementThreadRootId = isStep2bDmPost ? null : (replyRoot?.id ?? null);
+      const freshPlacementChannelId = isStep2bDmPost || isDirectReply ? null : destination.channelId;
+      const freshPlacementThreadRootId = isStep2bDmPost && !isDirectReply ? null : (replyRoot?.id ?? null);
       // HezSec #5: gate BOTH top-level sends and thread replies against channel membership
       // (including pending/failed membership reads) before any attachment upload or post.
-      if (!sampleMode && !isStep2bDmPost && typeof channelMembershipSendRefusal === "function") {
+      if (!sampleMode && !isStep2bDmPost && !isDirectReply && typeof channelMembershipSendRefusal === "function") {
         const membershipRefusal = channelMembershipSendRefusal({
           channelId: freshPlacementChannelId,
           generalId: GENERAL_CHANNEL_ID,
@@ -20639,10 +20848,12 @@ import "../../styles/kylon-image-viewer.css";
         }
       }
       /* NOTHING IS UPLOADED FOR A SEND THE SERVER WILL REFUSE. Files staged somewhere open stay staged when the
-         place changes (another channel, a thread under a private root), so the check is here, where the send
+         place changes (another channel, a thread under a private root or DM), so the check is here, where the send
          starts, and it reads the same placement the message will carry. The draft and its files are untouched. */
       if (!sampleMode && stagedAttachments.length > 0) {
-        const refusal = attachmentsRefusal(placementVisibility(channels, freshPlacementChannelId));
+        const refusal = isStep2bDmPost || isDirectReply
+          ? DM_ATTACHMENTS_REFUSAL_TEXT
+          : attachmentsRefusal(placementVisibility(channels, freshPlacementChannelId));
         if (refusal) { setComposerStatus(`${refusal} Remove the files to send this message.`, "error"); return; }
       }
       /* AND WHETHER IT ALSO GOES TO THE CHANNEL. Read from the control only where the control
@@ -20782,7 +20993,10 @@ import "../../styles/kylon-image-viewer.css";
          is true, which is the shape `cswarm reply --thread --broadcast-to-channel` sends and
          keeps the key set the smallest thing that says what was asked. */
       const placement: BrowserSignalPlacement = isStep2bDmPost && placementConversationId !== null
-        ? { conversationId: placementConversationId }
+        ? {
+          conversationId: placementConversationId,
+          ...(isDirectReply && placementThreadRootId !== null ? { threadRootId: placementThreadRootId } : {}),
+        }
         : placementThreadRootId !== null
         ? {
           threadRootId: placementThreadRootId,
@@ -20795,8 +21009,8 @@ import "../../styles/kylon-image-viewer.css";
         : { channel: placementChannel.slug };
       /* A public message always carries the key, empty when nobody is tagged: it is the public
          intent, and a deployment with mentions switched off refuses it rather than quietly
-         re-addressing the post to the workspace lead. DMs posted by conversation_id carry no mentions. */
-      if (sendPlan.audience === "public") placement.mentions = mentions;
+         re-addressing the post to the workspace lead. DMs and DM threads carry no mentions. */
+      if (sendPlan.audience === "public" && !isStep2bDmPost && !isDirectReply) placement.mentions = mentions;
       /** The chips a pending or posted row shows: the whole To: set, which is the address. */
       const rowMentions: EntityRef[] = recipients.map((recipient) => ({
         kind: recipient.kind,
@@ -20887,6 +21101,7 @@ import "../../styles/kylon-image-viewer.css";
       input.focus({ preventScroll: true });
       /** The posted row, or null while the one post has not landed. */
       let posted: Signal | null = null;
+      let persistUnavailableDraftAfterSettle = false;
       try {
         const attachmentRefs = sampleMode
           ? attachmentSnapshot.map((attachment) => ({
@@ -20902,7 +21117,7 @@ import "../../styles/kylon-image-viewer.css";
           if (!sendSession || !sendStillAuthorized(attachmentSnapshot.length > 0)) {
             throw new SendRetiredError();
           }
-          if (attachmentSnapshot.length > 0 && (isStep2bDmPost ||
+          if (attachmentSnapshot.length > 0 && (isStep2bDmPost || isDirectReply ||
             (typeof activeDmConversationId !== "undefined" && activeDmConversationId !== null) ||
             (typeof activeDm !== "undefined" && activeDm !== null))) {
             throw new AttachmentsRefused(DM_ATTACHMENTS_REFUSAL_TEXT);
@@ -21148,6 +21363,69 @@ import "../../styles/kylon-image-viewer.css";
           return;
         }
         const sameDraftScope = sendDraftKey === composerDraftKey(workspaceId);
+        // HezSec C1: only canonical Step 2b DM / group DM replies close and restore into the
+        // same DM composer on 404 thread_root_not_found; channel/private-channel replies keep
+        // the existing channel-thread failure path so private text never re-targets #general.
+        const isCanonicalDirectThread = isDirectReply && placementConversationId !== null &&
+          (freshPlacementConversationKind === "dm" || freshPlacementConversationKind === "group_dm");
+        const sameDirectConversation = isCanonicalDirectThread &&
+          activeDmConversationId === placementConversationId && sameDraftScope;
+        if (!landed && isCanonicalDirectThread && placementThreadRootId !== null &&
+          (caught instanceof ThreadRootUnavailableError || readableError(caught) === THREAD_ROOT_UNAVAILABLE_TEXT)) {
+          signals = signals.filter((signal) => signal.id !== pendingId);
+          visualMentions.delete(pendingId);
+          signalMentionRows.delete(pendingId);
+          deliveryReceiptCache.delete(pendingId);
+          composerIntent = null;
+          if (sameDirectConversation && replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
+            threadReplyRootUnavailable = true;
+            persistUnavailableDraftAfterSettle = true;
+            input.value = rawBody;
+            stagedAttachments = attachmentSnapshot;
+            renderStagedAttachments();
+            resizeComposerInput(input);
+            syncComposerControls();
+            const staleRetry = one<HTMLButtonElement>("[data-composer-retry]");
+            if (staleRetry) staleRetry.hidden = true;
+            syncComposerPlacement();
+            setComposerStatus(THREAD_ROOT_UNAVAILABLE_TEXT, "error");
+            renderFeed("latest");
+          } else {
+            if (
+              sendDraftKey &&
+              replyRoot !== null &&
+              placementConversationId !== null &&
+              (freshPlacementConversationKind === "dm" || freshPlacementConversationKind === "group_dm") &&
+              !evictedConversationIds.has(`${workspaceId}:${placementConversationId}`)
+            ) {
+              try {
+                window.localStorage.setItem(
+                  sendDraftKey,
+                  JSON.stringify({
+                    body: rawBody.slice(0, COMPOSER_DRAFT_STORAGE_MAX),
+                    ...(attachmentSnapshot.length > 0 ? { hadAttachments: true } : {}),
+                    threadReply: {
+                      rootId: replyRoot.id,
+                      conversationId: placementConversationId,
+                      conversationKind: freshPlacementConversationKind,
+                      author: replyRoot.author,
+                      unavailable: true,
+                    },
+                  }),
+                );
+              } catch {
+                // Storage unavailable.
+              }
+            }
+            if (replyRoot !== null && threadReplyRoot?.id === replyRoot.id) {
+              setThreadReplyRoot(null);
+            }
+            for (const attachment of attachmentSnapshot) {
+              if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+            }
+          }
+          return;
+        }
         const visibleOnFailure = posted !== null && showsOnScreen(posted) ? [posted] : [];
         const visibleFailureIds = new Set(visibleOnFailure.map((signal) => signal.id));
         for (const row of visibleOnFailure) {
@@ -21256,6 +21534,9 @@ import "../../styles/kylon-image-viewer.css";
            of the session. A review arm found it; it was pre-existing and this row widened it,
            because the derived pass holds while the flag is up. */
         if (composerSendToken === sendToken) setComposerSending(false);
+        if (persistUnavailableDraftAfterSettle && composerSendToken === sendToken) {
+          persistComposerDraft(sendDraftKey);
+        }
         /* AND WHAT IS RENDERED IS THE SCREEN'S. Same two facts the catch asks, for the same
            reason: the token says nobody tore the composer down, the workspace says the reader
            has not moved. */
@@ -21292,6 +21573,14 @@ import "../../styles/kylon-image-viewer.css";
          Cancelling mid-post would retire the intent of a send the server may already hold. */
       if (composerSending) return;
       setThreadReplyRoot(null);
+      one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+    });
+    one<HTMLButtonElement>("[data-composer-move-to-conversation]")?.addEventListener("click", () => {
+      if (composerSending || !threadReplyRootUnavailable) return;
+      setThreadReplyRoot(null);
+      setComposerStatus("", "idle");
+      persistComposerDraft();
+      syncComposerControls();
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });
     /* THE WHOLE EDIT SURFACE OF THE ADDRESS: remove a name, or put one first so the message
@@ -21679,6 +21968,22 @@ import "../../styles/kylon-image-viewer.css";
       holder?.querySelector<HTMLElement>(":scope > summary")?.focus();
     };
     document.addEventListener("keydown", closeReceiptsOnEscape);
+    const closeThreadReplyOnEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+          event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (threadReplyRoot === null || threadReplyRootUnavailable || composerSending) return;
+      if (document.querySelector("dialog[open], [data-context-menu], [data-reaction-picker], .dashboard__message-receipt[open]")) return;
+      const mentions = one<HTMLElement>("[data-mention-picker]");
+      if (mentions && !mentions.hidden) return;
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && focused.closest('[role="menu"], [role="listbox"], [role="dialog"], .hm-frame__side')) return;
+      event.preventDefault();
+      const returnSignalId = (typeof threadReplyOpenerSignalId !== "undefined" ? threadReplyOpenerSignalId : null) ?? threadReplyRoot.id;
+      setThreadReplyRoot(null);
+      const opener = all<HTMLButtonElement>("[data-message-reply]").find((btn) => btn.dataset.messageReply === returnSignalId) ?? null;
+      (opener ?? one<HTMLTextAreaElement>("[data-composer-input]"))?.focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", closeThreadReplyOnEscape);
     /* The last Escape owner: a key any handler above, or any closer to the focus, consumed is not a mark. */
     document.addEventListener("keydown", channelReadEscape);
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
