@@ -250,8 +250,19 @@ struct HistoryView: View {
                                         Text(date, format: .dateTime.month().day().hour().minute()).font(.caption).foregroundStyle(.secondary)
                                     }
                                 }
+                                if let root = message.thread_root_id {
+                                    let parent = messages.first { $0.id == root }
+                                    Text(parent.map { "Reply to " + String($0.body.prefix(100)) } ?? "Thread reply")
+                                        .font(.caption).lineLimit(2)
+                                }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
+                                if case .thread = item.destination, draft.access == .joined, message.thread_root_id == nil {
+                                    Button { draft.reply(to: message) } label: {
+                                        Label("Reply", systemImage: "arrowshape.turn.up.left").font(.subheadline)
+                                            .frame(minHeight: 44).contentShape(Rectangle())
+                                    }.accessibilityLabel("Reply to " + String(message.body.prefix(100)))
+                                }
                                 ForEach(message.attachments ?? []) { attachment in
                                     MessageAttachmentView(api: api, workspace: workspace.id, attachment: attachment)
                                 }
@@ -270,6 +281,7 @@ struct HistoryView: View {
                                 case .accepted: Text(row.createdAt, format: .dateTime.hour().minute())
                                 }
                             }
+                            if let target = row.replyTarget { Text("Reply to " + target.excerpt).font(.caption).lineLimit(2) }
                             Text(row.post.body ?? "").textSelection(.enabled)
                             ForEach(row.files) { FileUploadProgress(intent: $0) }
                             if case .uploadFailed = row.delivery {
@@ -287,11 +299,11 @@ struct HistoryView: View {
                                         .frame(minWidth: 44, minHeight: 44, alignment: .leading)
                                         .contentShape(Rectangle())
                                 }
-                                .disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                                .disabled(!draft.text.isEmpty || !draft.attachments.isEmpty || draft.replyTarget != nil)
                             } else if case .unconfirmed = row.delivery {
                                 Button("Retry") { deliver(draft.retry(row.id)) }
                             } else if case .refused = row.delivery {
-                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty)
+                                Button("Edit message") { draft.editRefused(row.id) }.disabled(!draft.text.isEmpty || !draft.attachments.isEmpty || draft.replyTarget != nil)
                             }
                         }.id(row.id)
                     }

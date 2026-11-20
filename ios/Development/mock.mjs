@@ -77,6 +77,12 @@ if (review) {
   }
   messages[0].attachments = [fixtureFile];
 }
+if (process.argv[2] === "--conversations") {
+  for (const [index, body] of ["First topic", "Other topic"].entries()) {
+    messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body,
+      created_at: new Date(Date.UTC(2026, 0, 2, 0, index)).toISOString(), fixtureDestination: channel, workspace });
+  }
+}
 const privateCheck = { conversation_id: randomUUID(), kind: "private_channel", channel_id: randomUUID(), slug: "access-check", joined: true };
 if (verify) threadRows.push(privateCheck);
 let privateDenied = false;
@@ -314,12 +320,21 @@ const server = createServer(async (req, res) => {
         attachments.push({ file_id: file.id, version_n: ref.version_n, name: file.name,
           content_type: file.type, size_bytes: file.size });
       }
+      if (cmd.thread_root_id) {
+        const root = messages.find(m => m.id === cmd.thread_root_id);
+        const conversation = threadRows.find(r => r.conversation_id === address(cmd));
+        if (!root || root.thread_root_id || root.workspace !== workspace ||
+            !(root.fixtureDestination === address(cmd) || (conversation?.channel_id && root.fixtureDestination === conversation.channel_id))) {
+          return reply(404, { error: "thread_root_not_found" });
+        }
+      }
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
-        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments,
+        messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body, attachments, thread_root_id: cmd.thread_root_id ?? null,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
         receipts.set(body.command_id, { command: body.command, signal: messages[0] });
+        if (review && cmd.body === "Thread receipt lost") return reply(503, {});
         if (review && body.command.body === "Uncertain send") {
           refuseNextLookup.add(body.command_id);
           return reply(503, {});

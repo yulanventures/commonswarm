@@ -33,6 +33,7 @@ struct Message: Decodable, Identifiable {
     let from_kind: String
     let body: String
     let created_at: String
+    let thread_root_id: UUID?
     let attachments: [MessageAttachment]?
 }
 
@@ -56,7 +57,7 @@ struct Post: Encodable {
 
     var body: String? { command["body"] ?? nil }
 
-    init(id: UUID, workspace: UUID, destination: Conversation.Destination, body: String) {
+    init(id: UUID, workspace: UUID, destination: Conversation.Destination, body: String, threadRootID: UUID? = nil) {
         command_id = id
         workspace_id = workspace
         var fields: [String: String?] = ["kind": "post_signal", "signal_kind": "note", "body": body,
@@ -71,6 +72,7 @@ struct Post: Encodable {
         case .person(let person): fields["to_user_id"] = person.uuidString.lowercased()
         case .agent(let agent): fields["to_agent_principal_id"] = agent.uuidString.lowercased()
         }
+        if let threadRootID { fields["thread_root_id"] = threadRootID.uuidString.lowercased() }
         command = fields
     }
 
@@ -158,7 +160,7 @@ struct ConversationAPI {
     }
 
     func history(_ workspace: UUID, _ destination: Conversation.Destination, before: Message? = nil) async throws -> [Message] {
-        var query = ["select": "id,from,from_kind,body,created_at,attachments", "workspace_id": "eq." + workspace.uuidString,
+        var query = ["select": "id,from,from_kind,body,created_at,thread_root_id,attachments", "workspace_id": "eq." + workspace.uuidString,
                      "order": "created_at.desc,id.desc", "limit": String(Self.pageSize)]
         var predicates: [String] = []
         switch destination {

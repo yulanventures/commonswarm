@@ -13,12 +13,24 @@ final class Composer: ObservableObject {
         guard read >= lastRead else { return false }
         lastRead = read
         if newAccess == .preview || newAccess == .unavailable {
+            replyTarget = nil
             text = ""
             attachments = []
             outgoing = []
         }
         access = newAccess
         return true
+    }
+
+    struct ReplyTarget {
+        let id: UUID
+        let excerpt: String
+    }
+    @Published var replyTarget: ReplyTarget?
+
+    func reply(to message: Message) {
+        guard access == .joined, message.thread_root_id == nil else { return }
+        replyTarget = ReplyTarget(id: message.id, excerpt: String(message.body.prefix(100)))
     }
 
     @Published var text = ""
@@ -36,6 +48,7 @@ final class Composer: ObservableObject {
 
     struct Outgoing: Identifiable {
         let post: Post
+        let replyTarget: ReplyTarget?
         let files: [UploadIntent]
         let createdAt = Date()
         var delivery: Delivery = .sending
@@ -54,8 +67,9 @@ final class Composer: ObservableObject {
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
         guard canSend else { return nil }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? attachments.map { $0.file.name }.joined(separator: ", ") : text
-        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body)
-        outgoing.append(Outgoing(post: post, files: attachments))
+        let post = Post(id: UUID(), workspace: workspace, destination: destination, body: body, threadRootID: replyTarget?.id)
+        outgoing.append(Outgoing(post: post, replyTarget: replyTarget, files: attachments))
+        replyTarget = nil
         attachments = []
         text = ""
         return post
@@ -72,12 +86,13 @@ final class Composer: ObservableObject {
     }
 
     func editRefused(_ id: UUID) {
-        guard text.isEmpty, attachments.isEmpty, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        guard text.isEmpty, attachments.isEmpty, replyTarget == nil, let i = outgoing.firstIndex(where: { $0.id == id }) else { return }
         switch outgoing[i].delivery {
         case .refused, .uploadFailed: break
         default: return
         }
         let row = outgoing.remove(at: i)
+        replyTarget = row.replyTarget
         attachments = row.files
         text = row.post.body ?? ""
     }

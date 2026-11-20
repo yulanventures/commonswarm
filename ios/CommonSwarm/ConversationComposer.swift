@@ -14,6 +14,16 @@ struct ConversationComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if let target = draft.replyTarget {
+                HStack {
+                    Label("Replying to " + target.excerpt, systemImage: "arrowshape.turn.up.left")
+                        .font(.subheadline).lineLimit(2)
+                    Spacer()
+                    Button { draft.replyTarget = nil } label: {
+                        Image(systemName: "xmark.circle").frame(width: 44, height: 44)
+                    }.accessibilityLabel("Cancel reply")
+                }
+            }
             if !draft.attachments.isEmpty {
                 Text("Files are visible to everyone in this workspace.").font(.caption)
                 ScrollView(.horizontal) {
@@ -51,7 +61,7 @@ struct ConversationComposer: View {
     }
 
     private var entry: some View {
-        let label = "Message " + destination
+        let label = draft.replyTarget == nil ? "Message " + destination : "Thread reply"
         return TextField(label, text: $draft.text,
                          prompt: Text(label).foregroundStyle(.primary.opacity(0.78)), axis: .vertical)
             .lineLimit(1...5).textFieldStyle(.plain)
