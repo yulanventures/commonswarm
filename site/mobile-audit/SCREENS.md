@@ -410,3 +410,12 @@ Decision card captures: choice asks from the agent to the viewer in the private 
 Each frame names one part of the card (its first row, a ticked row, the Something else field or row, or its last line), because a whole card is taller than the 844x390 view. Every choice screen has a hover witness, which also admits it to the 1280x800 and 1440x900 desktop pass: it hovers the message, and on the open, multi, ticked and long screens also focuses a row; nothing may move. On `choice-other` it only hovers, so the Something else field keeps the focus its keyboard witness starts from.
 
 Something else text across a redraw: `app.chat.choice-other-redraw` types into the Something else field, then its hover witness focuses that field, posts a note in the private channel so the app's own poll rebuilds the feed, and requires focus back on the same field afterwards, with the card's Done still shown and enabled (so the typed draft survived). It runs alone because of that note. Submitting is not captured: an answer is final, and every later capture of the run would find the ask answered. The submit after a rebuild is covered by `site/src/components/app/choice-card.observer.test.ts` instead.
+
+## Invitation captures reviewed on November 18
+
+Both runs below exercised 360×740, 390×844 and 1024×1366 in light and dark. Each review covered the twelve normal images for its two named screens.
+
+| Capture | Screens | Rendered coverage |
+| --- | --- | --- |
+| [#501 at 4dd005a3](https://github.com/yulanventures/commonswarm/actions/runs/44235302509) | `app.people.invites`, `dialog.people-invite-cancel` | The tab count matches the single pending email row in the fixture. The long address and timing wrap clear of Cancel. The dialog identifies the address and fits both actions. Visual PASS. Unused keys and connect codes are supported in source. |
+| [#502 capture at 13b5f076](https://github.com/yulanventures/commonswarm/actions/runs/44235649287) | `app.invitation-inbox`, `app.invitation-inbox.decline` | The recipient card shows Review and Decline. The confirmation stacks both choices with Keep it last. An immediate repeat tap at the opening position is safe. Visual PASS carries to e83a4a98, whose only delta changes the browser observer. [Current-head repeat-tap check](https://github.com/yulanventures/commonswarm/actions/runs/44236138992). |
