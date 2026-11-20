@@ -936,3 +936,66 @@ test("5. HezSec C1-C3 witnesses: NULL-total DM thread gates, DM human-to-agent t
   }), "seated agent oversight list");
   assert.ok(parseOversightListResponse(seatedOversight).some((c) => c.conversationId === dmAnnBot && c.readOnly === true));
 });
+
+test("8. Zero server-side DM / group-DM / DM-thread leakage into #general or outsider legacy signals reads", { timeout: 60_000 }, async () => {
+  // Post a 1:1 DM (ann <-> ben), a DM thread reply, and a group DM (ann, ben, annBotA) — all with channel_id NULL.
+  const dmId = String(((ok(await send(ann.jwt, {
+    kind: "conversation_open", members: [uRef(ben)],
+  }), "open ann-ben DM")).conversation as Row).conversation_id);
+  const dmRootId = await posted(ann.jwt, { conversation_id: dmId, body: "private 1:1 DM root" });
+  const dmThreadReplyId = await posted(ben.jwt, {
+    conversation_id: dmId,
+    thread_root_id: dmRootId,
+    body: "private 1:1 DM thread reply",
+  });
+
+  const grpId = String(((ok(await send(ann.jwt, {
+    kind: "conversation_open", members: [uRef(ben), aRef(annBotA)],
+  }), "open ann-ben-annBotA group")).conversation as Row).conversation_id);
+  const grpMsgId = await posted(ann.jwt, { conversation_id: grpId, body: "private group DM message" });
+  const dmIds = new Set([dmRootId, dmThreadReplyId, grpMsgId]);
+
+  // 1. Step 2b conversation_history on #general must NOT include any DM, group DM, or DM thread reply (even for participants).
+  const annList = parseConversationsListResponse(ok(await readResource(ann.jwt, {
+    resource: "conversations", workspace_id: workspace,
+  }), "ann conversations"));
+  const generalId = annList.find((c) => c.kind === "general")!.conversationId;
+  const generalHist = ok(await readResource(ann.jwt, {
+    resource: "conversation_history", workspace_id: workspace, conversation_id: generalId, limit: 100,
+  }), "general history");
+  for (const m of generalHist.messages as Row[]) {
+    assert.equal(dmIds.has(String(m.id)), false, `DM/group signal ${String(m.id)} leaked into #general conversation_history`);
+  }
+
+  // 2. Legacy channel_messages("general") must NOT include any DM, group DM, or DM thread reply (even for participant agent annBotA).
+  const legacyGeneral = ok(await readResource(annBotA.token, {
+    resource: "channel_messages", workspace_id: workspace, channel: "general", limit: 50,
+  }), "legacy channel_messages general");
+  for (const m of legacyGeneral.messages as Row[]) {
+    assert.equal(dmIds.has(String(m.signal_id)), false, `DM/group signal ${String(m.signal_id)} leaked into legacy channel_messages(general)`);
+  }
+
+  // 3. Legacy resource:"signals" (#general AND All/unfiltered) for an outsider agent (benBot, not in any of the three messages)
+  // must NEVER return any of those DM, group DM, or DM thread reply rows.
+  for (const channelFilter of ["general", null] as const) {
+    const outsiderSignals = ok(await readResource(benBot.token, {
+      resource: "signals",
+      workspace_id: workspace,
+      inbox: false,
+      about: null,
+      kind: null,
+      since: null,
+      in_reply_to: null,
+      channel: channelFilter,
+      limit: 100,
+      include_stale: true,
+    }), `outsider signals channel=${String(channelFilter)}`);
+    for (const s of outsiderSignals.signals as Row[]) {
+      assert.equal(
+        dmIds.has(String(s.id)),
+        false,
+        `DM/group signal ${String(s.id)} leaked to outsider agent via resource:signals channel=${String(channelFilter)}`,
+      );
+    }
+  }
+});
