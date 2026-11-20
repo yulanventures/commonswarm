@@ -197,7 +197,8 @@ struct PeopleDirectoryAPI: Sendable {
 
     func loadDirectory(
         workspaceID: UUID,
-        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true }
+        canDispatch: @escaping @MainActor @Sendable () -> Bool = { true },
+        onOwnerGrantsDenied: @escaping @MainActor @Sendable () -> Void = {}
     ) async throws -> PeopleDirectoryLoadResult {
         let wsFilter = "eq." + workspaceID.uuidString.lowercased()
         let viewerID = await MainActor.run { api.session.userID }
@@ -430,8 +431,12 @@ struct PeopleDirectoryAPI: Sendable {
         let effectiveAdminGrantsAll: Bool
 
         if freshNonOwner || workspaceGrantsReturnedNull {
-            // Non-owner viewer (or owner RPC returned null): never reuse owner-wide rows;
-            // fetch the viewer's own grants and keep only active grants for this workspace.
+            // Non-owner viewer (or owner RPC returned null): clear any cached owner-wide
+            // grant rows and count immediately BEFORE dispatching the own-grants RPC so
+            // owner-wide rows never stay visible while my_seat_admin_grants is in flight.
+            if await canDispatch() {
+                await onOwnerGrantsDenied()
+            }
             effectiveAdminGrantsAll = false
             do {
                 let myRows = try await fetchMyAdminGrantsRPC(canDispatch: canDispatch)

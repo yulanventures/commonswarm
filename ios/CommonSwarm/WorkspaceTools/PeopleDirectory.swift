@@ -465,8 +465,23 @@ final class PeopleDirectoryStore: ObservableObject {
                 && self.loadGeneration == generation
         }
 
+        let clearOwnerGrantsOnDenial: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            guard !self.isRetired, capturedSession.isActive,
+                  self.activeSessionID == sessionID, self.loadGeneration == generation else { return }
+            if self.adminGrantsAll {
+                self.adminGrants = []
+                self.adminGrantsAll = false
+            }
+            self.adminGrantsReady = false
+        }
+
         do {
-            let result = try await api.loadDirectory(workspaceID: workspaceID, canDispatch: readGate)
+            let result = try await api.loadDirectory(
+                workspaceID: workspaceID,
+                canDispatch: readGate,
+                onOwnerGrantsDenied: clearOwnerGrantsOnDenial
+            )
             guard !Task.isCancelled, !isRetired, capturedSession.isActive,
                   activeSessionID == sessionID, generation == loadGeneration else { return }
             switch result {

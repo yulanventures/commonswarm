@@ -80,6 +80,17 @@ struct VerifyPeopleDirectory {
         expect(false, "Timed out waiting for parallel owner-RPC + members hold")
     }
 
+    static func waitUntilMyGrantsHeld(_ origin: URL) async throws {
+        for _ in 0..<200 {
+            let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/my-admin-grants-held"))
+            if try JSONDecoder().decode(HeldStatus.self, from: data).held {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        expect(false, "Timed out waiting for my_seat_admin_grants hold")
+    }
+
     static func readCount(_ origin: URL) async throws -> Int {
         let (data, _) = try await URLSession.shared.data(from: origin.appending(path: "fixture/requests"))
         return try JSONDecoder().decode(RequestCount.self, from: data).reads
@@ -614,6 +625,54 @@ struct VerifyPeopleDirectory {
                 && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
         }
         expect(grantsRecovered, "Retrying after grant-read 503 must recover viewer's active grants cleanly")
+
+        // 11d. HezSec witness: demotion with my_seat_admin_grants held clears cached owner-wide
+        //      grant rows and Admins count BEFORE the own-grants RPC settles, then releasing it
+        //      delivers ONLY the caller's own active grant for this workspace.
+        try await postFixture("\(base)/fixture/viewer-role?role=owner")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=0")
+        try await postFixture("\(base)/fixture/own-admin-grants?on=0")
+        await store.load(api: directoryAPI)
+        let ownerPopulatedBeforeHeldDemotion = await MainActor.run {
+            store.viewerIsOwner
+                && store.adminGrantsAll
+                && store.adminGrants.count == 1
+                && store.visibleAdminGrants.first?.grantID == "grant_atlas_1"
+                && store.tabs.first(where: { $0.tab == .admins })?.count == 3
+        }
+        expect(ownerPopulatedBeforeHeldDemotion, "Expected owner-wide grant loaded before held-demotion witness")
+
+        try await postFixture("\(base)/fixture/viewer-role?role=member")
+        try await postFixture("\(base)/fixture/non-owner-grants?on=1")
+        try await postFixture("\(base)/fixture/own-admin-grants?on=1")
+        try await postFixture("\(base)/fixture/hold-my-admin-grants")
+        let heldDemotionTask = Task { await store.load(api: directoryAPI) }
+        try await waitUntilMyGrantsHeld(origin)
+        let clearedWhileOwnGrantsHeld = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.adminGrantsAll
+                && store.adminGrants.isEmpty
+                && store.visibleAdminGrants.isEmpty
+                && store.filteredAdminGrants.isEmpty
+                && !store.adminGrantsReady
+                && adminsTab?.count == nil
+        }
+        expect(clearedWhileOwnGrantsHeld, "Owner-wide grant rows and Admins count must clear BEFORE my_seat_admin_grants settles after demotion")
+
+        try await postFixture("\(base)/fixture/release-my-admin-grants")
+        await heldDemotionTask.value
+        let settledOwnGrantsAfterRelease = await MainActor.run {
+            let adminsTab = store.tabs.first(where: { $0.tab == .admins })
+            return !store.accessUnavailable
+                && !store.viewerIsOwner
+                && !store.adminGrantsAll
+                && store.adminGrantsReady
+                && !store.adminGrantsFailed
+                && store.visibleAdminGrants.count == 1
+                && store.visibleAdminGrants.first?.grantID == "my_grant_atlas_active"
+                && adminsTab?.count == 2
+        }
+        expect(settledOwnGrantsAfterRelease, "Releasing held my_seat_admin_grants must still deliver the demoted caller's own active workspace grant")
         try await postFixture("\(base)/fixture/viewer-role?role=owner")
         try await postFixture("\(base)/fixture/non-owner-grants?on=0")
         try await postFixture("\(base)/fixture/own-admin-grants?on=0")

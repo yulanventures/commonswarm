@@ -40,6 +40,9 @@ let releaseGrantsResponse = null;
 let holdMembersRequestOnce = false;
 let membersRequestHeld = false;
 let releaseMembersRequest = null;
+let holdMyGrantsOnce = false;
+let myGrantsHeld = false;
+let releaseMyGrants = null;
 let readRequestCount = 0;
 
 let emailCodePending = false;
@@ -147,6 +150,22 @@ const server = createServer(async (req, res) => {
       membersRequestHeld = false;
       if (releaseMembers) releaseMembers();
       if (releaseGrants) releaseGrants();
+      return reply(200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/hold-my-admin-grants") {
+      holdMyGrantsOnce = true;
+      myGrantsHeld = false;
+      releaseMyGrants = null;
+      return reply(200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/fixture/my-admin-grants-held") {
+      return reply(200, { held: myGrantsHeld });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/release-my-admin-grants") {
+      const release = releaseMyGrants;
+      releaseMyGrants = null;
+      myGrantsHeld = false;
+      if (release) release();
       return reply(200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/fixture/requests") {
@@ -264,6 +283,13 @@ const server = createServer(async (req, res) => {
       if (edge401) return reply(401, {});
       if (accessRefused || refuseAdminGrants) return reply(403, { error: "forbidden" });
       if (failAdminGrants || failMyAdminGrants) return reply(503, { error: "unavailable" });
+      if (holdMyGrantsOnce) {
+        holdMyGrantsOnce = false;
+        myGrantsHeld = true;
+        await new Promise((resolve) => {
+          releaseMyGrants = resolve;
+        });
+      }
       if (!ownAdminGrants) return reply(200, { grants: [] });
       return reply(200, {
         grants: [
