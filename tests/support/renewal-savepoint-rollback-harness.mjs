@@ -718,8 +718,9 @@ try {
     let firstPending,secondPending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
-      // Sole owned row gate; with swarm.users downgraded to FOR KEY SHARE, the
-      // second concurrent recovery queues on the first's workspace FOR UPDATE lock.
+      // Sole owned row gate; with swarm.users downgraded to FOR KEY SHARE and
+      // workspaceMode='share' for renew_agent_token, the second concurrent
+      // recovery queues on the first's workspace stream FOR UPDATE lock.
       await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${concurrent.grant}::uuid FOR UPDATE`;
       firstPending=renew(concurrent.raw,id());
       const firstPid=await waitBlockedBy(pid,100);
@@ -728,7 +729,7 @@ try {
       secondPending=renew(concurrent.raw,id());
       const secondPid=firstPid ? await waitBlockedBy(firstPid,100):0;
       check('unused-root concurrency distinct PID waits on first recovery',secondPid>0 && secondPid!==firstPid
-        && (await waitDetail(secondPid)).statement?.includes('swarm.workspaces'));
+        && (await waitDetail(secondPid)).statement?.includes('swarm.streams'));
     });
     const replies=await Promise.all([firstPending,secondPending]);
     const children=await observer`SELECT token_id FROM swarm.agent_tokens WHERE predecessor_token_id=${concurrent.t0}::uuid AND revoked_at IS NULL`;
