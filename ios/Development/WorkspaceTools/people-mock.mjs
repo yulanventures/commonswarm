@@ -19,10 +19,14 @@ const workspaces = [{ workspace_id: wsMain, name: "Simulator workspace" }];
 let accessRefused = false;
 let edge401 = false;
 let edge404 = false;
+let failMembers = false;
 let failInvites = false;
+let refuseInvites = false;
 let failAdminGrants = false;
+let refuseAdminGrants = false;
 let nonOwnerGrants = false;
 let duplicateRows = false;
+let omitMaya = false;
 let readRequestCount = 0;
 
 let emailCodePending = false;
@@ -50,13 +54,29 @@ const server = createServer(async (req, res) => {
       edge404 = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, edge404 });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/fail-members") {
+      failMembers = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, failMembers });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/fail-invites") {
       failInvites = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failInvites });
     }
+    if (req.method === "POST" && url.pathname === "/fixture/refuse-invites") {
+      refuseInvites = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, refuseInvites });
+    }
     if (req.method === "POST" && url.pathname === "/fixture/fail-admin-grants") {
       failAdminGrants = url.searchParams.get("on") !== "0";
       return reply(200, { ok: true, failAdminGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/refuse-admin-grants") {
+      refuseAdminGrants = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, refuseAdminGrants });
+    }
+    if (req.method === "POST" && url.pathname === "/fixture/omit-maya") {
+      omitMaya = url.searchParams.get("on") !== "0";
+      return reply(200, { ok: true, omitMaya });
     }
     if (req.method === "POST" && url.pathname === "/fixture/non-owner-grants") {
       nonOwnerGrants = url.searchParams.get("on") !== "0";
@@ -143,7 +163,7 @@ const server = createServer(async (req, res) => {
         return reply(400, { error: "missing_profile" });
       }
       if (edge401) return reply(401, {});
-      if (accessRefused) return reply(403, { error: "forbidden" });
+      if (accessRefused || refuseAdminGrants) return reply(403, { error: "forbidden" });
       if (failAdminGrants) return reply(503, { error: "unavailable" });
       if ((body?.p_workspace_id ?? "").toLowerCase() !== wsMain) return reply(200, null);
       if (nonOwnerGrants) return reply(200, null);
@@ -178,9 +198,10 @@ const server = createServer(async (req, res) => {
 
     switch (url.pathname) {
       case "/rest/v1/member_profiles": {
+        if (failMembers) return reply(503, { error: "unavailable" });
         const rows = [
           { user_id: me, display_name: "Alex Rivera", role: "owner" },
-          { user_id: maya, display_name: "Maya Chen", role: "admin" },
+          ...(omitMaya ? [] : [{ user_id: maya, display_name: "Maya Chen", role: "admin" }]),
           { user_id: devon, display_name: "Devon Park", role: "member" },
         ];
         if (duplicateRows) rows.push({ user_id: maya, display_name: "Maya Chen", role: "admin" });
@@ -198,16 +219,20 @@ const server = createServer(async (req, res) => {
             revoked_at: null,
             workspace_id: wsMain,
           },
-          {
-            principal_id: beacon,
-            name: "Beacon",
-            model: "Gemini Pro",
-            transport: "hosted_mcp",
-            turn_only: false,
-            owner_user_id: maya,
-            revoked_at: null,
-            workspace_id: wsMain,
-          },
+          ...(omitMaya
+            ? []
+            : [
+                {
+                  principal_id: beacon,
+                  name: "Beacon",
+                  model: "Gemini Pro",
+                  transport: "hosted_mcp",
+                  turn_only: false,
+                  owner_user_id: maya,
+                  revoked_at: null,
+                  workspace_id: wsMain,
+                },
+              ]),
         ];
         if (duplicateRows) rows.push({ ...rows[0] });
         return reply(200, rows);
@@ -231,6 +256,7 @@ const server = createServer(async (req, res) => {
         return reply(200, rows);
       }
       case "/rest/v1/pending_invitations":
+        if (refuseInvites) return reply(403, { error: "forbidden" });
         if (failInvites) return reply(503, { error: "unavailable" });
         return reply(200, [
           {

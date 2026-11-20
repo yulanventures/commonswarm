@@ -120,28 +120,31 @@ struct PeopleDirectoryView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: PeopleDetailDestination.self) { destination in
             switch destination {
-            case .person(let person):
+            case .person(let userID):
                 WorkspacePersonDetailView(
+                    store: store,
+                    api: directoryAPI,
                     workspaceName: workspace.name,
-                    person: person,
-                    ownedAgents: store.agentsOwned(by: person.userID)
+                    userID: userID
                 )
-            case .agent(let agent):
+            case .agent(let principalID):
                 WorkspaceAgentDetailView(
+                    store: store,
+                    api: directoryAPI,
                     workspaceName: workspace.name,
-                    agent: agent
+                    principalID: principalID
                 )
             }
         }
         .task {
-            store.activate()
+            store.enterList()
             await store.load(api: directoryAPI)
         }
         .onAppear {
-            store.activate()
+            store.enterList()
         }
         .onDisappear {
-            store.retire()
+            store.leaveList()
         }
     }
 
@@ -221,7 +224,7 @@ struct PeopleDirectoryView: View {
                 ScrollView {
                     VStack(spacing: 10) {
                         ForEach(rows) { person in
-                            NavigationLink(value: PeopleDetailDestination.person(person)) {
+                            NavigationLink(value: PeopleDetailDestination.person(person.userID)) {
                                 personCard(person)
                             }
                             .buttonStyle(.plain)
@@ -242,7 +245,7 @@ struct PeopleDirectoryView: View {
                 ScrollView {
                     VStack(spacing: 10) {
                         ForEach(rows) { agent in
-                            NavigationLink(value: PeopleDetailDestination.agent(agent)) {
+                            NavigationLink(value: PeopleDetailDestination.agent(agent.principalID)) {
                                 agentCard(agent)
                             }
                             .buttonStyle(.plain)
@@ -292,7 +295,7 @@ struct PeopleDirectoryView: View {
                                 .foregroundStyle(mutedForeground)
                             VStack(spacing: 10) {
                                 ForEach(adminPeople) { person in
-                                    NavigationLink(value: PeopleDetailDestination.person(person)) {
+                                    NavigationLink(value: PeopleDetailDestination.person(person.userID)) {
                                         personCard(person)
                                     }
                                     .buttonStyle(.plain)
@@ -484,10 +487,12 @@ struct PeopleDirectoryView: View {
 }
 
 private struct WorkspacePersonDetailView: View {
+    @ObservedObject var store: PeopleDirectoryStore
+    let api: PeopleDirectoryAPI
     let workspaceName: String
-    let person: WorkspacePerson
-    let ownedAgents: [WorkspaceAgent]
+    let userID: UUID
 
+    @State private var presentationToken = UUID()
     @Environment(\.colorScheme) private var colorScheme
 
     private var mutedForeground: Color {
@@ -497,60 +502,96 @@ private struct WorkspacePersonDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(verbatim: person.name)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(verbatim: "\(person.role.label) in \(workspaceName)")
-                        .font(.subheadline)
-                        .foregroundStyle(mutedForeground)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Agents")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    if ownedAgents.isEmpty {
-                        Text("No agents in this workspace.")
-                            .font(.subheadline)
-                            .foregroundStyle(mutedForeground)
-                    } else {
-                        ForEach(ownedAgents) { agent in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(verbatim: agent.name)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text(verbatim: "\(agent.hostLabel) · \(agent.lastActiveLabel())")
-                                    .font(.caption)
-                                    .foregroundStyle(mutedForeground)
-                            }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        Group {
+            if store.accessUnavailable {
+                ContentUnavailableView(
+                    "Access unavailable",
+                    systemImage: "lock.slash",
+                    description: Text("You don’t have access to people and agents in this workspace.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let person = store.authorizedPerson(id: userID) {
+                let ownedAgents = store.agentsOwned(by: person.userID)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(verbatim: person.name)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(verbatim: "\(person.role.label) in \(workspaceName)")
+                                .font(.subheadline)
+                                .foregroundStyle(mutedForeground)
                         }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Agents")
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            if ownedAgents.isEmpty {
+                                Text("No agents in this workspace.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(mutedForeground)
+                            } else {
+                                ForEach(ownedAgents) { agent in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(verbatim: agent.name)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                        Text(verbatim: "\(agent.hostLabel) · \(agent.lastActiveLabel())")
+                                            .font(.caption)
+                                            .foregroundStyle(mutedForeground)
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .padding()
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .refreshable { await store.load(api: api) }
+            } else if store.isLoading {
+                ProgressView("Loading person…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView(
+                    "Person unavailable",
+                    systemImage: "person.slash",
+                    description: Text("This person is no longer listed in this workspace.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding()
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Person")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: userID) {
+            store.enterDetail(presentationToken)
+            await store.load(api: api)
+        }
+        .onAppear {
+            store.enterDetail(presentationToken)
+        }
+        .onDisappear {
+            store.leaveDetail(presentationToken)
+        }
     }
 }
 
 private struct WorkspaceAgentDetailView: View {
+    @ObservedObject var store: PeopleDirectoryStore
+    let api: PeopleDirectoryAPI
     let workspaceName: String
-    let agent: WorkspaceAgent
+    let principalID: UUID
 
+    @State private var presentationToken = UUID()
     @Environment(\.colorScheme) private var colorScheme
     @State private var showTechnical = false
 
@@ -573,81 +614,117 @@ private struct WorkspaceAgentDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(verbatim: agent.name)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(verbatim: "\(agent.ownerLabel) · \(workspaceName)")
-                        .font(.subheadline)
-                        .foregroundStyle(mutedForeground)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 10) {
-                    detailRow(label: "Status", value: agent.activityStatus().label)
-                    detailRow(label: "Last active", value: agent.lastActiveLabel())
-                    detailRow(label: "Connection", value: agent.deliveryDescription)
-                    if let model = agent.model {
-                        detailRow(label: "Model", value: model)
-                    }
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Button {
-                        showTechnical.toggle()
-                    } label: {
-                        HStack {
-                            Text(showTechnical ? "Hide technical details" : "Technical details")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(secondaryForeground)
-                            Spacer()
-                            Image(systemName: showTechnical ? "chevron.up" : "chevron.down")
-                                .font(.caption.weight(.semibold))
+        let resolvedAgent = store.authorizedAgent(id: principalID)
+        Group {
+            if store.accessUnavailable {
+                ContentUnavailableView(
+                    "Access unavailable",
+                    systemImage: "lock.slash",
+                    description: Text("You don’t have access to people and agents in this workspace.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let agent = resolvedAgent {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(verbatim: agent.name)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(verbatim: "\(agent.ownerLabel) · \(workspaceName)")
+                                .font(.subheadline)
                                 .foregroundStyle(mutedForeground)
                         }
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 44)
-                        .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("agent-detail-technical-toggle")
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                    if showTechnical {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(verbatim: "Agent ID: \(agent.principalID.uuidString.lowercased())")
-                                .font(.caption.monospaced())
-                                .foregroundStyle(mutedForeground)
-                                .textSelection(.enabled)
-                            if let build = agent.clientBuild, !build.isEmpty {
-                                Text(verbatim: "Client build: \(build)")
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(mutedForeground)
-                            }
-                            if let ack = agent.lastAckVia, !ack.isEmpty {
-                                Text(verbatim: "Last ack via: \(ack)")
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(mutedForeground)
+                        VStack(alignment: .leading, spacing: 10) {
+                            detailRow(label: "Status", value: agent.activityStatus().label)
+                            detailRow(label: "Last active", value: agent.lastActiveLabel())
+                            detailRow(label: "Connection", value: agent.deliveryDescription)
+                            if let model = agent.model {
+                                detailRow(label: "Model", value: model)
                             }
                         }
-                        .padding(.top, 4)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button {
+                                showTechnical.toggle()
+                            } label: {
+                                HStack {
+                                    Text(showTechnical ? "Hide technical details" : "Technical details")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(secondaryForeground)
+                                    Spacer()
+                                    Image(systemName: showTechnical ? "chevron.up" : "chevron.down")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(mutedForeground)
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .background(secondaryBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("agent-detail-technical-toggle")
+
+                            if showTechnical {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(verbatim: "Agent ID: \(agent.principalID.uuidString.lowercased())")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(mutedForeground)
+                                        .textSelection(.enabled)
+                                    if let build = agent.clientBuild, !build.isEmpty {
+                                        Text(verbatim: "Client build: \(build)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(mutedForeground)
+                                    }
+                                    if let ack = agent.lastAckVia, !ack.isEmpty {
+                                        Text(verbatim: "Last ack via: \(ack)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(mutedForeground)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .padding()
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .refreshable { await store.load(api: api) }
+            } else if store.isLoading {
+                ProgressView("Loading agent…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView(
+                    "Agent unavailable",
+                    systemImage: "cpu",
+                    description: Text("This agent is no longer listed in this workspace.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding()
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Agent")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: resolvedAgent == nil) { _, missing in
+            if missing { showTechnical = false }
+        }
+        .task(id: principalID) {
+            store.enterDetail(presentationToken)
+            await store.load(api: api)
+        }
+        .onAppear {
+            store.enterDetail(presentationToken)
+        }
+        .onDisappear {
+            store.leaveDetail(presentationToken)
+        }
     }
 
     private func detailRow(label: String, value: String) -> some View {

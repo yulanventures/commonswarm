@@ -219,7 +219,153 @@ struct VerifyPeopleDirectory {
         await store.load(api: directoryAPI)
         let cleared403 = await MainActor.run { store.accessUnavailable && store.people.isEmpty && store.agents.isEmpty && store.invites.isEmpty && store.adminGrants.isEmpty }
         expect(cleared403, "403 must clear stale roster and set accessUnavailable")
+        try await postFixture("\(base)/fixture/access-refused?on=0")
 
-        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants RPC owner & null non-owner, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, 401/403/404 stale-roster retirement)")
+        // 9. Mixed read outcome precedence: member_profiles 503 + invites/grants 403 must
+        //    NOT take generic error path or retain stale privileged rows (invites & owner grants).
+        await MainActor.run { store.enterList() }
+        await store.load(api: directoryAPI)
+        let hadPrivilegedBeforeMixed = await MainActor.run {
+            store.coreReady && store.invites.count == 1 && store.adminGrants.count == 1 && !store.accessUnavailable
+        }
+        expect(hadPrivilegedBeforeMixed, "Expected populated invite email and owner grant before mixed-outcome witness")
+
+        // 9a. members 503 + invites 403
+        try await postFixture("\(base)/fixture/fail-members?on=1")
+        try await postFixture("\(base)/fixture/refuse-invites?on=1")
+        await store.load(api: directoryAPI)
+        let clearedOnMembers503Invites403 = await MainActor.run {
+            store.accessUnavailable
+                && !store.loadFailed
+                && store.people.isEmpty
+                && store.agents.isEmpty
+                && store.invites.isEmpty
+                && store.adminGrants.isEmpty
+        }
+        expect(clearedOnMembers503Invites403, "Core 503 + invites 403 must refuse and clear stale invite emails and owner grants")
+        try await postFixture("\(base)/fixture/fail-members?on=0")
+        try await postFixture("\(base)/fixture/refuse-invites?on=0")
+
+        // 9b. members 503 + admin grants RPC 403
+        await store.load(api: directoryAPI)
+        let reloadedBeforeGrants403 = await MainActor.run { store.invites.count == 1 && store.adminGrants.count == 1 }
+        expect(reloadedBeforeGrants403, "Expected reloaded privileged rows before grants 403 witness")
+        try await postFixture("\(base)/fixture/fail-members?on=1")
+        try await postFixture("\(base)/fixture/refuse-admin-grants?on=1")
+        await store.load(api: directoryAPI)
+        let clearedOnMembers503Grants403 = await MainActor.run {
+            store.accessUnavailable
+                && !store.loadFailed
+                && store.people.isEmpty
+                && store.agents.isEmpty
+                && store.invites.isEmpty
+                && store.adminGrants.isEmpty
+        }
+        expect(clearedOnMembers503Grants403, "Core 503 + admin grants 403 must refuse and clear stale privileged rows")
+        try await postFixture("\(base)/fixture/fail-members?on=0")
+        try await postFixture("\(base)/fixture/refuse-admin-grants?on=0")
+
+        // 10. Detail routes bound to authorized directory IDs:
+        //     live-member control, omission clearing, and opening detail across a held refusal.
+        await store.load(api: directoryAPI)
+        let mayaID = await MainActor.run { store.people.first(where: { $0.name == "Maya Chen" })!.userID }
+        let beaconID = await MainActor.run { store.agents.first(where: { $0.name == "Beacon" })!.principalID }
+        let routePerson = PeopleDetailDestination.person(mayaID)
+        let routeAgent = PeopleDetailDestination.agent(beaconID)
+        expect(routePerson != routeAgent, "Detail routes carry IDs, not snapshots")
+
+        // 10a. Live-member control: pushing detail + rechecking keeps live person & agent resolved
+        let controlToken = UUID()
+        await MainActor.run {
+            store.enterDetail(controlToken)
+            store.leaveList()
+        }
+        await store.load(api: directoryAPI)
+        let liveControlOK = await MainActor.run {
+            !store.accessUnavailable
+                && store.authorizedPerson(id: mayaID)?.name == "Maya Chen"
+                && store.authorizedAgent(id: beaconID)?.name == "Beacon"
+                && store.agentsOwned(by: mayaID).count == 1
+        }
+        expect(liveControlOK, "Live-member control: detail route must stay resolved after detail recheck")
+
+        // 10b. Omission witness: if Maya / Beacon disappear from refreshed roster, detail clears immediately
+        try await postFixture("\(base)/fixture/omit-maya?on=1")
+        await store.load(api: directoryAPI)
+        let omittedClearedOK = await MainActor.run {
+            !store.accessUnavailable
+                && store.authorizedPerson(id: mayaID) == nil
+                && store.authorizedAgent(id: beaconID) == nil
+                && store.agentsOwned(by: mayaID).isEmpty
+                && store.authorizedPerson(id: tokens.userID)?.name == "Alex Rivera"
+        }
+        expect(omittedClearedOK, "Omitted person/agent must clear detail resolution immediately while remaining rows stay authorized")
+        try await postFixture("\(base)/fixture/omit-maya?on=0")
+        await MainActor.run {
+            store.enterList()
+            store.leaveDetail(controlToken)
+        }
+        await store.load(api: directoryAPI)
+
+        // 10c. Held refusal across detail push (ordering 1: enterDetail before leaveList)
+        try await postFixture("\(base)/fixture/access-refused?on=1")
+        await MainActor.run { bearer.holdAll() }
+        let heldRefusalTask1 = Task { await store.load(api: directoryAPI) }
+        await bearer.waitUntilHeld()
+        let detailToken1 = UUID()
+        await MainActor.run {
+            store.enterDetail(detailToken1)
+            store.leaveList()
+            bearer.releaseAll()
+        }
+        await heldRefusalTask1.value
+        let clearedAcrossHeldPush1 = await MainActor.run {
+            store.accessUnavailable
+                && store.authorizedPerson(id: mayaID) == nil
+                && store.authorizedAgent(id: beaconID) == nil
+                && store.agentsOwned(by: mayaID).isEmpty
+        }
+        expect(clearedAcrossHeldPush1, "Pushing detail across a held list refusal must NOT drop the refusal or keep stale detail rows")
+        await MainActor.run { store.leaveDetail(detailToken1) }
+
+        // 10d. Held refusal across detail push (ordering 2: leaveList retires list refresh, then detail .task rechecks)
+        try await postFixture("\(base)/fixture/access-refused?on=0")
+        await MainActor.run { store.enterList() }
+        await store.load(api: directoryAPI)
+        try await postFixture("\(base)/fixture/access-refused?on=1")
+        await MainActor.run { bearer.holdAll() }
+        let heldRefusalTask2 = Task { await store.load(api: directoryAPI) }
+        await bearer.waitUntilHeld()
+        await MainActor.run {
+            store.leaveList()
+            bearer.releaseAll()
+        }
+        await heldRefusalTask2.value
+        let detailToken2 = UUID()
+        await MainActor.run { store.enterDetail(detailToken2) }
+        await store.load(api: directoryAPI)
+        let clearedAcrossHeldPush2 = await MainActor.run {
+            store.accessUnavailable
+                && store.authorizedPerson(id: mayaID) == nil
+                && store.authorizedAgent(id: beaconID) == nil
+                && store.agentsOwned(by: mayaID).isEmpty
+        }
+        expect(clearedAcrossHeldPush2, "Detail recheck must clear person/agent detail even if list disappearance retired the earlier refresh")
+
+        // Leaving detail when list is already gone must retire the store (0 sends on held bearer)
+        try await postFixture("\(base)/fixture/access-refused?on=0")
+        await MainActor.run { bearer.holdAll() }
+        let readsBeforeLeaveAll = try await readCount(origin)
+        let leaveAllTask = Task { await store.load(api: directoryAPI) }
+        await bearer.waitUntilHeld()
+        await MainActor.run {
+            store.leaveDetail(detailToken2)
+            bearer.releaseAll()
+        }
+        await leaveAllTask.value
+        let readsAfterLeaveAll = try await readCount(origin)
+        expect(readsBeforeLeaveAll == readsAfterLeaveAll, "Leaving detail with no visible list must retire store with ZERO sends")
+
+        print("PASS: VerifyPeopleDirectory (production POST workspace_seat_admin_grants RPC owner & null non-owner, duplicate-key safety, C1 held-bearer canDispatch & retire/activate zero-send, mixed 503+403 refusal precedence, ID-bound detail routes with held-refusal/omission/live-control)")
     }
 }

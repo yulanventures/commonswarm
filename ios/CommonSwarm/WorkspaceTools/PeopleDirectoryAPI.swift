@@ -137,26 +137,40 @@ struct PeopleDirectoryAPI: Sendable {
         let wsFilter = "eq." + workspaceID.uuidString.lowercased()
         let viewerID = await MainActor.run { api.session.userID }
 
-        async let membersTask: [MemberWire] = fetchView(
-            "member_profiles",
-            query: [
-                "select": "user_id,display_name,role",
-                "workspace_id": wsFilter,
-                "limit": "1000",
-            ],
-            canDispatch: canDispatch
-        )
-        async let agentsTask: [AgentWire] = fetchView(
-            "agent_principals",
-            query: [
-                "select": "principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id",
-                "workspace_id": wsFilter,
-                "revoked_at": "is.null",
-                "order": "name.asc,principal_id.asc",
-                "limit": "500",
-            ],
-            canDispatch: canDispatch
-        )
+        async let membersTask: Result<[MemberWire], Error> = {
+            do {
+                let rows: [MemberWire] = try await fetchView(
+                    "member_profiles",
+                    query: [
+                        "select": "user_id,display_name,role",
+                        "workspace_id": wsFilter,
+                        "limit": "1000",
+                    ],
+                    canDispatch: canDispatch
+                )
+                return .success(rows)
+            } catch {
+                return .failure(error)
+            }
+        }()
+        async let agentsTask: Result<[AgentWire], Error> = {
+            do {
+                let rows: [AgentWire] = try await fetchView(
+                    "agent_principals",
+                    query: [
+                        "select": "principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id",
+                        "workspace_id": wsFilter,
+                        "revoked_at": "is.null",
+                        "order": "name.asc,principal_id.asc",
+                        "limit": "500",
+                    ],
+                    canDispatch: canDispatch
+                )
+                return .success(rows)
+            } catch {
+                return .failure(error)
+            }
+        }()
         async let presenceTask: Result<[PresenceWire], Error> = {
             do {
                 let rows: [PresenceWire] = try await fetchView(
@@ -198,13 +212,20 @@ struct PeopleDirectoryAPI: Sendable {
             }
         }()
 
-        let memberRows = try await membersTask
-        let agentRows = try await agentsTask
+        let membersResult = await membersTask
+        let agentsResult = await agentsTask
         let presenceResult = await presenceTask
         let invitesResult = await invitesTask
         let grantsResult = await adminGrantsTask
 
-        // Propagate access refusal (401/403/404) or cancellation from secondary reads.
+        // Access refusal (401/403/404) from ANY read takes precedence over simultaneous transient errors
+        // so a core 503 cannot mask a secondary 403 and leave stale privileged rows on screen.
+        if case .failure(PeopleDirectoryError.accessRefused) = membersResult {
+            throw PeopleDirectoryError.accessRefused
+        }
+        if case .failure(PeopleDirectoryError.accessRefused) = agentsResult {
+            throw PeopleDirectoryError.accessRefused
+        }
         if case .failure(PeopleDirectoryError.accessRefused) = presenceResult {
             throw PeopleDirectoryError.accessRefused
         }
@@ -214,6 +235,9 @@ struct PeopleDirectoryAPI: Sendable {
         if case .failure(PeopleDirectoryError.accessRefused) = grantsResult {
             throw PeopleDirectoryError.accessRefused
         }
+
+        let memberRows = try membersResult.get()
+        let agentRows = try agentsResult.get()
 
         let presenceRows: [PresenceWire]?
         if case .success(let rows) = presenceResult {

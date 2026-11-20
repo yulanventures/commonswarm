@@ -269,8 +269,8 @@ enum PeopleDirectoryRules {
 }
 
 enum PeopleDetailDestination: Hashable {
-    case person(WorkspacePerson)
-    case agent(WorkspaceAgent)
+    case person(UUID)
+    case agent(UUID)
 }
 
 @MainActor
@@ -293,6 +293,8 @@ final class PeopleDirectoryStore: ObservableObject {
     let workspaceID: UUID
     private var loadGeneration = 0
     private var isRetired = false
+    private var isListVisible = false
+    private var activeDetailTokens: Set<UUID> = []
     private var activeSessionID: ObjectIdentifier?
 
     init(workspaceID: UUID) {
@@ -304,9 +306,49 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     func retire() {
+        isListVisible = false
+        activeDetailTokens.removeAll()
         isRetired = true
         loadGeneration += 1
         isLoading = false
+    }
+
+    func enterList() {
+        isListVisible = true
+        activate()
+    }
+
+    func leaveList() {
+        isListVisible = false
+        retireIfUnpresented()
+    }
+
+    func enterDetail(_ token: UUID) {
+        activeDetailTokens.insert(token)
+        activate()
+    }
+
+    func leaveDetail(_ token: UUID) {
+        activeDetailTokens.remove(token)
+        retireIfUnpresented()
+    }
+
+    private func retireIfUnpresented() {
+        if !isListVisible && activeDetailTokens.isEmpty {
+            isRetired = true
+            loadGeneration += 1
+            isLoading = false
+        }
+    }
+
+    func authorizedPerson(id: UUID) -> WorkspacePerson? {
+        guard !accessUnavailable, coreReady else { return nil }
+        return people.first { $0.userID == id }
+    }
+
+    func authorizedAgent(id: UUID) -> WorkspaceAgent? {
+        guard !accessUnavailable, coreReady else { return nil }
+        return agents.first { $0.principalID == id }
     }
 
     var managers: [WorkspacePerson] {
@@ -374,7 +416,8 @@ final class PeopleDirectoryStore: ObservableObject {
     }
 
     func agentsOwned(by userID: UUID) -> [WorkspaceAgent] {
-        agents.filter { $0.ownerUserID == userID }
+        guard !accessUnavailable, coreReady else { return [] }
+        return agents.filter { $0.ownerUserID == userID }
     }
 
     func load(api: PeopleDirectoryAPI) async {
