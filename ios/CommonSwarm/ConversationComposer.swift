@@ -16,7 +16,7 @@ struct ConversationComposer: View {
         VStack(alignment: .leading, spacing: 4) {
             if let target = draft.replyTarget {
                 HStack {
-                    Label("Replying to " + target.excerpt, systemImage: "arrowshape.turn.up.left")
+                    Label((draft.replyUnavailable ? "Reply unavailable: " : "Replying to ") + target.excerpt, systemImage: "arrowshape.turn.up.left")
                         .font(.subheadline).lineLimit(2)
                     Spacer()
                     Button { draft.replyTarget = nil } label: {

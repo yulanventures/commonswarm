@@ -22,21 +22,39 @@ final class Composer: ObservableObject {
         return true
     }
 
+    @Published private var conversation: ConversationSummary?
+
+    @discardableResult
+    func apply(_ row: ConversationSummary?, read: Int) -> Bool {
+        guard apply(row?.access ?? .unavailable, read: read) else { return false }
+        conversation = row
+        return true
+    }
+
+    func canReply(to message: Message) -> Bool {
+        access == .joined && conversation.map { message.allowsThread(in: $0) } == true
+    }
+
     struct ReplyTarget {
-        let id: UUID
-        let excerpt: String
+        let message: Message
+        var unavailable = false
+        var id: UUID { message.id }
+        var excerpt: String { String(message.body.prefix(100)) }
     }
     @Published var replyTarget: ReplyTarget?
 
     func reply(to message: Message) {
-        guard access == .joined, message.thread_root_id == nil else { return }
-        replyTarget = ReplyTarget(id: message.id, excerpt: String(message.body.prefix(100)))
+        guard canReply(to: message) else { return }
+        replyTarget = ReplyTarget(message: message)
     }
 
     @Published var text = ""
     @Published var attachments: [UploadIntent] = []
+    var replyUnavailable: Bool {
+        replyTarget.map { $0.unavailable || !canReply(to: $0.message) } ?? false
+    }
     var canSend: Bool {
-        access == .joined && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
+        access == .joined && !replyUnavailable && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && text.utf16.count <= 8_000
     }
 
     func stage(_ file: StagedFile) throws {
@@ -48,7 +66,7 @@ final class Composer: ObservableObject {
 
     struct Outgoing: Identifiable {
         let post: Post
-        let replyTarget: ReplyTarget?
+        var replyTarget: ReplyTarget?
         let files: [UploadIntent]
         let createdAt = Date()
         var delivery: Delivery = .sending
@@ -120,6 +138,7 @@ final class Composer: ObservableObject {
         // A refusal before receipt lookup cannot settle a previous uncertain attempt.
         if case .sending = outgoing[i].delivery, case APIError.refused(let status) = error,
            (400..<500).contains(status), status != 408 {
+            if status == 404 { outgoing[i].replyTarget?.unavailable = true }
             outgoing[i].delivery = .refused
         } else {
             outgoing[i].delivery = .unconfirmed

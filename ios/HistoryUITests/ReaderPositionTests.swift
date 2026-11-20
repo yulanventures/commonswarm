@@ -55,6 +55,12 @@ final class ReaderPositionTests: XCTestCase {
             try tap("Sign in")
         }
         try tap("Simulator workspace")
+        try tap("Atlas, Morgan")
+        XCTAssertTrue(app.buttons["Reply to Group topic"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Restricted topic"].exists)
+        XCTAssertFalse(app.buttons["Reply to Restricted topic"].exists)
+        screenshot("group-thread-audiences")
+        app.navigationBars.buttons["Simulator workspace"].tap()
         try tap("#mobile")
         try tap("Reply to First topic")
         let field = app.textFields["Thread reply"].firstMatch

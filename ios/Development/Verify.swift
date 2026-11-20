@@ -247,6 +247,14 @@ enum Verify {
                    canonicalDraft.text == "Next draft", "send and retry preserve the original root and the independent next draft")
         let draft = session.composer(workspace: ws.id, conversation: dm.id)
         draft.text = "Unsent A"
+        canonicalDraft.text = "Keep my reply"
+        guard let gone = canonicalDraft.begin(workspace: ws.id, destination: canonical.destination) else { throw Failure.mismatch("selected target") }
+        canonicalDraft.failed(gone.command_id, with: APIError.refused(404))
+        canonicalDraft.editRefused(gone.command_id)
+        try expect(canonicalDraft.text == "Keep my reply" && canonicalDraft.replyUnavailable && !canonicalDraft.canSend,
+                   "Edit keeps a refused thread draft until its author chooses where to send it")
+        canonicalDraft.replyTarget = nil
+        try expect(canonicalDraft.text == "Keep my reply" && canonicalDraft.canSend, "explicitly clearing Reply keeps the draft")
         let inB = session.composer(workspace: second.id, conversation: dm.id)
         try expect(inB.text.isEmpty, "workspace switch isolates partner drafts")
         inB.text = "Unsent B"

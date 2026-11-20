@@ -33,7 +33,30 @@ struct Message: Decodable, Identifiable {
     let from_kind: String
     let body: String
     let created_at: String
-    let thread_root_id: UUID?
+    let thread_root_id, in_reply_to, to, to_agent: UUID?
+    let audience: String?
+    let recipients: [MemberRef]?
+    let until: String?
+
+    func allowsThread(in row: ConversationSummary) -> Bool {
+        guard thread_root_id == nil, in_reply_to == nil else { return false }
+        if let until {
+            let expiry = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(until))
+                ?? (try? Date.ISO8601FormatStyle().parse(until))
+            guard let expiry, expiry.timeIntervalSinceNow > 1 else { return false }
+        }
+        if audience == "conversation" {
+            return row.kind.direct || (to == nil && to_agent == nil && (recipients ?? []).isEmpty)
+        }
+        guard row.kind.direct, audience == "addressed", let members = row.members,
+              let authorKind = ConversationMember.Kind(rawValue: from_kind) else { return false }
+        var readers = Set(recipients ?? [])
+        readers.insert(MemberRef(kind: authorKind, id: from))
+        if let to { readers.insert(MemberRef(kind: .user, id: to)) }
+        if let to_agent { readers.insert(MemberRef(kind: .agent, id: to_agent)) }
+        let active = members.filter { $0.left_at == nil }
+        return !active.isEmpty && active.allSatisfy { readers.contains(MemberRef(kind: $0.kind, id: $0.id)) }
+    }
     let attachments: [MessageAttachment]?
 }
 

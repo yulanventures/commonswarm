@@ -257,7 +257,7 @@ struct HistoryView: View {
                                 }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
-                                if case .thread = item.destination, draft.access == .joined, message.thread_root_id == nil {
+                                if draft.canReply(to: message) {
                                     Button { draft.reply(to: message) } label: {
                                         Label("Reply", systemImage: "arrowshape.turn.up.left").font(.subheadline)
                                             .frame(minHeight: 44).contentShape(Rectangle())

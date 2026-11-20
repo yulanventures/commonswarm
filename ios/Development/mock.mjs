@@ -79,6 +79,12 @@ if (review) {
   messages[0].attachments = [fixtureFile];
 }
 if (process.argv[2] === "--conversations") {
+  const group = { conversation_id: randomUUID(), kind: "group_dm", joined: true, members: [...members, teammate] };
+  threadRows.push(group);
+  for (const [body, audience] of [["Group topic", "conversation"], ["Restricted topic", "addressed"]]) {
+    messages.push({ id: randomUUID(), from: me, from_kind: "user", body, audience, recipients: [members[1]],
+      created_at: new Date().toISOString(), fixtureDestination: group.conversation_id, workspace });
+  }
   for (const [index, body] of ["First topic", "Other topic"].entries()) {
     messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body,
       created_at: new Date(Date.UTC(2026, 0, 2, 0, index)).toISOString(), fixtureDestination: channel, workspace });
@@ -236,7 +242,7 @@ const server = createServer(async (req, res) => {
       const history = messages.filter(m => targets.includes(m.fixtureDestination) && m.workspace === ws &&
         (!body.before_created_at || m.created_at < body.before_created_at ||
           (m.created_at === body.before_created_at && m.id < body.before_id.toLowerCase())));
-      return reply(200, { conversation: row, messages: history.slice(0, body.limit).reverse() });
+      return reply(200, { conversation: row, messages: history.slice(0, body.limit).reverse().map(m => ({ audience: "conversation", ...m })) });
     }
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
       if (typeof body.client_version !== "string" || body.client_version !== expectedClientVersion) {
