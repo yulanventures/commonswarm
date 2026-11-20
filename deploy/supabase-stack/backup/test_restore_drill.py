@@ -395,11 +395,13 @@ class DrillTests(unittest.TestCase):
         # This does not execute PostgreSQL, ACL enforcement or pg_restore COPY.
         ops_ddl = ('CREATE TABLE commonswarm_ops.migration_checksums (version text);\n'
                    'ALTER TABLE commonswarm_ops.migration_checksums OWNER TO swarm_admin;\n'
-                   'GRANT SELECT ON commonswarm_ops.migration_checksums TO swarm_command;\n')
+                   'GRANT SELECT ON commonswarm_ops.migration_checksums TO swarm_command;\n'
+                   '-- Name: migration_checksums checksum_runtime_read; Type: POLICY; Schema: commonswarm_ops; Owner: swarm_admin\n--\n\n'
+                   'CREATE POLICY checksum_runtime_read ON commonswarm_ops.migration_checksums FOR SELECT TO swarm_command, commonswarm_oauth_runtime USING (true);\n')
         self.schema.append(('commonswarm_ops', 'migration_checksums', 'TABLE', ops_ddl))
         self.write_schema()
         faults = (None, 'lost-row', 'sha256', 'applied_at', 'source', 'released_sha',
-                  'missing-function', 'owner', 'acl', 'gate')
+                  'missing-function', 'owner', 'acl', 'gate', 'policy-role-order', 'policy-public', 'policy-predicate')
         for fault in faults:
             with self.subTest(fault=fault):
                 self.target_ops_rows = [dict(self.ops_rows[0])]
@@ -416,7 +418,13 @@ class DrillTests(unittest.TestCase):
                 elif fault in ('owner', 'acl'):
                     ddl = ops_ddl.replace('OWNER TO swarm_admin', 'OWNER TO postgres') if fault == 'owner' else ops_ddl.replace('TO swarm_command', 'TO PUBLIC')
                     self.target_extra = [('commonswarm_ops', 'migration_checksums', 'TABLE', ddl)]
-                if fault is None:
+                if fault in ('policy-role-order', 'policy-public', 'policy-predicate'):
+                    policy = ops_ddl.replace('TO swarm_command, commonswarm_oauth_runtime USING (true)',
+                        'TO commonswarm_oauth_runtime, swarm_command USING (true)')
+                    if fault == 'policy-public': policy = policy.replace('TO commonswarm_oauth_runtime, swarm_command USING (true)', 'TO PUBLIC, commonswarm_oauth_runtime, swarm_command USING (true)')
+                    if fault == 'policy-predicate': policy = policy.replace('USING (true);', 'USING (false);')
+                    self.target_extra = [('commonswarm_ops', 'migration_checksums', 'TABLE', policy)]
+                if fault in (None, 'policy-role-order'):
                     self.assertEqual(drill.main(), 0)
                     self.assertTrue(self.status()['ok'])
                     self.assertFalse(any(self.resources.values()))
