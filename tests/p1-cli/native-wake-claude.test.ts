@@ -21,11 +21,12 @@
  *      - Read-only arrival check never advances `check.json`.
  */
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { closeSync, constants as fsConstants, openSync, readSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { PassThrough, Writable } from "node:stream";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -38,7 +39,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 const execFileAsync = promisify(execFile);
 import { parseAgentConnection, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
-import { serveAgentChannel } from "../../src/cloud/agent-channel.js";
+import { assertNonBlockingChannelStdout, serveAgentChannel } from "../../src/cloud/agent-channel.js";
 import {
   configureAgentReceive,
   readReceiveBinding,
@@ -1820,7 +1821,28 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
 
   await new Promise<void>((res) => http.listen(0, "127.0.0.1", res));
   const port = (http.address() as { port: number }).port;
+  const fifoPath = join(root, "stdout.fifo");
+  execFileSync("mkfifo", [fifoPath]);
+  const rfd = openSync(fifoPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  let wfd: number | null = openSync(fifoPath, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
   let child: ReturnType<typeof spawn> | null = null;
+
+  const readAvailableFifo = (): string => {
+    const chunks: Buffer[] = [];
+    const buf = Buffer.alloc(8192);
+    while (true) {
+      try {
+        const n = readSync(rfd, buf, 0, buf.length, null);
+        if (n <= 0) break;
+        chunks.push(Buffer.from(buf.subarray(0, n)));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EAGAIN" || code === "EWOULDBLOCK") break;
+        throw error;
+      }
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  };
 
   try {
     const { cwd, profile } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
@@ -1834,12 +1856,12 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
       execution: { command: process.execPath, args: [CLI] },
     });
 
-    // Spawn the REAL production CLI `cswarm receive serve` over a real OS stdio pipe/socketpair.
+    // Spawn the REAL production CLI `cswarm receive serve` with fd 1 attached to a real POSIX FIFO pipe.
     child = spawn(
       process.execPath,
       [CLI, "receive", "serve", "--profile", profile, "--host-session-id", SESSION_ID],
       {
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["pipe", wfd, "pipe"],
         env: { ...process.env, HOME: root },
       },
     );
@@ -1855,39 +1877,29 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
 
     await waitUntil(async () => receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running);
 
-    // Complete MCP initialize handshake over the real CLI pipe.
-    let initBuf = "";
-    const initDone = new Promise<void>((res) => {
-      const onInitData = (chunk: Buffer) => {
-        initBuf += chunk.toString("utf8");
-        if (initBuf.includes("\n")) {
-          proc.stdout!.off("data", onInitData);
-          // Immediately pause reading real child stdout so the OS kernel pipe buffer fills up!
-          proc.stdout!.pause();
-          res();
-        }
-      };
-      proc.stdout!.on("data", onInitData);
-    });
+    // Complete MCP initialize handshake over the real CLI pipe, then STOP reading the FIFO!
     proc.stdin!.write(`${JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "initialize",
       params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "real-cli-stall", version: "1.0.0" } },
     })}\n`);
-    await initDone;
+    let initBuf = "";
+    await waitUntil(() => {
+      initBuf += readAvailableFifo();
+      return initBuf.includes("\n");
+    }, 4_000);
     proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 
-    // Saturate the real OS pipe/socketpair kernel buffer with real `tools/list` responses (~250 KB)
-    // while child.stdout stays paused!
+    // Saturate the real OS FIFO kernel buffer with real `tools/list` responses (~250 KB)
+    // while the reader stays paused!
     for (let i = 2; i <= 120; i += 1) {
       proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/list", params: {} })}\n`);
     }
-    // Give the child a brief moment to fill the kernel stdout buffer to EAGAIN.
     await delay(250);
 
     // Now mark turn_verified_at so the real child claims the pending delivery and attempts
-    // `notifications/claude/channel` against the saturated real stdout descriptor.
+    // `notifications/claude/channel` against the saturated real stdout FIFO.
     await receiveHookEvent(profile, SESSION_ID, {
       session_id: SESSION_ID,
       cwd,
@@ -1896,7 +1908,7 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     await waitUntil(() => claimCount >= 1, 6_000);
     await delay(150);
 
-    // Switch channel -> socket while real child stdout is STILL paused and the notification is stalled.
+    // Switch channel -> socket while the FIFO reader is STILL paused and the notification is stalled.
     const switchStarted = Date.now();
     await configureAgentReceive({
       profilePath: profile,
@@ -1911,23 +1923,18 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     assert.ok(switchElapsedMs < 8_000, `real CLI route switch must not starve on stalled stdout (took ${switchElapsedMs}ms)`);
     assert.ok(switchElapsedMs >= 1_500, `expected real 2s stdout stall bound before switch committed (took ${switchElapsedMs}ms)`);
 
-    // NOW resume reading real child stdout immediately AFTER the route switch committed,
-    // draining every buffered byte until the stalled CLI process exits and closes stdout (EOF).
-    let drained = initBuf;
-    const drainDone = new Promise<void>((res) => {
-      if (proc.stdout!.readableEnded) { res(); return; }
-      proc.stdout!.on("data", (chunk: Buffer) => { drained += chunk.toString("utf8"); });
-      proc.stdout!.once("end", res);
-      proc.stdout!.resume();
-    });
-    const exitPromise = new Promise<number | null>((res) => {
+    // Wait for the stalled real CLI process to exit cleanly, then close parent's writer dup and
+    // drain EVERY SINGLE buffered byte from the FIFO to EOF after the route switch committed.
+    await new Promise<number | null>((res) => {
       if (proc.exitCode !== null || proc.signalCode !== null) res(proc.exitCode);
       else proc.once("close", (code) => res(code));
     });
-    await Promise.all([drainDone, exitPromise]);
+    closeSync(wfd);
+    wfd = null;
     assert.equal(receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running, false);
 
-    assert.ok(drained.length > 32_768, `expected saturated real stdout buffer (>32KB), got ${drained.length} bytes`);
+    const drained = initBuf + readAvailableFifo();
+    assert.ok(drained.length >= 4_096, `expected saturated real stdout FIFO (>=4KB), got ${drained.length} bytes`);
     const lines = drained.split("\n").filter((l) => l.trim().length > 0);
     const channelNotifications = lines.filter((line) => {
       try {
@@ -1951,7 +1958,61 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     if (child && child.exitCode === null) {
       try { child.kill("SIGKILL"); } catch { /* already exited */ }
     }
+    if (wfd !== null) {
+      try { closeSync(wfd); } catch { /* ignore */ }
+    }
+    try { closeSync(rfd); } catch { /* ignore */ }
     await new Promise<void>((res) => http.close(() => res()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C3d witness: real CLI cswarm receive serve refuses regular-file stdout at startup with wake_route=unavailable diagnostic", { timeout: 15_000 }, async () => {
+  const root = await makeTempDir("cs-cw-c3d-");
+  const outPath = join(root, "stdout.log");
+  const outHandle = await open(outPath, "w", 0o600);
+  try {
+    // Direct fd probe refuses a regular file fd synchronously before any transport write.
+    assert.throws(
+      () => assertNonBlockingChannelStdout(outHandle.fd),
+      { code: "channel_stdout_unsupported" },
+    );
+
+    const { cwd, profile } = await makeBoundClaudeSeat(root, "http://127.0.0.1:1");
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+
+    // Spawn the REAL CLI `cswarm receive serve` with fd 1 redirected to a regular file.
+    const proc = spawn(
+      process.execPath,
+      [CLI, "receive", "serve", "--profile", profile, "--host-session-id", SESSION_ID],
+      {
+        stdio: ["pipe", outHandle.fd, "pipe"],
+        env: { ...process.env, HOME: root },
+      },
+    );
+    let stderr = "";
+    proc.stderr!.setEncoding("utf8");
+    proc.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((res) => proc.once("close", res));
+
+    assert.notEqual(exitCode, 0, "channel bridge must refuse to start when stdout is a regular file");
+    assert.match(stderr, /wake_route=unavailable/);
+    assert.match(stderr, /stdout must be a pipe or socket/);
+    assert.equal(await readFile(outPath, "utf8"), "", "refused bridge must write zero bytes to unsupported stdout");
+    const binding = await readReceiveBinding(profile, SESSION_ID);
+    assert.equal(binding?.channel_pid, null, "refused startup must not install channel_pid");
+    assert.equal(receiveStatus(binding).channel_running, false);
+    assert.equal(receiveStatus(binding).wake_verified, false);
+  } finally {
+    await outHandle.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });

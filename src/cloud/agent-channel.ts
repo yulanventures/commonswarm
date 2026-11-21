@@ -178,12 +178,43 @@ class ChannelTransportStalledError extends Error {
   }
 }
 
+export const CHANNEL_STDOUT_UNSUPPORTED_REASON = "stdout must be a pipe or socket";
+
 /**
- * Production stdio MCP transport that writes directly to fd 1 with non-blocking `writeSync`
- * when stdout is a pipe or Unix socketpair (avoiding Node's un-cancellable `process.stdout`
- * userspace write buffer, whose `destroy()` leaves fd 1 open and flushes queued bytes later).
+ * Verify that fd 1 (or the supplied fd) is a POSIX pipe or Unix socket supported by our
+ * non-blocking `writeSync` writer. Terminals and regular files can block synchronously on
+ * `process.stdout.write()`, starving the receive lock during opt-out, so we fail closed at
+ * startup with a fixed diagnostic.
+ */
+export function assertNonBlockingChannelStdout(fd = 1): number {
+  let st;
+  try {
+    if (fd === 1) {
+      // Initializing process.stdout configures Node's libuv pipe/socket handle (O_NONBLOCK).
+      void process.stdout.writable;
+    }
+    st = fstatSync(fd);
+  } catch {
+    throw new AgentSetupError(
+      "channel_stdout_unsupported",
+      `wake_route=unavailable (${CHANNEL_STDOUT_UNSUPPORTED_REASON}): Claude channel bridge requires a pipe or socket stdout.`,
+    );
+  }
+  if (!st.isFIFO() && !st.isSocket()) {
+    throw new AgentSetupError(
+      "channel_stdout_unsupported",
+      `wake_route=unavailable (${CHANNEL_STDOUT_UNSUPPORTED_REASON}): Claude channel bridge requires a pipe or socket stdout; terminals and regular files are unsupported.`,
+    );
+  }
+  return fd;
+}
+
+/**
+ * Production stdio MCP transport that writes directly to a verified pipe/socket fd via
+ * non-blocking `writeSync` (never falling back to Node's un-cancellable `process.stdout.write()`).
  *
  * Guarantees:
+ *   - Refuses startup if stdout is not a pipe or socket (fails closed on TTYs and regular files).
  *   - `send()` resolves only after the kernel accepts 100% of the serialized frame bytes.
  *   - On `EAGAIN`, retries with an abortable timer until the write deadline (`notifyTimeoutMs`
  *     for channel notifications).
@@ -197,7 +228,7 @@ class BoundedStdioServerTransport implements Transport {
 
   private readonly readBuffer = new ReadBuffer();
   private readonly closeAbort = new AbortController();
-  private readonly nonBlockingFd: number | null;
+  private readonly nonBlockingFd: number;
   private started = false;
   private closed = false;
   private writeChain: Promise<void> = Promise.resolve();
@@ -221,23 +252,10 @@ class BoundedStdioServerTransport implements Transport {
 
   constructor(
     private readonly stdin: NodeJS.ReadableStream = process.stdin,
-    private readonly stdout: NodeJS.WritableStream = process.stdout,
+    stdoutFd = 1,
     private readonly notifyTimeoutMs: number = CHANNEL_NOTIFY_TIMEOUT_MS,
   ) {
-    let fd: number | null = null;
-    if (stdout === process.stdout) {
-      try {
-        // Initializing process.stdout configures Node's libuv pipe/socket handle (O_NONBLOCK).
-        void process.stdout.writable;
-        const st = fstatSync(1);
-        if (st.isFIFO() || st.isSocket()) {
-          fd = 1;
-        }
-      } catch {
-        fd = null;
-      }
-    }
-    this.nonBlockingFd = fd;
+    this.nonBlockingFd = assertNonBlockingChannelStdout(stdoutFd);
   }
 
   async start(): Promise<void> {
@@ -281,28 +299,6 @@ class BoundedStdioServerTransport implements Transport {
     }
   }
 
-  private async writeFallbackStream(buf: Buffer, deadlineMs: number): Promise<void> {
-    if (this.closed || this.closeAbort.signal.aborted) {
-      throw new ChannelTransportStalledError("CommonSwarm channel transport closed.");
-    }
-    const remaining = Math.max(1, deadlineMs - Date.now());
-    await new Promise<void>((resolveWrite, rejectWrite) => {
-      let settled = false;
-      const done = (err?: Error | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this.closeAbort.signal.removeEventListener("abort", onAbort);
-        if (err) rejectWrite(err);
-        else resolveWrite();
-      };
-      const onAbort = () => done(new ChannelTransportStalledError("CommonSwarm channel transport closed."));
-      const timer = setTimeout(() => done(new ChannelTransportStalledError()), remaining);
-      this.closeAbort.signal.addEventListener("abort", onAbort, { once: true });
-      this.stdout.write(buf, (err) => done(err ?? null));
-    });
-  }
-
   send(message: JSONRPCMessage): Promise<void> {
     if (this.closed || this.closeAbort.signal.aborted) {
       return Promise.reject(new ChannelTransportStalledError("CommonSwarm channel transport is closed."));
@@ -318,11 +314,7 @@ class BoundedStdioServerTransport implements Transport {
       if (this.closed || this.closeAbort.signal.aborted || Date.now() >= deadlineMs) {
         throw new ChannelTransportStalledError();
       }
-      if (this.nonBlockingFd !== null) {
-        await this.writeAllNonBlocking(this.nonBlockingFd, buf, deadlineMs);
-      } else {
-        await this.writeFallbackStream(buf, deadlineMs);
-      }
+      await this.writeAllNonBlocking(this.nonBlockingFd, buf, deadlineMs);
     });
     // Keep the write queue alive for subsequent work if an unrelated write settles,
     // while returning the exact completion/rejection promise to this caller.
@@ -380,6 +372,9 @@ export async function serveAgentChannel(options: {
   const initial = await readReceiveBinding(profilePath, host);
   if (!bindingAllowsChannel(initial, isGateway)) {
     throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
+  }
+  if (!isGateway && options.transport === undefined) {
+    assertNonBlockingChannelStdout(1);
   }
   if (receiveStatus(initial!).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
   const runtimeId = randomUUID();
@@ -695,7 +690,7 @@ export async function serveAgentChannel(options: {
   });
   const activeTransport = options.gateway
     ? null
-    : (options.transport ?? new BoundedStdioServerTransport(process.stdin, process.stdout, notifyTimeoutMs));
+    : (options.transport ?? new BoundedStdioServerTransport(process.stdin, 1, notifyTimeoutMs));
   try {
     await persist();
     if (options.gateway) initialized = true;
