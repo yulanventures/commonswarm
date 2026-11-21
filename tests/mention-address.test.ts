@@ -11,7 +11,10 @@ import {
   MentionResolutionError,
   bodyMayMention,
   foldMentionName,
+  prefilterMentionCandidateAgents,
+  resolveGroupDmAgentMentions,
   resolveMentions,
+  type GroupDmAgentMember,
   type MentionRosterEntry,
 } from "../src/protocol/mention-address.js";
 import * as composer from "../site/src/lib/mention-address.js";
@@ -109,4 +112,72 @@ test("only an @ that can open a tag asks for the roster", () => {
   assert.equal(bodyMayMention("hi (@Wren)"), true);
   assert.equal(bodyMayMention("me@wren.dev"), false);
   assert.equal(bodyMayMention("no at sign"), false);
+});
+
+test("C1e group-DM body mention resolver prefilters and resolves live peer agents without duplicating explicit to", () => {
+  const peerAgents: GroupDmAgentMember[] = [
+    { id: WREN, name: "Wren" },
+    { id: WRENLEY, name: "Wrenley" },
+    { id: ORBIT, name: "Orbit" },
+    { id: LEAD, name: "CommonSwarm Lead (Sol)" },
+    { id: id(20), name: "İpek" },
+  ];
+
+  // Prefilter narrows to plausible hits, respects accents/case, and ignores non-mention @ signs.
+  assert.deepEqual(
+    prefilterMentionCandidateAgents("Hey @ipek and @CommonSwarm Lead (Sol), see foo@wren.dev", peerAgents).map((a) => a.id),
+    [LEAD, id(20)],
+  );
+  assert.deepEqual(prefilterMentionCandidateAgents("no at sign here", peerAgents), []);
+  assert.deepEqual(prefilterMentionCandidateAgents("email@Wren.dev", peerAgents), []);
+
+  // Single & multiple @Agent mentions preserve body order, respect boundaries, and ignore unknown tags.
+  assert.deepEqual(
+    resolveGroupDmAgentMentions({ body: "cc @Wrenley, @Wren, @Ghost, and @ipek!", peerAgents }),
+    {
+      ok: true,
+      agents: [
+        { kind: "agent", id: WRENLEY },
+        { kind: "agent", id: WREN },
+        { kind: "agent", id: id(20) },
+      ],
+    },
+  );
+
+  // Deduplicates against explicit `to` agents while adding newly mentioned peers.
+  assert.deepEqual(
+    resolveGroupDmAgentMentions({
+      body: "@Wren and @Orbit please check",
+      peerAgents,
+      explicitTo: [{ kind: "agent", id: WREN }],
+    }),
+    {
+      ok: true,
+      agents: [{ kind: "agent", id: ORBIT }],
+    },
+  );
+
+  // Duplicate names inside the same group DM refuse with mention_ambiguous naming only in-group IDs,
+  // unless disambiguated via explicit `to`.
+  const dupA = "11111111-1111-4111-8111-111111111111";
+  const dupB = "22222222-2222-4222-8222-222222222222";
+  const dupPeers: GroupDmAgentMember[] = [
+    { id: dupA, name: "Reviewer" },
+    { id: dupB, name: "Reviewer" },
+    { id: ORBIT, name: "Orbit" },
+  ];
+  const amb = resolveGroupDmAgentMentions({ body: "@Reviewer please review", peerAgents: dupPeers });
+  assert.equal(amb.ok, false);
+  if (!amb.ok) {
+    assert.equal(amb.error, "mention_ambiguous");
+    assert.ok(amb.message.includes(dupA) && amb.message.includes(dupB));
+  }
+  assert.deepEqual(
+    resolveGroupDmAgentMentions({
+      body: "@Reviewer and @Orbit please review",
+      peerAgents: dupPeers,
+      explicitTo: [{ kind: "agent", id: dupA }],
+    }),
+    { ok: true, agents: [{ kind: "agent", id: ORBIT }] },
+  );
 });
