@@ -2,40 +2,49 @@
  * Experimental native Antigravity wake adapter (`agy agentapi send-message`) behind an
  * explicit feature flag (`--provider agy --mode wake --experimental-agy-agentapi`).
  *
- * HezLead narrow scope decision on #716 C1 (2026-11-20):
- *   The vendor Antigravity CLI (`antigravity agentapi send-message` / `get-conversation-metadata`)
- *   reads `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` ONLY from its own child process
- *   environment (no CLI flags, stdin, or credentials-file option exist in Antigravity 1.5.11).
- *   HezLead approved a narrow scope decision allowing ONLY the pinned, short-lived `antigravity`
- *   child process to receive canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in an
- *   otherwise stripped minimal environment for the life of that single short call, because the
- *   token already lives in the active `agy` session's environment, macOS isolates per-user process
- *   environments, and the adapter stays behind `--experimental-agy-agentapi`.
- *   Mandatory conditions enforced here:
- *     - NEVER read or set those credentials in `cswarm`'s own process environment or any long-lived process.
- *     - Registration (`cswarm receive register-agy`) accepts credentials ONLY via a 0600 file
- *       (`--credentials-file`) or stdin (`--stdin` / piped stdin) — never argv or process env.
- *     - NEVER print, log, or persist `ls_address`, `csrf_token`, or raw subprocess stdout/stderr in
- *       command output, wake state, or bridge logs; emit only fixed static diagnostic codes and text.
- *
- * Additional security & operational invariants (C2 & C3):
- *   - Canonical loopback IP literal only (`127.0.0.1:<port>` or `[::1]:<port>`): never store or pass
- *     hostnames like `localhost` or URL schemes; strip all proxy environment variables and set `NO_PROXY=*`.
- *   - Pin the trusted Antigravity binary (no ambient `PATH` lookup) with full ancestor directory walk
- *     up to `/` rejecting any world-writable directory or untrusted owner.
- *   - Bind registration to live provider session evidence: inspect the loopback-only listening process
- *     (`pid`, `uid`, `start_time`, canonical executable) BEFORE presenting credentials, verify
- *     `get-conversation-metadata <conv-uuid>` proves this LS owns the bound conversation and workspace
- *     `cwd`, and re-verify the exact listening process `(pid, uid, start_time, executable)` BEFORE
- *     presenting credentials on every wake dispatch (safe refusal of replaced endpoints on reused ports
- *     and of different live sessions).
- *   - Durable opt-out and held-startup safety: `--mode turn` persists before credential cleanup (reporting
- *     cleanup failure without rolling back turn mode), and bridge startup acquires the shared
- *     `receive-<scope>` lock and re-verifies the live wake route before writing its runtime marker.
+ * HezLead narrow scope decisions on #716 (2026-11-20):
+ *   1. C1 — Short-lived child env handoff & Option B Homebrew ancestor trust:
+ *      - The vendor Antigravity CLI (`antigravity agentapi send-message` / `get-conversation-metadata`)
+ *        reads `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` ONLY from its own child process
+ *        environment (verified on Antigravity 1.5.11: no flags, stdin, or credentials-file option).
+ *        ONLY the pinned, short-lived `antigravity` child receives canonical `ANTIGRAVITY_LS_ADDRESS`
+ *        and `ANTIGRAVITY_CSRF_TOKEN` in an otherwise stripped minimal env for that single short call.
+ *      - NEVER read or set those credentials in `cswarm`'s own process env or any long-lived process;
+ *        `cswarm receive register-agy` accepts ONLY an owned 0600 file (`--credentials-file`) or stdin;
+ *        never print `ls_address`, `csrf_token`, or raw subprocess output (fixed diagnostics only).
+ *      - Executable trust (Option B): leaf binary must be owned by root or current UID, strictly
+ *        non-group/world-writable (`0o022`), free of macOS ACLs, pass strict Apple `codesign` for
+ *        Google LLC (`TeamIdentifier=EQHXZ8M8AV`, `Identifier=cli`) on macOS, and match its pinned
+ *        SHA-256 digest (`agentapi_exe_sha256`). All ancestor directories up to `/` must reject
+ *        world-write, group-write (`0o022`), and macOS ACLs, EXCEPT macOS Homebrew ancestors
+ *        (`/opt/homebrew...` or `/usr/local/Caskroom...`) with gid `0` (wheel) or `80` (admin) ONLY
+ *        when the leaf passes strict Google LLC `codesign` + SHA-256 pin (because macOS admin-group
+ *        members already have sudo). When the vendor updates and the SHA-256 pin changes, fail closed
+ *        with a fixed re-register diagnostic (`agy_executable_pin_mismatch`).
+ *   2. C2 — Irreducible loopback TCP TOCTOU residual risk (accepted behind experimental flag):
+ *      - Antigravity's local language server listens only on plain loopback TCP (no Unix domain socket,
+ *        no `SO_PEERCRED`, no mTLS), and `antigravity agentapi` opens a new HTTP/2 gRPC TCP connection
+ *        per invocation (empirically verified to reject HTTP 302 redirects off loopback).
+ *      - Residual risk accepted by HezLead behind `--experimental-agy-agentapi`: a millisecond TCP
+ *        TOCTOU window exists between pre-exec OS listener verification and the vendor CLI's `connect()`.
+ *      - Mandatory mitigations enforced here:
+ *        (a) Registration listener lookup runs inside the shared `receive-<scope>` lock and re-verifies
+ *            after `get-conversation-metadata`.
+ *        (b) Dispatch re-verifies the exact listener `(canonical_address, pid, uid, start_time, exe,
+ *            sha256)` BEFORE `get-conversation-metadata`, AGAIN BETWEEN metadata and `send-message`,
+ *            AND ONCE MORE AFTER `send-message`.
+ *        (c) If post-send verification sees any listener change, remove the 0600 registration, mark
+ *            `wake_route` unavailable (`wake_unavailable_reason: "agy_endpoint_changed_after_send"`)
+ *            with a fixed reason, and require explicit re-registration.
+ *   3. C3 — Bounded lock hold during opt-out:
+ *      - Single total dispatch budget (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, well inside opt-out's
+ *        20s lock wait) across all inspections and child calls; `spawn`-based runner sends `SIGTERM`
+ *        then `SIGKILL` after grace and awaits child `"close"` before returning and releasing the
+ *        shared `receive-<scope>` lock.
  */
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import { lstat, open, readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -53,6 +62,7 @@ import {
   profileScopeKey,
   profileSessionContext,
   profileTarget,
+  readAgentProfile,
 } from "./agent-profile.js";
 import {
   checkedHostSessionId,
@@ -97,8 +107,10 @@ const execFileAsync = promisify(execFile);
 
 const AGY_WAKE_HEARTBEAT_MS = 5_000;
 const AGY_WAKE_POLL_MS = 30_000;
-const AGY_AGENTAPI_TIMEOUT_MS = 12_000;
-const AGY_ENDPOINT_INSPECT_TIMEOUT_MS = 5_000;
+/** Single total dispatch budget across inspections + metadata + send (fits inside 20s opt-out lock wait). */
+const AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000;
+const AGY_ENDPOINT_INSPECT_TIMEOUT_MS = 3_000;
+const AGY_CHILD_KILL_GRACE_MS = 400;
 const AGY_REGISTRATION_MAX_BYTES = 16 * 1024;
 const AGY_LS_ADDRESS_MAX_CHARS = 256;
 const AGY_CSRF_TOKEN_MAX_CHARS = 512;
@@ -106,8 +118,12 @@ const AGY_EXECUTABLE_MAX_CHARS = 1024;
 const AGY_CONTROL_OR_SPACE_RE = /[\x00-\x20\x7f]/;
 const AGY_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 const AGY_EXECUTABLE_BASENAME_RE = /^(agy|antigravity)(\.exe)?$/i;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const CANONICAL_LOOPBACK_ADDR_RE = /^(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/;
 const LOOPBACK_INPUT_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const MACOS_HOMEBREW_ADMIN_GIDS = new Set([0, 80]);
+const GOOGLE_DEVELOPER_TEAM_ID = "EQHXZ8M8AV";
+const GOOGLE_DEVELOPER_AUTHORITY = `Developer ID Application: Google LLC (${GOOGLE_DEVELOPER_TEAM_ID})`;
 const AGY_UNREACHABLE_RE =
   /econnrefused|connection refused|connect error|failed to connect|dial tcp|401|403|unauthorized|unauthenticated|forbidden|csrf|unavailable|connection reset|socket hang up|etimedout|eof/i;
 
@@ -121,6 +137,7 @@ export interface AgyRegistrationRecord {
   ls_uid: number;
   ls_start_time: string;
   agentapi_exe: string;
+  agentapi_exe_sha256: string;
   csrf_token: string;
   registered_at: string;
 }
@@ -140,9 +157,21 @@ export interface AgyCredentialsPayload {
   agentapi_exe?: string;
 }
 
+export interface AgyVendorVerificationResult {
+  ok: boolean;
+  /** True only when verified as Apple-notarized Google LLC (`EQHXZ8M8AV`). */
+  googleSigned: boolean;
+}
+
+export type AgyVendorVerifier = (
+  resolvedExecutablePath: string,
+  options?: { timeoutMs?: number; signal?: AbortSignal },
+) => Promise<AgyVendorVerificationResult>;
+
 export type AgyEndpointInspector = (input: {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
 }) => Promise<AgyLoopbackEndpoint | null>;
 
@@ -301,15 +330,111 @@ function isTrustedOwnerUid(uid: number): boolean {
   return uid === 0 || uid === selfUid;
 }
 
+function isHomebrewAncestorPath(dirPath: string): boolean {
+  return (
+    dirPath === "/opt/homebrew" ||
+    dirPath.startsWith("/opt/homebrew/") ||
+    dirPath === "/usr/local/Caskroom" ||
+    dirPath.startsWith("/usr/local/Caskroom/")
+  );
+}
+
+/** Compute lowercase 64-hex SHA-256 digest of a file on disk. */
+export async function sha256File(filePath: string): Promise<string> {
+  return new Promise<string>((resolveHash, rejectHash) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", rejectHash);
+    stream.on("end", () => resolveHash(hash.digest("hex")));
+  });
+}
+
 /**
- * Pin and verify a trusted Antigravity executable:
- * - Canonicalized via `realpath` (never resolved through `PATH`).
- * - Leaf basename must be `agy` or `antigravity`, regular executable file, owned by root or current UID,
- *   and not world-writable.
- * - Full ancestor directory walk from parent up to `/`: every ancestor must be a directory owned by
- *   root or current UID and MUST NOT be world-writable (rejects `/tmp` or any 0o777 parent dir).
+ * Inspect macOS extended ACLs via `/bin/ls -led` (absolute path, stripped env).
+ * Returns true if the file or directory has any extended ACL entries (fail closed).
  */
-export async function validateAgyAgentApiExecutable(raw: unknown): Promise<string> {
+async function hasMacOsAcl(
+  targetPath: string,
+  timeoutMs = AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (process.platform !== "darwin") return false;
+  try {
+    const res = await execFileAsync("/bin/ls", ["-led", targetPath], {
+      env: {},
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024,
+      ...(signal ? { signal } : {}),
+    });
+    const lines = String(res.stdout ?? "")
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return true;
+    // Mode field ends with '+' when an ACL is attached; additional lines list ACL entries (" 0: ...").
+    const modeToken = lines[0]!.trim().split(/\s+/)[0] ?? "";
+    if (modeToken.includes("+") || lines.length > 1) return true;
+    return false;
+  } catch {
+    // Fail closed if effective macOS permissions cannot be verified.
+    return true;
+  }
+}
+
+/**
+ * Default vendor build verification on macOS using `/usr/bin/codesign` (absolute path, stripped env).
+ * Verifies strict signature integrity AND Developer ID Application: Google LLC (EQHXZ8M8AV) + Identifier=cli.
+ */
+export const defaultAgyVendorVerifier: AgyVendorVerifier = async (resolvedPath, options) => {
+  if (process.platform !== "darwin") {
+    // Non-macOS has no Apple codesign; require an explicit approved pin or injected verifier.
+    return { ok: false, googleSigned: false };
+  }
+  const timeout = options?.timeoutMs ?? AGY_ENDPOINT_INSPECT_TIMEOUT_MS;
+  try {
+    await execFileAsync("/usr/bin/codesign", ["--verify", "--strict", resolvedPath], {
+      env: {},
+      timeout,
+      maxBuffer: 32 * 1024,
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+    const detail = await execFileAsync("/usr/bin/codesign", ["-dvv", resolvedPath], {
+      env: {},
+      timeout,
+      maxBuffer: 64 * 1024,
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+    const combined = `${detail.stdout ?? ""}\n${detail.stderr ?? ""}`;
+    const hasAuthority = combined.includes(`Authority=${GOOGLE_DEVELOPER_AUTHORITY}`);
+    const hasTeam = combined.includes(`TeamIdentifier=${GOOGLE_DEVELOPER_TEAM_ID}`);
+    const hasIdentifier = combined.includes("Identifier=cli");
+    return { ok: hasAuthority && hasTeam && hasIdentifier, googleSigned: hasAuthority && hasTeam && hasIdentifier };
+  } catch {
+    return { ok: false, googleSigned: false };
+  }
+};
+
+/**
+ * Pin and verify a trusted Antigravity executable (C1 + HezLead Option B):
+ * - Canonicalized via `realpath` (never resolved through `PATH`).
+ * - Leaf binary: regular non-symlink executable owned by root or current UID, strictly NO group-write
+ *   or world-write (`(mode & 0o022) === 0`), NO macOS ACLs.
+ * - Vendor build verification: strict Google LLC codesign (`EQHXZ8M8AV`) on macOS (or injectable verifier
+ *   in unit tests), plus SHA-256 digest pin check (`expectedSha256`) failing closed with
+ *   `agy_executable_pin_mismatch` on vendor updates.
+ * - Full ancestor directory walk up to `/`: owned by root or current UID, NO macOS ACLs, NEVER
+ *   world-writable (`0o002`), and NEVER group-writable (`0o020`) EXCEPT macOS Homebrew ancestors
+ *   with gid 0 (wheel) or 80 (admin) ONLY when the leaf passes strict Google LLC codesign + SHA-256 pin.
+ */
+export async function validateAgyAgentApiExecutable(
+  raw: unknown,
+  options?: {
+    expectedSha256?: string;
+    vendorVerifier?: AgyVendorVerifier;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<{ path: string; sha256: string }> {
   const shaped = validateAgyExecutablePathShape(raw);
   let resolved: string;
   try {
@@ -339,14 +464,49 @@ export async function validateAgyAgentApiExecutable(raw: unknown): Promise<strin
     !leafInfo.isFile() ||
     leafInfo.isSymbolicLink() ||
     (leafInfo.mode & 0o111) === 0 ||
-    (leafInfo.mode & 0o002) !== 0 ||
+    (leafInfo.mode & 0o022) !== 0 ||
     !isTrustedOwnerUid(leafInfo.uid)
   ) {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "Antigravity executable must be an owned, non-world-writable regular executable file.",
+      "Antigravity executable must be an owned regular executable file with no group or world write permissions.",
     );
   }
+  if (await hasMacOsAcl(resolved, options?.timeoutMs, options?.signal)) {
+    throw new AgentSetupError(
+      "agy_executable_invalid",
+      "Antigravity executable must not have extended ACL permissions.",
+    );
+  }
+
+  const verifier = options?.vendorVerifier ?? defaultAgyVendorVerifier;
+  const vendorCheck = await verifier(resolved, {
+    ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options?.signal ? { signal: options.signal } : {}),
+  });
+  if (!vendorCheck.ok) {
+    throw new AgentSetupError(
+      "agy_executable_unapproved",
+      "Antigravity executable did not pass approved vendor build verification.",
+    );
+  }
+
+  let sha256: string;
+  try {
+    sha256 = await sha256File(resolved);
+  } catch {
+    throw new AgentSetupError(
+      "agy_executable_invalid",
+      "Antigravity executable digest could not be computed.",
+    );
+  }
+  if (options?.expectedSha256 !== undefined && sha256 !== options.expectedSha256) {
+    throw new AgentSetupError(
+      "agy_executable_pin_mismatch",
+      "Pinned Antigravity executable changed or updated. Re-run cswarm receive register-agy.",
+    );
+  }
+
   let cursor = dirname(resolved);
   for (;;) {
     let dirInfo;
@@ -364,11 +524,32 @@ export async function validateAgyAgentApiExecutable(raw: unknown): Promise<strin
         "Antigravity executable ancestor directories must be owned by root or the current user and never world-writable.",
       );
     }
+    if ((dirInfo.mode & 0o020) !== 0) {
+      // HezLead Option B: allow root/admin group (gid 0 or 80) on macOS Homebrew ancestors ONLY when
+      // the leaf binary passed strict Google LLC codesign verification.
+      const allowedHomebrewAdmin =
+        process.platform === "darwin" &&
+        vendorCheck.googleSigned &&
+        isHomebrewAncestorPath(cursor) &&
+        MACOS_HOMEBREW_ADMIN_GIDS.has(dirInfo.gid);
+      if (!allowedHomebrewAdmin) {
+        throw new AgentSetupError(
+          "agy_executable_invalid",
+          "Antigravity executable ancestor directories must not be group-writable.",
+        );
+      }
+    }
+    if (await hasMacOsAcl(cursor, options?.timeoutMs, options?.signal)) {
+      throw new AgentSetupError(
+        "agy_executable_invalid",
+        "Antigravity executable ancestor directories must not have extended ACL permissions.",
+      );
+    }
     const parent = dirname(cursor);
     if (parent === cursor) break;
     cursor = parent;
   }
-  return resolved;
+  return { path: resolved, sha256 };
 }
 
 /**
@@ -407,7 +588,6 @@ export function parseAgyCredentialsPayload(raw: string): AgyCredentialsPayload {
       );
     }
   }
-  // Validate address syntax and CSRF token syntax without echoing raw values.
   parseAgyInputAddress(obj.ls_address);
   const csrfToken = validateAgyCsrfToken(obj.csrf_token);
   const agentapiExe =
@@ -535,13 +715,15 @@ export function buildMinimalAgyChildEnv(
 /**
  * Inspect the live loopback-only TCP listener on macOS using absolute `/usr/sbin/lsof` + `/bin/ps`
  * (zero PATH lookup, stripped env). Refuses wildcard listeners (`*:<port>`, `0.0.0.0:<port>`, `[::]:<port>`),
- * cross-UID listeners, and non-trusted executables.
+ * cross-UID listeners, and non-matching executables.
  */
 async function inspectMacOsLoopbackListener(input: {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<AgyLoopbackEndpoint | null> {
+  const timeout = Math.max(100, Math.min(input.timeoutMs ?? AGY_ENDPOINT_INSPECT_TIMEOUT_MS, AGY_ENDPOINT_INSPECT_TIMEOUT_MS));
   let lsofStdout: string;
   try {
     const res = await execFileAsync(
@@ -549,7 +731,7 @@ async function inspectMacOsLoopbackListener(input: {
       ["-nP", `-iTCP:${input.port}`, "-sTCP:LISTEN", "-F", "pun"],
       {
         env: {},
-        timeout: AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+        timeout,
         maxBuffer: 64 * 1024,
         ...(input.signal ? { signal: input.signal } : {}),
       },
@@ -604,7 +786,7 @@ async function inspectMacOsLoopbackListener(input: {
       ["-ww", "-p", String(match.pid), "-o", "uid=,lstart=,comm="],
       {
         env: {},
-        timeout: AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+        timeout,
         maxBuffer: 16 * 1024,
         ...(input.signal ? { signal: input.signal } : {}),
       },
@@ -613,7 +795,6 @@ async function inspectMacOsLoopbackListener(input: {
   } catch {
     return null;
   }
-  // Format: "<uid> <Day> <Mon> <DD> <HH:MM:SS> <YYYY> <executable path>"
   const psMatch = /^(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(
     psStdout,
   );
@@ -624,9 +805,9 @@ async function inspectMacOsLoopbackListener(input: {
   if (psUid !== match.uid) return null;
   if (typeof process.getuid === "function" && psUid !== process.getuid()) return null;
 
-  let verifiedExe: string;
+  let resolvedExe: string;
   try {
-    verifiedExe = await validateAgyAgentApiExecutable(commPath);
+    resolvedExe = await realpath(validateAgyExecutablePathShape(commPath));
   } catch {
     return null;
   }
@@ -635,7 +816,7 @@ async function inspectMacOsLoopbackListener(input: {
     pid: match.pid,
     uid: psUid,
     start_time: startTime,
-    executable: verifiedExe,
+    executable: resolvedExe,
   };
 }
 
@@ -702,13 +883,12 @@ async function inspectLinuxLoopbackListener(input: {
   const rparen = statRaw.lastIndexOf(")");
   if (rparen === -1) return null;
   const afterComm = statRaw.slice(rparen + 2).trim().split(/\s+/);
-  // Field 22 in /proc/<pid>/stat is index 19 after comm (field 3 is index 0).
   const startTicks = afterComm[19];
   if (!startTicks || !/^\d+$/.test(startTicks)) return null;
 
-  let verifiedExe: string;
+  let resolvedExe: string;
   try {
-    verifiedExe = await validateAgyAgentApiExecutable(exeRaw);
+    resolvedExe = await realpath(validateAgyExecutablePathShape(exeRaw));
   } catch {
     return null;
   }
@@ -717,7 +897,7 @@ async function inspectLinuxLoopbackListener(input: {
     pid,
     uid: selfUid ?? 0,
     start_time: startTicks,
-    executable: verifiedExe,
+    executable: resolvedExe,
   };
 }
 
@@ -774,6 +954,8 @@ function parseAgyRegistration(
     r.ls_start_time.length === 0 ||
     r.ls_start_time.length > 128 ||
     AGY_CONTROL_CHAR_RE.test(r.ls_start_time) ||
+    typeof r.agentapi_exe_sha256 !== "string" ||
+    !SHA256_HEX_RE.test(r.agentapi_exe_sha256) ||
     typeof r.registered_at !== "string" ||
     !Number.isFinite(Date.parse(r.registered_at))
   ) {
@@ -794,6 +976,7 @@ function parseAgyRegistration(
     ls_uid: r.ls_uid,
     ls_start_time: r.ls_start_time,
     agentapi_exe: agentapiExe,
+    agentapi_exe_sha256: r.agentapi_exe_sha256,
     csrf_token: csrfToken,
     registered_at: r.registered_at,
   };
@@ -832,19 +1015,136 @@ export type AgyAgentApiRunner = (
   },
 ) => Promise<{ stdout: string; stderr: string }>;
 
-const defaultAgyAgentApiRunner: AgyAgentApiRunner = async (executable, args, options) => {
-  const result = await execFileAsync(executable, [...args], {
-    cwd: options.cwd,
-    timeout: options.timeoutMs,
-    maxBuffer: 64 * 1024,
-    env: options.env,
-    ...(options.signal ? { signal: options.signal } : {}),
+/**
+ * Bounded `spawn`-based runner (C3): enforces `timeoutMs` and `options.signal`, escalates
+ * `SIGTERM` -> `SIGKILL` after grace, and ALWAYS awaits the child `"close"` event before settling
+ * so no timed-out child can survive past release of the shared `receive-<scope>` lock.
+ */
+export const defaultAgyAgentApiRunner: AgyAgentApiRunner = (executable, args, options) =>
+  new Promise((resolveRun, rejectRun) => {
+    const maxBytes = 64 * 1024;
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+    let child;
+    try {
+      child = spawn(executable, [...args], {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      rejectRun(error);
+      return;
+    }
+
+    const terminateChild = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        child.kill("SIGTERM");
+      } catch { /* already gone */ }
+      if (!killTimer) {
+        killTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            try {
+              child.kill("SIGKILL");
+            } catch { /* already gone */ }
+          }
+        }, AGY_CHILD_KILL_GRACE_MS);
+        killTimer.unref?.();
+      }
+    };
+
+    const onAbort = () => {
+      aborted = true;
+      terminateChild();
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        aborted = true;
+        terminateChild();
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    const effectiveTimeout = Math.max(1, options.timeoutMs);
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      terminateChild();
+    }, effectiveTimeout);
+
+    const cleanupTimers = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdoutBytes < maxBytes) {
+        const take = chunk.subarray(0, maxBytes - stdoutBytes);
+        stdoutChunks.push(take);
+        stdoutBytes += take.length;
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderrBytes < maxBytes) {
+        const take = chunk.subarray(0, maxBytes - stderrBytes);
+        stderrChunks.push(take);
+        stderrBytes += take.length;
+      }
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      cleanupTimers();
+      rejectRun(error);
+    });
+
+    child.on("close", (code, sig) => {
+      if (settled) return;
+      settled = true;
+      cleanupTimers();
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (timedOut) {
+        const err = Object.assign(new Error("agy_child_timeout"), {
+          code: "ETIMEDOUT",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      if (aborted) {
+        const err = Object.assign(new Error("agy_child_aborted"), {
+          code: "ABORT_ERR",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      if (code !== 0) {
+        const err = Object.assign(new Error(`agy_child_exit_${code ?? sig ?? "unknown"}`), {
+          code: code ?? sig ?? "ERR",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      resolveRun({ stdout, stderr });
+    });
   });
-  return {
-    stdout: String(result.stdout ?? ""),
-    stderr: String(result.stderr ?? ""),
-  };
-};
 
 function pathMatchesWorkspace(bindingCwd: string, workspacePath: string): boolean {
   const normBinding = resolve(bindingCwd);
@@ -871,7 +1171,7 @@ export async function verifyAgyConversationSession(options: {
   signal?: AbortSignal;
 }): Promise<{ ok: true } | { ok: false; code: string; detail: string }> {
   const runner = options.runner ?? defaultAgyAgentApiRunner;
-  const timeoutMs = options.timeoutMs ?? AGY_AGENTAPI_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? AGY_DISPATCH_TOTAL_BUDGET_MS;
   const childEnv = buildMinimalAgyChildEnv(options.canonicalLsAddress, options.csrfToken);
   const argv = ["agentapi", "get-conversation-metadata", options.hostSessionId] as const;
 
@@ -989,15 +1289,14 @@ export async function verifyAgyConversationSession(options: {
 
 /**
  * Private 0600 registration (`cswarm receive register-agy`).
- * - Accepts credentials ONLY via a 0600 `--credentials-file`, piped stdin, or explicit `credentials`
- *   payload — NEVER from `cswarm`'s own `process.env` or argv.
- * - Verifies the live loopback-only listening Antigravity process `(pid, uid, start_time, exe)`
- *   and canonicalizes to an IP literal (`127.0.0.1:<port>` or `[::1]:<port>`) BEFORE presenting
- *   credentials.
- * - Verifies provider session evidence via `agentapi get-conversation-metadata` before saving.
- * - Serializes under the shared `receive-<scope>` lock, refuses unless live binding is already
- *   `provider: "agy"` + `requested_mode: "wake"` + `experimental_agy_agentapi: true`, never mutates
- *   receive routes, and returns a secret-free AND address-free summary.
+ * - Accepts credentials ONLY via a 0600 `--credentials-file`, piped stdin, or explicit `credentialsJson`
+ *   — NEVER from `cswarm`'s own `process.env` or argv.
+ * - Runs loopback listener inspection, trusted executable + codesign + SHA-256 verification,
+ *   `get-conversation-metadata` session verification, AND post-metadata listener re-verification
+ *   ALL inside the shared `receive-<scope>` lock.
+ * - Refuses unless live binding is already `provider: "agy"` + `requested_mode: "wake"` +
+ *   `experimental_agy_agentapi: true`; clears `wake_unavailable_reason` upon verified registration;
+ *   returns a secret-free AND address-free summary.
  */
 export async function registerAgyWake(options: {
   profilePath: string;
@@ -1006,11 +1305,14 @@ export async function registerAgyWake(options: {
   credentialsJson?: string;
   stdin?: NodeJS.ReadableStream;
   endpointInspector?: AgyEndpointInspector;
+  vendorVerifier?: AgyVendorVerifier;
   runner?: AgyAgentApiRunner;
   now?: () => number;
 }) {
   const profile = privatePath(options.profilePath);
   const host = checkedHostSessionId(options.hostSessionId);
+  // Enforce profile/session binding first so mismatched session IDs return profile_other_session.
+  await readAgentProfile(profile, host);
   if (!ONBOARDING_UUID.test(host)) {
     throw new AgentSetupError(
       "agy_conversation_id_required",
@@ -1039,39 +1341,7 @@ export async function registerAgyWake(options: {
   }
 
   const parsedAddr = parseAgyInputAddress(payload.ls_address);
-  const explicitExe =
-    payload.agentapi_exe !== undefined
-      ? await validateAgyAgentApiExecutable(payload.agentapi_exe)
-      : undefined;
   const inspector = options.endpointInspector ?? defaultAgyEndpointInspector;
-  const endpoint = await inspector({ host: parsedAddr.host, port: parsedAddr.port });
-  if (!endpoint) {
-    throw new AgentSetupError(
-      "agy_endpoint_mismatch",
-      "No verified local Antigravity loopback listener owned by this user matched the supplied port.",
-    );
-  }
-  const canonicalAddr = validateCanonicalAgyLsAddress(endpoint.canonical_address);
-  if (canonicalAddr.port !== parsedAddr.port) {
-    throw new AgentSetupError(
-      "agy_endpoint_mismatch",
-      "Verified Antigravity listener port did not match the supplied address.",
-    );
-  }
-  if (typeof process.getuid === "function" && endpoint.uid !== process.getuid()) {
-    throw new AgentSetupError(
-      "agy_endpoint_mismatch",
-      "Verified Antigravity listener must be owned by the current user.",
-    );
-  }
-  const pinnedExe = await validateAgyAgentApiExecutable(endpoint.executable);
-  if (explicitExe !== undefined && explicitExe !== pinnedExe) {
-    throw new AgentSetupError(
-      "agy_endpoint_mismatch",
-      "Supplied agentapi_exe does not match the live Antigravity listener executable.",
-    );
-  }
-
   const nowMs = (options.now ?? Date.now)();
   const nowIso = new Date(nowMs).toISOString();
 
@@ -1083,22 +1353,77 @@ export async function registerAgyWake(options: {
         profilePath: profile,
         hostSessionId: host,
         expectedProvider: "agy",
+        allowUnavailableForRegistration: true,
       });
       if (!auth.ok) {
         throw new AgentSetupError(auth.code, auth.detail);
       }
 
+      // C2: Perform listener lookup INSIDE the shared receive-<scope> lock!
+      const endpoint = await inspector({ host: parsedAddr.host, port: parsedAddr.port });
+      if (!endpoint) {
+        throw new AgentSetupError(
+          "agy_endpoint_mismatch",
+          "No verified local Antigravity loopback listener owned by this user matched the supplied port.",
+        );
+      }
+      const canonicalAddr = validateCanonicalAgyLsAddress(endpoint.canonical_address);
+      if (canonicalAddr.port !== parsedAddr.port) {
+        throw new AgentSetupError(
+          "agy_endpoint_mismatch",
+          "Verified Antigravity listener port did not match the supplied address.",
+        );
+      }
+      if (typeof process.getuid === "function" && endpoint.uid !== process.getuid()) {
+        throw new AgentSetupError(
+          "agy_endpoint_mismatch",
+          "Verified Antigravity listener must be owned by the current user.",
+        );
+      }
+      const pinned = await validateAgyAgentApiExecutable(endpoint.executable, {
+        ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+      });
+      if (payload.agentapi_exe !== undefined) {
+        const explicitChecked = await validateAgyAgentApiExecutable(payload.agentapi_exe, {
+          expectedSha256: pinned.sha256,
+          ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+        });
+        if (explicitChecked.path !== pinned.path) {
+          throw new AgentSetupError(
+            "agy_endpoint_mismatch",
+            "Supplied agentapi_exe does not match the live Antigravity listener executable.",
+          );
+        }
+      }
+
       // Verify provider session evidence BEFORE saving the 0600 credential record.
       const verified = await verifyAgyConversationSession({
-        executable: pinnedExe,
+        executable: pinned.path,
         canonicalLsAddress: canonicalAddr.canonical,
         csrfToken: payload.csrf_token,
         hostSessionId: host,
         expectedCwd: auth.binding.cwd,
+        timeoutMs: AGY_DISPATCH_TOTAL_BUDGET_MS,
         ...(options.runner ? { runner: options.runner } : {}),
       });
       if (!verified.ok) {
         throw new AgentSetupError(verified.code, verified.detail);
+      }
+
+      // C2: Re-verify the exact listening process AFTER metadata verification before committing 0600 file.
+      const postMetaEndpoint = await inspector({ host: canonicalAddr.host, port: canonicalAddr.port });
+      if (
+        !postMetaEndpoint ||
+        postMetaEndpoint.canonical_address !== canonicalAddr.canonical ||
+        postMetaEndpoint.pid !== endpoint.pid ||
+        postMetaEndpoint.uid !== endpoint.uid ||
+        postMetaEndpoint.start_time !== endpoint.start_time ||
+        postMetaEndpoint.executable !== pinned.path
+      ) {
+        throw new AgentSetupError(
+          "agy_endpoint_mismatch",
+          "Antigravity loopback listener changed during registration verification. Retry cswarm receive register-agy.",
+        );
       }
 
       const record: AgyRegistrationRecord = {
@@ -1109,12 +1434,20 @@ export async function registerAgyWake(options: {
         ls_pid: endpoint.pid,
         ls_uid: endpoint.uid,
         ls_start_time: endpoint.start_time,
-        agentapi_exe: pinnedExe,
+        agentapi_exe: pinned.path,
+        agentapi_exe_sha256: pinned.sha256,
         csrf_token: payload.csrf_token,
         registered_at: nowIso,
       };
       await writeSecureJsonFile(agyRegistrationPath(profile, host), JSON.stringify(record));
-      const status = receiveStatus(auth.binding, nowMs, auth.profile.host_session_id, profile);
+
+      // Clear wake_unavailable_reason only if previously marked unavailable (otherwise leave binding untouched).
+      let bindingForStatus = auth.binding;
+      if (auth.binding.wake_unavailable_reason) {
+        bindingForStatus = { ...auth.binding, wake_unavailable_reason: null };
+        await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(bindingForStatus));
+      }
+      const status = receiveStatus(bindingForStatus, nowMs, auth.profile.host_session_id, profile);
       // Never print ls_address or csrf_token in output.
       return {
         registered: true,
@@ -1144,6 +1477,7 @@ export async function markAgyIdle(profilePath: string, hostSessionId: string) {
       binding.provider !== "agy" ||
       binding.requested_mode !== "wake" ||
       binding.experimental_agy_agentapi !== true ||
+      binding.wake_unavailable_reason ||
       !receiveStatus(binding).channel_running
     ) {
       throw new AgentSetupError(
@@ -1179,31 +1513,86 @@ export interface AgyAgentApiAdapterOptions {
   profilePath: string;
   runner?: AgyAgentApiRunner;
   endpointInspector?: AgyEndpointInspector;
+  vendorVerifier?: AgyVendorVerifier;
+  /** Single total budget across all inspections and child calls (defaults to 8_000ms). */
   timeoutMs?: number;
 }
 
 /**
  * Invokes `<pinned-antigravity> agentapi send-message --title=CommonSwarm <conversation-uuid> "<fixed text>"`:
- * - Re-verifies canonical loopback IP literal, trusted executable (full ancestor walk), AND exact
- *   listening process `(pid, uid, start_time, executable)` BEFORE presenting credentials.
- * - Re-verifies `get-conversation-metadata` proves this LS owns the bound conversation and workspace
- *   BEFORE invoking `send-message`.
- * - Passes ONLY canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in an otherwise
- *   stripped, proxy-free child environment (HezLead #716 C1 narrow scope decision).
- * - Emits ONLY fixed static diagnostic codes and text (never prints address, token, or raw stderr).
+ * - Single total dispatch budget (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, inside opt-out's 20s wait).
+ * - Verifies trusted pinned executable (strict `0o022`, no ACLs, Google LLC codesign + SHA-256 pin).
+ * - Verifies exact live loopback listener `(canonical_address, pid, uid, start_time, exe, sha256)`:
+ *   (1) BEFORE `get-conversation-metadata`,
+ *   (2) AGAIN BETWEEN `get-conversation-metadata` and `send-message`,
+ *   (3) ONCE MORE AFTER `send-message` (marking `wake_route` unavailable and requiring re-registration if changed).
+ * - Passes ONLY canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in a stripped,
+ *   proxy-free child env (HezLead #716 C1 narrow scope decision).
+ * - Emits ONLY fixed static diagnostic codes and text.
  */
 export class AgyAgentApiAdapter implements NativeWakeAdapter {
   readonly route = "agy-agentapi" as const;
   private readonly profilePath: string;
   private readonly runner: AgyAgentApiRunner;
   private readonly endpointInspector: AgyEndpointInspector;
+  private readonly vendorVerifier?: AgyVendorVerifier;
   private readonly timeoutMs: number;
 
   constructor(options: AgyAgentApiAdapterOptions) {
     this.profilePath = privatePath(options.profilePath);
     this.runner = options.runner ?? defaultAgyAgentApiRunner;
     this.endpointInspector = options.endpointInspector ?? defaultAgyEndpointInspector;
-    this.timeoutMs = options.timeoutMs ?? AGY_AGENTAPI_TIMEOUT_MS;
+    this.vendorVerifier = options.vendorVerifier;
+    this.timeoutMs = options.timeoutMs ?? AGY_DISPATCH_TOTAL_BUDGET_MS;
+  }
+
+  private async verifyEndpointMatches(
+    registration: AgyRegistrationRecord,
+    canonicalAddr: { canonical: string; host: "127.0.0.1" | "::1"; port: number },
+    pinnedPath: string,
+    remainingMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (remainingMs <= 0) return false;
+    const liveEndpoint = await this.endpointInspector({
+      host: canonicalAddr.host,
+      port: canonicalAddr.port,
+      timeoutMs: Math.min(remainingMs, AGY_ENDPOINT_INSPECT_TIMEOUT_MS),
+      ...(signal ? { signal } : {}),
+    });
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : registration.ls_uid;
+    return Boolean(
+      liveEndpoint &&
+        liveEndpoint.canonical_address === canonicalAddr.canonical &&
+        liveEndpoint.pid === registration.ls_pid &&
+        liveEndpoint.uid === registration.ls_uid &&
+        liveEndpoint.uid === currentUid &&
+        liveEndpoint.start_time === registration.ls_start_time &&
+        liveEndpoint.executable === pinnedPath,
+    );
+  }
+
+  /**
+   * Mark wake route unavailable and remove stale 0600 credentials after a post-send endpoint change.
+   * Called while NativeWakeBridge already holds the `receive-<scope>` lock (so writes binding directly
+   * via atomic writeSecureJsonFile without re-acquiring the lock).
+   */
+  private async markWakeUnavailableAfterEndpointChange(
+    hostSessionId: string,
+    reason: string,
+  ): Promise<void> {
+    await deleteSecureJsonFile(agyRegistrationPath(this.profilePath, hostSessionId)).catch(() => undefined);
+    try {
+      const current = await readReceiveBinding(this.profilePath, hostSessionId);
+      if (current && current.provider === "agy" && current.requested_mode === "wake") {
+        const next = {
+          ...current,
+          wake_verified_at: null,
+          wake_unavailable_reason: reason,
+        };
+        await writeSecureJsonFile(receiveBindingPath(this.profilePath, hostSessionId), JSON.stringify(next));
+      }
+    } catch { /* best-effort unavailability marker */ }
   }
 
   async sendWake(input: {
@@ -1213,6 +1602,9 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     cwd: string;
     signal?: AbortSignal;
   }): Promise<{ ok: true } | { ok: false; code: string; detail: string }> {
+    const deadlineMs = Date.now() + this.timeoutMs;
+    const remainingMs = () => Math.max(0, deadlineMs - Date.now());
+
     if (!ONBOARDING_UUID.test(input.hostSessionId)) {
       return {
         ok: false,
@@ -1260,10 +1652,31 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       };
     }
 
-    let pinnedExe: string;
+    // C1: Re-verify trusted pinned executable (strict 0o022, no ACLs, Google LLC codesign + SHA-256 pin).
+    let pinned: { path: string; sha256: string };
     try {
-      pinnedExe = await validateAgyAgentApiExecutable(registration.agentapi_exe);
-    } catch {
+      pinned = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
+        expectedSha256: registration.agentapi_exe_sha256,
+        ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
+        timeoutMs: remainingMs(),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch (error) {
+      const code = error instanceof AgentSetupError ? error.code : "agy_executable_invalid";
+      if (code === "agy_executable_pin_mismatch") {
+        return {
+          ok: false,
+          code: "agy_executable_pin_mismatch",
+          detail: "Pinned Antigravity executable changed or updated. Re-run cswarm receive register-agy.",
+        };
+      }
+      if (code === "agy_executable_unapproved") {
+        return {
+          ok: false,
+          code: "agy_executable_unapproved",
+          detail: "Antigravity executable did not pass approved vendor build verification.",
+        };
+      }
       return {
         ok: false,
         code: "agy_executable_invalid",
@@ -1271,40 +1684,73 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       };
     }
 
-    // C2: Verify the EXACT loopback listener process identity BEFORE presenting the CSRF token!
-    const liveEndpoint = await this.endpointInspector({
-      host: canonicalAddr.host,
-      port: canonicalAddr.port,
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
-    const currentUid = typeof process.getuid === "function" ? process.getuid() : registration.ls_uid;
-    if (
-      !liveEndpoint ||
-      liveEndpoint.canonical_address !== canonicalAddr.canonical ||
-      liveEndpoint.pid !== registration.ls_pid ||
-      liveEndpoint.uid !== registration.ls_uid ||
-      liveEndpoint.uid !== currentUid ||
-      liveEndpoint.start_time !== registration.ls_start_time ||
-      liveEndpoint.executable !== pinnedExe
-    ) {
+    // C2 Check #1 (before get-conversation-metadata): Verify exact loopback listener BEFORE presenting CSRF token!
+    if (!(await this.verifyEndpointMatches(registration, canonicalAddr, pinned.path, remainingMs(), input.signal))) {
+      await this.markWakeUnavailableAfterEndpointChange(
+        input.hostSessionId,
+        "agy_endpoint_mismatch",
+      );
       return {
         ok: false,
         code: "agy_endpoint_mismatch",
-        detail: "Registered Antigravity language server is no longer listening on its verified loopback endpoint. Re-run cswarm receive register-agy.",
+        detail: "Registered Antigravity language server is no longer listening on its verified loopback endpoint; wake route disabled. Re-run cswarm receive register-agy.",
       };
     }
 
-    // C2: Verify the bound conversation UUID & workspace still belong to this exact LS before sending.
+    const metaBudget = remainingMs();
+    if (metaBudget <= 0) {
+      return {
+        ok: false,
+        code: "agy_dispatch_timeout",
+        detail: "Antigravity wake dispatch exceeded its bounded budget.",
+      };
+    }
+
+    // C2: Verify the bound conversation UUID & workspace still belong to this exact LS.
     const sessionCheck = await verifyAgyConversationSession({
-      executable: pinnedExe,
+      executable: pinned.path,
       canonicalLsAddress: canonicalAddr.canonical,
       csrfToken: registration.csrf_token,
       hostSessionId: input.hostSessionId,
       expectedCwd: input.cwd,
       runner: this.runner,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: metaBudget,
       ...(input.signal ? { signal: input.signal } : {}),
     });
+
+    // C2 Check #2 (AFTER get-conversation-metadata / BEFORE send-message):
+    // Recheck exact listener + executable SHA-256 after EVERY call that receives the token;
+    // disable the route on any change!
+    const postMetaBudget = Math.max(remainingMs(), 1_000);
+    let postMetaStillMatches = false;
+    try {
+      const postMetaExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
+        expectedSha256: registration.agentapi_exe_sha256,
+        ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
+        timeoutMs: postMetaBudget,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      postMetaStillMatches = await this.verifyEndpointMatches(
+        registration,
+        canonicalAddr,
+        postMetaExe.path,
+        postMetaBudget,
+        input.signal,
+      );
+    } catch {
+      postMetaStillMatches = false;
+    }
+    if (!postMetaStillMatches) {
+      await this.markWakeUnavailableAfterEndpointChange(
+        input.hostSessionId,
+        "agy_endpoint_changed_after_metadata",
+      );
+      return {
+        ok: false,
+        code: "agy_endpoint_mismatch",
+        detail: "Antigravity language server changed after session check; wake route disabled. Re-run cswarm receive register-agy.",
+      };
+    }
     if (!sessionCheck.ok) {
       return sessionCheck;
     }
@@ -1325,61 +1771,110 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       };
     }
 
+    const sendBudget = remainingMs();
+    if (sendBudget <= 0) {
+      return {
+        ok: false,
+        code: "agy_dispatch_timeout",
+        detail: "Antigravity wake dispatch exceeded its bounded budget.",
+      };
+    }
     const childEnv = buildMinimalAgyChildEnv(canonicalAddr.canonical, registration.csrf_token);
 
+    let sendFailure: { ok: false; code: string; detail: string } | null = null;
     try {
-      const res = await this.runner(pinnedExe, argv, {
+      const res = await this.runner(pinned.path, argv, {
         cwd: input.cwd,
-        timeoutMs: this.timeoutMs,
+        timeoutMs: sendBudget,
         env: childEnv,
         ...(input.signal ? { signal: input.signal } : {}),
       });
-      // agentapi can exit 0 with a JSON error field; inspect strictly without echoing raw text.
       const trimmed = res.stdout.trim();
       if (trimmed.startsWith("{")) {
         try {
           const parsed = JSON.parse(trimmed) as Record<string, unknown>;
           if (typeof parsed.error === "string" && parsed.error.length > 0) {
-            if (AGY_UNREACHABLE_RE.test(parsed.error)) {
-              return {
-                ok: false,
-                code: "agy_ls_unreachable",
-                detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
-              };
-            }
-            return {
-              ok: false,
-              code: "agy_agentapi_failed",
-              detail: "Antigravity wake command reported an error.",
-            };
+            sendFailure = AGY_UNREACHABLE_RE.test(parsed.error)
+              ? {
+                  ok: false,
+                  code: "agy_ls_unreachable",
+                  detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
+                }
+              : {
+                  ok: false,
+                  code: "agy_agentapi_failed",
+                  detail: "Antigravity wake command reported an error.",
+                };
           }
         } catch { /* non-JSON stdout on exit 0 is success */ }
       }
-      return { ok: true };
     } catch (error) {
       // C1: Emit ONLY fixed static codes and diagnostic text — never raw stderr/stdout/err.message.
       const err = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
       const combined = `${err.stderr ?? ""} ${err.stdout ?? ""} ${err.message ?? ""}`;
       if (err.code === "ENOENT") {
-        return {
+        sendFailure = {
           ok: false,
           code: "agy_not_found",
           detail: "Pinned Antigravity CLI executable was not found.",
         };
-      }
-      if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
-        return {
+      } else if (err.code === "ETIMEDOUT") {
+        sendFailure = {
+          ok: false,
+          code: "agy_dispatch_timeout",
+          detail: "Antigravity wake command timed out within its bounded dispatch budget.",
+        };
+      } else if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED") {
+        sendFailure = {
           ok: false,
           code: "agy_ls_unreachable",
           detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
         };
+      } else {
+        sendFailure = {
+          ok: false,
+          code: "agy_agentapi_failed",
+          detail: "Antigravity wake command failed.",
+        };
       }
+    }
+
+    // C2 Check #3 (POST-send, HezLead condition): Re-verify exact listener (pid, uid, start_time, exe, sha256)
+    // once more AFTER send-message (even if send-message failed); if changed, disable wake_route and require re-registration!
+    const postSendBudget = Math.max(remainingMs(), 1_000);
+    let postSendStillMatches = false;
+    try {
+      const postExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
+        expectedSha256: registration.agentapi_exe_sha256,
+        ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
+        timeoutMs: postSendBudget,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      postSendStillMatches = await this.verifyEndpointMatches(
+        registration,
+        canonicalAddr,
+        postExe.path,
+        postSendBudget,
+        input.signal,
+      );
+    } catch {
+      postSendStillMatches = false;
+    }
+
+    if (!postSendStillMatches) {
+      await this.markWakeUnavailableAfterEndpointChange(
+        input.hostSessionId,
+        "agy_endpoint_changed_after_send",
+      );
       return {
         ok: false,
-        code: "agy_agentapi_failed",
-        detail: "Antigravity wake command failed.",
+        code: "agy_endpoint_changed_after_send",
+        detail: "Antigravity language server changed during wake dispatch; wake route marked unavailable. Re-run cswarm receive register-agy.",
       };
     }
+
+    if (sendFailure) return sendFailure;
+    return { ok: true };
   }
 }
 
@@ -1416,6 +1911,7 @@ export interface ServeAgyWakeBridgeOptions {
   hostSessionId: string;
   adapter?: NativeWakeAdapter;
   endpointInspector?: AgyEndpointInspector;
+  vendorVerifier?: AgyVendorVerifier;
   debounceMs?: number;
   minIntervalMs?: number;
   retryAfterMs?: number;
@@ -1516,6 +2012,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
     new AgyAgentApiAdapter({
       profilePath,
       ...(options.endpointInspector ? { endpointInspector: options.endpointInspector } : {}),
+      ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
     });
   const bridge = new NativeWakeBridge({
     profilePath,
@@ -1639,6 +2136,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
       current !== null &&
       current.requested_mode === "wake" &&
       current.experimental_agy_agentapi === true &&
+      !current.wake_unavailable_reason &&
       current.channel_instance_id === runtimeId
     );
   };
@@ -1651,7 +2149,12 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
         return;
       }
       await updateReceiveBinding(profilePath, host, (b) => {
-        if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake" || b.experimental_agy_agentapi !== true) {
+        if (
+          b.channel_instance_id !== runtimeId ||
+          b.requested_mode !== "wake" ||
+          b.experimental_agy_agentapi !== true ||
+          b.wake_unavailable_reason
+        ) {
           stop();
           return b;
         }

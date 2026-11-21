@@ -69,7 +69,7 @@ export function assertFixedNativeWakePrompt(prompt: string): number {
 
 /** Map a local receive binding to its public wake route label (`whoami` and `receive status`). */
 export function wakeRouteForBinding(binding: ReceiveBinding | null): NativeWakeRoute {
-  if (!binding || binding.requested_mode !== "wake") return "none";
+  if (!binding || binding.requested_mode !== "wake" || binding.wake_unavailable_reason) return "none";
   if (binding.provider === "codex") return "codex-queue";
   if (binding.provider === "agy" && binding.experimental_agy_agentapi === true) return "agy-agentapi";
   if (binding.provider === "claude") return "channel";
@@ -244,6 +244,7 @@ export async function resolveAuthorizedWakeBinding(options: {
   hostSessionId?: string;
   expectedProvider: ReceiveProvider;
   expectedSeat?: WakeSeatExpectation;
+  allowUnavailableForRegistration?: boolean;
 }): Promise<AuthorizedWakeBindingResult> {
   let profile: string;
   try {
@@ -348,6 +349,13 @@ export async function resolveAuthorizedWakeBinding(options: {
       ok: false,
       code: "agy_agentapi_experimental_flag_required",
       detail: "Antigravity native wake requires explicit --experimental-agy-agentapi opt-in.",
+    };
+  }
+  if (!options.allowUnavailableForRegistration && binding.wake_unavailable_reason) {
+    return {
+      ok: false,
+      code: "agy_re_registration_required",
+      detail: "Antigravity wake route is unavailable after an endpoint change. Re-run cswarm receive register-agy.",
     };
   }
   return { ok: true, profile: opened, binding };

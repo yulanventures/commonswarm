@@ -51,6 +51,7 @@ export interface ReceiveBinding {
   provider: ReceiveProvider;
   requested_mode: ReceiveMode;
   experimental_agy_agentapi?: boolean;
+  wake_unavailable_reason?: string | null;
   grok_bot_agent_id?: string;
   cwd: string;
   hook_file: string | null;
@@ -93,6 +94,8 @@ export async function readReceiveBinding(profile: string, hostSessionId?: string
   if (!binding || binding.version !== 1 || binding.profile !== profile || binding.host_session_id !== host ||
       !RECEIVE_MODES.includes(binding.requested_mode) || !RECEIVE_PROVIDERS.includes(binding.provider) ||
       (binding.experimental_agy_agentapi !== undefined && typeof binding.experimental_agy_agentapi !== "boolean") ||
+      (binding.wake_unavailable_reason !== undefined && binding.wake_unavailable_reason !== null &&
+        (typeof binding.wake_unavailable_reason !== "string" || !/^[a-z0-9_]{1,64}$/.test(binding.wake_unavailable_reason))) ||
       (binding.provider === "agy" && binding.requested_mode === "wake" && binding.experimental_agy_agentapi !== true) ||
       (binding.grok_bot_agent_id !== undefined && (typeof binding.grok_bot_agent_id !== "string" || !ONBOARDING_UUID.test(binding.grok_bot_agent_id))) ||
       (binding.provider === "grok-bot" && binding.requested_mode === "wake" && !binding.grok_bot_agent_id) ||
@@ -131,8 +134,9 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
   const channelLive = binding !== null && binding.channel_pid !== null &&
     binding.channel_heartbeat_at !== null && now - Date.parse(binding.channel_heartbeat_at) >= 0 && now - Date.parse(binding.channel_heartbeat_at) <= RECEIVE_HEARTBEAT_MAX_AGE_MS &&
     processAlive(binding.channel_pid);
-  const wakeVerified = binding?.requested_mode === "wake" && channelLive && binding?.wake_verified_at !== null;
-  const wakeRoute = binding?.requested_mode !== "wake"
+  const unavailableReason = binding?.wake_unavailable_reason ?? null;
+  const wakeVerified = binding?.requested_mode === "wake" && !unavailableReason && channelLive && binding?.wake_verified_at !== null;
+  const wakeRoute = binding?.requested_mode !== "wake" || unavailableReason !== null
     ? "none"
     : binding.provider === "codex"
     ? "codex-queue"
@@ -145,11 +149,13 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
     requested_mode: binding?.requested_mode ?? null,
     effective_mode: wakeVerified ? "wake" : "turn",
     wake_route: wakeRoute,
+    ...(unavailableReason !== null ? { wake_unavailable_reason: unavailableReason } : {}),
     turn_check: binding === null || binding.hook_file === null ? "instruction" : binding.turn_verified_at === null ? "pending_host" : "verified",
     wake_verified: Boolean(wakeVerified),
     channel_running: Boolean(channelLive),
     host_session_id: binding?.host_session_id ?? null,
     next_action: boundProfileCommands(binding === null ? "Ask the user to choose wakeups or turn checks, then run cswarm receive configure." :
+      unavailableReason !== null ? "Antigravity wake route is unavailable after an endpoint change. Re-register with cswarm receive register-agy and confirm with cswarm receive status." :
       wakeVerified ? null : binding.requested_mode === "wake" ?
         binding.provider === "codex" ? "Wake is not verified. Start cswarm receive serve for this Codex thread, run cswarm receive test, end this turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         binding.provider === "agy" ? "Wake is not verified. Run cswarm receive register-agy inside the active Antigravity session, start cswarm receive serve, run cswarm receive test, end this turn and run cswarm receive idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
@@ -349,6 +355,7 @@ export async function configureAgentReceive(options: {
       ...binding,
       requested_mode: options.mode as ReceiveMode,
       ...(provider === "agy" ? { experimental_agy_agentapi: options.mode === "wake" && options.experimentalAgyAgentapi === true } : {}),
+      wake_unavailable_reason: null,
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
     if (provider === "grok-bot" && grokAgentId) {
