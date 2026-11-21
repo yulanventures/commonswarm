@@ -195,6 +195,7 @@ test("C3 review checks wire parser validates records, rejects malformed payloads
   });
 
   assert.equal(parseReviewChecksReadOutcome(200, { review_checks: [rawCheck()] }).status, "ready");
+  assert.equal(parseReviewChecksReadOutcome(400, { error: "invalid_request" }).status, "unsupported");
   assert.equal(parseReviewChecksReadOutcome(400, { error: "unsupported_resource" }).status, "unsupported");
   assert.equal(parseReviewChecksReadOutcome(404, { error: "unknown_resource" }).status, "unsupported");
   assert.equal(parseReviewChecksReadOutcome(403, { error: "forbidden" }).status, "denied");

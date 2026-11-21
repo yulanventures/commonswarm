@@ -86,6 +86,7 @@ const UNSUPPORTED_READ_ERRORS = new Set([
   "unknown_resource",
   "invalid_resource",
   "unsupported_resource",
+  "invalid_request",
 ]);
 
 function nullableText(value: unknown): string | null {

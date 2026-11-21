@@ -403,7 +403,7 @@ function installReviewCardFixture() {
       if (body?.resource === "review_checks") {
         f.reviewReads += 1;
         if (unsupportedCase) {
-          return Response.json({ error: "unsupported_resource", message: "Unsupported read resource." }, { status: 400 });
+          return Response.json({ error: "invalid_request" }, { status: 400 });
         }
         if (retireCase && body?.conversation_id === convGeneral) {
           f.heldRead = true;
