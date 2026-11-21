@@ -27,7 +27,10 @@ SELECT
     SELECT v.relkind = 'v'
       AND v.reloptions @> ARRAY['security_barrier=true']
       AND pg_get_userbyid(v.relowner) = 'swarm_admin'
-      AND pg_get_viewdef(v.oid) LIKE '%wake_path_eligible_deliveries%'
+      AND (
+        pg_get_viewdef(v.oid) LIKE '%wake_path_eligible_deliveries%'
+        OR pg_get_viewdef(v.oid) LIKE '%claims_visible_wake_path_deliveries%'
+      )
       AND pg_get_viewdef(v.oid) LIKE '%swarm.is_member%'
     FROM pg_class AS v
     WHERE v.oid = to_regclass('swarm_read.agent_wake_path_deliveries')
