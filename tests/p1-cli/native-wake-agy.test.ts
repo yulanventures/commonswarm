@@ -572,9 +572,12 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
     }
     assert.equal(retryRunnerCalls.length, 0, "retired route retry must launch ZERO credential-bearing calls");
 
-    // 3. KEEP RETIREMENT THROUGH OPT-OUT (--mode turn) AND RE-ENABLE (--mode wake) WITH SURVIVING RECORD (C2 #1):
-    //    Refuse deletion on turn opt-out while a REAL VALID 0600 registration record survives on disk,
-    //    switch back to wake, and verify ZERO token-bearing calls before verified re-registration!
+    // 3. CRASH-AFTER-FIRST-WRITE & REFUSED-CLEANUP WITNESS THROUGH TURN -> WAKE -> DISPATCH (C2):
+    //    Opt-out writes turn mode AND wake_unavailable_reason="agy_re_registration_required" in ONE
+    //    single durable write BEFORE attempting deletion. Simulate an abrupt interruption immediately
+    //    after that first write (verifying the marker is ALREADY on disk before any catch handler runs!),
+    //    leaving the real valid 0600 registration intact, then re-enable wake and verify ZERO
+    //    credential-bearing calls before verified re-registration!
     await rm(regPath, { recursive: true, force: true });
     await registerAgyWake({
       profilePath: fx.profilePath,
@@ -587,6 +590,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
     });
     assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record exists before turn opt-out");
 
+    let observedRightAfterFirstWrite: Awaited<ReturnType<typeof readReceiveBinding>> = null;
     await assert.rejects(
       configureAgentReceive({
         profilePath: fx.profilePath,
@@ -595,17 +599,28 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
         hostSessionId: CONV,
         cwd: fx.cwd,
         deleteAgyRegistration: async () => {
-          throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+          // Inspect disk RIGHT AFTER the first durable write (before deletion or catch runs):
+          // proves a crash here STILL leaves turn mode + re-registration marker durably committed!
+          observedRightAfterFirstWrite = await readReceiveBinding(fx.profilePath, CONV);
+          throw Object.assign(new Error("SIMULATED_CRASH_BEFORE_DELETE"), { code: "EACCES" });
         },
         execution,
       }),
-      { code: "agy_registration_cleanup_failed" },
+      (err: { code?: string; message?: string }) =>
+        err.code === "agy_registration_cleanup_failed" &&
+        /receive configure --provider agy --mode wake --experimental-agy-agentapi.*receive register-agy/.test(
+          String(err.message),
+        ),
     );
-    // Turn mode is persisted, valid 0600 record still survives on disk, AND retirement marker is durably set!
-    assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record survived refused delete");
-    const turnWithSurviving = await readReceiveBinding(fx.profilePath, CONV);
-    assert.equal(turnWithSurviving?.requested_mode, "turn");
-    assert.equal(turnWithSurviving?.wake_unavailable_reason, "agy_registration_cleanup_failed");
+    // Marker MUST already have been persisted in the FIRST write (before deletion or catch)!
+    assert.equal(observedRightAfterFirstWrite?.requested_mode, "turn");
+    assert.equal(
+      observedRightAfterFirstWrite?.wake_unavailable_reason,
+      "agy_re_registration_required",
+      "first durable write must atomically include re-registration marker before deletion",
+    );
+    // Old valid 0600 record is still intact on disk!
+    assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record survived interrupted opt-out");
 
     // Re-enabling --mode wake MUST keep retirement active and refuse surviving record with 0 token-bearing calls!
     const reenabledAfterSurviving = await configureAgentReceive({
@@ -618,7 +633,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
       execution,
     });
     assert.equal(reenabledAfterSurviving.wake_route, "none");
-    assert.equal(reenabledAfterSurviving.wake_unavailable_reason, "agy_registration_cleanup_failed");
+    assert.equal(reenabledAfterSurviving.wake_unavailable_reason, "agy_re_registration_required");
 
     const survivingRetryCalls: string[] = [];
     const survivingBridge = new NativeWakeBridge({
@@ -646,7 +661,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
     if (survivingDecision.action === "binding_inactive") {
       assert.equal(survivingDecision.code, "agy_re_registration_required");
     }
-    assert.equal(survivingRetryCalls.length, 0, "surviving record after failed turn cleanup must launch ZERO token-bearing calls");
+    assert.equal(survivingRetryCalls.length, 0, "surviving record after interrupted opt-out must launch ZERO token-bearing calls");
 
     // 4. TIMEOUT WITHOUT COMPLETED POSTCHECK WITNESS (C2 #3):
     //    When a token-bearing call times out and postcheck is unavailable, fail safe by retiring

@@ -352,12 +352,18 @@ export async function configureAgentReceive(options: {
     };
     const changed = binding.requested_mode !== options.mode ||
       (provider === "agy" && binding.experimental_agy_agentapi !== (options.mode === "wake" && options.experimentalAgyAgentapi === true));
+    const retiringAgyOptOut = provider === "agy" && options.mode === "turn" && existing?.requested_mode === "wake";
     binding = {
       ...binding,
       requested_mode: options.mode as ReceiveMode,
       ...(provider === "agy" ? { experimental_agy_agentapi: options.mode === "wake" && options.experimentalAgyAgentapi === true } : {}),
       // C2: NEVER clear wake_unavailable_reason in configure (neither turn nor wake).
-      // Retirement persists across opt-out and re-enable until a verified register-agy succeeds.
+      // When opting out of an active agy wake route, persist turn mode AND the re-registration
+      // requirement atomically in the SAME single durable write BEFORE attempting deletion,
+      // preserving any existing retirement reason. Only a verified register-agy clears it.
+      ...(retiringAgyOptOut
+        ? { wake_unavailable_reason: binding.wake_unavailable_reason ?? "agy_re_registration_required" }
+        : {}),
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
     if (provider === "grok-bot" && grokAgentId) {
@@ -381,24 +387,17 @@ export async function configureAgentReceive(options: {
       binding = { ...binding, channel_config: config };
       startCommand = `claude --resume ${shellQuote(host)} --mcp-config ${shellQuote(config)} --dangerously-load-development-channels server:cswarm`;
     }
-    // Persist the updated receive binding FIRST under the shared receive-<scope> lock so
-    // opt-out (--mode turn) is durable even if credential cleanup fails below (C3), while
-    // preserving any wake_unavailable_reason retirement marker (C2).
+    // Single atomic durable write: persists turn mode AND re-registration requirement BEFORE deletion,
+    // so even a crash or refused delete after this write cannot leave a surviving record unmarked (C2/C3).
     await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(binding));
     if (provider === "agy" && options.mode === "turn") {
       const remover = options.deleteAgyRegistration ?? deleteSecureJsonFile;
       try {
         await remover(join(dirname(profile), `wake-agy-${profileScopeKey(host)}.json`));
       } catch {
-        // If deletion failed, a registration record may survive on disk; ensure retirement is
-        // durably recorded so switching back to wake cannot admit the surviving credential.
-        if (!binding.wake_unavailable_reason) {
-          binding = { ...binding, wake_unavailable_reason: "agy_registration_cleanup_failed" };
-          await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(binding));
-        }
         throw new AgentSetupError(
           "agy_registration_cleanup_failed",
-          "Turn mode is saved, but removing the Antigravity wake registration file failed. Remove it and re-run cswarm receive register-agy before enabling wake again.",
+          "Turn mode is saved, but removing the Antigravity wake registration file failed. Remove it, then re-enable experimental wake mode with cswarm receive configure --provider agy --mode wake --experimental-agy-agentapi and run cswarm receive register-agy.",
         );
       }
     }
