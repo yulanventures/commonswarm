@@ -355,7 +355,9 @@ export async function configureAgentReceive(options: {
       ...binding,
       requested_mode: options.mode as ReceiveMode,
       ...(provider === "agy" ? { experimental_agy_agentapi: options.mode === "wake" && options.experimentalAgyAgentapi === true } : {}),
-      wake_unavailable_reason: null,
+      // C2: Only opting out to turn mode (or a verified register-agy) clears wake_unavailable_reason.
+      // Re-running configure in wake mode must NEVER clear a retired/disabled wake route.
+      ...(options.mode === "turn" ? { wake_unavailable_reason: null } : {}),
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
     if (provider === "grok-bot" && grokAgentId) {

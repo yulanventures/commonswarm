@@ -4384,35 +4384,21 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:111",
-          "detail": "8-second single total dispatch budget across inspections + metadata + send-message (fits inside opt-out's 20s receive lock wait).",
+          "citation": "src/cloud/native-wake-agy.ts:109",
+          "detail": "8-second single common absolute lock-hold budget across all verification subprocesses (ls/codesign/lsof/ps), vendor calls, reserved postchecks, and child close (inside opt-out's 20s wait).",
           "operation": {
             "name": "agy-dispatch-total-budget",
             "class": "not-run",
             "writes": [],
             "removes": [],
-            "reason": "Local bounded dispatch budget, not a network request timeout."
-          }
-        },
-        "src/cloud/native-wake-agy.ts:AGY_ENDPOINT_INSPECT_TIMEOUT_MS": {
-          "class": "local",
-          "scope": "per-request",
-          "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:112",
-          "detail": "3-second local subprocess timeout for macOS loopback listener, ACL, and codesign verification.",
-          "operation": {
-            "name": "agy-endpoint-inspect-timeout",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Local OS inspection timeout, not a network request timeout."
+            "reason": "Local bounded dispatch/registration lock-hold budget, not a network request timeout."
           }
         },
         "src/cloud/native-wake-agy.ts:setInterval": {
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:2180",
+          "citation": "src/cloud/native-wake-agy.ts:2427",
           "detail": "5-second local standalone Antigravity wake-bridge heartbeat interval.",
           "operation": {
             "name": "agy-wake-heartbeat",
@@ -4426,7 +4412,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:1054",
+          "citation": "src/cloud/native-wake-agy.ts:441",
           "detail": "400ms SIGTERM-to-SIGKILL escalation grace inside spawn-based defaultAgyAgentApiRunner before awaiting child close.",
           "operation": {
             "name": "agy-child-kill-grace",
@@ -4442,7 +4428,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/native-wake-agy.ts:2014",
+          "citation": "src/cloud/native-wake-agy.ts:2260",
           "detail": "ThinCommandClient signal request timeout for self-addressed Antigravity idle canary emission.",
           "operation": {
             "name": "agy-wake-canary-timeout",
@@ -4454,39 +4440,11 @@
             "reason": "Antigravity wake canary posts a self-addressed signal command."
           }
         },
-        "src/cloud/native-wake-agy.ts:timeout": {
-          "class": "local",
-          "scope": "per-request",
-          "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:393",
-          "detail": "execFile timeout for macOS /usr/bin/codesign vendor build verification.",
-          "operation": {
-            "name": "agy-codesign-timeout",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of AGY_ENDPOINT_INSPECT_TIMEOUT_MS."
-          }
-        },
         "src/cloud/native-wake-agy.ts:timeoutMs": {
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:359",
-          "detail": "Default timeoutMs for macOS ACL check (hasMacOsAcl).",
-          "operation": {
-            "name": "agy-acl-check-timeout",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of AGY_ENDPOINT_INSPECT_TIMEOUT_MS."
-          }
-        },
-        "src/cloud/native-wake-agy.ts:timeoutMs#2": {
-          "class": "local",
-          "scope": "per-request",
-          "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:1174",
+          "citation": "src/cloud/native-wake-agy.ts:1322",
           "detail": "Default timeoutMs for verifyAgyConversationSession (AGY_DISPATCH_TOTAL_BUDGET_MS).",
           "operation": {
             "name": "agy-session-verify-timeout",
@@ -4496,25 +4454,11 @@
             "reason": "Use of AGY_DISPATCH_TOTAL_BUDGET_MS."
           }
         },
-        "src/cloud/native-wake-agy.ts:timeoutMs#3": {
+        "src/cloud/native-wake-agy.ts:timeoutMs#2": {
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:1406",
-          "detail": "Single dispatch budget timeoutMs passed to verifyAgyConversationSession during registration.",
-          "operation": {
-            "name": "agy-register-session-verify-timeout",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of AGY_DISPATCH_TOTAL_BUDGET_MS."
-          }
-        },
-        "src/cloud/native-wake-agy.ts:timeoutMs#4": {
-          "class": "local",
-          "scope": "per-request",
-          "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:1466",
+          "citation": "src/cloud/native-wake-agy.ts:1683",
           "detail": "20-second local receive-<scope> lock acquisition timeout for register-agy serialization against opt-out.",
           "operation": {
             "name": "agy-wake-register-lock",
@@ -4524,11 +4468,11 @@
             "reason": "Local filesystem lock timeout, not a network request timeout."
           }
         },
-        "src/cloud/native-wake-agy.ts:timeoutMs#5": {
+        "src/cloud/native-wake-agy.ts:timeoutMs#3": {
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-agy.ts:2126",
+          "citation": "src/cloud/native-wake-agy.ts:2373",
           "detail": "20-second local receive-<scope> lock acquisition timeout for serveAgyWakeBridge startup route check.",
           "operation": {
             "name": "agy-wake-startup-lock",

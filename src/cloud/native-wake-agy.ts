@@ -3,7 +3,7 @@
  * explicit feature flag (`--provider agy --mode wake --experimental-agy-agentapi`).
  *
  * HezLead narrow scope decisions on #716 (2026-11-20):
- *   1. C1 — Short-lived child env handoff & Option B Homebrew ancestor trust:
+ *   1. C1 — Short-lived child env handoff, approved build allowlist & Option B Homebrew ancestor trust:
  *      - The vendor Antigravity CLI (`antigravity agentapi send-message` / `get-conversation-metadata`)
  *        reads `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` ONLY from its own child process
  *        environment (verified on Antigravity 1.5.11: no flags, stdin, or credentials-file option).
@@ -12,37 +12,38 @@
  *      - NEVER read or set those credentials in `cswarm`'s own process env or any long-lived process;
  *        `cswarm receive register-agy` accepts ONLY an owned 0600 file (`--credentials-file`) or stdin;
  *        never print `ls_address`, `csrf_token`, or raw subprocess output (fixed diagnostics only).
- *      - Executable trust (Option B): leaf binary must be owned by root or current UID, strictly
- *        non-group/world-writable (`0o022`), free of macOS ACLs, pass strict Apple `codesign` for
- *        Google LLC (`TeamIdentifier=EQHXZ8M8AV`, `Identifier=cli`) on macOS, and match its pinned
- *        SHA-256 digest (`agentapi_exe_sha256`). All ancestor directories up to `/` must reject
- *        world-write, group-write (`0o022`), and macOS ACLs, EXCEPT macOS Homebrew ancestors
- *        (`/opt/homebrew...` or `/usr/local/Caskroom...`) with gid `0` (wheel) or `80` (admin) ONLY
- *        when the leaf passes strict Google LLC `codesign` + SHA-256 pin (because macOS admin-group
- *        members already have sudo). When the vendor updates and the SHA-256 pin changes, fail closed
- *        with a fixed re-register diagnostic (`agy_executable_pin_mismatch`).
+ *      - Executable trust (Option B + shipped approved build digest allowlist):
+ *        Every candidate executable's SHA-256 digest MUST appear in `APPROVED_AGY_BINARY_DIGESTS`
+ *        BEFORE any token-bearing child is launched or the Homebrew ancestor exception can apply,
+ *        AND on dispatch must also match the registered `agentapi_exe_sha256`. Leaf binary must be
+ *        owned by root or current UID, strictly non-group/world-writable (`0o022`), free of macOS
+ *        ACLs, and pass strict Apple `codesign` for Google LLC (`TeamIdentifier=EQHXZ8M8AV`,
+ *        `Identifier=cli`) on macOS. All ancestor directories up to `/` reject world-write,
+ *        group-write (`0o022`), and macOS ACLs, EXCEPT macOS Homebrew ancestors with gid `0` (wheel)
+ *        or `80` (admin) ONLY when the leaf passes strict Google LLC `codesign` AND the approved
+ *        SHA-256 digest allowlist. Unknown/upgraded digests fail closed with `agy_executable_pin_mismatch`.
  *   2. C2 — Irreducible loopback TCP TOCTOU residual risk (accepted behind experimental flag):
  *      - Antigravity's local language server listens only on plain loopback TCP (no Unix domain socket,
  *        no `SO_PEERCRED`, no mTLS), and `antigravity agentapi` opens a new HTTP/2 gRPC TCP connection
  *        per invocation (empirically verified to reject HTTP 302 redirects off loopback).
- *      - Residual risk accepted by HezLead behind `--experimental-agy-agentapi`: a millisecond TCP
- *        TOCTOU window exists between pre-exec OS listener verification and the vendor CLI's `connect()`.
  *      - Mandatory mitigations enforced here:
- *        (a) Registration listener lookup runs inside the shared `receive-<scope>` lock and re-verifies
- *            after `get-conversation-metadata`.
+ *        (a) Registration listener lookup runs inside the shared `receive-<scope>` lock, and post-probe
+ *            listener re-verification ALWAYS runs even when `get-conversation-metadata` fails.
  *        (b) Dispatch re-verifies the exact listener `(canonical_address, pid, uid, start_time, exe,
- *            sha256)` BEFORE `get-conversation-metadata`, AGAIN BETWEEN metadata and `send-message`,
- *            AND ONCE MORE AFTER `send-message`.
- *        (c) If post-send verification sees any listener change, remove the 0600 registration, mark
- *            `wake_route` unavailable (`wake_unavailable_reason: "agy_endpoint_changed_after_send"`)
- *            with a fixed reason, and require explicit re-registration.
- *   3. C3 — Bounded lock hold during opt-out:
- *      - Single total dispatch budget (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, well inside opt-out's
- *        20s lock wait) across all inspections and child calls; `spawn`-based runner sends `SIGTERM`
- *        then `SIGKILL` after grace and awaits child `"close"` before returning and releasing the
- *        shared `receive-<scope>` lock.
+ *            sha256)` BEFORE `get-conversation-metadata`, AFTER `get-conversation-metadata` (before
+ *            `send-message`), AND AFTER `send-message` (even on error).
+ *        (c) On any detected change, route retirement persists `wake_unavailable_reason` to the receive
+ *            binding FIRST, then deletes the 0600 registration file, surfacing any cleanup or persistence
+ *            failure without swallowing it. `receive configure` in wake mode never clears a retired route;
+ *            only a verified `register-agy` (or opt-out to `--mode turn`) clears it.
+ *   3. C3 — Common absolute deadline across the full lock hold:
+ *      - A single absolute deadline (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, inside opt-out's 20s lock
+ *        wait) governs BOTH registration and dispatch across ALL verification subprocesses (`ls`,
+ *        `codesign`, `lsof`, `ps`), vendor child calls, reserved postchecks, and child termination.
+ *        Every subprocess runs via `spawn` with `SIGTERM -> SIGKILL` escalation and awaits `"close"`
+ *        before settling and releasing the shared `receive-<scope>` lock.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { lstat, open, readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
@@ -50,7 +51,6 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { createWakeSubscriber, type WakeHandle } from "../listener/wake.js";
 import { assertProfileIdentity } from "./agent-check.js";
 import { boundProfileCommands } from "./agent-onboarding-contract.js";
@@ -103,13 +103,12 @@ import {
   writeSecureJsonFile,
 } from "./storage.js";
 
-const execFileAsync = promisify(execFile);
-
 const AGY_WAKE_HEARTBEAT_MS = 5_000;
 const AGY_WAKE_POLL_MS = 30_000;
-/** Single total dispatch budget across inspections + metadata + send (fits inside 20s opt-out lock wait). */
+/** Single absolute lock-hold budget across all verifications, vendor calls, postchecks, and child close. */
 const AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000;
-const AGY_ENDPOINT_INSPECT_TIMEOUT_MS = 3_000;
+/** Portion of AGY_DISPATCH_TOTAL_BUDGET_MS reserved inside the absolute deadline for postchecks. */
+const AGY_POSTCHECK_RESERVE_MS = 1_500;
 const AGY_CHILD_KILL_GRACE_MS = 400;
 const AGY_REGISTRATION_MAX_BYTES = 16 * 1024;
 const AGY_LS_ADDRESS_MAX_CHARS = 256;
@@ -126,6 +125,24 @@ const GOOGLE_DEVELOPER_TEAM_ID = "EQHXZ8M8AV";
 const GOOGLE_DEVELOPER_AUTHORITY = `Developer ID Application: Google LLC (${GOOGLE_DEVELOPER_TEAM_ID})`;
 const AGY_UNREACHABLE_RE =
   /econnrefused|connection refused|connect error|failed to connect|dial tcp|401|403|unauthorized|unauthenticated|forbidden|csrf|unavailable|connection reset|socket hang up|etimedout|eof/i;
+
+/**
+ * Shipped allowlist of approved Antigravity CLI binary SHA-256 digests (versioned per vendor release).
+ * First registration, re-registration after an upgrade, and dispatch MUST match an entry here before
+ * any token-bearing child is launched or the macOS Homebrew ancestor exception can apply.
+ */
+export const APPROVED_AGY_BINARY_DIGESTS: Readonly<
+  Record<string, { version: string; platform: string }>
+> = Object.freeze({
+  "3f669d53b6a9807b161c327bf6ce33cdd24ecbf3026edcbb7347c004d1a2d9f2": {
+    version: "1.5.11,6132547114106880",
+    platform: "darwin-arm64",
+  },
+});
+
+const DEFAULT_APPROVED_DIGEST_SET: ReadonlySet<string> = new Set(
+  Object.keys(APPROVED_AGY_BINARY_DIGESTS),
+);
 
 export interface AgyRegistrationRecord {
   version: 1;
@@ -165,15 +182,34 @@ export interface AgyVendorVerificationResult {
 
 export type AgyVendorVerifier = (
   resolvedExecutablePath: string,
-  options?: { timeoutMs?: number; signal?: AbortSignal },
+  options?: { deadlineMs?: number; timeoutMs?: number; signal?: AbortSignal },
 ) => Promise<AgyVendorVerificationResult>;
 
 export type AgyEndpointInspector = (input: {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  deadlineMs?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }) => Promise<AgyLoopbackEndpoint | null>;
+
+function remainingFromDeadline(deadlineMs?: number, fallbackMs = AGY_DISPATCH_TOTAL_BUDGET_MS): number {
+  if (deadlineMs === undefined) return fallbackMs;
+  return deadlineMs - Date.now();
+}
+
+function splitTotalBudget(totalTimeoutMs: number): {
+  totalDeadlineMs: number;
+  mainDeadlineMs: number;
+} {
+  const now = Date.now();
+  const safeTotal = Math.max(100, totalTimeoutMs);
+  const reserve = Math.min(AGY_POSTCHECK_RESERVE_MS, Math.max(50, Math.floor(safeTotal * 0.25)));
+  return {
+    totalDeadlineMs: now + safeTotal,
+    mainDeadlineMs: now + Math.max(50, safeTotal - reserve),
+  };
+}
 
 /**
  * Parse a registration-time loopback address input (`127.0.0.1:<port>`, `[::1]:<port>`,
@@ -350,91 +386,270 @@ export async function sha256File(filePath: string): Promise<string> {
   });
 }
 
+export type AgyAgentApiRunner = (
+  executable: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+  },
+) => Promise<{ stdout: string; stderr: string }>;
+
 /**
- * Inspect macOS extended ACLs via `/bin/ls -led` (absolute path, stripped env).
- * Returns true if the file or directory has any extended ACL entries (fail closed).
+ * Bounded `spawn`-based runner (C3): enforces `timeoutMs` and `options.signal`, escalates
+ * `SIGTERM` -> `SIGKILL` after grace, and ALWAYS awaits the child `"close"` event before settling
+ * so no timed-out verification or vendor child can survive past release of the `receive-<scope>` lock.
+ */
+export const defaultAgyAgentApiRunner: AgyAgentApiRunner = (executable, args, options) =>
+  new Promise((resolveRun, rejectRun) => {
+    const maxBytes = 64 * 1024;
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+    if (options.timeoutMs <= 0) {
+      rejectRun(Object.assign(new Error("agy_child_timeout"), { code: "ETIMEDOUT", stdout: "", stderr: "" }));
+      return;
+    }
+
+    let child;
+    try {
+      child = spawn(executable, [...args], {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      rejectRun(error);
+      return;
+    }
+
+    const terminateChild = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        child.kill("SIGTERM");
+      } catch { /* already gone */ }
+      if (!killTimer) {
+        killTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            try {
+              child.kill("SIGKILL");
+            } catch { /* already gone */ }
+          }
+        }, AGY_CHILD_KILL_GRACE_MS);
+        killTimer.unref?.();
+      }
+    };
+
+    const onAbort = () => {
+      aborted = true;
+      terminateChild();
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        aborted = true;
+        terminateChild();
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      terminateChild();
+    }, options.timeoutMs);
+
+    const cleanupTimers = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdoutBytes < maxBytes) {
+        const take = chunk.subarray(0, maxBytes - stdoutBytes);
+        stdoutChunks.push(take);
+        stdoutBytes += take.length;
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderrBytes < maxBytes) {
+        const take = chunk.subarray(0, maxBytes - stderrBytes);
+        stderrChunks.push(take);
+        stderrBytes += take.length;
+      }
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      cleanupTimers();
+      rejectRun(error);
+    });
+
+    child.on("close", (code, sig) => {
+      if (settled) return;
+      settled = true;
+      cleanupTimers();
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (timedOut) {
+        const err = Object.assign(new Error("agy_child_timeout"), {
+          code: "ETIMEDOUT",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      if (aborted) {
+        const err = Object.assign(new Error("agy_child_aborted"), {
+          code: "ABORT_ERR",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      if (code !== 0) {
+        const err = Object.assign(new Error(`agy_child_exit_${code ?? sig ?? "unknown"}`), {
+          code: code ?? sig ?? "ERR",
+          stdout,
+          stderr,
+        });
+        rejectRun(err);
+        return;
+      }
+      resolveRun({ stdout, stderr });
+    });
+  });
+
+/**
+ * Inspect macOS extended ACLs via `/bin/ls -led` (absolute path, stripped env)
+ * sharing the caller's absolute `deadlineMs` (C3).
  */
 async function hasMacOsAcl(
   targetPath: string,
-  timeoutMs = AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+  deadlineMs?: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
   if (process.platform !== "darwin") return false;
+  const rem = remainingFromDeadline(deadlineMs);
+  if (rem <= 0) {
+    throw new AgentSetupError("agy_dispatch_timeout", "Antigravity verification exceeded its bounded budget.");
+  }
   try {
-    const res = await execFileAsync("/bin/ls", ["-led", targetPath], {
+    const res = await defaultAgyAgentApiRunner("/bin/ls", ["-led", targetPath], {
+      cwd: "/",
       env: {},
-      timeout: timeoutMs,
-      maxBuffer: 16 * 1024,
+      timeoutMs: rem,
       ...(signal ? { signal } : {}),
     });
-    const lines = String(res.stdout ?? "")
+    const lines = res.stdout
       .split(/\r?\n/)
       .filter((line) => line.length > 0);
     if (lines.length === 0) return true;
-    // Mode field ends with '+' when an ACL is attached; additional lines list ACL entries (" 0: ...").
     const modeToken = lines[0]!.trim().split(/\s+/)[0] ?? "";
     if (modeToken.includes("+") || lines.length > 1) return true;
     return false;
-  } catch {
-    // Fail closed if effective macOS permissions cannot be verified.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT") {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity verification exceeded its bounded budget.");
+    }
     return true;
   }
 }
 
 /**
- * Default vendor build verification on macOS using `/usr/bin/codesign` (absolute path, stripped env).
- * Verifies strict signature integrity AND Developer ID Application: Google LLC (EQHXZ8M8AV) + Identifier=cli.
+ * Default vendor build verification on macOS using `/usr/bin/codesign` (absolute path, stripped env)
+ * sharing the caller's absolute `deadlineMs` across both `--verify` and `-dvv` subprocesses (C3).
  */
 export const defaultAgyVendorVerifier: AgyVendorVerifier = async (resolvedPath, options) => {
   if (process.platform !== "darwin") {
-    // Non-macOS has no Apple codesign; require an explicit approved pin or injected verifier.
     return { ok: false, googleSigned: false };
   }
-  const timeout = options?.timeoutMs ?? AGY_ENDPOINT_INSPECT_TIMEOUT_MS;
+  const deadlineMs =
+    options?.deadlineMs ??
+    (options?.timeoutMs !== undefined ? Date.now() + options.timeoutMs : Date.now() + AGY_DISPATCH_TOTAL_BUDGET_MS);
+
+  const rem1 = remainingFromDeadline(deadlineMs);
+  if (rem1 <= 0) {
+    throw new AgentSetupError("agy_dispatch_timeout", "Antigravity signature verification exceeded its bounded budget.");
+  }
   try {
-    await execFileAsync("/usr/bin/codesign", ["--verify", "--strict", resolvedPath], {
+    await defaultAgyAgentApiRunner("/usr/bin/codesign", ["--verify", "--strict", resolvedPath], {
+      cwd: "/",
       env: {},
-      timeout,
-      maxBuffer: 32 * 1024,
+      timeoutMs: rem1,
       ...(options?.signal ? { signal: options.signal } : {}),
     });
-    const detail = await execFileAsync("/usr/bin/codesign", ["-dvv", resolvedPath], {
+    const rem2 = remainingFromDeadline(deadlineMs);
+    if (rem2 <= 0) {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity signature verification exceeded its bounded budget.");
+    }
+    const detail = await defaultAgyAgentApiRunner("/usr/bin/codesign", ["-dvv", resolvedPath], {
+      cwd: "/",
       env: {},
-      timeout,
-      maxBuffer: 64 * 1024,
+      timeoutMs: rem2,
       ...(options?.signal ? { signal: options.signal } : {}),
     });
-    const combined = `${detail.stdout ?? ""}\n${detail.stderr ?? ""}`;
+    const combined = `${detail.stdout}\n${detail.stderr}`;
     const hasAuthority = combined.includes(`Authority=${GOOGLE_DEVELOPER_AUTHORITY}`);
     const hasTeam = combined.includes(`TeamIdentifier=${GOOGLE_DEVELOPER_TEAM_ID}`);
     const hasIdentifier = combined.includes("Identifier=cli");
     return { ok: hasAuthority && hasTeam && hasIdentifier, googleSigned: hasAuthority && hasTeam && hasIdentifier };
-  } catch {
+  } catch (error) {
+    if (error instanceof AgentSetupError) throw error;
+    if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT") {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity signature verification exceeded its bounded budget.");
+    }
     return { ok: false, googleSigned: false };
   }
 };
 
 /**
- * Pin and verify a trusted Antigravity executable (C1 + HezLead Option B):
+ * Pin and verify a trusted Antigravity executable (C1 + HezLead Option B + C3 common deadline):
  * - Canonicalized via `realpath` (never resolved through `PATH`).
  * - Leaf binary: regular non-symlink executable owned by root or current UID, strictly NO group-write
  *   or world-write (`(mode & 0o022) === 0`), NO macOS ACLs.
- * - Vendor build verification: strict Google LLC codesign (`EQHXZ8M8AV`) on macOS (or injectable verifier
- *   in unit tests), plus SHA-256 digest pin check (`expectedSha256`) failing closed with
- *   `agy_executable_pin_mismatch` on vendor updates.
+ * - Approved build digest check: SHA-256 MUST match `approvedDigests` (defaults to the shipped
+ *   `APPROVED_AGY_BINARY_DIGESTS` allowlist) AND `expectedSha256` (if supplied) BEFORE any token-bearing
+ *   child is launched or the Homebrew ancestor exception can apply.
+ * - Vendor signature check: strict Google LLC codesign (`EQHXZ8M8AV`) on macOS (or injectable verifier).
  * - Full ancestor directory walk up to `/`: owned by root or current UID, NO macOS ACLs, NEVER
  *   world-writable (`0o002`), and NEVER group-writable (`0o020`) EXCEPT macOS Homebrew ancestors
- *   with gid 0 (wheel) or 80 (admin) ONLY when the leaf passes strict Google LLC codesign + SHA-256 pin.
+ *   with gid 0 (wheel) or 80 (admin) ONLY when the leaf passes BOTH strict Google LLC codesign AND
+ *   the approved SHA-256 digest allowlist.
  */
 export async function validateAgyAgentApiExecutable(
   raw: unknown,
   options?: {
     expectedSha256?: string;
+    approvedDigests?: ReadonlySet<string>;
     vendorVerifier?: AgyVendorVerifier;
+    deadlineMs?: number;
     timeoutMs?: number;
     signal?: AbortSignal;
   },
 ): Promise<{ path: string; sha256: string }> {
+  const deadlineMs =
+    options?.deadlineMs ??
+    (options?.timeoutMs !== undefined ? Date.now() + options.timeoutMs : undefined);
+  const checkBudget = () => {
+    if (deadlineMs !== undefined && deadlineMs - Date.now() <= 0) {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity verification exceeded its bounded budget.");
+    }
+  };
+
+  checkBudget();
   const shaped = validateAgyExecutablePathShape(raw);
   let resolved: string;
   try {
@@ -472,25 +687,8 @@ export async function validateAgyAgentApiExecutable(
       "Antigravity executable must be an owned regular executable file with no group or world write permissions.",
     );
   }
-  if (await hasMacOsAcl(resolved, options?.timeoutMs, options?.signal)) {
-    throw new AgentSetupError(
-      "agy_executable_invalid",
-      "Antigravity executable must not have extended ACL permissions.",
-    );
-  }
 
-  const verifier = options?.vendorVerifier ?? defaultAgyVendorVerifier;
-  const vendorCheck = await verifier(resolved, {
-    ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-    ...(options?.signal ? { signal: options.signal } : {}),
-  });
-  if (!vendorCheck.ok) {
-    throw new AgentSetupError(
-      "agy_executable_unapproved",
-      "Antigravity executable did not pass approved vendor build verification.",
-    );
-  }
-
+  checkBudget();
   let sha256: string;
   try {
     sha256 = await sha256File(resolved);
@@ -500,6 +698,15 @@ export async function validateAgyAgentApiExecutable(
       "Antigravity executable digest could not be computed.",
     );
   }
+
+  // C1: Require an approved digest from an independent allowlist BEFORE vendor calls or Homebrew exception!
+  const approvedSet = options?.approvedDigests ?? DEFAULT_APPROVED_DIGEST_SET;
+  if (!approvedSet.has(sha256)) {
+    throw new AgentSetupError(
+      "agy_executable_pin_mismatch",
+      "Pinned Antigravity executable is not in the approved build allowlist. Re-run cswarm receive register-agy with an approved build.",
+    );
+  }
   if (options?.expectedSha256 !== undefined && sha256 !== options.expectedSha256) {
     throw new AgentSetupError(
       "agy_executable_pin_mismatch",
@@ -507,8 +714,29 @@ export async function validateAgyAgentApiExecutable(
     );
   }
 
+  if (await hasMacOsAcl(resolved, deadlineMs, options?.signal)) {
+    throw new AgentSetupError(
+      "agy_executable_invalid",
+      "Antigravity executable must not have extended ACL permissions.",
+    );
+  }
+
+  checkBudget();
+  const verifier = options?.vendorVerifier ?? defaultAgyVendorVerifier;
+  const vendorCheck = await verifier(resolved, {
+    ...(deadlineMs !== undefined ? { deadlineMs, timeoutMs: Math.max(1, deadlineMs - Date.now()) } : {}),
+    ...(options?.signal ? { signal: options.signal } : {}),
+  });
+  if (!vendorCheck.ok) {
+    throw new AgentSetupError(
+      "agy_executable_unapproved",
+      "Antigravity executable did not pass approved vendor build verification.",
+    );
+  }
+
   let cursor = dirname(resolved);
   for (;;) {
+    checkBudget();
     let dirInfo;
     try {
       dirInfo = await lstat(cursor);
@@ -526,10 +754,11 @@ export async function validateAgyAgentApiExecutable(
     }
     if ((dirInfo.mode & 0o020) !== 0) {
       // HezLead Option B: allow root/admin group (gid 0 or 80) on macOS Homebrew ancestors ONLY when
-      // the leaf binary passed strict Google LLC codesign verification.
+      // the leaf binary passed BOTH strict Google LLC codesign AND the approved SHA-256 allowlist.
       const allowedHomebrewAdmin =
         process.platform === "darwin" &&
         vendorCheck.googleSigned &&
+        approvedSet.has(sha256) &&
         isHomebrewAncestorPath(cursor) &&
         MACOS_HOMEBREW_ADMIN_GIDS.has(dirInfo.gid);
       if (!allowedHomebrewAdmin) {
@@ -539,7 +768,7 @@ export async function validateAgyAgentApiExecutable(
         );
       }
     }
-    if (await hasMacOsAcl(cursor, options?.timeoutMs, options?.signal)) {
+    if (await hasMacOsAcl(cursor, deadlineMs, options?.signal)) {
       throw new AgentSetupError(
         "agy_executable_invalid",
         "Antigravity executable ancestor directories must not have extended ACL permissions.",
@@ -714,30 +943,40 @@ export function buildMinimalAgyChildEnv(
 
 /**
  * Inspect the live loopback-only TCP listener on macOS using absolute `/usr/sbin/lsof` + `/bin/ps`
- * (zero PATH lookup, stripped env). Refuses wildcard listeners (`*:<port>`, `0.0.0.0:<port>`, `[::]:<port>`),
- * cross-UID listeners, and non-matching executables.
+ * via the bounded spawn runner, sharing the caller's single absolute `deadlineMs` (C3).
  */
 async function inspectMacOsLoopbackListener(input: {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  deadlineMs?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<AgyLoopbackEndpoint | null> {
-  const timeout = Math.max(100, Math.min(input.timeoutMs ?? AGY_ENDPOINT_INSPECT_TIMEOUT_MS, AGY_ENDPOINT_INSPECT_TIMEOUT_MS));
+  const deadlineMs =
+    input.deadlineMs ??
+    (input.timeoutMs !== undefined ? Date.now() + input.timeoutMs : Date.now() + AGY_DISPATCH_TOTAL_BUDGET_MS);
+
+  const rem1 = remainingFromDeadline(deadlineMs);
+  if (rem1 <= 0) {
+    throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+  }
   let lsofStdout: string;
   try {
-    const res = await execFileAsync(
+    const res = await defaultAgyAgentApiRunner(
       "/usr/sbin/lsof",
       ["-nP", `-iTCP:${input.port}`, "-sTCP:LISTEN", "-F", "pun"],
       {
+        cwd: "/",
         env: {},
-        timeout,
-        maxBuffer: 64 * 1024,
+        timeoutMs: rem1,
         ...(input.signal ? { signal: input.signal } : {}),
       },
     );
-    lsofStdout = String(res.stdout ?? "");
-  } catch {
+    lsofStdout = res.stdout;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT") {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+    }
     return null;
   }
 
@@ -779,20 +1018,27 @@ async function inspectMacOsLoopbackListener(input: {
   if (!match) return null;
   if (typeof process.getuid === "function" && match.uid !== process.getuid()) return null;
 
+  const rem2 = remainingFromDeadline(deadlineMs);
+  if (rem2 <= 0) {
+    throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+  }
   let psStdout: string;
   try {
-    const res = await execFileAsync(
+    const res = await defaultAgyAgentApiRunner(
       "/bin/ps",
       ["-ww", "-p", String(match.pid), "-o", "uid=,lstart=,comm="],
       {
+        cwd: "/",
         env: {},
-        timeout,
-        maxBuffer: 16 * 1024,
+        timeoutMs: rem2,
         ...(input.signal ? { signal: input.signal } : {}),
       },
     );
-    psStdout = String(res.stdout ?? "").trim();
-  } catch {
+    psStdout = res.stdout.trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT") {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+    }
     return null;
   }
   const psMatch = /^(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(
@@ -827,7 +1073,11 @@ async function inspectMacOsLoopbackListener(input: {
 async function inspectLinuxLoopbackListener(input: {
   host: "127.0.0.1" | "::1" | "localhost";
   port: number;
+  deadlineMs?: number;
 }): Promise<AgyLoopbackEndpoint | null> {
+  if (input.deadlineMs !== undefined && input.deadlineMs - Date.now() <= 0) {
+    throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+  }
   const portHex = input.port.toString(16).toUpperCase().padStart(4, "0");
   const candidates: Array<{ inode: string; canonical: string }> = [];
 
@@ -862,6 +1112,9 @@ async function inspectLinuxLoopbackListener(input: {
   const procEntries = await readdir("/proc").catch(() => [] as string[]);
   const matchedPids = new Map<number, string>();
   for (const entry of procEntries) {
+    if (input.deadlineMs !== undefined && input.deadlineMs - Date.now() <= 0) {
+      throw new AgentSetupError("agy_dispatch_timeout", "Antigravity listener inspection exceeded its bounded budget.");
+    }
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number.parseInt(entry, 10);
     const procStat = await stat(`/proc/${entry}`).catch(() => null);
@@ -1004,147 +1257,42 @@ export async function removeAgyRegistration(
   await deleteSecureJsonFile(path);
 }
 
-export type AgyAgentApiRunner = (
-  executable: string,
-  args: readonly string[],
-  options: {
-    cwd: string;
-    timeoutMs: number;
-    env: NodeJS.ProcessEnv;
-    signal?: AbortSignal;
-  },
-) => Promise<{ stdout: string; stderr: string }>;
-
 /**
- * Bounded `spawn`-based runner (C3): enforces `timeoutMs` and `options.signal`, escalates
- * `SIGTERM` -> `SIGKILL` after grace, and ALWAYS awaits the child `"close"` event before settling
- * so no timed-out child can survive past release of the shared `receive-<scope>` lock.
+ * C2: Durable route retirement while the caller already holds `receive-<scope>` lock.
+ * 1. Persist `wake_unavailable_reason` + `wake_verified_at: null` onto `receive-<scope>.json` FIRST.
+ * 2. Delete `wake-agy-<scope>.json` SECOND.
+ * Never swallows persistence or cleanup failures — callers surface them explicitly!
  */
-export const defaultAgyAgentApiRunner: AgyAgentApiRunner = (executable, args, options) =>
-  new Promise((resolveRun, rejectRun) => {
-    const maxBytes = 64 * 1024;
-    let settled = false;
-    let timedOut = false;
-    let aborted = false;
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-
-    let child;
-    try {
-      child = spawn(executable, [...args], {
-        cwd: options.cwd,
-        env: options.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      rejectRun(error);
-      return;
+async function retireAgyWakeRouteUnlocked(
+  profilePath: string,
+  hostSessionId: string,
+  reason: string,
+): Promise<{ retired: boolean; cleanupFailed: boolean; markerFailed: boolean }> {
+  let markerFailed = false;
+  let retired = false;
+  try {
+    const current = await readReceiveBinding(profilePath, hostSessionId);
+    if (current && current.provider === "agy" && current.requested_mode === "wake") {
+      const next = {
+        ...current,
+        wake_verified_at: null,
+        wake_unavailable_reason: reason,
+      };
+      await writeSecureJsonFile(receiveBindingPath(profilePath, hostSessionId), JSON.stringify(next));
+      retired = true;
     }
+  } catch {
+    markerFailed = true;
+  }
 
-    const terminateChild = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      try {
-        child.kill("SIGTERM");
-      } catch { /* already gone */ }
-      if (!killTimer) {
-        killTimer = setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) {
-            try {
-              child.kill("SIGKILL");
-            } catch { /* already gone */ }
-          }
-        }, AGY_CHILD_KILL_GRACE_MS);
-        killTimer.unref?.();
-      }
-    };
-
-    const onAbort = () => {
-      aborted = true;
-      terminateChild();
-    };
-    if (options.signal) {
-      if (options.signal.aborted) {
-        aborted = true;
-        terminateChild();
-      } else {
-        options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
-
-    const effectiveTimeout = Math.max(1, options.timeoutMs);
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      terminateChild();
-    }, effectiveTimeout);
-
-    const cleanupTimers = () => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-      if (options.signal) options.signal.removeEventListener("abort", onAbort);
-    };
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (stdoutBytes < maxBytes) {
-        const take = chunk.subarray(0, maxBytes - stdoutBytes);
-        stdoutChunks.push(take);
-        stdoutBytes += take.length;
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderrBytes < maxBytes) {
-        const take = chunk.subarray(0, maxBytes - stderrBytes);
-        stderrChunks.push(take);
-        stderrBytes += take.length;
-      }
-    });
-
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      cleanupTimers();
-      rejectRun(error);
-    });
-
-    child.on("close", (code, sig) => {
-      if (settled) return;
-      settled = true;
-      cleanupTimers();
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      if (timedOut) {
-        const err = Object.assign(new Error("agy_child_timeout"), {
-          code: "ETIMEDOUT",
-          stdout,
-          stderr,
-        });
-        rejectRun(err);
-        return;
-      }
-      if (aborted) {
-        const err = Object.assign(new Error("agy_child_aborted"), {
-          code: "ABORT_ERR",
-          stdout,
-          stderr,
-        });
-        rejectRun(err);
-        return;
-      }
-      if (code !== 0) {
-        const err = Object.assign(new Error(`agy_child_exit_${code ?? sig ?? "unknown"}`), {
-          code: code ?? sig ?? "ERR",
-          stdout,
-          stderr,
-        });
-        rejectRun(err);
-        return;
-      }
-      resolveRun({ stdout, stderr });
-    });
-  });
+  let cleanupFailed = false;
+  try {
+    await deleteSecureJsonFile(agyRegistrationPath(profilePath, hostSessionId));
+  } catch {
+    cleanupFailed = true;
+  }
+  return { retired, cleanupFailed, markerFailed };
+}
 
 function pathMatchesWorkspace(bindingCwd: string, workspacePath: string): boolean {
   const normBinding = resolve(bindingCwd);
@@ -1172,6 +1320,13 @@ export async function verifyAgyConversationSession(options: {
 }): Promise<{ ok: true } | { ok: false; code: string; detail: string }> {
   const runner = options.runner ?? defaultAgyAgentApiRunner;
   const timeoutMs = options.timeoutMs ?? AGY_DISPATCH_TOTAL_BUDGET_MS;
+  if (timeoutMs <= 0) {
+    return {
+      ok: false,
+      code: "agy_dispatch_timeout",
+      detail: "Antigravity session verification exceeded its bounded budget.",
+    };
+  }
   const childEnv = buildMinimalAgyChildEnv(options.canonicalLsAddress, options.csrfToken);
   const argv = ["agentapi", "get-conversation-metadata", options.hostSessionId] as const;
 
@@ -1194,6 +1349,13 @@ export async function verifyAgyConversationSession(options: {
         detail: "Pinned Antigravity CLI executable was not found.",
       };
     }
+    if (err.code === "ETIMEDOUT") {
+      return {
+        ok: false,
+        code: "agy_dispatch_timeout",
+        detail: "Antigravity session verification timed out within its bounded budget.",
+      };
+    }
     if (/not_found|notfound|trajectory not found/i.test(combined)) {
       return {
         ok: false,
@@ -1201,7 +1363,7 @@ export async function verifyAgyConversationSession(options: {
         detail: "Antigravity language server does not own this bound conversation.",
       };
     }
-    if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
+    if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED") {
       return {
         ok: false,
         code: "agy_ls_unreachable",
@@ -1291,12 +1453,12 @@ export async function verifyAgyConversationSession(options: {
  * Private 0600 registration (`cswarm receive register-agy`).
  * - Accepts credentials ONLY via a 0600 `--credentials-file`, piped stdin, or explicit `credentialsJson`
  *   — NEVER from `cswarm`'s own `process.env` or argv.
- * - Runs loopback listener inspection, trusted executable + codesign + SHA-256 verification,
- *   `get-conversation-metadata` session verification, AND post-metadata listener re-verification
- *   ALL inside the shared `receive-<scope>` lock.
- * - Refuses unless live binding is already `provider: "agy"` + `requested_mode: "wake"` +
- *   `experimental_agy_agentapi: true`; clears `wake_unavailable_reason` upon verified registration;
- *   returns a secret-free AND address-free summary.
+ * - Enforces a single common absolute deadline inside the shared `receive-<scope>` lock covering
+ *   listener inspection, approved-digest + codesign + ACL verification, `get-conversation-metadata`,
+ *   AND mandatory post-probe listener re-verification (even when the metadata probe fails!).
+ * - If post-probe verification detects an endpoint change, retires any affected saved registration
+ *   (persisting `wake_unavailable_reason` FIRST, then deleting the 0600 file, surfacing any failure).
+ * - Clears `wake_unavailable_reason` ONLY after a fully verified registration; never prints address or token.
  */
 export async function registerAgyWake(options: {
   profilePath: string;
@@ -1306,7 +1468,9 @@ export async function registerAgyWake(options: {
   stdin?: NodeJS.ReadableStream;
   endpointInspector?: AgyEndpointInspector;
   vendorVerifier?: AgyVendorVerifier;
+  approvedDigests?: ReadonlySet<string>;
   runner?: AgyAgentApiRunner;
+  timeoutMs?: number;
   now?: () => number;
 }) {
   const profile = privatePath(options.profilePath);
@@ -1349,6 +1513,9 @@ export async function registerAgyWake(options: {
     dirname(profile),
     `receive-${profileScopeKey(host)}`,
     async () => {
+      const { totalDeadlineMs, mainDeadlineMs } = splitTotalBudget(
+        options.timeoutMs ?? AGY_DISPATCH_TOTAL_BUDGET_MS,
+      );
       const auth = await resolveAuthorizedWakeBinding({
         profilePath: profile,
         hostSessionId: host,
@@ -1359,8 +1526,17 @@ export async function registerAgyWake(options: {
         throw new AgentSetupError(auth.code, auth.detail);
       }
 
-      // C2: Perform listener lookup INSIDE the shared receive-<scope> lock!
-      const endpoint = await inspector({ host: parsedAddr.host, port: parsedAddr.port });
+      // C2 & C3: Perform listener lookup INSIDE the shared receive-<scope> lock under common deadline.
+      const inspectRem = mainDeadlineMs - Date.now();
+      if (inspectRem <= 0) {
+        throw new AgentSetupError("agy_dispatch_timeout", "Antigravity registration exceeded its bounded budget.");
+      }
+      const endpoint = await inspector({
+        host: parsedAddr.host,
+        port: parsedAddr.port,
+        deadlineMs: mainDeadlineMs,
+        timeoutMs: inspectRem,
+      });
       if (!endpoint) {
         throw new AgentSetupError(
           "agy_endpoint_mismatch",
@@ -1380,13 +1556,20 @@ export async function registerAgyWake(options: {
           "Verified Antigravity listener must be owned by the current user.",
         );
       }
+
+      // C1: Validate executable against independent approved digest allowlist + codesign + strict 0o022/ACL
+      // BEFORE launching ANY token-bearing child!
       const pinned = await validateAgyAgentApiExecutable(endpoint.executable, {
+        ...(options.approvedDigests ? { approvedDigests: options.approvedDigests } : {}),
         ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+        deadlineMs: mainDeadlineMs,
       });
       if (payload.agentapi_exe !== undefined) {
         const explicitChecked = await validateAgyAgentApiExecutable(payload.agentapi_exe, {
           expectedSha256: pinned.sha256,
+          ...(options.approvedDigests ? { approvedDigests: options.approvedDigests } : {}),
           ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+          deadlineMs: mainDeadlineMs,
         });
         if (explicitChecked.path !== pinned.path) {
           throw new AgentSetupError(
@@ -1403,27 +1586,61 @@ export async function registerAgyWake(options: {
         csrfToken: payload.csrf_token,
         hostSessionId: host,
         expectedCwd: auth.binding.cwd,
-        timeoutMs: AGY_DISPATCH_TOTAL_BUDGET_MS,
+        timeoutMs: mainDeadlineMs - Date.now(),
         ...(options.runner ? { runner: options.runner } : {}),
       });
-      if (!verified.ok) {
-        throw new AgentSetupError(verified.code, verified.detail);
+
+      // C2: ALWAYS run post-probe listener + digest recheck (even when verifyAgyConversationSession failed!)
+      // strictly within totalDeadlineMs; if changed, retire any saved registration before throwing!
+      let postProbeStillMatches = false;
+      const postRem = totalDeadlineMs - Date.now();
+      if (postRem > 0) {
+        try {
+          const postExe = await validateAgyAgentApiExecutable(pinned.path, {
+            expectedSha256: pinned.sha256,
+            ...(options.approvedDigests ? { approvedDigests: options.approvedDigests } : {}),
+            ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+            deadlineMs: totalDeadlineMs,
+          });
+          const postMetaEndpoint = await inspector({
+            host: canonicalAddr.host,
+            port: canonicalAddr.port,
+            deadlineMs: totalDeadlineMs,
+            timeoutMs: Math.max(1, totalDeadlineMs - Date.now()),
+          });
+          postProbeStillMatches = Boolean(
+            postMetaEndpoint &&
+              postMetaEndpoint.canonical_address === canonicalAddr.canonical &&
+              postMetaEndpoint.pid === endpoint.pid &&
+              postMetaEndpoint.uid === endpoint.uid &&
+              postMetaEndpoint.start_time === endpoint.start_time &&
+              postMetaEndpoint.executable === postExe.path,
+          );
+        } catch {
+          postProbeStillMatches = false;
+        }
       }
 
-      // C2: Re-verify the exact listening process AFTER metadata verification before committing 0600 file.
-      const postMetaEndpoint = await inspector({ host: canonicalAddr.host, port: canonicalAddr.port });
-      if (
-        !postMetaEndpoint ||
-        postMetaEndpoint.canonical_address !== canonicalAddr.canonical ||
-        postMetaEndpoint.pid !== endpoint.pid ||
-        postMetaEndpoint.uid !== endpoint.uid ||
-        postMetaEndpoint.start_time !== endpoint.start_time ||
-        postMetaEndpoint.executable !== pinned.path
-      ) {
+      if (!postProbeStillMatches) {
+        const retired = await retireAgyWakeRouteUnlocked(
+          profile,
+          host,
+          "agy_endpoint_changed_during_registration",
+        );
+        if (retired.markerFailed || retired.cleanupFailed) {
+          throw new AgentSetupError(
+            "agy_endpoint_changed_cleanup_failed",
+            "Antigravity loopback listener changed during registration; wake route retired, but local cleanup failed. Remove the registration file and retry cswarm receive register-agy.",
+          );
+        }
         throw new AgentSetupError(
           "agy_endpoint_mismatch",
-          "Antigravity loopback listener changed during registration verification. Retry cswarm receive register-agy.",
+          "Antigravity loopback listener changed during registration verification; wake route retired. Retry cswarm receive register-agy.",
         );
+      }
+
+      if (!verified.ok) {
+        throw new AgentSetupError(verified.code, verified.detail);
       }
 
       const record: AgyRegistrationRecord = {
@@ -1441,7 +1658,7 @@ export async function registerAgyWake(options: {
       };
       await writeSecureJsonFile(agyRegistrationPath(profile, host), JSON.stringify(record));
 
-      // Clear wake_unavailable_reason only if previously marked unavailable (otherwise leave binding untouched).
+      // Clear wake_unavailable_reason ONLY after verified registration completes.
       let bindingForStatus = auth.binding;
       if (auth.binding.wake_unavailable_reason) {
         bindingForStatus = { ...auth.binding, wake_unavailable_reason: null };
@@ -1514,20 +1731,18 @@ export interface AgyAgentApiAdapterOptions {
   runner?: AgyAgentApiRunner;
   endpointInspector?: AgyEndpointInspector;
   vendorVerifier?: AgyVendorVerifier;
-  /** Single total budget across all inspections and child calls (defaults to 8_000ms). */
+  approvedDigests?: ReadonlySet<string>;
+  /** Single absolute lock-hold budget across all verifications, vendor calls, and postchecks (default 8_000ms). */
   timeoutMs?: number;
 }
 
 /**
  * Invokes `<pinned-antigravity> agentapi send-message --title=CommonSwarm <conversation-uuid> "<fixed text>"`:
- * - Single total dispatch budget (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, inside opt-out's 20s wait).
- * - Verifies trusted pinned executable (strict `0o022`, no ACLs, Google LLC codesign + SHA-256 pin).
- * - Verifies exact live loopback listener `(canonical_address, pid, uid, start_time, exe, sha256)`:
- *   (1) BEFORE `get-conversation-metadata`,
- *   (2) AGAIN BETWEEN `get-conversation-metadata` and `send-message`,
- *   (3) ONCE MORE AFTER `send-message` (marking `wake_route` unavailable and requiring re-registration if changed).
- * - Passes ONLY canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in a stripped,
- *   proxy-free child env (HezLead #716 C1 narrow scope decision).
+ * - Single common absolute deadline (`AGY_DISPATCH_TOTAL_BUDGET_MS = 8_000`, inside opt-out's 20s wait)
+ *   shared across ALL verification subprocesses, both vendor child calls, reserved postchecks, and close-wait.
+ * - Verifies approved build allowlist + registered SHA-256 pin + strict `0o022`/ACL + Google LLC codesign.
+ * - Verifies exact live loopback listener BEFORE and AFTER each token-bearing call; any change persists
+ *   `wake_unavailable_reason` FIRST, then removes the 0600 registration, surfacing any cleanup failure.
  * - Emits ONLY fixed static diagnostic codes and text.
  */
 export class AgyAgentApiAdapter implements NativeWakeAdapter {
@@ -1536,6 +1751,7 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
   private readonly runner: AgyAgentApiRunner;
   private readonly endpointInspector: AgyEndpointInspector;
   private readonly vendorVerifier?: AgyVendorVerifier;
+  private readonly approvedDigests?: ReadonlySet<string>;
   private readonly timeoutMs: number;
 
   constructor(options: AgyAgentApiAdapterOptions) {
@@ -1543,6 +1759,7 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     this.runner = options.runner ?? defaultAgyAgentApiRunner;
     this.endpointInspector = options.endpointInspector ?? defaultAgyEndpointInspector;
     this.vendorVerifier = options.vendorVerifier;
+    this.approvedDigests = options.approvedDigests;
     this.timeoutMs = options.timeoutMs ?? AGY_DISPATCH_TOTAL_BUDGET_MS;
   }
 
@@ -1550,18 +1767,31 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     registration: AgyRegistrationRecord,
     canonicalAddr: { canonical: string; host: "127.0.0.1" | "::1"; port: number },
     pinnedPath: string,
-    remainingMs: number,
+    deadlineMs: number,
     signal?: AbortSignal,
-  ): Promise<boolean> {
-    if (remainingMs <= 0) return false;
-    const liveEndpoint = await this.endpointInspector({
-      host: canonicalAddr.host,
-      port: canonicalAddr.port,
-      timeoutMs: Math.min(remainingMs, AGY_ENDPOINT_INSPECT_TIMEOUT_MS),
-      ...(signal ? { signal } : {}),
-    });
+  ): Promise<{ ok: true } | { ok: false; timedOut: boolean }> {
+    const rem = deadlineMs - Date.now();
+    if (rem <= 0) return { ok: false, timedOut: true };
+    let liveEndpoint: AgyLoopbackEndpoint | null;
+    try {
+      liveEndpoint = await this.endpointInspector({
+        host: canonicalAddr.host,
+        port: canonicalAddr.port,
+        deadlineMs,
+        timeoutMs: rem,
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      if (
+        (error instanceof AgentSetupError && error.code === "agy_dispatch_timeout") ||
+        (error as NodeJS.ErrnoException)?.code === "ETIMEDOUT"
+      ) {
+        return { ok: false, timedOut: true };
+      }
+      return { ok: false, timedOut: false };
+    }
     const currentUid = typeof process.getuid === "function" ? process.getuid() : registration.ls_uid;
-    return Boolean(
+    const matches = Boolean(
       liveEndpoint &&
         liveEndpoint.canonical_address === canonicalAddr.canonical &&
         liveEndpoint.pid === registration.ls_pid &&
@@ -1570,29 +1800,24 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
         liveEndpoint.start_time === registration.ls_start_time &&
         liveEndpoint.executable === pinnedPath,
     );
+    return matches ? { ok: true } : { ok: false, timedOut: false };
   }
 
-  /**
-   * Mark wake route unavailable and remove stale 0600 credentials after a post-send endpoint change.
-   * Called while NativeWakeBridge already holds the `receive-<scope>` lock (so writes binding directly
-   * via atomic writeSecureJsonFile without re-acquiring the lock).
-   */
-  private async markWakeUnavailableAfterEndpointChange(
+  private async retireAndReport(
     hostSessionId: string,
     reason: string,
-  ): Promise<void> {
-    await deleteSecureJsonFile(agyRegistrationPath(this.profilePath, hostSessionId)).catch(() => undefined);
-    try {
-      const current = await readReceiveBinding(this.profilePath, hostSessionId);
-      if (current && current.provider === "agy" && current.requested_mode === "wake") {
-        const next = {
-          ...current,
-          wake_verified_at: null,
-          wake_unavailable_reason: reason,
-        };
-        await writeSecureJsonFile(receiveBindingPath(this.profilePath, hostSessionId), JSON.stringify(next));
-      }
-    } catch { /* best-effort unavailability marker */ }
+    normalCode: string,
+    normalDetail: string,
+  ): Promise<{ ok: false; code: string; detail: string }> {
+    const retired = await retireAgyWakeRouteUnlocked(this.profilePath, hostSessionId, reason);
+    if (retired.markerFailed || retired.cleanupFailed) {
+      return {
+        ok: false,
+        code: "agy_endpoint_changed_cleanup_failed",
+        detail: "Antigravity endpoint changed; wake route disabled, but local cleanup failed. Remove the registration file and re-run cswarm receive register-agy.",
+      };
+    }
+    return { ok: false, code: normalCode, detail: normalDetail };
   }
 
   async sendWake(input: {
@@ -1602,8 +1827,7 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     cwd: string;
     signal?: AbortSignal;
   }): Promise<{ ok: true } | { ok: false; code: string; detail: string }> {
-    const deadlineMs = Date.now() + this.timeoutMs;
-    const remainingMs = () => Math.max(0, deadlineMs - Date.now());
+    const { totalDeadlineMs, mainDeadlineMs } = splitTotalBudget(this.timeoutMs);
 
     if (!ONBOARDING_UUID.test(input.hostSessionId)) {
       return {
@@ -1652,17 +1876,25 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       };
     }
 
-    // C1: Re-verify trusted pinned executable (strict 0o022, no ACLs, Google LLC codesign + SHA-256 pin).
+    // C1 & C3: Re-verify approved allowlist + SHA-256 pin + strict 0o022/ACL + codesign under mainDeadlineMs.
     let pinned: { path: string; sha256: string };
     try {
       pinned = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
         expectedSha256: registration.agentapi_exe_sha256,
+        ...(this.approvedDigests ? { approvedDigests: this.approvedDigests } : {}),
         ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
-        timeoutMs: remainingMs(),
+        deadlineMs: mainDeadlineMs,
         ...(input.signal ? { signal: input.signal } : {}),
       });
     } catch (error) {
       const code = error instanceof AgentSetupError ? error.code : "agy_executable_invalid";
+      if (code === "agy_dispatch_timeout") {
+        return {
+          ok: false,
+          code: "agy_dispatch_timeout",
+          detail: "Antigravity executable verification exceeded its bounded dispatch budget.",
+        };
+      }
       if (code === "agy_executable_pin_mismatch") {
         return {
           ok: false,
@@ -1685,19 +1917,30 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     }
 
     // C2 Check #1 (before get-conversation-metadata): Verify exact loopback listener BEFORE presenting CSRF token!
-    if (!(await this.verifyEndpointMatches(registration, canonicalAddr, pinned.path, remainingMs(), input.signal))) {
-      await this.markWakeUnavailableAfterEndpointChange(
+    const preCheck = await this.verifyEndpointMatches(
+      registration,
+      canonicalAddr,
+      pinned.path,
+      mainDeadlineMs,
+      input.signal,
+    );
+    if (!preCheck.ok) {
+      if (preCheck.timedOut) {
+        return {
+          ok: false,
+          code: "agy_dispatch_timeout",
+          detail: "Antigravity listener verification exceeded its bounded dispatch budget.",
+        };
+      }
+      return this.retireAndReport(
         input.hostSessionId,
         "agy_endpoint_mismatch",
+        "agy_endpoint_mismatch",
+        "Registered Antigravity language server is no longer listening on its verified loopback endpoint; wake route disabled. Re-run cswarm receive register-agy.",
       );
-      return {
-        ok: false,
-        code: "agy_endpoint_mismatch",
-        detail: "Registered Antigravity language server is no longer listening on its verified loopback endpoint; wake route disabled. Re-run cswarm receive register-agy.",
-      };
     }
 
-    const metaBudget = remainingMs();
+    const metaBudget = mainDeadlineMs - Date.now();
     if (metaBudget <= 0) {
       return {
         ok: false,
@@ -1719,37 +1962,42 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     });
 
     // C2 Check #2 (AFTER get-conversation-metadata / BEFORE send-message):
-    // Recheck exact listener + executable SHA-256 after EVERY call that receives the token;
-    // disable the route on any change!
-    const postMetaBudget = Math.max(remainingMs(), 1_000);
+    // Strictly within totalDeadlineMs (no fresh time past totalDeadlineMs!).
+    const postMetaDeadline = sessionCheck.ok ? mainDeadlineMs : totalDeadlineMs;
     let postMetaStillMatches = false;
-    try {
-      const postMetaExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
-        expectedSha256: registration.agentapi_exe_sha256,
-        ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
-        timeoutMs: postMetaBudget,
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
-      postMetaStillMatches = await this.verifyEndpointMatches(
-        registration,
-        canonicalAddr,
-        postMetaExe.path,
-        postMetaBudget,
-        input.signal,
-      );
-    } catch {
-      postMetaStillMatches = false;
+    if (postMetaDeadline - Date.now() > 0) {
+      try {
+        const postMetaExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
+          expectedSha256: registration.agentapi_exe_sha256,
+          ...(this.approvedDigests ? { approvedDigests: this.approvedDigests } : {}),
+          ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
+          deadlineMs: postMetaDeadline,
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        const ep = await this.verifyEndpointMatches(
+          registration,
+          canonicalAddr,
+          postMetaExe.path,
+          postMetaDeadline,
+          input.signal,
+        );
+        postMetaStillMatches = ep.ok;
+      } catch {
+        postMetaStillMatches = false;
+      }
     }
     if (!postMetaStillMatches) {
-      await this.markWakeUnavailableAfterEndpointChange(
+      // If the main metadata call itself timed out and exhausted the budget, return agy_dispatch_timeout
+      // unless the listener actually changed; still retire if endpoint could not be confirmed!
+      if (!sessionCheck.ok && sessionCheck.code === "agy_dispatch_timeout") {
+        return sessionCheck;
+      }
+      return this.retireAndReport(
         input.hostSessionId,
         "agy_endpoint_changed_after_metadata",
+        "agy_endpoint_mismatch",
+        "Antigravity language server changed after session check; wake route disabled. Re-run cswarm receive register-agy.",
       );
-      return {
-        ok: false,
-        code: "agy_endpoint_mismatch",
-        detail: "Antigravity language server changed after session check; wake route disabled. Re-run cswarm receive register-agy.",
-      };
     }
     if (!sessionCheck.ok) {
       return sessionCheck;
@@ -1771,7 +2019,7 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       };
     }
 
-    const sendBudget = remainingMs();
+    const sendBudget = mainDeadlineMs - Date.now();
     if (sendBudget <= 0) {
       return {
         ok: false,
@@ -1809,7 +2057,6 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
         } catch { /* non-JSON stdout on exit 0 is success */ }
       }
     } catch (error) {
-      // C1: Emit ONLY fixed static codes and diagnostic text — never raw stderr/stdout/err.message.
       const err = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
       const combined = `${err.stderr ?? ""} ${err.stdout ?? ""} ${err.message ?? ""}`;
       if (err.code === "ENOENT") {
@@ -1839,38 +2086,41 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       }
     }
 
-    // C2 Check #3 (POST-send, HezLead condition): Re-verify exact listener (pid, uid, start_time, exe, sha256)
-    // once more AFTER send-message (even if send-message failed); if changed, disable wake_route and require re-registration!
-    const postSendBudget = Math.max(remainingMs(), 1_000);
+    // C2 Check #3 (POST-send) strictly within totalDeadlineMs (using the reserved postcheck window,
+    // NEVER allocating fresh time past totalDeadlineMs!).
     let postSendStillMatches = false;
-    try {
-      const postExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
-        expectedSha256: registration.agentapi_exe_sha256,
-        ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
-        timeoutMs: postSendBudget,
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
-      postSendStillMatches = await this.verifyEndpointMatches(
-        registration,
-        canonicalAddr,
-        postExe.path,
-        postSendBudget,
-        input.signal,
-      );
-    } catch {
-      postSendStillMatches = false;
+    if (totalDeadlineMs - Date.now() > 0) {
+      try {
+        const postExe = await validateAgyAgentApiExecutable(registration.agentapi_exe, {
+          expectedSha256: registration.agentapi_exe_sha256,
+          ...(this.approvedDigests ? { approvedDigests: this.approvedDigests } : {}),
+          ...(this.vendorVerifier ? { vendorVerifier: this.vendorVerifier } : {}),
+          deadlineMs: totalDeadlineMs,
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        const ep = await this.verifyEndpointMatches(
+          registration,
+          canonicalAddr,
+          postExe.path,
+          totalDeadlineMs,
+          input.signal,
+        );
+        postSendStillMatches = ep.ok;
+      } catch {
+        postSendStillMatches = false;
+      }
     }
 
     if (!postSendStillMatches) {
-      await this.markWakeUnavailableAfterEndpointChange(
+      if (sendFailure?.code === "agy_dispatch_timeout") {
+        return sendFailure;
+      }
+      return this.retireAndReport(
         input.hostSessionId,
         "agy_endpoint_changed_after_send",
+        "agy_endpoint_changed_after_send",
+        "Antigravity language server changed during wake dispatch; wake route marked unavailable. Re-run cswarm receive register-agy.",
       );
-      return {
-        ok: false,
-        code: "agy_endpoint_changed_after_send",
-        detail: "Antigravity language server changed during wake dispatch; wake route marked unavailable. Re-run cswarm receive register-agy.",
-      };
     }
 
     if (sendFailure) return sendFailure;
@@ -1912,6 +2162,7 @@ export interface ServeAgyWakeBridgeOptions {
   adapter?: NativeWakeAdapter;
   endpointInspector?: AgyEndpointInspector;
   vendorVerifier?: AgyVendorVerifier;
+  approvedDigests?: ReadonlySet<string>;
   debounceMs?: number;
   minIntervalMs?: number;
   retryAfterMs?: number;
@@ -2013,6 +2264,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
       profilePath,
       ...(options.endpointInspector ? { endpointInspector: options.endpointInspector } : {}),
       ...(options.vendorVerifier ? { vendorVerifier: options.vendorVerifier } : {}),
+      ...(options.approvedDigests ? { approvedDigests: options.approvedDigests } : {}),
     });
   const bridge = new NativeWakeBridge({
     profilePath,
@@ -2281,7 +2533,6 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
           await touch();
         }
         if (decision.action === "error" && decision.code !== lastErrorCode) {
-          // C1: Emit fixed diagnostic code only (never raw subprocess output, address, or token).
           process.stderr.write(`CommonSwarm agy wake: ${decision.code}. Check cswarm receive status.\n`);
           lastErrorCode = decision.code;
         } else if (decision.action === "sent") {

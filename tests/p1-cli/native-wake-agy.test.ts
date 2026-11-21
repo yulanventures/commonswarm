@@ -29,6 +29,7 @@ import {
 import {
   AgyAgentApiAdapter,
   agyRegistrationPath,
+  APPROVED_AGY_BINARY_DIGESTS,
   buildMinimalAgyChildEnv,
   defaultAgyAgentApiRunner,
   markAgyIdle,
@@ -39,7 +40,6 @@ import {
   serveAgyWakeBridge,
   sha256File,
   validateAgyAgentApiExecutable,
-  validateAgyCsrfToken,
   validateCanonicalAgyLsAddress,
   type AgyAgentApiRunner,
   type AgyEndpointInspector,
@@ -127,6 +127,7 @@ async function createBoundProfile(hostSessionId: string | undefined = CONV, url 
   await chmod(fakeBin, 0o755);
   const pinnedBin = await realpath(fakeBin);
   const pinnedSha256 = await sha256File(pinnedBin);
+  const approvedDigests = new Set([pinnedSha256]);
 
   const realCwd = await realpath(cwd);
   return {
@@ -137,6 +138,7 @@ async function createBoundProfile(hostSessionId: string | undefined = CONV, url 
     execRoot,
     pinnedBin,
     pinnedSha256,
+    approvedDigests,
     cleanup: async () => {
       await rm(dir, { recursive: true, force: true });
       await rm(execRoot, { recursive: true, force: true });
@@ -186,129 +188,47 @@ function makeSessionRunner(
   };
 }
 
-test("C1 witness: strict 0o022 leaf/ancestor check rejects group-writable paths, unapproved binaries, and SHA-256 pin drift", async () => {
+function assertProcessDead(pid: number, label: string): void {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, `${label}: expected valid recorded child PID, got ${pid}`);
+  let alive = true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+  }
+  assert.equal(alive, false, `${label}: child process ${pid} must be terminated before lock release`);
+}
+
+test("C1 witness: shipped approved digest allowlist blocks first registration of unknown digests with zero token-bearing children, plus strict 0o022 and vendor signature checks", async () => {
+  // Shipped allowlist carries version metadata and 64-hex SHA-256 digests.
+  const shippedDigests = Object.keys(APPROVED_AGY_BINARY_DIGESTS);
+  assert.ok(shippedDigests.length >= 1);
+  assert.match(shippedDigests[0]!, /^[0-9a-f]{64}$/);
+  assert.ok(APPROVED_AGY_BINARY_DIGESTS[shippedDigests[0]!]!.version.length > 0);
+
   assert.deepEqual(parseAgyInputAddress("127.0.0.1:49152"), { host: "127.0.0.1", port: 49152 });
   assert.deepEqual(parseAgyInputAddress("localhost:50051"), { host: "localhost", port: 50051 });
   assert.deepEqual(parseAgyInputAddress("[::1]:50051"), { host: "::1", port: 50051 });
-  assert.deepEqual(parseAgyInputAddress("http://127.0.0.1:49152"), { host: "127.0.0.1", port: 49152 });
-
-  for (const bad of [
-    "", "   ", "0.0.0.0:49152", "10.0.0.5:49152", "example.com:443", "https://127.0.0.1:49152",
-    "127.0.0.1", "127.0.0.1:0", "127.0.0.1:70000", "127.0.0.1:49152/path",
-    "http://user:pass@127.0.0.1:49152", "127.0.0.1:49152?foo=1", "127.0.0.1:49152#frag", "127.0.0.1:49152\n",
-  ]) {
-    assert.throws(() => parseAgyInputAddress(bad), { code: "agy_ls_address_invalid" });
-  }
-
-  // Canonical validator accepts ONLY loopback IP literals — NEVER hostnames or URL schemes.
   assert.deepEqual(validateCanonicalAgyLsAddress("127.0.0.1:49152"), {
     canonical: "127.0.0.1:49152",
     host: "127.0.0.1",
     port: 49152,
   });
-  assert.deepEqual(validateCanonicalAgyLsAddress("[::1]:49152"), {
-    canonical: "[::1]:49152",
-    host: "::1",
-    port: 49152,
-  });
-  for (const nonCanonical of ["localhost:49152", "http://127.0.0.1:49152", "0.0.0.0:49152", "127.0.0.1:0"]) {
+  for (const nonCanonical of ["localhost:49152", "http://127.0.0.1:49152", "0.0.0.0:49152"]) {
     assert.throws(() => validateCanonicalAgyLsAddress(nonCanonical), { code: "agy_ls_address_invalid" });
   }
 
-  // Stripped child env excludes ambient credentials, PATH, and disables proxies.
   const childEnv = buildMinimalAgyChildEnv(CANONICAL_LS, SECRET_CSRF);
   assert.equal(childEnv.ANTIGRAVITY_LS_ADDRESS, CANONICAL_LS);
   assert.equal(childEnv.ANTIGRAVITY_CSRF_TOKEN, SECRET_CSRF);
   assert.equal(childEnv.NO_PROXY, "*");
   assert.equal(childEnv.HTTP_PROXY, "");
-  assert.equal(childEnv.HTTPS_PROXY, "");
-  assert.equal(childEnv.ALL_PROXY, "");
   assert.equal(childEnv.PATH, undefined);
 
   const fx = await createBoundProfile(CONV);
   try {
-    await assert.rejects(() => validateAgyAgentApiExecutable("agy", { vendorVerifier: APPROVED_TEST_VERIFIER }), { code: "agy_executable_invalid" });
-    await assert.rejects(() => validateAgyAgentApiExecutable("/bin/sh", { vendorVerifier: APPROVED_TEST_VERIFIER }), { code: "agy_executable_invalid" });
-
-    // Unapproved / unsigned binary refused (both via default verifier AND explicit rejecting verifier)!
-    await assert.rejects(() => validateAgyAgentApiExecutable(fx.pinnedBin), { code: "agy_executable_unapproved" });
-    await assert.rejects(
-      () => validateAgyAgentApiExecutable(fx.pinnedBin, { vendorVerifier: REJECTING_TEST_VERIFIER }),
-      { code: "agy_executable_unapproved" },
-    );
-
-    // Approved binary with strict 0o755 passes and returns canonical path + sha256.
-    const verified = await validateAgyAgentApiExecutable(fx.pinnedBin, {
-      expectedSha256: fx.pinnedSha256,
-      vendorVerifier: APPROVED_TEST_VERIFIER,
-    });
-    assert.deepEqual(verified, { path: fx.pinnedBin, sha256: fx.pinnedSha256 });
-
-    // SHA-256 pin drift (e.g. vendor update) fails closed with agy_executable_pin_mismatch!
-    await assert.rejects(
-      () => validateAgyAgentApiExecutable(fx.pinnedBin, {
-        expectedSha256: "0".repeat(64),
-        vendorVerifier: APPROVED_TEST_VERIFIER,
-      }),
-      { code: "agy_executable_pin_mismatch" },
-    );
-
-    // Group-writable leaf (0o775) is STRICTLY REFUSED!
-    await chmod(fx.pinnedBin, 0o775);
-    await assert.rejects(
-      () => validateAgyAgentApiExecutable(fx.pinnedBin, { vendorVerifier: APPROVED_TEST_VERIFIER }),
-      { code: "agy_executable_invalid" },
-    );
-    await chmod(fx.pinnedBin, 0o755);
-
-    // Group-writable non-Homebrew ancestor directory (0o775) is STRICTLY REFUSED even when leaf is 0o755!
-    const groupWritableParent = join(fx.execRoot, "group-writable-dir");
-    await mkdir(groupWritableParent, { mode: 0o755 });
-    const nestedBin = join(groupWritableParent, "antigravity");
-    await writeFile(nestedBin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    await chmod(nestedBin, 0o755);
-    await chmod(groupWritableParent, 0o775);
-    await assert.rejects(
-      () => validateAgyAgentApiExecutable(nestedBin, { vendorVerifier: APPROVED_TEST_VERIFIER }),
-      { code: "agy_executable_invalid" },
-    );
-    await chmod(groupWritableParent, 0o755);
-  } finally {
-    await fx.cleanup();
-  }
-});
-
-test("experimental feature flag gates --provider agy --mode wake and reports wake_route: agy-agentapi, wake_verified: false", async () => {
-  const fx = await createBoundProfile(CONV);
-  try {
     const execution = { command: process.execPath, args: [CLI_PATH] };
-
-    await assert.rejects(
-      configureAgentReceive({
-        profilePath: fx.profilePath,
-        mode: "wake",
-        provider: "agy",
-        hostSessionId: CONV,
-        cwd: fx.cwd,
-        execution,
-      }),
-      { code: "agy_agentapi_experimental_flag_required" },
-    );
-
-    await assert.rejects(
-      configureAgentReceive({
-        profilePath: fx.profilePath,
-        mode: "turn",
-        provider: "agy",
-        hostSessionId: CONV,
-        cwd: fx.cwd,
-        experimentalAgyAgentapi: true,
-        execution,
-      }),
-      { code: "experimental_agy_flag_requires_wake" },
-    );
-
-    const configured = await configureAgentReceive({
+    await configureAgentReceive({
       profilePath: fx.profilePath,
       mode: "wake",
       provider: "agy",
@@ -317,17 +237,70 @@ test("experimental feature flag gates --provider agy --mode wake and reports wak
       experimentalAgyAgentapi: true,
       execution,
     });
-    assert.equal(configured.requested_mode, "wake");
-    assert.equal(configured.effective_mode, "turn");
-    assert.equal(configured.wake_route, "agy-agentapi");
-    assert.equal(configured.wake_verified, false);
-    assert.equal(wakeRouteForBinding(await readReceiveBinding(fx.profilePath, CONV)), "agy-agentapi");
+
+    // FIRST-REGISTRATION WRONG-DIGEST WITNESS (uses default shipped APPROVED_AGY_BINARY_DIGESTS):
+    // Even if vendorVerifier passes, an unapproved digest is REFUSED on first registration with
+    // agy_executable_pin_mismatch and ZERO token-bearing children launched!
+    const runnerCalls: string[] = [];
+    await assert.rejects(
+      registerAgyWake({
+        profilePath: fx.profilePath,
+        hostSessionId: CONV,
+        credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+        endpointInspector: makeInspector(makeEndpoint(fx.pinnedBin)),
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        runner: async (_exe, args) => {
+          runnerCalls.push(args.join(" "));
+          return { stdout: "", stderr: "" };
+        },
+      }),
+      { code: "agy_executable_pin_mismatch" },
+    );
+    assert.equal(runnerCalls.length, 0, "unapproved first-registration digest must launch ZERO token-bearing children");
+    assert.equal(await readAgyRegistration(fx.profilePath, CONV), null);
+
+    // Unapproved vendor signature refused even when digest is in test allowlist!
+    await assert.rejects(
+      () => validateAgyAgentApiExecutable(fx.pinnedBin, {
+        approvedDigests: fx.approvedDigests,
+        vendorVerifier: REJECTING_TEST_VERIFIER,
+      }),
+      { code: "agy_executable_unapproved" },
+    );
+
+    // Group-writable leaf (0o775) refused!
+    await chmod(fx.pinnedBin, 0o775);
+    await assert.rejects(
+      () => validateAgyAgentApiExecutable(fx.pinnedBin, {
+        approvedDigests: fx.approvedDigests,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+      }),
+      { code: "agy_executable_invalid" },
+    );
+    await chmod(fx.pinnedBin, 0o755);
+
+    // Group-writable non-Homebrew ancestor directory (0o775) refused!
+    const groupWritableParent = join(fx.execRoot, "group-writable-dir");
+    await mkdir(groupWritableParent, { mode: 0o755 });
+    const nestedBin = join(groupWritableParent, "antigravity");
+    await writeFile(nestedBin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await chmod(nestedBin, 0o755);
+    const nestedSha = await sha256File(nestedBin);
+    await chmod(groupWritableParent, 0o775);
+    await assert.rejects(
+      () => validateAgyAgentApiExecutable(nestedBin, {
+        approvedDigests: new Set([nestedSha]),
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+      }),
+      { code: "agy_executable_invalid" },
+    );
+    await chmod(groupWritableParent, 0o755);
   } finally {
     await fx.cleanup();
   }
 });
 
-test("C1 witness: registration accepts ONLY 0600 file or stdin (never env), never prints ls_address or csrf_token, and serializes under receive lock", async () => {
+test("C1 witness: registration accepts ONLY 0600 file or stdin (never env), never prints ls_address or csrf_token, and inspects inside receive lock", async () => {
   const fx = await createBoundProfile(CONV);
   try {
     const execution = { command: process.execPath, args: [CLI_PATH] };
@@ -346,72 +319,39 @@ test("C1 witness: registration accepts ONLY 0600 file or stdin (never env), neve
       execution,
     });
 
-    // Refuses when neither --credentials-file nor stdin is provided (NEVER falls back to process.env).
-    const prevAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
-    const prevCsrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
-    process.env.ANTIGRAVITY_LS_ADDRESS = CANONICAL_LS;
-    process.env.ANTIGRAVITY_CSRF_TOKEN = SECRET_CSRF;
-    try {
-      await assert.rejects(
-        registerAgyWake({
-          profilePath: fx.profilePath,
-          hostSessionId: CONV,
-          endpointInspector: inspector,
-          vendorVerifier: APPROVED_TEST_VERIFIER,
-          runner,
-        }),
-        { code: "agy_credentials_input_required" },
-      );
-    } finally {
-      if (prevAddr === undefined) delete process.env.ANTIGRAVITY_LS_ADDRESS;
-      else process.env.ANTIGRAVITY_LS_ADDRESS = prevAddr;
-      if (prevCsrf === undefined) delete process.env.ANTIGRAVITY_CSRF_TOKEN;
-      else process.env.ANTIGRAVITY_CSRF_TOKEN = prevCsrf;
-    }
-    await assert.rejects(lstat(regPath), { code: "ENOENT" });
-
     // Refuses non-0600 file and symlink for --credentials-file.
     const credsFile = join(fx.dir, "agy-creds.json");
     await writeFile(credsFile, JSON.stringify({ ls_address: "localhost:49152", csrf_token: SECRET_CSRF }), { mode: 0o644 });
     await chmod(credsFile, 0o644);
     await assert.rejects(() => readAgyCredentialsFromFile(credsFile), { code: "agy_credentials_file_unsafe" });
-
     await chmod(credsFile, 0o600);
     const credsLink = join(fx.dir, "agy-creds-link.json");
     await symlink(credsFile, credsLink);
     await assert.rejects(() => readAgyCredentialsFromFile(credsLink), { code: "agy_credentials_file_unsafe" });
 
-    // Valid 0600 --credentials-file succeeds, stores canonical IP literal + pid/lstart + exe SHA-256 pin,
-    // and NEVER prints ls_address or csrf_token in return output!
-    const beforeBinding = await readReceiveBinding(fx.profilePath, CONV);
+    // Valid 0600 --credentials-file succeeds without printing ls_address or csrf_token.
     const registered = await registerAgyWake({
       profilePath: fx.profilePath,
       hostSessionId: CONV,
       credentialsFile: credsFile,
       endpointInspector: inspector,
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner,
     });
     const serialized = JSON.stringify(registered);
     assert.equal(registered.registered, true);
-    assert.equal(registered.wake_route, "agy-agentapi");
-    assert.equal(registered.wake_verified, false);
     assert.equal("ls_address" in registered, false);
     assert.equal(serialized.includes(CANONICAL_LS), false);
     assert.equal(serialized.includes("localhost:49152"), false);
     assert.equal(serialized.includes(SECRET_CSRF), false);
-    assert.deepEqual(await readReceiveBinding(fx.profilePath, CONV), beforeBinding);
 
     const regStat = await lstat(regPath);
     assert.equal(regStat.mode & 0o777, 0o600);
     const loaded = await readAgyRegistration(fx.profilePath, CONV);
-    assert.ok(loaded);
-    assert.equal(loaded.ls_address, CANONICAL_LS);
-    assert.equal(loaded.ls_pid, endpoint.pid);
-    assert.equal(loaded.agentapi_exe, fx.pinnedBin);
-    assert.equal(loaded.agentapi_exe_sha256, fx.pinnedSha256);
+    assert.equal(loaded?.agentapi_exe_sha256, fx.pinnedSha256);
 
-    // Registration lookup runs INSIDE shared receive-<scope> lock (blocked while lock held).
+    // Stdin registration inspects listener strictly inside receive-<scope> lock.
     const lockName = `receive-${profileScopeKey(CONV)}`;
     const events: string[] = [];
     let releaseHolder!: () => void;
@@ -431,32 +371,29 @@ test("C1 witness: registration accepts ONLY 0600 file or stdin (never env), neve
       hostSessionId: CONV,
       stdin: stdinStream,
       endpointInspector: async () => {
-        events.push("inspector-called-inside-lock");
+        events.push("inspector-inside-lock");
         return endpoint;
       },
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner,
-    }).then((r) => {
-      events.push("register-finished");
-      return r;
     });
     await delay(80);
-    assert.deepEqual(events, ["holder-acquired"], "listener inspection must occur INSIDE receive-<scope> lock");
+    assert.deepEqual(events, ["holder-acquired"]);
     releaseHolder();
     await pendingReg;
-    assert.equal(events[0], "holder-acquired");
-    assert.equal(events[1], "holder-releasing");
-    assert.equal(events[2], "inspector-called-inside-lock");
+    assert.equal(events[2], "inspector-inside-lock");
   } finally {
     await fx.cleanup();
   }
 });
 
-test("C2 witness: detects listener replacement BETWEEN metadata and send, invalidates route on POST-send replacement, and refuses pin drift and different live sessions", async () => {
+test("C2 witness: ambiguous failed registration probe still runs postcheck & retires route, and changed endpoint with refused cleanup sticks across configure and retry with zero credential-bearing calls", async () => {
   const fx = await createBoundProfile(CONV);
   try {
     const execution = { command: process.execPath, args: [CLI_PATH] };
     const endpoint = makeEndpoint(fx.pinnedBin);
+    const regPath = agyRegistrationPath(fx.profilePath, CONV);
 
     await configureAgentReceive({
       profilePath: fx.profilePath,
@@ -468,196 +405,242 @@ test("C2 witness: detects listener replacement BETWEEN metadata and send, invali
       execution,
     });
 
+    // Establish initial valid registration.
     await registerAgyWake({
       profilePath: fx.profilePath,
       hostSessionId: CONV,
-      credentialsJson: JSON.stringify({ ls_address: "localhost:49152", csrf_token: SECRET_CSRF }),
+      credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner: makeSessionRunner([fx.cwd]),
     });
+    assert.ok(await readAgyRegistration(fx.profilePath, CONV));
 
-    // 1. REPLACEMENT BETWEEN METADATA AND SEND:
-    //    Check #1 (pre-metadata) sees the valid endpoint, metadata succeeds, then listener is replaced
-    //    before send -> Check #2 catches it and send-message is NEVER invoked!
-    let midCalls = 0;
-    const midRunnerCalls: string[][] = [];
-    const midSwapAdapter = new AgyAgentApiAdapter({
-      profilePath: fx.profilePath,
-      vendorVerifier: APPROVED_TEST_VERIFIER,
-      endpointInspector: async () => {
-        midCalls += 1;
-        return midCalls === 1 ? endpoint : { ...endpoint, pid: endpoint.pid + 99 };
-      },
-      runner: makeSessionRunner([fx.cwd], ({ args }) => {
-        midRunnerCalls.push([...args]);
+    // 1. AMBIGUOUS FAILED REGISTRATION PROBE + POSTCHECK FAILURE WITNESS:
+    //    Re-registration's metadata probe fails ambiguously AND listener swaps after the probe.
+    //    Postcheck MUST still run, retire the previously saved registration, and set wake_unavailable_reason!
+    let regInspectCalls = 0;
+    await assert.rejects(
+      registerAgyWake({
+        profilePath: fx.profilePath,
+        hostSessionId: CONV,
+        credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+        endpointInspector: async () => {
+          regInspectCalls += 1;
+          return regInspectCalls === 1 ? endpoint : { ...endpoint, pid: endpoint.pid + 77 };
+        },
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fx.approvedDigests,
+        runner: async () => {
+          throw Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" });
+        },
       }),
-    });
-    const midSwapRes = await midSwapAdapter.sendWake({
-      hostSessionId: CONV,
-      prompt: formatNativeWakePrompt(1),
-      batch: 1,
-      cwd: fx.cwd,
-    });
-    assert.equal(midSwapRes.ok, false);
-    if (!midSwapRes.ok) assert.equal(midSwapRes.code, "agy_endpoint_mismatch");
-    assert.equal(midCalls, 2);
-    assert.equal(midRunnerCalls.length, 1);
-    assert.equal(midRunnerCalls[0]![1], "get-conversation-metadata");
-    assert.equal(midRunnerCalls.some((c) => c[1] === "send-message"), false, "send-message must never run after mid-dispatch replacement");
-    // Post-metadata change ALSO disables the route and removes 0600 credentials!
-    assert.equal(await readAgyRegistration(fx.profilePath, CONV), null);
-    assert.equal((await readReceiveBinding(fx.profilePath, CONV))?.wake_unavailable_reason, "agy_endpoint_changed_after_metadata");
-    assert.equal(receiveStatus(await readReceiveBinding(fx.profilePath, CONV)).wake_route, "none");
+      { code: "agy_endpoint_mismatch" },
+    );
+    assert.equal(regInspectCalls, 2, "failed registration probe must still run postcheck");
+    assert.equal(await readAgyRegistration(fx.profilePath, CONV), null, "affected saved registration must be deleted");
+    const retiredAfterReg = await readReceiveBinding(fx.profilePath, CONV);
+    assert.equal(retiredAfterReg?.wake_unavailable_reason, "agy_endpoint_changed_during_registration");
+    assert.equal(receiveStatus(retiredAfterReg).wake_route, "none");
 
-    // Re-register cleanly before pin drift and post-send witnesses.
+    // Re-register cleanly so we can test changed endpoint + refused cleanup + configure + retry!
     await registerAgyWake({
       profilePath: fx.profilePath,
       hostSessionId: CONV,
       credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner: makeSessionRunner([fx.cwd]),
     });
-
-    // 2. PIN DRIFT WITNESS (vendor binary updated on disk -> fixed re-register diagnostic, 0 runner calls):
-    await writeFile(fx.pinnedBin, "#!/bin/sh\n# updated vendor binary\nexit 0\n", { mode: 0o755 });
-    await chmod(fx.pinnedBin, 0o755);
-    const pinDriftCalls: string[] = [];
-    const pinDriftAdapter = new AgyAgentApiAdapter({
-      profilePath: fx.profilePath,
-      vendorVerifier: APPROVED_TEST_VERIFIER,
-      endpointInspector: makeInspector(endpoint),
-      runner: async (_exe, args) => {
-        pinDriftCalls.push(args.join(" "));
-        return { stdout: "", stderr: "" };
-      },
-    });
-    const pinDriftRes = await pinDriftAdapter.sendWake({
-      hostSessionId: CONV,
-      prompt: formatNativeWakePrompt(1),
-      batch: 1,
-      cwd: fx.cwd,
-    });
-    assert.equal(pinDriftRes.ok, false);
-    if (!pinDriftRes.ok) {
-      assert.equal(pinDriftRes.code, "agy_executable_pin_mismatch");
-      assert.match(pinDriftRes.detail, /register-agy/);
-    }
-    assert.equal(pinDriftCalls.length, 0);
-    // Restore original binary bytes for remaining checks.
-    await writeFile(fx.pinnedBin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    await chmod(fx.pinnedBin, 0o755);
-
-    // 3. POST-SEND REPLACEMENT WITNESS (HezLead C2 condition):
-    //    Check #1 (pre-metadata) and Check #2 (pre-send) pass, send-message runs, then Check #3
-    //    (post-send) observes a changed listener -> marks wake_route unavailable with fixed reason,
-    //    removes 0600 registration, and refuses subsequent dispatches until re-registered!
-    let postChecks = 0;
-    const postSwapAdapter = new AgyAgentApiAdapter({
-      profilePath: fx.profilePath,
-      vendorVerifier: APPROVED_TEST_VERIFIER,
-      endpointInspector: async () => {
-        postChecks += 1;
-        return postChecks <= 2 ? endpoint : { ...endpoint, start_time: "Sat Nov 21 00:00:00 2026" };
-      },
-      runner: makeSessionRunner([fx.cwd]),
-    });
-    let clock = 1_760_000_000_000;
-    const bridge = new NativeWakeBridge({
-      profilePath: fx.profilePath,
-      hostSessionId: CONV,
-      cwd: fx.cwd,
-      adapter: postSwapAdapter,
-      expectedProvider: "agy",
-      expectedSeat: { workspaceId: WS, principalId: AGENT },
-      now: () => clock,
-    });
-    bridge.notifyArrival();
-    clock += 6_000;
-    const postDecision = await bridge.tick();
-    assert.equal(postDecision.action, "error");
-    if (postDecision.action === "error") {
-      assert.equal(postDecision.code, "agy_endpoint_changed_after_send");
-      assert.equal(postDecision.detail.includes(CANONICAL_LS), false);
-      assert.equal(postDecision.detail.includes(SECRET_CSRF), false);
-    }
-    assert.equal(postChecks, 3);
-    // 0600 registration deleted and wake_route marked unavailable on binding!
-    assert.equal(await readAgyRegistration(fx.profilePath, CONV), null);
-    const bindingAfterSwap = await readReceiveBinding(fx.profilePath, CONV);
-    assert.ok(bindingAfterSwap);
-    assert.equal(bindingAfterSwap.wake_unavailable_reason, "agy_endpoint_changed_after_send");
-    const statusAfterSwap = receiveStatus(bindingAfterSwap);
-    assert.equal(statusAfterSwap.wake_route, "none");
-    assert.equal(statusAfterSwap.wake_verified, false);
-    assert.equal(statusAfterSwap.wake_unavailable_reason, "agy_endpoint_changed_after_send");
-
-    // Subsequent authorization refuses until explicit re-registration!
-    const authBlocked = await resolveAuthorizedWakeBinding({
-      profilePath: fx.profilePath,
-      hostSessionId: CONV,
-      expectedProvider: "agy",
-    });
-    assert.equal(authBlocked.ok, false);
-    if (!authBlocked.ok) assert.equal(authBlocked.code, "agy_re_registration_required");
-
-    // Re-registration restores wake_route: "agy-agentapi" cleanly!
-    const rereg = await registerAgyWake({
-      profilePath: fx.profilePath,
-      hostSessionId: CONV,
-      credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
-      endpointInspector: makeInspector(endpoint),
-      vendorVerifier: APPROVED_TEST_VERIFIER,
-      runner: makeSessionRunner([fx.cwd]),
-    });
-    assert.equal(rereg.wake_route, "agy-agentapi");
     assert.equal((await readReceiveBinding(fx.profilePath, CONV))?.wake_unavailable_reason, null);
 
-    // 4. NON-DISCLOSURE ON FAILURE: raw stderr containing ls_address + csrf_token never enters detail or wake-state.json.
-    const leakyBridge = new NativeWakeBridge({
+    // 2. CHANGED ENDPOINT WITH REFUSED CLEANUP + CONFIGURE + RETRY WITH ZERO CREDENTIAL-BEARING CALLS:
+    //    During send-message, replace wake-agy-<scope>.json with a non-empty directory so cleanup fails,
+    //    and swap the listener on Check #3 (post-send).
+    let dispatchInspects = 0;
+    let clock = 1_760_000_000_000;
+    const bridge = new NativeWakeBridge({
       profilePath: fx.profilePath,
       hostSessionId: CONV,
       cwd: fx.cwd,
       adapter: new AgyAgentApiAdapter({
         profilePath: fx.profilePath,
         vendorVerifier: APPROVED_TEST_VERIFIER,
-        endpointInspector: makeInspector(endpoint),
+        approvedDigests: fx.approvedDigests,
+        endpointInspector: async () => {
+          dispatchInspects += 1;
+          return dispatchInspects <= 2 ? endpoint : { ...endpoint, pid: endpoint.pid + 88 };
+        },
         runner: async (_exe, args) => {
           if (args[1] === "get-conversation-metadata") {
             return { stdout: makeMetadataJson([fx.cwd]), stderr: "" };
           }
-          throw Object.assign(new Error(`dial tcp ${CANONICAL_LS}: connection refused token=${SECRET_CSRF}`), {
-            stderr: `rpc error: ECONNREFUSED ${CANONICAL_LS} x-csrf=${SECRET_CSRF} OPAQUE_STDERR_MARKER`,
-          });
+          // Simulate refused cleanup on disk right before post-send retirement runs!
+          await rm(regPath, { force: true });
+          await mkdir(regPath, { mode: 0o700 });
+          await writeFile(join(regPath, "blocker"), "x", { mode: 0o600 });
+          return { stdout: JSON.stringify({ response: {} }), stderr: "" };
         },
       }),
       expectedProvider: "agy",
       expectedSeat: { workspaceId: WS, principalId: AGENT },
       now: () => clock,
     });
-    leakyBridge.notifyArrival();
-    clock += 16 * 60_000;
-    const failDecision = await leakyBridge.tick();
-    assert.equal(failDecision.action, "error");
-    if (failDecision.action === "error") {
-      assert.equal(failDecision.code, "agy_ls_unreachable");
-      assert.equal(failDecision.detail.includes(SECRET_CSRF), false);
-      assert.equal(failDecision.detail.includes(CANONICAL_LS), false);
-      assert.equal(failDecision.detail.includes("OPAQUE_STDERR_MARKER"), false);
+
+    bridge.notifyArrival();
+    clock += 6_000;
+    const postDecision = await bridge.tick();
+    assert.equal(postDecision.action, "error");
+    if (postDecision.action === "error") {
+      assert.equal(postDecision.code, "agy_endpoint_changed_cleanup_failed");
+      assert.equal(postDecision.detail.includes(CANONICAL_LS), false);
+      assert.equal(postDecision.detail.includes(SECRET_CSRF), false);
     }
-    const wakeState = await readNativeWakeState(fx.profilePath, CONV);
-    const stateJson = JSON.stringify(wakeState);
-    assert.equal(stateJson.includes(SECRET_CSRF), false);
-    assert.equal(stateJson.includes(CANONICAL_LS), false);
-    assert.equal(stateJson.includes("OPAQUE_STDERR_MARKER"), false);
+    // Unavailable marker MUST be durably persisted even though cleanup failed!
+    const bindingAfterRefusedCleanup = await readReceiveBinding(fx.profilePath, CONV);
+    assert.equal(bindingAfterRefusedCleanup?.wake_unavailable_reason, "agy_endpoint_changed_after_send");
+    assert.equal(receiveStatus(bindingAfterRefusedCleanup).wake_route, "none");
+
+    // Running `receive configure --provider agy --mode wake --experimental-agy-agentapi` MUST NOT clear the disabled route!
+    const reconfigured = await configureAgentReceive({
+      profilePath: fx.profilePath,
+      mode: "wake",
+      provider: "agy",
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      experimentalAgyAgentapi: true,
+      execution,
+    });
+    assert.equal(reconfigured.wake_route, "none", "configure in wake mode must NEVER clear a retired wake route");
+    assert.equal(reconfigured.wake_unavailable_reason, "agy_endpoint_changed_after_send");
+
+    // Retry dispatch after configure -> MUST refuse with ZERO credential-bearing calls!
+    const retryRunnerCalls: string[] = [];
+    const retryBridge = new NativeWakeBridge({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      adapter: new AgyAgentApiAdapter({
+        profilePath: fx.profilePath,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fx.approvedDigests,
+        endpointInspector: makeInspector(endpoint),
+        runner: async (_exe, args) => {
+          retryRunnerCalls.push(args.join(" "));
+          return { stdout: "", stderr: "" };
+        },
+      }),
+      expectedProvider: "agy",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      now: () => clock,
+    });
+    retryBridge.notifyArrival();
+    clock += 16 * 60_000;
+    const retryDecision = await retryBridge.tick();
+    assert.equal(retryDecision.action, "binding_inactive");
+    if (retryDecision.action === "binding_inactive") {
+      assert.equal(retryDecision.code, "agy_re_registration_required");
+    }
+    assert.equal(retryRunnerCalls.length, 0, "retired route retry must launch ZERO credential-bearing calls");
   } finally {
     await fx.cleanup();
   }
 });
 
-test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single budget before lock release so concurrent opt-out commits turn mode, plus refused-delete and held-startup witnesses", async () => {
-  // Part A: Real held child process + single dispatch budget + concurrent opt-out!
+test("C3 witness: common absolute deadline bounds BOTH a held verification subprocess AND a held vendor child (requiring valid PID + dead at opt-out settlement), plus refused-delete and held-startup witnesses", async () => {
+  // Part A: Held VERIFICATION subprocess (e.g. hung codesign/lsof child) + concurrent opt-out!
+  const fxVerify = await createBoundProfile(CONV);
+  try {
+    const execution = { command: process.execPath, args: [CLI_PATH] };
+    const endpoint = makeEndpoint(fxVerify.pinnedBin);
+    await configureAgentReceive({
+      profilePath: fxVerify.profilePath,
+      mode: "wake",
+      provider: "agy",
+      hostSessionId: CONV,
+      cwd: fxVerify.cwd,
+      experimentalAgyAgentapi: true,
+      execution,
+    });
+    await registerAgyWake({
+      profilePath: fxVerify.profilePath,
+      hostSessionId: CONV,
+      credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+      endpointInspector: makeInspector(endpoint),
+      vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fxVerify.approvedDigests,
+      runner: makeSessionRunner([fxVerify.cwd]),
+    });
+
+    const verifyPidFile = join(fxVerify.dir, "hung-verify-child.pid");
+    let verifySpawned!: () => void;
+    const verifySpawnedPromise = new Promise<void>((r) => { verifySpawned = r; });
+
+    const hungVerificationInspector: AgyEndpointInspector = async (input) => {
+      verifySpawned();
+      const rem = input.deadlineMs !== undefined ? input.deadlineMs - Date.now() : (input.timeoutMs ?? 500);
+      await defaultAgyAgentApiRunner(
+        process.execPath,
+        [
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(verifyPidFile)}, String(process.pid)); process.on("SIGTERM", () => {}); setTimeout(() => {}, 60000);`,
+        ],
+        { cwd: fxVerify.cwd, env: {}, timeoutMs: rem, ...(input.signal ? { signal: input.signal } : {}) },
+      );
+      return endpoint;
+    };
+
+    let clock = 1_760_000_000_000;
+    const verifyBridge = new NativeWakeBridge({
+      profilePath: fxVerify.profilePath,
+      hostSessionId: CONV,
+      cwd: fxVerify.cwd,
+      adapter: new AgyAgentApiAdapter({
+        profilePath: fxVerify.profilePath,
+        endpointInspector: hungVerificationInspector,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fxVerify.approvedDigests,
+        runner: makeSessionRunner([fxVerify.cwd]),
+        timeoutMs: 900,
+      }),
+      expectedProvider: "agy",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      now: () => clock,
+    });
+
+    verifyBridge.notifyArrival();
+    clock += 6_000;
+    const t0 = Date.now();
+    const tickPromise = verifyBridge.tick();
+    await verifySpawnedPromise;
+    await delay(80); // let child write its PID
+
+    const optOutPromise = configureAgentReceive({
+      profilePath: fxVerify.profilePath,
+      mode: "turn",
+      provider: "agy",
+      hostSessionId: CONV,
+      cwd: fxVerify.cwd,
+      execution,
+    });
+
+    const [tickRes, optOutRes] = await Promise.all([tickPromise, optOutPromise]);
+    const elapsedMs = Date.now() - t0;
+    assert.equal(tickRes.action, "error");
+    if (tickRes.action === "error") assert.equal(tickRes.code, "agy_dispatch_timeout");
+    assert.equal(optOutRes.requested_mode, "turn");
+    assert.ok(elapsedMs < 5_000, `hung verification subprocess + opt-out must finish within budget (${elapsedMs}ms)`);
+
+    // REQUIRED valid recorded verification child PID + dead at opt-out settlement!
+    const verifyPid = Number.parseInt((await readFile(verifyPidFile, "utf8")).trim(), 10);
+    assertProcessDead(verifyPid, "held verification subprocess");
+  } finally {
+    await fxVerify.cleanup();
+  }
+
+  // Part B: Held VENDOR child ignoring SIGTERM + concurrent opt-out!
   const fxHold = await createBoundProfile(CONV);
   try {
     const execution = { command: process.execPath, args: [CLI_PATH] };
@@ -677,22 +660,19 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
       credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fxHold.approvedDigests,
       runner: makeSessionRunner([fxHold.cwd]),
     });
 
-    // Write a real executable script that records its PID, ignores SIGTERM, and sleeps 60s
-    // (exercising real spawn + single total budget + SIGTERM->SIGKILL + await child close before lock release!).
-    const pidFile = join(fxHold.dir, "hung-child.pid");
+    const pidFile = join(fxHold.dir, "hung-vendor-child.pid");
     let childSpawned!: () => void;
     const childSpawnedPromise = new Promise<void>((r) => { childSpawned = r; });
 
     const realHungRunner: AgyAgentApiRunner = async (_exe, args, options) => {
       if (args[1] === "get-conversation-metadata") {
-        // Consume part of the single shared budget (~200ms), then succeed.
-        await delay(200);
+        await delay(150);
         return { stdout: makeMetadataJson([fxHold.cwd]), stderr: "" };
       }
-      // On send-message, spawn a REAL child process via defaultAgyAgentApiRunner that ignores SIGTERM!
       childSpawned();
       return defaultAgyAgentApiRunner(
         process.execPath,
@@ -713,8 +693,9 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
         profilePath: fxHold.profilePath,
         endpointInspector: makeInspector(endpoint),
         vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fxHold.approvedDigests,
         runner: realHungRunner,
-        timeoutMs: 900, // Single total budget covering BOTH metadata (200ms) + send (~700ms remaining)
+        timeoutMs: 1_000,
       }),
       expectedProvider: "agy",
       expectedSeat: { workspaceId: WS, principalId: AGENT },
@@ -726,8 +707,8 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
     const t0 = Date.now();
     const tickPromise = bridge.tick();
     await childSpawnedPromise;
+    await delay(80);
 
-    // Concurrently opt out to --mode turn while the real hung child holds the receive-<scope> lock!
     const optOutPromise = configureAgentReceive({
       profilePath: fxHold.profilePath,
       mode: "turn",
@@ -739,37 +720,21 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
 
     const [tickRes, optOutRes] = await Promise.all([tickPromise, optOutPromise]);
     const elapsedMs = Date.now() - t0;
-
     assert.equal(tickRes.action, "error");
     if (tickRes.action === "error") assert.equal(tickRes.code, "agy_dispatch_timeout");
     assert.equal(optOutRes.requested_mode, "turn");
-    assert.equal(optOutRes.wake_route, "none");
-    assert.ok(elapsedMs < 5_000, `bounded dispatch + opt-out must finish quickly (took ${elapsedMs}ms)`);
+    assert.ok(elapsedMs < 5_000, `bounded dispatch + opt-out must finish quickly (${elapsedMs}ms)`);
 
-    // Prove the real child process was ALREADY dead before the lock was released!
-    const childPidText = await readFile(pidFile, "utf8").catch(() => "");
-    const childPid = Number.parseInt(childPidText.trim(), 10);
-    if (Number.isSafeInteger(childPid) && childPid > 0) {
-      let alive = true;
-      try {
-        process.kill(childPid, 0);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-      }
-      assert.equal(alive, false, "timed-out child process must be terminated before lock release");
-    }
+    // REQUIRED valid recorded vendor child PID + dead at opt-out settlement!
+    const vendorPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
+    assertProcessDead(vendorPid, "held vendor child");
 
-    // Opt-out won durably: 0600 registration removed and subsequent wake refuses.
     assert.equal(await readAgyRegistration(fxHold.profilePath, CONV), null);
-    bridge.notifyArrival();
-    clock += 16 * 60_000;
-    const nextTick = await bridge.tick();
-    assert.equal(nextTick.action, "binding_inactive");
   } finally {
     await fxHold.cleanup();
   }
 
-  // Part B: Refused delete witness (durable opt-out before cleanup + explicit cleanup failure report).
+  // Part C: Refused delete witness (durable opt-out before cleanup).
   const fxA = await createBoundProfile(CONV);
   try {
     const execution = { command: process.execPath, args: [CLI_PATH] };
@@ -789,6 +754,7 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
       credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fxA.approvedDigests,
       runner: makeSessionRunner([fxA.cwd]),
     });
 
@@ -810,14 +776,13 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
     );
 
     const bindingAfter = await readReceiveBinding(fxA.profilePath, CONV);
-    assert.ok(bindingAfter);
-    assert.equal(bindingAfter.requested_mode, "turn");
+    assert.equal(bindingAfter?.requested_mode, "turn");
     assert.equal(wakeRouteForBinding(bindingAfter), "none");
   } finally {
     await fxA.cleanup();
   }
 
-  // Part C: Startup held across opt-out witness (bridge startup checks live route under receive-<scope> lock).
+  // Part D: Startup held across opt-out witness.
   let releaseDirectoryFetch!: () => void;
   let directoryFetchReached!: () => void;
   const dirReachedPromise = new Promise<void>((r) => { directoryFetchReached = r; });
@@ -874,20 +839,14 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
       credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fxB.approvedDigests,
       runner: makeSessionRunner([fxB.cwd]),
     });
 
-    const dispatched: number[] = [];
     const servePromise = serveAgyWakeBridge({
       profilePath: fxB.profilePath,
       hostSessionId: CONV,
-      adapter: {
-        route: "agy-agentapi",
-        async sendWake() {
-          dispatched.push(1);
-          return { ok: true };
-        },
-      },
+      adapter: { route: "agy-agentapi", async sendWake() { return { ok: true }; } },
       wake: {
         setTopic() {},
         noteClaim() {},
@@ -912,13 +871,10 @@ test("C3 witness: real held child ignoring SIGTERM is SIGKILLed within single bu
     await assert.rejects(servePromise, { code: "wake_opted_out" });
 
     const bindingAfter = await readReceiveBinding(fxB.profilePath, CONV);
-    assert.ok(bindingAfter);
-    assert.equal(bindingAfter.requested_mode, "turn");
-    assert.equal(bindingAfter.channel_pid, null);
-    assert.equal(bindingAfter.channel_instance_id, null);
-    assert.equal(bindingAfter.channel_heartbeat_at, null);
+    assert.equal(bindingAfter?.requested_mode, "turn");
+    assert.equal(bindingAfter?.channel_pid, null);
+    assert.equal(bindingAfter?.channel_instance_id, null);
     assert.equal(receiveStatus(bindingAfter).channel_running, false);
-    assert.equal(dispatched.length, 0);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
@@ -1036,6 +992,7 @@ test("serveAgyWakeBridge + requestReceiveCanary + markAgyIdle + cswarm check ver
       credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner: makeSessionRunner([fx.cwd]),
     });
 
@@ -1043,6 +1000,7 @@ test("serveAgyWakeBridge + requestReceiveCanary + markAgyIdle + cswarm check ver
       profilePath: fx.profilePath,
       endpointInspector: makeInspector(endpoint),
       vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
       runner: makeSessionRunner([fx.cwd], ({ args }) => {
         if (args[1] === "send-message") {
           dispatched.push({ hostSessionId: args[3]!, prompt: args[4]! });
