@@ -11,7 +11,7 @@ import {
 import { AgentSetupError, ONBOARDING_UUID, privatePath, profileScopeKey, readAgentProfile } from "./agent-profile.js";
 import { shellQuote } from "./agent-check.js";
 import { HOST_HOOK_TIMEOUT_SECONDS } from "./agent-check-budget.js";
-import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
+import { deleteSecureJsonFile, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
 
 import { findGrokBotGateway } from "./agent-grok-bot-gateway.js";
 
@@ -50,6 +50,7 @@ export interface ReceiveBinding {
   host_session_id: string;
   provider: ReceiveProvider;
   requested_mode: ReceiveMode;
+  experimental_agy_agentapi?: boolean;
   grok_bot_agent_id?: string;
   cwd: string;
   hook_file: string | null;
@@ -91,6 +92,8 @@ export async function readReceiveBinding(profile: string, hostSessionId?: string
   const nullableText = (value: unknown) => value === null || typeof value === "string";
   if (!binding || binding.version !== 1 || binding.profile !== profile || binding.host_session_id !== host ||
       !RECEIVE_MODES.includes(binding.requested_mode) || !RECEIVE_PROVIDERS.includes(binding.provider) ||
+      (binding.experimental_agy_agentapi !== undefined && typeof binding.experimental_agy_agentapi !== "boolean") ||
+      (binding.provider === "agy" && binding.requested_mode === "wake" && binding.experimental_agy_agentapi !== true) ||
       (binding.grok_bot_agent_id !== undefined && (typeof binding.grok_bot_agent_id !== "string" || !ONBOARDING_UUID.test(binding.grok_bot_agent_id))) ||
       (binding.provider === "grok-bot" && binding.requested_mode === "wake" && !binding.grok_bot_agent_id) ||
       (binding.stop_drains_in_turn !== undefined && (!Number.isSafeInteger(binding.stop_drains_in_turn) || binding.stop_drains_in_turn < 0)) ||
@@ -133,6 +136,8 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
     ? "none"
     : binding.provider === "codex"
     ? "codex-queue"
+    : binding.provider === "agy" && binding.experimental_agy_agentapi === true
+    ? "agy-agentapi"
     : binding.provider === "claude" || binding.provider === "grok-bot"
     ? "channel"
     : "none";
@@ -147,6 +152,7 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
     next_action: boundProfileCommands(binding === null ? "Ask the user to choose wakeups or turn checks, then run cswarm receive configure." :
       wakeVerified ? null : binding.requested_mode === "wake" ?
         binding.provider === "codex" ? "Wake is not verified. Start cswarm receive serve for this Codex thread, run cswarm receive test, end this turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
+        binding.provider === "agy" ? "Wake is not verified. Run cswarm receive register-agy inside the active Antigravity session, start cswarm receive serve, run cswarm receive test, end this turn and run cswarm receive idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         binding.provider === "grok-bot" ? "Wake is not verified. Start cswarm receive serve on this Bot computer, run cswarm receive test, then cswarm receive idle when the session is idle. Confirm with cswarm receive status. Use cswarm check meanwhile." :
         "Wake is not verified. Enable the configured Claude channel in this same session, run cswarm receive test, end the turn, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         channelLive ? "Turn mode is selected; the previous channel is stopping. Confirm channel_running is false with cswarm receive status." :
@@ -274,13 +280,20 @@ export function parseReceiveProvider(value: string): (typeof RECEIVE_PROVIDERS)[
 export async function configureAgentReceive(options: {
   profilePath: string; mode: string; provider?: string; hostSessionId?: string; cwd?: string;
   grokBotAgentId?: string; gatewayPaths?: readonly string[];
-  previewChannel?: boolean; execution: { command: string; args: string[] };
+  previewChannel?: boolean; experimentalAgyAgentapi?: boolean;
+  execution: { command: string; args: string[] };
 }) {
   const profile = privatePath(options.profilePath);
   parseReceiveMode(options.mode);
   const provider = parseReceiveProvider(options.provider ?? "instructions");
   if (options.grokBotAgentId !== undefined && !ONBOARDING_UUID.test(options.grokBotAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID.");
   if (options.grokBotAgentId !== undefined && provider !== "grok-bot") throw new AgentSetupError("grok_bot_agent_id_unsupported", "Use --grok-bot-agent-id only with --provider grok-bot.");
+  if (options.experimentalAgyAgentapi && provider !== "agy") {
+    throw new AgentSetupError("experimental_agy_flag_unsupported", "Use --experimental-agy-agentapi only with --provider agy --mode wake.");
+  }
+  if (options.experimentalAgyAgentapi && options.mode !== "wake") {
+    throw new AgentSetupError("experimental_agy_flag_requires_wake", "Use --experimental-agy-agentapi only with --mode wake.");
+  }
   const openedProfile = await readAgentProfile(profile, options.hostSessionId);
   const host = checkedHostSessionId(options.hostSessionId);
   if (provider !== "instructions" && host === "manual") throw new AgentSetupError("host_session_required", "A host hook needs this session's ID. Supply --host-session-id, or use --provider instructions for prompt-based turn checks.");
@@ -293,6 +306,23 @@ export async function configureAgentReceive(options: {
       throw new AgentSetupError(
         "profile_not_host_bound",
         "Codex wake requires a host-bound profile matching $CODEX_THREAD_ID. Bind this seat's profile with cswarm setup --host-session-id \"$CODEX_THREAD_ID\" first.",
+      );
+    }
+  }
+  if (provider === "agy" && options.mode === "wake") {
+    if (!options.experimentalAgyAgentapi) {
+      throw new AgentSetupError(
+        "agy_agentapi_experimental_flag_required",
+        "Antigravity native wake is experimental. Pass --experimental-agy-agentapi to opt in, or use --mode turn.",
+      );
+    }
+    if (!ONBOARDING_UUID.test(host)) {
+      throw new AgentSetupError("agy_conversation_id_required", "Antigravity wake requires this session's conversation UUID as --host-session-id.");
+    }
+    if (openedProfile.host_session_id === undefined || openedProfile.host_session_id !== host) {
+      throw new AgentSetupError(
+        "profile_not_host_bound",
+        "Antigravity wake requires a host-bound profile matching this session's conversation UUID. Bind this seat's profile with cswarm setup --host-session-id <conversation-uuid> first.",
       );
     }
   }
@@ -313,8 +343,18 @@ export async function configureAgentReceive(options: {
       channel_config: null, channel_instance_id: null, channel_pid: null, channel_heartbeat_at: null,
       wake_verified_at: null, canary: null,
     };
-    const changed = binding.requested_mode !== options.mode;
-    binding = { ...binding, requested_mode: options.mode as ReceiveMode, ...(changed ? { wake_verified_at: null, canary: null } : {}) };
+    const changed = binding.requested_mode !== options.mode ||
+      (provider === "agy" && binding.experimental_agy_agentapi !== (options.mode === "wake" && options.experimentalAgyAgentapi === true));
+    binding = {
+      ...binding,
+      requested_mode: options.mode as ReceiveMode,
+      ...(provider === "agy" ? { experimental_agy_agentapi: options.mode === "wake" && options.experimentalAgyAgentapi === true } : {}),
+      ...(changed ? { wake_verified_at: null, canary: null } : {}),
+    };
+    if (provider === "agy" && options.mode === "turn") {
+      // Serialized under the shared receive-<scope> lock: remove the 0600 LS registration on opt-out.
+      await deleteSecureJsonFile(join(dirname(profile), `wake-agy-${profileScopeKey(host)}.json`));
+    }
     if (provider === "grok-bot" && grokAgentId) {
       if (existing?.grok_bot_agent_id && existing.grok_bot_agent_id !== grokAgentId) throw new AgentSetupError("receive_provider_conflict", "This session is bound to a different Bot agent UUID.");
       binding = { ...binding, grok_bot_agent_id: grokAgentId };
@@ -341,6 +381,7 @@ export async function configureAgentReceive(options: {
       ...receiveStatus(binding, Date.now(), openedProfile.host_session_id), profile, hook_file: binding.hook_file,
       instruction: turnCheckInstruction(profile, host),
       ...(provider === "codex" && options.mode === "wake" ? { host_step: `Start the Codex native-wake bridge for this thread: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
+      ...(provider === "agy" && options.mode === "wake" ? { host_step: `Inside this Antigravity session, register local LS credentials via env: cswarm receive register-agy --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)} ; then start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(provider === "grok-bot" && options.mode === "wake" ? { host_step: `On this Bot computer, with gateway.json present, start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(startCommand ? { start_command: startCommand, host_step: "Resume this same Claude session with this command and approve the channel when Claude asks. Organization policy still applies. This command does not start a separate worker." } : {}),
     };
@@ -431,7 +472,7 @@ export async function requestReceiveCanary(profile: string, host: string) {
     return {
       ...binding,
       wake_verified_at: null,
-      ...(binding.provider === "grok-bot" ? { idle: false, last_turn_ended_at: null } : {}),
+      ...(binding.provider === "grok-bot" || binding.provider === "agy" ? { idle: false, last_turn_ended_at: null } : {}),
       canary: { nonce: randomUUID(), requested_at: new Date().toISOString(), signal_id: null, emitted_while_idle: false, received_at: null },
     };
   });
@@ -440,6 +481,8 @@ export async function requestReceiveCanary(profile: string, host: string) {
     ? "End this Bot turn. From a separate terminal on this computer, run cswarm receive idle with this profile and host-session-id only after the chat is idle. After the woken session confirms the receipt, check cswarm receive status for wake_verified: true."
     : next.provider === "codex"
     ? "End this turn so the Codex session becomes idle. The wake bridge will queue a fixed-text wake via codex queue. After this same session runs cswarm check, run cswarm receive status to confirm wake_verified is true."
+    : next.provider === "agy"
+    ? "End this Antigravity turn. From a separate terminal on this computer, run cswarm receive idle only after the chat is idle. The wake bridge will send a fixed-text wake via agy agentapi send-message. After this same session runs cswarm check, run cswarm receive status to confirm wake_verified is true."
     : "End this turn so the session becomes idle. The channel will send a self-addressed test message. After this same session receives it, run cswarm receive status to confirm wake_verified is true.";
   const boundAction = next.provider === "grok-bot" ? action.replace(" with this profile and host-session-id", "") : action;
   return { state: "pending", next_action: boundProfileCommands(openedProfile.host_session_id ? boundAction : action, profile, openedProfile.host_session_id), host_session_id: next.host_session_id };

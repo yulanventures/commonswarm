@@ -4380,6 +4380,66 @@
             "reason": "Local scheduler tick interval, not a network request timeout."
           }
         },
+        "src/cloud/native-wake-agy.ts:AGY_AGENTAPI_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-agy.ts:68",
+          "detail": "12-second local subprocess timeout for agy agentapi send-message (bounded below RECEIVE_HEARTBEAT_MAX_AGE_MS=15s).",
+          "operation": {
+            "name": "agy-agentapi-subprocess-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local CLI subprocess timeout, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-agy.ts:setInterval": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-agy.ts:570",
+          "detail": "5-second local standalone Antigravity wake-bridge heartbeat interval.",
+          "operation": {
+            "name": "agy-wake-heartbeat",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local heartbeat interval, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-agy.ts:signalRequestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/native-wake-agy.ts:456",
+          "detail": "ThinCommandClient signal request timeout for self-addressed Antigravity idle canary emission.",
+          "operation": {
+            "name": "agy-wake-canary-timeout",
+            "class": "not-run",
+            "writes": [
+              "channel or signal command state"
+            ],
+            "removes": [],
+            "reason": "Antigravity wake canary posts a self-addressed signal command."
+          }
+        },
+        "src/cloud/native-wake-agy.ts:timeoutMs": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-agy.ts:288",
+          "detail": "20-second local receive-<scope> lock acquisition timeout for register-agy serialization against opt-out.",
+          "operation": {
+            "name": "agy-wake-register-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local filesystem lock timeout, not a network request timeout."
+          }
+        },
         "src/cloud/native-wake-codex.ts:CODEX_QUEUE_TIMEOUT_MS": {
           "class": "local",
           "scope": "per-request",

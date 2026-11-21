@@ -71,6 +71,7 @@ export function assertFixedNativeWakePrompt(prompt: string): number {
 export function wakeRouteForBinding(binding: ReceiveBinding | null): NativeWakeRoute {
   if (!binding || binding.requested_mode !== "wake") return "none";
   if (binding.provider === "codex") return "codex-queue";
+  if (binding.provider === "agy" && binding.experimental_agy_agentapi === true) return "agy-agentapi";
   if (binding.provider === "claude") return "channel";
   if (binding.provider === "grok-bot") return "channel";
   return "none";
@@ -306,6 +307,13 @@ export async function resolveAuthorizedWakeBinding(options: {
       detail: "Codex native wake requires a bound $CODEX_THREAD_ID UUID.",
     };
   }
+  if (options.expectedProvider === "agy" && !ONBOARDING_UUID.test(host)) {
+    return {
+      ok: false,
+      code: "agy_conversation_id_required",
+      detail: "Antigravity native wake requires a bound conversation UUID.",
+    };
+  }
   const binding = await readReceiveBinding(profile, host).catch(() => null);
   if (!binding) {
     return {
@@ -333,6 +341,13 @@ export async function resolveAuthorizedWakeBinding(options: {
       ok: false,
       code: "wake_opted_out",
       detail: "This seat is no longer opted into wake mode.",
+    };
+  }
+  if (options.expectedProvider === "agy" && binding.experimental_agy_agentapi !== true) {
+    return {
+      ok: false,
+      code: "agy_agentapi_experimental_flag_required",
+      detail: "Antigravity native wake requires explicit --experimental-agy-agentapi opt-in.",
     };
   }
   return { ok: true, profile: opened, binding };
@@ -382,7 +397,7 @@ export async function acknowledgeNativeWakeOnCheck(options: {
 
   if (
     binding &&
-    binding.provider === "codex" &&
+    (binding.provider === "codex" || (binding.provider === "agy" && binding.experimental_agy_agentapi === true)) &&
     binding.requested_mode === "wake" &&
     binding.canary !== null &&
     binding.canary.emitted_while_idle &&
@@ -436,6 +451,7 @@ export interface NativeWakeBridgeOptions {
 
 function defaultProviderForRoute(route: Exclude<NativeWakeRoute, "none">): ReceiveProvider {
   if (route === "codex-queue") return "codex";
+  if (route === "agy-agentapi") return "agy";
   return "claude";
 }
 
