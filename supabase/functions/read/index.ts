@@ -1741,6 +1741,16 @@ async function handle(
               to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
               a.fix_hint
             )
+          WHEN a.kind = 'agent_unseen' THEN
+            format(
+              'System alert (%s, id %s): %s has %s unseen ask/notice waiting since %s. Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.waiting_count,
+              to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              a.fix_hint
+            )
           ELSE
             format(
               'System alert (%s, id %s): %s lost access. Fix: %s',
@@ -1768,7 +1778,14 @@ async function handle(
       FROM swarm_read.system_alerts AS a
       WHERE a.workspace_id = ${body.workspace_id}::uuid
         AND a.resolved_at IS NULL
-        AND a.routed_lead_principal_id = ${agent.principal_id}::uuid
+        AND (
+          a.routed_lead_principal_id = ${agent.principal_id}::uuid
+          OR (
+            a.kind = 'agent_unseen'
+            AND a.sender_kind = 'agent'
+            AND a.sender_id = ${agent.principal_id}::uuid
+          )
+        )
         AND (${body.about}::text IS NULL OR ('system_alert:' || a.kind) = ${body.about}::text)
         AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
         AND ${inReplyTo}::uuid IS NULL
@@ -1810,6 +1827,16 @@ async function handle(
               to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
               a.fix_hint
             )
+          WHEN a.kind = 'agent_unseen' THEN
+            format(
+              'System alert (%s, id %s): %s has %s unseen ask/notice waiting since %s. Fix: %s',
+              a.kind,
+              a.alert_id,
+              a.affected_seat_name,
+              a.waiting_count,
+              to_char(a.oldest_waiting_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+              a.fix_hint
+            )
           ELSE
             format(
               'System alert (%s, id %s): %s lost access. Fix: %s',
@@ -1837,7 +1864,14 @@ async function handle(
       FROM swarm_read.system_alerts AS a
       WHERE a.workspace_id = ${body.workspace_id}::uuid
         AND a.resolved_at IS NULL
-        AND a.routed_lead_principal_id = ${agent.principal_id}::uuid
+        AND (
+          a.routed_lead_principal_id = ${agent.principal_id}::uuid
+          OR (
+            a.kind = 'agent_unseen'
+            AND a.sender_kind = 'agent'
+            AND a.sender_id = ${agent.principal_id}::uuid
+          )
+        )
         AND (${body.about}::text IS NULL OR ('system_alert:' || a.kind) = ${body.about}::text)
         AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
         AND ${inReplyTo}::uuid IS NULL
