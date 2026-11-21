@@ -54,7 +54,14 @@ const MIGRATION_SQL = readFileSync(
   "utf8",
 );
 
-const sql = postgres(DATABASE_URL, { max: 5, onnotice: () => {} });
+function localClusterAdminUrl(dbUrl: string): string {
+  const target = new URL(dbUrl);
+  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname), "local stack required");
+  target.username = "supabase_admin";
+  return target.toString();
+}
+
+const sql = postgres(localClusterAdminUrl(DATABASE_URL), { max: 5, onnotice: () => {} });
 test.after(() => sql.end({ timeout: 5 }));
 
 const MIN = 60 * 1000;
@@ -76,6 +83,11 @@ async function seedWorkspace(
   await tx`
     INSERT INTO auth.users (id, email, aud, role, encrypted_password, email_confirmed_at, created_at, updated_at)
     VALUES (${ownerId}::uuid, ${`owner-${ownerId}@example.test`}, 'authenticated', 'authenticated', '', now(), now(), now())
+  `;
+  await tx`
+    INSERT INTO swarm.users (user_id, display_name)
+    VALUES (${ownerId}::uuid, 'Backfill witness owner')
+    ON CONFLICT (user_id) DO NOTHING
   `;
   await tx`
     INSERT INTO swarm.workspaces (workspace_id, name, created_by)
@@ -677,6 +689,9 @@ test("20261120000007 Condition 3: deterministic lock-wait expiry race observed v
         await txClean`DELETE FROM swarm.agent_principals WHERE workspace_id = ${wsId}::uuid`;
         await txClean`DELETE FROM swarm.memberships WHERE workspace_id = ${wsId}::uuid`;
         await txClean`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
+        await txClean`DELETE FROM swarm.org_memberships WHERE org_id = ${wsId}::uuid`;
+        await txClean`DELETE FROM swarm.organizations WHERE id = ${wsId}::uuid`;
+        await txClean`DELETE FROM swarm.users WHERE user_id = ${ownerId}::uuid`;
         await txClean`DELETE FROM auth.users WHERE id = ${ownerId}::uuid`;
         await txClean`SET LOCAL session_replication_role = origin`;
       });
