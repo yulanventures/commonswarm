@@ -4467,6 +4467,34 @@
             "removes": [],
             "reason": "Local filesystem lock timeout, not a network request timeout."
           }
+        },
+        "src/cloud/github-ci-stamps.ts:GITHUB_CI_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/github-ci-stamps.ts:27",
+          "detail": "10-second per-request timeout for read-only GitHub Actions/Checks GET calls.",
+          "operation": {
+            "name": "github-ci-readonly-get",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "External read-only GitHub API GET timeout, not a CommonSwarm Cloud API request."
+          }
+        },
+        "src/cloud/github-ci-stamps.ts:timeoutMs": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/github-ci-stamps.ts:292",
+          "detail": "AbortSignal.timeout(timeoutMs) bound on read-only GitHub CI GET requests.",
+          "operation": {
+            "name": "github-ci-readonly-get-signal",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "External read-only GitHub API GET timeout, not a CommonSwarm Cloud API request."
+          }
         }
       }
     }
