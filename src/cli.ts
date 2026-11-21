@@ -146,6 +146,7 @@ import {
   type StreamRoute,
 } from "./cloud/command-client.js";
 import { normalizeReactionEmoji, SIGNAL_REACTION_EMOJI_RULE } from "./protocol/signal-reactions.js";
+import { classifyRosterSeatStatus } from "./protocol/seat-status.js";
 import {
   isReplyStatus,
   REPLY_STATUSES,
@@ -4980,16 +4981,27 @@ async function runRoster(args: Arguments): Promise<void> {
     throw new Error("roster is read with an agent credential; people see agents in the web app");
   }
   const roster = await readAgentRoster(cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher);
+  const now = roster.generated_at && Number.isFinite(Date.parse(roster.generated_at))
+    ? Date.parse(roster.generated_at) : Date.now();
   if (args.has("json")) {
-    process.stdout.write(`${JSON.stringify(roster, null, 2)}\n`);
+    const enriched = {
+      ...roster,
+      agents: roster.agents.map((row) => ({
+        ...row,
+        seat_status: classifyRosterSeatStatus(row, now),
+      })),
+    };
+    process.stdout.write(`${JSON.stringify(enriched, null, 2)}\n`);
     return;
   }
   for (const row of roster.agents) {
+    const seat = classifyRosterSeatStatus(row, now);
     const waiting = row.waiting_on_people.count === 0 ? ""
       : ` · waiting on people: ${row.waiting_on_people.count} (oldest ${rosterAge(row.waiting_on_people.since)})`;
-    const work = row.open_work?.text ? ` · ${sanitizeDisplayLabel(row.open_work.text, "")}` : "";
-    process.stdout.write(`${sanitizeDisplayLabel(row.name, "Unnamed agent")} · ${row.status.replaceAll("_", " ")} · `
-      + `${sanitizeDisplayLabel(row.owner.display_name ?? "", "Unnamed member")} · active ${rosterAge(row.last_activity_at)}`
+    const work = seat.work_text ? ` · ${sanitizeDisplayLabel(seat.work_text, "")}`
+      : row.open_work?.text ? ` · ${sanitizeDisplayLabel(row.open_work.text, "")}` : "";
+    process.stdout.write(`${sanitizeDisplayLabel(row.name, "Unnamed agent")} · ${seat.line} · `
+      + `${sanitizeDisplayLabel(row.owner.display_name ?? "", "Unnamed member")}`
       + `${waiting}${work}\n`);
   }
   if (roster.truncated) process.stdout.write("Showing the first 200 agents.\n");
