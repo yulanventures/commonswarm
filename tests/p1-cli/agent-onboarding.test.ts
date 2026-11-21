@@ -183,6 +183,7 @@ test("setup checks identity before saving and starts no receiver", async () => {
   assert.deepEqual(result.receive_capabilities.wake_providers, [
     { provider: "claude", preview: true, requires_idle_test: true },
     { provider: "codex", preview: false, requires_idle_test: true },
+    { provider: "agy", preview: false, experimental: true, requires_idle_test: true },
     { provider: "grok-bot", preview: false, requires_idle_test: true },
   ]);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);

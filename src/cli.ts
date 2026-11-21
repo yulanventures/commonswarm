@@ -68,6 +68,7 @@ import {
   RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
   RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS,
   RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
+  RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS,
   RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
   RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   onboardingUsage,
@@ -77,6 +78,7 @@ import {
   runReceiveConfigure,
   runReceiveConfirm,
   runReceiveIdle,
+  runReceiveRegisterAgy,
   runReceiveServe,
   runReceiveStatus,
   runReceiveTest,
@@ -101,6 +103,7 @@ import {
   type NativeWakeRoute,
 } from "./cloud/native-wake.js";
 import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
+import { AgyAgentApiAdapter } from "./cloud/native-wake-agy.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -8458,9 +8461,8 @@ async function runConfiguredListener(options: {
   const routeMode = options.routeMode ?? "main";
   const deferOverChars = options.deferOverChars ?? null;
   const pendingMainQueue = new FilePendingMainQueue(paths.instanceDirectory);
-  let codexWakeBridge: NativeWakeBridge | null = null;
+  let nativeWakeBridge: NativeWakeBridge | null = null;
   if (
-    options.provider === "codex" &&
     options.profilePath !== undefined &&
     options.hostSessionId !== undefined
   ) {
@@ -8468,23 +8470,45 @@ async function runConfiguredListener(options: {
       workspaceId: options.workspaceId,
       principalId: options.principalId,
     };
-    const auth = await resolveAuthorizedWakeBinding({
-      profilePath: options.profilePath,
-      hostSessionId: options.hostSessionId,
-      expectedProvider: "codex",
-      expectedSeat,
-    });
-    if (auth.ok) {
-      codexWakeBridge = new NativeWakeBridge({
+    if (options.provider === "codex") {
+      const auth = await resolveAuthorizedWakeBinding({
         profilePath: options.profilePath,
-        hostSessionId: auth.binding.host_session_id,
-        cwd: auth.binding.cwd,
+        hostSessionId: options.hostSessionId,
         expectedProvider: "codex",
         expectedSeat,
-        adapter: new CodexQueueAdapter({
-          ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
-        }),
       });
+      if (auth.ok) {
+        nativeWakeBridge = new NativeWakeBridge({
+          profilePath: options.profilePath,
+          hostSessionId: auth.binding.host_session_id,
+          cwd: auth.binding.cwd,
+          expectedProvider: "codex",
+          expectedSeat,
+          adapter: new CodexQueueAdapter({
+            ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
+          }),
+        });
+      }
+    }
+    if (nativeWakeBridge === null) {
+      const agyAuth = await resolveAuthorizedWakeBinding({
+        profilePath: options.profilePath,
+        hostSessionId: options.hostSessionId,
+        expectedProvider: "agy",
+        expectedSeat,
+      });
+      if (agyAuth.ok) {
+        nativeWakeBridge = new NativeWakeBridge({
+          profilePath: options.profilePath,
+          hostSessionId: agyAuth.binding.host_session_id,
+          cwd: agyAuth.binding.cwd,
+          expectedProvider: "agy",
+          expectedSeat,
+          adapter: new AgyAgentApiAdapter({
+            profilePath: options.profilePath,
+          }),
+        });
+      }
     }
   }
   process.on("SIGINT", onProcessSignal);
@@ -8578,10 +8602,10 @@ async function runConfiguredListener(options: {
         const instrumentedModel = activity.instrumentModel(
           await newModel(onCanaryAttempt, activity.events),
         );
-        const wakeBridgeTimer = codexWakeBridge === null
+        const wakeBridgeTimer = nativeWakeBridge === null
           ? null
           : setInterval(() => {
-            void codexWakeBridge.tick(signal).catch(() => undefined);
+            void nativeWakeBridge.tick(signal).catch(() => undefined);
           }, 1_000);
         try {
           return await runListenerRuntime({
@@ -8616,12 +8640,12 @@ async function runConfiguredListener(options: {
             deliveryHoldBudgetMs: turnBudgetMs,
             ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
             pendingMainQueue,
-            ...(codexWakeBridge === null
+            ...(nativeWakeBridge === null
               ? {}
               : {
                 onMainArrival: () => {
-                  codexWakeBridge.notifyArrival();
-                  void codexWakeBridge.tick(signal).catch(() => undefined);
+                  nativeWakeBridge.notifyArrival();
+                  void nativeWakeBridge.tick(signal).catch(() => undefined);
                 },
               }),
             fetcher: boundFetch,
@@ -12389,11 +12413,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     errorMode: "onboarding",
   }),
   receive: group({
-    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "experimental-agy-agentapi", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--experimental-agy-agentapi] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
     status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]"], bootstrap: true }),
     test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
     confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]"], bootstrap: true }),
     idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    "register-agy": commandEntry({ ...noTool("registers Antigravity local LS credentials from a 0600 file or stdin into a 0600 file; never a model tool"), handler: runReceiveRegisterAgy, description: "Register local Antigravity LS credentials from a 0600 file or stdin for experimental native wake.", mutates: true, flags: ["profile", "host-session-id", "credentials-file", "stdin", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive register-agy --profile <absolute-path> --host-session-id <conversation-uuid> (--credentials-file <0600-path> | --stdin) [--json]"], bootstrap: true }),
     serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve --profile <absolute-path> --host-session-id <id>"], bootstrap: true }),
   }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
     refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
@@ -12608,6 +12633,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "receive.test": RECEIVE_COMMON_FLAGS,
   "receive.confirm": RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
   "receive.idle": RECEIVE_COMMON_FLAGS,
+  "receive.register-agy": RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS,
   "receive.serve": RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
   "__listen-supervisor": RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,

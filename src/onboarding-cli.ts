@@ -35,8 +35,8 @@ export interface OnboardingArguments {
   assertShape(flags: readonly string[], positionals: number): void;
 }
 
-export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt", "after"] as const;
-export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
+export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt", "after", "credentials-file"] as const;
+export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel", "experimental-agy-agentapi", "stdin"] as const;
 
 export function onboardingUsage(): string {
   return `setup imports a private connection file and checks the authenticated identity. It starts no listener.
@@ -261,7 +261,7 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
 
 export const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
 
-export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"] as const;
+export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "experimental-agy-agentapi", "grok-bot-agent-id"] as const;
 
 export async function runReceiveConfigure(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-configure");
@@ -269,6 +269,7 @@ export async function runReceiveConfigure(args: OnboardingArguments): Promise<vo
   await output(await configureAgentReceive({
     profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
     hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
+    experimentalAgyAgentapi: args.has("experimental-agy-agentapi"),
     grokBotAgentId: args.optional("grok-bot-agent-id"),
     execution: { command: await stableNodePath(), args: [...process.execArgv, resolve(process.argv[1]!)] },
   }));
@@ -316,8 +317,38 @@ export async function runReceiveConfirm(args: OnboardingArguments): Promise<void
 export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-idle");
   args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  const profilePath = args.required("profile");
+  const hostSessionId = checkedHostSessionId(args.required("host-session-id"));
+  const binding = await readReceiveBinding(profilePath, hostSessionId);
+  if (binding?.provider === "agy") {
+    const { markAgyIdle } = await import("./cloud/native-wake-agy.js");
+    await output(await markAgyIdle(profilePath, hostSessionId));
+    return;
+  }
   const { markGrokBotIdle } = await import("./cloud/agent-channel-grok-bot.js");
-  await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
+  await output(await markGrokBotIdle(profilePath, hostSessionId));
+}
+
+export const RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "credentials-file", "stdin"] as const;
+
+export async function runReceiveRegisterAgy(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-register-agy");
+  args.assertShape(RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS, 2);
+  const credentialsFile = args.optional("credentials-file");
+  const useStdin = args.has("stdin");
+  if (credentialsFile !== undefined && useStdin) {
+    throw new AgentSetupError("agy_credentials_input_conflict", "Supply either --credentials-file or --stdin, not both.");
+  }
+  const { registerAgyWake } = await import("./cloud/native-wake-agy.js");
+  await output(await registerAgyWake({
+    profilePath: args.required("profile"),
+    hostSessionId: checkedHostSessionId(args.required("host-session-id")),
+    ...(credentialsFile !== undefined
+      ? { credentialsFile }
+      : useStdin || !process.stdin.isTTY
+        ? { stdin: process.stdin }
+        : {}),
+  }));
 }
 
 export const RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
@@ -330,6 +361,9 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
   if (binding?.provider === "codex") {
     const { serveCodexWakeBridge } = await import("./cloud/native-wake-codex.js");
     await serveCodexWakeBridge(options);
+  } else if (binding?.provider === "agy") {
+    const { serveAgyWakeBridge } = await import("./cloud/native-wake-agy.js");
+    await serveAgyWakeBridge(options);
   } else if (binding?.provider === "grok-bot") {
     const { serveGrokBotChannel } = await import("./cloud/agent-channel-grok-bot.js");
     await serveGrokBotChannel(options);

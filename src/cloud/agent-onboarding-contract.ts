@@ -1,10 +1,10 @@
 export const AGENT_CONNECTION_VERSION = 1 as const;
 export const RECEIVE_MODES = ["wake", "turn"] as const;
 export type ReceiveMode = (typeof RECEIVE_MODES)[number];
-export const RECEIVE_PROVIDERS = ["claude", "codex", "gemini", "instructions", "grok-bot"] as const;
+export const RECEIVE_PROVIDERS = ["claude", "codex", "gemini", "agy", "instructions", "grok-bot"] as const;
 export type ReceiveProvider = (typeof RECEIVE_PROVIDERS)[number];
 export const RECEIVE_WAKE_PROVIDER = "claude" as const;
-export const RECEIVE_WAKE_PROVIDERS = ["claude", "codex", "grok-bot"] as const;
+export const RECEIVE_WAKE_PROVIDERS = ["claude", "codex", "agy", "grok-bot"] as const;
 export const RECEIVE_CHOICE = {
   question: "How should I check CommonSwarm messages?",
   wake: "Wake this session when messages arrive. This can use model tokens while you are away; host support and approval are required.",
@@ -54,6 +54,6 @@ export function quoteAgentArgument(value: string): string { return `'${value.rep
 export function boundProfileCommands(text: string | null, profile: string, hostSessionId?: string): string | null {
   if (text === null) return null;
   if (!hostSessionId || hostSessionId === "manual") return text;
-  return text.replace(/cswarm (?:receive (?:configure|status|test|idle|serve)|check)(?![\w-])/g,
+  return text.replace(/cswarm (?:receive (?:configure|status|test|idle|serve|register-agy)|check)(?![\w-])/g,
     command => `${command} --profile ${quoteAgentArgument(profile)} --host-session-id ${quoteAgentArgument(hostSessionId)}`);
 }
