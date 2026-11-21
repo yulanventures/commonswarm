@@ -14,6 +14,7 @@ import { HOST_HOOK_TIMEOUT_SECONDS } from "./agent-check-budget.js";
 import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
 
 import { findGrokBotGateway } from "./agent-grok-bot-gateway.js";
+import { checkClaudePeerAuthHelper, type ClaudePeerAuthAvailability } from "./claude-peer-auth.js";
 
 const exec = promisify(execFile);
 export const RECEIVE_HEARTBEAT_MAX_AGE_MS = 15_000;
@@ -128,17 +129,29 @@ function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), boundHostSessionId?: string, profile?: string) {
+export function receiveStatus(
+  binding: ReceiveBinding | null,
+  now = Date.now(),
+  boundHostSessionId?: string,
+  profile?: string,
+  claudePeerAuth?: ClaudePeerAuthAvailability,
+) {
   const channelLive = binding !== null && binding.channel_pid !== null &&
     binding.channel_heartbeat_at !== null && now - Date.parse(binding.channel_heartbeat_at) >= 0 && now - Date.parse(binding.channel_heartbeat_at) <= RECEIVE_HEARTBEAT_MAX_AGE_MS &&
     processAlive(binding.channel_pid);
-  const wakeVerified = binding?.requested_mode === "wake" && channelLive && binding?.wake_verified_at !== null;
+  const claudeSocketSelected = binding?.requested_mode === "wake" && binding.provider === "claude" && binding.wake_transport === "socket";
+  const peerAuth = claudeSocketSelected ? (claudePeerAuth ?? checkClaudePeerAuthHelper()) : null;
+  const claudeSocketUnavailable = peerAuth !== null && !peerAuth.available;
+  const wakeRouteReason = claudeSocketUnavailable ? peerAuth.reason : null;
+  const wakeVerified = !claudeSocketUnavailable && binding?.requested_mode === "wake" && channelLive && binding?.wake_verified_at !== null;
   const wakeRoute = binding?.requested_mode !== "wake"
     ? "none"
     : binding.provider === "codex"
     ? "codex-queue"
     : binding.provider === "claude"
-    ? binding.wake_transport === "socket" ? "claude-socket" : "channel"
+    ? binding.wake_transport === "socket"
+      ? (claudeSocketUnavailable ? "unavailable" : "claude-socket")
+      : "channel"
     : binding.provider === "grok-bot"
     ? "channel"
     : "none";
@@ -146,12 +159,14 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), 
     requested_mode: binding?.requested_mode ?? null,
     effective_mode: wakeVerified ? "wake" : "turn",
     wake_route: wakeRoute,
+    ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
     turn_check: binding === null || binding.hook_file === null ? "instruction" : binding.turn_verified_at === null ? "pending_host" : "verified",
     wake_verified: Boolean(wakeVerified),
     channel_running: Boolean(channelLive),
     host_session_id: binding?.host_session_id ?? null,
     next_action: boundProfileCommands(binding === null ? "Ask the user to choose wakeups or turn checks, then run cswarm receive configure." :
       wakeVerified ? null : binding.requested_mode === "wake" ?
+        claudeSocketUnavailable ? `Claude inbox-socket wake is unavailable (${wakeRouteReason}). Install /usr/bin/python3 (on macOS, Xcode Command Line Tools) or switch to --wake-transport channel or --mode turn. Use cswarm check meanwhile.` :
         binding.provider === "codex" ? "Wake is not verified. Start cswarm receive serve for this Codex thread, run cswarm receive test, end this turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         binding.provider === "grok-bot" ? "Wake is not verified. Start cswarm receive serve on this Bot computer, run cswarm receive test, then cswarm receive idle when the session is idle. Confirm with cswarm receive status. Use cswarm check meanwhile." :
         binding.provider === "claude" && binding.wake_transport === "socket" ? "Wake is not verified. Run cswarm receive register-socket inside this Claude session, start cswarm receive serve, run cswarm receive test, end the turn so the session becomes idle, then confirm with cswarm receive status. Use cswarm check meanwhile." :

@@ -31,6 +31,7 @@ import {
   updateReceiveBinding,
   type ReceiveBinding,
 } from "./agent-receive.js";
+import { checkClaudePeerAuthHelper, type ClaudePeerAuthAvailability } from "./claude-peer-auth.js";
 
 type ReceiveProvider = ReceiveBinding["provider"];
 import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
@@ -44,6 +45,7 @@ export const NATIVE_WAKE_ROUTES = [
   "claude-socket",
   "channel",
   "agy-agentapi",
+  "unavailable",
   "none",
 ] as const;
 export type NativeWakeRoute = (typeof NATIVE_WAKE_ROUTES)[number];
@@ -68,14 +70,35 @@ export function assertFixedNativeWakePrompt(prompt: string): number {
 }
 
 /** Map a local receive binding to its public wake route label (`whoami` and `receive status`). */
-export function wakeRouteForBinding(binding: ReceiveBinding | null): NativeWakeRoute {
+export function wakeRouteForBinding(
+  binding: ReceiveBinding | null,
+  claudePeerAuth?: ClaudePeerAuthAvailability,
+): NativeWakeRoute {
   if (!binding || binding.requested_mode !== "wake") return "none";
   if (binding.provider === "codex") return "codex-queue";
   if (binding.provider === "claude") {
-    return binding.wake_transport === "socket" ? "claude-socket" : "channel";
+    if (binding.wake_transport === "socket") {
+      const helper = claudePeerAuth ?? checkClaudePeerAuthHelper();
+      return helper.available ? "claude-socket" : "unavailable";
+    }
+    return "channel";
   }
   if (binding.provider === "grok-bot") return "channel";
   return "none";
+}
+
+export function formatWakeRouteLine(
+  wakeRoute: NativeWakeRoute,
+  wakeVerified: boolean,
+  wakeRouteReason?: string | null,
+): string {
+  if (wakeRoute === "unavailable" && wakeRouteReason) {
+    return `Wake route: unavailable (${wakeRouteReason}).`;
+  }
+  if (wakeRoute !== "none" && wakeRoute !== "unavailable") {
+    return `Wake route: ${wakeRoute} (${wakeVerified ? "verified" : "unverified"}).`;
+  }
+  return `Wake route: ${wakeRoute}.`;
 }
 
 export interface NativeWakeState {

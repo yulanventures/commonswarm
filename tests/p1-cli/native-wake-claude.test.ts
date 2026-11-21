@@ -51,10 +51,12 @@ import { checkAgentMessages } from "../../src/cloud/agent-check.js";
 import {
   acknowledgeNativeWakeOnCheck,
   assertFixedNativeWakePrompt,
+  formatWakeRouteLine,
   NativeWakeBridge,
   readNativeWakeState,
   wakeRouteForBinding,
 } from "../../src/cloud/native-wake.js";
+import { checkClaudePeerAuthHelper } from "../../src/cloud/claude-peer-auth.js";
 import {
   CLAUDE_WAKE_ENV_SOCKET,
   CLAUDE_WAKE_ENV_TOKEN,
@@ -1588,6 +1590,131 @@ test("HezSec C3b witness: stalled real StdioServerTransport write terminates bef
     assert.equal(afterHeldBr?.channel_heartbeat_at, null);
   } finally {
     await new Promise<void>((res) => http.close(() => res()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Peer-auth helper edge cases: absolute python3 path (ignores PATH), macOS CLT stub guard, and unavailable route reporting", async () => {
+  const root = await makeTempDir("cs-cw-py-");
+  const sockPath = join(root, "inbox.sock");
+  const decoyDir = join(root, "decoy-bin");
+  const decoyMarker = join(root, "decoy-ran");
+  await mkdir(decoyDir, { mode: 0o700 });
+  const decoyPy = join(decoyDir, "python3");
+  await writeFile(decoyPy, `#!/bin/sh\ntouch "${decoyMarker}"\nexit 99\n`, { mode: 0o700 });
+  const srv = await startUnixSocketServer(sockPath);
+
+  try {
+    const { cwd, profile, sessionsDir } = await makeBoundClaudeSeat(root);
+    await writeSessionJson(sessionsDir, process.pid, {
+      sessionId: SESSION_ID,
+      pid: process.pid,
+      status: "idle",
+      messagingSocketPath: sockPath,
+      cwd,
+    });
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    await registerClaudeWakeSocket({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+    });
+
+    // (1) Prepend a malicious/decoy `python3` onto PATH; real adapter must invoke absolute /usr/bin/python3, NEVER PATH.
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${decoyDir}:${prevPath ?? ""}`;
+    try {
+      const adapter = new ClaudeSocketAdapter({
+        profilePath: profile,
+        sessionsDir,
+        isPidAlive: (p) => p === process.pid,
+      });
+      const sent = await adapter.sendWake({
+        hostSessionId: SESSION_ID,
+        prompt: "New CommonSwarm messages (batch 1): run cswarm check",
+        batch: 1,
+        cwd,
+      });
+      assert.deepEqual(sent, { ok: true });
+      await delay(40);
+      assert.equal(srv.received.length, 1);
+      await assert.rejects(() => stat(decoyMarker), /ENOENT/, "PATH decoy python3 must never be invoked");
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+    }
+
+    // (2) macOS without Command Line Tools: xcode-select -p fails -> fail closed WITHOUT touching /usr/bin/python3 stub!
+    let checkedPythonStub = false;
+    const cltMissingProbe = {
+      platform: "darwin" as const,
+      execSync: (file: string, args: readonly string[]) => {
+        assert.equal(file, "/usr/bin/xcode-select");
+        assert.deepEqual(args, ["-p"]);
+        return { ok: false };
+      },
+      isExecutable: () => {
+        checkedPythonStub = true;
+        return true;
+      },
+    };
+    const unavailable = checkClaudePeerAuthHelper(cltMissingProbe);
+    assert.deepEqual(unavailable, { available: false, reason: "python3 missing" });
+    assert.equal(checkedPythonStub, false, "must fail closed on xcode-select -p failure without probing/launching /usr/bin/python3 stub");
+
+    const stubBlockedAdapter = new ClaudeSocketAdapter({
+      profilePath: profile,
+      sessionsDir,
+      isPidAlive: (p) => p === process.pid,
+      peerAuthOptions: cltMissingProbe,
+    });
+    const blocked = await stubBlockedAdapter.sendWake({
+      hostSessionId: SESSION_ID,
+      prompt: "New CommonSwarm messages (batch 2): run cswarm check",
+      batch: 2,
+      cwd,
+    });
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) {
+      assert.equal(blocked.code, "claude_wake_peer_auth_unavailable");
+      assert.match(blocked.detail, /python3 missing/);
+    }
+    assert.equal(checkedPythonStub, false, "sendWake must not launch /usr/bin/python3 stub when xcode-select -p fails");
+    await delay(40);
+    assert.equal(srv.received.length, 1, "unavailable helper must send zero auth bytes");
+
+    // (3) When helper is unavailable, wakeRouteForBinding, receiveStatus, and whoami formatting report
+    // wake_route: "unavailable" with reason "python3 missing" (never "claude-socket" or wake_verified: true).
+    const binding = await readReceiveBinding(profile, SESSION_ID);
+    assert.ok(binding);
+    const verifiedLikeBinding = {
+      ...binding,
+      channel_pid: process.pid,
+      channel_heartbeat_at: new Date().toISOString(),
+      wake_verified_at: new Date().toISOString(),
+    };
+    assert.equal(wakeRouteForBinding(verifiedLikeBinding, unavailable), "unavailable");
+    const statusUnavailable = receiveStatus(verifiedLikeBinding, Date.now(), SESSION_ID, profile, unavailable);
+    assert.equal(statusUnavailable.wake_route, "unavailable");
+    assert.equal(statusUnavailable.wake_route_reason, "python3 missing");
+    assert.equal(statusUnavailable.wake_verified, false);
+    assert.equal(statusUnavailable.effective_mode, "turn");
+    assert.match(String(statusUnavailable.next_action), /python3 missing/);
+    assert.equal(
+      formatWakeRouteLine(statusUnavailable.wake_route, statusUnavailable.wake_verified, statusUnavailable.wake_route_reason),
+      "Wake route: unavailable (python3 missing).",
+    );
+  } finally {
+    await srv.close();
     await rm(root, { recursive: true, force: true });
   }
 });

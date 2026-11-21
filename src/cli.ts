@@ -96,6 +96,7 @@ import { ReviewCheckError } from "./cloud/review-checks.js";
 import { spawnSync } from "node:child_process";
 import {
   findProfileReceiveBinding,
+  formatWakeRouteLine,
   NativeWakeBridge,
   resolveAuthorizedWakeBinding,
   wakeRouteForBinding,
@@ -5673,12 +5674,14 @@ async function runWhoami(args: Arguments): Promise<void> {
     }
   }
   let wakeRoute: NativeWakeRoute = "none";
+  let wakeRouteReason: string | null = null;
   let wakeVerified = false;
   let receiveCapability: {
     configured: boolean;
     requested_mode: "wake" | "turn" | null;
     effective_mode: "wake" | "turn" | "direct";
     wake_route: NativeWakeRoute;
+    wake_route_reason?: string;
     turn_check: "verified" | "pending_host" | "instruction" | "none";
     wake_verified: boolean;
     channel_running: boolean;
@@ -5696,13 +5699,15 @@ async function runWhoami(args: Arguments): Promise<void> {
         args.expandedProfileHostSessionId,
         args.expandedProfileInputPath,
       );
-      wakeRoute = wakeRouteForBinding(binding);
+      wakeRoute = status.wake_route as NativeWakeRoute;
+      wakeRouteReason = status.wake_route_reason ?? null;
       wakeVerified = status.wake_verified;
       receiveCapability = {
         configured: binding !== null,
         requested_mode: status.requested_mode,
         effective_mode: status.effective_mode as "wake" | "turn",
         wake_route: wakeRoute,
+        ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
         turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
         wake_verified: status.wake_verified,
         channel_running: status.channel_running,
@@ -5748,6 +5753,7 @@ async function runWhoami(args: Arguments): Promise<void> {
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
     wake_route: wakeRoute,
+    ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
     wake_verified: wakeVerified,
     renewal_grant: activeGrant,
     workspace: {
@@ -5785,7 +5791,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         ? "Role: workspace lead (untagged channel messages route to you).\n"
         : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
-      `Wake route: ${wakeRoute}${wakeRoute !== "none" ? (wakeVerified ? " (verified)" : " (unverified)") : ""}.\n` +
+      `${formatWakeRouteLine(wakeRoute, wakeVerified, wakeRouteReason)}\n` +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"
         : `${describeRenewalGrant(output.renewal_grant).join("\n")}\n`),

@@ -47,6 +47,10 @@ import {
   type NativeWakeAdapter,
 } from "./native-wake.js";
 import {
+  checkClaudePeerAuthHelper,
+  type ClaudePeerAuthProbeOptions,
+} from "./claude-peer-auth.js";
+import {
   RenewalReauthorisationRequired,
   RenewalRevoked,
   RenewalSuspended,
@@ -108,6 +112,7 @@ export type ClaudeSocketTransport = (input: {
   expectedUid: number;
   timeoutMs: number;
   signal?: AbortSignal;
+  peerAuthOptions?: ClaudePeerAuthProbeOptions;
 }) => Promise<void>;
 
 export function claudeWakeRegistrationPath(profilePath: string, hostSessionId: string): string {
@@ -706,7 +711,15 @@ const defaultClaudeSocketTransport: ClaudeSocketTransport = async ({
   expectedUid,
   timeoutMs,
   signal,
+  peerAuthOptions,
 }) => {
+  const availability = checkClaudePeerAuthHelper(peerAuthOptions);
+  if (!availability.available) {
+    throw new ClaudeSocketPeerError(
+      "claude_wake_peer_auth_unavailable",
+      `Unable to authenticate connected Claude socket peer (${availability.reason}); refusing to send bearer.`,
+    );
+  }
   await new Promise<void>((resolvePromise, rejectPromise) => {
     if (signal?.aborted) {
       rejectPromise(new Error("claude socket wake aborted"));
@@ -715,7 +728,7 @@ const defaultClaudeSocketTransport: ClaudeSocketTransport = async ({
     const payload = `${lines.join("\n")}\n`;
     const timeoutSeconds = (Math.max(100, timeoutMs) / 1000).toFixed(3);
     const child = spawn(
-      "python3",
+      availability.pythonPath,
       ["-c", CLAUDE_PEER_AUTH_SENDER_PY, socketPath, String(expectedPid), String(expectedUid), timeoutSeconds],
       {
         stdio: ["pipe", "ignore", "pipe"],
@@ -801,6 +814,7 @@ export interface ClaudeSocketAdapterOptions {
   timeoutMs?: number;
   transport?: ClaudeSocketTransport;
   isPidAlive?: (pid: number) => boolean;
+  peerAuthOptions?: ClaudePeerAuthProbeOptions;
 }
 
 /**
@@ -818,6 +832,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
   private readonly timeoutMs: number;
   private readonly transport: ClaudeSocketTransport;
   private readonly isPidAlive: ((pid: number) => boolean) | undefined;
+  private readonly peerAuthOptions: ClaudePeerAuthProbeOptions | undefined;
 
   constructor(options: ClaudeSocketAdapterOptions) {
     this.profilePath = privatePath(options.profilePath);
@@ -825,6 +840,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
     this.timeoutMs = options.timeoutMs ?? CLAUDE_SOCKET_TIMEOUT_MS;
     this.transport = options.transport ?? defaultClaudeSocketTransport;
     this.isPidAlive = options.isPidAlive;
+    this.peerAuthOptions = options.peerAuthOptions;
   }
 
   private async resolveLiveIdleTarget(hostSessionId: string, cwd: string): Promise<
@@ -958,6 +974,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
         expectedUid,
         timeoutMs: this.timeoutMs,
         ...(input.signal ? { signal: input.signal } : {}),
+        ...(this.peerAuthOptions ? { peerAuthOptions: this.peerAuthOptions } : {}),
       });
       return { ok: true };
     } catch (error) {

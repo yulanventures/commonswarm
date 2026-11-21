@@ -4597,6 +4597,34 @@
             "removes": [],
             "reason": "Local MCP stdio pipe write timer, not a Cloud API request."
           }
+        },
+        "src/cloud/claude-peer-auth.ts:XCODE_SELECT_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/claude-peer-auth.ts:18",
+          "detail": "2-second bound on /usr/bin/xcode-select -p probe before touching /usr/bin/python3 on macOS.",
+          "operation": {
+            "name": "claude-peer-auth-xcode-select-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local host CLT probe, not a Cloud API request."
+          }
+        },
+        "src/cloud/claude-peer-auth.ts:timeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/claude-peer-auth.ts:44",
+          "detail": "spawnSync timeout option for /usr/bin/xcode-select -p probe.",
+          "operation": {
+            "name": "claude-peer-auth-xcode-select-spawn",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local host CLT probe, not a Cloud API request."
+          }
         }
       }
     }
