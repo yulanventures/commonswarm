@@ -590,7 +590,9 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
     });
     assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record exists before turn opt-out");
 
-    let observedRightAfterFirstWrite: Awaited<ReturnType<typeof readReceiveBinding>> = null;
+    const firstWriteSnapshot: { binding: Awaited<ReturnType<typeof readReceiveBinding>> } = {
+      binding: null,
+    };
     await assert.rejects(
       configureAgentReceive({
         profilePath: fx.profilePath,
@@ -601,7 +603,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
         deleteAgyRegistration: async () => {
           // Inspect disk RIGHT AFTER the first durable write (before deletion or catch runs):
           // proves a crash here STILL leaves turn mode + re-registration marker durably committed!
-          observedRightAfterFirstWrite = await readReceiveBinding(fx.profilePath, CONV);
+          firstWriteSnapshot.binding = await readReceiveBinding(fx.profilePath, CONV);
           throw Object.assign(new Error("SIMULATED_CRASH_BEFORE_DELETE"), { code: "EACCES" });
         },
         execution,
@@ -613,9 +615,10 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
         ),
     );
     // Marker MUST already have been persisted in the FIRST write (before deletion or catch)!
-    assert.equal(observedRightAfterFirstWrite?.requested_mode, "turn");
+    assert.ok(firstWriteSnapshot.binding, "first durable write snapshot must exist");
+    assert.equal(firstWriteSnapshot.binding.requested_mode, "turn");
     assert.equal(
-      observedRightAfterFirstWrite?.wake_unavailable_reason,
+      firstWriteSnapshot.binding.wake_unavailable_reason,
       "agy_re_registration_required",
       "first durable write must atomically include re-registration marker before deletion",
     );
