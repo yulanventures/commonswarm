@@ -325,6 +325,7 @@ test("20261120000007 Condition 1 fail-closed: missing checksum with post-C6 writ
       const postBeforePerm30dUntil = postBeforePerm30dCreated + 30 * DAY;
       const firstPermCreated = nowMs - 10 * MIN;
 
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
       await tx`SET LOCAL ROLE swarm_command`;
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until, created_at)
@@ -335,6 +336,7 @@ test("20261120000007 Condition 1 fail-closed: missing checksum with post-C6 writ
           (${firstPermanentSignalId}::uuid, ${wsId}::uuid, ${ownerId}::uuid, 'user', NULL, 'note', 'First permanent signal written after explicit post-C6 writes', ${chId}::uuid, ${PERMANENT_UNTIL_ISO}::timestamptz, ${iso(firstPermCreated)}::timestamptz)
       `;
       await tx`RESET ROLE`;
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
 
       await tx.unsafe(MIGRATION_SQL);
 
