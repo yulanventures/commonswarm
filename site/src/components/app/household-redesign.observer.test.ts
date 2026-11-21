@@ -1263,6 +1263,7 @@ test("openWorkspace settles each read independently so sibling failures keep loa
       resetChoices: () => {},
       resetSignalMentions: () => {},
       resetSignalReactions: () => {},
+      resetReviewChecks: () => {},
       files: [],
       fileLoadError: "",
       signalFilter: "all",

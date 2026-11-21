@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 function installReviewCardFixture() {
   const w = window as any;

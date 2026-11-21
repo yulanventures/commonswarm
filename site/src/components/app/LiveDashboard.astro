@@ -12073,18 +12073,20 @@ import "../../styles/kylon-image-viewer.css";
       }
       if (!isAlive()) return;
       reviewCheckTickets.delete(check.checkId);
+      const restoreReviewCardFocus = (): void => {
+        if (!hadCardFocus) return;
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) return;
+        const card = one<HTMLElement>(`[data-feed-list] [data-review-check="${CSS.escape(check.checkId)}"]`);
+        const btn = card?.querySelector<HTMLButtonElement>(`[data-review-stamp="${verdict}"]:not([disabled])`) ?? null;
+        (btn ?? card)?.focus({ preventScroll: true });
+      };
       if (result.ok) {
         reviewChecksByThread = upsertReviewCheckInMap(reviewChecksByThread, result.reviewCheck);
         reviewCheckDrafts.delete(reviewCheckDraftKey(workspaceId, check.checkId));
         reviewCheckErrors.delete(check.checkId);
         renderFeed();
-        if (hadCardFocus) {
-          queueMicrotask(() => window.requestAnimationFrame(() => {
-            const now = document.activeElement;
-            if (now !== null && now !== document.body) return;
-            one<HTMLElement>(`[data-feed-list] [data-review-check="${CSS.escape(check.checkId)}"]`)?.focus({ preventScroll: true });
-          }));
-        }
+        restoreReviewCardFocus();
         if (result.satisfiedNow) {
           void refreshLatestSignals();
         }
@@ -12092,13 +12094,7 @@ import "../../styles/kylon-image-viewer.css";
       }
       reviewCheckErrors.set(check.checkId, result.message);
       renderFeed();
-      if (hadCardFocus) {
-        queueMicrotask(() => window.requestAnimationFrame(() => {
-          const now = document.activeElement;
-          if (now !== null && now !== document.body) return;
-          one<HTMLElement>(`[data-feed-list] [data-review-check="${CSS.escape(check.checkId)}"]`)?.focus({ preventScroll: true });
-        }));
-      }
+      restoreReviewCardFocus();
       if ((result.status === 409 && result.error === "stale_head") || result.status === 404) {
         void refreshReviewChecks(workspaceId, ticket.version, true);
       }
