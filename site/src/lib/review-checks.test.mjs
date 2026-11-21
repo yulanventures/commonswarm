@@ -26,6 +26,7 @@ class FakeNode {
   id = "";
   tabIndex = 0;
   disabled = false;
+  hidden = false;
   type = "";
   value = "";
   title = "";
@@ -112,8 +113,8 @@ function rawCheck(overrides = {}) {
     thread_root_id: ROOT,
     required_seats: [
       { kind: "agent", id: AGENT_SEC, name: "HezSec" },
-      { kind: "agent", id: AGENT_DES, name: "Designer" },
       { kind: "user", id: VIEWER, name: "Owner" },
+      { kind: "agent", id: AGENT_DES, name: "Designer" },
     ],
     stamps: [
       {
@@ -128,17 +129,6 @@ function rawCheck(overrides = {}) {
         effective_verdict: "pass",
       },
       {
-        seat_kind: "agent",
-        seat_id: AGENT_DES,
-        name: "Designer",
-        verdict: "pass",
-        head_sha: "0".repeat(40),
-        note: "Old head note must not show",
-        stamped_at: "2026-11-20T17:00:00Z",
-        stale: true,
-        effective_verdict: "pending",
-      },
-      {
         seat_kind: "user",
         seat_id: VIEWER,
         name: "Owner",
@@ -147,6 +137,17 @@ function rawCheck(overrides = {}) {
         note: null,
         stamped_at: null,
         stale: false,
+        effective_verdict: "pending",
+      },
+      {
+        seat_kind: "agent",
+        seat_id: AGENT_DES,
+        name: "Designer",
+        verdict: "hold",
+        head_sha: "0".repeat(40),
+        note: "Missing migration witness",
+        stamped_at: "2026-11-20T17:00:00Z",
+        stale: true,
         effective_verdict: "pending",
       },
     ],
@@ -167,8 +168,8 @@ test("C3 review checks wire parser validates records, rejects malformed payloads
   assert.equal(parsed.checkId, CHECK_1);
   assert.equal(shortReviewSha(parsed.headSha), "aaaaaaaaa");
   assert.equal(parsed.stamps.length, 3);
-  assert.equal(parsed.stamps[1].stale, true);
-  assert.equal(parsed.stamps[1].effectiveVerdict, "pending");
+  assert.equal(parsed.stamps[2].stale, true);
+  assert.equal(parsed.stamps[2].effectiveVerdict, "pending");
 
   assert.equal(parseReviewCheckRecord({ ...rawCheck(), head_sha: "not-a-sha" }), null);
   assert.equal(parseReviewCheckRecord({ ...rawCheck(), subject: { kind: "issue", repo: "a/b", ref: "1" } }), null);
@@ -211,7 +212,7 @@ test("C3 review checks wire parser validates records, rejects malformed payloads
   if (!staleOutcome.ok) {
     assert.equal(staleOutcome.error, "stale_head");
     assert.equal(staleOutcome.currentHeadSha, SHA_2);
-    assert.match(staleOutcome.message, /bbbbbbbbb/);
+    assert.equal(staleOutcome.message, "Revision changed. Review it before sending.");
   }
 
   const okOutcome = parseStampReviewCheckOutcome(200, {
@@ -235,9 +236,11 @@ test("C3 review checks grouping, upsert, summary, and required-seat viewer check
   assert.equal(viewerRequiredStamp(c1, AGENT_SEC), null, "agent seat is never interactive for user id");
 
   const summaryPending = reviewCheckStatusSummary(c1);
-  assert.equal(summaryPending.label, "Pending");
+  assert.equal(summaryPending.label, "Pending reviews");
   assert.equal(summaryPending.countLabel, "1/3");
   assert.equal(summaryPending.tone, "pending");
+  assert.equal(reviewCheckStatusSummary({ status: "hold", stamps: c1.stamps }).label, "On hold");
+  assert.equal(reviewCheckStatusSummary({ status: "satisfied", stamps: c1.stamps }).label, "Reviews passed");
 
   const byRoot = groupReviewChecksByThreadRoot([c1, parseReviewCheckRecord(rawCheck({ check_id: "11111111-1111-4111-8111-000000000002", thread_root_id: null }))]);
   assert.equal(byRoot.size, 1);
@@ -248,7 +251,7 @@ test("C3 review checks grouping, upsert, summary, and required-seat viewer check
   assert.equal(next.get(ROOT)?.[0]?.status, "satisfied");
 });
 
-test("buildReviewCheckCard renders status, stale old-head stamp without stale note, viewer-only actions, and safe textContent", () => {
+test("buildReviewCheckCard renders status, earlier-revision note, in-row viewer actions with closed Add a note disclosure, and safe textContent", () => {
   const doc = fakeDocument();
   const check = parseReviewCheckRecord(
     rawCheck({
@@ -258,17 +261,18 @@ test("buildReviewCheckCard renders status, stale old-head stamp without stale no
   assert.ok(check);
   const stamped = [];
   const drafts = [];
+  const noteOpenEvents = [];
   const card = buildReviewCheckCard(
     doc,
     {
       check,
       viewerUserId: VIEWER,
-      draftNote: "Checking edge case",
-      error: "Head moved to bbbbbbbbb.",
+      error: "Revision changed. Review it before sending.",
     },
     {
       onStamp: (c, v, n) => stamped.push({ id: c.checkId, v, n }),
       onDraftChange: (id, note) => drafts.push({ id, note }),
+      onNoteOpenChange: (id, open) => noteOpenEvents.push({ id, open }),
     },
   );
 
@@ -279,22 +283,39 @@ test("buildReviewCheckCard renders status, stale old-head stamp without stale no
   const allText = card.textContent;
   assert.ok(allText.includes("org/<script>alert(1)</script>#710"), "untrusted repo kept as literal textContent");
   assert.ok(allText.includes("@ aaaaaaaaa"), "short head SHA rendered");
-  assert.ok(allText.includes("Pending"), "overall status pill rendered");
+  assert.ok(allText.includes("Pending reviews"), "overall status pill rendered");
   assert.ok(allText.includes("1/3"), "pass fraction rendered");
   assert.ok(allText.includes("Clean authz"), "current-head note rendered");
-  assert.ok(allText.includes("Pending · old pass @ 000000000"), "stale stamp explains old verdict + old SHA");
-  assert.ok(!allText.includes("Old head note must not show"), "stale stamp note must NOT display as current");
-  assert.ok(allText.includes("Head moved to bbbbbbbbb."), "inline error banner rendered");
+  assert.ok(allText.includes("Held on earlier revision @ 000000000"), "stale stamp explains earlier revision");
+  assert.ok(allText.includes("Missing migration witness"), "earlier revision hold reason stays readable");
+  assert.ok(allText.includes("Revision changed. Review it before sending."), "inline error banner rendered");
 
-  const noteInput = card.walk((n) => n.dataset.reviewCheckNote === CHECK_1)[0];
-  assert.ok(noteInput);
-  assert.equal(noteInput.value, "Checking edge case");
+  // Viewer actions live inside the viewer's own middle seat row, with Add a note closed by default.
+  const seatRows = card.walk((n) => n.tagName === "LI" && n.dataset.reviewSeat !== undefined);
+  assert.equal(seatRows.length, 3);
+  assert.equal(seatRows[1].dataset.reviewSeat, `user:${VIEWER}`, "viewer sits in the middle seat row");
+  assert.equal(seatRows[0].walk((n) => n.dataset.reviewStamp !== undefined).length, 0);
+  assert.equal(seatRows[2].walk((n) => n.dataset.reviewStamp !== undefined).length, 0);
+
+  const viewerRow = seatRows[1];
+  const noteToggle = viewerRow.walk((n) => n.dataset.reviewNoteToggle === CHECK_1)[0];
+  const noteInput = viewerRow.walk((n) => n.dataset.reviewCheckNote === CHECK_1)[0];
+  assert.ok(noteToggle && noteInput);
+  assert.equal(noteToggle.textContent, "Add a note");
+  assert.equal(noteToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(noteInput.hidden, true, "note input starts closed behind disclosure");
+
+  noteToggle.dispatch("click");
+  assert.equal(noteToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(noteInput.hidden, false);
+  assert.deepEqual(noteOpenEvents, [{ id: CHECK_1, open: true }]);
+
   noteInput.value = "Updated note";
   noteInput.dispatch("input");
   assert.deepEqual(drafts, [{ id: CHECK_1, note: "Updated note" }]);
 
-  const passBtn = card.walk((n) => n.dataset.reviewStamp === "pass")[0];
-  const holdBtn = card.walk((n) => n.dataset.reviewStamp === "hold")[0];
+  const passBtn = viewerRow.walk((n) => n.dataset.reviewStamp === "pass")[0];
+  const holdBtn = viewerRow.walk((n) => n.dataset.reviewStamp === "hold")[0];
   assert.ok(passBtn && holdBtn);
   assert.equal(passBtn.getAttribute("aria-pressed"), "false");
   assert.equal(holdBtn.getAttribute("aria-pressed"), "false");

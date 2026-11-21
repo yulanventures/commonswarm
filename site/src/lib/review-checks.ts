@@ -79,6 +79,7 @@ export type StampReviewCheckResult =
 
 export const REVIEW_CHECK_NOTE_MAX = 500;
 export const REVIEW_CHECK_STAMP_FAILED = "Couldn't record that verdict. Try again.";
+export const REVIEW_CHECK_STALE_HEAD_MESSAGE = "Revision changed. Review it before sending.";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -297,9 +298,7 @@ export function parseStampReviewCheckOutcome(
       status,
       error,
       ...(currentHeadSha ? { currentHeadSha } : {}),
-      message: currentHeadSha
-        ? `Head moved to ${shortReviewSha(currentHeadSha)}. Check refreshed — verify the new head before stamping.`
-        : "Head moved. Check refreshed — verify the new head before stamping.",
+      message: REVIEW_CHECK_STALE_HEAD_MESSAGE,
     };
   }
   return {
@@ -382,7 +381,7 @@ export function reviewCheckStatusSummary(
   }
   if (check.status === "satisfied") {
     return {
-      label: "Ready",
+      label: "Reviews passed",
       countLabel: `${passedCount}/${requiredCount}`,
       tone: "ready",
       passedCount,
@@ -392,7 +391,7 @@ export function reviewCheckStatusSummary(
   }
   if (check.status === "hold") {
     return {
-      label: "Hold",
+      label: "On hold",
       countLabel: `${passedCount}/${requiredCount}`,
       tone: "hold",
       passedCount,
@@ -401,7 +400,7 @@ export function reviewCheckStatusSummary(
     };
   }
   return {
-    label: "Pending",
+    label: "Pending reviews",
     countLabel: `${passedCount}/${requiredCount}`,
     tone: "pending",
     passedCount,

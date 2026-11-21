@@ -2643,6 +2643,7 @@ import "../../styles/kylon-image-viewer.css";
     const reviewChecksUnsupportedWorkspaces = new Set<string>();
     const reviewCheckErrors = new Map<string, string>();
     const reviewCheckDrafts = new Map<string, string>();
+    const reviewCheckNoteOpen = new Set<string>();
     type ReviewCheckTicket = { viewer: string; workspaceId: string; version: number; epoch: number };
     let reviewCheckTickets = new Map<string, ReviewCheckTicket>();
     const reviewCheckTicketLive = (ticket: ReviewCheckTicket): boolean =>
@@ -2667,6 +2668,7 @@ import "../../styles/kylon-image-viewer.css";
       reviewCheckErrors.clear();
       if (clearAccountState) {
         reviewCheckDrafts.clear();
+        reviewCheckNoteOpen.clear();
         reviewChecksUnsupportedWorkspaces.clear();
       }
     };
@@ -12010,6 +12012,7 @@ import "../../styles/kylon-image-viewer.css";
             pending: reviewCheckIsPending(check.checkId),
             error: reviewCheckErrors.get(check.checkId) ?? null,
             draftNote: reviewCheckDrafts.get(draftKey) ?? "",
+            noteOpen: reviewCheckNoteOpen.has(draftKey),
             formatTime: (iso) => {
               const formatted = formatTime(iso);
               return formatted.relative ? { text: formatted.relative, iso } : null;
@@ -12020,6 +12023,11 @@ import "../../styles/kylon-image-viewer.css";
               const key = reviewCheckDraftKey(workspaceId, checkId);
               if (note.length > 0) reviewCheckDrafts.set(key, note);
               else reviewCheckDrafts.delete(key);
+            },
+            onNoteOpenChange: (checkId, open) => {
+              const key = reviewCheckDraftKey(workspaceId, checkId);
+              if (open) reviewCheckNoteOpen.add(key);
+              else reviewCheckNoteOpen.delete(key);
             },
             onStamp: (targetCheck, verdict, note) => {
               void sendReviewCheckStamp(targetCheck, verdict, note);
@@ -12083,7 +12091,9 @@ import "../../styles/kylon-image-viewer.css";
       };
       if (result.ok) {
         reviewChecksByThread = upsertReviewCheckInMap(reviewChecksByThread, result.reviewCheck);
-        reviewCheckDrafts.delete(reviewCheckDraftKey(workspaceId, check.checkId));
+        const draftKey = reviewCheckDraftKey(workspaceId, check.checkId);
+        reviewCheckDrafts.delete(draftKey);
+        reviewCheckNoteOpen.delete(draftKey);
         reviewCheckErrors.delete(check.checkId);
         renderFeed();
         restoreReviewCardFocus();

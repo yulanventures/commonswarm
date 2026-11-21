@@ -1181,6 +1181,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__seat-detail {
   font-size: 12px;
   line-height: 1.45;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__seat-detail--stale {
+  color: var(--k-shell-muted);
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__seat-note {
   overflow-wrap: anywhere;
 }
@@ -1188,16 +1191,14 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__seat-time {
   color: var(--k-shell-muted);
   white-space: nowrap;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-review-check__actions {
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__seat-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--k-shell-line);
+  margin-top: 6px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input {
-  flex: 1 1 180px;
+  inline-size: 100%;
   min-inline-size: 0;
   min-block-size: 44px;
   box-sizing: border-box;
@@ -1210,6 +1211,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input {
   font-size: 13px;
   line-height: 1.4;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input[hidden] {
+  display: none;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input::placeholder {
   color: var(--k-shell-muted);
 }
@@ -1220,7 +1224,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input:focus-vi
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__buttons {
   display: flex;
-  flex: none;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -1263,6 +1267,34 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--hold[aria-pres
   background: color-mix(in srgb, var(--k-shell-danger, #b91c1c) 14%, var(--k-shell-surface));
   color: var(--k-shell-ink);
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 44px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--k-shell-radius);
+  background: transparent;
+  color: var(--k-shell-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle:hover:not(:disabled) {
+  background: var(--k-shell-hover);
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__error {
   margin: 0;
   color: var(--k-shell-danger, #b91c1c);
@@ -1271,24 +1303,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__error {
   overflow-wrap: anywhere;
 }
 @media (width <= 52rem) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-input {
-    flex: none;
-    inline-size: 100%;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__buttons {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    inline-size: 100%;
+  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn {
+    flex: 1 1 auto;
   }
 }
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] .hm-review-check,
   live-dashboard.dashboard[data-kylon-shell] .hm-review-check__status,
-  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn {
+  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn,
+  live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle {
     border-color: CanvasText;
   }
 }

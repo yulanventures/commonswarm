@@ -70,8 +70,8 @@ function installReviewCardFixture() {
       thread_root_id: root1,
       required_seats: [
         { kind: "agent", id: agentSec, name: "HezSec" },
-        { kind: "agent", id: agentDes, name: "Designer" },
         { kind: "user", id: owner, name: "Synthetic owner" },
+        { kind: "agent", id: agentDes, name: "Designer" },
       ],
       stamps: [
         {
@@ -86,17 +86,6 @@ function installReviewCardFixture() {
           effective_verdict: secEff,
         },
         {
-          seat_kind: "agent",
-          seat_id: agentDes,
-          name: "Designer",
-          verdict: desVerdict,
-          head_sha: desVerdictSha,
-          note: desVerdict ? "Visual check clean" : null,
-          stamped_at: desVerdict ? recent : null,
-          stale: desStale,
-          effective_verdict: desEff,
-        },
-        {
           seat_kind: "user",
           seat_id: owner,
           name: "Synthetic owner",
@@ -106,6 +95,17 @@ function installReviewCardFixture() {
           stamped_at: ownerVerdict ? new Date().toISOString() : null,
           stale: ownerStale,
           effective_verdict: ownerEff,
+        },
+        {
+          seat_kind: "agent",
+          seat_id: agentDes,
+          name: "Designer",
+          verdict: desVerdict,
+          head_sha: desVerdictSha,
+          note: desVerdict ? "Visual check clean" : null,
+          stamped_at: desVerdict ? recent : null,
+          stale: desStale,
+          effective_verdict: desEff,
         },
       ],
       status,
@@ -152,6 +152,7 @@ function installReviewCardFixture() {
   const f = (w.reviewCardFixture = {
     scenario,
     phone: scenario.endsWith("-phone"),
+    owner,
     wsId,
     convGeneral,
     convOps,
@@ -532,37 +533,48 @@ async function observeReviewCard() {
     const card2 = () => document.querySelector<HTMLElement>(`[data-review-check="${f.check2Id}"]`);
     await wait(() => shown(card1()) && shown(card2()), "both review check cards rendered on their thread roots");
 
-    // 1. Initial rendering, status pill, short SHA, read-only non-seat card, touch targets, and no phone overflow.
+    // 1. Initial rendering, status pill, short SHA, viewer in middle row with closed Add a note disclosure,
+    //    read-only non-seat card, touch targets, and no phone overflow.
     check(card1()!.textContent!.includes("yulanventures/commonswarm#710"), "missing subject on card 1");
     check(card1()!.textContent!.includes("@ 111111111"), "missing 9-char head SHA on card 1");
     check(card1()!.dataset.reviewStatus === "pending", "expected pending status on card 1");
-    check(card1()!.textContent!.includes("Pending") && card1()!.textContent!.includes("1/3"), "expected Pending 1/3 on card 1");
+    check(card1()!.textContent!.includes("Pending reviews") && card1()!.textContent!.includes("1/3"), "expected Pending reviews 1/3 on card 1");
     check(card2()!.querySelectorAll("[data-review-stamp]").length === 0, "non-required viewer must see strictly read-only card 2");
 
-    const passBtn1 = card1()!.querySelector<HTMLButtonElement>('[data-review-stamp="pass"]')!;
-    const holdBtn1 = card1()!.querySelector<HTMLButtonElement>('[data-review-stamp="hold"]')!;
-    const noteInput1 = card1()!.querySelector<HTMLInputElement>("[data-review-check-note]")!;
-    check(passBtn1.getBoundingClientRect().height >= 44 && holdBtn1.getBoundingClientRect().height >= 44 && noteInput1.getBoundingClientRect().height >= 44,
+    const seatRows1 = Array.from(card1()!.querySelectorAll<HTMLLIElement>("[data-review-seat]"));
+    check(seatRows1.length === 3 && seatRows1[1]!.dataset.reviewSeat === `user:${f.owner}`, "viewer seat must appear in the middle of the list");
+    const viewerRow1 = seatRows1[1]!;
+    const passBtn1 = viewerRow1.querySelector<HTMLButtonElement>('[data-review-stamp="pass"]')!;
+    const holdBtn1 = viewerRow1.querySelector<HTMLButtonElement>('[data-review-stamp="hold"]')!;
+    const noteToggle1 = viewerRow1.querySelector<HTMLButtonElement>("[data-review-note-toggle]")!;
+    const noteInput1 = viewerRow1.querySelector<HTMLInputElement>("[data-review-check-note]")!;
+    check(Boolean(passBtn1 && holdBtn1 && noteToggle1 && noteInput1), "Pass, Hold, and Add a note disclosure must live inside the viewer row");
+    check(noteToggle1.getAttribute("aria-expanded") === "false" && noteInput1.hidden === true, "Add a note disclosure must start closed");
+    check(passBtn1.getBoundingClientRect().height >= 44 && holdBtn1.getBoundingClientRect().height >= 44 && noteToggle1.getBoundingClientRect().height >= 44,
       "review check controls must meet 44px touch targets");
     if (f.phone) {
       check(card1()!.getBoundingClientRect().right <= innerWidth + 1, "review check card overflowed phone viewport");
     }
 
-    // 2. Viewer enters note and clicks Hold -> card updates to Hold with note and aria-pressed="true".
-    noteInput1.value = "Needs migration witness";
+    // 2. Viewer opens Add a note, enters Hold reason, and clicks Hold -> card updates to On hold with note and aria-pressed="true".
+    noteToggle1.click();
+    check(noteToggle1.getAttribute("aria-expanded") === "true" && noteInput1.hidden === false, "Add a note disclosure must open on click");
+    check(noteInput1.getBoundingClientRect().height >= 44, "opened note input must meet 44px touch target");
+    noteInput1.value = "Missing migration witness";
     noteInput1.dispatchEvent(new Event("input", { bubbles: true }));
     holdBtn1.click();
     await wait(
       () =>
         card1()?.dataset.reviewStatus === "hold" &&
-        card1()?.textContent!.includes("Needs migration witness") &&
+        card1()!.textContent!.includes("On hold") &&
+        card1()?.textContent!.includes("Missing migration witness") &&
         card1()?.querySelector<HTMLButtonElement>('[data-review-stamp="hold"]')?.getAttribute("aria-pressed") === "true",
       "Hold verdict recorded with note and aria-pressed",
     );
-    check(f.stamps.length === 1 && f.stamps[0].verdict === "hold" && f.stamps[0].head_sha === f.sha1 && f.stamps[0].note === "Needs migration witness",
+    check(f.stamps.length === 1 && f.stamps[0].verdict === "hold" && f.stamps[0].head_sha === f.sha1 && f.stamps[0].note === "Missing migration witness",
       "unexpected Hold command payload: " + JSON.stringify(f.stamps));
 
-    // 3. Viewer clicks Pass on old head -> 409 stale_head -> error alert + auto-refresh to sha2 with stale old-head badges!
+    // 3. Viewer clicks Pass on old head -> 409 stale_head -> error alert + auto-refresh to sha2 with earlier-revision badges AND Hold reason readable!
     const readsBeforeStale = f.reviewReads;
     card1()!.querySelector<HTMLButtonElement>('[data-review-stamp="pass"]')!.click();
     await wait(
@@ -570,23 +582,24 @@ async function observeReviewCard() {
         f.reviewReads > readsBeforeStale &&
         card1()?.dataset.reviewHead === f.sha2 &&
         shown(card1()?.querySelector('[role="alert"]')) &&
-        card1()!.textContent!.includes("Pending · old pass @ 111111111") &&
-        card1()!.textContent!.includes("Pending · old hold @ 111111111"),
-      "409 stale_head showed alert, refreshed to sha2, and marked old stamps stale",
+        card1()!.querySelector('[role="alert"]')!.textContent === "Revision changed. Review it before sending." &&
+        card1()!.textContent!.includes("Passed on earlier revision @ 111111111") &&
+        card1()!.textContent!.includes("Held on earlier revision @ 111111111"),
+      "409 stale_head showed alert, refreshed to sha2, and marked old stamps with earlier revision labels",
     );
-    check(!card1()!.textContent!.includes("Needs migration witness"), "stale old-head note must not display as current after head move");
+    check(card1()!.textContent!.includes("Missing migration witness"), "earlier Hold reason must stay readable with its earlier revision");
 
-    // 4. Viewer clicks Pass on sha2 -> satisfied_now -> card updates to Ready (3/3) and once-only satisfied note appears!
+    // 4. Viewer clicks Pass on sha2 -> satisfied_now -> card updates to Reviews passed (3/3) and once-only satisfied note appears!
     const passOnSha2 = card1()!.querySelector<HTMLButtonElement>('[data-review-stamp="pass"]')!;
     passOnSha2.focus();
     passOnSha2.click();
     await wait(
       () =>
         card1()?.dataset.reviewStatus === "satisfied" &&
-        card1()!.textContent!.includes("Ready") &&
+        card1()!.textContent!.includes("Reviews passed") &&
         card1()!.textContent!.includes("3/3") &&
         document.body.textContent!.includes("Review check satisfied for yulanventures/commonswarm#710 at 222222222."),
-      "Pass on sha2 transitioned card to Ready (3/3) and loaded satisfied thread note",
+      "Pass on sha2 transitioned card to Reviews passed (3/3) and loaded satisfied thread note",
     );
     check(document.activeElement !== document.body && Boolean(card1()?.contains(document.activeElement)),
       "focus must remain inside review check card after stamping");

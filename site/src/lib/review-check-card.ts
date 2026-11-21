@@ -1,11 +1,11 @@
 // Revision-bound review check thread card (C3): one calm card attached to a thread root.
 // Pure DOM. Repo, ref, head SHA, seat names, and notes are untrusted and enter only via textContent.
-// Interactive Pass / Hold controls appear strictly when the signed-in person is a required seat.
+// Interactive Pass / Hold and a closed "Add a note" disclosure sit directly inside the viewer's own
+// reviewer row when the signed-in person is a required seat.
 import {
   REVIEW_CHECK_NOTE_MAX,
   reviewCheckStatusSummary,
   shortReviewSha,
-  viewerRequiredStamp,
   type ReviewCheckRecord,
   type ReviewCheckStamp,
   type ReviewCheckVerdict,
@@ -17,12 +17,14 @@ export interface ReviewCheckCardVM {
   pending?: boolean;
   error?: string | null;
   draftNote?: string;
+  noteOpen?: boolean;
   formatTime?: (iso: string) => { text: string; iso: string } | null;
 }
 
 export interface ReviewCheckCardHandlers {
   onStamp: (check: ReviewCheckRecord, verdict: ReviewCheckVerdict, note: string) => void;
   onDraftChange?: (checkId: string, note: string) => void;
+  onNoteOpenChange?: (checkId: string, open: boolean) => void;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -49,22 +51,103 @@ function seatVerdictDescriptor(stamp: ReviewCheckStamp): {
     return { kind: "hold", symbol: "✕", label: "Hold" };
   }
   if (stamp.stale && stamp.verdict && stamp.headSha) {
+    const pastVerb = stamp.verdict === "hold" ? "Held on earlier revision" : "Passed on earlier revision";
     return {
       kind: "stale",
       symbol: "○",
-      label: `Pending · old ${stamp.verdict} @ ${shortReviewSha(stamp.headSha)}`,
+      label: `${pastVerb} @ ${shortReviewSha(stamp.headSha)}`,
     };
   }
   return { kind: "pending", symbol: "○", label: "Pending" };
 }
 
+function buildViewerRowActions(
+  doc: Document,
+  check: ReviewCheckRecord,
+  stamp: ReviewCheckStamp,
+  vm: ReviewCheckCardVM,
+  handlers: ReviewCheckCardHandlers,
+): HTMLDivElement {
+  const pending = vm.pending === true;
+  const draftNote = vm.draftNote ?? "";
+  let noteExpanded = vm.noteOpen === true || draftNote.length > 0;
+  const noteInputId = `hm-review-note-${check.checkId}`;
+
+  const actions = el(doc, "div", "hm-review-check__seat-actions");
+  const buttons = el(doc, "div", "hm-review-check__buttons");
+
+  const noteInput = el(doc, "input", "hm-review-check__note-input");
+  noteInput.id = noteInputId;
+  noteInput.type = "text";
+  noteInput.maxLength = REVIEW_CHECK_NOTE_MAX;
+  noteInput.placeholder = "Note (optional)";
+  noteInput.autocomplete = "off";
+  noteInput.setAttribute("aria-label", "Review note");
+  noteInput.dataset.reviewCheckNote = check.checkId;
+  noteInput.value = draftNote;
+  noteInput.disabled = pending;
+  noteInput.hidden = !noteExpanded;
+  noteInput.addEventListener("input", () => {
+    handlers.onDraftChange?.(check.checkId, noteInput.value);
+  });
+
+  const passBtn = el(doc, "button", "hm-review-check__btn hm-review-check__btn--pass");
+  passBtn.type = "button";
+  passBtn.dataset.reviewStamp = "pass";
+  passBtn.disabled = pending;
+  passBtn.setAttribute("aria-pressed", String(stamp.effectiveVerdict === "pass"));
+  const passMark = el(doc, "span", "hm-review-check__btn-mark", "✓");
+  passMark.setAttribute("aria-hidden", "true");
+  passBtn.append(passMark, el(doc, "span", "hm-review-check__btn-label", "Pass"));
+  passBtn.addEventListener("click", () => {
+    if (pending) return;
+    handlers.onStamp(check, "pass", noteInput.value);
+  });
+
+  const holdBtn = el(doc, "button", "hm-review-check__btn hm-review-check__btn--hold");
+  holdBtn.type = "button";
+  holdBtn.dataset.reviewStamp = "hold";
+  holdBtn.disabled = pending;
+  holdBtn.setAttribute("aria-pressed", String(stamp.effectiveVerdict === "hold"));
+  const holdMark = el(doc, "span", "hm-review-check__btn-mark", "✕");
+  holdMark.setAttribute("aria-hidden", "true");
+  holdBtn.append(holdMark, el(doc, "span", "hm-review-check__btn-label", "Hold"));
+  holdBtn.addEventListener("click", () => {
+    if (pending) return;
+    handlers.onStamp(check, "hold", noteInput.value);
+  });
+
+  const noteToggle = el(doc, "button", "hm-review-check__note-toggle", "Add a note");
+  noteToggle.type = "button";
+  noteToggle.disabled = pending;
+  noteToggle.dataset.reviewNoteToggle = check.checkId;
+  noteToggle.setAttribute("aria-expanded", String(noteExpanded));
+  noteToggle.setAttribute("aria-controls", noteInputId);
+  noteToggle.addEventListener("click", () => {
+    if (pending) return;
+    noteExpanded = !noteExpanded;
+    noteToggle.setAttribute("aria-expanded", String(noteExpanded));
+    noteInput.hidden = !noteExpanded;
+    handlers.onNoteOpenChange?.(check.checkId, noteExpanded);
+    if (noteExpanded && typeof noteInput.focus === "function") {
+      noteInput.focus({ preventScroll: true });
+    }
+  });
+
+  buttons.append(passBtn, holdBtn, noteToggle);
+  actions.append(buttons, noteInput);
+  return actions;
+}
+
 function buildSeatRow(
   doc: Document,
+  check: ReviewCheckRecord,
   stamp: ReviewCheckStamp,
   isViewer: boolean,
-  formatTime?: ReviewCheckCardVM["formatTime"],
+  vm: ReviewCheckCardVM,
+  handlers: ReviewCheckCardHandlers,
 ): HTMLLIElement {
-  const item = el(doc, "li", "hm-review-check__seat");
+  const item = el(doc, "li", isViewer ? "hm-review-check__seat hm-review-check__seat--viewer" : "hm-review-check__seat");
   item.dataset.reviewSeat = `${stamp.seatKind}:${stamp.seatId}`;
   const verdict = seatVerdictDescriptor(stamp);
   item.dataset.seatVerdict = verdict.kind;
@@ -86,12 +169,15 @@ function buildSeatRow(
   line.append(who, badge);
   item.append(line);
 
-  // Only show a stamp's note and timestamp while it applies to the current head (never stale notes).
-  const hasCurrentNote = !stamp.stale && stamp.note !== null && stamp.note.length > 0;
-  const formattedAt = !stamp.stale && stamp.stampedAt && formatTime ? formatTime(stamp.stampedAt) : null;
-  if (hasCurrentNote || formattedAt) {
-    const detail = el(doc, "div", "hm-review-check__seat-detail");
-    if (hasCurrentNote) {
+  // Keep both current-head notes and earlier-revision notes readable alongside their revision context.
+  const hasNote = stamp.note !== null && stamp.note.length > 0;
+  const formattedAt = stamp.stampedAt && vm.formatTime ? vm.formatTime(stamp.stampedAt) : null;
+  if (hasNote || formattedAt) {
+    const detailClass = stamp.stale
+      ? "hm-review-check__seat-detail hm-review-check__seat-detail--stale"
+      : "hm-review-check__seat-detail";
+    const detail = el(doc, "div", detailClass);
+    if (hasNote) {
       detail.append(el(doc, "span", "hm-review-check__seat-note", stamp.note!));
     }
     if (formattedAt && formattedAt.text) {
@@ -102,6 +188,10 @@ function buildSeatRow(
       detail.append(time);
     }
     item.append(detail);
+  }
+
+  if (isViewer) {
+    item.append(buildViewerRowActions(doc, check, stamp, vm, handlers));
   }
 
   return item;
@@ -117,7 +207,6 @@ export function buildReviewCheckCard(
   const summary = reviewCheckStatusSummary(check);
   const subjectText = `${check.subject.repo}#${check.subject.ref}`;
   const shortSha = shortReviewSha(check.headSha);
-  const viewerStamp = viewerRequiredStamp(check, vm.viewerUserId);
   const pending = vm.pending === true;
 
   const root = el(doc, "section", "hm-review-check");
@@ -151,63 +240,14 @@ export function buildReviewCheckCard(
   head.append(identity, statusPill);
   root.append(head);
 
-  // Per-seat verdict rows.
+  // Per-seat verdict rows; viewer controls appear directly inside the viewer's own row.
   const list = el(doc, "ul", "hm-review-check__seats");
   const viewerIdLower = vm.viewerUserId?.toLowerCase() ?? "";
   for (const stamp of check.stamps) {
     const isViewer = Boolean(viewerIdLower) && stamp.seatKind === "user" && stamp.seatId === viewerIdLower;
-    list.append(buildSeatRow(doc, stamp, isViewer, vm.formatTime));
+    list.append(buildSeatRow(doc, check, stamp, isViewer, vm, handlers));
   }
   root.append(list);
-
-  // Inline viewer stamp controls ONLY when the signed-in person is one of the required user seats.
-  if (viewerStamp) {
-    const actions = el(doc, "div", "hm-review-check__actions");
-    const noteInput = el(doc, "input", "hm-review-check__note-input");
-    noteInput.type = "text";
-    noteInput.maxLength = REVIEW_CHECK_NOTE_MAX;
-    noteInput.placeholder = "Note (optional)";
-    noteInput.autocomplete = "off";
-    noteInput.setAttribute("aria-label", "Review note");
-    noteInput.dataset.reviewCheckNote = check.checkId;
-    noteInput.value = vm.draftNote ?? "";
-    noteInput.disabled = pending;
-    noteInput.addEventListener("input", () => {
-      handlers.onDraftChange?.(check.checkId, noteInput.value);
-    });
-
-    const buttons = el(doc, "div", "hm-review-check__buttons");
-
-    const passBtn = el(doc, "button", "hm-review-check__btn hm-review-check__btn--pass");
-    passBtn.type = "button";
-    passBtn.dataset.reviewStamp = "pass";
-    passBtn.disabled = pending;
-    passBtn.setAttribute("aria-pressed", String(viewerStamp.effectiveVerdict === "pass"));
-    const passMark = el(doc, "span", "hm-review-check__btn-mark", "✓");
-    passMark.setAttribute("aria-hidden", "true");
-    passBtn.append(passMark, el(doc, "span", "hm-review-check__btn-label", "Pass"));
-    passBtn.addEventListener("click", () => {
-      if (pending) return;
-      handlers.onStamp(check, "pass", noteInput.value);
-    });
-
-    const holdBtn = el(doc, "button", "hm-review-check__btn hm-review-check__btn--hold");
-    holdBtn.type = "button";
-    holdBtn.dataset.reviewStamp = "hold";
-    holdBtn.disabled = pending;
-    holdBtn.setAttribute("aria-pressed", String(viewerStamp.effectiveVerdict === "hold"));
-    const holdMark = el(doc, "span", "hm-review-check__btn-mark", "✕");
-    holdMark.setAttribute("aria-hidden", "true");
-    holdBtn.append(holdMark, el(doc, "span", "hm-review-check__btn-label", "Hold"));
-    holdBtn.addEventListener("click", () => {
-      if (pending) return;
-      handlers.onStamp(check, "hold", noteInput.value);
-    });
-
-    buttons.append(passBtn, holdBtn);
-    actions.append(noteInput, buttons);
-    root.append(actions);
-  }
 
   if (vm.error) {
     const alert = el(doc, "p", "hm-review-check__error", vm.error);
