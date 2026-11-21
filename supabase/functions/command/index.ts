@@ -14852,9 +14852,31 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
       exactKeys(command, ["kind", "signal_id", "emoji"]);
   }
   if ((REACTION_COMMAND_KINDS as readonly string[]).includes(String(command?.kind))) return false;
+  if (tool === "mark_read") {
+    return command?.kind === "conversation_mark_read" &&
+      exactKeys(command, ["kind", "conversation_id", "through_signal_id"]);
+  }
+  if (command?.kind === "conversation_mark_read") return false;
+  if (tool === "dm" && command?.kind === "conversation_open") {
+    return Object.keys(command).every((key) => ["kind", "members", "new_group"].includes(key));
+  }
+  if (command?.kind === "conversation_open") return false;
+  if (isConversationCommandKind(String(command?.kind))) return false;
   if (command?.kind === FILE_DOWNLOAD_URL_KIND || command?.kind === FILE_VERSION_CREATE_KIND ||
       command?.kind === FILE_VERSION_COMMIT_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
+  if (tool === "dm") {
+    return (command.signal_kind === "note" || command.signal_kind === "ask") &&
+      typeof command.conversation_id === "string" &&
+      command.thread_root_id == null &&
+      command.in_reply_to == null;
+  }
+  if (tool === "thread") {
+    return (command.signal_kind === "note" || command.signal_kind === "ask") &&
+      typeof command.conversation_id === "string" &&
+      typeof command.thread_root_id === "string" &&
+      command.in_reply_to == null;
+  }
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
   /* A hosted reply is private (in_reply_to) or, to a message everyone in its channel can read, a

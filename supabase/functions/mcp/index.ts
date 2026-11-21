@@ -6,6 +6,7 @@ import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   authenticateHostedSeatCapability,
+  HOSTED_SEAT_READ_TOOLS,
   type HostedCapability,
   type HostedSeatCapability,
   type ProviderGrantStatus,
@@ -36,6 +37,14 @@ import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { fitChannelPage } from "./channel-page.ts";
 import { markChannelReadSeen } from "./channel-seen.ts";
+import {
+  buildDmPostCommand,
+  buildThreadPostCommand,
+  dmOpenCommandId,
+  fitHostedConversationHistoryPage,
+  fitHostedConversationsList,
+  isDirectConversationKind,
+} from "./conversation-tools.ts";
 import { fitMemoryRows, memorySaveCommand, memoryWriteOutput } from "./memory-tools.ts";
 import { reactionCommand, reactionOutput } from "./reaction-tools.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
@@ -54,7 +63,12 @@ import {
   hostedAskNamesNobody, hostedImplicitAuthor, hostedMentions, sendHostedSignal, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
   MentionResolutionError, type HostedSignalTool,
 } from "./signal-tools.ts";
-import { MENTION_REFUSAL_SENTENCES } from "../../../src/protocol/mention-address.ts";
+import {
+  bodyMayMention,
+  MENTION_REFUSAL_SENTENCES,
+  resolveMentions,
+  type WireMention,
+} from "../../../src/protocol/mention-address.ts";
 import type { ReplyAuthor } from "../../../src/protocol/reply-placement.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
@@ -224,12 +238,9 @@ async function seatCapability(
   binding: SeatBinding,
   tool: Exclude<HostedToolName, "claim_seat">,
 ): Promise<HostedSeatCapability | null> {
-  const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
-  // file_get resolves its version through the command path (live-state checks under
-  // the hosted locks), so only file_ls joins the read-role tools.
-  const use = tool === "whoami" || tool === "members" || tool === "roster" || tool === "file_ls" ||
-    tool === "channel_ls" || tool === "channel_read" || tool === "memory_search" || tool === "memory_get" ||
-    content?.effect === "read" ? "read" : "command";
+  // Single source of truth: HOSTED_SEAT_READ_TOOLS classifies read-role tools
+  // (file_get stays on command because it checks live state under hosted locks).
+  const use = (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(tool) ? "read" : "command";
   return await authDb.begin("isolation level read committed", async (tx) => {
     await setRole(tx, use === "read" ? "swarm_read" : "swarm_command");
     return await authenticateHostedSeatCapability(tx, {
@@ -348,6 +359,159 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     return { ...page,
       provenance: messageReadProvenance(messages.map((m) => ({ ...m, id: m.signal_id })),
         { tool: "channel_read", scope: "messages posted to the whole workspace in one channel" }, next !== null) };
+  }
+  if (call.name === "conversations") {
+    const output = readOutput(await handleHostedRead({
+      resource: "conversations",
+      workspace_id: binding.workspaceId,
+      include_archived: args.include_archived === true,
+    }, capability));
+    const raw = Array.isArray(output.conversations)
+      ? output.conversations as Array<Record<string, unknown>>
+      : [];
+    const limit = typeof args.limit === "number" ? args.limit : 50;
+    const sliced = raw.slice(0, limit);
+    const fitted = fitHostedConversationsList({
+      context: output.context,
+      workspace_id: binding.workspaceId,
+      conversations: sliced,
+    }, limits.maxResponseBytes);
+    return {
+      ...fitted,
+      truncated: fitted.truncated || raw.length > sliced.length,
+    };
+  }
+  if (call.name === "conversation_read") {
+    const hasAfter = typeof args.after_created_at === "string" && typeof args.after_id === "string";
+    const hasBefore = typeof args.before_created_at === "string" && typeof args.before_id === "string";
+    const output = readOutput(await handleHostedRead({
+      resource: "conversation_history",
+      workspace_id: binding.workspaceId,
+      conversation_id: String(args.conversation_id).toLowerCase(),
+      before_created_at: hasBefore ? String(args.before_created_at) : null,
+      before_id: hasBefore ? String(args.before_id).toLowerCase() : null,
+      after_created_at: hasAfter ? String(args.after_created_at) : null,
+      after_id: hasAfter ? String(args.after_id).toLowerCase() : null,
+      limit: typeof args.limit === "number" ? args.limit : 25,
+      include_mentions: args.include_mentions !== false,
+      include_reactions: args.include_reactions === true,
+    }, capability));
+    const fitted = fitHostedConversationHistoryPage({
+      context: output.context,
+      workspace_id: binding.workspaceId,
+      conversation: (output.conversation ?? {}) as Record<string, unknown>,
+      messages: Array.isArray(output.messages) ? output.messages as Array<Record<string, unknown>> : [],
+      has_more: output.has_more === true,
+      next_before: (output.next_before ?? null) as { created_at: string; id: string } | null,
+      next_after: (output.next_after ?? null) as { created_at: string; id: string } | null,
+    }, hasAfter ? "forward" : "backward", limits.maxResponseBytes);
+    return {
+      ...fitted,
+      provenance: messageReadProvenance(
+        fitted.messages,
+        { tool: "conversation_read", scope: "messages visible to this seat in one conversation" },
+        fitted.has_more,
+      ),
+    };
+  }
+  if (call.name === "dm") {
+    const requestId = String(args.request_id);
+    const hasBody = typeof args.body === "string";
+    const members = (args.members as Array<{ kind: "user" | "agent"; id: string }>).map((m) => ({
+      kind: m.kind,
+      id: m.id.toLowerCase(),
+    }));
+    const opened = await handleHostedCommand({
+      command_id: hasBody ? dmOpenCommandId(requestId) : requestId,
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: {
+        kind: "conversation_open",
+        members,
+        new_group: args.new_group === true,
+      },
+    }, capability);
+    const openedOut = commandOutput(opened);
+    const conv = (openedOut.conversation ?? {}) as Record<string, unknown>;
+    const convId = typeof conv.conversation_id === "string" ? conv.conversation_id : null;
+    if (!hasBody || convId === null) {
+      return openedOut;
+    }
+    const posted = await handleHostedCommand({
+      command_id: requestId,
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: buildDmPostCommand(convId, args),
+    }, capability);
+    const postedOut = commandOutput(posted);
+    return {
+      conversation: conv,
+      created: openedOut.created === true,
+      signal: postedOut.signal ?? postedOut,
+    };
+  }
+  if (call.name === "thread") {
+    const conversationId = String(args.conversation_id).toLowerCase();
+    const convReader = await seatCapability(call.token, binding, "conversation_read");
+    if (convReader === null) throw new HostedToolFailure("hosted_seat_forbidden");
+    const convOutput = readOutput(await handleHostedRead({
+      resource: "conversation_history",
+      workspace_id: binding.workspaceId,
+      conversation_id: conversationId,
+      before_created_at: null,
+      before_id: null,
+      after_created_at: null,
+      after_id: null,
+      limit: 1,
+      include_mentions: false,
+      include_reactions: false,
+    }, convReader));
+    const convMeta = (convOutput.conversation ?? {}) as Record<string, unknown>;
+    const isDirect = isDirectConversationKind(convMeta.kind);
+    const selectors = Array.isArray(args.mentions) ? (args.mentions as unknown[]).map(String) : [];
+    let resolvedMentions: WireMention[] = [];
+    if (isDirect) {
+      if (selectors.length > 0) {
+        throw new HostedToolFailure("conversation_mentions");
+      }
+      // Keep inline @tags as plain body text for canonical DM/group-DM routing.
+    } else if (selectors.length > 0 || bodyMayMention(String(args.body ?? ""))) {
+      const reader = await seatCapability(call.token, binding, "members");
+      if (reader === null) throw new HostedToolFailure("hosted_seat_forbidden");
+      const roster = hostedRoster(readOutput(await handleHostedRead({ resource: "members", workspace_id: binding.workspaceId }, reader)));
+      try {
+        resolvedMentions = resolveMentions({ body: String(args.body ?? ""), selectors, roster });
+      } catch (error) {
+        if (error instanceof MentionResolutionError) throw new HostedToolInputError(MENTION_REFUSAL_SENTENCES[error.code]);
+        throw error;
+      }
+    }
+    const result = await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: buildThreadPostCommand(args, resolvedMentions),
+    }, capability);
+    return commandOutput(result);
+  }
+  if (call.name === "mark_read") {
+    const result = await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: {
+        kind: "conversation_mark_read",
+        conversation_id: String(args.conversation_id).toLowerCase(),
+        through_signal_id: typeof args.through_signal_id === "string"
+          ? args.through_signal_id.toLowerCase()
+          : null,
+      },
+    }, capability);
+    return commandOutput(result);
   }
   if (call.name === "memory_search") {
     const output = readOutput(await handleHostedRead({

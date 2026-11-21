@@ -76,6 +76,14 @@ const MESSAGES = {
   memory_history_full: "This workspace's memory history is full, so no more memories can be saved or edited.",
   memory_limit: "This workspace holds 500 memories, the most it can. Whoever saved a memory can forget it to make room.",
   interactive_replies_unavailable: "Choice asks aren't turned on here, so nothing was sent. To send a plain ask, leave out options, choices and multi, and add recipients if the ask had none.",
+  conversation_not_found: "This conversation isn't available in this workspace. Call conversations to see conversations this seat can read.",
+  conversation_mentions: "A message in a direct message or group is for its members, so it takes no mentions.",
+  conversation_member_limit: "A direct or group conversation can hold at most 9 members including this seat.",
+  conversation_member_unavailable: "One or more requested members are not active in this workspace. Call members to see current workspace participants.",
+  thread_root_not_found: "That thread isn't available in this conversation. Call conversation_read to find a live root message id.",
+  thread_root_is_a_reply: "Threads are one level deep. Reply to the thread's root message id instead of a nested reply.",
+  broadcast_not_allowed_in_dm: "Direct messages cannot be broadcast to a channel.",
+  dm_attachments_unsupported: "File attachments aren't supported in direct messages yet. Send the message without attachments.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;
