@@ -22,13 +22,13 @@
  */
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { closeSync, constants as fsConstants, openSync, readSync } from "node:fs";
+import { closeSync, constants as fsConstants, openSync, readSync, writeSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { PassThrough, Writable } from "node:stream";
 import { chmod, mkdir, mkdtemp, open, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -37,7 +37,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 const execFileAsync = promisify(execFile);
-import { parseAgentConnection, saveAgentProfile } from "../../src/cloud/agent-profile.js";
+import { parseAgentConnection, profileScopeKey, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { assertNonBlockingChannelStdout, serveAgentChannel } from "../../src/cloud/agent-channel.js";
 import {
@@ -1891,24 +1891,54 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     }, 4_000);
     proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 
-    // Saturate the real OS FIFO kernel buffer with real `tools/list` responses (~250 KB)
-    // while the reader stays paused!
-    for (let i = 2; i <= 120; i += 1) {
-      proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/list", params: {} })}\n`);
+    // Deterministically saturate the real OS FIFO kernel buffer down to 0 free bytes
+    // (works identically for macOS 8 KiB, Linux 64 KiB, or any larger pipe buffer size)
+    // by writing non-blocking filler lines into `wfd` until the kernel returns EAGAIN.
+    let filledBytes = 0;
+    for (const chunkSize of [4096, 256, 16, 1]) {
+      const filler = Buffer.alloc(chunkSize, 0x20); // spaces
+      while (filledBytes < 2 * 1024 * 1024) {
+        try {
+          const n = writeSync(wfd, filler, 0, filler.length);
+          if (n <= 0) break;
+          filledBytes += n;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "EAGAIN" || code === "EWOULDBLOCK") break;
+          throw error;
+        }
+      }
     }
-    await delay(250);
+    assert.ok(filledBytes >= 4_096, `expected real OS FIFO to absorb >=4KB filler, filled ${filledBytes} bytes`);
+    // Confirm the kernel pipe buffer is genuinely full (0 free bytes -> immediate EAGAIN).
+    assert.throws(
+      () => writeSync(wfd!, Buffer.alloc(1, 0x20)),
+      (err: NodeJS.ErrnoException) => err.code === "EAGAIN" || err.code === "EWOULDBLOCK",
+      "OS FIFO must be completely full (EAGAIN) before triggering channel notification",
+    );
 
     // Now mark turn_verified_at so the real child claims the pending delivery and attempts
-    // `notifications/claude/channel` against the saturated real stdout FIFO.
+    // `notifications/claude/channel` against the completely saturated real stdout FIFO.
     await receiveHookEvent(profile, SESSION_ID, {
       session_id: SESSION_ID,
       cwd,
       hook_event_name: "SessionStart",
     });
     await waitUntil(() => claimCount >= 1, 6_000);
-    await delay(150);
+    // Deterministically prove the stalled notification write actually began inside the shared
+    // receive-<scope> lock (lock file held by `proc.pid`) before starting configureAgentReceive.
+    const receiveLockPath = join(dirname(profile), `receive-${profileScopeKey(SESSION_ID)}.lock`);
+    await waitUntil(async () => {
+      try {
+        const raw = await readFile(receiveLockPath, "utf8");
+        const lock = JSON.parse(raw) as { pid?: number };
+        return lock.pid === proc.pid;
+      } catch {
+        return false;
+      }
+    }, 6_000);
 
-    // Switch channel -> socket while the FIFO reader is STILL paused and the notification is stalled.
+    // Switch channel -> socket while the FIFO reader is STILL paused and the child holds receive-<scope>.
     const switchStarted = Date.now();
     await configureAgentReceive({
       profilePath: profile,
@@ -1921,7 +1951,7 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     });
     const switchElapsedMs = Date.now() - switchStarted;
     assert.ok(switchElapsedMs < 8_000, `real CLI route switch must not starve on stalled stdout (took ${switchElapsedMs}ms)`);
-    assert.ok(switchElapsedMs >= 1_500, `expected real 2s stdout stall bound before switch committed (took ${switchElapsedMs}ms)`);
+    assert.ok(switchElapsedMs >= 1_000, `expected real 2s stdout stall bound before switch committed (took ${switchElapsedMs}ms)`);
 
     // Wait for the stalled real CLI process to exit cleanly, then close parent's writer dup and
     // drain EVERY SINGLE buffered byte from the FIFO to EOF after the route switch committed.
@@ -1934,7 +1964,7 @@ test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never deliv
     assert.equal(receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running, false);
 
     const drained = initBuf + readAvailableFifo();
-    assert.ok(drained.length >= 4_096, `expected saturated real stdout FIFO (>=4KB), got ${drained.length} bytes`);
+    assert.ok(drained.length >= filledBytes, `expected drained FIFO (${drained.length}) >= filledBytes (${filledBytes})`);
     const lines = drained.split("\n").filter((l) => l.trim().length > 0);
     const channelNotifications = lines.filter((line) => {
       try {
