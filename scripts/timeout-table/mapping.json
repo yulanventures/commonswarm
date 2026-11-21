@@ -4555,6 +4555,48 @@
             "removes": [],
             "reason": "Local file lock wait, not a network request timeout."
           }
+        },
+        "src/cloud/agent-channel.ts:CHANNEL_NOTIFY_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/agent-channel.ts:47",
+          "detail": "2-second bound on MCP stdio channel notification write under the shared receive lock so a stalled stdout drain cannot starve opt-out.",
+          "operation": {
+            "name": "claude-channel-notify-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local MCP stdio pipe write bound, not a Cloud API request."
+          }
+        },
+        "src/cloud/agent-channel.ts:notifyTimeoutMs": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/agent-channel.ts:199",
+          "detail": "Configurable local timeout bounding MCP channel notification write under the receive lock.",
+          "operation": {
+            "name": "claude-channel-notify-option",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local MCP stdio pipe write bound, not a Cloud API request."
+          }
+        },
+        "src/cloud/agent-channel.ts:setTimeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/agent-channel.ts:615",
+          "detail": "Timer racing server.notification against notifyTimeoutMs so stalled stdio transports are terminated before releasing the receive lock.",
+          "operation": {
+            "name": "claude-channel-notify-timer",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local MCP stdio pipe write timer, not a Cloud API request."
+          }
         }
       }
     }

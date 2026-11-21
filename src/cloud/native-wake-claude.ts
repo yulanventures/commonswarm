@@ -15,9 +15,9 @@
  *   - Read-only arrival detection: never claims/acks deliveries or advances `check.json` before
  *     the Claude session itself runs `cswarm check`, keeping C1a `agent_unseen` truthful.
  */
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, readdir, readFile, realpath, unlink } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -104,6 +104,8 @@ export type ClaudeSessionRegistryInspection =
 export type ClaudeSocketTransport = (input: {
   socketPath: string;
   lines: readonly string[];
+  expectedPid: number;
+  expectedUid: number;
   timeoutMs: number;
   signal?: AbortSignal;
 }) => Promise<void>;
@@ -625,9 +627,83 @@ function sanitizeSocketDetail(detail: string, token: string): string {
   return scrubbed.replaceAll(/[\r\n]+/g, " ").trim().slice(0, 200) || "claude_socket_write_failed";
 }
 
+/**
+ * Python helper invoked over a private stdin pipe (never argv/env for the token) that connects to
+ * the canonical Unix socket and verifies kernel-authenticated peer credentials BEFORE writing a
+ * single auth byte:
+ *   - macOS: LOCAL_PEERPID (SOL_LOCAL=0, 0x002) + getpeereid()
+ *   - Linux: SO_PEERCRED (SOL_SOCKET, SO_PEERCRED)
+ * Fails closed (exit 41/42) with zero bytes written if peer identity cannot be verified or does
+ * not match the pinned Claude session PID and current user UID.
+ */
+const CLAUDE_PEER_AUTH_SENDER_PY = [
+  "import ctypes, errno, socket, struct, sys",
+  "sock_path = sys.argv[1]",
+  "expected_pid = int(sys.argv[2])",
+  "expected_uid = int(sys.argv[3])",
+  "timeout_s = max(0.05, float(sys.argv[4]))",
+  "payload = sys.stdin.buffer.read()",
+  "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+  "s.settimeout(timeout_s)",
+  "try:",
+  "    try:",
+  "        s.connect(sock_path)",
+  "    except OSError as e:",
+  "        if e.errno == errno.ENOENT:",
+  "            sys.stderr.write('ENOENT\\n'); sys.exit(43)",
+  "        if e.errno == errno.ECONNREFUSED:",
+  "            sys.stderr.write('ECONNREFUSED\\n'); sys.exit(44)",
+  "        sys.stderr.write(f'CONNECT_ERROR:{e.errno}\\n'); sys.exit(45)",
+  "    if sys.platform == 'darwin':",
+  "        libc = ctypes.CDLL(None)",
+  "        libc.getsockopt.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]",
+  "        libc.getsockopt.restype = ctypes.c_int",
+  "        pid = ctypes.c_int(0)",
+  "        plen = ctypes.c_uint32(ctypes.sizeof(pid))",
+  "        if libc.getsockopt(s.fileno(), 0, 0x002, ctypes.byref(pid), ctypes.byref(plen)) != 0:",
+  "            sys.stderr.write('peer_cred_unavailable\\n'); sys.exit(41)",
+  "        libc.getpeereid.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32)]",
+  "        libc.getpeereid.restype = ctypes.c_int",
+  "        euid = ctypes.c_uint32(0)",
+  "        egid = ctypes.c_uint32(0)",
+  "        if libc.getpeereid(s.fileno(), ctypes.byref(euid), ctypes.byref(egid)) != 0:",
+  "            sys.stderr.write('peer_cred_unavailable\\n'); sys.exit(41)",
+  "        peer_pid, peer_uid = pid.value, euid.value",
+  "    elif sys.platform.startswith('linux'):",
+  "        so_peercred = getattr(socket, 'SO_PEERCRED', 17)",
+  "        cred = s.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize('=iII'))",
+  "        peer_pid, peer_uid, _ = struct.unpack('=iII', cred)",
+  "    else:",
+  "        sys.stderr.write('peer_cred_unsupported\\n'); sys.exit(41)",
+  "    if peer_pid != expected_pid or peer_uid != expected_uid:",
+  "        sys.stderr.write(f'peer_mismatch:got_pid={peer_pid},got_uid={peer_uid}\\n')",
+  "        sys.exit(42)",
+  "    s.sendall(payload)",
+  "    s.shutdown(socket.SHUT_WR)",
+  "finally:",
+  "    s.close()",
+].join("\n");
+
+function minimalPeerAuthEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return env;
+}
+
+class ClaudeSocketPeerError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "ClaudeSocketPeerError";
+  }
+}
+
 const defaultClaudeSocketTransport: ClaudeSocketTransport = async ({
   socketPath,
   lines,
+  expectedPid,
+  expectedUid,
   timeoutMs,
   signal,
 }) => {
@@ -637,33 +713,85 @@ const defaultClaudeSocketTransport: ClaudeSocketTransport = async ({
       return;
     }
     const payload = `${lines.join("\n")}\n`;
-    const socket = createConnection({ path: socketPath });
+    const timeoutSeconds = (Math.max(100, timeoutMs) / 1000).toFixed(3);
+    const child = spawn(
+      "python3",
+      ["-c", CLAUDE_PEER_AUTH_SENDER_PY, socketPath, String(expectedPid), String(expectedUid), timeoutSeconds],
+      {
+        stdio: ["pipe", "ignore", "pipe"],
+        env: minimalPeerAuthEnv(),
+      },
+    );
+    let stderr = "";
     let settled = false;
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
-      socket.removeAllListeners();
-      socket.destroy();
       if (err) rejectPromise(err);
       else resolvePromise();
     };
-    const onAbort = () => finish(new Error("claude socket wake aborted"));
-    const timer = setTimeout(() => finish(new Error("claude socket wake timed out")), timeoutMs);
+    const killChild = () => {
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    };
+    const onAbort = () => {
+      killChild();
+      finish(new Error("claude socket wake aborted"));
+    };
+    const timer = setTimeout(() => {
+      killChild();
+      finish(new Error("claude socket wake timed out"));
+    }, timeoutMs);
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
-    socket.once("error", (err) => finish(err instanceof Error ? err : new Error(String(err))));
-    socket.once("connect", () => {
-      socket.write(payload, "utf8", (writeErr) => {
-        if (writeErr) {
-          finish(writeErr instanceof Error ? writeErr : new Error(String(writeErr)));
-          return;
-        }
-        // Gracefully half-close so Claude Code processes the complete NDJSON lines.
-        socket.end(() => finish());
-      });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < 512) stderr += chunk;
     });
+    child.once("error", (err) => {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        finish(new ClaudeSocketPeerError(
+          "claude_wake_peer_auth_unavailable",
+          "Unable to authenticate connected Claude socket peer (python3 unavailable); refusing to send bearer.",
+        ));
+        return;
+      }
+      finish(err instanceof Error ? err : new Error(String(err)));
+    });
+    child.once("close", (code) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const detail = stderr.trim();
+      if (code === 41) {
+        finish(new ClaudeSocketPeerError(
+          "claude_wake_peer_auth_unavailable",
+          `Unable to authenticate connected Claude socket peer (${detail || "peer_cred_unavailable"}); refusing to send bearer.`,
+        ));
+        return;
+      }
+      if (code === 42) {
+        finish(new ClaudeSocketPeerError(
+          "claude_wake_peer_mismatch",
+          `Connected Unix socket peer does not match pinned Claude session pid=${expectedPid} uid=${expectedUid} (${detail || "peer_mismatch"}); zero auth bytes sent.`,
+        ));
+        return;
+      }
+      if (code === 43) {
+        finish(new ClaudeSocketPeerError("claude_wake_socket_missing", "Claude inbox socket disappeared before connect."));
+        return;
+      }
+      if (code === 44) {
+        finish(new ClaudeSocketPeerError("claude_wake_socket_refused", "Claude inbox socket refused connection."));
+        return;
+      }
+      finish(new Error(detail || `claude socket peer-auth helper exited with code ${String(code)}`));
+    });
+    child.stdin?.once("error", () => { /* ignore EPIPE if helper rejected peer before reading stdin */ });
+    child.stdin?.end(payload, "utf8");
   });
 };
 
@@ -807,6 +935,15 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
       return { ok: false, code: target.code, detail: target.detail };
     }
 
+    const expectedUid = process.getuid ? process.getuid() : -1;
+    if (expectedUid < 0) {
+      return {
+        ok: false,
+        code: "claude_wake_peer_auth_unavailable",
+        detail: "Cannot determine local UID to authenticate Claude inbox socket peer.",
+      };
+    }
+
     const authLine = JSON.stringify({ type: "auth", token: target.registration.token });
     const userLine = JSON.stringify({
       type: "user",
@@ -817,11 +954,20 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
       await this.transport({
         socketPath: target.canonicalPath,
         lines: [authLine, userLine],
+        expectedPid: target.entry.pid,
+        expectedUid,
         timeoutMs: this.timeoutMs,
         ...(input.signal ? { signal: input.signal } : {}),
       });
       return { ok: true };
     } catch (error) {
+      if (error instanceof ClaudeSocketPeerError) {
+        return {
+          ok: false,
+          code: error.code,
+          detail: sanitizeSocketDetail(error.message, target.registration.token),
+        };
+      }
       const err = error as NodeJS.ErrnoException;
       const code =
         err.code === "ENOENT"
@@ -875,6 +1021,8 @@ export interface ServeClaudeWakeBridgeOptions {
   isPidAlive?: (pid: number) => boolean;
   now?: () => number;
   signal?: AbortSignal;
+  /** Test seam invoked right before the shared-lock startup mutation to test startup racing a route change. */
+  beforeStartupLock?: () => Promise<void> | void;
 }
 
 /**
@@ -1016,17 +1164,39 @@ export async function serveClaudeWakeBridge(options: ServeClaudeWakeBridgeOption
 
   await withFileLock(dirname(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
     const binding = await readReceiveBinding(profilePath, host);
-    if (binding && receiveStatus(binding, now()).channel_running) {
+    if (!binding || binding.provider !== "claude" || binding.requested_mode !== "wake" || binding.wake_transport !== "socket") {
+      throw new AgentSetupError(
+        binding?.requested_mode !== "wake" ? "wake_opted_out" : "wake_transport_mismatch",
+        "Claude socket wake is not active for this session.",
+      );
+    }
+    if (receiveStatus(binding, now()).channel_running) {
       throw new AgentSetupError("channel_already_running", "This session already has a live wake bridge.");
     }
-    await updateReceiveBinding(profilePath, host, (b) => ({
-      ...b,
-      channel_instance_id: runtimeId,
-      channel_pid: process.pid,
-      channel_heartbeat_at: new Date(now()).toISOString(),
-      wake_verified_at: null,
-      canary: b.canary ? { ...b.canary, emitted_while_idle: false, received_at: null } : null,
-    }));
+    if (options.beforeStartupLock !== undefined) {
+      await options.beforeStartupLock();
+    }
+    // Recheck the selected route and running marker INSIDE the shared receive-<scope> lock
+    // so a concurrent route/mode switch can never receive stale bridge runtime state.
+    await updateReceiveBinding(profilePath, host, (b) => {
+      if (b.provider !== "claude" || b.requested_mode !== "wake" || b.wake_transport !== "socket") {
+        throw new AgentSetupError(
+          b.requested_mode !== "wake" ? "wake_opted_out" : "wake_transport_mismatch",
+          "Claude socket wake is no longer active for this session.",
+        );
+      }
+      if (receiveStatus(b, now()).channel_running) {
+        throw new AgentSetupError("channel_already_running", "This session already has a live wake bridge.");
+      }
+      return {
+        ...b,
+        channel_instance_id: runtimeId,
+        channel_pid: process.pid,
+        channel_heartbeat_at: new Date(now()).toISOString(),
+        wake_verified_at: null,
+        canary: b.canary ? { ...b.canary, emitted_while_idle: false, received_at: null } : null,
+      };
+    });
   });
 
   let touching = false;

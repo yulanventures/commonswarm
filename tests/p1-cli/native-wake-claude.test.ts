@@ -21,9 +21,10 @@
  *      - Read-only arrival check never advances `check.json`.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
+import { PassThrough, Writable } from "node:stream";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,6 +33,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 const execFileAsync = promisify(execFile);
 import { parseAgentConnection, saveAgentProfile } from "../../src/cloud/agent-profile.js";
@@ -1054,6 +1056,75 @@ test("HezSec C2 witness: socket directory chain refuses non-0700 parent dirs, us
     await delay(50);
     assert.equal(privSrv.received.length, 1, "refused endpoint must receive zero auth bytes");
     assert.equal(pubSrv.received.length, 0, "unsafe 0755 endpoint must receive zero auth bytes");
+
+    // Kernel-authenticated connected-peer witness: a real separate OS process listening on a valid
+    // 0700 owned Unix socket whose PID != pinned Claude session PID (process.pid) must be refused
+    // via LOCAL_PEERPID / SO_PEERCRED BEFORE writing a single auth byte!
+    await chmod(privateDir, 0o700);
+    const rogueSock = join(privateDir, "rogue.sock");
+    const rogueScript = [
+      "const net = require('node:net');",
+      "let totalBytes = 0; let connections = 0;",
+      "const srv = net.createServer((c) => {",
+      "  connections += 1;",
+      "  c.on('data', (chunk) => { totalBytes += chunk.length; });",
+      "});",
+      "srv.listen(process.argv[1], () => { process.stdout.write('READY\\n'); });",
+      "process.on('SIGTERM', () => {",
+      "  process.stdout.write(JSON.stringify({ connections, totalBytes }) + '\\n');",
+      "  srv.close(() => process.exit(0));",
+      "});",
+    ].join("\n");
+    const rogueChild = spawn(process.execPath, ["-e", rogueScript, rogueSock], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let rogueOut = "";
+    rogueChild.stdout.setEncoding("utf8");
+    const rogueReady = new Promise<void>((res, rej) => {
+      rogueChild.stdout.on("data", (chunk: string) => {
+        rogueOut += chunk;
+        if (rogueOut.includes("READY")) res();
+      });
+      rogueChild.once("exit", (code) => rej(new Error(`rogue listener exited early: ${code}`)));
+    });
+    try {
+      await rogueReady;
+      // Pin session registry to process.pid (NOT rogueChild.pid) pointing to rogueSock.
+      await writeSessionJson(sessionsDir, process.pid, {
+        sessionId: SESSION_ID,
+        pid: process.pid,
+        status: "idle",
+        messagingSocketPath: rogueSock,
+        cwd,
+      });
+      await registerClaudeWakeSocket({
+        profilePath: profile,
+        hostSessionId: SESSION_ID,
+        sessionsDir,
+        env: { [CLAUDE_WAKE_ENV_SOCKET]: rogueSock, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+      });
+      const peerRefused = await realAdapter.sendWake({
+        hostSessionId: SESSION_ID,
+        prompt: "New CommonSwarm messages (batch 3): run cswarm check",
+        batch: 3,
+        cwd,
+      });
+      assert.equal(peerRefused.ok, false);
+      if (!peerRefused.ok) {
+        assert.equal(peerRefused.code, "claude_wake_peer_mismatch");
+        assert.equal(peerRefused.detail.includes(MSG_TOKEN), false, "peer mismatch error must never contain token");
+      }
+      const rogueExit = new Promise<void>((res) => rogueChild.once("close", () => res()));
+      rogueChild.kill("SIGTERM");
+      await rogueExit;
+      const summaryLine = rogueOut.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{")).pop();
+      assert.ok(summaryLine, `expected rogue listener JSON summary, got: ${rogueOut}`);
+      const summary = JSON.parse(summaryLine) as { connections: number; totalBytes: number };
+      assert.equal(summary.connections, 1, "transport must connect and inspect kernel peer credentials");
+      assert.equal(summary.totalBytes, 0, "rogue peer must receive ZERO auth bytes on peer PID mismatch");
+    } finally {
+      try { rogueChild.kill("SIGKILL"); } catch { /* already exited */ }
+    }
   } finally {
     await chmod(privateDir, 0o700).catch(() => undefined);
     await pubSrv.close();
@@ -1251,6 +1322,271 @@ test("HezSec C3 witness: held channel notification racing channel->socket switch
     releaseNotify?.();
     await client.close().catch(() => undefined);
     await running?.catch(() => undefined);
+    await new Promise<void>((res) => http.close(() => res()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C3b witness: stalled real StdioServerTransport write terminates before route change commits, and held startup in both bridges refuses stale route mutation", { timeout: 25_000 }, async () => {
+  const root = await makeTempDir("cs-cw-c3b-");
+  let deliveryServed = false;
+
+  const http = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read") {
+        if (body.resource === "members") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            workspace_id: WS,
+            workspace_name: "Test Workspace",
+            identity: {
+              credential_valid: true,
+              principal_id: AGENT,
+              workspace_id: WS,
+              owner_user_id: OWNER,
+              name: "Claude Seat",
+            },
+            members: [{ user_id: OWNER, display_name: "Owner", role: "owner" }],
+            agents: [{ principal_id: AGENT, name: "Claude Seat", owner_user_id: OWNER }],
+          }));
+          return;
+        }
+        if (body.resource === "renewal_grants") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+          return;
+        }
+        if (body.resource === "signals") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            signals: [],
+            capabilities: { cursor_after: 1, delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+            pending_delivery_count: 0,
+          }));
+          return;
+        }
+      }
+      if (req.url === "/functions/v1/command") {
+        if (body.command?.kind === "claim_agent_inbox") {
+          const list = !deliveryServed
+            ? (() => {
+              deliveryServed = true;
+              return [{
+                lease_id: "88888888-8888-4888-8888-888888888888",
+                leased_until: new Date(Date.now() + 60_000).toISOString(),
+                sender_owner_relation: "same_owner",
+                signal: {
+                  id: "99999999-9999-4999-8999-999999999999",
+                  workspace_id: WS,
+                  from: OWNER,
+                  from_kind: "user",
+                  to: null,
+                  to_agent: AGENT,
+                  in_reply_to: null,
+                  about: null,
+                  kind: "ask",
+                  body: "stalled stdout witness",
+                  created_at: new Date().toISOString(),
+                  until: "2099-01-01T00:00:00.000Z",
+                },
+              }];
+            })()
+            : [];
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            status: "accepted",
+            ok: true,
+            event_ids: [],
+            events: [],
+            capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+            pending_delivery_count: list.length,
+            terminal_delivery_failure_count: 0,
+            deliveries: list,
+          }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "accepted", ok: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((res) => http.listen(0, "127.0.0.1", res));
+  const port = (http.address() as { port: number }).port;
+  const fakeWake: WakeHandle = {
+    setTopic: () => undefined,
+    noteClaim: () => undefined,
+    canClaimOnWake: () => true,
+    noteWakeClaim: () => undefined,
+    next: async ({ until, signal }) => {
+      await delay(Math.max(0, Math.min(50, until - Date.now())), undefined, { signal }).catch(() => undefined);
+      return "deadline";
+    },
+    close: async () => undefined,
+  };
+
+  try {
+    const { cwd, profile } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
+
+    // Part 1: Stalled actual StdioServerTransport write while holding receive-<scope> lock.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+
+    const stdinStream = new PassThrough();
+    let stalledHit!: () => void;
+    const stalledPromise = new Promise<void>((r) => { stalledHit = r; });
+    const stalledStdout = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        const text = chunk.toString("utf8");
+        if (text.includes("notifications/claude/channel")) {
+          // Simulate a wedged stdio pipe: never drain (never invoke callback), forcing
+          // StdioServerTransport.send to block on stdout 'drain' while holding receive-<scope>.
+          stalledHit();
+          return;
+        }
+        callback();
+      },
+    });
+    stalledStdout.on("error", () => { /* expected when channel tears down stalled stream */ });
+
+    const stdioTransport = new StdioServerTransport(stdinStream, stalledStdout);
+    const channelRun = serveAgentChannel({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      transport: stdioTransport,
+      notifyTimeoutMs: 150,
+    });
+
+    const waitUntil = async (fn: () => Promise<boolean> | boolean, timeoutMs = 6_000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await fn()) return;
+        await delay(30);
+      }
+      throw new Error("timed out waiting for C3b condition");
+    };
+
+    await waitUntil(async () => receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running);
+    // Complete MCP initialize handshake over real StdioServerTransport.
+    stdinStream.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "stall-test", version: "1.0.0" } },
+    })}\n`);
+    stdinStream.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    await receiveHookEvent(profile, SESSION_ID, {
+      session_id: SESSION_ID,
+      cwd,
+      hook_event_name: "SessionStart",
+    });
+
+    // Wait until the real StdioServerTransport.send enters the stalled notification write.
+    await stalledPromise;
+    // Immediately request route switch channel -> socket while the stalled send holds receive-<scope>.
+    const switchStarted = Date.now();
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    const switchElapsedMs = Date.now() - switchStarted;
+    assert.ok(switchElapsedMs < 5_000, `route switch must not block indefinitely on stalled stdout (took ${switchElapsedMs}ms)`);
+    assert.equal(stalledStdout.destroyed, true, "stalled transport must be terminated before the route change commits");
+    await channelRun;
+    const afterStall = await readReceiveBinding(profile, SESSION_ID);
+    assert.equal(afterStall?.wake_transport, "socket");
+    assert.equal(receiveStatus(afterStall).channel_running, false);
+
+    // Part 2A: serveAgentChannel startup held across channel -> socket switch must not write stale runtime state.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    const beforeHeldChInstanceId = (await readReceiveBinding(profile, SESSION_ID))?.channel_instance_id ?? null;
+    let chStartupPaused!: () => void;
+    let releaseChStartup!: () => void;
+    const chStartupWaiting = new Promise<void>((r) => { chStartupPaused = r; });
+    const allowChStartup = new Promise<void>((r) => { releaseChStartup = r; });
+    const [, serverT2] = InMemoryTransport.createLinkedPair();
+    const heldChannelStartup = serveAgentChannel({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      transport: serverT2,
+      beforeStartupLock: async () => {
+        chStartupPaused();
+        await allowChStartup;
+      },
+    });
+    await chStartupWaiting;
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    releaseChStartup();
+    await assert.rejects(() => heldChannelStartup, { code: "channel_not_configured" });
+    const afterHeldCh = await readReceiveBinding(profile, SESSION_ID);
+    assert.equal(afterHeldCh?.wake_transport, "socket");
+    assert.equal(afterHeldCh?.channel_instance_id, beforeHeldChInstanceId, "held channel startup must not install runtime state into socket binding");
+    assert.equal(afterHeldCh?.channel_pid, null);
+    assert.equal(afterHeldCh?.channel_heartbeat_at, null);
+
+    // Part 2B: serveClaudeWakeBridge startup held across socket -> channel switch must not write stale runtime state.
+    const beforeHeldBrInstanceId = (await readReceiveBinding(profile, SESSION_ID))?.channel_instance_id ?? null;
+    let brStartupPaused!: () => void;
+    let releaseBrStartup!: () => void;
+    const brStartupWaiting = new Promise<void>((r) => { brStartupPaused = r; });
+    const allowBrStartup = new Promise<void>((r) => { releaseBrStartup = r; });
+    const heldBridgeStartup = serveClaudeWakeBridge({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      wake: fakeWake,
+      beforeStartupLock: async () => {
+        brStartupPaused();
+        await allowBrStartup;
+      },
+    });
+    await brStartupWaiting;
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    releaseBrStartup();
+    await assert.rejects(() => heldBridgeStartup, { code: "wake_transport_mismatch" });
+    const afterHeldBr = await readReceiveBinding(profile, SESSION_ID);
+    assert.equal(afterHeldBr?.wake_transport, "channel");
+    assert.equal(afterHeldBr?.channel_instance_id, beforeHeldBrInstanceId, "held socket-bridge startup must not install runtime state into channel binding");
+    assert.equal(afterHeldBr?.channel_pid, null);
+    assert.equal(afterHeldBr?.channel_heartbeat_at, null);
+  } finally {
     await new Promise<void>((res) => http.close(() => res()));
     await rm(root, { recursive: true, force: true });
   }
