@@ -926,18 +926,39 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   assert.equal(ownerHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 1);
   assert.equal(outsiderHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 0);
 
-  // agent_wake_path exposes unseen_count for the 4 unclaimed deliveries (dmAsk1, dmAsk2, openAddressedAsk, publicMention) once the seat has an observed baseline.
+  // agent_wake_path enforces canonical conversation & per-message audience visibility before aggregating:
+  // owner sees all 4 unclaimed deliveries on worker (dmAsk1, dmAsk2, openAddressedAsk, publicMention) and 2 on dmWorker,
+  // while unrelated outsider sees ONLY the 1 public open-channel mention on worker (with strictly newer oldest_unobserved_at)
+  // and NO row (neither count nor timestamp) for dmWorker's private-only deliveries or secretWorker's #vault delivery.
   const baseline = await signal(ws, { kind: "user", id: owner }, "note", "baseline", { toAgent: worker, ago: "10 seconds" });
+  const dmBaseline = await signal(ws, { kind: "user", id: owner }, "note", "dm-baseline", { toAgent: dmWorker, ago: "10 seconds" });
+  const secretBaseline = await signal(ws, { kind: "user", id: owner }, "note", "secret-baseline", { toAgent: secretWorker, ago: "10 seconds" });
   await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome)
-    VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed')
+    VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed'),
+           (${ws}::uuid, ${dmBaseline}::uuid, ${dmWorker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed'),
+           (${ws}::uuid, ${secretBaseline}::uuid, ${secretWorker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed')
     ON CONFLICT (signal_id, recipient_agent_principal_id) DO UPDATE SET
       enqueued_at = EXCLUDED.enqueued_at, delivered_at = EXCLUDED.delivered_at,
       surfaced_at = EXCLUDED.surfaced_at, acked_at = EXCLUDED.acked_at, ack_outcome = EXCLUDED.ack_outcome`;
-  const wakeRows = await sql.begin(async (tx) => {
+  const wakeRowsAs = async (viewerId: string) => await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE authenticated`;
-    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
-    return await tx<{ principal_id: string; unseen_count: number }[]>`
-      SELECT principal_id::text, unseen_count FROM swarm_read.agent_wake_path WHERE workspace_id = ${ws}::uuid`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewerId, role: "authenticated" })}, true)`;
+    return await tx<{ principal_id: string; oldest_unobserved_at: Date; unseen_count: number }[]>`
+      SELECT principal_id::text, oldest_unobserved_at, unseen_count
+      FROM swarm_read.agent_wake_path
+      WHERE workspace_id = ${ws}::uuid`;
   });
-  assert.equal(wakeRows.find((r) => r.principal_id === worker)?.unseen_count, 4);
+  const ownerWake = await wakeRowsAs(owner);
+  const outsiderWake = await wakeRowsAs(outsider);
+  const ownerWorkerWake = ownerWake.find((r) => r.principal_id === worker);
+  const outsiderWorkerWake = outsiderWake.find((r) => r.principal_id === worker);
+  assert.equal(ownerWorkerWake?.unseen_count, 4, "owner sees 2 DM asks + 1 addressed open-channel ask + 1 public mention in agent_wake_path");
+  assert.equal(outsiderWorkerWake?.unseen_count, 1, "unrelated member sees ONLY the public mention in agent_wake_path");
+  assert.ok(
+    outsiderWorkerWake!.oldest_unobserved_at.getTime() > ownerWorkerWake!.oldest_unobserved_at.getTime(),
+    "unrelated member agent_wake_path oldest_unobserved_at must not leak older DM timestamp",
+  );
+  assert.equal(ownerWake.find((r) => r.principal_id === dmWorker)?.unseen_count, 2, "owner sees dmWorker private-only deliveries in agent_wake_path");
+  assert.equal(outsiderWake.find((r) => r.principal_id === dmWorker), undefined, "unrelated member gets NO agent_wake_path row for private-only dmWorker deliveries");
+  assert.equal(outsiderWake.find((r) => r.principal_id === secretWorker), undefined, "unrelated member gets NO agent_wake_path row for private-channel secretWorker delivery");
 });

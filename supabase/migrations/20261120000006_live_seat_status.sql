@@ -1,10 +1,95 @@
 -- C2 Live Seat Status:
--- 1. Expose unseen_count alongside oldest_unobserved_at on swarm_read.agent_wake_path.
+-- 1. Enforce canonical live conversation & per-message audience visibility on caller-visible
+--    swarm_read.agent_wake_path_deliveries rows and expose unseen_count alongside
+--    oldest_unobserved_at on swarm_read.agent_wake_path (keeping recipient wake eligibility
+--    semantics in swarm.actor_wake_path_eligible_deliveries separate).
 -- 2. Expose messages_waiting ({count, since}), wake ({watcher_at, channel_at, listener_at, turn_at}),
 --    and open-channel working-on text (keeping private-channel and addressed titles null) on
 --    swarm_read.workspace_roster(uuid).
 -- 3. Expose messages_waiting_count and wake inside status.facts on swarm_read.home_overview().
--- All new fields preserve private-channel isolation and caller-scoped access gates.
+-- All new fields preserve canonical conversation & audience isolation and caller-scoped access gates.
+
+CREATE OR REPLACE FUNCTION swarm.claims_can_read_wake_signal(
+  p_workspace_id uuid,
+  p_signal_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+  v_user uuid;
+  v_agent uuid;
+  v_actor_kind text;
+  v_actor_id uuid;
+BEGIN
+  IF p_workspace_id IS NULL OR p_signal_id IS NULL OR v_claims IS NULL
+    OR (v_claims ? 'role' AND v_claims->>'role' IS DISTINCT FROM 'authenticated')
+    OR coalesce(v_claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    RETURN false;
+  END IF;
+  v_user := (v_claims->>'sub')::uuid;
+  IF v_claims ? 'agent_principal_id' THEN
+    IF coalesce(v_claims->>'agent_principal_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RETURN false;
+    END IF;
+    v_agent := (v_claims->>'agent_principal_id')::uuid;
+    IF NOT EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS p
+      JOIN swarm.agent_workspace_memberships AS am
+        ON am.principal_id = p.principal_id
+       AND am.workspace_id = p_workspace_id
+       AND am.owner_user_id = p.owner_user_id
+       AND am.revoked_at IS NULL
+      WHERE p.principal_id = v_agent
+        AND p.owner_user_id = v_user
+        AND p.revoked_at IS NULL
+    ) THEN
+      RETURN false;
+    END IF;
+    v_actor_kind := 'agent';
+    v_actor_id := v_agent;
+  ELSE
+    v_actor_kind := 'user';
+    v_actor_id := v_user;
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1
+    FROM swarm.signals AS s
+    JOIN swarm.conversation_signals AS cs
+      ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+    WHERE s.workspace_id = p_workspace_id
+      AND s.id = p_signal_id
+      AND EXISTS (
+        SELECT 1
+        FROM swarm.conversation_target(
+          s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id
+        ) AS ct
+        WHERE ct.visible
+      )
+      AND swarm.conversation_signal_visible_to(
+        cs.workspace_id, cs.signal_id, cs.audience,
+        s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+        v_actor_kind, v_actor_id
+      )
+  );
+END;
+$$;
+
+ALTER FUNCTION swarm.claims_can_read_wake_signal(uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.claims_can_read_wake_signal(uuid, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries
+WITH (security_barrier = true)
+AS
+SELECT d.workspace_id, d.signal_id, d.principal_id, d.enqueued_at
+FROM swarm.claims_wake_path_eligible_deliveries() AS d
+WHERE swarm.is_member(d.workspace_id, auth.uid())
+  AND swarm.claims_can_read_wake_signal(d.workspace_id, d.signal_id);
+
+ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
 
 CREATE OR REPLACE VIEW swarm_read.agent_wake_path
 WITH (security_barrier = true)
