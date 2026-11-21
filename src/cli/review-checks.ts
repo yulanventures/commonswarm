@@ -6,6 +6,9 @@ import { readAgentSignalDirectory } from "../cloud/signals.js";
 import {
   GITHUB_CI_SOURCES,
   GithubCiError,
+  isTrustedGithubApiOrigin,
+  normalizeGithubApiBaseUrl,
+  readGithubCiPolicyFile,
   readGithubTokenFromFile,
   renderGithubCiSyncResult,
   syncGithubCiToReviewCheck,
@@ -243,18 +246,31 @@ export async function executeCheckCiCli(
   if (tokenFile && tokenStdin) {
     throw new GithubCiError("invalid_request", "Pass at most one of --github-token-file or --github-token-stdin.", 400);
   }
+  const apiBaseUrl = normalizeGithubApiBaseUrl(args.optional("github-api-url"));
+  const trustedOrigin = isTrustedGithubApiOrigin(apiBaseUrl);
+  if (!trustedOrigin && (tokenFile || tokenStdin)) {
+    throw new GithubCiError(
+      "github_untrusted_origin_token_refused",
+      "GitHub credentials may only be sent to https://api.github.com; alternate --github-api-url overrides must remain credential-free.",
+      400,
+    );
+  }
   const env = options.env ?? process.env;
   let githubToken: string | null = null;
   if (tokenFile) {
     githubToken = await readGithubTokenFromFile(tokenFile);
   } else if (tokenStdin) {
     githubToken = await (options.readTokenStdin ?? readStdinToken)();
-  } else {
+  } else if (trustedOrigin) {
+    // Only forward ambient GITHUB_TOKEN / GH_TOKEN to the trusted https://api.github.com origin.
     const envToken = env.GITHUB_TOKEN ?? env.GH_TOKEN;
     if (typeof envToken === "string" && envToken.trim().length > 0) {
       githubToken = validateGithubToken(envToken);
     }
   }
+
+  const policyFile = args.optional("policy-file");
+  const policy = policyFile ? await readGithubCiPolicyFile(policyFile) : null;
 
   const requiredSuites = args
     .all("suite")
@@ -269,9 +285,10 @@ export async function executeCheckCiCli(
     ...(checkId ? { checkId } : {}),
     ...(subject ? { repo: subject.repo, ref: subject.ref } : {}),
     ...(args.optional("head-sha") ? { expectedHeadSha: args.optional("head-sha") } : {}),
+    policy,
     ...(requiredSuites.length > 0 ? { requiredSuites } : {}),
     ...(rawSource ? { source: rawSource as GithubCiSource } : {}),
-    ...(args.optional("github-api-url") ? { apiBaseUrl: args.optional("github-api-url") } : {}),
+    apiBaseUrl,
     githubToken,
     dryRun: args.has("dry-run"),
     fetcher: auth.fetcher,

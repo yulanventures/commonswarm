@@ -2,23 +2,34 @@
  * C3b — Read-only GitHub CI status adapter for revision-bound review checks.
  *
  * Covers:
- *   1. Exact-head pass, fail (-> hold), and in-progress/missing (-> pending, no stamp).
- *   2. Strict stale-head rejection: late success on an older head_sha is strictly ignored
- *      and counted in `ignored_stale_head`; `--head-sha` mismatch fails closed with `stale_head`.
- *   3. Strict superseded-attempt & superseded-run filtering: older `run_attempt` on the same
- *      `run_id` and older workflow/check runs for the same suite on the same head are ignored.
- *   4. Strict read-only GET enforcement, redirect refusal, bounded timeout (`github_timeout`),
- *      bounded response size (`github_response_too_large`), malformed-response fail-closed
- *      (`github_malformed_response`), non-loopback HTTP refusal, and repo validation.
- *   5. Secret hygiene: 0600 private token file enforcement (refuses symlinks & 0644 files),
- *      env / stdin / file loading (never argv), and token redaction on errors/output/notes.
- *   6. End-to-end CLI (`executeCheckCiCli` + real `dist/cli.js check ci`) against mock GitHub
- *      and CommonSwarm HTTP servers.
+ *   1. Credential separation & origin pinning (HezSec C1):
+ *      - Independent GitHub fetcher (never uses CommonSwarm's session-proof fetcher; zero
+ *        CommonSwarm proof headers or bearer reach GitHub, zero GitHub token reaches CommonSwarm).
+ *      - GitHub credentials pinned strictly to https://api.github.com; alternate --github-api-url
+ *        overrides are credential-free (ambient GITHUB_TOKEN/GH_TOKEN suppressed, explicit token
+ *        refused) and diagnostic (--dry-run) only (cannot stamp).
+ *      - Atomic O_NOFOLLOW + O_NONBLOCK + fstat ownership/mode/type token & policy file opens
+ *        (refuses symlinks, FIFOs, directories, and non-0600 files).
+ *   2. Trusted publisher & expected-suite policy (HezSec C2):
+ *      - Machine-written stamps require a trusted policy pinning required suites and publisher
+ *        identities (workflow_path, check_run app_slug/app_id, or commit_status exact context +
+ *        creator_login/creator_id).
+ *      - Missing required suites stay pending; same-name results from untrusted publishers are
+ *        strictly ignored; complete trusted controls stamp pass.
+ *      - workflow_dispatch commit-status contexts ("server suite / p1-cli", "server suite / server")
+ *        verified under trusted policy while isolating "server suite / mobile-audit (focused)".
+ *   3. Completeness & immutable latest-run selection (HezSec C3):
+ *      - Fails closed on ANY Link rel="next" continuation (even on a 1-item short page) across
+ *        actions/runs, check-runs, and commits/{sha}/statuses.
+ *      - Fails closed on missing/invalid/mismatched total_count and missing/invalid created_at.
+ *      - Late-finishing older runs (higher updated_at/completed_at) NEVER override a newer pending
+ *        or failed run across workflow runs, check runs, and commit statuses.
+ *   4. End-to-end CLI (`executeCheckCiCli` + real `dist/cli.js check ci`) verification.
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -29,9 +40,13 @@ import {
   GithubCiError,
   normalizeGithubApiBaseUrl,
   normalizeGithubRepo,
+  parseGithubCiPolicy,
   readGithubCiForCommit,
+  readGithubCiPolicyFile,
   readGithubTokenFromFile,
   syncGithubCiToReviewCheck,
+  TRUSTED_GITHUB_API_ORIGIN,
+  type GithubCiPolicy,
 } from "../src/cloud/github-ci-stamps.js";
 import { executeCheckCiCli, type ReviewCheckCliArgs } from "../src/cli/review-checks.js";
 import { ReviewCheckError, type ReviewCheckRecord } from "../src/cloud/review-checks.js";
@@ -44,8 +59,18 @@ const CHECK_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const SHA_OLD = "1111111111111111111111111111111111111111";
 const SHA_NEW = "2222222222222222222222222222222222222222";
 const GH_SECRET = "ghp_secret_ci_token_do_not_leak_9876543210";
+const CS_PROOF_SECRET = "cs_session_proof_secret_never_send_to_github";
 const AGENT_TOKEN = `swm_agt_${"D".repeat(43)}`;
 const CLI = resolve("dist/cli.js");
+
+const TRUSTED_MIXED_POLICY: GithubCiPolicy = {
+  version: 1,
+  repo: "yulanventures/commonswarm",
+  required: [
+    { kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" },
+    { kind: "check_run", suite: "unit", app_slug: "github-actions" },
+  ],
+};
 
 function makeCheckRecord(overrides: Partial<ReviewCheckRecord> = {}): ReviewCheckRecord {
   return {
@@ -103,31 +128,53 @@ function makeCliArgs(
   };
 }
 
-test("evaluateGithubCiRuns: exact-head pass, fail->hold, pending, stale-head ignored, and older attempts ignored", () => {
-  // 1. Late success on SHA_OLD is strictly ignored while SHA_NEW has pending suite -> pending!
+/**
+ * Creates a GitHub-origin-preserving fetcher that routes https://api.github.com/* to a local
+ * mock server WITHOUT changing the adapter's origin checks (so tests exercise real trusted-origin
+ * policy and credential separation end-to-end).
+ */
+function makeTrustedGithubProxyFetcher(localBaseUrl: string): typeof fetch {
+  return (input, init) => {
+    const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    assert.ok(
+      rawUrl.startsWith(`${TRUSTED_GITHUB_API_ORIGIN}/`),
+      `trusted GitHub fetcher must only target ${TRUSTED_GITHUB_API_ORIGIN}, got ${rawUrl}`,
+    );
+    const rewritten = `${localBaseUrl}${rawUrl.slice(TRUSTED_GITHUB_API_ORIGIN.length)}`;
+    return fetch(rewritten, init);
+  };
+}
+
+test("evaluateGithubCiRuns: policy enforcement, stale-head, superseded attempts, untrusted publishers, and immutable ordering (late-finishing older run)", () => {
+  // 1. Late success on SHA_OLD is strictly ignored while SHA_NEW has pending suite -> pending.
   const staleIgnored = evaluateGithubCiRuns({
     expectedHeadSha: SHA_NEW,
+    policy: TRUSTED_MIXED_POLICY,
     workflowRuns: [
       {
         id: 1001,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_OLD,
         run_attempt: 1,
         status: "completed",
         conclusion: "success",
-        updated_at: "2026-11-20T20:05:00Z",
         created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:05:00Z",
         html_url: "https://github.com/yulanventures/commonswarm/actions/runs/1001",
       },
       {
         id: 1002,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_NEW,
         run_attempt: 1,
         status: "in_progress",
         conclusion: null,
-        updated_at: "2026-11-20T20:04:00Z",
         created_at: "2026-11-20T20:01:00Z",
+        updated_at: "2026-11-20T20:04:00Z",
         html_url: "https://github.com/yulanventures/commonswarm/actions/runs/1002",
       },
     ],
@@ -135,45 +182,56 @@ test("evaluateGithubCiRuns: exact-head pass, fail->hold, pending, stale-head ign
       {
         id: 2001,
         name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
         head_sha: SHA_OLD,
         status: "completed",
         conclusion: "success",
-        completed_at: "2026-11-20T20:05:00Z",
         started_at: "2026-11-20T20:00:00Z",
+        completed_at: "2026-11-20T20:05:00Z",
         html_url: null,
       },
     ],
-    requiredSuites: ["p1-cli", "unit"],
   });
+  assert.equal(staleIgnored.policy_enforced, true);
   assert.equal(staleIgnored.decision, "pending");
   assert.equal(staleIgnored.verdict, null);
   assert.equal(staleIgnored.ignored_stale_head, 2);
   assert.deepEqual(staleIgnored.missing_suites, ["unit"]);
 
-  // 2. Superseded attempt 1 (success) is ignored when attempt 2 fails -> hold!
+  // 2. Superseded attempt 1 (success) is ignored when attempt 2 fails -> hold.
   const attempt2Fail = evaluateGithubCiRuns({
     expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" }],
+    },
     workflowRuns: [
       {
         id: 3001,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_NEW,
         run_attempt: 1,
         status: "completed",
         conclusion: "success",
-        updated_at: "2026-11-20T20:01:00Z",
         created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:01:00Z",
         html_url: null,
       },
       {
         id: 3001,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_NEW,
         run_attempt: 2,
         status: "completed",
         conclusion: "failure",
-        updated_at: "2026-11-20T20:03:00Z",
         created_at: "2026-11-20T20:02:00Z",
+        updated_at: "2026-11-20T20:03:00Z",
         html_url: null,
       },
     ],
@@ -182,45 +240,219 @@ test("evaluateGithubCiRuns: exact-head pass, fail->hold, pending, stale-head ign
   assert.equal(attempt2Fail.decision, "hold");
   assert.equal(attempt2Fail.verdict, "hold");
   assert.equal(attempt2Fail.ignored_superseded_attempts, 1);
-  assert.equal(attempt2Fail.suites.length, 1);
   assert.equal(attempt2Fail.suites[0]!.run_attempt, 2);
-  assert.equal(attempt2Fail.suites[0]!.conclusion, "failure");
 
-  // 3. Superseded attempt 1 (failure) is ignored when attempt 2 succeeds, and older workflow run is superseded -> pass!
-  const attempt2Pass = evaluateGithubCiRuns({
+  // 3. HezSec C2 witness: same-name results from untrusted publishers are strictly ignored!
+  const untrustedIgnored = evaluateGithubCiRuns({
     expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        { kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" },
+        { kind: "check_run", suite: "unit", app_slug: "github-actions" },
+        { kind: "commit_status", context: "server suite / server", creator_login: "github-actions[bot]" },
+      ],
+    },
     workflowRuns: [
       {
-        id: 4001,
+        id: 4100,
         name: "p1-cli",
+        path: ".github/workflows/spoofed-p1-cli.yml",
+        workflow_id: 999,
         head_sha: SHA_NEW,
         run_attempt: 1,
         status: "completed",
-        conclusion: "failure",
-        updated_at: "2026-11-20T20:01:00Z",
+        conclusion: "success",
         created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:01:00Z",
+        html_url: null,
+      },
+    ],
+    checkRuns: [
+      {
+        id: 4200,
+        name: "unit",
+        app_slug: "untrusted-third-party-app",
+        app_id: 99999,
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-11-20T20:00:00Z",
+        completed_at: "2026-11-20T20:01:00Z",
+        html_url: null,
+      },
+    ],
+    commitStatuses: [
+      {
+        id: 4300,
+        context: "server suite / server",
+        state: "success",
+        head_sha: SHA_NEW,
+        creator_login: "random-repo-writer",
+        creator_id: 7777,
+        description: "spoofed green",
+        target_url: "https://example.com/spoof",
+        created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:00:00Z",
+      },
+    ],
+  });
+  assert.equal(untrustedIgnored.decision, "pending");
+  assert.equal(untrustedIgnored.verdict, null);
+  assert.equal(untrustedIgnored.ignored_untrusted_publisher, 3);
+  assert.deepEqual(untrustedIgnored.missing_suites, ["p1-cli", "unit", "server suite / server"]);
+
+  // 4. HezSec C3 witness: late-finishing older workflow_run (higher updated_at) NEVER beats newer pending/failed run!
+  const lateOlderWorkflowVsNewerPending = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" }],
+    },
+    workflowRuns: [
+      {
+        id: 5001,
+        name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
+        head_sha: SHA_NEW,
+        run_attempt: 1,
+        status: "completed",
+        conclusion: "success",
+        created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:15:00Z", // finished LATE!
         html_url: null,
       },
       {
+        id: 5002,
+        name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
+        head_sha: SHA_NEW,
+        run_attempt: 1,
+        status: "in_progress",
+        conclusion: null,
+        created_at: "2026-11-20T20:05:00Z", // created LATER!
+        updated_at: "2026-11-20T20:06:00Z",
+        html_url: null,
+      },
+    ],
+    checkRuns: [],
+  });
+  assert.equal(lateOlderWorkflowVsNewerPending.decision, "pending");
+  assert.equal(lateOlderWorkflowVsNewerPending.suites[0]!.run_id, 5002);
+
+  // 5. HezSec C3 witness: late-finishing older check_run (higher completed_at) NEVER beats newer failed check_run!
+  const lateOlderCheckVsNewerFailure = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "check_run", suite: "unit", app_slug: "github-actions" }],
+    },
+    workflowRuns: [],
+    checkRuns: [
+      {
+        id: 6001,
+        name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-11-20T20:00:00Z",
+        completed_at: "2026-11-20T20:15:00Z", // finished LATE!
+        html_url: null,
+      },
+      {
+        id: 6002,
+        name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "failure",
+        started_at: "2026-11-20T20:05:00Z",
+        completed_at: "2026-11-20T20:06:00Z", // failed earlier, newer check_run id!
+        html_url: null,
+      },
+    ],
+  });
+  assert.equal(lateOlderCheckVsNewerFailure.decision, "hold");
+  assert.equal(lateOlderCheckVsNewerFailure.verdict, "hold");
+  assert.equal(lateOlderCheckVsNewerFailure.suites[0]!.run_id, 6002);
+
+  // 6. HezSec C3 witness: late-updated older commit_status NEVER beats newer failed commit_status!
+  const lateOlderStatusVsNewerFailure = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "commit_status", context: "server suite / server", creator_login: "github-actions[bot]" }],
+    },
+    workflowRuns: [],
+    checkRuns: [],
+    commitStatuses: [
+      {
+        id: 7001,
+        context: "server suite / server",
+        state: "success",
+        head_sha: SHA_NEW,
+        creator_login: "github-actions[bot]",
+        creator_id: 41898282,
+        description: "dispatch run 100: success",
+        target_url: "https://github.com/yulanventures/commonswarm/actions/runs/100",
+        created_at: "2026-11-20T20:00:00Z",
+        updated_at: "2026-11-20T20:15:00Z",
+      },
+      {
+        id: 7002,
+        context: "server suite / server",
+        state: "failure",
+        head_sha: SHA_NEW,
+        creator_login: "github-actions[bot]",
+        creator_id: 41898282,
+        description: "dispatch run 200: failure",
+        target_url: "https://github.com/yulanventures/commonswarm/actions/runs/200",
+        created_at: "2026-11-20T20:05:00Z",
+        updated_at: "2026-11-20T20:05:00Z",
+      },
+    ],
+  });
+  assert.equal(lateOlderStatusVsNewerFailure.decision, "hold");
+  assert.equal(lateOlderStatusVsNewerFailure.suites[0]!.run_id, 200);
+
+  // 7. Complete trusted control passes cleanly and formats note.
+  const completeTrusted = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: TRUSTED_MIXED_POLICY,
+    workflowRuns: [
+      {
         id: 4002,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_NEW,
         run_attempt: 1,
         status: "completed",
         conclusion: "failure",
-        updated_at: "2026-11-20T20:02:00Z",
         created_at: "2026-11-20T20:01:30Z",
+        updated_at: "2026-11-20T20:02:00Z",
         html_url: null,
       },
       {
         id: 4002,
         name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
         head_sha: SHA_NEW,
         run_attempt: 2,
         status: "completed",
         conclusion: "success",
-        updated_at: "2026-11-20T20:04:00Z",
         created_at: "2026-11-20T20:03:00Z",
+        updated_at: "2026-11-20T20:04:00Z",
         html_url: null,
       },
     ],
@@ -228,89 +460,113 @@ test("evaluateGithubCiRuns: exact-head pass, fail->hold, pending, stale-head ign
       {
         id: 5001,
         name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
         head_sha: SHA_NEW,
         status: "completed",
         conclusion: "success",
-        completed_at: "2026-11-20T20:04:00Z",
         started_at: "2026-11-20T20:03:00Z",
+        completed_at: "2026-11-20T20:04:00Z",
         html_url: null,
       },
     ],
-    requiredSuites: ["p1-cli", "unit"],
   });
-  assert.equal(attempt2Pass.decision, "pass");
-  assert.equal(attempt2Pass.verdict, "pass");
-  assert.equal(attempt2Pass.ignored_superseded_attempts, 1);
-  assert.equal(attempt2Pass.ignored_superseded_runs, 1);
-  const note = formatGithubCiStampNote(attempt2Pass);
+  assert.equal(completeTrusted.decision, "pass");
+  assert.equal(completeTrusted.verdict, "pass");
+  assert.equal(completeTrusted.ignored_superseded_attempts, 1);
+  const note = formatGithubCiStampNote(completeTrusted);
   assert.match(note, /^GitHub CI pass @ 222222222:/);
   assert.match(note, /p1-cli \(attempt 2, success, run 4002\)/);
   assert.match(note, /unit \(attempt 1, success, run 5001\)/);
-
-  // 4. Queued check-run rerun (null timestamps, higher id) supersedes an older passing check run -> pending!
-  const queuedSupersedesPass = evaluateGithubCiRuns({
-    expectedHeadSha: SHA_NEW,
-    workflowRuns: [],
-    checkRuns: [
-      {
-        id: 6001,
-        name: "unit",
-        head_sha: SHA_NEW,
-        status: "completed",
-        conclusion: "success",
-        completed_at: "2026-11-20T20:04:00Z",
-        started_at: "2026-11-20T20:03:00Z",
-        html_url: null,
-      },
-      {
-        id: 6002,
-        name: "unit",
-        head_sha: SHA_NEW,
-        status: "queued",
-        conclusion: null,
-        completed_at: null,
-        started_at: null,
-        html_url: null,
-      },
-    ],
-  });
-  assert.equal(queuedSupersedesPass.decision, "pending");
-  assert.equal(queuedSupersedesPass.verdict, null);
-  assert.equal(queuedSupersedesPass.ignored_superseded_runs, 1);
-
-  // 5. Empty CI on head stays pending (never stamps pass on 0 runs).
-  const empty = evaluateGithubCiRuns({
-    expectedHeadSha: SHA_NEW,
-    workflowRuns: [],
-    checkRuns: [],
-  });
-  assert.equal(empty.decision, "pending");
-  assert.equal(empty.verdict, null);
 });
 
-test("validators & token file security: rejects bad repo/URL/non-0600/symlink token files and redacts tokens on errors", async () => {
+test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted-origin token refusal, short-page Link next, invalid total_count, missing created_at", async () => {
   assert.throws(() => normalizeGithubRepo("../evil"), { code: "github_repo_invalid" });
   assert.throws(() => normalizeGithubRepo("owner/repo?foo=1"), { code: "github_repo_invalid" });
   assert.throws(() => normalizeGithubApiBaseUrl("http://api.github.com"), { code: "github_api_url_invalid" });
   assert.throws(() => normalizeGithubApiBaseUrl("https://user:pass@api.github.com"), { code: "github_api_url_invalid" });
   assert.equal(normalizeGithubApiBaseUrl("http://127.0.0.1:8080/"), "http://127.0.0.1:8080");
 
-  const root = await mkdtemp(join(tmpdir(), "cs-gh-tok-"));
+  // Policy validator rejects traversal workflow_path and duplicate rules.
+  assert.throws(
+    () => parseGithubCiPolicy({
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "workflow_run", suite: "unit", workflow_path: ".github/workflows/../evil.yml" }],
+    }),
+    { code: "github_policy_invalid" },
+  );
+  assert.throws(
+    () => parseGithubCiPolicy({
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        { kind: "check_run", suite: "unit", app_slug: "github-actions" },
+        { kind: "check_run", suite: "unit", app_slug: "github-actions" },
+      ],
+    }),
+    { code: "github_policy_invalid" },
+  );
+
+  const root = await mkdtemp(join(tmpdir(), "cs-gh-sec-"));
   try {
-    const goodPath = join(root, "token.txt");
+    // 1. Atomic O_NOFOLLOW + O_NONBLOCK + fstat token file checks (and swap-before-open witness).
+    const tokenPath = join(root, "token.txt");
     const openPath = join(root, "open.txt");
-    const linkPath = join(root, "link.txt");
-    await writeFile(goodPath, `${GH_SECRET}\n`, { mode: 0o600 });
-    await chmod(goodPath, 0o600);
+    const dirPath = join(root, "dir.txt");
+    const fifoPath = join(root, "fifo.txt");
+    await writeFile(tokenPath, `${GH_SECRET}\n`, { mode: 0o600 });
+    await chmod(tokenPath, 0o600);
     await writeFile(openPath, `${GH_SECRET}\n`, { mode: 0o644 });
     await chmod(openPath, 0o644);
-    await symlink(goodPath, linkPath);
+    await mkdir(dirPath, { mode: 0o700 });
 
-    assert.equal(await readGithubTokenFromFile(goodPath), GH_SECRET);
+    assert.equal(await readGithubTokenFromFile(tokenPath), GH_SECRET);
     await assert.rejects(() => readGithubTokenFromFile(openPath), { code: "github_token_file_unsafe" });
-    await assert.rejects(() => readGithubTokenFromFile(linkPath), { code: "github_token_file_unsafe" });
+    await assert.rejects(() => readGithubTokenFromFile(dirPath), { code: "github_token_file_unsafe" });
 
-    // Token redaction on transport error + malformed response + timeout refusal.
+    // Swap safe token file to a symlink before open -> refused via O_NOFOLLOW!
+    const targetSecret = join(root, "real.txt");
+    await writeFile(targetSecret, `${GH_SECRET}\n`, { mode: 0o600 });
+    await chmod(targetSecret, 0o600);
+    await unlink(tokenPath);
+    await symlink(targetSecret, tokenPath);
+    await assert.rejects(() => readGithubTokenFromFile(tokenPath), { code: "github_token_file_unsafe" });
+
+    // Swap to a FIFO -> O_NONBLOCK opens immediately and fstat rejects non-regular file without hanging!
+    await execFileAsync("mkfifo", ["-m", "0600", fifoPath]);
+    await assert.rejects(() => readGithubTokenFromFile(fifoPath), { code: "github_token_file_unsafe" });
+
+    // Policy file rejects symlinks & group-writable files.
+    const policyPath = join(root, "policy.json");
+    const policyLink = join(root, "policy-link.json");
+    await writeFile(policyPath, JSON.stringify(TRUSTED_MIXED_POLICY), { mode: 0o644 });
+    await chmod(policyPath, 0o644);
+    assert.equal((await readGithubCiPolicyFile(policyPath)).repo, "yulanventures/commonswarm");
+    await chmod(policyPath, 0o664);
+    await assert.rejects(() => readGithubCiPolicyFile(policyPath), { code: "github_policy_file_unsafe" });
+    await chmod(policyPath, 0o644);
+    await symlink(policyPath, policyLink);
+    await assert.rejects(() => readGithubCiPolicyFile(policyLink), { code: "github_policy_file_unsafe" });
+
+    // 2. HezSec C1: sending a GitHub token to a non-trusted origin is refused before any fetch!
+    let untrustedFetchCalls = 0;
+    await assert.rejects(
+      () => readGithubCiForCommit({
+        repo: "yulanventures/commonswarm",
+        headSha: SHA_NEW,
+        apiBaseUrl: "http://127.0.0.1:9999",
+        token: GH_SECRET,
+        fetcher: async () => {
+          untrustedFetchCalls += 1;
+          return new Response("{}", { status: 200 });
+        },
+      }),
+      { code: "github_untrusted_origin_token_refused" },
+    );
+    assert.equal(untrustedFetchCalls, 0);
+
+    // 3. Token redaction on transport error.
     await assert.rejects(
       () => readGithubCiForCommit({
         repo: "yulanventures/commonswarm",
@@ -323,49 +579,121 @@ test("validators & token file security: rejects bad repo/URL/non-0600/symlink to
       (err: unknown) => {
         assert.ok(err instanceof GithubCiError);
         assert.equal(err.code, "github_transport_error");
-        assert.equal(err.message.includes(GH_SECRET), false, "token must be redacted from error message");
+        assert.equal(err.message.includes(GH_SECRET), false, "token must be redacted");
         assert.match(err.message, /\[redacted\]/);
         return true;
       },
     );
 
-    // Malformed payload (non-array workflow_runs / invalid run_attempt) fails closed.
-    await assert.rejects(
-      () => readGithubCiForCommit({
-        repo: "yulanventures/commonswarm",
-        headSha: SHA_NEW,
-        source: "actions",
-        fetcher: async () => new Response(JSON.stringify({ workflow_runs: "oops" }), { status: 200 }),
-      }),
-      { code: "github_malformed_response" },
-    );
+    // 4. HezSec C3: SHORT 1-item page with Link rel="next" fails closed on ALL THREE endpoints!
+    const nextLinkHeader = {
+      "content-type": "application/json",
+      link: '<https://api.github.com/repos/yulanventures/commonswarm/x?page=2>; rel="next"',
+    };
     await assert.rejects(
       () => readGithubCiForCommit({
         repo: "yulanventures/commonswarm",
         headSha: SHA_NEW,
         source: "actions",
         fetcher: async () => new Response(JSON.stringify({
-          workflow_runs: [{ id: 1, name: "unit", head_sha: SHA_NEW, run_attempt: 0, status: "completed", conclusion: "success" }],
-        }), { status: 200 }),
+          total_count: 1,
+          workflow_runs: [{
+            id: 1, name: "unit", path: ".github/workflows/server-suite.yml", head_sha: SHA_NEW,
+            run_attempt: 1, status: "completed", conclusion: "success", created_at: "2026-11-20T20:00:00Z",
+          }],
+        }), { status: 200, headers: nextLinkHeader }),
       }),
-      { code: "github_malformed_response" },
+      { code: "github_response_truncated" },
+    );
+    await assert.rejects(
+      () => readGithubCiForCommit({
+        repo: "yulanventures/commonswarm",
+        headSha: SHA_NEW,
+        source: "checks",
+        fetcher: async () => new Response(JSON.stringify({
+          total_count: 1,
+          check_runs: [{
+            id: 1, name: "unit", head_sha: SHA_NEW, status: "completed", conclusion: "success",
+            app: { id: 15368, slug: "github-actions" },
+          }],
+        }), { status: 200, headers: nextLinkHeader }),
+      }),
+      { code: "github_response_truncated" },
+    );
+    await assert.rejects(
+      () => readGithubCiForCommit({
+        repo: "yulanventures/commonswarm",
+        headSha: SHA_NEW,
+        source: "statuses",
+        fetcher: async () => new Response(JSON.stringify([{
+          id: 1, context: "server suite / unit", state: "success",
+          created_at: "2026-11-20T20:00:00Z", creator: { login: "github-actions[bot]", id: 41898282 },
+        }]), { status: 200, headers: nextLinkHeader }),
+      }),
+      { code: "github_response_truncated" },
     );
 
-    // Truncated GitHub list (total_count > returned items) fails closed.
+    // 5. HezSec C3: missing / invalid / smaller total_count fails closed!
+    for (const badTotal of [undefined, "1", -1, 0]) {
+      await assert.rejects(
+        () => readGithubCiForCommit({
+          repo: "yulanventures/commonswarm",
+          headSha: SHA_NEW,
+          source: "actions",
+          fetcher: async () => new Response(JSON.stringify({
+            ...(badTotal !== undefined ? { total_count: badTotal } : {}),
+            workflow_runs: [{
+              id: 1, name: "unit", path: ".github/workflows/server-suite.yml", head_sha: SHA_NEW,
+              run_attempt: 1, status: "completed", conclusion: "success", created_at: "2026-11-20T20:00:00Z",
+            }],
+          }), { status: 200 }),
+        }),
+        { code: "github_malformed_response" },
+      );
+    }
     await assert.rejects(
       () => readGithubCiForCommit({
         repo: "yulanventures/commonswarm",
         headSha: SHA_NEW,
-        source: "actions",
+        source: "checks",
         fetcher: async () => new Response(JSON.stringify({
           total_count: 150,
-          workflow_runs: [{ id: 1, name: "unit", head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "success" }],
+          check_runs: [{
+            id: 1, name: "unit", head_sha: SHA_NEW, status: "completed", conclusion: "success",
+          }],
         }), { status: 200 }),
       }),
       { code: "github_response_truncated" },
     );
 
-    // Bounded timeout fails closed with github_timeout.
+    // 6. HezSec C3: missing or invalid created_at fails closed on workflow_runs and statuses!
+    await assert.rejects(
+      () => readGithubCiForCommit({
+        repo: "yulanventures/commonswarm",
+        headSha: SHA_NEW,
+        source: "actions",
+        fetcher: async () => new Response(JSON.stringify({
+          total_count: 1,
+          workflow_runs: [{
+            id: 1, name: "unit", head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "success",
+          }],
+        }), { status: 200 }),
+      }),
+      { code: "github_malformed_response" },
+    );
+    await assert.rejects(
+      () => readGithubCiForCommit({
+        repo: "yulanventures/commonswarm",
+        headSha: SHA_NEW,
+        source: "statuses",
+        fetcher: async () => new Response(JSON.stringify([{
+          id: 1, context: "server suite / unit", state: "success", created_at: "not-a-timestamp",
+        }]), { status: 200 }),
+      }),
+      { code: "github_malformed_response" },
+    );
+
+    // 7. Bounded timeout fails closed with github_timeout.
     await assert.rejects(
       () => readGithubCiForCommit({
         repo: "yulanventures/commonswarm",
@@ -383,10 +711,11 @@ test("validators & token file security: rejects bad repo/URL/non-0600/symlink to
   }
 });
 
-test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head stamp, hold, pending, dry-run, and stale-head refusal", async () => {
-  const githubRequests: Array<{ method: string; url: string; auth: string | null }> = [];
+test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on GitHub, no GH bearer at alternate origin, policy-bound stamping, and real CLI", async () => {
+  const githubRequests: Array<{ method: string; url: string; auth: string | null; csProof: string | null }> = [];
+  const csRequests: Array<{ url: string; auth: string | null; csProof: string | null }> = [];
   const stampedCommands: Array<Record<string, unknown>> = [];
-  let ghMode: "pass" | "hold" | "pending" | "stale_only" = "pass";
+  let ghMode: "pass" | "hold" | "pending" | "untrusted_only" = "pass";
   let currentCheck = makeCheckRecord();
 
   const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -394,33 +723,37 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
       method: req.method ?? "",
       url: req.url ?? "",
       auth: typeof req.headers.authorization === "string" ? req.headers.authorization : null,
+      csProof: typeof req.headers["x-swarm-session-proof"] === "string" ? req.headers["x-swarm-session-proof"] : null,
     });
     assert.equal(req.method, "GET", "GitHub CI adapter must be strictly read-only GET");
     if (req.url?.includes("/actions/runs")) {
       const workflow_runs = ghMode === "pass"
         ? [
-          // Stale old-head failure must be ignored; older attempt 1 failure must be ignored.
-          { id: 8001, name: "p1-cli", head_sha: SHA_OLD, run_attempt: 1, status: "completed", conclusion: "failure", updated_at: "2026-11-20T20:09:00Z", created_at: "2026-11-20T20:00:00Z", html_url: null },
-          { id: 9001, name: "p1-cli", head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "failure", updated_at: "2026-11-20T20:01:00Z", created_at: "2026-11-20T20:00:00Z", html_url: null },
-          { id: 9001, name: "p1-cli", head_sha: SHA_NEW, run_attempt: 2, status: "completed", conclusion: "success", updated_at: "2026-11-20T20:05:00Z", created_at: "2026-11-20T20:02:00Z", html_url: null },
+          { id: 8001, name: "p1-cli", path: ".github/workflows/server-suite.yml", workflow_id: 10, head_sha: SHA_OLD, run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-11-20T20:00:00Z", updated_at: "2026-11-20T20:09:00Z", html_url: null },
+          { id: 9001, name: "p1-cli", path: ".github/workflows/server-suite.yml", workflow_id: 10, head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-11-20T20:00:00Z", updated_at: "2026-11-20T20:01:00Z", html_url: null },
+          { id: 9001, name: "p1-cli", path: ".github/workflows/server-suite.yml", workflow_id: 10, head_sha: SHA_NEW, run_attempt: 2, status: "completed", conclusion: "success", created_at: "2026-11-20T20:02:00Z", updated_at: "2026-11-20T20:05:00Z", html_url: null },
         ]
         : ghMode === "hold"
         ? [
-          { id: 9002, name: "p1-cli", head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "failure", updated_at: "2026-11-20T20:05:00Z", created_at: "2026-11-20T20:02:00Z", html_url: null },
+          { id: 9002, name: "p1-cli", path: ".github/workflows/server-suite.yml", workflow_id: 10, head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "failure", created_at: "2026-11-20T20:02:00Z", updated_at: "2026-11-20T20:05:00Z", html_url: null },
         ]
         : ghMode === "pending"
         ? [
-          { id: 9003, name: "p1-cli", head_sha: SHA_NEW, run_attempt: 1, status: "in_progress", conclusion: null, updated_at: "2026-11-20T20:05:00Z", created_at: "2026-11-20T20:02:00Z", html_url: null },
+          // Only p1-cli is green; required "unit" check_run has not appeared yet -> must stay pending!
+          { id: 9003, name: "p1-cli", path: ".github/workflows/server-suite.yml", workflow_id: 10, head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "success", created_at: "2026-11-20T20:02:00Z", updated_at: "2026-11-20T20:05:00Z", html_url: null },
         ]
         : [
-          { id: 8002, name: "p1-cli", head_sha: SHA_OLD, run_attempt: 1, status: "completed", conclusion: "success", updated_at: "2026-11-20T20:09:00Z", created_at: "2026-11-20T20:00:00Z", html_url: null },
+          // Same-name run from UNTRUSTED workflow path!
+          { id: 9004, name: "p1-cli", path: ".github/workflows/untrusted.yml", workflow_id: 99, head_sha: SHA_NEW, run_attempt: 1, status: "completed", conclusion: "success", created_at: "2026-11-20T20:02:00Z", updated_at: "2026-11-20T20:05:00Z", html_url: null },
         ];
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: workflow_runs.length, workflow_runs }));
       return;
     }
     if (req.url?.includes("/check-runs")) {
       const check_runs = ghMode === "pass"
-        ? [{ id: 7001, name: "unit", head_sha: SHA_NEW, status: "completed", conclusion: "success", completed_at: "2026-11-20T20:05:00Z", started_at: "2026-11-20T20:02:00Z", html_url: null }]
+        ? [{ id: 7001, name: "unit", app: { id: 15368, slug: "github-actions" }, head_sha: SHA_NEW, status: "completed", conclusion: "success", started_at: "2026-11-20T20:02:00Z", completed_at: "2026-11-20T20:05:00Z", html_url: null }]
+        : ghMode === "untrusted_only"
+        ? [{ id: 7002, name: "unit", app: { id: 88888, slug: "other-app" }, head_sha: SHA_NEW, status: "completed", conclusion: "success", started_at: "2026-11-20T20:02:00Z", completed_at: "2026-11-20T20:05:00Z", html_url: null }]
         : [];
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: check_runs.length, check_runs }));
       return;
@@ -433,6 +766,11 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
   });
 
   const csServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    csRequests.push({
+      url: req.url ?? "",
+      auth: typeof req.headers.authorization === "string" ? req.headers.authorization : null,
+      csProof: typeof req.headers["x-swarm-session-proof"] === "string" ? req.headers["x-swarm-session-proof"] : null,
+    });
     let raw = "";
     req.setEncoding("utf8");
     req.on("data", (chunk) => { raw += chunk; });
@@ -472,15 +810,87 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
 
   await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
   await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
-  const ghPort = (ghServer.address() as { port: number }).port;
-  const csPort = (csServer.address() as { port: number }).port;
-  const ghUrl = `http://127.0.0.1:${ghPort}`;
-  const csTarget = { url: `http://127.0.0.1:${csPort}`, anonKey: "fixture-anon" };
+  const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
+  const trustedGhFetcher = makeTrustedGithubProxyFetcher(ghUrl);
+
+  // Simulate CommonSwarm's session-proof-injecting fetcher (like bindSessionProof in src/cli.ts).
+  const csSessionProofFetcher: typeof fetch = (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set("x-swarm-session-proof", CS_PROOF_SECRET);
+    return fetch(input, { ...init, headers });
+  };
 
   const root = await mkdtemp(join(tmpdir(), "cs-gh-cli-"));
   try {
-    // 1. Stale --head-sha fails closed with stale_head (409) BEFORE touching GitHub!
-    const beforeGhCount = githubRequests.length;
+    const policyFile = join(root, "ci-policy.json");
+    const tokenFile = join(root, "gh.token");
+    const agentTokenFile = join(root, "agent.token");
+    await writeFile(policyFile, JSON.stringify(TRUSTED_MIXED_POLICY), { mode: 0o644 });
+    await chmod(policyFile, 0o644);
+    await writeFile(tokenFile, `${GH_SECRET}\n`, { mode: 0o600 });
+    await chmod(tokenFile, 0o600);
+    await writeFile(agentTokenFile, `${AGENT_TOKEN}\n`, { mode: 0o600 });
+    await chmod(agentTokenFile, 0o600);
+
+    // 1. HezSec C1: alternate --github-api-url + ambient GITHUB_TOKEN + --dry-run sends ZERO Authorization header!
+    const beforeAlt = githubRequests.length;
+    const altDryOut = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", CHECK_ID], {
+        "github-api-url": ghUrl,
+        "dry-run": true,
+        json: true,
+      }),
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      { env: { GITHUB_TOKEN: GH_SECRET } },
+    );
+    assert.equal(JSON.parse(altDryOut).action, "dry_run");
+    const altReqs = githubRequests.slice(beforeAlt);
+    assert.ok(altReqs.length >= 1);
+    assert.ok(altReqs.every((r) => r.auth === null), "alternate origin MUST NOT receive ambient GitHub bearer");
+    assert.ok(altReqs.every((r) => r.csProof === null), "GitHub request MUST NOT receive CommonSwarm session-proof header");
+
+    // 2. HezSec C1: alternate --github-api-url + explicit --github-token-file is REFUSED before any request!
+    const beforeExplicitRefuse = githubRequests.length;
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], {
+          "github-api-url": ghUrl,
+          "github-token-file": tokenFile,
+          "dry-run": true,
+        }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      ),
+      { code: "github_untrusted_origin_token_refused" },
+    );
+    assert.equal(githubRequests.length, beforeExplicitRefuse);
+
+    // 3. HezSec C1: alternate --github-api-url WITHOUT --dry-run is REFUSED from stamping!
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], {
+          "github-api-url": ghUrl,
+          "policy-file": policyFile,
+        }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      ),
+      { code: "github_untrusted_origin_stamp_refused" },
+    );
+    assert.equal(stampedCommands.length, 0);
+
+    // 4. HezSec C2: stamping without --policy-file is REFUSED (even on trusted origin with --suite)!
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], { suite: ["p1-cli"] }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+        { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+      ),
+      { code: "github_policy_required" },
+    );
+    assert.equal(stampedCommands.length, 0);
+
+    // 5. Stale --head-sha fails closed with stale_head (409) BEFORE touching GitHub!
+    const beforeStale = githubRequests.length;
     await assert.rejects(
       () => syncGithubCiToReviewCheck({
         target: csTarget,
@@ -489,52 +899,59 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
         repo: "yulanventures/commonswarm",
         ref: "713",
         expectedHeadSha: SHA_OLD,
-        apiBaseUrl: ghUrl,
+        policy: TRUSTED_MIXED_POLICY,
         githubToken: GH_SECRET,
+        fetcher: csSessionProofFetcher,
+        githubFetcher: trustedGhFetcher,
       }),
       (err: unknown) => err instanceof ReviewCheckError && err.code === "stale_head" && err.status === 409,
     );
-    assert.equal(githubRequests.length, beforeGhCount, "stale --head-sha must fail before hitting GitHub");
+    assert.equal(githubRequests.length, beforeStale);
 
-    // 2. Late success on SHA_OLD only -> pending, zero stamp sent!
-    ghMode = "stale_only";
-    const staleOnly = await syncGithubCiToReviewCheck({
-      target: csTarget,
-      bearer: AGENT_TOKEN,
-      workspaceId: WS,
-      checkId: CHECK_ID,
-      apiBaseUrl: ghUrl,
-      githubToken: GH_SECRET,
-    });
-    assert.equal(staleOnly.stamped, false);
-    assert.equal(staleOnly.action, "pending");
-    assert.equal(staleOnly.evaluation.ignored_stale_head, 1);
-    assert.equal(stampedCommands.length, 0);
-
-    // 3. Pending on SHA_NEW -> zero stamp sent!
+    // 6. HezSec C2: missing required CI ("unit" not yet present while "p1-cli" is green) -> pending, 0 stamps!
     ghMode = "pending";
     const pendingRes = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      apiBaseUrl: ghUrl,
+      policy: TRUSTED_MIXED_POLICY,
       githubToken: GH_SECRET,
+      fetcher: csSessionProofFetcher,
+      githubFetcher: trustedGhFetcher,
     });
     assert.equal(pendingRes.stamped, false);
     assert.equal(pendingRes.action, "pending");
+    assert.deepEqual(pendingRes.evaluation.missing_suites, ["unit"]);
     assert.equal(stampedCommands.length, 0);
 
-    // 4. Failing suite on SHA_NEW -> stamps "hold" via CLI helper!
+    // 7. HezSec C2: same-name green results from UNTRUSTED publishers -> ignored, pending, 0 stamps!
+    ghMode = "untrusted_only";
+    const untrustedRes = await syncGithubCiToReviewCheck({
+      target: csTarget,
+      bearer: AGENT_TOKEN,
+      workspaceId: WS,
+      checkId: CHECK_ID,
+      policy: TRUSTED_MIXED_POLICY,
+      githubToken: GH_SECRET,
+      fetcher: csSessionProofFetcher,
+      githubFetcher: trustedGhFetcher,
+    });
+    assert.equal(untrustedRes.stamped, false);
+    assert.equal(untrustedRes.action, "pending");
+    assert.equal(untrustedRes.evaluation.ignored_untrusted_publisher, 2);
+    assert.deepEqual(untrustedRes.evaluation.missing_suites, ["p1-cli", "unit"]);
+    assert.equal(stampedCommands.length, 0);
+
+    // 8. Trusted failing suite -> stamps "hold" via CLI helper!
     ghMode = "hold";
     const holdOut = await executeCheckCiCli(
       makeCliArgs(["check", "ci", "yulanventures/commonswarm#713"], {
-        "github-api-url": ghUrl,
-        suite: ["p1-cli"],
+        "policy-file": policyFile,
         json: true,
       }),
-      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: fetch },
-      { env: { GITHUB_TOKEN: GH_SECRET } },
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
     );
     assert.equal(holdOut.includes(GH_SECRET), false, "GitHub token must never appear in CLI JSON output");
     const holdJson = JSON.parse(holdOut);
@@ -542,32 +959,46 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
     assert.equal(holdJson.action, "hold");
     assert.equal(stampedCommands.length, 1);
     assert.equal(stampedCommands[0]!.verdict, "hold");
-    assert.equal(stampedCommands[0]!.head_sha, SHA_NEW);
 
-    // 5. Dry-run on passing SHA_NEW -> does NOT stamp!
+    // 9. Complete trusted control on https://api.github.com -> stamps "pass"!
     ghMode = "pass";
-    const dryOut = await executeCheckCiCli(
-      makeCliArgs(["check", "ci", CHECK_ID], {
-        "github-api-url": ghUrl,
-        suite: ["p1-cli", "unit"],
-        "dry-run": true,
+    const beforeTrustedPass = githubRequests.length;
+    const passOut = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", "yulanventures/commonswarm#713"], {
+        "policy-file": policyFile,
+        "github-token-file": tokenFile,
         json: true,
       }),
-      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: fetch },
-      { env: { GH_TOKEN: GH_SECRET } },
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      { githubFetcher: trustedGhFetcher },
     );
-    assert.equal(JSON.parse(dryOut).stamped, false);
-    assert.equal(JSON.parse(dryOut).action, "dry_run");
-    assert.equal(stampedCommands.length, 1);
+    assert.equal(passOut.includes(GH_SECRET), false, "GitHub token must never leak in output");
+    const passJson = JSON.parse(passOut);
+    assert.equal(passJson.stamped, true);
+    assert.equal(passJson.action, "pass");
+    assert.equal(passJson.satisfied_now, true);
+    assert.equal(passJson.evaluation.policy_enforced, true);
+    assert.equal(passJson.evaluation.ignored_stale_head, 1);
+    assert.equal(passJson.evaluation.ignored_superseded_attempts, 1);
+    assert.equal(stampedCommands.length, 2);
+    assert.equal(stampedCommands[1]!.verdict, "pass");
+    assert.match(String(stampedCommands[1]!.note), /p1-cli \(attempt 2, success, run 9001\)/);
+    assert.match(String(stampedCommands[1]!.note), /unit \(attempt 1, success, run 7001\)/);
 
-    // 6. Real CLI binary `cswarm check ci` with 0600 --github-token-file -> stamps "pass" and never prints token!
-    const tokenFile = join(root, "gh.token");
-    const agentTokenFile = join(root, "agent.token");
-    await writeFile(tokenFile, `${GH_SECRET}\n`, { mode: 0o600 });
-    await chmod(tokenFile, 0o600);
-    await writeFile(agentTokenFile, `${AGENT_TOKEN}\n`, { mode: 0o600 });
-    await chmod(agentTokenFile, 0o600);
+    // HezSec C1 credential separation assertions across EVERY recorded request:
+    const trustedReqs = githubRequests.slice(beforeTrustedPass);
+    assert.ok(trustedReqs.length === 2, "policy with workflow_run+check_run queries actions+checks");
+    assert.ok(trustedReqs.every((r) => r.auth === `Bearer ${GH_SECRET}`), "trusted origin receives GitHub token");
+    assert.ok(githubRequests.every((r) => r.method === "GET"));
+    assert.ok(githubRequests.every((r) => r.csProof === null), "NO GitHub request may ever carry CommonSwarm session-proof header");
+    assert.ok(githubRequests.every((r) => r.auth !== `Bearer ${AGENT_TOKEN}`), "NO GitHub request may ever carry CommonSwarm bearer");
+    assert.ok(csRequests.length >= 2);
+    assert.ok(csRequests.every((r) => r.csProof === CS_PROOF_SECRET), "CommonSwarm requests still carry session-proof");
+    assert.ok(csRequests.every((r) => r.auth !== `Bearer ${GH_SECRET}`), "NO CommonSwarm request may ever carry GitHub token");
 
+    // 10. Real CLI binary `cswarm check ci --dry-run` against loopback fixture with ambient GITHUB_TOKEN:
+    // succeeds credential-free (0 Authorization sent to loopback fixture) and never prints token.
+    const beforeRealCli = githubRequests.length;
     const cliRes = await execFileAsync(
       process.execPath,
       [
@@ -577,28 +1008,44 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
         "--workspace-id", WS,
         "--agent-token-file", agentTokenFile,
         "--github-api-url", ghUrl,
-        "--github-token-file", tokenFile,
-        "--suite", "p1-cli,unit",
+        "--policy-file", policyFile,
+        "--dry-run",
         "--json",
       ],
-      { encoding: "utf8", env: { ...process.env, HOME: root } },
+      { encoding: "utf8", env: { ...process.env, HOME: root, GITHUB_TOKEN: GH_SECRET } },
     );
     assert.equal(cliRes.stdout.includes(GH_SECRET), false, "CLI stdout must never leak GitHub token");
     assert.equal(cliRes.stderr.includes(GH_SECRET), false, "CLI stderr must never leak GitHub token");
-    const passJson = JSON.parse(cliRes.stdout);
-    assert.equal(passJson.stamped, true);
-    assert.equal(passJson.action, "pass");
-    assert.equal(passJson.satisfied_now, true);
-    assert.equal(passJson.evaluation.ignored_stale_head, 1);
-    assert.equal(passJson.evaluation.ignored_superseded_attempts, 1);
-    assert.equal(stampedCommands.length, 2);
-    assert.equal(stampedCommands[1]!.verdict, "pass");
-    assert.equal(stampedCommands[1]!.head_sha, SHA_NEW);
-    assert.match(String(stampedCommands[1]!.note), /p1-cli \(attempt 2, success, run 9001\)/);
-    assert.match(String(stampedCommands[1]!.note), /unit \(attempt 1, success, run 7001\)/);
-    assert.equal(String(stampedCommands[1]!.note).includes(GH_SECRET), false);
-    assert.ok(githubRequests.every((r) => r.method === "GET"));
-    assert.ok(githubRequests.some((r) => r.auth === `Bearer ${GH_SECRET}`));
+    const cliJson = JSON.parse(cliRes.stdout);
+    assert.equal(cliJson.stamped, false);
+    assert.equal(cliJson.action, "dry_run");
+    assert.equal(cliJson.evaluation.decision, "pass");
+    const realCliGhReqs = githubRequests.slice(beforeRealCli);
+    assert.ok(realCliGhReqs.length >= 1);
+    assert.ok(realCliGhReqs.every((r) => r.auth === null), "real CLI MUST NOT send ambient GITHUB_TOKEN to alternate origin");
+
+    // Real CLI binary refuses stamping from alternate --github-api-url (non-zero exit).
+    await assert.rejects(
+      () => execFileAsync(
+        process.execPath,
+        [
+          CLI, "check", "ci", "yulanventures/commonswarm#713",
+          "--url", csTarget.url,
+          "--anon-key", csTarget.anonKey,
+          "--workspace-id", WS,
+          "--agent-token-file", agentTokenFile,
+          "--github-api-url", ghUrl,
+          "--policy-file", policyFile,
+        ],
+        { encoding: "utf8", env: { ...process.env, HOME: root, GITHUB_TOKEN: GH_SECRET } },
+      ),
+      (err: unknown) => {
+        const stderr = (err as { stderr?: string }).stderr ?? "";
+        assert.match(stderr, /https:\/\/api\.github\.com/);
+        assert.equal(stderr.includes(GH_SECRET), false);
+        return true;
+      },
+    );
   } finally {
     await new Promise<void>((r) => ghServer.close(() => r()));
     await new Promise<void>((r) => csServer.close(() => r()));
@@ -606,41 +1053,19 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
   }
 });
 
-test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' by latest created_at, ignores main-head actions/runs, and isolates focused contexts", async () => {
-  const MAIN_SHA = "9999999999999999999999999999999999999999";
+test("workflow_dispatch commit statuses witness: trusted publisher policy, exact context pinning, latest created_at, and focused-context isolation", async () => {
   const stampedCommands: Array<Record<string, unknown>> = [];
   let currentCheck = makeCheckRecord({ head_sha: SHA_NEW });
 
   const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     assert.equal(req.method, "GET", "GitHub adapter must only issue GET");
-    if (req.url?.includes("/actions/runs")) {
-      // workflow_dispatch runs report main's SHA, NOT the PR head SHA! Must be ignored as stale_head.
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
-        total_count: 1,
-        workflow_runs: [{
-          id: 44858176467,
-          name: "server-suite",
-          head_sha: MAIN_SHA,
-          run_attempt: 1,
-          status: "completed",
-          conclusion: "failure",
-          updated_at: "2026-11-21T03:01:00Z",
-          created_at: "2026-11-21T02:55:00Z",
-          html_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858176467",
-        }],
-      }));
-      return;
-    }
-    if (req.url?.includes("/check-runs")) {
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 0, check_runs: [] }));
-      return;
-    }
     if (req.url?.includes(`/commits/${SHA_NEW}/statuses`)) {
       // Dispatch-shaped statuses matching .github/workflows/server-suite.yml lines 594-607:
       // - older failure on "server suite / p1-cli" superseded by newer success by created_at
-      // - "server suite / server" passes
-      // - "server suite / mobile-audit (focused)" must NOT satisfy --suite mobile-audit
-      // - a status whose URL carries SHA_OLD must be ignored as stale_head
+      // - "server suite / server" passes from github-actions[bot]
+      // - spoofed "server suite / unit" from untrusted creator must be ignored
+      // - "server suite / mobile-audit (focused)" must NOT satisfy "server suite / mobile-audit"
+      // - stale SHA_OLD status must be ignored as stale_head
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([
         {
           id: 901,
@@ -648,6 +1073,7 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
           state: "failure",
           description: "dispatch run 44857347609: failure",
           target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44857347609",
+          creator: { login: "github-actions[bot]", id: 41898282 },
           created_at: "2026-11-21T02:50:00Z",
           updated_at: "2026-11-21T02:50:00Z",
           url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
@@ -658,6 +1084,7 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
           state: "success",
           description: "dispatch run 44858176467: success",
           target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858176467/attempts/2",
+          creator: { login: "github-actions[bot]", id: 41898282 },
           created_at: "2026-11-21T03:01:30Z",
           updated_at: "2026-11-21T03:01:30Z",
           url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
@@ -668,6 +1095,7 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
           state: "success",
           description: "dispatch run 44858179999: success",
           target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858179999",
+          creator: { login: "github-actions[bot]", id: 41898282 },
           created_at: "2026-11-21T03:02:00Z",
           updated_at: "2026-11-21T03:02:00Z",
           url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
@@ -678,6 +1106,7 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
           state: "success",
           description: "dispatch run 44858180000: success, 1 screen(s)",
           target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858180000",
+          creator: { login: "github-actions[bot]", id: 41898282 },
           created_at: "2026-11-21T03:02:10Z",
           updated_at: "2026-11-21T03:02:10Z",
           url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
@@ -686,10 +1115,22 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
           id: 905,
           context: "server suite / unit",
           state: "success",
-          description: "dispatch run 44850000000: success",
+          description: "spoofed by random writer",
           target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44850000000",
+          creator: { login: "random-writer", id: 55555 },
           created_at: "2026-11-21T03:03:00Z",
           updated_at: "2026-11-21T03:03:00Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+        },
+        {
+          id: 906,
+          context: "server suite / site",
+          state: "success",
+          description: "dispatch run 44850000001: success",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44850000001",
+          creator: { login: "github-actions[bot]", id: 41898282 },
+          created_at: "2026-11-21T03:03:10Z",
+          updated_at: "2026-11-21T03:03:10Z",
           url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_OLD}`,
         },
       ]));
@@ -725,54 +1166,88 @@ test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' b
   await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
   await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
   const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
-  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon" };
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
+  const trustedGhFetcher = makeTrustedGithubProxyFetcher(ghUrl);
 
   try {
-    // 1. Focused "server suite / mobile-audit (focused)" must NOT satisfy --suite mobile-audit -> pending!
+    // 1. Focused "server suite / mobile-audit (focused)" must NOT satisfy exact context "server suite / mobile-audit"!
     const focusedNotFull = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      requiredSuites: ["p1-cli", "mobile-audit"],
-      apiBaseUrl: ghUrl,
+      policy: {
+        version: 1,
+        repo: "yulanventures/commonswarm",
+        required: [
+          { kind: "commit_status", context: "server suite / p1-cli", creator_login: "github-actions[bot]" },
+          { kind: "commit_status", context: "server suite / mobile-audit", creator_login: "github-actions[bot]" },
+        ],
+      },
       githubToken: GH_SECRET,
+      githubFetcher: trustedGhFetcher,
     });
     assert.equal(focusedNotFull.stamped, false);
     assert.equal(focusedNotFull.action, "pending");
-    assert.deepEqual(focusedNotFull.evaluation.missing_suites, ["mobile-audit"]);
+    assert.deepEqual(focusedNotFull.evaluation.missing_suites, ["server suite / mobile-audit"]);
     assert.equal(stampedCommands.length, 0);
 
-    // 2. Stale-SHA "server suite / unit" (SHA_OLD in URL) must NOT satisfy --suite unit -> pending!
-    const staleUnitMissing = await syncGithubCiToReviewCheck({
+    // 2. Spoofed "server suite / unit" from random-writer + stale SHA_OLD "server suite / site" both rejected -> pending!
+    const spoofAndStale = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      requiredSuites: ["p1-cli", "unit"],
-      apiBaseUrl: ghUrl,
+      policy: {
+        version: 1,
+        repo: "yulanventures/commonswarm",
+        required: [
+          { kind: "commit_status", context: "server suite / unit", creator_login: "github-actions[bot]" },
+          { kind: "commit_status", context: "server suite / site", creator_login: "github-actions[bot]" },
+        ],
+      },
       githubToken: GH_SECRET,
+      githubFetcher: trustedGhFetcher,
     });
-    assert.equal(staleUnitMissing.stamped, false);
-    assert.equal(staleUnitMissing.action, "pending");
-    assert.deepEqual(staleUnitMissing.evaluation.missing_suites, ["unit"]);
-    assert.equal(staleUnitMissing.evaluation.ignored_stale_head, 2, "must ignore both main-head workflow_run and SHA_OLD commit status");
+    assert.equal(spoofAndStale.stamped, false);
+    assert.equal(spoofAndStale.action, "pending");
+    assert.equal(spoofAndStale.evaluation.ignored_untrusted_publisher, 1);
+    assert.equal(spoofAndStale.evaluation.ignored_stale_head, 1);
+    assert.deepEqual(spoofAndStale.evaluation.missing_suites, ["server suite / unit", "server suite / site"]);
+    assert.equal(stampedCommands.length, 0);
 
-    // 3. Matching dispatch statuses ("server suite / p1-cli" latest created_at success + "server suite / server" success)
-    // satisfy --suite p1-cli,server (and also full context selector "server suite / server") and stamp pass!
+    // 3. Trusted dispatch statuses ("server suite / p1-cli" latest created_at success + "server suite / server" success)
+    // with exact context + creator_login + target_url_prefix stamp pass!
     const passed = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      requiredSuites: ["p1-cli", "server suite / server"],
-      apiBaseUrl: ghUrl,
+      policy: {
+        version: 1,
+        repo: "yulanventures/commonswarm",
+        required: [
+          {
+            kind: "commit_status",
+            context: "server suite / p1-cli",
+            creator_login: "github-actions[bot]",
+            target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
+          },
+          {
+            kind: "commit_status",
+            context: "server suite / server",
+            creator_login: "github-actions[bot]",
+            target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
+          },
+        ],
+      },
       githubToken: GH_SECRET,
+      githubFetcher: trustedGhFetcher,
     });
     assert.equal(passed.stamped, true);
     assert.equal(passed.action, "pass");
-    assert.equal(passed.evaluation.ignored_stale_head, 2);
-    assert.equal(passed.evaluation.ignored_superseded_runs, 1, "older failed p1-cli status must be superseded by newer created_at");
+    assert.equal(passed.evaluation.ignored_stale_head, 1);
+    assert.equal(passed.evaluation.ignored_superseded_runs, 1);
     assert.equal(stampedCommands.length, 1);
     assert.equal(stampedCommands[0]!.verdict, "pass");
     assert.equal(stampedCommands[0]!.head_sha, SHA_NEW);
