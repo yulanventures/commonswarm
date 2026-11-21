@@ -1601,6 +1601,10 @@ import "../../styles/kylon-image-viewer.css";
     setConversationNotify,
     messageStatus,
     askChoices,
+    readReviewChecks,
+    stampReviewCheck,
+    type ReviewCheckRecord,
+    type ReviewCheckVerdict,
     signalMentions,
     type SignalMention,
     signalReactions,
@@ -1639,6 +1643,12 @@ import "../../styles/kylon-image-viewer.css";
   import { bindDialogInvite, dialogInviteCurrent, dialogInviteLink, dialogInviteNotice, settleDialogInvite,
     type DialogInviteReceipt, type DialogInviteScope } from "../../lib/people/invite-receipt";
   import { PendingRefreshGate } from "../../lib/pending-refresh";
+  import {
+    REVIEW_CHECK_STAMP_FAILED,
+    groupReviewChecksByThreadRoot,
+    upsertReviewCheckInMap,
+  } from "../../lib/review-checks";
+  import { buildReviewCheckCard } from "../../lib/review-check-card";
   import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
   import {
     agentPresenceLine,
@@ -2621,6 +2631,46 @@ import "../../styles/kylon-image-viewer.css";
       choiceCheckedReplyIds.clear();
       choiceFailedIds.clear();
       choiceInFlight = { ids: new Set(), replies: new Set() };
+    };
+    /* Revision-bound review checks (C3): thread-root cards for the active conversation.
+       Scoped strictly to viewer + workspace + conversation and retired synchronously on any switch or eviction. */
+    let reviewChecksByThread = new Map<string, ReviewCheckRecord[]>();
+    let reviewCheckGeneration = 0;
+    let reviewCheckEpoch = 0;
+    let reviewCheckCheckedAt = 0;
+    let reviewCheckCheckedKey = "";
+    let reviewCheckCheckedSignalCount = -1;
+    const reviewChecksUnsupportedWorkspaces = new Set<string>();
+    const reviewCheckErrors = new Map<string, string>();
+    const reviewCheckDrafts = new Map<string, string>();
+    const reviewCheckNoteOpen = new Set<string>();
+    type ReviewCheckTicket = { viewer: string; workspaceId: string; version: number; epoch: number };
+    let reviewCheckTickets = new Map<string, ReviewCheckTicket>();
+    const reviewCheckTicketLive = (ticket: ReviewCheckTicket): boolean =>
+      ticket.viewer === (session?.user.id ?? "") &&
+      ticket.workspaceId === activeWorkspaceId &&
+      ticket.version === requestVersion &&
+      ticket.epoch === reviewCheckEpoch;
+    const reviewCheckIsPending = (checkId: string): boolean => {
+      const ticket = reviewCheckTickets.get(checkId);
+      return ticket !== undefined && reviewCheckTicketLive(ticket);
+    };
+    const reviewCheckDraftKey = (workspaceId: string, checkId: string): string =>
+      `${session?.user.id ?? ""}:${workspaceId}:${checkId}`;
+    const resetReviewChecks = (clearAccountState = false): void => {
+      reviewChecksByThread = new Map();
+      reviewCheckGeneration += 1;
+      reviewCheckEpoch += 1;
+      reviewCheckCheckedAt = 0;
+      reviewCheckCheckedKey = "";
+      reviewCheckCheckedSignalCount = -1;
+      reviewCheckTickets = new Map();
+      reviewCheckErrors.clear();
+      if (clearAccountState) {
+        reviewCheckDrafts.clear();
+        reviewCheckNoteOpen.clear();
+        reviewChecksUnsupportedWorkspaces.clear();
+      }
     };
     const resetMessageStatus = (): void => {
       messageStatusRows = new Map();
@@ -11946,6 +11996,182 @@ import "../../styles/kylon-image-viewer.css";
       if ((changed || deferred) && !addAgentViewOpen()) renderFeed();
     };
 
+    const appendReviewChecks = (body: HTMLElement, signal: Signal): void => {
+      if (signal.threadRootId !== null) return;
+      const checks = reviewChecksByThread.get(signal.id);
+      if (!checks || checks.length === 0) return;
+      const viewerId = session?.user.id ?? null;
+      const workspaceId = activeWorkspaceId ?? "";
+      for (const check of checks) {
+        const draftKey = reviewCheckDraftKey(workspaceId, check.checkId);
+        const card = buildReviewCheckCard(
+          document,
+          {
+            check,
+            viewerUserId: viewerId,
+            pending: reviewCheckIsPending(check.checkId),
+            error: reviewCheckErrors.get(check.checkId) ?? null,
+            draftNote: reviewCheckDrafts.get(draftKey) ?? "",
+            noteOpen: reviewCheckNoteOpen.has(draftKey),
+            formatTime: (iso) => {
+              const formatted = formatTime(iso);
+              return formatted.relative ? { text: formatted.relative, iso } : null;
+            },
+          },
+          {
+            onDraftChange: (checkId, note) => {
+              const key = reviewCheckDraftKey(workspaceId, checkId);
+              if (note.length > 0) reviewCheckDrafts.set(key, note);
+              else reviewCheckDrafts.delete(key);
+            },
+            onNoteOpenChange: (checkId, open) => {
+              const key = reviewCheckDraftKey(workspaceId, checkId);
+              if (open) reviewCheckNoteOpen.add(key);
+              else reviewCheckNoteOpen.delete(key);
+            },
+            onStamp: (targetCheck, verdict, note) => {
+              void sendReviewCheckStamp(targetCheck, verdict, note);
+            },
+          },
+        );
+        body.append(card);
+      }
+    };
+
+    const sendReviewCheckStamp = async (
+      check: ReviewCheckRecord,
+      verdict: ReviewCheckVerdict,
+      note: string,
+    ): Promise<void> => {
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      if (!activeSession || !workspaceId || reviewCheckIsPending(check.checkId)) return;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: activeSession.user.id, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      const ticket: ReviewCheckTicket = {
+        viewer: activeSession.user.id,
+        workspaceId,
+        version: requestVersion,
+        epoch: reviewCheckEpoch,
+      };
+      reviewCheckTickets.set(check.checkId, ticket);
+      reviewCheckErrors.delete(check.checkId);
+      const hadCardFocus =
+        document.activeElement instanceof Element &&
+        document.activeElement.closest(`[data-review-check="${CSS.escape(check.checkId)}"]`) !== null;
+      renderFeed();
+      const isAlive = (): boolean =>
+        reviewCheckTickets.get(check.checkId) === ticket &&
+        reviewCheckTicketLive(ticket) &&
+        (!pinned || pinned.isCurrent(workspaceId));
+      let result: Awaited<ReturnType<typeof stampReviewCheck>>;
+      try {
+        result = await stampReviewCheck(
+          activeSession,
+          uuid(),
+          workspaceId,
+          { checkId: check.checkId, headSha: check.headSha, verdict, note },
+          { pinned, isAlive },
+        );
+      } catch {
+        result = { ok: false, status: 0, error: null, message: REVIEW_CHECK_STAMP_FAILED };
+      }
+      if (!isAlive()) return;
+      reviewCheckTickets.delete(check.checkId);
+      const restoreReviewCardFocus = (): void => {
+        if (!hadCardFocus) return;
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) return;
+        const card = one<HTMLElement>(`[data-feed-list] [data-review-check="${CSS.escape(check.checkId)}"]`);
+        const btn = card?.querySelector<HTMLButtonElement>(`[data-review-stamp="${verdict}"]:not([disabled])`) ?? null;
+        (btn ?? card)?.focus({ preventScroll: true });
+      };
+      if (result.ok) {
+        reviewChecksByThread = upsertReviewCheckInMap(reviewChecksByThread, result.reviewCheck);
+        const draftKey = reviewCheckDraftKey(workspaceId, check.checkId);
+        reviewCheckDrafts.delete(draftKey);
+        reviewCheckNoteOpen.delete(draftKey);
+        reviewCheckErrors.delete(check.checkId);
+        renderFeed();
+        restoreReviewCardFocus();
+        if (result.satisfiedNow) {
+          void refreshLatestSignals();
+        }
+        return;
+      }
+      reviewCheckErrors.set(check.checkId, result.message);
+      renderFeed();
+      restoreReviewCardFocus();
+      if ((result.status === 409 && result.error === "stale_head") || result.status === 404) {
+        void refreshReviewChecks(workspaceId, ticket.version, true);
+      }
+    };
+
+    const refreshReviewChecks = async (workspaceId: string, version: number, force = false): Promise<void> => {
+      const viewerId = session?.user.id ?? "";
+      if (sampleMode || !viewerId || signals.length === 0) return;
+      if (reviewChecksUnsupportedWorkspaces.has(workspaceId)) return;
+      const targetConvId =
+        conversationHistory?.conversationId ??
+        (typeof activeDmConversationId === "string" && activeDmConversationId ? activeDmConversationId : null) ??
+        (typeof conversationForChannel === "function" ? conversationForChannel(activeChannelId)?.conversationId ?? null : null);
+      const convKey = `${workspaceId}:${targetConvId ?? "all"}`;
+      const now = Date.now();
+      const hasNewSignals = convKey !== reviewCheckCheckedKey || signals.length !== reviewCheckCheckedSignalCount;
+      if (!force && !hasNewSignals && now - reviewCheckCheckedAt < 20_000) return;
+      reviewCheckCheckedAt = now;
+      reviewCheckCheckedKey = convKey;
+      reviewCheckCheckedSignalCount = signals.length;
+      const generation = ++reviewCheckGeneration;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: viewerId, workspaceId })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
+      const isAlive = (): boolean =>
+        generation === reviewCheckGeneration &&
+        version === requestVersion &&
+        workspaceId === activeWorkspaceId &&
+        (session?.user.id ?? "") === viewerId &&
+        (!pinned || pinned.isCurrent(workspaceId));
+      let outcome: Awaited<ReturnType<typeof readReviewChecks>>;
+      try {
+        outcome = await readReviewChecks(workspaceId, {
+          ...(targetConvId ? { conversationId: targetConvId } : {}),
+          limit: 50,
+          pinned,
+          expectedUserId: viewerId,
+          isAlive,
+        });
+      } catch {
+        return;
+      }
+      if (!isAlive()) return;
+      if (outcome.status === "unsupported") {
+        reviewChecksUnsupportedWorkspaces.add(workspaceId);
+        if (reviewChecksByThread.size > 0) {
+          reviewChecksByThread = new Map();
+          if (!addAgentViewOpen()) renderFeed();
+        }
+        return;
+      }
+      if (outcome.status === "denied") {
+        if (reviewChecksByThread.size > 0) {
+          reviewChecksByThread = new Map();
+          if (!addAgentViewOpen()) renderFeed();
+        }
+        return;
+      }
+      if (outcome.status !== "ready") return;
+      const next = groupReviewChecksByThreadRoot(outcome.checks);
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...reviewChecksByThread]);
+      reviewChecksByThread = next;
+      if (changed && !addAgentViewOpen()) renderFeed();
+    };
+
     /** Read the mentions of loaded messages not asked about yet, and repaint when any has one. */
     const refreshSignalMentions = async (workspaceId: string, version: number): Promise<void> => {
       if (sampleMode || !session) return;
@@ -13885,6 +14111,7 @@ import "../../styles/kylon-image-viewer.css";
         if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
         appendChoices(body, signal, markdown, streamSignal?.answered ?? false, choiceChecking, choiceTitle);
+        appendReviewChecks(body, signal);
         /* Reactions sit under the message, before the row's tools; they are never in the floating footer. */
         appendReactions(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
@@ -14373,6 +14600,7 @@ import "../../styles/kylon-image-viewer.css";
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
+        void refreshReviewChecks(workspaceId, version);
         void refreshSignalMentions(workspaceId, version);
         void refreshSignalReactions(workspaceId, version);
         return;
@@ -14445,6 +14673,7 @@ import "../../styles/kylon-image-viewer.css";
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
       void refreshChoices(workspaceId, version);
+      void refreshReviewChecks(workspaceId, version);
       void refreshSignalMentions(workspaceId, version);
       void refreshSignalReactions(workspaceId, version);
     };
@@ -14545,6 +14774,7 @@ import "../../styles/kylon-image-viewer.css";
             void refreshDeliveryReceipts(workspaceId, version);
             void refreshMessageStatus(workspaceId, version);
             void refreshChoices(workspaceId, version);
+            void refreshReviewChecks(workspaceId, version);
             void refreshSignalMentions(workspaceId, version);
             void refreshSignalReactions(workspaceId, version);
             void refreshPendingAccess(workspaceId, version);
@@ -14606,6 +14836,7 @@ import "../../styles/kylon-image-viewer.css";
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
+        void refreshReviewChecks(workspaceId, version);
         void refreshSignalMentions(workspaceId, version);
         void refreshSignalReactions(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
@@ -14872,7 +15103,7 @@ import "../../styles/kylon-image-viewer.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices(); resetSignalMentions(); resetSignalReactions();
+      resetChoices(); resetReviewChecks(true); resetSignalMentions(); resetSignalReactions();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -15666,7 +15897,7 @@ import "../../styles/kylon-image-viewer.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices(); resetSignalMentions(); resetSignalReactions();
+      resetChoices(); resetReviewChecks(false); resetSignalMentions(); resetSignalReactions();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -17140,6 +17371,9 @@ import "../../styles/kylon-image-viewer.css";
       if (invalidateArchive && typeof invalidateWaitingArchived === "function") {
         invalidateWaitingArchived(workspaceId);
       }
+      if (typeof resetReviewChecks === "function") {
+        resetReviewChecks(false);
+      }
       const viewingEvicted =
         activeDmConversationId === conversationId ||
         (conversationHistory !== null && conversationHistory.conversationId === conversationId);
@@ -17223,8 +17457,9 @@ import "../../styles/kylon-image-viewer.css";
       if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
       const invalidatedArchive =
         typeof hasLostConversationAccess === "function" && hasLostConversationAccess(workspaceId, prevList, rows);
-      if (invalidatedArchive && typeof invalidateWaitingArchived === "function") {
-        invalidateWaitingArchived(workspaceId);
+      if (invalidatedArchive) {
+        if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
+        if (typeof resetReviewChecks === "function") resetReviewChecks(false);
       }
       // Reconcile authoritative omission even while the active conversation's first history page is still loading.
       const requestedDmId = activeDmConversationId ??
@@ -18519,7 +18754,7 @@ import "../../styles/kylon-image-viewer.css";
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
-        resetChoices(); resetSignalMentions(); resetSignalReactions();
+        resetChoices(); resetReviewChecks(false); resetSignalMentions(); resetSignalReactions();
         // A new visit takes a fresh unread snapshot, even when it comes back to the channel it left.
         unreadVisit = null;
         renderUnreadBar();
@@ -22394,6 +22629,7 @@ import "../../styles/kylon-image-viewer.css";
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
+        void refreshReviewChecks(workspaceId, version);
         void refreshSignalMentions(workspaceId, version);
         void refreshSignalReactions(workspaceId, version);
       } catch (caught) {

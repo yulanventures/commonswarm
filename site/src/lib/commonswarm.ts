@@ -2,6 +2,16 @@ import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants
 import { homeOverviewUnavailable } from "./home-map";
 import type { HomeOverview } from "./home/contract";
 import type { AccountAgent } from "./account-agents";
+import {
+  buildReviewChecksReadRequest,
+  parseReviewChecksReadOutcome,
+  parseStampReviewCheckOutcome,
+  reviewCheckStampCommand,
+  type ReviewCheckRecord,
+  type ReviewChecksReadOutcome,
+  type ReviewCheckVerdict,
+  type StampReviewCheckResult,
+} from "./review-checks.js";
 /*
  * The browser client. This file is the whole of the web app's contact with the backend.
  *
@@ -5716,6 +5726,56 @@ export async function readOversightConversationHistory(
   }
   return parseOversightHistoryResponse(status, body, browserSignalFromRow);
 }
+
+/** C3 `resource: "review_checks"`: read revision-bound review checks for a workspace, conversation, or thread root. */
+export async function readReviewChecks(
+  workspaceId: string,
+  options: {
+    checkId?: string | null;
+    threadRootId?: string | null;
+    conversationId?: string | null;
+    limit?: number;
+  } & ConversationReadOptions = {},
+): Promise<ReviewChecksReadOutcome> {
+  const { checkId, threadRootId, conversationId, limit, ...readOptions } = options;
+  const { status, body } = await postConversationRead(
+    buildReviewChecksReadRequest(workspaceId, { checkId, threadRootId, conversationId, limit }),
+    "review checks",
+    { ...readOptions, workspaceId },
+  );
+  return parseReviewChecksReadOutcome(status, body);
+}
+
+/** C3 `review_check_stamp`: record the signed-in person's own pass or hold verdict at one head SHA. */
+export async function stampReviewCheck(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  input: {
+    checkId: string;
+    headSha: string;
+    verdict: ReviewCheckVerdict;
+    note?: string | null;
+  },
+  options?: {
+    pinned?: PinnedAccountContext | null;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<StampReviewCheckResult> {
+  const command = reviewCheckStampCommand(input.checkId, input.headSha, input.verdict, input.note);
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    command,
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  return parseStampReviewCheckOutcome(status, body);
+}
+
+export type { ReviewCheckRecord, ReviewChecksReadOutcome, ReviewCheckVerdict, StampReviewCheckResult };
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */
 export function uuid(): string {
