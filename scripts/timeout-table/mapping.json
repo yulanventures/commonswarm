@@ -4482,6 +4482,20 @@
             "reason": "Local Unix domain socket write, not a Cloud API request."
           }
         },
+        "src/cloud/native-wake-claude.ts:CLAUDE_WAKE_LOCK_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-claude.ts:140",
+          "detail": "Local receive-binding file lock timeout during Claude wake socket registration and hook refresh.",
+          "operation": {
+            "name": "claude-wake-lock-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local file lock wait, not a network request timeout."
+          }
+        },
         "src/cloud/native-wake-claude.ts:setInterval": {
           "class": "local",
           "scope": "per-request",
@@ -4518,10 +4532,24 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:442",
+          "citation": "src/cloud/native-wake-claude.ts:533",
           "detail": "Local receive-binding file lock timeout during Claude wake socket registration.",
           "operation": {
             "name": "claude-wake-register-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local file lock wait, not a network request timeout."
+          }
+        },
+        "src/cloud/native-wake-claude.ts:timeoutMs#2": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/native-wake-claude.ts:611",
+          "detail": "Local receive-binding file lock timeout during Claude hook socket token refresh.",
+          "operation": {
+            "name": "claude-wake-hook-refresh-lock",
             "class": "not-run",
             "writes": [],
             "removes": [],

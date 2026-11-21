@@ -54,7 +54,7 @@ import {
 } from "./cli/ax.js";
 import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, selectAgentWorkspace, agentWorkspaceStatePath, profileSessionContext } from "./cloud/agent-profile.js";
-import { readReceiveBinding, receiveStatus } from "./cloud/agent-receive.js";
+import { readReceiveBinding, receiveStatus, WAKE_TRANSPORTS } from "./cloud/agent-receive.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
@@ -103,7 +103,6 @@ import {
 } from "./cloud/native-wake.js";
 import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
 import { ClaudeSocketAdapter } from "./cloud/native-wake-claude.js";
-import { receiveStatus, WAKE_TRANSPORTS } from "./cloud/agent-receive.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";

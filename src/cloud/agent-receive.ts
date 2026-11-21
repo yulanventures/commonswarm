@@ -352,10 +352,6 @@ export async function configureAgentReceive(options: {
       ...(nextTransport !== undefined ? { wake_transport: nextTransport } : {}),
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
-    if ((options.mode === "turn" || nextTransport !== "socket") && provider === "claude") {
-      const { clearClaudeWakeRegistration } = await import("./native-wake-claude.js");
-      await clearClaudeWakeRegistration(profile, host).catch(() => undefined);
-    }
     if (provider === "grok-bot" && grokAgentId) {
       if (existing?.grok_bot_agent_id && existing.grok_bot_agent_id !== grokAgentId) throw new AgentSetupError("receive_provider_conflict", "This session is bound to a different Bot agent UUID.");
       binding = { ...binding, grok_bot_agent_id: grokAgentId };
@@ -368,8 +364,6 @@ export async function configureAgentReceive(options: {
     let startCommand: string | null = null;
     if (options.mode === "wake" && provider === "claude" && nextTransport === "socket") {
       binding = { ...binding, channel_config: null };
-      const { refreshClaudeWakeSocketFromHookEnv } = await import("./native-wake-claude.js");
-      await refreshClaudeWakeSocketFromHookEnv({ profilePath: profile, hostSessionId: host, cwd });
     } else if (options.mode === "wake" && provider === "claude") {
       const config = join(dirname(profile), `claude-channel-${profileScopeKey(host)}.json`);
       await writeSecureJsonFile(config, JSON.stringify({ mcpServers: {
@@ -382,6 +376,19 @@ export async function configureAgentReceive(options: {
       startCommand = `claude --resume ${shellQuote(host)} --mcp-config ${shellQuote(config)} --dangerously-load-development-channels server:cswarm`;
     }
     await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(binding));
+    if ((options.mode === "turn" || nextTransport !== "socket") && provider === "claude") {
+      const { clearClaudeWakeRegistration } = await import("./native-wake-claude.js");
+      await clearClaudeWakeRegistration(profile, host);
+    }
+    if (options.mode === "wake" && provider === "claude" && nextTransport === "socket") {
+      const { refreshClaudeWakeSocketFromHookEnv } = await import("./native-wake-claude.js");
+      await refreshClaudeWakeSocketFromHookEnv({
+        profilePath: profile,
+        hostSessionId: host,
+        cwd,
+        alreadyLocked: true,
+      });
+    }
     return {
       ...receiveStatus(binding, Date.now(), openedProfile.host_session_id), profile, hook_file: binding.hook_file,
       instruction: turnCheckInstruction(profile, host),
@@ -420,19 +427,19 @@ export async function receiveHookEvent(profile: string, host: string, input: unk
   const turnEnd = isTurnEndHookEvent(binding.provider, event.hook_event_name);
   const stopHookActive = event.stop_hook_active === true || event.continuationActive === true;
   let stopDrain = false;
-  await updateReceiveBinding(profile, host, b => {
+  const updated = await updateReceiveBinding(profile, host, b => {
     if (turnEnd) {
       stopDrain = b.requested_mode === "turn" && !stopHookActive && (b.stop_drains_in_turn ?? 0) < MAX_STOP_DRAINS_PER_TURN;
       return { ...b, turn_verified_at: now, last_turn_ended_at: now, idle: true };
     }
     return { ...b, turn_verified_at: now, last_turn_started_at: now, idle: false, stop_drains_in_turn: 0 };
   });
-  if (binding.provider === "claude" && binding.requested_mode === "wake" && binding.wake_transport === "socket") {
+  if (updated.provider === "claude" && updated.requested_mode === "wake" && updated.wake_transport === "socket") {
     const { refreshClaudeWakeSocketFromHookEnv } = await import("./native-wake-claude.js");
     await refreshClaudeWakeSocketFromHookEnv({
       profilePath: profile,
       hostSessionId: host,
-      cwd: binding.cwd,
+      cwd: updated.cwd,
     }).catch(() => undefined);
   }
   if (turnEnd) {

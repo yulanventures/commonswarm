@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DeliveryCommandClient, DeliveryHttpError, DeliveryProtocolError, type DeliveryRow } from "./delivery.js";
 import { RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended } from "./renewal.js";
@@ -159,15 +160,31 @@ class ChannelReplyClient extends ThinCommandClient {
   }
 }
 
-export async function serveAgentChannel(options: { profilePath: string; hostSessionId: string; gateway?: GatewayChannelTransport }): Promise<void> {
+function bindingAllowsChannel(binding: ReceiveBinding | null | undefined, isGateway: boolean): binding is ReceiveBinding {
+  if (!binding || binding.requested_mode !== "wake") return false;
+  if (isGateway) return binding.provider === "grok-bot";
+  // Older Claude wake bindings with no explicit wake_transport default to channel.
+  return binding.provider === "claude" && (binding.wake_transport ?? "channel") === "channel";
+}
+
+export async function serveAgentChannel(options: {
+  profilePath: string;
+  hostSessionId: string;
+  gateway?: GatewayChannelTransport;
+  /** Optional MCP transport override (defaults to StdioServerTransport). */
+  transport?: Transport;
+  /** Test seam invoked immediately before acquiring the receive lock to emit a channel notification. */
+  beforeNotify?: () => Promise<void> | void;
+}): Promise<void> {
+  const isGateway = Boolean(options.gateway);
   const profilePath = privatePath(options.profilePath);
   const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const host = options.hostSessionId;
   const initial = await readReceiveBinding(profilePath, host);
-  if (!initial || initial.provider !== (options.gateway ? "grok-bot" : "claude") || initial.requested_mode !== "wake") {
+  if (!bindingAllowsChannel(initial, isGateway)) {
     throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
   }
-  if (receiveStatus(initial).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
+  if (receiveStatus(initial!).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
   const runtimeId = randomUUID();
   const startedAt = Date.now();
   const abort = new AbortController();
@@ -452,7 +469,10 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   process.on("SIGINT", stop);
   await withFileLock(dirname(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
     const binding = await readReceiveBinding(profilePath, host);
-    if (binding && receiveStatus(binding).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
+    if (!bindingAllowsChannel(binding, isGateway)) {
+      throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
+    }
+    if (receiveStatus(binding!).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
     await updateReceiveBinding(profilePath, host, b => ({
       ...b, ...(options.gateway ? { idle: false } : {}), channel_instance_id: runtimeId, channel_pid: process.pid,
       channel_heartbeat_at: new Date().toISOString(), wake_verified_at: null,
@@ -460,20 +480,20 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
     }));
   });
   const touch = async () => updateReceiveBinding(profilePath, host, b => {
-    if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") { stop(); return b; }
+    if (b.channel_instance_id !== runtimeId || !bindingAllowsChannel(b, isGateway)) { stop(); return b; }
     return { ...b, channel_heartbeat_at: new Date().toISOString() };
   });
   try {
     await persist();
     if (options.gateway) initialized = true;
-    else await server.connect(new StdioServerTransport());
+    else await server.connect(options.transport ?? new StdioServerTransport());
     heartbeat = setInterval(() => { void touch().catch(stop); }, CHANNEL_HEARTBEAT_MS);
     manager?.start();
     while (!stopped) {
       if (!initialized) { await delay(50, undefined, { signal: abort.signal }); continue; }
       if (manager && manager.dispatchState() !== "running") throw new AgentSetupError("channel_session_expired", "The managed session stopped. Renew or restart that same session before enabling wake again.");
       const binding = await readReceiveBinding(profilePath, host);
-      if (!binding || binding.requested_mode !== "wake" || binding.channel_instance_id !== runtimeId) break;
+      if (!bindingAllowsChannel(binding, isGateway) || binding!.channel_instance_id !== runtimeId) break;
       // Startup settings can be loaded by the wrong host conversation. Wait for
       // a matching host-generated hook on this connection before claiming anything.
       if (!options.gateway && (binding.turn_verified_at === null || Date.parse(binding.turn_verified_at) < startedAt || Date.parse(binding.turn_verified_at) > Date.now())) {
@@ -521,47 +541,60 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
           } else if (Date.parse(pending.row.leasedUntil) <= Date.now()) {
             gate.pending = null; notified = false; await persist(); lastPoll = 0;
           } else if (!notified) {
-            if ((await readReceiveBinding(profilePath, host))?.requested_mode !== "wake") break;
-            const isCurrentWakeTest = isCurrentCanary(binding, pending.row, profile.principal_id);
+            const isCurrentWakeTest = isCurrentCanary(binding!, pending.row, profile.principal_id);
             const selfAddressed = isSelfAddressed(pending.row, profile.principal_id);
             if (selfAddressed) selfAddressedSignalIds.add(pending.row.signal.id);
             else rememberReplyPlace(pending.row.signal);
-            if (isCurrentWakeTest && !binding.idle) { await delay(250, undefined, { signal: abort.signal }); continue; }
+            if (isCurrentWakeTest && !binding!.idle) { await delay(250, undefined, { signal: abort.signal }); continue; }
+            if (options.beforeNotify !== undefined) {
+              await options.beforeNotify();
+            }
             if (options.gateway) {
+              const liveBinding = await readReceiveBinding(profilePath, host);
+              if (!bindingAllowsChannel(liveBinding, isGateway) || liveBinding!.channel_instance_id !== runtimeId) break;
               // Publish the challenge before HTTP so an immediate CLI receipt can find it.
               notified = true;
               await persist();
               try { await options.gateway.send(pending, abort.signal); }
               catch (error) { notified = false; await persist(); throw error; }
             } else {
-              // Native Wake rule: channel notifications emit ONLY the fixed wake prompt (never
-              // teammate message text, sender text, or subject) to close prompt-injection paths.
-              const batch = (journal.notification_batch ?? 0) + 1;
-              journal.notification_batch = batch;
-              const content = formatNativeWakePrompt(batch);
-              assertFixedNativeWakePrompt(content);
-              await server.notification({ method: "notifications/claude/channel", params: {
-                content,
-                meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
-                  sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
-                  sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
-                  attachment_count: String(pending.row.signal.attachments?.length ?? 0),
-                  batch: String(batch),
-                },
-              } });
+              // Serialize channel notification against route/mode changes on the shared receive lock.
+              const retired = await withFileLock(dirname(profilePath), `receive-${profileScopeKey(host)}`, async () => {
+                const liveBinding = await readReceiveBinding(profilePath, host);
+                if (!bindingAllowsChannel(liveBinding, isGateway) || liveBinding!.channel_instance_id !== runtimeId) {
+                  return true;
+                }
+                // Native Wake rule: channel notifications emit ONLY the fixed wake prompt (never
+                // teammate message text, sender text, or subject) to close prompt-injection paths.
+                const batch = (journal.notification_batch ?? 0) + 1;
+                journal.notification_batch = batch;
+                const content = formatNativeWakePrompt(batch);
+                assertFixedNativeWakePrompt(content);
+                await server.notification({ method: "notifications/claude/channel", params: {
+                  content,
+                  meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
+                    sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
+                    sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
+                    attachment_count: String(pending.row.signal.attachments?.length ?? 0),
+                    batch: String(batch),
+                  },
+                } });
+                return false;
+              });
+              if (retired) break;
             }
             notified = true;
             await persist();
             if (pending.row.signal.kind === "ask") await appendHandledAsk(profilePath, host, pending.row.signal.id);
             await updateReceiveBinding(profilePath, host, b => ({ ...b, idle: false,
-              canary: isCurrentCanary(binding, pending.row, profile.principal_id) && b.canary && b.canary.nonce === binding.canary?.nonce ? { ...b.canary, signal_id: pending.row.signal.id, emitted_while_idle: binding.idle } : b.canary,
+              canary: isCurrentCanary(binding!, pending.row, profile.principal_id) && b.canary && b.canary.nonce === binding!.canary?.nonce ? { ...b.canary, signal_id: pending.row.signal.id, emitted_while_idle: binding!.idle } : b.canary,
             }));
           }
         } else {
-          if (binding.canary && binding.canary.signal_id === null && binding.idle) {
+          if (binding!.canary && binding!.canary.signal_id === null && binding!.idle) {
             const result = await sender.sendSignal({
-              workspaceId: profile.workspace_id, credential: token, commandId: `canary_${binding.canary.nonce.replace(/-/g, "")}`,
-              command: { kind: "post_signal", signal_kind: "note", body: canaryBody(binding.canary.nonce),
+              workspaceId: profile.workspace_id, credential: token, commandId: `canary_${binding!.canary.nonce.replace(/-/g, "")}`,
+              command: { kind: "post_signal", signal_kind: "note", body: canaryBody(binding!.canary.nonce),
                 to_user_id: null, to_agent_principal_id: profile.principal_id, in_reply_to: null, about: null, until_ms: 5 * 60_000 },
               signal: abort.signal,
             });
@@ -569,11 +602,13 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
             const canaryId = result.response.signal?.id;
             if (!canaryId) throw new AgentSetupError("canary_outcome_unknown", "The service did not name the accepted wake test. The same request can be retried.");
             await updateReceiveBinding(profilePath, host, b => ({ ...b,
-              canary: b.canary?.nonce === binding.canary?.nonce ? { ...b.canary!, signal_id: canaryId } : b.canary,
+              canary: b.canary?.nonce === binding!.canary?.nonce ? { ...b.canary!, signal_id: canaryId } : b.canary,
             }));
             lastPoll = 0;
           }
           if (Date.now() - lastPoll >= CHANNEL_POLL_MS) {
+            const claimBinding = await readReceiveBinding(profilePath, host);
+            if (!bindingAllowsChannel(claimBinding, isGateway) || claimBinding!.channel_instance_id !== runtimeId) break;
             const claimed = await delivery.claimAgentInbox({
               workspaceId: profile.workspace_id, credential: token, commandId: newCommandId(),
               listenerInstanceId: journal.listener_instance_id, expectedPrincipalId: profile.principal_id,

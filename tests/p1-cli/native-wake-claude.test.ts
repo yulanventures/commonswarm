@@ -24,22 +24,26 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 const execFileAsync = promisify(execFile);
 import { parseAgentConnection, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
+import { serveAgentChannel } from "../../src/cloud/agent-channel.js";
 import {
   configureAgentReceive,
   readReceiveBinding,
   receiveHookEvent,
   receiveStatus,
   requestReceiveCanary,
+  updateReceiveBinding,
 } from "../../src/cloud/agent-receive.js";
 import { checkAgentMessages } from "../../src/cloud/agent-check.js";
 import {
@@ -56,8 +60,10 @@ import {
   claudeWakeRegistrationPath,
   inspectClaudeSessionRegistry,
   readClaudeWakeRegistration,
+  refreshClaudeWakeSocketFromHookEnv,
   registerClaudeWakeSocket,
   serveClaudeWakeBridge,
+  validateClaudeSocketPath,
 } from "../../src/cloud/native-wake-claude.js";
 import type { WakeHandle } from "../../src/listener/wake.js";
 
@@ -198,7 +204,7 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
     assert.equal(info.mode & 0o777, 0o600, "registration file must be 0600");
     const saved = await readClaudeWakeRegistration(profile, SESSION_ID);
     assert.ok(saved);
-    assert.equal(saved.socket_path, sockPath);
+    assert.equal(saved.socket_path, join(await realpath(root), "inbox.sock"));
     assert.equal(saved.token, MSG_TOKEN);
 
     // Refuses regular file instead of Unix socket.
@@ -211,7 +217,7 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
         sessionsDir,
         env: { [CLAUDE_WAKE_ENV_SOCKET]: regularFile, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
       }),
-      /claude_wake_socket_unsafe|Unix domain socket/,
+      { code: "claude_wake_socket_unsafe" },
     );
 
     // Refuses symlink to Unix socket.
@@ -224,7 +230,7 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
         sessionsDir,
         env: { [CLAUDE_WAKE_ENV_SOCKET]: symlinkSock, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
       }),
-      /claude_wake_socket_unsafe|Unix domain socket/,
+      { code: "claude_wake_socket_unsafe" },
     );
 
     // Refuses control chars / newlines in token (prevents NDJSON frame injection).
@@ -235,7 +241,7 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
         sessionsDir,
         env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: "bad\ntoken" },
       }),
-      /claude_wake_token_invalid|single-line/,
+      { code: "claude_wake_token_invalid" },
     );
 
     // Refuses mismatched socket compared to live session registry.
@@ -249,14 +255,14 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
           sessionsDir,
           env: { [CLAUDE_WAKE_ENV_SOCKET]: otherSockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
         }),
-        /claude_wake_socket_mismatch|does not match/,
+        { code: "claude_wake_socket_mismatch" },
       );
     } finally {
       await otherSrv.close();
     }
 
-    // Switching from channel wake (with prior wake_verified_at) to socket via registerClaudeWakeSocket
-    // clears wake_verified_at and canary so channel verification never falsely carries to claude-socket.
+    // Switching socket -> channel deletes wake-claude-*.json, and manual registerClaudeWakeSocket
+    // refuses channel transport without mutating wake_transport or wake_verified_at.
     await configureAgentReceive({
       profilePath: profile,
       mode: "wake",
@@ -271,7 +277,6 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
       null,
       "switching claude wake from socket to channel must delete wake-claude registration file",
     );
-    const { updateReceiveBinding } = await import("../../src/cloud/agent-receive.js");
     await updateReceiveBinding(profile, SESSION_ID, (b) => ({
       ...b,
       wake_verified_at: new Date().toISOString(),
@@ -283,19 +288,61 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
         received_at: new Date().toISOString(),
       },
     }));
-    const switchedToSocket = await registerClaudeWakeSocket({
+    await assert.rejects(
+      () => registerClaudeWakeSocket({
+        profilePath: profile,
+        hostSessionId: SESSION_ID,
+        sessionsDir,
+        env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+      }),
+      { code: "wake_transport_mismatch" },
+      "manual register-socket must refuse channel transport instead of silently switching routes",
+    );
+    assert.equal((await readReceiveBinding(profile, SESSION_ID))?.wake_transport, "channel");
+    assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
+
+    // Explicit reconfigure channel -> socket clears wake_verified_at and canary so channel
+    // verification never falsely carries over to claude-socket.
+    await configureAgentReceive({
       profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
       hostSessionId: SESSION_ID,
-      sessionsDir,
-      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
     });
-    assert.equal(switchedToSocket.wake_route, "claude-socket");
     const afterSwitch = await readReceiveBinding(profile, SESSION_ID);
     assert.equal(afterSwitch?.wake_transport, "socket");
     assert.equal(afterSwitch?.wake_verified_at, null, "flipping channel -> socket must clear wake_verified_at");
     assert.equal(afterSwitch?.canary, null, "flipping channel -> socket must clear prior canary");
 
-    // Opting out to turn mode deletes the saved 0600 messaging token file.
+    // Refuses saving without a positive live session match.
+    const emptySessionsDir = join(root, "empty-sessions");
+    await mkdir(emptySessionsDir, { recursive: true, mode: 0o700 });
+    await assert.rejects(
+      () => registerClaudeWakeSocket({
+        profilePath: profile,
+        hostSessionId: SESSION_ID,
+        sessionsDir: emptySessionsDir,
+        env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+      }),
+      { code: "claude_session_not_found" },
+      "manual register-socket must require a positive live session registry match",
+    );
+    assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
+
+    // Re-register cleanly while in socket wake mode, then opt out to turn mode.
+    await registerClaudeWakeSocket({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+    });
+    assert.ok(await readClaudeWakeRegistration(profile, SESSION_ID));
+
+    // Opting out to turn mode deletes the saved 0600 messaging token file and manual
+    // registerClaudeWakeSocket refuses to save in turn mode.
     await configureAgentReceive({
       profilePath: profile,
       mode: "turn",
@@ -306,6 +353,17 @@ test("registerClaudeWakeSocket stores 0600 token from env only, refuses unsafe s
     });
     assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
     assert.equal(wakeRouteForBinding(await readReceiveBinding(profile, SESSION_ID)), "none");
+    await assert.rejects(
+      () => registerClaudeWakeSocket({
+        profilePath: profile,
+        hostSessionId: SESSION_ID,
+        sessionsDir,
+        env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+      }),
+      { code: "wake_opted_out" },
+      "manual register-socket must refuse turn mode",
+    );
+    assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
   } finally {
     await srv.close();
     await rm(root, { recursive: true, force: true });
@@ -660,13 +718,15 @@ test("serveClaudeWakeBridge + CLI register-socket/status/whoami: end-to-end idle
     next: async ({ until, signal }) => {
       const waitMs = Math.max(0, Math.min(50, until - Date.now()));
       await delay(waitMs, undefined, { signal }).catch(() => undefined);
-      return "timeout";
+      return "deadline";
     },
     close: async () => undefined,
   };
 
   try {
-    const { cwd, profile, sessionsDir } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
+    const { cwd, profile } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
+    const sessionsDir = join(root, ".claude", "sessions");
+    await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
     await writeSessionJson(sessionsDir, process.pid, {
       sessionId: SESSION_ID,
       pid: process.pid,
@@ -765,9 +825,12 @@ test("serveClaudeWakeBridge + CLI register-socket/status/whoami: end-to-end idle
     assert.equal(whoamiJson.wake_route, "claude-socket");
     assert.equal(whoamiJson.wake_verified, true);
 
-    // `receiveHookEvent` auto-refreshes the 0600 token when Claude hook env carries a rotated token.
+    // `receiveHookEvent` auto-refreshes the 0600 token when Claude hook env carries a rotated token
+    // and the bound live session matches in $HOME/.claude/sessions.
     const prevSocket = process.env[CLAUDE_WAKE_ENV_SOCKET];
     const prevToken = process.env[CLAUDE_WAKE_ENV_TOKEN];
+    const prevHome = process.env.HOME;
+    process.env.HOME = root;
     process.env[CLAUDE_WAKE_ENV_SOCKET] = sockPath;
     process.env[CLAUDE_WAKE_ENV_TOKEN] = "claude_msg_rotated_token_42";
     try {
@@ -780,6 +843,8 @@ test("serveClaudeWakeBridge + CLI register-socket/status/whoami: end-to-end idle
       const refreshed = await readClaudeWakeRegistration(profile, SESSION_ID);
       assert.equal(refreshed?.token, "claude_msg_rotated_token_42");
     } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
       if (prevSocket === undefined) delete process.env[CLAUDE_WAKE_ENV_SOCKET];
       else process.env[CLAUDE_WAKE_ENV_SOCKET] = prevSocket;
       if (prevToken === undefined) delete process.env[CLAUDE_WAKE_ENV_TOKEN];
@@ -791,6 +856,401 @@ test("serveClaudeWakeBridge + CLI register-socket/status/whoami: end-to-end idle
   } finally {
     abort.abort();
     await srv.close();
+    await new Promise<void>((res) => http.close(() => res()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C1 witness: delayed hook refresh racing opt-out never recreates the 0600 bearer", async () => {
+  const root = await makeTempDir("cs-cw-c1-");
+  const sockPath = join(root, "inbox.sock");
+  const srv = await startUnixSocketServer(sockPath);
+  try {
+    const { cwd, profile, sessionsDir } = await makeBoundClaudeSeat(root);
+    await writeSessionJson(sessionsDir, process.pid, {
+      sessionId: SESSION_ID,
+      pid: process.pid,
+      status: "idle",
+      messagingSocketPath: sockPath,
+      cwd,
+    });
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    await registerClaudeWakeSocket({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+    });
+    assert.ok(await readClaudeWakeRegistration(profile, SESSION_ID));
+
+    let hookEntered!: () => void;
+    let releaseHook!: () => void;
+    const hookWaiting = new Promise<void>((r) => { hookEntered = r; });
+    const allowHook = new Promise<void>((r) => { releaseHook = r; });
+
+    // Start a delayed hook refresh that pauses right before acquiring the receive lock.
+    const delayedRefresh = refreshClaudeWakeSocketFromHookEnv({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      cwd,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: "late_hook_token_must_not_persist" },
+      beforeLock: async () => {
+        hookEntered();
+        await allowHook;
+      },
+    });
+    await hookWaiting;
+
+    // Opt out to turn mode while the hook is paused; deletes wake-claude-*.json under lock.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "turn",
+      provider: "claude",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
+
+    // Release the delayed hook -> acquires lock, sees turn mode, refuses to recreate the bearer!
+    releaseHook();
+    const refreshed = await delayedRefresh;
+    assert.equal(refreshed, false, "delayed hook must refuse to write after opt-out");
+    assert.equal(await readClaudeWakeRegistration(profile, SESSION_ID), null);
+
+    // Cleanup failures on transition out of socket wake must be surfaced, not swallowed.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    const regPath = claudeWakeRegistrationPath(profile, SESSION_ID);
+    await mkdir(regPath, { mode: 0o700 });
+    await assert.rejects(
+      () => configureAgentReceive({
+        profilePath: profile,
+        mode: "turn",
+        provider: "claude",
+        hostSessionId: SESSION_ID,
+        cwd,
+        execution: { command: process.execPath, args: [CLI] },
+      }),
+      /EISDIR|EPERM/,
+      "non-ENOENT cleanup failure on opt-out must surface instead of being swallowed",
+    );
+    await rm(regPath, { recursive: true, force: true });
+  } finally {
+    await srv.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C2 witness: socket directory chain refuses non-0700 parent dirs, user symlinks, zero auth bytes on refusal, and live matching control", async () => {
+  const root = await makeTempDir("cs-cw-c2-");
+  const publicDir = join(root, "pub");
+  const privateDir = join(root, "priv");
+  const linkDir = join(root, "link");
+  await mkdir(publicDir, { mode: 0o755 });
+  await chmod(publicDir, 0o755);
+  await mkdir(privateDir, { mode: 0o700 });
+  await chmod(privateDir, 0o700);
+  await symlink(privateDir, linkDir);
+
+  const pubSock = join(publicDir, "a.sock");
+  const privSock = join(privateDir, "b.sock");
+  const pubSrv = await startUnixSocketServer(pubSock);
+  const privSrv = await startUnixSocketServer(privSock);
+  try {
+    // 0755 immediate parent directory is refused (must be 0700).
+    await assert.rejects(
+      () => validateClaudeSocketPath(pubSock),
+      { code: "claude_wake_socket_unsafe" },
+      "non-0700 socket parent directory must be rejected",
+    );
+
+    // User-owned symlinked directory along the path is refused.
+    await assert.rejects(
+      () => validateClaudeSocketPath(join(linkDir, "b.sock")),
+      { code: "claude_wake_socket_unsafe" },
+      "user-owned symlink in socket path must be rejected",
+    );
+
+    // Traversal segment ".." is refused.
+    await assert.rejects(
+      () => validateClaudeSocketPath(`${privateDir}/../priv/b.sock`),
+      { code: "claude_wake_socket_unsafe" },
+      "path traversal segments must be rejected",
+    );
+
+    // Valid 0700 private parent directory succeeds and canonicalizes the path.
+    const ok = await validateClaudeSocketPath(privSock);
+    const expectedCanonical = join(await realpath(privateDir), "b.sock");
+    assert.equal(ok.canonicalPath, expectedCanonical);
+
+    // Live matching control over a real Unix socket succeeds and connects to canonical path.
+    const { cwd, profile, sessionsDir } = await makeBoundClaudeSeat(root);
+    await writeSessionJson(sessionsDir, process.pid, {
+      sessionId: SESSION_ID,
+      pid: process.pid,
+      status: "idle",
+      messagingSocketPath: privSock,
+      cwd,
+    });
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    await registerClaudeWakeSocket({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      sessionsDir,
+      env: { [CLAUDE_WAKE_ENV_SOCKET]: privSock, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
+    });
+
+    const realAdapter = new ClaudeSocketAdapter({
+      profilePath: profile,
+      sessionsDir,
+      isPidAlive: (p) => p === process.pid,
+    });
+    const liveSent = await realAdapter.sendWake({
+      hostSessionId: SESSION_ID,
+      prompt: "New CommonSwarm messages (batch 1): run cswarm check",
+      batch: 1,
+      cwd,
+    });
+    assert.deepEqual(liveSent, { ok: true });
+    await delay(50);
+    assert.equal(privSrv.received.length, 1, "live matching control must deliver auth+user frames");
+
+    // Synthetic refused-endpoint case over a real listening Unix socket: loosen parent dir to 0755
+    // before send -> refused with claude_wake_socket_unsafe and ZERO auth bytes written!
+    await chmod(privateDir, 0o755);
+    const refused = await realAdapter.sendWake({
+      hostSessionId: SESSION_ID,
+      prompt: "New CommonSwarm messages (batch 2): run cswarm check",
+      batch: 2,
+      cwd,
+    });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.code, "claude_wake_socket_unsafe");
+    await delay(50);
+    assert.equal(privSrv.received.length, 1, "refused endpoint must receive zero auth bytes");
+    assert.equal(pubSrv.received.length, 0, "unsafe 0755 endpoint must receive zero auth bytes");
+  } finally {
+    await chmod(privateDir, 0o700).catch(() => undefined);
+    await pubSrv.close();
+    await privSrv.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C3 witness: held channel notification racing channel->socket switch emits zero notifications, retires channel, and refuses restart", { timeout: 25_000 }, async () => {
+  const root = await makeTempDir("cs-cw-c3-");
+  let claimCount = 0;
+  let claimCountAfterSwitch = 0;
+  let switchedToSocket = false;
+  let deliveryServed = false;
+
+  const http = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read") {
+        if (body.resource === "members") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            workspace_id: WS,
+            workspace_name: "Test Workspace",
+            identity: {
+              credential_valid: true,
+              principal_id: AGENT,
+              workspace_id: WS,
+              owner_user_id: OWNER,
+              name: "Claude Seat",
+            },
+            members: [{ user_id: OWNER, display_name: "Owner", role: "owner" }],
+            agents: [{ principal_id: AGENT, name: "Claude Seat", owner_user_id: OWNER }],
+          }));
+          return;
+        }
+        if (body.resource === "renewal_grants") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+          return;
+        }
+      }
+      if (req.url === "/functions/v1/command") {
+        if (body.command?.kind === "claim_agent_inbox") {
+          claimCount += 1;
+          if (switchedToSocket) claimCountAfterSwitch += 1;
+          if (!deliveryServed) {
+            deliveryServed = true;
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+              status: "accepted",
+              ok: true,
+              event_ids: [],
+              events: [],
+              capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+              pending_delivery_count: 1,
+              terminal_delivery_failure_count: 0,
+              deliveries: [{
+                lease_id: "88888888-8888-4888-8888-888888888888",
+                leased_until: new Date(Date.now() + 60_000).toISOString(),
+                sender_owner_relation: "same_owner",
+                signal: {
+                  id: "99999999-9999-4999-8999-999999999999",
+                  workspace_id: WS,
+                  from: OWNER,
+                  from_kind: "user",
+                  to: null,
+                  to_agent: AGENT,
+                  in_reply_to: null,
+                  about: null,
+                  kind: "ask",
+                  body: "hello before route switch",
+                  created_at: new Date().toISOString(),
+                  until: "2099-01-01T00:00:00.000Z",
+                },
+              }],
+            }));
+            return;
+          }
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            status: "accepted",
+            ok: true,
+            event_ids: [],
+            events: [],
+            capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+            pending_delivery_count: 0,
+            terminal_delivery_failure_count: 0,
+            deliveries: [],
+          }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "accepted", ok: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((res) => http.listen(0, "127.0.0.1", res));
+  const port = (http.address() as { port: number }).port;
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const notifications: Array<Record<string, unknown>> = [];
+  const client = new Client({ name: "c3-held-notify-test", version: "1.0.0" });
+  client.fallbackNotificationHandler = async (notification) => {
+    notifications.push(notification as unknown as Record<string, unknown>);
+  };
+
+  let releaseNotify: (() => void) | null = null;
+  let running: Promise<void> | null = null;
+  try {
+    const { cwd, profile } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
+    // Start from a legacy binding with no explicit wake_transport (must default to channel).
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    await updateReceiveBinding(profile, SESSION_ID, (b) => {
+      const { wake_transport: _removed, ...legacy } = b;
+      return legacy;
+    });
+
+    let notifyPaused!: () => void;
+    const notifyWaiting = new Promise<void>((r) => { notifyPaused = r; });
+    const allowNotify = new Promise<void>((r) => { releaseNotify = r; });
+
+    running = serveAgentChannel({
+      profilePath: profile,
+      hostSessionId: SESSION_ID,
+      transport: serverTransport,
+      beforeNotify: async () => {
+        notifyPaused();
+        await allowNotify;
+      },
+    });
+    await client.connect(clientTransport);
+
+    const waitUntil = async (fn: () => Promise<boolean> | boolean, timeoutMs = 8_000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await fn()) return;
+        await delay(40);
+      }
+      throw new Error("timed out waiting for channel retirement condition");
+    };
+
+    await waitUntil(async () => receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running);
+    // Mark turn_verified_at after start so the channel claims the pending delivery and hits beforeNotify.
+    await receiveHookEvent(profile, SESSION_ID, {
+      session_id: SESSION_ID,
+      cwd,
+      hook_event_name: "SessionStart",
+    });
+
+    // Wait until the channel has claimed the delivery and paused right before acquiring the receive lock.
+    await notifyWaiting;
+    assert.equal(claimCount, 1);
+
+    // Switch transport from channel -> socket while notification is held.
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    switchedToSocket = true;
+
+    // Release the held notification -> acquires receive lock, sees wake_transport === "socket",
+    // emits ZERO notifications, exits cleanly, and frees channel_running!
+    releaseNotify!();
+    await running;
+    running = null;
+
+    assert.equal(notifications.length, 0, "held channel notification must not be emitted after switching to socket");
+    assert.equal(claimCountAfterSwitch, 0, "retired channel must not claim after switching to socket");
+    assert.equal(
+      receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running,
+      false,
+      "retired channel must release the running marker so the socket bridge can start",
+    );
+
+    // Starting serveAgentChannel directly while wake_transport === "socket" must be refused.
+    await assert.rejects(
+      () => serveAgentChannel({ profilePath: profile, hostSessionId: SESSION_ID }),
+      { code: "channel_not_configured" },
+    );
+  } finally {
+    releaseNotify?.();
+    await client.close().catch(() => undefined);
+    await running?.catch(() => undefined);
     await new Promise<void>((res) => http.close(() => res()));
     await rm(root, { recursive: true, force: true });
   }

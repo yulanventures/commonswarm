@@ -137,11 +137,18 @@ export function validateClaudeMessagingToken(raw: unknown): string {
   return raw;
 }
 
-async function canonicalSocketPath(socketPath: string): Promise<string> {
-  const dir = await realpath(dirname(socketPath));
-  return join(dir, basename(socketPath));
-}
+const CLAUDE_WAKE_LOCK_TIMEOUT_MS = 2_000;
 
+/**
+ * Enforce a canonical Unix socket path whose entire directory chain prevents replacement
+ * by another local principal:
+ *   1. No non-root symlink anywhere along the raw input path (allows macOS root-owned /tmp -> private/tmp).
+ *   2. Every canonical ancestor directory from / down to dirname(socket) is owned by root or the
+ *      current UID, and any group/world-writable ancestor (e.g. /private/tmp) must carry the sticky bit.
+ *   3. The socket's immediate canonical parent directory must be private (0700, owned by current UID),
+ *      preventing any other local principal from traversing, unlinking, or replacing the socket before connect.
+ *   4. The socket entry itself must be an owned, non-symlink, non-group/world-writable Unix domain socket.
+ */
 export async function validateClaudeSocketPath(raw: unknown): Promise<{ socketPath: string; canonicalPath: string }> {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 1024 || CONTROL_CHAR_RE.test(raw) || !isAbsolute(raw)) {
     throw new AgentSetupError(
@@ -149,9 +156,88 @@ export async function validateClaudeSocketPath(raw: unknown): Promise<{ socketPa
       `${CLAUDE_WAKE_ENV_SOCKET} must be an absolute path to this Claude session's Unix inbox socket.`,
     );
   }
+  const myUid = process.getuid ? process.getuid() : null;
+
+  // 1. Reject any "." / ".." traversal or non-root symlink along the raw input path.
+  const rawParts = raw.split("/").filter((part) => part.length > 0);
+  if (rawParts.length === 0 || rawParts.some((part) => part === "." || part === "..")) {
+    throw new AgentSetupError(
+      "claude_wake_socket_unsafe",
+      "The Claude inbox socket path must be a normalized absolute path without traversal segments.",
+    );
+  }
+  let rawCursor = "";
+  for (let i = 0; i < rawParts.length; i += 1) {
+    rawCursor = `${rawCursor}/${rawParts[i]!}`;
+    let stepInfo;
+    try {
+      stepInfo = await lstat(rawCursor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new AgentSetupError(
+          "claude_wake_socket_missing",
+          "The Claude inbox socket path does not exist on this host. Run this inside the live Claude session.",
+        );
+      }
+      throw error;
+    }
+    if (stepInfo.isSymbolicLink()) {
+      const isFinal = i === rawParts.length - 1;
+      if (isFinal || stepInfo.uid !== 0) {
+        throw new AgentSetupError(
+          "claude_wake_socket_unsafe",
+          "The Claude inbox socket path must not traverse a user-writable or non-root symlink.",
+        );
+      }
+    }
+  }
+
+  // 2. Canonicalize parent directory and verify every directory ancestor from / down to parent.
+  const canonicalDir = await realpath(dirname(raw));
+  const canonicalPath = join(canonicalDir, basename(raw));
+  const dirParts = canonicalDir.split("/").filter((part) => part.length > 0);
+  const ancestors: string[] = ["/"];
+  let acc = "";
+  for (const part of dirParts) {
+    acc = `${acc}/${part}`;
+    ancestors.push(acc);
+  }
+  for (let i = 0; i < ancestors.length; i += 1) {
+    const ancestor = ancestors[i]!;
+    const dirInfo = await lstat(ancestor);
+    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) {
+      throw new AgentSetupError(
+        "claude_wake_socket_unsafe",
+        "The Claude inbox socket parent chain must consist exclusively of real directories.",
+      );
+    }
+    const mode = dirInfo.mode & 0o7777;
+    if (myUid !== null && dirInfo.uid !== 0 && dirInfo.uid !== myUid) {
+      throw new AgentSetupError(
+        "claude_wake_socket_unsafe",
+        "The Claude inbox socket directory chain must be owned by root or the current user.",
+      );
+    }
+    const isImmediateParent = i === ancestors.length - 1;
+    if (isImmediateParent) {
+      if ((myUid !== null && dirInfo.uid !== myUid) || (mode & 0o077) !== 0) {
+        throw new AgentSetupError(
+          "claude_wake_socket_unsafe",
+          "The Claude inbox socket directory must be a private 0700 directory owned by the current user.",
+        );
+      }
+    } else if ((mode & 0o022) !== 0 && (mode & 0o1000) === 0) {
+      throw new AgentSetupError(
+        "claude_wake_socket_unsafe",
+        "A writable ancestor directory of the Claude inbox socket is missing the sticky bit.",
+      );
+    }
+  }
+
+  // 3. Verify the canonical socket entry itself.
   let info;
   try {
-    info = await lstat(raw);
+    info = await lstat(canonicalPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new AgentSetupError(
@@ -161,13 +247,19 @@ export async function validateClaudeSocketPath(raw: unknown): Promise<{ socketPa
     }
     throw error;
   }
-  if (!info.isSocket() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid())) {
+  const sockMode = info.mode & 0o7777;
+  if (
+    !info.isSocket() ||
+    info.isSymbolicLink() ||
+    (myUid !== null && info.uid !== myUid) ||
+    (sockMode & 0o022) !== 0
+  ) {
     throw new AgentSetupError(
       "claude_wake_socket_unsafe",
-      "The Claude inbox socket must be an owned, non-symlink Unix domain socket.",
+      "The Claude inbox socket must be an owned, non-symlink, non-group/world-writable Unix domain socket.",
     );
   }
-  return { socketPath: raw, canonicalPath: await canonicalSocketPath(raw) };
+  return { socketPath: canonicalPath, canonicalPath };
 }
 
 function parseClaudeWakeRegistration(
@@ -308,7 +400,11 @@ export async function inspectClaudeSessionRegistry(options: {
       continue;
     }
     const rawCwd = typeof rec.cwd === "string" && rec.cwd.length > 0 ? rec.cwd : null;
-    if (expectedCanonicalCwd !== null && rawCwd !== null) {
+    if (expectedCanonicalCwd !== null) {
+      if (rawCwd === null) {
+        sawCwdMismatch = true;
+        continue;
+      }
       const entryCwd = await realpath(rawCwd).catch(() => rawCwd);
       if (entryCwd !== expectedCanonicalCwd) {
         sawCwdMismatch = true;
@@ -383,7 +479,7 @@ export async function registerClaudeWakeSocket(options: {
     if (!binding) {
       throw new AgentSetupError(
         "receive_not_configured",
-        "Configure Claude wake mode first (cswarm receive configure --provider claude --mode wake --wake-transport socket).",
+        "Configure Claude socket wake mode first (cswarm receive configure --provider claude --mode wake --wake-transport socket).",
       );
     }
     if (binding.provider !== "claude") {
@@ -392,26 +488,35 @@ export async function registerClaudeWakeSocket(options: {
         `Claude inbox-socket registration only applies to --provider claude (this binding is ${binding.provider}).`,
       );
     }
+    if (binding.requested_mode !== "wake") {
+      throw new AgentSetupError(
+        "wake_opted_out",
+        "Cannot register a Claude inbox-socket token while this seat is in turn mode. Opt into wake mode first.",
+      );
+    }
+    if (binding.wake_transport !== "socket") {
+      throw new AgentSetupError(
+        "wake_transport_mismatch",
+        "Cannot register a Claude inbox-socket token while wake transport is channel. Reconfigure with --wake-transport socket first.",
+      );
+    }
     const inspected = await inspectClaudeSessionRegistry({
       hostSessionId: host,
       expectedCwd: binding.cwd,
       ...(options.sessionsDir ? { sessionsDir: options.sessionsDir } : {}),
       ...(options.isPidAlive ? { isPidAlive: options.isPidAlive } : {}),
     });
-    if (inspected.found) {
-      const liveCanonical = await canonicalSocketPath(inspected.entry.messagingSocketPath).catch(
-        () => inspected.entry.messagingSocketPath,
-      );
-      if (liveCanonical !== socketValidated.canonicalPath) {
-        throw new AgentSetupError(
-          "claude_wake_socket_mismatch",
-          "The Claude inbox socket in this shell does not match the live session registry entry for this host session ID.",
-        );
-      }
-    } else if (inspected.reason === "claude_session_cwd_mismatch") {
+    if (!inspected.found) {
       throw new AgentSetupError(
-        "claude_session_cwd_mismatch",
-        "The live Claude session for this host session ID is running in a different project directory.",
+        inspected.reason,
+        `No matching live Claude session found in ~/.claude/sessions for this host session ID (${inspected.reason}).`,
+      );
+    }
+    const liveValidated = await validateClaudeSocketPath(inspected.entry.messagingSocketPath);
+    if (liveValidated.canonicalPath !== socketValidated.canonicalPath) {
+      throw new AgentSetupError(
+        "claude_wake_socket_mismatch",
+        "The Claude inbox socket in this shell does not match the live session registry entry for this host session ID.",
       );
     }
 
@@ -419,32 +524,25 @@ export async function registerClaudeWakeSocket(options: {
       version: 1,
       profile,
       host_session_id: host,
-      socket_path: socketValidated.socketPath,
+      socket_path: socketValidated.canonicalPath,
       token,
       registered_at: nowIso,
     };
     await writeSecureJsonFile(claudeWakeRegistrationPath(profile, host), JSON.stringify(registration));
-
-    let nextBinding = binding;
-    if (binding.requested_mode === "wake" && binding.wake_transport !== "socket") {
-      nextBinding = { ...binding, wake_transport: "socket", wake_verified_at: null, canary: null };
-      await writeSecureJsonFile(
-        join(dirname(profile), `receive-${profileScopeKey(host)}.json`),
-        JSON.stringify(nextBinding),
-      );
-    }
     return {
       registered: true as const,
       host_session_id: host,
-      wake_route: wakeRouteForBinding(nextBinding),
+      wake_route: wakeRouteForBinding(binding),
       registered_at: nowIso,
     };
-  }, { timeoutMs: 2_000 });
+  }, { timeoutMs: CLAUDE_WAKE_LOCK_TIMEOUT_MS });
 }
 
 /**
  * Best-effort refresh invoked inside `receiveHookEvent` (SessionStart / UserPromptSubmit / Stop)
- * after the hook has verified `event.session_id === binding.host_session_id` and `cwd`.
+ * or `configureAgentReceive` after verifying `event.session_id === binding.host_session_id` and `cwd`.
+ * Serialized on the shared `receive-<scope>` lock and re-verifies live socket opt-in + positive
+ * live session registry match inside the lock so a delayed hook can NEVER recreate a bearer after opt-out.
  */
 export async function refreshClaudeWakeSocketFromHookEnv(options: {
   profilePath: string;
@@ -454,6 +552,9 @@ export async function refreshClaudeWakeSocketFromHookEnv(options: {
   sessionsDir?: string;
   isPidAlive?: (pid: number) => boolean;
   now?: () => number;
+  alreadyLocked?: boolean;
+  /** Test seam invoked before acquiring the receive lock to simulate a delayed hook racing opt-out. */
+  beforeLock?: () => Promise<void> | void;
 }): Promise<boolean> {
   const env = options.env ?? process.env;
   const rawSocket = env[CLAUDE_WAKE_ENV_SOCKET];
@@ -464,32 +565,56 @@ export async function refreshClaudeWakeSocketFromHookEnv(options: {
     const host = checkedHostSessionId(options.hostSessionId);
     const opened = await readAgentProfile(profile, host);
     if (opened.host_session_id !== host) return false;
-    const socketValidated = await validateClaudeSocketPath(rawSocket);
     const token = validateClaudeMessagingToken(rawToken);
-    const inspected = await inspectClaudeSessionRegistry({
-      hostSessionId: host,
-      expectedCwd: options.cwd,
-      ...(options.sessionsDir ? { sessionsDir: options.sessionsDir } : {}),
-      ...(options.isPidAlive ? { isPidAlive: options.isPidAlive } : {}),
-    });
-    if (inspected.found) {
-      const liveCanonical = await canonicalSocketPath(inspected.entry.messagingSocketPath).catch(
-        () => inspected.entry.messagingSocketPath,
-      );
-      if (liveCanonical !== socketValidated.canonicalPath) return false;
-    } else if (inspected.reason === "claude_session_cwd_mismatch") {
-      return false;
+    if (options.beforeLock !== undefined) {
+      await options.beforeLock();
     }
-    const registration: ClaudeWakeRegistration = {
-      version: 1,
-      profile,
-      host_session_id: host,
-      socket_path: socketValidated.socketPath,
-      token,
-      registered_at: new Date((options.now ?? Date.now)()).toISOString(),
+
+    const runLocked = async (): Promise<boolean> => {
+      const binding = await readReceiveBinding(profile, host).catch(() => null);
+      if (
+        !binding ||
+        binding.provider !== "claude" ||
+        binding.requested_mode !== "wake" ||
+        binding.wake_transport !== "socket"
+      ) {
+        return false;
+      }
+      const socketValidated = await validateClaudeSocketPath(rawSocket);
+      const inspected = await inspectClaudeSessionRegistry({
+        hostSessionId: host,
+        expectedCwd: binding.cwd,
+        ...(options.sessionsDir ? { sessionsDir: options.sessionsDir } : {}),
+        ...(options.isPidAlive ? { isPidAlive: options.isPidAlive } : {}),
+      });
+      if (!inspected.found) {
+        return false;
+      }
+      const liveValidated = await validateClaudeSocketPath(inspected.entry.messagingSocketPath);
+      if (liveValidated.canonicalPath !== socketValidated.canonicalPath) {
+        return false;
+      }
+      const registration: ClaudeWakeRegistration = {
+        version: 1,
+        profile,
+        host_session_id: host,
+        socket_path: socketValidated.canonicalPath,
+        token,
+        registered_at: new Date((options.now ?? Date.now)()).toISOString(),
+      };
+      await writeSecureJsonFile(claudeWakeRegistrationPath(profile, host), JSON.stringify(registration));
+      return true;
     };
-    await writeSecureJsonFile(claudeWakeRegistrationPath(profile, host), JSON.stringify(registration));
-    return true;
+
+    if (options.alreadyLocked) {
+      return await runLocked();
+    }
+    return await withFileLock(
+      dirname(profile),
+      `receive-${profileScopeKey(host)}`,
+      runLocked,
+      { timeoutMs: CLAUDE_WAKE_LOCK_TIMEOUT_MS },
+    );
   } catch {
     return false;
   }
@@ -575,7 +700,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
   }
 
   private async resolveLiveIdleTarget(hostSessionId: string, cwd: string): Promise<
-    | { ok: true; registration: ClaudeWakeRegistration; entry: ClaudeSessionRegistryEntry }
+    | { ok: true; registration: ClaudeWakeRegistration; entry: ClaudeSessionRegistryEntry; canonicalPath: string }
     | { ok: false; deferrable: boolean; code: string; detail: string }
   > {
     const registration = await readClaudeWakeRegistration(this.profilePath, hostSessionId).catch(() => null);
@@ -622,10 +747,18 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
         detail: error instanceof Error ? error.message : "Claude inbox socket is unavailable.",
       };
     }
-    const registryCanonical = await canonicalSocketPath(inspected.entry.messagingSocketPath).catch(
-      () => inspected.entry.messagingSocketPath,
-    );
-    if (registryCanonical !== validated.canonicalPath) {
+    let registryValidated: { socketPath: string; canonicalPath: string };
+    try {
+      registryValidated = await validateClaudeSocketPath(inspected.entry.messagingSocketPath);
+    } catch (error) {
+      return {
+        ok: false,
+        deferrable: false,
+        code: error instanceof AgentSetupError ? error.code : "claude_wake_socket_invalid",
+        detail: error instanceof Error ? error.message : "Live Claude inbox socket is unavailable.",
+      };
+    }
+    if (registryValidated.canonicalPath !== validated.canonicalPath) {
       return {
         ok: false,
         deferrable: false,
@@ -633,7 +766,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
         detail: "Registered Claude inbox socket no longer matches the live session registry. Re-run cswarm receive register-socket.",
       };
     }
-    return { ok: true, registration, entry: inspected.entry };
+    return { ok: true, registration, entry: inspected.entry, canonicalPath: validated.canonicalPath };
   }
 
   async isReadyToWake(input: {
@@ -682,7 +815,7 @@ export class ClaudeSocketAdapter implements NativeWakeAdapter {
 
     try {
       await this.transport({
-        socketPath: target.registration.socket_path,
+        socketPath: target.canonicalPath,
         lines: [authLine, userLine],
         timeoutMs: this.timeoutMs,
         ...(input.signal ? { signal: input.signal } : {}),
