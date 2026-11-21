@@ -1,20 +1,28 @@
 -- C2 Live Seat Status:
 -- 1. Enforce canonical live conversation & per-message audience visibility on caller-visible
---    swarm_read.agent_wake_path_deliveries rows and expose unseen_count alongside
---    oldest_unobserved_at on swarm_read.agent_wake_path (keeping recipient wake eligibility
---    semantics in swarm.actor_wake_path_eligible_deliveries separate).
+--    swarm_read.agent_wake_path_deliveries rows — across candidate, observed baseline, and
+--    newer-observed supersession signals — and expose unseen_count alongside oldest_unobserved_at
+--    on swarm_read.agent_wake_path (keeping recipient wake eligibility semantics in
+--    swarm.actor_wake_path_eligible_deliveries and swarm.wake_path_eligible_deliveries separate).
 -- 2. Expose messages_waiting ({count, since}), wake ({watcher_at, channel_at, listener_at, turn_at}),
 --    and open-channel working-on text (keeping private-channel and addressed titles null) on
 --    swarm_read.workspace_roster(uuid).
 -- 3. Expose messages_waiting_count and wake inside status.facts on swarm_read.home_overview().
 -- All new fields preserve canonical conversation & audience isolation and caller-scoped access gates.
 
-CREATE OR REPLACE FUNCTION swarm.claims_can_read_wake_signal(
-  p_workspace_id uuid,
-  p_signal_id uuid
-) RETURNS boolean
-LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog AS $$
+CREATE OR REPLACE FUNCTION swarm.claims_visible_wake_path_deliveries()
+RETURNS TABLE (
+  workspace_id uuid,
+  signal_id uuid,
+  principal_id uuid,
+  enqueued_at timestamptz
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+#variable_conflict use_column
 DECLARE
   v_claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
   v_user uuid;
@@ -22,30 +30,25 @@ DECLARE
   v_actor_kind text;
   v_actor_id uuid;
 BEGIN
-  IF p_workspace_id IS NULL OR p_signal_id IS NULL OR v_claims IS NULL
+  IF v_claims IS NULL
     OR (v_claims ? 'role' AND v_claims->>'role' IS DISTINCT FROM 'authenticated')
     OR coalesce(v_claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
-    RETURN false;
+    RETURN;
   END IF;
   v_user := (v_claims->>'sub')::uuid;
   IF v_claims ? 'agent_principal_id' THEN
     IF coalesce(v_claims->>'agent_principal_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
-      RETURN false;
+      RETURN;
     END IF;
     v_agent := (v_claims->>'agent_principal_id')::uuid;
     IF NOT EXISTS (
       SELECT 1
-      FROM swarm.agent_principals AS p
-      JOIN swarm.agent_workspace_memberships AS am
-        ON am.principal_id = p.principal_id
-       AND am.workspace_id = p_workspace_id
-       AND am.owner_user_id = p.owner_user_id
-       AND am.revoked_at IS NULL
-      WHERE p.principal_id = v_agent
-        AND p.owner_user_id = v_user
-        AND p.revoked_at IS NULL
+      FROM swarm.agent_principals AS ap
+      WHERE ap.principal_id = v_agent
+        AND ap.owner_user_id = v_user
+        AND ap.revoked_at IS NULL
     ) THEN
-      RETURN false;
+      RETURN;
     END IF;
     v_actor_kind := 'agent';
     v_actor_id := v_agent;
@@ -54,40 +57,161 @@ BEGIN
     v_actor_id := v_user;
   END IF;
 
-  RETURN EXISTS (
-    SELECT 1
-    FROM swarm.signals AS s
-    JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
-    WHERE s.workspace_id = p_workspace_id
-      AND s.id = p_signal_id
-      AND EXISTS (
+  RETURN QUERY
+  SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
+         d.enqueued_at
+  FROM swarm.signal_deliveries AS d
+  JOIN swarm.signals AS s
+    ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+  JOIN swarm.conversation_signals AS cs
+    ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+  JOIN swarm.agent_principals AS p
+    ON p.principal_id = d.recipient_agent_principal_id
+  WHERE swarm.is_member(d.workspace_id, v_user)
+    AND (
+      v_actor_kind = 'user'
+      OR EXISTS (
         SELECT 1
-        FROM swarm.conversation_target(
-          s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id
-        ) AS ct
-        WHERE ct.visible
+        FROM swarm.agent_workspace_memberships AS caller_seat
+        WHERE caller_seat.principal_id = v_agent
+          AND caller_seat.workspace_id = d.workspace_id
+          AND caller_seat.owner_user_id = v_user
+          AND caller_seat.revoked_at IS NULL
       )
-      AND swarm.conversation_signal_visible_to(
-        cs.workspace_id, cs.signal_id, cs.audience,
-        s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
-        v_actor_kind, v_actor_id
+    )
+    AND d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
+    AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+    AND d.enqueued_at >= (SELECT wpr.applied_at FROM swarm.wake_path_release AS wpr WHERE wpr.singleton)
+    AND s.until > statement_timestamp()
+    AND s.kind IN ('ask', 'note')
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.conversation_target(
+        s.workspace_id, v_actor_kind, v_actor_id, cs.conversation_id
+      ) AS ct
+      WHERE ct.visible
+    )
+    AND swarm.conversation_signal_visible_to(
+      cs.workspace_id, cs.signal_id, cs.audience,
+      s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+      v_actor_kind, v_actor_id
+    )
+    AND (
+      s.channel_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM swarm.channels AS ch
+        WHERE ch.workspace_id = s.workspace_id
+          AND ch.channel_id = s.channel_id
+          AND (
+            ch.visibility = 'open'
+            OR EXISTS (
+              SELECT 1
+              FROM swarm.channel_members AS cm
+              WHERE cm.workspace_id = s.workspace_id
+                AND cm.channel_id = s.channel_id
+                AND cm.member_kind = 'agent'
+                AND cm.agent_principal_id = d.recipient_agent_principal_id
+            )
+          )
       )
-  );
+    )
+    AND (s.to_agent_principal_id = d.recipient_agent_principal_id
+      OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
+        WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+          AND r.recipient_agent_principal_id = d.recipient_agent_principal_id)
+      OR EXISTS (SELECT 1 FROM swarm.signal_mentions AS m
+        WHERE m.workspace_id = s.workspace_id AND m.signal_id = s.id
+          AND m.mentioned_agent_principal_id = d.recipient_agent_principal_id))
+    AND p.revoked_at IS NULL
+    AND p.turn_only = false
+    AND EXISTS (SELECT 1 FROM swarm.agent_workspace_memberships AS seat
+      WHERE seat.principal_id = d.recipient_agent_principal_id
+        AND seat.workspace_id = d.workspace_id
+        AND seat.revoked_at IS NULL)
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.signal_deliveries AS observed
+      JOIN swarm.signals AS observed_signal
+        ON observed_signal.workspace_id = observed.workspace_id
+       AND observed_signal.id = observed.signal_id
+      JOIN swarm.conversation_signals AS observed_cs
+        ON observed_cs.workspace_id = observed_signal.workspace_id
+       AND observed_cs.signal_id = observed_signal.id
+      WHERE observed.workspace_id = d.workspace_id
+        AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
+        AND observed.ack_outcome = 'observed'
+        AND observed.last_lease_id IS NULL
+        AND observed.last_leased_by IS NULL
+        AND observed.acked_at >= (SELECT wpr2.applied_at FROM swarm.wake_path_release AS wpr2 WHERE wpr2.singleton)
+        AND EXISTS (
+          SELECT 1
+          FROM swarm.conversation_target(
+            observed_signal.workspace_id, v_actor_kind, v_actor_id, observed_cs.conversation_id
+          ) AS oct
+          WHERE oct.visible
+        )
+        AND swarm.conversation_signal_visible_to(
+          observed_cs.workspace_id, observed_cs.signal_id, observed_cs.audience,
+          observed_signal.from_kind, observed_signal.from_principal,
+          observed_signal.to_user_id, observed_signal.to_agent_principal_id,
+          v_actor_kind, v_actor_id
+        )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM swarm.signal_deliveries AS later
+      JOIN swarm.signals AS later_signal
+        ON later_signal.workspace_id = later.workspace_id
+       AND later_signal.id = later.signal_id
+      JOIN swarm.conversation_signals AS later_cs
+        ON later_cs.workspace_id = later_signal.workspace_id
+       AND later_cs.signal_id = later_signal.id
+      WHERE later.workspace_id = d.workspace_id
+        AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
+        AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)
+          > (date_trunc('milliseconds', s.created_at), s.id)
+        AND later_signal.kind IN ('ask', 'note')
+        AND EXISTS (
+          SELECT 1
+          FROM swarm.conversation_target(
+            later_signal.workspace_id, v_actor_kind, v_actor_id, later_cs.conversation_id
+          ) AS lct
+          WHERE lct.visible
+        )
+        AND swarm.conversation_signal_visible_to(
+          later_cs.workspace_id, later_cs.signal_id, later_cs.audience,
+          later_signal.from_kind, later_signal.from_principal,
+          later_signal.to_user_id, later_signal.to_agent_principal_id,
+          v_actor_kind, v_actor_id
+        )
+        AND (later_signal.to_agent_principal_id = d.recipient_agent_principal_id
+          OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS later_recipient
+            WHERE later_recipient.workspace_id = later_signal.workspace_id
+              AND later_recipient.signal_id = later_signal.id
+              AND later_recipient.recipient_agent_principal_id = d.recipient_agent_principal_id)
+          OR EXISTS (SELECT 1 FROM swarm.signal_mentions AS later_mention
+            WHERE later_mention.workspace_id = later_signal.workspace_id
+              AND later_mention.signal_id = later_signal.id
+              AND later_mention.mentioned_agent_principal_id = d.recipient_agent_principal_id))
+        AND later.ack_outcome = 'observed'
+        AND later.last_lease_id IS NULL
+        AND later.last_leased_by IS NULL
+    );
 END;
 $$;
 
-ALTER FUNCTION swarm.claims_can_read_wake_signal(uuid, uuid) OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm.claims_can_read_wake_signal(uuid, uuid)
+ALTER FUNCTION swarm.claims_visible_wake_path_deliveries() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.claims_visible_wake_path_deliveries()
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.claims_visible_wake_path_deliveries() TO authenticated;
 
 CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries
 WITH (security_barrier = true)
 AS
 SELECT d.workspace_id, d.signal_id, d.principal_id, d.enqueued_at
-FROM swarm.claims_wake_path_eligible_deliveries() AS d
-WHERE swarm.is_member(d.workspace_id, auth.uid())
-  AND swarm.claims_can_read_wake_signal(d.workspace_id, d.signal_id);
+FROM swarm.claims_visible_wake_path_deliveries() AS d
+WHERE swarm.is_member(d.workspace_id, auth.uid());
 
 ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
 

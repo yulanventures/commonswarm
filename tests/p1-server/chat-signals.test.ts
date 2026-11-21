@@ -4246,7 +4246,11 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   const pubSeed = await sendWs(ws, ownerB.jwt, installedPost({
     channel: openSlug,
     signal_kind: "ask",
-    to_agent_principal_id: wakeProbeAgent.principal,
+    to: [
+      { kind: "agent", id: wakeProbeAgent.principal },
+      { kind: "user", id: personA.id },
+      { kind: "user", id: outsiderC.id },
+    ],
     body: "Public observed seed",
   }));
   assert.equal(pubSeed.status, 200);

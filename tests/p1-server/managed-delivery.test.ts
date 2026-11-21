@@ -1148,16 +1148,33 @@ test("a claimed delivery leaves both wake eligibility surfaces", { timeout: 30_0
 
 test("a departed owner cannot view a seat that a remaining member can inspect", { timeout: 30_000 }, async () => {
   const agent = await seedAgent("wake-owner-left");
-  const known = await postAsk(agent.principalId);
-  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
-    lease_id: null, listener_instance_id: null, outcome: "observed",
-    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
-  await postAsk(agent.principalId);
   const other = await createUser("wake-remaining-member");
   await sql`INSERT INTO swarm.users (user_id, display_name)
     VALUES (${other.id}::uuid, 'RemainingWakeMember')`;
   await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role)
     VALUES (${shared.workspace}::uuid, ${other.id}::uuid, 'member')`;
+  const postSharedAsk = async () => {
+    const posted = await runCmd(shared.ownerJwt, {
+      kind: "post_signal",
+      signal_kind: "ask",
+      body: `synth-shared-ask-${randomUUID()}`,
+      to_user_id: null,
+      to_agent_principal_id: null,
+      to: [
+        { kind: "agent", id: agent.principalId },
+        { kind: "user", id: other.id },
+      ],
+      about: null,
+      in_reply_to: null,
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    return String((posted.body.signal as { id: string }).id);
+  };
+  const known = await postSharedAsk();
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  await postSharedAsk();
   assert.equal((await wakePathRows(agent.principalId, other.id)).length, 1);
   await sql.begin(async (tx) => {
     await tx`DELETE FROM swarm.memberships
