@@ -351,10 +351,6 @@ export async function configureAgentReceive(options: {
       ...(provider === "agy" ? { experimental_agy_agentapi: options.mode === "wake" && options.experimentalAgyAgentapi === true } : {}),
       ...(changed ? { wake_verified_at: null, canary: null } : {}),
     };
-    if (provider === "agy" && options.mode === "turn") {
-      // Serialized under the shared receive-<scope> lock: remove the 0600 LS registration on opt-out.
-      await deleteSecureJsonFile(join(dirname(profile), `wake-agy-${profileScopeKey(host)}.json`));
-    }
     if (provider === "grok-bot" && grokAgentId) {
       if (existing?.grok_bot_agent_id && existing.grok_bot_agent_id !== grokAgentId) throw new AgentSetupError("receive_provider_conflict", "This session is bound to a different Bot agent UUID.");
       binding = { ...binding, grok_bot_agent_id: grokAgentId };
@@ -376,12 +372,24 @@ export async function configureAgentReceive(options: {
       binding = { ...binding, channel_config: config };
       startCommand = `claude --resume ${shellQuote(host)} --mcp-config ${shellQuote(config)} --dangerously-load-development-channels server:cswarm`;
     }
+    // Persist the updated receive binding FIRST under the shared receive-<scope> lock so
+    // opt-out (--mode turn) is durable even if credential cleanup fails below (C3).
     await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(binding));
+    if (provider === "agy" && options.mode === "turn") {
+      try {
+        await deleteSecureJsonFile(join(dirname(profile), `wake-agy-${profileScopeKey(host)}.json`));
+      } catch {
+        throw new AgentSetupError(
+          "agy_registration_cleanup_failed",
+          "Turn mode is saved, but removing the Antigravity wake registration file failed. Remove it and re-check cswarm receive status.",
+        );
+      }
+    }
     return {
       ...receiveStatus(binding, Date.now(), openedProfile.host_session_id), profile, hook_file: binding.hook_file,
       instruction: turnCheckInstruction(profile, host),
       ...(provider === "codex" && options.mode === "wake" ? { host_step: `Start the Codex native-wake bridge for this thread: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
-      ...(provider === "agy" && options.mode === "wake" ? { host_step: `Inside this Antigravity session, register local LS credentials via env: cswarm receive register-agy --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)} ; then start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
+      ...(provider === "agy" && options.mode === "wake" ? { host_step: `Register local Antigravity credentials via a 0600 file or stdin: cswarm receive register-agy --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)} --stdin ; then start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(provider === "grok-bot" && options.mode === "wake" ? { host_step: `On this Bot computer, with gateway.json present, start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(startCommand ? { start_command: startCommand, host_step: "Resume this same Claude session with this command and approve the channel when Claude asks. Organization policy still applies. This command does not start a separate worker." } : {}),
     };

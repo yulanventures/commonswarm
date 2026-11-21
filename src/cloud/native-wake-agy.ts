@@ -2,25 +2,45 @@
  * Experimental native Antigravity wake adapter (`agy agentapi send-message`) behind an
  * explicit feature flag (`--provider agy --mode wake --experimental-agy-agentapi`).
  *
- * Security & operational invariants:
- *   - Explicit experimental opt-in required: never activates without `--experimental-agy-agentapi`
- *     recorded on the live `receive-<scope>.json` binding.
- *   - Env-only 0600 registration (`cswarm receive register-agy`): reads ANTIGRAVITY_LS_ADDRESS and
- *     ANTIGRAVITY_CSRF_TOKEN strictly from process env (never argv/stdout/stderr/logs), validates
- *     loopback LS address (127.0.0.1 / localhost / [::1]) and single-line non-control-char values,
- *     and serializes registration and opt-out deletion under the exact shared `receive-<scope>` lock.
- *   - Refuses registration unless the live binding is already `provider: "agy"`, `requested_mode: "wake"`,
- *     and `experimental_agy_agentapi: true` on a private host-bound profile; never writes in turn mode
- *     or silently mutates receive routes.
- *   - Fixed text ONLY (assertFixedNativeWakePrompt right before execFile); passes LS address and
- *     CSRF token strictly via child env (never argv); redacts CSRF token from every error detail.
- *   - Fails loudly on stale/restarted agy LS or missing registration (never silently drops).
+ * HezLead narrow scope decision on #716 C1 (2026-11-20):
+ *   The vendor Antigravity CLI (`antigravity agentapi send-message` / `get-conversation-metadata`)
+ *   reads `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` ONLY from its own child process
+ *   environment (no CLI flags, stdin, or credentials-file option exist in Antigravity 1.5.11).
+ *   HezLead approved a narrow scope decision allowing ONLY the pinned, short-lived `antigravity`
+ *   child process to receive canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in an
+ *   otherwise stripped minimal environment for the life of that single short call, because the
+ *   token already lives in the active `agy` session's environment, macOS isolates per-user process
+ *   environments, and the adapter stays behind `--experimental-agy-agentapi`.
+ *   Mandatory conditions enforced here:
+ *     - NEVER read or set those credentials in `cswarm`'s own process environment or any long-lived process.
+ *     - Registration (`cswarm receive register-agy`) accepts credentials ONLY via a 0600 file
+ *       (`--credentials-file`) or stdin (`--stdin` / piped stdin) — never argv or process env.
+ *     - NEVER print, log, or persist `ls_address`, `csrf_token`, or raw subprocess stdout/stderr in
+ *       command output, wake state, or bridge logs; emit only fixed static diagnostic codes and text.
+ *
+ * Additional security & operational invariants (C2 & C3):
+ *   - Canonical loopback IP literal only (`127.0.0.1:<port>` or `[::1]:<port>`): never store or pass
+ *     hostnames like `localhost` or URL schemes; strip all proxy environment variables and set `NO_PROXY=*`.
+ *   - Pin the trusted Antigravity binary (no ambient `PATH` lookup) with full ancestor directory walk
+ *     up to `/` rejecting any world-writable directory or untrusted owner.
+ *   - Bind registration to live provider session evidence: inspect the loopback-only listening process
+ *     (`pid`, `uid`, `start_time`, canonical executable) BEFORE presenting credentials, verify
+ *     `get-conversation-metadata <conv-uuid>` proves this LS owns the bound conversation and workspace
+ *     `cwd`, and re-verify the exact listening process `(pid, uid, start_time, executable)` BEFORE
+ *     presenting credentials on every wake dispatch (safe refusal of replaced endpoints on reused ports
+ *     and of different live sessions).
+ *   - Durable opt-out and held-startup safety: `--mode turn` persists before credential cleanup (reporting
+ *     cleanup failure without rolling back turn mode), and bridge startup acquires the shared
+ *     `receive-<scope>` lock and re-verifies the live wake route before writing its runtime marker.
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createWakeSubscriber, type WakeHandle } from "../listener/wake.js";
 import { assertProfileIdentity } from "./agent-check.js";
@@ -37,6 +57,7 @@ import {
 import {
   checkedHostSessionId,
   readReceiveBinding,
+  receiveBindingPath,
   receiveStatus,
   updateReceiveBinding,
 } from "./agent-receive.js";
@@ -45,6 +66,7 @@ import {
   assertFixedNativeWakePrompt,
   NativeWakeBridge,
   resolveAuthorizedWakeBinding,
+  wakeRouteForBinding,
   type NativeWakeAdapter,
 } from "./native-wake.js";
 import {
@@ -76,6 +98,7 @@ const execFileAsync = promisify(execFile);
 const AGY_WAKE_HEARTBEAT_MS = 5_000;
 const AGY_WAKE_POLL_MS = 30_000;
 const AGY_AGENTAPI_TIMEOUT_MS = 12_000;
+const AGY_ENDPOINT_INSPECT_TIMEOUT_MS = 5_000;
 const AGY_REGISTRATION_MAX_BYTES = 16 * 1024;
 const AGY_LS_ADDRESS_MAX_CHARS = 256;
 const AGY_CSRF_TOKEN_MAX_CHARS = 512;
@@ -83,7 +106,8 @@ const AGY_EXECUTABLE_MAX_CHARS = 1024;
 const AGY_CONTROL_OR_SPACE_RE = /[\x00-\x20\x7f]/;
 const AGY_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 const AGY_EXECUTABLE_BASENAME_RE = /^(agy|antigravity)(\.exe)?$/i;
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const CANONICAL_LOOPBACK_ADDR_RE = /^(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/;
+const LOOPBACK_INPUT_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const AGY_UNREACHABLE_RE =
   /econnrefused|connection refused|connect error|failed to connect|dial tcp|401|403|unauthorized|unauthenticated|forbidden|csrf|unavailable|connection reset|socket hang up|etimedout|eof/i;
 
@@ -91,24 +115,56 @@ export interface AgyRegistrationRecord {
   version: 1;
   profile: string;
   host_session_id: string;
+  /** Canonical loopback IP literal only: `127.0.0.1:<port>` or `[::1]:<port>`. */
   ls_address: string;
+  ls_pid: number;
+  ls_uid: number;
+  ls_start_time: string;
+  agentapi_exe: string;
   csrf_token: string;
-  agentapi_exe?: string;
   registered_at: string;
 }
 
-/** Validate ANTIGRAVITY_LS_ADDRESS: strictly local loopback host:port (or http(s)://loopback:port). */
-export function validateAgyLsAddress(raw: unknown): string {
+export interface AgyLoopbackEndpoint {
+  /** Strictly `127.0.0.1:<port>` or `[::1]:<port>`. */
+  canonical_address: string;
+  pid: number;
+  uid: number;
+  start_time: string;
+  executable: string;
+}
+
+export interface AgyCredentialsPayload {
+  ls_address: string;
+  csrf_token: string;
+  agentapi_exe?: string;
+}
+
+export type AgyEndpointInspector = (input: {
+  host: "127.0.0.1" | "::1" | "localhost";
+  port: number;
+  signal?: AbortSignal;
+}) => Promise<AgyLoopbackEndpoint | null>;
+
+/**
+ * Parse a registration-time loopback address input (`127.0.0.1:<port>`, `[::1]:<port>`,
+ * `localhost:<port>`, or `http://` of those). Rejects non-loopback hosts, `https://`,
+ * paths, credentials, queries, fragments, control chars, and invalid ports.
+ */
+export function parseAgyInputAddress(raw: unknown): {
+  host: "127.0.0.1" | "::1" | "localhost";
+  port: number;
+} {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > AGY_LS_ADDRESS_MAX_CHARS) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must be set in the environment to a local loopback address (127.0.0.1, localhost, or [::1] with port).",
+      "Antigravity language-server address must be a local loopback host and TCP port.",
     );
   }
   if (AGY_CONTROL_OR_SPACE_RE.test(raw) || /[@?#]/.test(raw)) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must not contain whitespace, control characters, credentials, query, or fragment.",
+      "Antigravity language-server address must not contain whitespace, control characters, credentials, query, or fragment.",
     );
   }
   const hasScheme = raw.includes("://");
@@ -118,57 +174,95 @@ export function validateAgyLsAddress(raw: unknown): string {
   } catch {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must be a valid local loopback host:port or http(s)://loopback:port.",
+      "Antigravity language-server address must be a valid local loopback host:port.",
     );
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+  if (parsed.protocol !== "http:") {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS scheme must be http or https when supplied.",
+      "Antigravity language-server address must be bare host:port or http:// loopback only.",
     );
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must not include credentials, query, or fragment.",
+      "Antigravity language-server address must not include credentials, query, or fragment.",
     );
   }
   if (parsed.pathname !== "" && parsed.pathname !== "/") {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must not include a path.",
+      "Antigravity language-server address must not include a path.",
     );
   }
   if (!hasScheme && raw.endsWith("/")) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must not include a trailing slash without a scheme.",
+      "Antigravity language-server address must not include a trailing slash.",
     );
   }
-  const host = parsed.hostname.toLowerCase();
-  if (!LOOPBACK_HOSTS.has(host)) {
+  const hostRaw = parsed.hostname.toLowerCase();
+  if (!LOOPBACK_INPUT_HOSTS.has(hostRaw)) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must target local loopback only (127.0.0.1, localhost, or [::1]).",
+      "Antigravity language-server address must target local loopback only (127.0.0.1, [::1], or localhost).",
     );
   }
   if (!/^[0-9]{1,5}$/.test(parsed.port)) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS must include an explicit TCP port (1-65535).",
+      "Antigravity language-server address must include an explicit TCP port (1-65535).",
     );
   }
   const port = Number.parseInt(parsed.port, 10);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
     throw new AgentSetupError(
       "agy_ls_address_invalid",
-      "ANTIGRAVITY_LS_ADDRESS port must be between 1 and 65535.",
+      "Antigravity language-server address port must be between 1 and 65535.",
     );
   }
-  return raw;
+  const normalizedHost: "127.0.0.1" | "::1" | "localhost" =
+    hostRaw === "[::1]" || hostRaw === "::1"
+      ? "::1"
+      : hostRaw === "127.0.0.1"
+        ? "127.0.0.1"
+        : "localhost";
+  return { host: normalizedHost, port };
 }
 
-/** Validate ANTIGRAVITY_CSRF_TOKEN without ever echoing its value in error text. */
+/**
+ * Validate a persisted/canonical loopback IP literal (`127.0.0.1:<port>` or `[::1]:<port>`).
+ * Hostnames such as `localhost` and URL schemes are strictly refused here so the child never
+ * performs independent DNS/host resolution.
+ */
+export function validateCanonicalAgyLsAddress(raw: unknown): {
+  canonical: string;
+  host: "127.0.0.1" | "::1";
+  port: number;
+} {
+  if (typeof raw !== "string" || !CANONICAL_LOOPBACK_ADDR_RE.test(raw)) {
+    throw new AgentSetupError(
+      "agy_ls_address_invalid",
+      "Antigravity registration requires a canonical loopback IP literal (127.0.0.1:<port> or [::1]:<port>).",
+    );
+  }
+  const match = CANONICAL_LOOPBACK_ADDR_RE.exec(raw)!;
+  const hostLiteral = match[1]!;
+  const port = Number.parseInt(match[2]!, 10);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new AgentSetupError(
+      "agy_ls_address_invalid",
+      "Antigravity language-server port must be between 1 and 65535.",
+    );
+  }
+  return {
+    canonical: `${hostLiteral}:${port}`,
+    host: hostLiteral === "[::1]" ? "::1" : "127.0.0.1",
+    port,
+  };
+}
+
+/** Validate CSRF token without ever echoing its value in error text. */
 export function validateAgyCsrfToken(raw: unknown): string {
   if (
     typeof raw !== "string" ||
@@ -178,7 +272,7 @@ export function validateAgyCsrfToken(raw: unknown): string {
   ) {
     throw new AgentSetupError(
       "agy_csrf_token_invalid",
-      "ANTIGRAVITY_CSRF_TOKEN must be set in the environment to a non-empty single-line token without whitespace or control characters.",
+      "Antigravity CSRF token must be a non-empty single-line token without whitespace or control characters.",
     );
   }
   return raw;
@@ -195,13 +289,26 @@ function validateAgyExecutablePathShape(raw: unknown): string {
   ) {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "ANTIGRAVITY_AGENTAPI_EXE must be an absolute path to a non-world-writable agy or antigravity executable.",
+      "Antigravity executable must be an absolute path to a trusted agy or antigravity binary.",
     );
   }
   return raw;
 }
 
-/** Validate optional ANTIGRAVITY_AGENTAPI_EXE: canonical executable agy/antigravity binary, not world-writable. */
+function isTrustedOwnerUid(uid: number): boolean {
+  if (typeof process.getuid !== "function") return true;
+  const selfUid = process.getuid();
+  return uid === 0 || uid === selfUid;
+}
+
+/**
+ * Pin and verify a trusted Antigravity executable:
+ * - Canonicalized via `realpath` (never resolved through `PATH`).
+ * - Leaf basename must be `agy` or `antigravity`, regular executable file, owned by root or current UID,
+ *   and not world-writable.
+ * - Full ancestor directory walk from parent up to `/`: every ancestor must be a directory owned by
+ *   root or current UID and MUST NOT be world-writable (rejects `/tmp` or any 0o777 parent dir).
+ */
 export async function validateAgyAgentApiExecutable(raw: unknown): Promise<string> {
   const shaped = validateAgyExecutablePathShape(raw);
   let resolved: string;
@@ -210,48 +317,419 @@ export async function validateAgyAgentApiExecutable(raw: unknown): Promise<strin
   } catch {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "ANTIGRAVITY_AGENTAPI_EXE does not resolve to an accessible agy or antigravity executable.",
+      "Antigravity executable does not resolve to an accessible binary.",
     );
   }
   if (!isAbsolute(resolved) || !AGY_EXECUTABLE_BASENAME_RE.test(basename(resolved))) {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "ANTIGRAVITY_AGENTAPI_EXE must resolve to an agy or antigravity executable.",
+      "Antigravity executable must resolve to a trusted agy or antigravity binary.",
     );
   }
-  let info;
+  let leafInfo;
   try {
-    info = await stat(resolved);
+    leafInfo = await lstat(resolved);
   } catch {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "ANTIGRAVITY_AGENTAPI_EXE could not be verified on disk.",
+      "Antigravity executable could not be inspected on disk.",
     );
   }
-  if (!info.isFile() || (info.mode & 0o111) === 0 || (info.mode & 0o002) !== 0) {
+  if (
+    !leafInfo.isFile() ||
+    leafInfo.isSymbolicLink() ||
+    (leafInfo.mode & 0o111) === 0 ||
+    (leafInfo.mode & 0o002) !== 0 ||
+    !isTrustedOwnerUid(leafInfo.uid)
+  ) {
     throw new AgentSetupError(
       "agy_executable_invalid",
-      "ANTIGRAVITY_AGENTAPI_EXE must be an executable regular file and not world-writable.",
+      "Antigravity executable must be an owned, non-world-writable regular executable file.",
     );
+  }
+  let cursor = dirname(resolved);
+  for (;;) {
+    let dirInfo;
+    try {
+      dirInfo = await lstat(cursor);
+    } catch {
+      throw new AgentSetupError(
+        "agy_executable_invalid",
+        "Antigravity executable ancestor directory could not be verified.",
+      );
+    }
+    if (!dirInfo.isDirectory() || (dirInfo.mode & 0o002) !== 0 || !isTrustedOwnerUid(dirInfo.uid)) {
+      throw new AgentSetupError(
+        "agy_executable_invalid",
+        "Antigravity executable ancestor directories must be owned by root or the current user and never world-writable.",
+      );
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
   }
   return resolved;
 }
 
-/** Redact CSRF token occurrences (raw and URL-encoded) from any error detail or stderr snippet. */
-export function redactAgySecrets(text: string, csrfToken?: string | null): string {
-  if (!text) return "";
-  let redacted = text;
-  if (csrfToken && csrfToken.length > 0) {
-    redacted = redacted.split(csrfToken).join("[REDACTED]");
-    try {
-      const encoded = encodeURIComponent(csrfToken);
-      if (encoded !== csrfToken && encoded.length > 0) {
-        redacted = redacted.split(encoded).join("[REDACTED]");
-      }
-    } catch { /* ignore */ }
+/**
+ * Parse registration credentials payload supplied over a 0600 file or stdin.
+ * Never echoes any input values in error messages.
+ */
+export function parseAgyCredentialsPayload(raw: string): AgyCredentialsPayload {
+  if (Buffer.byteLength(raw, "utf8") > AGY_REGISTRATION_MAX_BYTES) {
+    throw new AgentSetupError(
+      "agy_credentials_invalid",
+      "Antigravity registration input exceeds the maximum allowed size.",
+    );
   }
-  return redacted;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new AgentSetupError(
+      "agy_credentials_invalid",
+      "Antigravity registration input must be a valid JSON object containing ls_address and csrf_token.",
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AgentSetupError(
+      "agy_credentials_invalid",
+      "Antigravity registration input must be a JSON object.",
+    );
+  }
+  const obj = parsed as Record<string, unknown>;
+  const allowedKeys = new Set(["ls_address", "csrf_token", "agentapi_exe"]);
+  for (const key of Object.keys(obj)) {
+    if (!allowedKeys.has(key)) {
+      throw new AgentSetupError(
+        "agy_credentials_invalid",
+        "Antigravity registration input contains an unsupported field.",
+      );
+    }
+  }
+  // Validate address syntax and CSRF token syntax without echoing raw values.
+  parseAgyInputAddress(obj.ls_address);
+  const csrfToken = validateAgyCsrfToken(obj.csrf_token);
+  const agentapiExe =
+    obj.agentapi_exe === undefined
+      ? undefined
+      : validateAgyExecutablePathShape(obj.agentapi_exe);
+  return {
+    ls_address: obj.ls_address as string,
+    csrf_token: csrfToken,
+    ...(agentapiExe !== undefined ? { agentapi_exe: agentapiExe } : {}),
+  };
 }
+
+/** Read registration credentials from an owned 0600 regular file (no symlinks via O_NOFOLLOW). */
+export async function readAgyCredentialsFromFile(filePath: string): Promise<AgyCredentialsPayload> {
+  if (
+    typeof filePath !== "string" ||
+    filePath.length === 0 ||
+    AGY_CONTROL_CHAR_RE.test(filePath) ||
+    !isAbsolute(filePath)
+  ) {
+    throw new AgentSetupError(
+      "agy_credentials_file_unsafe",
+      "--credentials-file must be an absolute path to a private 0600 regular file.",
+    );
+  }
+  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let handle;
+  try {
+    handle = await open(filePath, openFlags);
+  } catch {
+    throw new AgentSetupError(
+      "agy_credentials_file_unsafe",
+      "Could not open --credentials-file as a non-symlink regular file.",
+    );
+  }
+  try {
+    const info = await handle.stat();
+    if (
+      !info.isFile() ||
+      (typeof process.getuid === "function" && info.uid !== process.getuid()) ||
+      (info.mode & 0o077) !== 0 ||
+      info.size > AGY_REGISTRATION_MAX_BYTES
+    ) {
+      throw new AgentSetupError(
+        "agy_credentials_file_unsafe",
+        "--credentials-file must be an owned regular file with 0600 permissions.",
+      );
+    }
+    const raw = await handle.readFile({ encoding: "utf8" });
+    return parseAgyCredentialsPayload(raw);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Read registration credentials from a bounded stdin stream (max 16 KB). */
+export async function readAgyCredentialsFromStdin(
+  stream: NodeJS.ReadableStream = process.stdin,
+): Promise<AgyCredentialsPayload> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+    total += buf.length;
+    if (total > AGY_REGISTRATION_MAX_BYTES) {
+      throw new AgentSetupError(
+        "agy_credentials_invalid",
+        "Antigravity registration input from stdin exceeds the maximum allowed size.",
+      );
+    }
+    chunks.push(buf);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    throw new AgentSetupError(
+      "agy_credentials_input_required",
+      "Supply Antigravity registration JSON via --credentials-file <0600-path> or piped stdin.",
+    );
+  }
+  return parseAgyCredentialsPayload(raw);
+}
+
+/**
+ * Minimal stripped child environment for the pinned short-lived `antigravity agentapi` call.
+ * Strips ALL ambient process variables, credentials, PATH, and proxy configuration.
+ * Only canonical loopback `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` are supplied
+ * under HezLead's #716 C1 narrow scope decision.
+ */
+export function buildMinimalAgyChildEnv(
+  canonicalLsAddress: string,
+  csrfToken: string,
+): NodeJS.ProcessEnv {
+  const checked = validateCanonicalAgyLsAddress(canonicalLsAddress);
+  const token = validateAgyCsrfToken(csrfToken);
+  let homeDir: string | undefined;
+  try {
+    homeDir = homedir();
+  } catch {
+    homeDir = undefined;
+  }
+  let tempDir: string | undefined;
+  try {
+    tempDir = tmpdir();
+  } catch {
+    tempDir = undefined;
+  }
+  return {
+    ...(homeDir ? { HOME: homeDir } : {}),
+    ...(tempDir ? { TMPDIR: tempDir } : {}),
+    NO_PROXY: "*",
+    no_proxy: "*",
+    HTTP_PROXY: "",
+    HTTPS_PROXY: "",
+    ALL_PROXY: "",
+    http_proxy: "",
+    https_proxy: "",
+    all_proxy: "",
+    CMUX_ANTIGRAVITY_HOOKS_DISABLED: "1",
+    ANTIGRAVITY_LS_ADDRESS: checked.canonical,
+    ANTIGRAVITY_CSRF_TOKEN: token,
+  };
+}
+
+/**
+ * Inspect the live loopback-only TCP listener on macOS using absolute `/usr/sbin/lsof` + `/bin/ps`
+ * (zero PATH lookup, stripped env). Refuses wildcard listeners (`*:<port>`, `0.0.0.0:<port>`, `[::]:<port>`),
+ * cross-UID listeners, and non-trusted executables.
+ */
+async function inspectMacOsLoopbackListener(input: {
+  host: "127.0.0.1" | "::1" | "localhost";
+  port: number;
+  signal?: AbortSignal;
+}): Promise<AgyLoopbackEndpoint | null> {
+  let lsofStdout: string;
+  try {
+    const res = await execFileAsync(
+      "/usr/sbin/lsof",
+      ["-nP", `-iTCP:${input.port}`, "-sTCP:LISTEN", "-F", "pun"],
+      {
+        env: {},
+        timeout: AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+        maxBuffer: 64 * 1024,
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+    );
+    lsofStdout = String(res.stdout ?? "");
+  } catch {
+    return null;
+  }
+
+  const wantedNames = new Set<string>();
+  if (input.host === "127.0.0.1" || input.host === "localhost") {
+    wantedNames.add(`127.0.0.1:${input.port}`);
+  }
+  if (input.host === "::1" || input.host === "localhost") {
+    wantedNames.add(`[::1]:${input.port}`);
+  }
+
+  let currentPid: number | null = null;
+  let currentUid: number | null = null;
+  const matches = new Map<number, { pid: number; uid: number; canonical: string }>();
+
+  for (const rawLine of lsofStdout.split(/\r?\n/)) {
+    if (!rawLine) continue;
+    const tag = rawLine[0];
+    const value = rawLine.slice(1);
+    if (tag === "p") {
+      const pid = Number.parseInt(value, 10);
+      currentPid = Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+      currentUid = null;
+    } else if (tag === "u") {
+      const uid = Number.parseInt(value, 10);
+      currentUid = Number.isSafeInteger(uid) && uid >= 0 ? uid : null;
+    } else if (tag === "n" && currentPid !== null && currentUid !== null) {
+      if (wantedNames.has(value)) {
+        const existing = matches.get(currentPid);
+        if (!existing || value.startsWith("127.0.0.1:")) {
+          matches.set(currentPid, { pid: currentPid, uid: currentUid, canonical: value });
+        }
+      }
+    }
+  }
+
+  if (matches.size !== 1) return null;
+  const [match] = matches.values();
+  if (!match) return null;
+  if (typeof process.getuid === "function" && match.uid !== process.getuid()) return null;
+
+  let psStdout: string;
+  try {
+    const res = await execFileAsync(
+      "/bin/ps",
+      ["-ww", "-p", String(match.pid), "-o", "uid=,lstart=,comm="],
+      {
+        env: {},
+        timeout: AGY_ENDPOINT_INSPECT_TIMEOUT_MS,
+        maxBuffer: 16 * 1024,
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+    );
+    psStdout = String(res.stdout ?? "").trim();
+  } catch {
+    return null;
+  }
+  // Format: "<uid> <Day> <Mon> <DD> <HH:MM:SS> <YYYY> <executable path>"
+  const psMatch = /^(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(
+    psStdout,
+  );
+  if (!psMatch) return null;
+  const psUid = Number.parseInt(psMatch[1]!, 10);
+  const startTime = psMatch[2]!.trim();
+  const commPath = psMatch[3]!.trim();
+  if (psUid !== match.uid) return null;
+  if (typeof process.getuid === "function" && psUid !== process.getuid()) return null;
+
+  let verifiedExe: string;
+  try {
+    verifiedExe = await validateAgyAgentApiExecutable(commPath);
+  } catch {
+    return null;
+  }
+  return {
+    canonical_address: match.canonical,
+    pid: match.pid,
+    uid: psUid,
+    start_time: startTime,
+    executable: verifiedExe,
+  };
+}
+
+/**
+ * Inspect the live loopback-only TCP listener on Linux via `/proc/net/tcp{,6}` and `/proc/<pid>`.
+ * Zero external subprocesses, zero PATH lookup, refuses wildcard listeners and untrusted binaries.
+ */
+async function inspectLinuxLoopbackListener(input: {
+  host: "127.0.0.1" | "::1" | "localhost";
+  port: number;
+}): Promise<AgyLoopbackEndpoint | null> {
+  const portHex = input.port.toString(16).toUpperCase().padStart(4, "0");
+  const candidates: Array<{ inode: string; canonical: string }> = [];
+
+  if (input.host === "127.0.0.1" || input.host === "localhost") {
+    const raw4 = await readFile("/proc/net/tcp", "utf8").catch(() => "");
+    for (const line of raw4.split("\n").slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      if (cols[1] === `0100007F:${portHex}` && cols[3] === "0A" && cols[9]) {
+        candidates.push({ inode: cols[9]!, canonical: `127.0.0.1:${input.port}` });
+      }
+    }
+  }
+  if (input.host === "::1" || input.host === "localhost") {
+    const raw6 = await readFile("/proc/net/tcp6", "utf8").catch(() => "");
+    for (const line of raw6.split("\n").slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      if (
+        cols[1] === `00000000000000000000000001000000:${portHex}` &&
+        cols[3] === "0A" &&
+        cols[9]
+      ) {
+        candidates.push({ inode: cols[9]!, canonical: `[::1]:${input.port}` });
+      }
+    }
+  }
+  if (candidates.length === 0) return null;
+  const wantedInodes = new Map(candidates.map((c) => [`socket:[${c.inode}]`, c.canonical]));
+  const selfUid = typeof process.getuid === "function" ? process.getuid() : null;
+
+  const procEntries = await readdir("/proc").catch(() => [] as string[]);
+  const matchedPids = new Map<number, string>();
+  for (const entry of procEntries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number.parseInt(entry, 10);
+    const procStat = await stat(`/proc/${entry}`).catch(() => null);
+    if (!procStat || (selfUid !== null && procStat.uid !== selfUid)) continue;
+    const fds = await readdir(`/proc/${entry}/fd`).catch(() => [] as string[]);
+    for (const fd of fds) {
+      const target = await readlink(`/proc/${entry}/fd/${fd}`).catch(() => "");
+      const canonical = wantedInodes.get(target);
+      if (canonical) {
+        matchedPids.set(pid, canonical);
+        break;
+      }
+    }
+  }
+  if (matchedPids.size !== 1) return null;
+  const [[pid, canonical]] = matchedPids.entries();
+  const exeRaw = await readlink(`/proc/${pid}/exe`).catch(() => "");
+  const statRaw = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+  const rparen = statRaw.lastIndexOf(")");
+  if (rparen === -1) return null;
+  const afterComm = statRaw.slice(rparen + 2).trim().split(/\s+/);
+  // Field 22 in /proc/<pid>/stat is index 19 after comm (field 3 is index 0).
+  const startTicks = afterComm[19];
+  if (!startTicks || !/^\d+$/.test(startTicks)) return null;
+
+  let verifiedExe: string;
+  try {
+    verifiedExe = await validateAgyAgentApiExecutable(exeRaw);
+  } catch {
+    return null;
+  }
+  return {
+    canonical_address: canonical,
+    pid,
+    uid: selfUid ?? 0,
+    start_time: startTicks,
+    executable: verifiedExe,
+  };
+}
+
+export const defaultAgyEndpointInspector: AgyEndpointInspector = async (input) => {
+  if (process.platform === "darwin") {
+    return inspectMacOsLoopbackListener(input);
+  }
+  if (process.platform === "linux") {
+    return inspectLinuxLoopbackListener(input);
+  }
+  return null;
+};
 
 export function agyRegistrationPath(profilePath: string, hostSessionId: string): string {
   const profile = privatePath(profilePath);
@@ -270,13 +748,13 @@ function parseAgyRegistration(
   } catch {
     throw new AgentSetupError(
       "agy_registration_invalid",
-      "Antigravity wake registration file is damaged. Re-run cswarm receive register-agy inside the active agy session.",
+      "Antigravity wake registration file is damaged. Re-run cswarm receive register-agy.",
     );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new AgentSetupError(
       "agy_registration_invalid",
-      "Antigravity wake registration file is invalid. Re-run cswarm receive register-agy inside the active agy session.",
+      "Antigravity wake registration file is invalid. Re-run cswarm receive register-agy.",
     );
   }
   const r = parsed as Record<string, unknown>;
@@ -286,6 +764,16 @@ function parseAgyRegistration(
     r.host_session_id !== expectedHost ||
     typeof r.host_session_id !== "string" ||
     !ONBOARDING_UUID.test(r.host_session_id) ||
+    typeof r.ls_pid !== "number" ||
+    !Number.isSafeInteger(r.ls_pid) ||
+    r.ls_pid <= 0 ||
+    typeof r.ls_uid !== "number" ||
+    !Number.isSafeInteger(r.ls_uid) ||
+    r.ls_uid < 0 ||
+    typeof r.ls_start_time !== "string" ||
+    r.ls_start_time.length === 0 ||
+    r.ls_start_time.length > 128 ||
+    AGY_CONTROL_CHAR_RE.test(r.ls_start_time) ||
     typeof r.registered_at !== "string" ||
     !Number.isFinite(Date.parse(r.registered_at))
   ) {
@@ -294,17 +782,19 @@ function parseAgyRegistration(
       "Antigravity wake registration does not match this profile and conversation. Re-run cswarm receive register-agy.",
     );
   }
-  const lsAddress = validateAgyLsAddress(r.ls_address);
+  const canonicalAddr = validateCanonicalAgyLsAddress(r.ls_address);
   const csrfToken = validateAgyCsrfToken(r.csrf_token);
-  const agentapiExe =
-    r.agentapi_exe === undefined ? undefined : validateAgyExecutablePathShape(r.agentapi_exe);
+  const agentapiExe = validateAgyExecutablePathShape(r.agentapi_exe);
   return {
     version: 1,
     profile: expectedProfile,
     host_session_id: expectedHost,
-    ls_address: lsAddress,
+    ls_address: canonicalAddr.canonical,
+    ls_pid: r.ls_pid,
+    ls_uid: r.ls_uid,
+    ls_start_time: r.ls_start_time,
+    agentapi_exe: agentapiExe,
     csrf_token: csrfToken,
-    ...(agentapiExe !== undefined ? { agentapi_exe: agentapiExe } : {}),
     registered_at: r.registered_at,
   };
 }
@@ -331,16 +821,192 @@ export async function removeAgyRegistration(
   await deleteSecureJsonFile(path);
 }
 
+export type AgyAgentApiRunner = (
+  executable: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+  },
+) => Promise<{ stdout: string; stderr: string }>;
+
+const defaultAgyAgentApiRunner: AgyAgentApiRunner = async (executable, args, options) => {
+  const result = await execFileAsync(executable, [...args], {
+    cwd: options.cwd,
+    timeout: options.timeoutMs,
+    maxBuffer: 64 * 1024,
+    env: options.env,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return {
+    stdout: String(result.stdout ?? ""),
+    stderr: String(result.stderr ?? ""),
+  };
+};
+
+function pathMatchesWorkspace(bindingCwd: string, workspacePath: string): boolean {
+  const normBinding = resolve(bindingCwd);
+  const normWorkspace = resolve(workspacePath);
+  if (normBinding === normWorkspace) return true;
+  const prefix = normWorkspace.endsWith(sep) ? normWorkspace : `${normWorkspace}${sep}`;
+  return normBinding.startsWith(prefix);
+}
+
 /**
- * Env-only 0600 registration (`cswarm receive register-agy`).
- * Reads ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN strictly from env, serializes under the
- * shared `receive-<scope>` lock, refuses unless the live binding is already `provider: "agy"` +
- * `requested_mode: "wake"` + `experimental_agy_agentapi: true`, and never mutates receive routes.
+ * Verify provider session evidence via `agentapi get-conversation-metadata <conv-uuid>`:
+ * proves the verified loopback language server owns `<conv-uuid>` AND that at least one
+ * workspace folder in the conversation's metadata covers `expectedCwd`.
+ * Never echoes address, CSRF token, or raw subprocess output in errors.
+ */
+export async function verifyAgyConversationSession(options: {
+  executable: string;
+  canonicalLsAddress: string;
+  csrfToken: string;
+  hostSessionId: string;
+  expectedCwd: string;
+  runner?: AgyAgentApiRunner;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<{ ok: true } | { ok: false; code: string; detail: string }> {
+  const runner = options.runner ?? defaultAgyAgentApiRunner;
+  const timeoutMs = options.timeoutMs ?? AGY_AGENTAPI_TIMEOUT_MS;
+  const childEnv = buildMinimalAgyChildEnv(options.canonicalLsAddress, options.csrfToken);
+  const argv = ["agentapi", "get-conversation-metadata", options.hostSessionId] as const;
+
+  let stdout: string;
+  try {
+    const res = await runner(options.executable, argv, {
+      cwd: options.expectedCwd,
+      timeoutMs,
+      env: childEnv,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    stdout = res.stdout;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+    const combined = `${err.stderr ?? ""} ${err.stdout ?? ""} ${err.message ?? ""}`;
+    if (err.code === "ENOENT") {
+      return {
+        ok: false,
+        code: "agy_not_found",
+        detail: "Pinned Antigravity CLI executable was not found.",
+      };
+    }
+    if (/not_found|notfound|trajectory not found/i.test(combined)) {
+      return {
+        ok: false,
+        code: "agy_session_mismatch",
+        detail: "Antigravity language server does not own this bound conversation.",
+      };
+    }
+    if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
+      return {
+        ok: false,
+        code: "agy_ls_unreachable",
+        detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
+      };
+    }
+    return {
+      ok: false,
+      code: "agy_agentapi_failed",
+      detail: "Antigravity session verification failed.",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return {
+      ok: false,
+      code: "agy_session_mismatch",
+      detail: "Antigravity session metadata response was not valid JSON.",
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      code: "agy_session_mismatch",
+      detail: "Antigravity session metadata response was invalid.",
+    };
+  }
+  const top = parsed as Record<string, unknown>;
+  if (typeof top.error === "string" && top.error.length > 0) {
+    if (AGY_UNREACHABLE_RE.test(top.error)) {
+      return {
+        ok: false,
+        code: "agy_ls_unreachable",
+        detail: "Antigravity language server rejected credentials. Re-run cswarm receive register-agy.",
+      };
+    }
+    return {
+      ok: false,
+      code: "agy_session_mismatch",
+      detail: "Antigravity language server does not own this bound conversation.",
+    };
+  }
+  const response = top.response as Record<string, unknown> | undefined;
+  const convMeta = response?.conversationMetadata as Record<string, unknown> | undefined;
+  const metadata = convMeta?.metadata as Record<string, unknown> | undefined;
+  const workspaces = metadata?.workspaces;
+  if (!Array.isArray(workspaces) || workspaces.length === 0) {
+    return {
+      ok: false,
+      code: "agy_session_mismatch",
+      detail: "Antigravity session metadata did not report any workspace folders.",
+    };
+  }
+
+  const expectedReal = await realpath(options.expectedCwd).catch(() => resolve(options.expectedCwd));
+  let workspaceMatched = false;
+  for (const ws of workspaces) {
+    if (!ws || typeof ws !== "object" || Array.isArray(ws)) continue;
+    const uri = (ws as Record<string, unknown>).workspaceFolderAbsoluteUri;
+    if (typeof uri !== "string" || !uri.startsWith("file://")) continue;
+    let wsFsPath: string;
+    try {
+      wsFsPath = fileURLToPath(uri);
+    } catch {
+      continue;
+    }
+    const wsReal = await realpath(wsFsPath).catch(() => resolve(wsFsPath));
+    if (pathMatchesWorkspace(expectedReal, wsReal) || pathMatchesWorkspace(options.expectedCwd, wsFsPath)) {
+      workspaceMatched = true;
+      break;
+    }
+  }
+  if (!workspaceMatched) {
+    return {
+      ok: false,
+      code: "agy_session_mismatch",
+      detail: "Antigravity session workspace does not match this seat's bound directory.",
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Private 0600 registration (`cswarm receive register-agy`).
+ * - Accepts credentials ONLY via a 0600 `--credentials-file`, piped stdin, or explicit `credentials`
+ *   payload — NEVER from `cswarm`'s own `process.env` or argv.
+ * - Verifies the live loopback-only listening Antigravity process `(pid, uid, start_time, exe)`
+ *   and canonicalizes to an IP literal (`127.0.0.1:<port>` or `[::1]:<port>`) BEFORE presenting
+ *   credentials.
+ * - Verifies provider session evidence via `agentapi get-conversation-metadata` before saving.
+ * - Serializes under the shared `receive-<scope>` lock, refuses unless live binding is already
+ *   `provider: "agy"` + `requested_mode: "wake"` + `experimental_agy_agentapi: true`, never mutates
+ *   receive routes, and returns a secret-free AND address-free summary.
  */
 export async function registerAgyWake(options: {
   profilePath: string;
   hostSessionId: string;
-  env?: NodeJS.ProcessEnv;
+  credentialsFile?: string;
+  credentialsJson?: string;
+  stdin?: NodeJS.ReadableStream;
+  endpointInspector?: AgyEndpointInspector;
+  runner?: AgyAgentApiRunner;
   now?: () => number;
 }) {
   const profile = privatePath(options.profilePath);
@@ -351,14 +1017,61 @@ export async function registerAgyWake(options: {
       "Antigravity wake registration requires this session's conversation UUID as --host-session-id.",
     );
   }
-  const env = options.env ?? process.env;
-  const lsAddress = validateAgyLsAddress(env.ANTIGRAVITY_LS_ADDRESS);
-  const csrfToken = validateAgyCsrfToken(env.ANTIGRAVITY_CSRF_TOKEN);
-  const rawAgentApiExe = env.ANTIGRAVITY_AGENTAPI_EXE;
-  const agentapiExe =
-    typeof rawAgentApiExe === "string" && rawAgentApiExe.length > 0
-      ? await validateAgyAgentApiExecutable(rawAgentApiExe)
+  if (options.credentialsFile !== undefined && options.credentialsJson !== undefined) {
+    throw new AgentSetupError(
+      "agy_credentials_input_conflict",
+      "Supply either --credentials-file or stdin, not both.",
+    );
+  }
+
+  let payload: AgyCredentialsPayload;
+  if (options.credentialsFile !== undefined) {
+    payload = await readAgyCredentialsFromFile(options.credentialsFile);
+  } else if (options.credentialsJson !== undefined) {
+    payload = parseAgyCredentialsPayload(options.credentialsJson);
+  } else if (options.stdin !== undefined) {
+    payload = await readAgyCredentialsFromStdin(options.stdin);
+  } else {
+    throw new AgentSetupError(
+      "agy_credentials_input_required",
+      "Pass Antigravity credentials via --credentials-file <0600-path> or --stdin (never env or argv).",
+    );
+  }
+
+  const parsedAddr = parseAgyInputAddress(payload.ls_address);
+  const explicitExe =
+    payload.agentapi_exe !== undefined
+      ? await validateAgyAgentApiExecutable(payload.agentapi_exe)
       : undefined;
+  const inspector = options.endpointInspector ?? defaultAgyEndpointInspector;
+  const endpoint = await inspector({ host: parsedAddr.host, port: parsedAddr.port });
+  if (!endpoint) {
+    throw new AgentSetupError(
+      "agy_endpoint_mismatch",
+      "No verified local Antigravity loopback listener owned by this user matched the supplied port.",
+    );
+  }
+  const canonicalAddr = validateCanonicalAgyLsAddress(endpoint.canonical_address);
+  if (canonicalAddr.port !== parsedAddr.port) {
+    throw new AgentSetupError(
+      "agy_endpoint_mismatch",
+      "Verified Antigravity listener port did not match the supplied address.",
+    );
+  }
+  if (typeof process.getuid === "function" && endpoint.uid !== process.getuid()) {
+    throw new AgentSetupError(
+      "agy_endpoint_mismatch",
+      "Verified Antigravity listener must be owned by the current user.",
+    );
+  }
+  const pinnedExe = await validateAgyAgentApiExecutable(endpoint.executable);
+  if (explicitExe !== undefined && explicitExe !== pinnedExe) {
+    throw new AgentSetupError(
+      "agy_endpoint_mismatch",
+      "Supplied agentapi_exe does not match the live Antigravity listener executable.",
+    );
+  }
+
   const nowMs = (options.now ?? Date.now)();
   const nowIso = new Date(nowMs).toISOString();
 
@@ -374,27 +1087,44 @@ export async function registerAgyWake(options: {
       if (!auth.ok) {
         throw new AgentSetupError(auth.code, auth.detail);
       }
+
+      // Verify provider session evidence BEFORE saving the 0600 credential record.
+      const verified = await verifyAgyConversationSession({
+        executable: pinnedExe,
+        canonicalLsAddress: canonicalAddr.canonical,
+        csrfToken: payload.csrf_token,
+        hostSessionId: host,
+        expectedCwd: auth.binding.cwd,
+        ...(options.runner ? { runner: options.runner } : {}),
+      });
+      if (!verified.ok) {
+        throw new AgentSetupError(verified.code, verified.detail);
+      }
+
       const record: AgyRegistrationRecord = {
         version: 1,
         profile,
         host_session_id: host,
-        ls_address: lsAddress,
-        csrf_token: csrfToken,
-        ...(agentapiExe !== undefined ? { agentapi_exe: agentapiExe } : {}),
+        ls_address: canonicalAddr.canonical,
+        ls_pid: endpoint.pid,
+        ls_uid: endpoint.uid,
+        ls_start_time: endpoint.start_time,
+        agentapi_exe: pinnedExe,
+        csrf_token: payload.csrf_token,
         registered_at: nowIso,
       };
       await writeSecureJsonFile(agyRegistrationPath(profile, host), JSON.stringify(record));
       const status = receiveStatus(auth.binding, nowMs, auth.profile.host_session_id, profile);
+      // Never print ls_address or csrf_token in output.
       return {
         registered: true,
         profile,
         host_session_id: host,
         wake_route: "agy-agentapi" as const,
-        ls_address: lsAddress,
         registered_at: nowIso,
         wake_verified: status.wake_verified,
         next_action: boundProfileCommands(
-          "Antigravity wake credentials saved to a 0600 file. Start cswarm receive serve, run cswarm receive test, end this turn and run cswarm receive idle, then confirm wake_verified: true with cswarm receive status.",
+          "Antigravity wake credentials verified and saved to a 0600 file. Start cswarm receive serve, run cswarm receive test, end this turn and run cswarm receive idle, then confirm wake_verified: true with cswarm receive status.",
           profile,
           auth.profile.host_session_id,
         ),
@@ -445,58 +1175,35 @@ async function readAgentProfileForIdle(profilePath: string, hostSessionId: strin
   return auth.profile;
 }
 
-export type AgyAgentApiRunner = (
-  executable: string,
-  args: readonly string[],
-  options: {
-    cwd: string;
-    timeoutMs: number;
-    env: NodeJS.ProcessEnv;
-    signal?: AbortSignal;
-  },
-) => Promise<{ stdout: string; stderr: string }>;
-
-const defaultAgyAgentApiRunner: AgyAgentApiRunner = async (executable, args, options) => {
-  const result = await execFileAsync(executable, [...args], {
-    cwd: options.cwd,
-    timeout: options.timeoutMs,
-    maxBuffer: 64 * 1024,
-    env: options.env,
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
-  return {
-    stdout: String(result.stdout ?? ""),
-    stderr: String(result.stderr ?? ""),
-  };
-};
-
 export interface AgyAgentApiAdapterOptions {
   profilePath: string;
-  agyExecutable?: string;
   runner?: AgyAgentApiRunner;
+  endpointInspector?: AgyEndpointInspector;
   timeoutMs?: number;
-  baseEnv?: NodeJS.ProcessEnv;
 }
 
 /**
- * Invokes `agy agentapi send-message --title=CommonSwarm <conversation-uuid> "<fixed text>"`,
- * reading ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN from the 0600 registration file and
- * passing them strictly via child env (never argv), with CSRF token redaction on every error path.
+ * Invokes `<pinned-antigravity> agentapi send-message --title=CommonSwarm <conversation-uuid> "<fixed text>"`:
+ * - Re-verifies canonical loopback IP literal, trusted executable (full ancestor walk), AND exact
+ *   listening process `(pid, uid, start_time, executable)` BEFORE presenting credentials.
+ * - Re-verifies `get-conversation-metadata` proves this LS owns the bound conversation and workspace
+ *   BEFORE invoking `send-message`.
+ * - Passes ONLY canonical `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` in an otherwise
+ *   stripped, proxy-free child environment (HezLead #716 C1 narrow scope decision).
+ * - Emits ONLY fixed static diagnostic codes and text (never prints address, token, or raw stderr).
  */
 export class AgyAgentApiAdapter implements NativeWakeAdapter {
   readonly route = "agy-agentapi" as const;
   private readonly profilePath: string;
-  private readonly explicitExecutable?: string;
   private readonly runner: AgyAgentApiRunner;
+  private readonly endpointInspector: AgyEndpointInspector;
   private readonly timeoutMs: number;
-  private readonly baseEnv: NodeJS.ProcessEnv;
 
   constructor(options: AgyAgentApiAdapterOptions) {
     this.profilePath = privatePath(options.profilePath);
-    this.explicitExecutable = options.agyExecutable;
     this.runner = options.runner ?? defaultAgyAgentApiRunner;
+    this.endpointInspector = options.endpointInspector ?? defaultAgyEndpointInspector;
     this.timeoutMs = options.timeoutMs ?? AGY_AGENTAPI_TIMEOUT_MS;
-    this.baseEnv = options.baseEnv ?? process.env;
   }
 
   async sendWake(input: {
@@ -515,11 +1222,11 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
     }
     try {
       assertFixedNativeWakePrompt(input.prompt);
-    } catch (error) {
+    } catch {
       return {
         ok: false,
         code: "wake_prompt_unsafe",
-        detail: error instanceof Error ? error.message : "Unsafe wake prompt refused.",
+        detail: "Refused non-fixed wake prompt.",
       };
     }
 
@@ -528,29 +1235,81 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       registration = await readAgyRegistration(this.profilePath, input.hostSessionId);
     } catch (error) {
       const code = error instanceof AgentSetupError ? error.code : "agy_registration_invalid";
-      const detail = error instanceof Error ? error.message : "Antigravity wake registration is invalid.";
-      return { ok: false, code, detail: detail.slice(0, 240) };
+      return {
+        ok: false,
+        code,
+        detail: "Antigravity wake registration is invalid. Re-run cswarm receive register-agy.",
+      };
     }
     if (registration === null) {
       return {
         ok: false,
         code: "agy_not_registered",
-        detail: "Antigravity wake is not registered for this conversation. Run cswarm receive register-agy inside the active agy session.",
+        detail: "Antigravity wake is not registered for this conversation. Run cswarm receive register-agy.",
       };
     }
 
-    let executable = this.explicitExecutable ?? "agy";
-    if (!this.explicitExecutable && registration.agentapi_exe) {
-      try {
-        executable = await validateAgyAgentApiExecutable(registration.agentapi_exe);
-      } catch (error) {
-        const code = error instanceof AgentSetupError ? error.code : "agy_executable_invalid";
-        const detail = error instanceof Error ? error.message : "Antigravity executable is invalid.";
-        return { ok: false, code, detail: detail.slice(0, 240) };
-      }
+    let canonicalAddr: { canonical: string; host: "127.0.0.1" | "::1"; port: number };
+    try {
+      canonicalAddr = validateCanonicalAgyLsAddress(registration.ls_address);
+    } catch {
+      return {
+        ok: false,
+        code: "agy_ls_address_invalid",
+        detail: "Antigravity registration does not contain a canonical loopback IP literal.",
+      };
     }
 
-    // Secrets MUST NEVER enter argv: pass LS address and CSRF token strictly via child env.
+    let pinnedExe: string;
+    try {
+      pinnedExe = await validateAgyAgentApiExecutable(registration.agentapi_exe);
+    } catch {
+      return {
+        ok: false,
+        code: "agy_executable_invalid",
+        detail: "Pinned Antigravity executable failed trust verification.",
+      };
+    }
+
+    // C2: Verify the EXACT loopback listener process identity BEFORE presenting the CSRF token!
+    const liveEndpoint = await this.endpointInspector({
+      host: canonicalAddr.host,
+      port: canonicalAddr.port,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : registration.ls_uid;
+    if (
+      !liveEndpoint ||
+      liveEndpoint.canonical_address !== canonicalAddr.canonical ||
+      liveEndpoint.pid !== registration.ls_pid ||
+      liveEndpoint.uid !== registration.ls_uid ||
+      liveEndpoint.uid !== currentUid ||
+      liveEndpoint.start_time !== registration.ls_start_time ||
+      liveEndpoint.executable !== pinnedExe
+    ) {
+      return {
+        ok: false,
+        code: "agy_endpoint_mismatch",
+        detail: "Registered Antigravity language server is no longer listening on its verified loopback endpoint. Re-run cswarm receive register-agy.",
+      };
+    }
+
+    // C2: Verify the bound conversation UUID & workspace still belong to this exact LS before sending.
+    const sessionCheck = await verifyAgyConversationSession({
+      executable: pinnedExe,
+      canonicalLsAddress: canonicalAddr.canonical,
+      csrfToken: registration.csrf_token,
+      hostSessionId: input.hostSessionId,
+      expectedCwd: input.cwd,
+      runner: this.runner,
+      timeoutMs: this.timeoutMs,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    if (!sessionCheck.ok) {
+      return sessionCheck;
+    }
+
+    // Secrets MUST NEVER enter argv: pass canonical LS address and CSRF token strictly in stripped child env.
     const argv = [
       "agentapi",
       "send-message",
@@ -558,55 +1317,67 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       input.hostSessionId,
       input.prompt,
     ] as const;
-    if (argv.some((arg) => arg.includes(registration.csrf_token))) {
+    if (argv.some((arg) => arg.includes(registration.csrf_token) || arg.includes(canonicalAddr.canonical))) {
       return {
         ok: false,
         code: "agy_secret_in_argv_refused",
-        detail: "Refused wake command containing CSRF secret in argv.",
+        detail: "Refused wake command containing sensitive endpoint data in argv.",
       };
     }
 
-    const childEnv: NodeJS.ProcessEnv = {
-      ...this.baseEnv,
-      CMUX_ANTIGRAVITY_HOOKS_DISABLED: "1",
-      ANTIGRAVITY_LS_ADDRESS: registration.ls_address,
-      ANTIGRAVITY_CSRF_TOKEN: registration.csrf_token,
-    };
+    const childEnv = buildMinimalAgyChildEnv(canonicalAddr.canonical, registration.csrf_token);
 
     try {
-      await this.runner(executable, argv, {
+      const res = await this.runner(pinnedExe, argv, {
         cwd: input.cwd,
         timeoutMs: this.timeoutMs,
         env: childEnv,
         ...(input.signal ? { signal: input.signal } : {}),
       });
+      // agentapi can exit 0 with a JSON error field; inspect strictly without echoing raw text.
+      const trimmed = res.stdout.trim();
+      if (trimmed.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+          if (typeof parsed.error === "string" && parsed.error.length > 0) {
+            if (AGY_UNREACHABLE_RE.test(parsed.error)) {
+              return {
+                ok: false,
+                code: "agy_ls_unreachable",
+                detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
+              };
+            }
+            return {
+              ok: false,
+              code: "agy_agentapi_failed",
+              detail: "Antigravity wake command reported an error.",
+            };
+          }
+        } catch { /* non-JSON stdout on exit 0 is success */ }
+      }
       return { ok: true };
     } catch (error) {
+      // C1: Emit ONLY fixed static codes and diagnostic text — never raw stderr/stdout/err.message.
       const err = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const rawDetail =
-        (typeof err.stderr === "string" && err.stderr.trim()) ||
-        (typeof err.stdout === "string" && err.stdout.trim()) ||
-        err.message ||
-        "agy_agentapi_failed";
-      const safeDetail = redactAgySecrets(rawDetail, registration.csrf_token);
+      const combined = `${err.stderr ?? ""} ${err.stdout ?? ""} ${err.message ?? ""}`;
       if (err.code === "ENOENT") {
         return {
           ok: false,
           code: "agy_not_found",
-          detail: `Antigravity CLI executable not found: ${safeDetail}`.slice(0, 240),
+          detail: "Pinned Antigravity CLI executable was not found.",
         };
       }
-      if (AGY_UNREACHABLE_RE.test(safeDetail) || err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
+      if (AGY_UNREACHABLE_RE.test(combined) || err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
         return {
           ok: false,
           code: "agy_ls_unreachable",
-          detail: `Antigravity language server unreachable or rejected token (restarted or stale registration). Re-run cswarm receive register-agy. (${safeDetail})`.slice(0, 240),
+          detail: "Antigravity language server is unreachable or rejected credentials. Re-run cswarm receive register-agy.",
         };
       }
       return {
         ok: false,
         code: "agy_agentapi_failed",
-        detail: safeDetail.slice(0, 240),
+        detail: "Antigravity wake command failed.",
       };
     }
   }
@@ -643,8 +1414,8 @@ async function readCheckCursor(profilePath: string): Promise<SignalCursor | null
 export interface ServeAgyWakeBridgeOptions {
   profilePath: string;
   hostSessionId: string;
-  agyExecutable?: string;
   adapter?: NativeWakeAdapter;
+  endpointInspector?: AgyEndpointInspector;
   debounceMs?: number;
   minIntervalMs?: number;
   retryAfterMs?: number;
@@ -659,7 +1430,7 @@ export interface ServeAgyWakeBridgeOptions {
 /**
  * Long-lived bridge for `cswarm receive serve --profile P --host-session-id <conv>`
  * on an experimental Antigravity seat. Watches read-only inbox arrivals and nudges the bound
- * agy conversation via `agy agentapi send-message` with fixed text only.
+ * agy conversation via `antigravity agentapi send-message` with fixed text only.
  */
 export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Promise<void> {
   const profilePath = privatePath(options.profilePath);
@@ -682,7 +1453,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
   if (initialReg === null) {
     throw new AgentSetupError(
       "agy_not_registered",
-      "Register Antigravity local LS credentials first: run cswarm receive register-agy inside the active agy session.",
+      "Register Antigravity credentials first with cswarm receive register-agy.",
     );
   }
   const profile = initialAuth.profile;
@@ -744,7 +1515,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
     options.adapter ??
     new AgyAgentApiAdapter({
       profilePath,
-      ...(options.agyExecutable ? { agyExecutable: options.agyExecutable } : {}),
+      ...(options.endpointInspector ? { endpointInspector: options.endpointInspector } : {}),
     });
   const bridge = new NativeWakeBridge({
     profilePath,
@@ -764,6 +1535,7 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
   const wake: WakeHandle = options.wake ?? createWakeSubscriber({ target });
 
   let stopped = false;
+  let installedRuntimeMarker = false;
   let lastPoll = 0;
   let lastErrorCode: string | null = null;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -804,20 +1576,61 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  await withFileLock(dirname(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
-    const binding = await readReceiveBinding(profilePath, host);
-    if (binding && receiveStatus(binding, now()).channel_running) {
-      throw new AgentSetupError("channel_already_running", "This session already has a live wake bridge.");
-    }
-    await updateReceiveBinding(profilePath, host, (b) => ({
-      ...b,
-      channel_instance_id: runtimeId,
-      channel_pid: process.pid,
-      channel_heartbeat_at: new Date(now()).toISOString(),
-      wake_verified_at: null,
-      canary: b.canary ? { ...b.canary, emitted_while_idle: false, received_at: null } : null,
-    }));
-  });
+  // C3: Atomically re-verify live wake route, registration, and single-receiver ownership
+  // under the shared `receive-<scope>` lock BEFORE writing any runtime marker.
+  try {
+    await withFileLock(
+      dirname(profilePath),
+      `receive-${profileScopeKey(host)}`,
+      async () => {
+        const liveAuth = await resolveAuthorizedWakeBinding({
+          profilePath,
+          hostSessionId: host,
+          expectedProvider: "agy",
+          expectedSeat: {
+            workspaceId: profile.workspace_id,
+            principalId: profile.principal_id,
+          },
+        });
+        if (!liveAuth.ok || wakeRouteForBinding(liveAuth.binding) !== "agy-agentapi") {
+          throw new AgentSetupError(
+            liveAuth.ok ? "wake_opted_out" : liveAuth.code,
+            liveAuth.ok ? "This seat is no longer opted into experimental Antigravity wake mode." : liveAuth.detail,
+          );
+        }
+        const liveReg = await readAgyRegistration(profilePath, host);
+        if (liveReg === null) {
+          throw new AgentSetupError(
+            "agy_not_registered",
+            "Register Antigravity credentials first with cswarm receive register-agy.",
+          );
+        }
+        if (receiveStatus(liveAuth.binding, now()).channel_running) {
+          throw new AgentSetupError("channel_already_running", "This session already has a live wake bridge.");
+        }
+        const nextBinding = {
+          ...liveAuth.binding,
+          channel_instance_id: runtimeId,
+          channel_pid: process.pid,
+          channel_heartbeat_at: new Date(now()).toISOString(),
+          wake_verified_at: null,
+          canary: liveAuth.binding.canary
+            ? { ...liveAuth.binding.canary, emitted_while_idle: false, received_at: null }
+            : null,
+        };
+        await writeSecureJsonFile(receiveBindingPath(profilePath, host), JSON.stringify(nextBinding));
+        installedRuntimeMarker = true;
+      },
+      { timeoutMs: 20_000 },
+    );
+  } catch (error) {
+    stop();
+    if (options.signal) options.signal.removeEventListener("abort", externalAbort);
+    await wake.close();
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+    throw error;
+  }
 
   let touching = false;
   const bindingStillOwned = async (): Promise<boolean> => {
@@ -965,7 +1778,8 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
           await touch();
         }
         if (decision.action === "error" && decision.code !== lastErrorCode) {
-          process.stderr.write(`CommonSwarm agy wake: ${decision.code}: ${decision.detail}\n`);
+          // C1: Emit fixed diagnostic code only (never raw subprocess output, address, or token).
+          process.stderr.write(`CommonSwarm agy wake: ${decision.code}. Check cswarm receive status.\n`);
           lastErrorCode = decision.code;
         } else if (decision.action === "sent") {
           lastErrorCode = null;
@@ -1002,11 +1816,13 @@ export async function serveAgyWakeBridge(options: ServeAgyWakeBridgeOptions): Pr
     if (heartbeat) clearInterval(heartbeat);
     manager?.stopTimers();
     await wake.close();
-    await updateReceiveBinding(profilePath, host, (b) =>
-      b.channel_instance_id === runtimeId
-        ? { ...b, channel_pid: null, channel_heartbeat_at: null, wake_verified_at: null }
-        : b,
-    ).catch(() => undefined);
+    if (installedRuntimeMarker) {
+      await updateReceiveBinding(profilePath, host, (b) =>
+        b.channel_instance_id === runtimeId
+          ? { ...b, channel_pid: null, channel_heartbeat_at: null, wake_verified_at: null }
+          : b,
+      ).catch(() => undefined);
+    }
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
   }

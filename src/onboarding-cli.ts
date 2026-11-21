@@ -35,8 +35,8 @@ export interface OnboardingArguments {
   assertShape(flags: readonly string[], positionals: number): void;
 }
 
-export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt", "after"] as const;
-export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel", "experimental-agy-agentapi"] as const;
+export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt", "after", "credentials-file"] as const;
+export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel", "experimental-agy-agentapi", "stdin"] as const;
 
 export function onboardingUsage(): string {
   return `setup imports a private connection file and checks the authenticated identity. It starts no listener.
@@ -329,13 +329,25 @@ export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
   await output(await markGrokBotIdle(profilePath, hostSessionId));
 }
 
+export const RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "credentials-file", "stdin"] as const;
+
 export async function runReceiveRegisterAgy(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-register-agy");
-  args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  args.assertShape(RUN_RECEIVE_REGISTER_AGY_ACCEPTED_FLAGS, 2);
+  const credentialsFile = args.optional("credentials-file");
+  const useStdin = args.has("stdin");
+  if (credentialsFile !== undefined && useStdin) {
+    throw new AgentSetupError("agy_credentials_input_conflict", "Supply either --credentials-file or --stdin, not both.");
+  }
   const { registerAgyWake } = await import("./cloud/native-wake-agy.js");
   await output(await registerAgyWake({
     profilePath: args.required("profile"),
     hostSessionId: checkedHostSessionId(args.required("host-session-id")),
+    ...(credentialsFile !== undefined
+      ? { credentialsFile }
+      : useStdin || !process.stdin.isTTY
+        ? { stdin: process.stdin }
+        : {}),
   }));
 }
 
