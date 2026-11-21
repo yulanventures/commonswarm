@@ -425,6 +425,10 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: check_runs.length, check_runs }));
       return;
     }
+    if (req.url?.includes("/statuses")) {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([]));
+      return;
+    }
     res.writeHead(404).end();
   });
 
@@ -599,5 +603,183 @@ test("syncGithubCiToReviewCheck & executeCheckCiCli: read-only GET, exact-head s
     await new Promise<void>((r) => ghServer.close(() => r()));
     await new Promise<void>((r) => csServer.close(() => r()));
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workflow_dispatch commit statuses witness: maps 'server suite / <suite>' by latest created_at, ignores main-head actions/runs, and isolates focused contexts", async () => {
+  const MAIN_SHA = "9999999999999999999999999999999999999999";
+  const stampedCommands: Array<Record<string, unknown>> = [];
+  let currentCheck = makeCheckRecord({ head_sha: SHA_NEW });
+
+  const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    assert.equal(req.method, "GET", "GitHub adapter must only issue GET");
+    if (req.url?.includes("/actions/runs")) {
+      // workflow_dispatch runs report main's SHA, NOT the PR head SHA! Must be ignored as stale_head.
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+        total_count: 1,
+        workflow_runs: [{
+          id: 44858176467,
+          name: "server-suite",
+          head_sha: MAIN_SHA,
+          run_attempt: 1,
+          status: "completed",
+          conclusion: "failure",
+          updated_at: "2026-11-21T03:01:00Z",
+          created_at: "2026-11-21T02:55:00Z",
+          html_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858176467",
+        }],
+      }));
+      return;
+    }
+    if (req.url?.includes("/check-runs")) {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 0, check_runs: [] }));
+      return;
+    }
+    if (req.url?.includes(`/commits/${SHA_NEW}/statuses`)) {
+      // Dispatch-shaped statuses matching .github/workflows/server-suite.yml lines 594-607:
+      // - older failure on "server suite / p1-cli" superseded by newer success by created_at
+      // - "server suite / server" passes
+      // - "server suite / mobile-audit (focused)" must NOT satisfy --suite mobile-audit
+      // - a status whose URL carries SHA_OLD must be ignored as stale_head
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([
+        {
+          id: 901,
+          context: "server suite / p1-cli",
+          state: "failure",
+          description: "dispatch run 44857347609: failure",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44857347609",
+          created_at: "2026-11-21T02:50:00Z",
+          updated_at: "2026-11-21T02:50:00Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+        },
+        {
+          id: 902,
+          context: "server suite / p1-cli",
+          state: "success",
+          description: "dispatch run 44858176467: success",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858176467/attempts/2",
+          created_at: "2026-11-21T03:01:30Z",
+          updated_at: "2026-11-21T03:01:30Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+        },
+        {
+          id: 903,
+          context: "server suite / server",
+          state: "success",
+          description: "dispatch run 44858179999: success",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858179999",
+          created_at: "2026-11-21T03:02:00Z",
+          updated_at: "2026-11-21T03:02:00Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+        },
+        {
+          id: 904,
+          context: "server suite / mobile-audit (focused)",
+          state: "success",
+          description: "dispatch run 44858180000: success, 1 screen(s)",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44858180000",
+          created_at: "2026-11-21T03:02:10Z",
+          updated_at: "2026-11-21T03:02:10Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+        },
+        {
+          id: 905,
+          context: "server suite / unit",
+          state: "success",
+          description: "dispatch run 44850000000: success",
+          target_url: "https://github.com/yulanventures/commonswarm/actions/runs/44850000000",
+          created_at: "2026-11-21T03:03:00Z",
+          updated_at: "2026-11-21T03:03:00Z",
+          url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_OLD}`,
+        },
+      ]));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  const csServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read" && body.resource === "review_checks") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ review_check: currentCheck }));
+        return;
+      }
+      if (req.url === "/functions/v1/command" && body.command?.kind === "review_check_stamp") {
+        stampedCommands.push(body.command);
+        currentCheck = makeCheckRecord({ status: "satisfied", satisfied: true });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          review_check: currentCheck,
+          satisfied_now: true,
+          satisfied_signal_id: "99999999-9999-4999-8999-999999999999",
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
+  const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon" };
+
+  try {
+    // 1. Focused "server suite / mobile-audit (focused)" must NOT satisfy --suite mobile-audit -> pending!
+    const focusedNotFull = await syncGithubCiToReviewCheck({
+      target: csTarget,
+      bearer: AGENT_TOKEN,
+      workspaceId: WS,
+      checkId: CHECK_ID,
+      requiredSuites: ["p1-cli", "mobile-audit"],
+      apiBaseUrl: ghUrl,
+      githubToken: GH_SECRET,
+    });
+    assert.equal(focusedNotFull.stamped, false);
+    assert.equal(focusedNotFull.action, "pending");
+    assert.deepEqual(focusedNotFull.evaluation.missing_suites, ["mobile-audit"]);
+    assert.equal(stampedCommands.length, 0);
+
+    // 2. Stale-SHA "server suite / unit" (SHA_OLD in URL) must NOT satisfy --suite unit -> pending!
+    const staleUnitMissing = await syncGithubCiToReviewCheck({
+      target: csTarget,
+      bearer: AGENT_TOKEN,
+      workspaceId: WS,
+      checkId: CHECK_ID,
+      requiredSuites: ["p1-cli", "unit"],
+      apiBaseUrl: ghUrl,
+      githubToken: GH_SECRET,
+    });
+    assert.equal(staleUnitMissing.stamped, false);
+    assert.equal(staleUnitMissing.action, "pending");
+    assert.deepEqual(staleUnitMissing.evaluation.missing_suites, ["unit"]);
+    assert.equal(staleUnitMissing.evaluation.ignored_stale_head, 2, "must ignore both main-head workflow_run and SHA_OLD commit status");
+
+    // 3. Matching dispatch statuses ("server suite / p1-cli" latest created_at success + "server suite / server" success)
+    // satisfy --suite p1-cli,server (and also full context selector "server suite / server") and stamp pass!
+    const passed = await syncGithubCiToReviewCheck({
+      target: csTarget,
+      bearer: AGENT_TOKEN,
+      workspaceId: WS,
+      checkId: CHECK_ID,
+      requiredSuites: ["p1-cli", "server suite / server"],
+      apiBaseUrl: ghUrl,
+      githubToken: GH_SECRET,
+    });
+    assert.equal(passed.stamped, true);
+    assert.equal(passed.action, "pass");
+    assert.equal(passed.evaluation.ignored_stale_head, 2);
+    assert.equal(passed.evaluation.ignored_superseded_runs, 1, "older failed p1-cli status must be superseded by newer created_at");
+    assert.equal(stampedCommands.length, 1);
+    assert.equal(stampedCommands[0]!.verdict, "pass");
+    assert.equal(stampedCommands[0]!.head_sha, SHA_NEW);
+    assert.match(String(stampedCommands[0]!.note), /server suite \/ p1-cli \(attempt 2, success, run 44858176467\)/);
+    assert.match(String(stampedCommands[0]!.note), /server suite \/ server \(attempt 1, success, run 44858179999\)/);
+  } finally {
+    await new Promise<void>((r) => ghServer.close(() => r()));
+    await new Promise<void>((r) => csServer.close(() => r()));
   }
 });

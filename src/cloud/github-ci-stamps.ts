@@ -30,7 +30,7 @@ export const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 export const GITHUB_CI_TIMEOUT_MS = 10_000;
 export const GITHUB_CI_MAX_BYTES = 2 * 1024 * 1024;
 export const GITHUB_CI_NOTE_MAX = 2_000;
-export const GITHUB_CI_SOURCES = ["all", "actions", "checks"] as const;
+export const GITHUB_CI_SOURCES = ["all", "actions", "checks", "statuses"] as const;
 export type GithubCiSource = (typeof GITHUB_CI_SOURCES)[number];
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
@@ -73,10 +73,23 @@ export interface GithubCheckRunRaw {
   html_url: string | null;
 }
 
+export type GithubCommitStatusState = "pending" | "success" | "failure" | "error";
+
+export interface GithubCommitStatusRaw {
+  id: number;
+  context: string;
+  state: GithubCommitStatusState;
+  head_sha: string;
+  description: string | null;
+  target_url: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export type GithubCiSuiteState = "pass" | "fail" | "pending";
 
 export interface GithubCiSuiteResult {
-  source: "workflow_run" | "check_run";
+  source: "workflow_run" | "check_run" | "commit_status";
   suite: string;
   head_sha: string;
   run_id: number;
@@ -328,6 +341,86 @@ function parseCheckRunsPayload(payload: unknown): GithubCheckRunRaw[] {
   return out;
 }
 
+const COMMIT_STATUS_STATES = new Set<GithubCommitStatusState>(["pending", "success", "failure", "error"]);
+
+function extractCommitStatusSha(rec: Record<string, unknown>, requestedSha: string): string {
+  const explicit = typeof rec.head_sha === "string"
+    ? rec.head_sha.trim()
+    : typeof rec.sha === "string"
+    ? rec.sha.trim()
+    : null;
+  if (explicit !== null) {
+    if (!FULL_SHA_RE.test(explicit)) {
+      throw new GithubCiError("github_malformed_response", "GitHub commit status entry has an invalid SHA.", 502);
+    }
+    return explicit.toLowerCase();
+  }
+  if (typeof rec.url === "string" && rec.url.length > 0) {
+    const match = /\/statuses\/([0-9a-f]{40}|[0-9a-f]{64})(?:$|[?#])/i.exec(rec.url);
+    if (match) return match[1]!.toLowerCase();
+  }
+  return requestedSha;
+}
+
+function parseCommitStatusesPayload(
+  payload: unknown,
+  requestedSha: string,
+  hasNextPage: boolean,
+): GithubCommitStatusRaw[] {
+  if (!Array.isArray(payload)) {
+    throw new GithubCiError("github_malformed_response", "GitHub commits/{sha}/statuses response must be a JSON array.", 502);
+  }
+  if (hasNextPage && payload.length >= 100) {
+    throw new GithubCiError(
+      "github_response_truncated",
+      `GitHub commits/${requestedSha.slice(0, 9)}/statuses returned a paginated page (${payload.length}+ entries); refusing to evaluate a truncated status list.`,
+      502,
+    );
+  }
+  const out: GithubCommitStatusRaw[] = [];
+  for (const item of payload) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new GithubCiError("github_malformed_response", "GitHub commit status entry must be an object.", 502);
+    }
+    const r = item as Record<string, unknown>;
+    const rawState = typeof r.state === "string" ? r.state.trim().toLowerCase() : "";
+    if (
+      typeof r.id !== "number" ||
+      !Number.isSafeInteger(r.id) ||
+      r.id < 1 ||
+      typeof r.context !== "string" ||
+      r.context.trim().length === 0 ||
+      !COMMIT_STATUS_STATES.has(rawState as GithubCommitStatusState)
+    ) {
+      throw new GithubCiError(
+        "github_malformed_response",
+        "GitHub commit status entry is missing required id, context, or valid state.",
+        502,
+      );
+    }
+    const createdAt = parseOptionalString(r.created_at, "created_at");
+    const updatedAt = parseOptionalString(r.updated_at, "updated_at");
+    if (createdAt === null && updatedAt === null) {
+      throw new GithubCiError(
+        "github_malformed_response",
+        "GitHub commit status entry is missing created_at/updated_at timestamp.",
+        502,
+      );
+    }
+    out.push({
+      id: r.id,
+      context: r.context.trim(),
+      state: rawState as GithubCommitStatusState,
+      head_sha: extractCommitStatusSha(r, requestedSha),
+      description: parseOptionalString(r.description, "description"),
+      target_url: parseOptionalString(r.target_url, "target_url"),
+      created_at: createdAt,
+      updated_at: updatedAt,
+    });
+  }
+  return out;
+}
+
 async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
   if (!response.body) {
     const text = await response.text();
@@ -365,7 +458,7 @@ async function githubReadOnlyGetJson(options: {
   maxBytes: number;
   fetcher: typeof fetch;
   signal?: AbortSignal;
-}): Promise<unknown> {
+}): Promise<{ payload: unknown; hasNextPage: boolean }> {
   const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
   const combinedSignal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
   const headers: Record<string, string> = {
@@ -436,8 +529,10 @@ async function githubReadOnlyGetJson(options: {
     throw new GithubCiError("github_http_error", `GitHub API returned HTTP ${response.status}: ${safeDetail}`, response.status);
   }
 
+  const linkHeader = response.headers.get("link") ?? "";
+  const hasNextPage = /rel="next"/i.test(linkHeader);
   try {
-    return JSON.parse(rawText);
+    return { payload: JSON.parse(rawText), hasNextPage };
   } catch {
     throw new GithubCiError("github_malformed_response", "GitHub API returned invalid JSON.", 502);
   }
@@ -458,6 +553,7 @@ export async function readGithubCiForCommit(options: {
   head_sha: string;
   workflow_runs: GithubWorkflowRunRaw[];
   check_runs: GithubCheckRunRaw[];
+  commit_statuses: GithubCommitStatusRaw[];
 }> {
   const repo = normalizeGithubRepo(options.repo);
   const headSha = normalizeReviewCheckSha(options.headSha);
@@ -475,10 +571,11 @@ export async function readGithubCiForCommit(options: {
 
   let workflowRuns: GithubWorkflowRunRaw[] = [];
   let checkRuns: GithubCheckRunRaw[] = [];
+  let commitStatuses: GithubCommitStatusRaw[] = [];
 
   if (source === "all" || source === "actions") {
     const actionsUrl = `${apiBaseUrl}/repos/${encodedOwner}/${encodedName}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`;
-    const payload = await githubReadOnlyGetJson({
+    const { payload } = await githubReadOnlyGetJson({
       url: actionsUrl,
       token,
       timeoutMs,
@@ -491,7 +588,7 @@ export async function readGithubCiForCommit(options: {
 
   if (source === "all" || source === "checks") {
     const checksUrl = `${apiBaseUrl}/repos/${encodedOwner}/${encodedName}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`;
-    const payload = await githubReadOnlyGetJson({
+    const { payload } = await githubReadOnlyGetJson({
       url: checksUrl,
       token,
       timeoutMs,
@@ -502,11 +599,25 @@ export async function readGithubCiForCommit(options: {
     checkRuns = parseCheckRunsPayload(payload);
   }
 
+  if (source === "all" || source === "statuses") {
+    const statusesUrl = `${apiBaseUrl}/repos/${encodedOwner}/${encodedName}/commits/${encodeURIComponent(headSha)}/statuses?per_page=100`;
+    const { payload, hasNextPage } = await githubReadOnlyGetJson({
+      url: statusesUrl,
+      token,
+      timeoutMs,
+      maxBytes,
+      fetcher,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    commitStatuses = parseCommitStatusesPayload(payload, headSha, hasNextPage);
+  }
+
   return {
     repo: repo.full,
     head_sha: headSha,
     workflow_runs: workflowRuns,
     check_runs: checkRuns,
+    commit_statuses: commitStatuses,
   };
 }
 
@@ -538,11 +649,77 @@ function isNewerCheckRun(candidate: GithubCheckRunRaw, current: GithubCheckRunRa
   return candidate.id > current.id;
 }
 
+function isNewerCommitStatus(candidate: GithubCommitStatusRaw, current: GithubCommitStatusRaw): boolean {
+  const candTs = parseTimestampMs(candidate.created_at) || parseTimestampMs(candidate.updated_at);
+  const currTs = parseTimestampMs(current.created_at) || parseTimestampMs(current.updated_at);
+  if (candTs !== currTs) return candTs > currTs;
+  return candidate.id > current.id;
+}
+
+function classifyCommitStatusState(state: GithubCommitStatusState): {
+  status: string;
+  conclusion: string | null;
+  suiteState: GithubCiSuiteState;
+} {
+  if (state === "pending") {
+    return { status: "pending", conclusion: null, suiteState: "pending" };
+  }
+  if (state === "success") {
+    return { status: "completed", conclusion: "success", suiteState: "pass" };
+  }
+  return { status: "completed", conclusion: state, suiteState: "fail" };
+}
+
+function parseDispatchRunMeta(status: GithubCommitStatusRaw): { runId: number; runAttempt: number } {
+  let runId = status.id;
+  let runAttempt = 1;
+  if (status.target_url) {
+    const urlRun = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?/i.exec(status.target_url);
+    if (urlRun) {
+      const parsedId = Number.parseInt(urlRun[1]!, 10);
+      if (Number.isSafeInteger(parsedId) && parsedId > 0) runId = parsedId;
+      if (urlRun[2]) {
+        const parsedAttempt = Number.parseInt(urlRun[2], 10);
+        if (Number.isSafeInteger(parsedAttempt) && parsedAttempt > 0) runAttempt = parsedAttempt;
+      }
+    }
+  }
+  if (runId === status.id && status.description) {
+    const descRun = /\bdispatch run (\d+)\b/i.exec(status.description);
+    if (descRun) {
+      const parsedId = Number.parseInt(descRun[1]!, 10);
+      if (Number.isSafeInteger(parsedId) && parsedId > 0) runId = parsedId;
+    }
+  }
+  return { runId, runAttempt };
+}
+
+/**
+ * Match a required `--suite` selector against a suite result.
+ * Supports exact full-name match (case-insensitive) AND, for commit status contexts shaped like
+ * `"server suite / p1-cli"`, exact match on the trimmed suffix after `" / "` (so `p1-cli` matches
+ * `"server suite / p1-cli"`, while `"server suite / mobile-audit (focused)"` will NOT falsely
+ * match `mobile-audit`).
+ */
+function suiteMatchesSelector(entry: GithubCiSuiteResult, selectorLower: string): boolean {
+  const fullLower = entry.suite.toLowerCase();
+  if (fullLower === selectorLower) return true;
+  if (entry.source === "commit_status") {
+    const slashIdx = fullLower.lastIndexOf(" / ");
+    if (slashIdx >= 0) {
+      const suffix = fullLower.slice(slashIdx + 3).trim();
+      if (suffix === selectorLower) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Pure deterministic evaluator:
- *   1. Strictly ignores any workflow/check run whose `head_sha !== expectedHeadSha`.
+ *   1. Strictly ignores any workflow run, check run, or commit status whose `head_sha !== expectedHeadSha`.
  *   2. Within each workflow `run_id`, keeps ONLY the highest `run_attempt` (ignores older attempts).
- *   3. Within each suite name on `expectedHeadSha`, keeps ONLY the latest run.
+ *   3. Within each suite/context name on `expectedHeadSha`, keeps ONLY the latest run/status
+ *      (for commit statuses, latest per `context` by `created_at`, then `id`).
  *   4. Applies optional `--suite` required filter; missing required suites keep decision `"pending"`.
  *   5. Any failing suite -> `"hold"`; any pending/missing/empty -> `"pending"`; all passing -> `"pass"`.
  */
@@ -550,6 +727,7 @@ export function evaluateGithubCiRuns(options: {
   expectedHeadSha: string;
   workflowRuns: readonly GithubWorkflowRunRaw[];
   checkRuns: readonly GithubCheckRunRaw[];
+  commitStatuses?: readonly GithubCommitStatusRaw[];
   requiredSuites?: readonly string[];
 }): GithubCiEvaluation {
   const expectedHeadSha = normalizeReviewCheckSha(options.expectedHeadSha);
@@ -611,6 +789,27 @@ export function evaluateGithubCiRuns(options: {
     }
   }
 
+  // Step 1 & 3 for commit statuses (e.g. workflow_dispatch `server suite / p1-cli`):
+  // filter exact head_sha, then collapse per `context` to the latest by `created_at` (tie-break `id`).
+  const latestStatusByContext = new Map<string, GithubCommitStatusRaw>();
+  for (const status of options.commitStatuses ?? []) {
+    const sha = status.head_sha.trim().toLowerCase();
+    if (sha !== expectedHeadSha) {
+      ignoredStaleHead += 1;
+      continue;
+    }
+    const key = status.context.trim().toLowerCase();
+    const existing = latestStatusByContext.get(key);
+    if (!existing) {
+      latestStatusByContext.set(key, status);
+    } else if (isNewerCommitStatus(status, existing)) {
+      latestStatusByContext.set(key, status);
+      ignoredSupersededRuns += 1;
+    } else {
+      ignoredSupersededRuns += 1;
+    }
+  }
+
   const allSuites: GithubCiSuiteResult[] = [];
   for (const run of latestWorkflowBySuite.values()) {
     allSuites.push({
@@ -640,6 +839,22 @@ export function evaluateGithubCiRuns(options: {
       html_url: run.html_url,
     });
   }
+  for (const status of latestStatusByContext.values()) {
+    const classified = classifyCommitStatusState(status.state);
+    const { runId, runAttempt } = parseDispatchRunMeta(status);
+    allSuites.push({
+      source: "commit_status",
+      suite: status.context,
+      head_sha: expectedHeadSha,
+      run_id: runId,
+      run_attempt: runAttempt,
+      status: classified.status,
+      conclusion: classified.conclusion,
+      state: classified.suiteState,
+      updated_at: status.created_at ?? status.updated_at,
+      html_url: status.target_url,
+    });
+  }
 
   const required = (options.requiredSuites ?? [])
     .map((s) => s.trim())
@@ -657,14 +872,21 @@ export function evaluateGithubCiRuns(options: {
         dedupedRequired.push(req);
       }
     }
+    const addedKeys = new Set<string>();
     selectedSuites = [];
     for (const req of dedupedRequired) {
       const lower = req.toLowerCase();
-      const matches = allSuites.filter((entry) => entry.suite.toLowerCase() === lower);
+      const matches = allSuites.filter((entry) => suiteMatchesSelector(entry, lower));
       if (matches.length === 0) {
         missingSuites.push(req);
       } else {
-        selectedSuites.push(...matches);
+        for (const match of matches) {
+          const dedupKey = `${match.source}:${match.suite.toLowerCase()}:${match.run_id}`;
+          if (!addedKeys.has(dedupKey)) {
+            addedKeys.add(dedupKey);
+            selectedSuites.push(match);
+          }
+        }
       }
     }
   } else {
@@ -775,6 +997,7 @@ export async function syncGithubCiToReviewCheck(options: {
     expectedHeadSha: pinnedHeadSha,
     workflowRuns: rawCi.workflow_runs,
     checkRuns: rawCi.check_runs,
+    commitStatuses: rawCi.commit_statuses,
     ...(options.requiredSuites ? { requiredSuites: options.requiredSuites } : {}),
   });
   const note = formatGithubCiStampNote(evaluation);

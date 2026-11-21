@@ -228,7 +228,7 @@ export async function executeCheckCiCli(
   if (!checkId && !subject) {
     throw new ReviewCheckError(
       "invalid_request",
-      "Usage: cswarm check ci <check-id|owner/repo#pr> [--head-sha <sha>] [--suite <name>] [--source all|actions|checks] [--dry-run]",
+      "Usage: cswarm check ci <check-id|owner/repo#pr> [--head-sha <sha>] [--suite <name>] [--source all|actions|checks|statuses] [--dry-run]",
       400,
     );
   }
