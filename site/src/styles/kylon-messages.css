@@ -1246,7 +1246,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn {
   line-height: 1;
   cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn:hover:not(:disabled) {
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn:hover:not(:disabled):not([aria-pressed="true"]) {
   background: var(--k-shell-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn:focus-visible {
@@ -1257,7 +1257,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn:disabled {
   opacity: 0.6;
   cursor: progress;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--pass[aria-pressed="true"] {
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--pass[aria-pressed="true"],
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--pass[aria-pressed="true"]:hover:not(:disabled) {
   border-color: var(--k-shell-accent);
   background: var(--k-shell-accent);
   color: var(--k-shell-accent-ink);
@@ -1265,6 +1266,11 @@ live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--pass[aria-pres
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--hold[aria-pressed="true"] {
   border-color: var(--k-shell-danger, #b91c1c);
   background: color-mix(in srgb, var(--k-shell-danger, #b91c1c) 14%, var(--k-shell-surface));
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-review-check__btn--hold[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: var(--k-shell-danger, #b91c1c);
+  background: color-mix(in srgb, var(--k-shell-danger, #b91c1c) 18%, var(--k-shell-surface));
   color: var(--k-shell-ink);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-review-check__note-toggle {
