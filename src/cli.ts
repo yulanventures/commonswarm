@@ -54,7 +54,7 @@ import {
 } from "./cli/ax.js";
 import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, selectAgentWorkspace, agentWorkspaceStatePath, profileSessionContext } from "./cloud/agent-profile.js";
-import { readReceiveBinding, receiveStatus } from "./cloud/agent-receive.js";
+import { readReceiveBinding, receiveStatus, WAKE_TRANSPORTS } from "./cloud/agent-receive.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
@@ -77,6 +77,7 @@ import {
   runReceiveConfigure,
   runReceiveConfirm,
   runReceiveIdle,
+  runReceiveRegisterSocket,
   runReceiveServe,
   runReceiveStatus,
   runReceiveTest,
@@ -95,12 +96,14 @@ import { ReviewCheckError } from "./cloud/review-checks.js";
 import { spawnSync } from "node:child_process";
 import {
   findProfileReceiveBinding,
+  formatWakeRouteLine,
   NativeWakeBridge,
   resolveAuthorizedWakeBinding,
   wakeRouteForBinding,
   type NativeWakeRoute,
 } from "./cloud/native-wake.js";
 import { CodexQueueAdapter } from "./cloud/native-wake-codex.js";
+import { ClaudeSocketAdapter } from "./cloud/native-wake-claude.js";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, realpath, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -762,7 +765,7 @@ export const KNOWN_FLAGS = new Set([
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
-  "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
+  "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "wake-transport", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
   "wake-profile", "wake-host-session-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
@@ -5671,12 +5674,14 @@ async function runWhoami(args: Arguments): Promise<void> {
     }
   }
   let wakeRoute: NativeWakeRoute = "none";
+  let wakeRouteReason: string | null = null;
   let wakeVerified = false;
   let receiveCapability: {
     configured: boolean;
     requested_mode: "wake" | "turn" | null;
     effective_mode: "wake" | "turn" | "direct";
     wake_route: NativeWakeRoute;
+    wake_route_reason?: string;
     turn_check: "verified" | "pending_host" | "instruction" | "none";
     wake_verified: boolean;
     channel_running: boolean;
@@ -5694,13 +5699,15 @@ async function runWhoami(args: Arguments): Promise<void> {
         args.expandedProfileHostSessionId,
         args.expandedProfileInputPath,
       );
-      wakeRoute = wakeRouteForBinding(binding);
+      wakeRoute = status.wake_route as NativeWakeRoute;
+      wakeRouteReason = status.wake_route_reason ?? null;
       wakeVerified = status.wake_verified;
       receiveCapability = {
         configured: binding !== null,
         requested_mode: status.requested_mode,
         effective_mode: status.effective_mode as "wake" | "turn",
         wake_route: wakeRoute,
+        ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
         turn_check: status.turn_check as "verified" | "pending_host" | "instruction",
         wake_verified: status.wake_verified,
         channel_running: status.channel_running,
@@ -5746,6 +5753,7 @@ async function runWhoami(args: Arguments): Promise<void> {
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
     wake_route: wakeRoute,
+    ...(wakeRouteReason !== null ? { wake_route_reason: wakeRouteReason } : {}),
     wake_verified: wakeVerified,
     renewal_grant: activeGrant,
     workspace: {
@@ -5783,7 +5791,7 @@ async function runWhoami(args: Arguments): Promise<void> {
         ? "Role: workspace lead (untagged channel messages route to you).\n"
         : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
-      `Wake route: ${wakeRoute}${wakeRoute !== "none" ? (wakeVerified ? " (verified)" : " (unverified)") : ""}.\n` +
+      `${formatWakeRouteLine(wakeRoute, wakeVerified, wakeRouteReason)}\n` +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"
         : `${describeRenewalGrant(output.renewal_grant).join("\n")}\n`),
@@ -8458,9 +8466,9 @@ async function runConfiguredListener(options: {
   const routeMode = options.routeMode ?? "main";
   const deferOverChars = options.deferOverChars ?? null;
   const pendingMainQueue = new FilePendingMainQueue(paths.instanceDirectory);
-  let codexWakeBridge: NativeWakeBridge | null = null;
+  let nativeWakeBridge: NativeWakeBridge | null = null;
   if (
-    options.provider === "codex" &&
+    (options.provider === "codex" || options.provider === "claude") &&
     options.profilePath !== undefined &&
     options.hostSessionId !== undefined
   ) {
@@ -8468,22 +8476,29 @@ async function runConfiguredListener(options: {
       workspaceId: options.workspaceId,
       principalId: options.principalId,
     };
+    const expectedWakeTransport = options.provider === "claude" ? "socket" as const : undefined;
     const auth = await resolveAuthorizedWakeBinding({
       profilePath: options.profilePath,
       hostSessionId: options.hostSessionId,
-      expectedProvider: "codex",
+      expectedProvider: options.provider,
+      ...(expectedWakeTransport !== undefined ? { expectedWakeTransport } : {}),
       expectedSeat,
     });
     if (auth.ok) {
-      codexWakeBridge = new NativeWakeBridge({
+      nativeWakeBridge = new NativeWakeBridge({
         profilePath: options.profilePath,
         hostSessionId: auth.binding.host_session_id,
         cwd: auth.binding.cwd,
-        expectedProvider: "codex",
+        expectedProvider: options.provider,
+        ...(expectedWakeTransport !== undefined ? { expectedWakeTransport } : {}),
         expectedSeat,
-        adapter: new CodexQueueAdapter({
-          ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
-        }),
+        adapter: options.provider === "codex"
+          ? new CodexQueueAdapter({
+            ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}),
+          })
+          : new ClaudeSocketAdapter({
+            profilePath: options.profilePath,
+          }),
       });
     }
   }
@@ -8578,10 +8593,10 @@ async function runConfiguredListener(options: {
         const instrumentedModel = activity.instrumentModel(
           await newModel(onCanaryAttempt, activity.events),
         );
-        const wakeBridgeTimer = codexWakeBridge === null
+        const wakeBridgeTimer = nativeWakeBridge === null
           ? null
           : setInterval(() => {
-            void codexWakeBridge.tick(signal).catch(() => undefined);
+            void nativeWakeBridge.tick(signal).catch(() => undefined);
           }, 1_000);
         try {
           return await runListenerRuntime({
@@ -8616,12 +8631,12 @@ async function runConfiguredListener(options: {
             deliveryHoldBudgetMs: turnBudgetMs,
             ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
             pendingMainQueue,
-            ...(codexWakeBridge === null
+            ...(nativeWakeBridge === null
               ? {}
               : {
                 onMainArrival: () => {
-                  codexWakeBridge.notifyArrival();
-                  void codexWakeBridge.tick(signal).catch(() => undefined);
+                  nativeWakeBridge.notifyArrival();
+                  void nativeWakeBridge.tick(signal).catch(() => undefined);
                 },
               }),
             fetcher: boundFetch,
@@ -11695,7 +11710,7 @@ const HELP_FLAG_VALUES: Readonly<Record<string, string>> = {
 
 function helpFlag(key: string, flag: string): string {
   const enumeration = key === "receive.configure"
-    ? flag === "mode" ? RECEIVE_MODES : flag === "provider" ? RECEIVE_PROVIDERS : undefined
+    ? flag === "mode" ? RECEIVE_MODES : flag === "provider" ? RECEIVE_PROVIDERS : flag === "wake-transport" ? WAKE_TRANSPORTS : undefined
     : key.startsWith("session.")
     ? flag === "mode" ? SESSION_MODES : flag === "provider" ? SESSION_PROVIDERS : undefined
     : undefined;
@@ -12389,11 +12404,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     errorMode: "onboarding",
   }),
   receive: group({
-    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "wake-transport", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--wake-transport ${WAKE_TRANSPORTS.join("|")}] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
     status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]"], bootstrap: true }),
     test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
     confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]"], bootstrap: true }),
     idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    "register-socket": commandEntry({ ...noTool("registers this Claude session's local inbox socket and 0600 messaging token; never a model tool"), handler: runReceiveRegisterSocket, description: "Register this Claude session's inbox socket and messaging token.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive register-socket --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
     serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve --profile <absolute-path> --host-session-id <id>"], bootstrap: true }),
   }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
     refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
@@ -12608,6 +12624,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "receive.test": RECEIVE_COMMON_FLAGS,
   "receive.confirm": RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
   "receive.idle": RECEIVE_COMMON_FLAGS,
+  "receive.register-socket": RECEIVE_COMMON_FLAGS,
   "receive.serve": RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
   "__listen-supervisor": RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { fstatSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { DeliveryCommandClient, DeliveryHttpError, DeliveryProtocolError, type DeliveryRow } from "./delivery.js";
 import { RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended } from "./renewal.js";
 import { CommandHttpError, CommandTransportError, ThinCommandClient, newCommandId, type PostSignalCommand, type PostSignalRequest, type PostSignalResult, type SenderOwnerRelation } from "./command-client.js";
@@ -28,6 +30,7 @@ import { ASK_PARENT_CONTEXT_SENTENCE, appendHandledAsk, defaultAskParent } from 
 import { CHAIN_MAX_HOPS, isAskChainRefusalCode, printableAskRefusalMessage } from "./ask-chain-constants.js";
 import { mcpFileGet } from "../mcp/file-image.js";
 import { FileCommandRefused, FileTransportError } from "./files.js";
+import { assertFixedNativeWakePrompt, formatNativeWakePrompt } from "./native-wake.js";
 
 export const CHANNEL_RECEIPT_TOOL = "cswarm_received";
 export const CHANNEL_RECEIPT_FIELDS = ["signal_id", "receipt", "host_session_id"] as const;
@@ -43,6 +46,9 @@ export const CHANNEL_FILE_TOOL = "cswarm_file_get";
 const CHANNEL_ASK_OPTIONAL_FIELDS = ["parent_signal_id"] as const;
 const CHANNEL_HEARTBEAT_MS = 5_000;
 const CHANNEL_POLL_MS = 30_000;
+const CHANNEL_NOTIFY_TIMEOUT_MS = 2_000;
+const CHANNEL_RPC_WRITE_TIMEOUT_MS = 10_000;
+const CHANNEL_STDOUT_RETRY_MS = 20;
 
 /** Trusted delivery metadata leads; teammate-authored text stays inside the block. */
 export function channelNoticePrefix(sender: string, signalId: string, receipt: string, hostSessionId: string, chainHop?: number, publicReply: boolean | "open" | "private" = false): string {
@@ -65,14 +71,6 @@ export function channelNotice(sender: string, signalId: string, receipt: string,
   return `${channelNoticePrefix(sender, signalId, receipt, hostSessionId, chainHop, publicReply)}\n${ownerRelationLines(relation).join("\n")}\n\n${channelMessageBlock(body)}`;
 }
 
-function channelCanaryNotice(sender: string, signalId: string, receipt: string, hostSessionId: string): string {
-  return `CommonSwarm wake test from ${sender}. First call ${CHANNEL_RECEIPT_TOOL} with signal_id ${signalId}, receipt ${receipt}, host_session_id ${hostSessionId}. No reply or other work is needed.`;
-}
-
-function channelSelfNotice(sender: string, signalId: string, receipt: string, hostSessionId: string, body: string): string {
-  return `CommonSwarm self-addressed message from ${sender}. First call ${CHANNEL_RECEIPT_TOOL} with signal_id ${signalId}, receipt ${receipt}, host_session_id ${hostSessionId}. No reply or other work is needed.\n\n${channelMessageBlock(body)}`;
-}
-
 export interface ChannelPending {
   row: DeliveryRow;
   receipt: string;
@@ -92,7 +90,7 @@ export class ChannelReceiptGate {
   }
 }
 
-interface ChannelJournal { version: 1; listener_instance_id: string; pending: ChannelPending | null; notified?: boolean }
+interface ChannelJournal { version: 1; listener_instance_id: string; pending: ChannelPending | null; notified?: boolean; notification_batch?: number }
 
 export interface GatewayChannelTransport {
   send(pending: ChannelPending, signal: AbortSignal): Promise<void>;
@@ -166,15 +164,219 @@ class ChannelReplyClient extends ThinCommandClient {
   }
 }
 
-export async function serveAgentChannel(options: { profilePath: string; hostSessionId: string; gateway?: GatewayChannelTransport }): Promise<void> {
+function bindingAllowsChannel(binding: ReceiveBinding | null | undefined, isGateway: boolean): binding is ReceiveBinding {
+  if (!binding || binding.requested_mode !== "wake") return false;
+  if (isGateway) return binding.provider === "grok-bot";
+  // Older Claude wake bindings with no explicit wake_transport default to channel.
+  return binding.provider === "claude" && (binding.wake_transport ?? "channel") === "channel";
+}
+
+class ChannelTransportStalledError extends Error {
+  constructor(message = "CommonSwarm channel stdout write stalled.") {
+    super(message);
+    this.name = "ChannelTransportStalledError";
+  }
+}
+
+export const CHANNEL_STDOUT_UNSUPPORTED_REASON = "stdout must be a pipe or socket";
+
+/**
+ * Verify that fd 1 (or the supplied fd) is a POSIX pipe or Unix socket supported by our
+ * non-blocking `writeSync` writer. Terminals and regular files can block synchronously on
+ * `process.stdout.write()`, starving the receive lock during opt-out, so we fail closed at
+ * startup with a fixed diagnostic.
+ */
+export function assertNonBlockingChannelStdout(fd = 1): number {
+  let st;
+  try {
+    if (fd === 1) {
+      // Initializing process.stdout configures Node's libuv pipe/socket handle (O_NONBLOCK).
+      void process.stdout.writable;
+    }
+    st = fstatSync(fd);
+  } catch {
+    throw new AgentSetupError(
+      "channel_stdout_unsupported",
+      `wake_route=unavailable (${CHANNEL_STDOUT_UNSUPPORTED_REASON}): Claude channel bridge requires a pipe or socket stdout.`,
+    );
+  }
+  if (!st.isFIFO() && !st.isSocket()) {
+    throw new AgentSetupError(
+      "channel_stdout_unsupported",
+      `wake_route=unavailable (${CHANNEL_STDOUT_UNSUPPORTED_REASON}): Claude channel bridge requires a pipe or socket stdout; terminals and regular files are unsupported.`,
+    );
+  }
+  return fd;
+}
+
+/**
+ * Production stdio MCP transport that writes directly to a verified pipe/socket fd via
+ * non-blocking `writeSync` (never falling back to Node's un-cancellable `process.stdout.write()`).
+ *
+ * Guarantees:
+ *   - Refuses startup if stdout is not a pipe or socket (fails closed on TTYs and regular files).
+ *   - `send()` resolves only after the kernel accepts 100% of the serialized frame bytes.
+ *   - On `EAGAIN`, retries with an abortable timer until the write deadline (`notifyTimeoutMs`
+ *     for channel notifications).
+ *   - `close()` aborts any in-flight retry immediately and awaits the active write loop's exit
+ *     before returning, so once `receive-<scope>` unlocks, zero additional bytes can be written.
+ */
+class BoundedStdioServerTransport implements Transport {
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+
+  private readonly readBuffer = new ReadBuffer();
+  private readonly closeAbort = new AbortController();
+  private readonly nonBlockingFd: number;
+  private started = false;
+  private closed = false;
+  private writeChain: Promise<void> = Promise.resolve();
+
+  private readonly onData = (chunk: Buffer) => {
+    try {
+      this.readBuffer.append(chunk);
+      while (true) {
+        const message = this.readBuffer.readMessage();
+        if (message === null) break;
+        this.onmessage?.(message);
+      }
+    } catch (error) {
+      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  private readonly onError = (error: Error) => {
+    this.onerror?.(error);
+  };
+
+  constructor(
+    private readonly stdin: NodeJS.ReadableStream = process.stdin,
+    stdoutFd = 1,
+    private readonly notifyTimeoutMs: number = CHANNEL_NOTIFY_TIMEOUT_MS,
+  ) {
+    this.nonBlockingFd = assertNonBlockingChannelStdout(stdoutFd);
+  }
+
+  async start(): Promise<void> {
+    if (this.started) {
+      throw new Error("BoundedStdioServerTransport already started.");
+    }
+    this.started = true;
+    this.stdin.on("data", this.onData);
+    this.stdin.on("error", this.onError);
+  }
+
+  private async writeAllNonBlocking(fd: number, buf: Buffer, deadlineMs: number): Promise<void> {
+    let offset = 0;
+    while (offset < buf.length) {
+      if (this.closed || this.closeAbort.signal.aborted) {
+        throw new ChannelTransportStalledError("CommonSwarm channel transport closed before write completed.");
+      }
+      try {
+        const written = writeSync(fd, buf, offset, buf.length - offset);
+        if (written > 0) {
+          offset += written;
+          continue;
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
+          throw error;
+        }
+      }
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) {
+        throw new ChannelTransportStalledError();
+      }
+      try {
+        await delay(Math.min(CHANNEL_STDOUT_RETRY_MS, remaining), undefined, {
+          signal: this.closeAbort.signal,
+        });
+      } catch {
+        throw new ChannelTransportStalledError("CommonSwarm channel transport aborted while waiting for stdout.");
+      }
+    }
+  }
+
+  send(message: JSONRPCMessage): Promise<void> {
+    if (this.closed || this.closeAbort.signal.aborted) {
+      return Promise.reject(new ChannelTransportStalledError("CommonSwarm channel transport is closed."));
+    }
+    const isNotification =
+      typeof (message as { method?: unknown }).method === "string" &&
+      (message as { method?: unknown }).method === "notifications/claude/channel";
+    const timeoutMs = isNotification ? this.notifyTimeoutMs : CHANNEL_RPC_WRITE_TIMEOUT_MS;
+    const deadlineMs = Date.now() + timeoutMs;
+    const buf = Buffer.from(serializeMessage(message), "utf8");
+
+    const task = this.writeChain.then(async () => {
+      if (this.closed || this.closeAbort.signal.aborted || Date.now() >= deadlineMs) {
+        throw new ChannelTransportStalledError();
+      }
+      await this.writeAllNonBlocking(this.nonBlockingFd, buf, deadlineMs);
+    });
+    // Keep the write queue alive for subsequent work if an unrelated write settles,
+    // while returning the exact completion/rejection promise to this caller.
+    this.writeChain = task.catch(() => undefined);
+    return task;
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) {
+      await this.writeChain;
+      return;
+    }
+    this.closed = true;
+    this.closeAbort.abort();
+    this.stdin.off("data", this.onData);
+    this.stdin.off("error", this.onError);
+    if (this.stdin.listenerCount("data") === 0 && typeof this.stdin.pause === "function") {
+      this.stdin.pause();
+    }
+    this.readBuffer.clear();
+    // Wait for any in-flight non-blocking write step to terminate before releasing callers/locks.
+    await this.writeChain;
+    this.onclose?.();
+  }
+}
+
+function terminateStalledTransport(transport: Transport): Promise<void> {
+  const stdoutCandidate = (transport as unknown as { _stdout?: { destroy?: (err?: Error) => void } })._stdout;
+  if (stdoutCandidate && stdoutCandidate !== process.stdout && typeof stdoutCandidate.destroy === "function") {
+    try {
+      stdoutCandidate.destroy(new Error("CommonSwarm channel notification stalled on stdout drain."));
+    } catch { /* best-effort stream teardown */ }
+  }
+  return transport.close().catch(() => undefined);
+}
+
+export async function serveAgentChannel(options: {
+  profilePath: string;
+  hostSessionId: string;
+  gateway?: GatewayChannelTransport;
+  /** Optional MCP transport override (defaults to StdioServerTransport). */
+  transport?: Transport;
+  /** Bounded timeout for emitting a channel notification under the shared receive lock. */
+  notifyTimeoutMs?: number;
+  /** Test seam invoked immediately before acquiring the receive lock to emit a channel notification. */
+  beforeNotify?: () => Promise<void> | void;
+  /** Test seam invoked right before the shared-lock startup mutation to test startup racing a route change. */
+  beforeStartupLock?: () => Promise<void> | void;
+}): Promise<void> {
+  const isGateway = Boolean(options.gateway);
+  const notifyTimeoutMs = options.notifyTimeoutMs ?? CHANNEL_NOTIFY_TIMEOUT_MS;
   const profilePath = privatePath(options.profilePath);
   const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const host = options.hostSessionId;
   const initial = await readReceiveBinding(profilePath, host);
-  if (!initial || initial.provider !== (options.gateway ? "grok-bot" : "claude") || initial.requested_mode !== "wake") {
+  if (!bindingAllowsChannel(initial, isGateway)) {
     throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
   }
-  if (receiveStatus(initial).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
+  if (!isGateway && options.transport === undefined) {
+    assertNonBlockingChannelStdout(1);
+  }
+  if (receiveStatus(initial!).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
   const runtimeId = randomUUID();
   const startedAt = Date.now();
   const abort = new AbortController();
@@ -206,6 +408,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   if (previous !== null) {
     try { journal = JSON.parse(previous); } catch { throw new AgentSetupError("channel_journal_invalid", "The channel journal is damaged. Preserve it for recovery before restarting."); }
     if (!journal || journal.version !== 1 || typeof journal.listener_instance_id !== "string" || !ONBOARDING_UUID.test(journal.listener_instance_id) ||
+        (journal.notification_batch !== undefined && (typeof journal.notification_batch !== "number" || !Number.isSafeInteger(journal.notification_batch) || journal.notification_batch < 0)) ||
         (journal.pending !== null && (!journal.pending || !journal.pending.row?.signal || journal.pending.row.signal.workspace_id !== profile.workspace_id ||
           !ONBOARDING_UUID.test(journal.pending.row.leaseId) || !Number.isFinite(Date.parse(journal.pending.row.leasedUntil)) ||
           typeof journal.pending.confirmed !== "boolean" || !ONBOARDING_UUID.test(journal.pending.receipt) ||
@@ -458,28 +661,47 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   process.on("SIGINT", stop);
   await withFileLock(dirname(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
     const binding = await readReceiveBinding(profilePath, host);
-    if (binding && receiveStatus(binding).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
-    await updateReceiveBinding(profilePath, host, b => ({
-      ...b, ...(options.gateway ? { idle: false } : {}), channel_instance_id: runtimeId, channel_pid: process.pid,
-      channel_heartbeat_at: new Date().toISOString(), wake_verified_at: null,
-      canary: b.canary ? { ...b.canary, emitted_while_idle: false, received_at: null } : null,
-    }));
+    if (!bindingAllowsChannel(binding, isGateway)) {
+      throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
+    }
+    if (receiveStatus(binding).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
+    if (options.beforeStartupLock !== undefined) {
+      await options.beforeStartupLock();
+    }
+    // Recheck the selected route and running marker INSIDE the shared receive-<scope> lock
+    // so a concurrent route/mode switch can never receive stale channel runtime state.
+    await updateReceiveBinding(profilePath, host, b => {
+      if (!bindingAllowsChannel(b, isGateway)) {
+        throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
+      }
+      if (receiveStatus(b).channel_running) {
+        throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
+      }
+      return {
+        ...b, ...(options.gateway ? { idle: false } : {}), channel_instance_id: runtimeId, channel_pid: process.pid,
+        channel_heartbeat_at: new Date().toISOString(), wake_verified_at: null,
+        canary: b.canary ? { ...b.canary, emitted_while_idle: false, received_at: null } : null,
+      };
+    });
   });
   const touch = async () => updateReceiveBinding(profilePath, host, b => {
-    if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") { stop(); return b; }
+    if (b.channel_instance_id !== runtimeId || !bindingAllowsChannel(b, isGateway)) { stop(); return b; }
     return { ...b, channel_heartbeat_at: new Date().toISOString() };
   });
+  const activeTransport = options.gateway
+    ? null
+    : (options.transport ?? new BoundedStdioServerTransport(process.stdin, 1, notifyTimeoutMs));
   try {
     await persist();
     if (options.gateway) initialized = true;
-    else await server.connect(new StdioServerTransport());
+    else await server.connect(activeTransport!);
     heartbeat = setInterval(() => { void touch().catch(stop); }, CHANNEL_HEARTBEAT_MS);
     manager?.start();
     while (!stopped) {
       if (!initialized) { await delay(50, undefined, { signal: abort.signal }); continue; }
       if (manager && manager.dispatchState() !== "running") throw new AgentSetupError("channel_session_expired", "The managed session stopped. Renew or restart that same session before enabling wake again.");
       const binding = await readReceiveBinding(profilePath, host);
-      if (!binding || binding.requested_mode !== "wake" || binding.channel_instance_id !== runtimeId) break;
+      if (!bindingAllowsChannel(binding, isGateway) || binding!.channel_instance_id !== runtimeId) break;
       // Startup settings can be loaded by the wrong host conversation. Wait for
       // a matching host-generated hook on this connection before claiming anything.
       if (!options.gateway && (binding.turn_verified_at === null || Date.parse(binding.turn_verified_at) < startedAt || Date.parse(binding.turn_verified_at) > Date.now())) {
@@ -527,55 +749,98 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
           } else if (Date.parse(pending.row.leasedUntil) <= Date.now()) {
             gate.pending = null; notified = false; await persist(); lastPoll = 0;
           } else if (!notified) {
-            if ((await readReceiveBinding(profilePath, host))?.requested_mode !== "wake") break;
-            const isCanary = isOwnCanary(binding, pending.row, profile.principal_id);
-            const isCurrentWakeTest = isCurrentCanary(binding, pending.row, profile.principal_id);
+            const isCurrentWakeTest = isCurrentCanary(binding!, pending.row, profile.principal_id);
             const selfAddressed = isSelfAddressed(pending.row, profile.principal_id);
             if (selfAddressed) selfAddressedSignalIds.add(pending.row.signal.id);
             else rememberReplyPlace(pending.row.signal);
-            if (isCurrentWakeTest && !binding.idle) { await delay(250, undefined, { signal: abort.signal }); continue; }
+            if (isCurrentWakeTest && !binding!.idle) { await delay(250, undefined, { signal: abort.signal }); continue; }
+            if (options.beforeNotify !== undefined) {
+              await options.beforeNotify();
+            }
             if (options.gateway) {
+              const liveBinding = await readReceiveBinding(profilePath, host);
+              if (!bindingAllowsChannel(liveBinding, isGateway) || liveBinding!.channel_instance_id !== runtimeId) break;
               // Publish the challenge before HTTP so an immediate CLI receipt can find it.
               notified = true;
               await persist();
               try { await options.gateway.send(pending, abort.signal); }
               catch (error) { notified = false; await persist(); throw error; }
-            } else await server.notification({ method: "notifications/claude/channel", params: {
-              content: isCanary
-                ? channelCanaryNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host)
-                : selfAddressed
-                ? channelSelfNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host, pending.row.signal.body)
-                : channelNotice(
-                    pending.row.signal.from,
-                    pending.row.signal.id,
-                    pending.receipt,
-                    host,
-                    pending.row.signal.body,
-                    pending.row.senderOwnerRelation,
-                    pending.row.signal.chain_hop,
-                    publicReplyThreadRoot(pending.row.signal) === null
-                      ? false
-                      : pending.row.signal.channel_visibility === "private"
-                      ? "private"
-                      : "open",
-                  ),
-              meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
-                sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
-                sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
-                attachment_count: String(pending.row.signal.attachments?.length ?? 0),
-              },
-            } });
+            } else {
+              // Serialize channel notification against route/mode changes on the shared receive lock,
+              // and bound the actual transport write so a stalled stdout drain cannot starve opt-out.
+              const notifyOutcome = await withFileLock(dirname(profilePath), `receive-${profileScopeKey(host)}`, async (): Promise<"sent" | "retired" | "stalled"> => {
+                const liveBinding = await readReceiveBinding(profilePath, host);
+                if (!bindingAllowsChannel(liveBinding, isGateway) || liveBinding.channel_instance_id !== runtimeId) {
+                  return "retired";
+                }
+                // Native Wake rule: channel notifications emit ONLY the fixed wake prompt (never
+                // teammate message text, sender text, or subject) to close prompt-injection paths.
+                const batch = (journal.notification_batch ?? 0) + 1;
+                journal.notification_batch = batch;
+                const content = formatNativeWakePrompt(batch);
+                assertFixedNativeWakePrompt(content);
+                // Mark notified before writing to stdio so an immediate cswarm_received
+                // reply cannot race ahead of releasing the receive lock.
+                notified = true;
+                const sendPromise = server.notification({ method: "notifications/claude/channel", params: {
+                  content,
+                  meta: { signal_id: pending.row.signal.id, message_id: pending.row.signal.id, receipt: pending.receipt, workspace_id: profile.workspace_id,
+                    sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
+                    sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
+                    attachment_count: String(pending.row.signal.attachments?.length ?? 0),
+                    batch: String(batch),
+                  },
+                } });
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const timeoutPromise = new Promise<"stalled">(resolveTimeout => {
+                  timer = setTimeout(() => resolveTimeout("stalled"), notifyTimeoutMs);
+                });
+                const abortPromise = new Promise<"retired">(resolveAbort => {
+                  if (abort.signal.aborted) { resolveAbort("retired"); return; }
+                  abort.signal.addEventListener("abort", () => resolveAbort("retired"), { once: true });
+                });
+                let outcome: "sent" | "retired" | "stalled";
+                try {
+                  outcome = await Promise.race([
+                    sendPromise.then(() => "sent" as const),
+                    timeoutPromise,
+                    abortPromise,
+                  ]);
+                } catch (err) {
+                  if (timer !== undefined) clearTimeout(timer);
+                  notified = false;
+                  if (err instanceof ChannelTransportStalledError) {
+                    stop();
+                    if (activeTransport) await terminateStalledTransport(activeTransport);
+                    return "stalled";
+                  }
+                  throw err;
+                }
+                if (timer !== undefined) clearTimeout(timer);
+                if (outcome !== "sent") {
+                  notified = false;
+                  // Terminate the stalled/aborted transport BEFORE releasing the receive lock so
+                  // no buffered frame can drain after a pending route change commits.
+                  stop();
+                  if (activeTransport) await terminateStalledTransport(activeTransport);
+                  sendPromise.catch(() => undefined);
+                }
+                return outcome;
+              });
+              if (notifyOutcome !== "sent") break;
+            }
             notified = true;
+            await persist();
             if (pending.row.signal.kind === "ask") await appendHandledAsk(profilePath, host, pending.row.signal.id);
             await updateReceiveBinding(profilePath, host, b => ({ ...b, idle: false,
-              canary: isCurrentCanary(binding, pending.row, profile.principal_id) && b.canary && b.canary.nonce === binding.canary?.nonce ? { ...b.canary, signal_id: pending.row.signal.id, emitted_while_idle: binding.idle } : b.canary,
+              canary: isCurrentCanary(binding!, pending.row, profile.principal_id) && b.canary && b.canary.nonce === binding!.canary?.nonce ? { ...b.canary, signal_id: pending.row.signal.id, emitted_while_idle: binding!.idle } : b.canary,
             }));
           }
         } else {
-          if (binding.canary && binding.canary.signal_id === null && binding.idle) {
+          if (binding!.canary && binding!.canary.signal_id === null && binding!.idle) {
             const result = await sender.sendSignal({
-              workspaceId: profile.workspace_id, credential: token, commandId: `canary_${binding.canary.nonce.replace(/-/g, "")}`,
-              command: { kind: "post_signal", signal_kind: "note", body: canaryBody(binding.canary.nonce),
+              workspaceId: profile.workspace_id, credential: token, commandId: `canary_${binding!.canary.nonce.replace(/-/g, "")}`,
+              command: { kind: "post_signal", signal_kind: "note", body: canaryBody(binding!.canary.nonce),
                 to_user_id: null, to_agent_principal_id: profile.principal_id, in_reply_to: null, about: null, until_ms: 5 * 60_000 },
               signal: abort.signal,
             });
@@ -583,11 +848,13 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
             const canaryId = result.response.signal?.id;
             if (!canaryId) throw new AgentSetupError("canary_outcome_unknown", "The service did not name the accepted wake test. The same request can be retried.");
             await updateReceiveBinding(profilePath, host, b => ({ ...b,
-              canary: b.canary?.nonce === binding.canary?.nonce ? { ...b.canary!, signal_id: canaryId } : b.canary,
+              canary: b.canary?.nonce === binding!.canary?.nonce ? { ...b.canary!, signal_id: canaryId } : b.canary,
             }));
             lastPoll = 0;
           }
           if (Date.now() - lastPoll >= CHANNEL_POLL_MS) {
+            const claimBinding = await readReceiveBinding(profilePath, host);
+            if (!bindingAllowsChannel(claimBinding, isGateway) || claimBinding!.channel_instance_id !== runtimeId) break;
             const claimed = await delivery.claimAgentInbox({
               workspaceId: profile.workspace_id, credential: token, commandId: newCommandId(),
               listenerInstanceId: journal.listener_instance_id, expectedPrincipalId: profile.principal_id,
