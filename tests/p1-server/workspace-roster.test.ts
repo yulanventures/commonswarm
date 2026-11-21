@@ -926,7 +926,7 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
   assert.equal(ownerHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 1);
   assert.equal(outsiderHome.find((a) => a.principal_id === secretWorker)!.status.facts.messages_waiting_count, 0);
 
-  // agent_wake_path exposes unseen_count for the 3 unclaimed deliveries (dmAsk1, dmAsk2, openAddressedAsk) once the seat has an observed baseline.
+  // agent_wake_path exposes unseen_count for the 4 unclaimed deliveries (dmAsk1, dmAsk2, openAddressedAsk, publicMention) once the seat has an observed baseline.
   const baseline = await signal(ws, { kind: "user", id: owner }, "note", "baseline", { toAgent: worker, ago: "10 seconds" });
   await sql`INSERT INTO swarm.signal_deliveries (workspace_id, signal_id, recipient_agent_principal_id, enqueued_at, delivered_at, surfaced_at, acked_at, ack_outcome)
     VALUES (${ws}::uuid, ${baseline}::uuid, ${worker}::uuid, statement_timestamp() - interval '10 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', statement_timestamp() - interval '9 seconds', 'observed')
@@ -939,5 +939,5 @@ test("C2 live seat status: open-channel working-on exposes text while private-ch
     return await tx<{ principal_id: string; unseen_count: number }[]>`
       SELECT principal_id::text, unseen_count FROM swarm_read.agent_wake_path WHERE workspace_id = ${ws}::uuid`;
   });
-  assert.equal(wakeRows.find((r) => r.principal_id === worker)?.unseen_count, 3);
+  assert.equal(wakeRows.find((r) => r.principal_id === worker)?.unseen_count, 4);
 });
