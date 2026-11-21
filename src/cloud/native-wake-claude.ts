@@ -689,12 +689,9 @@ const CLAUDE_PEER_AUTH_SENDER_PY = [
   "    s.close()",
 ].join("\n");
 
-function minimalPeerAuthEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
-  return env;
+function isolatedPeerAuthEnv(): NodeJS.ProcessEnv {
+  // Never inherit PATH, PYTHONPATH, PYTHONSTARTUP, HOME, or workspace environment variables.
+  return { LC_ALL: "C" };
 }
 
 class ClaudeSocketPeerError extends Error {
@@ -727,12 +724,16 @@ const defaultClaudeSocketTransport: ClaudeSocketTransport = async ({
     }
     const payload = `${lines.join("\n")}\n`;
     const timeoutSeconds = (Math.max(100, timeoutMs) / 1000).toFixed(3);
+    // Launch the verified absolute system interpreter in isolated mode (-I) with site
+    // startup disabled (-S), minimal scrubbed env, and safe cwd ("/") so workspace files
+    // and inherited PATH/PYTHON* variables can never execute code with the bearer on stdin.
     const child = spawn(
       availability.pythonPath,
-      ["-c", CLAUDE_PEER_AUTH_SENDER_PY, socketPath, String(expectedPid), String(expectedUid), timeoutSeconds],
+      ["-I", "-S", "-c", CLAUDE_PEER_AUTH_SENDER_PY, socketPath, String(expectedPid), String(expectedUid), timeoutSeconds],
       {
+        cwd: "/",
         stdio: ["pipe", "ignore", "pipe"],
-        env: minimalPeerAuthEnv(),
+        env: isolatedPeerAuthEnv(),
       },
     );
     let stderr = "";

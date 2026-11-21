@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { fstatSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { DeliveryCommandClient, DeliveryHttpError, DeliveryProtocolError, type DeliveryRow } from "./delivery.js";
 import { RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended } from "./renewal.js";
 import { CommandHttpError, CommandTransportError, ThinCommandClient, newCommandId, type PostSignalCommand, type PostSignalRequest, type PostSignalResult, type SenderOwnerRelation } from "./command-client.js";
@@ -46,6 +47,8 @@ const CHANNEL_ASK_OPTIONAL_FIELDS = ["parent_signal_id"] as const;
 const CHANNEL_HEARTBEAT_MS = 5_000;
 const CHANNEL_POLL_MS = 30_000;
 const CHANNEL_NOTIFY_TIMEOUT_MS = 2_000;
+const CHANNEL_RPC_WRITE_TIMEOUT_MS = 10_000;
+const CHANNEL_STDOUT_RETRY_MS = 20;
 
 /** Trusted delivery metadata leads; teammate-authored text stays inside the block. */
 export function channelNoticePrefix(sender: string, signalId: string, receipt: string, hostSessionId: string, chainHop?: number, publicReply: boolean | "open" | "private" = false): string {
@@ -168,15 +171,189 @@ function bindingAllowsChannel(binding: ReceiveBinding | null | undefined, isGate
   return binding.provider === "claude" && (binding.wake_transport ?? "channel") === "channel";
 }
 
-function terminateStalledTransport(transport: Transport, isDefaultStdio: boolean): Promise<void> {
+class ChannelTransportStalledError extends Error {
+  constructor(message = "CommonSwarm channel stdout write stalled.") {
+    super(message);
+    this.name = "ChannelTransportStalledError";
+  }
+}
+
+/**
+ * Production stdio MCP transport that writes directly to fd 1 with non-blocking `writeSync`
+ * when stdout is a pipe or Unix socketpair (avoiding Node's un-cancellable `process.stdout`
+ * userspace write buffer, whose `destroy()` leaves fd 1 open and flushes queued bytes later).
+ *
+ * Guarantees:
+ *   - `send()` resolves only after the kernel accepts 100% of the serialized frame bytes.
+ *   - On `EAGAIN`, retries with an abortable timer until the write deadline (`notifyTimeoutMs`
+ *     for channel notifications).
+ *   - `close()` aborts any in-flight retry immediately and awaits the active write loop's exit
+ *     before returning, so once `receive-<scope>` unlocks, zero additional bytes can be written.
+ */
+class BoundedStdioServerTransport implements Transport {
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+
+  private readonly readBuffer = new ReadBuffer();
+  private readonly closeAbort = new AbortController();
+  private readonly nonBlockingFd: number | null;
+  private started = false;
+  private closed = false;
+  private writeChain: Promise<void> = Promise.resolve();
+
+  private readonly onData = (chunk: Buffer) => {
+    try {
+      this.readBuffer.append(chunk);
+      while (true) {
+        const message = this.readBuffer.readMessage();
+        if (message === null) break;
+        this.onmessage?.(message);
+      }
+    } catch (error) {
+      this.onerror?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  private readonly onError = (error: Error) => {
+    this.onerror?.(error);
+  };
+
+  constructor(
+    private readonly stdin: NodeJS.ReadableStream = process.stdin,
+    private readonly stdout: NodeJS.WritableStream = process.stdout,
+    private readonly notifyTimeoutMs: number = CHANNEL_NOTIFY_TIMEOUT_MS,
+  ) {
+    let fd: number | null = null;
+    if (stdout === process.stdout) {
+      try {
+        // Initializing process.stdout configures Node's libuv pipe/socket handle (O_NONBLOCK).
+        void process.stdout.writable;
+        const st = fstatSync(1);
+        if (st.isFIFO() || st.isSocket()) {
+          fd = 1;
+        }
+      } catch {
+        fd = null;
+      }
+    }
+    this.nonBlockingFd = fd;
+  }
+
+  async start(): Promise<void> {
+    if (this.started) {
+      throw new Error("BoundedStdioServerTransport already started.");
+    }
+    this.started = true;
+    this.stdin.on("data", this.onData);
+    this.stdin.on("error", this.onError);
+  }
+
+  private async writeAllNonBlocking(fd: number, buf: Buffer, deadlineMs: number): Promise<void> {
+    let offset = 0;
+    while (offset < buf.length) {
+      if (this.closed || this.closeAbort.signal.aborted) {
+        throw new ChannelTransportStalledError("CommonSwarm channel transport closed before write completed.");
+      }
+      try {
+        const written = writeSync(fd, buf, offset, buf.length - offset);
+        if (written > 0) {
+          offset += written;
+          continue;
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
+          throw error;
+        }
+      }
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) {
+        throw new ChannelTransportStalledError();
+      }
+      try {
+        await delay(Math.min(CHANNEL_STDOUT_RETRY_MS, remaining), undefined, {
+          signal: this.closeAbort.signal,
+        });
+      } catch {
+        throw new ChannelTransportStalledError("CommonSwarm channel transport aborted while waiting for stdout.");
+      }
+    }
+  }
+
+  private async writeFallbackStream(buf: Buffer, deadlineMs: number): Promise<void> {
+    if (this.closed || this.closeAbort.signal.aborted) {
+      throw new ChannelTransportStalledError("CommonSwarm channel transport closed.");
+    }
+    const remaining = Math.max(1, deadlineMs - Date.now());
+    await new Promise<void>((resolveWrite, rejectWrite) => {
+      let settled = false;
+      const done = (err?: Error | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.closeAbort.signal.removeEventListener("abort", onAbort);
+        if (err) rejectWrite(err);
+        else resolveWrite();
+      };
+      const onAbort = () => done(new ChannelTransportStalledError("CommonSwarm channel transport closed."));
+      const timer = setTimeout(() => done(new ChannelTransportStalledError()), remaining);
+      this.closeAbort.signal.addEventListener("abort", onAbort, { once: true });
+      this.stdout.write(buf, (err) => done(err ?? null));
+    });
+  }
+
+  send(message: JSONRPCMessage): Promise<void> {
+    if (this.closed || this.closeAbort.signal.aborted) {
+      return Promise.reject(new ChannelTransportStalledError("CommonSwarm channel transport is closed."));
+    }
+    const isNotification =
+      typeof (message as { method?: unknown }).method === "string" &&
+      (message as { method?: unknown }).method === "notifications/claude/channel";
+    const timeoutMs = isNotification ? this.notifyTimeoutMs : CHANNEL_RPC_WRITE_TIMEOUT_MS;
+    const deadlineMs = Date.now() + timeoutMs;
+    const buf = Buffer.from(serializeMessage(message), "utf8");
+
+    const task = this.writeChain.then(async () => {
+      if (this.closed || this.closeAbort.signal.aborted || Date.now() >= deadlineMs) {
+        throw new ChannelTransportStalledError();
+      }
+      if (this.nonBlockingFd !== null) {
+        await this.writeAllNonBlocking(this.nonBlockingFd, buf, deadlineMs);
+      } else {
+        await this.writeFallbackStream(buf, deadlineMs);
+      }
+    });
+    // Keep the write queue alive for subsequent work if an unrelated write settles,
+    // while returning the exact completion/rejection promise to this caller.
+    this.writeChain = task.catch(() => undefined);
+    return task;
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) {
+      await this.writeChain;
+      return;
+    }
+    this.closed = true;
+    this.closeAbort.abort();
+    this.stdin.off("data", this.onData);
+    this.stdin.off("error", this.onError);
+    if (this.stdin.listenerCount("data") === 0 && typeof this.stdin.pause === "function") {
+      this.stdin.pause();
+    }
+    this.readBuffer.clear();
+    // Wait for any in-flight non-blocking write step to terminate before releasing callers/locks.
+    await this.writeChain;
+    this.onclose?.();
+  }
+}
+
+function terminateStalledTransport(transport: Transport): Promise<void> {
   const stdoutCandidate = (transport as unknown as { _stdout?: { destroy?: (err?: Error) => void } })._stdout;
-  if (stdoutCandidate && typeof stdoutCandidate.destroy === "function") {
+  if (stdoutCandidate && stdoutCandidate !== process.stdout && typeof stdoutCandidate.destroy === "function") {
     try {
       stdoutCandidate.destroy(new Error("CommonSwarm channel notification stalled on stdout drain."));
-    } catch { /* best-effort stream teardown */ }
-  } else if (isDefaultStdio && typeof process.stdout.destroy === "function") {
-    try {
-      process.stdout.destroy(new Error("CommonSwarm channel notification stalled on stdout drain."));
     } catch { /* best-effort stream teardown */ }
   }
   return transport.close().catch(() => undefined);
@@ -516,8 +693,9 @@ export async function serveAgentChannel(options: {
     if (b.channel_instance_id !== runtimeId || !bindingAllowsChannel(b, isGateway)) { stop(); return b; }
     return { ...b, channel_heartbeat_at: new Date().toISOString() };
   });
-  const activeTransport = options.gateway ? null : (options.transport ?? new StdioServerTransport());
-  const isDefaultStdio = !options.gateway && options.transport === undefined;
+  const activeTransport = options.gateway
+    ? null
+    : (options.transport ?? new BoundedStdioServerTransport(process.stdin, process.stdout, notifyTimeoutMs));
   try {
     await persist();
     if (options.gateway) initialized = true;
@@ -636,6 +814,11 @@ export async function serveAgentChannel(options: {
                 } catch (err) {
                   if (timer !== undefined) clearTimeout(timer);
                   notified = false;
+                  if (err instanceof ChannelTransportStalledError) {
+                    stop();
+                    if (activeTransport) await terminateStalledTransport(activeTransport);
+                    return "stalled";
+                  }
                   throw err;
                 }
                 if (timer !== undefined) clearTimeout(timer);
@@ -644,7 +827,7 @@ export async function serveAgentChannel(options: {
                   // Terminate the stalled/aborted transport BEFORE releasing the receive lock so
                   // no buffered frame can drain after a pending route change commits.
                   stop();
-                  if (activeTransport) await terminateStalledTransport(activeTransport, isDefaultStdio);
+                  if (activeTransport) await terminateStalledTransport(activeTransport);
                   sendPromise.catch(() => undefined);
                 }
                 return outcome;

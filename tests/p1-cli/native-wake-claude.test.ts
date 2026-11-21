@@ -1629,9 +1629,23 @@ test("Peer-auth helper edge cases: absolute python3 path (ignores PATH), macOS C
       env: { [CLAUDE_WAKE_ENV_SOCKET]: sockPath, [CLAUDE_WAKE_ENV_TOKEN]: MSG_TOKEN },
     });
 
-    // (1) Prepend a malicious/decoy `python3` onto PATH; real adapter must invoke absolute /usr/bin/python3, NEVER PATH.
+    // (1) Plant a PATH decoy `python3` AND poisoned workspace modules (socket.py, ctypes.py,
+    // sitecustomize.py) with poisoned PYTHONPATH / PYTHONSTARTUP / CWD. Real adapter must invoke
+    // absolute /usr/bin/python3 in isolated mode (-I -S) with cwd="/" and minimal env so NONE run!
+    const poisonMarker = join(root, "poison-imported");
+    const poisonPy = `import pathlib, sys\npathlib.Path(${JSON.stringify(poisonMarker)}).write_text("POISON")\nsys.exit(98)\n`;
+    await writeFile(join(cwd, "socket.py"), poisonPy, { mode: 0o600 });
+    await writeFile(join(cwd, "ctypes.py"), poisonPy, { mode: 0o600 });
+    await writeFile(join(cwd, "sitecustomize.py"), poisonPy, { mode: 0o600 });
+
     const prevPath = process.env.PATH;
+    const prevPyPath = process.env.PYTHONPATH;
+    const prevPyStartup = process.env.PYTHONSTARTUP;
+    const prevCwd = process.cwd();
     process.env.PATH = `${decoyDir}:${prevPath ?? ""}`;
+    process.env.PYTHONPATH = cwd;
+    process.env.PYTHONSTARTUP = join(cwd, "sitecustomize.py");
+    process.chdir(cwd);
     try {
       const adapter = new ClaudeSocketAdapter({
         profilePath: profile,
@@ -1648,9 +1662,15 @@ test("Peer-auth helper edge cases: absolute python3 path (ignores PATH), macOS C
       await delay(40);
       assert.equal(srv.received.length, 1);
       await assert.rejects(() => stat(decoyMarker), /ENOENT/, "PATH decoy python3 must never be invoked");
+      await assert.rejects(() => stat(poisonMarker), /ENOENT/, "workspace socket.py/ctypes.py/sitecustomize.py must never be imported");
     } finally {
+      process.chdir(prevCwd);
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;
+      if (prevPyPath === undefined) delete process.env.PYTHONPATH;
+      else process.env.PYTHONPATH = prevPyPath;
+      if (prevPyStartup === undefined) delete process.env.PYTHONSTARTUP;
+      else process.env.PYTHONSTARTUP = prevPyStartup;
     }
 
     // (2) macOS without Command Line Tools: xcode-select -p fails -> fail closed WITHOUT touching /usr/bin/python3 stub!
@@ -1715,6 +1735,223 @@ test("Peer-auth helper edge cases: absolute python3 path (ignores PATH), macOS C
     );
   } finally {
     await srv.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HezSec C3c witness: real CLI cswarm receive serve stdout stall never delivers stalled notification even after reader resumes post-switch", { timeout: 25_000 }, async () => {
+  const root = await makeTempDir("cs-cw-c3c-");
+  let claimCount = 0;
+  let deliveryServed = false;
+
+  const http = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read") {
+        if (body.resource === "members") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            workspace_id: WS,
+            workspace_name: "Test Workspace",
+            identity: {
+              credential_valid: true,
+              principal_id: AGENT,
+              workspace_id: WS,
+              owner_user_id: OWNER,
+              name: "Claude Seat",
+            },
+            members: [{ user_id: OWNER, display_name: "Owner", role: "owner" }],
+            agents: [{ principal_id: AGENT, name: "Claude Seat", owner_user_id: OWNER }],
+          }));
+          return;
+        }
+        if (body.resource === "renewal_grants") {
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+          return;
+        }
+      }
+      if (req.url === "/functions/v1/command") {
+        if (body.command?.kind === "claim_agent_inbox") {
+          claimCount += 1;
+          const list = !deliveryServed
+            ? (() => {
+              deliveryServed = true;
+              return [{
+                lease_id: "88888888-8888-4888-8888-888888888888",
+                leased_until: new Date(Date.now() + 60_000).toISOString(),
+                sender_owner_relation: "same_owner",
+                signal: {
+                  id: "99999999-9999-4999-8999-999999999999",
+                  workspace_id: WS,
+                  from: OWNER,
+                  from_kind: "user",
+                  to: null,
+                  to_agent: AGENT,
+                  in_reply_to: null,
+                  about: null,
+                  kind: "ask",
+                  body: "real-cli stalled stdout witness",
+                  created_at: new Date().toISOString(),
+                  until: "2099-01-01T00:00:00.000Z",
+                },
+              }];
+            })()
+            : [];
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+            status: "accepted",
+            ok: true,
+            event_ids: [],
+            events: [],
+            capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+            pending_delivery_count: list.length,
+            terminal_delivery_failure_count: 0,
+            deliveries: list,
+          }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "accepted", ok: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((res) => http.listen(0, "127.0.0.1", res));
+  const port = (http.address() as { port: number }).port;
+  let child: ReturnType<typeof spawn> | null = null;
+
+  try {
+    const { cwd, profile } = await makeBoundClaudeSeat(root, `http://127.0.0.1:${port}`);
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "channel",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+
+    // Spawn the REAL production CLI `cswarm receive serve` over a real OS stdio pipe/socketpair.
+    child = spawn(
+      process.execPath,
+      [CLI, "receive", "serve", "--profile", profile, "--host-session-id", SESSION_ID],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, HOME: root },
+      },
+    );
+    const proc = child;
+    const waitUntil = async (fn: () => Promise<boolean> | boolean, timeoutMs = 8_000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await fn()) return;
+        await delay(30);
+      }
+      throw new Error("timed out waiting for real CLI stdio stall condition");
+    };
+
+    await waitUntil(async () => receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running);
+
+    // Complete MCP initialize handshake over the real CLI pipe.
+    let initBuf = "";
+    const initDone = new Promise<void>((res) => {
+      const onInitData = (chunk: Buffer) => {
+        initBuf += chunk.toString("utf8");
+        if (initBuf.includes("\n")) {
+          proc.stdout!.off("data", onInitData);
+          // Immediately pause reading real child stdout so the OS kernel pipe buffer fills up!
+          proc.stdout!.pause();
+          res();
+        }
+      };
+      proc.stdout!.on("data", onInitData);
+    });
+    proc.stdin!.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "real-cli-stall", version: "1.0.0" } },
+    })}\n`);
+    await initDone;
+    proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+
+    // Saturate the real OS pipe/socketpair kernel buffer with real `tools/list` responses (~250 KB)
+    // while child.stdout stays paused!
+    for (let i = 2; i <= 120; i += 1) {
+      proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/list", params: {} })}\n`);
+    }
+    // Give the child a brief moment to fill the kernel stdout buffer to EAGAIN.
+    await delay(250);
+
+    // Now mark turn_verified_at so the real child claims the pending delivery and attempts
+    // `notifications/claude/channel` against the saturated real stdout descriptor.
+    await receiveHookEvent(profile, SESSION_ID, {
+      session_id: SESSION_ID,
+      cwd,
+      hook_event_name: "SessionStart",
+    });
+    await waitUntil(() => claimCount >= 1, 6_000);
+    await delay(150);
+
+    // Switch channel -> socket while real child stdout is STILL paused and the notification is stalled.
+    const switchStarted = Date.now();
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "wake",
+      provider: "claude",
+      wakeTransport: "socket",
+      hostSessionId: SESSION_ID,
+      cwd,
+      execution: { command: process.execPath, args: [CLI] },
+    });
+    const switchElapsedMs = Date.now() - switchStarted;
+    assert.ok(switchElapsedMs < 8_000, `real CLI route switch must not starve on stalled stdout (took ${switchElapsedMs}ms)`);
+    assert.ok(switchElapsedMs >= 1_500, `expected real 2s stdout stall bound before switch committed (took ${switchElapsedMs}ms)`);
+
+    // NOW resume reading real child stdout immediately AFTER the route switch committed,
+    // draining every buffered byte until the stalled CLI process exits and closes stdout (EOF).
+    let drained = initBuf;
+    const drainDone = new Promise<void>((res) => {
+      if (proc.stdout!.readableEnded) { res(); return; }
+      proc.stdout!.on("data", (chunk: Buffer) => { drained += chunk.toString("utf8"); });
+      proc.stdout!.once("end", res);
+      proc.stdout!.resume();
+    });
+    const exitPromise = new Promise<number | null>((res) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) res(proc.exitCode);
+      else proc.once("close", (code) => res(code));
+    });
+    await Promise.all([drainDone, exitPromise]);
+    assert.equal(receiveStatus(await readReceiveBinding(profile, SESSION_ID)).channel_running, false);
+
+    assert.ok(drained.length > 32_768, `expected saturated real stdout buffer (>32KB), got ${drained.length} bytes`);
+    const lines = drained.split("\n").filter((l) => l.trim().length > 0);
+    const channelNotifications = lines.filter((line) => {
+      try {
+        const parsed = JSON.parse(line) as { method?: string };
+        return parsed.method === "notifications/claude/channel";
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(
+      channelNotifications.length,
+      0,
+      "stalled notification on real CLI stdout must NEVER complete even after reader resumes post-switch",
+    );
+    assert.equal(
+      drained.includes("notifications/claude/channel"),
+      false,
+      "no notification frame bytes may leak onto real CLI stdout after stall cancellation",
+    );
+  } finally {
+    if (child && child.exitCode === null) {
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    }
+    await new Promise<void>((res) => http.close(() => res()));
     await rm(root, { recursive: true, force: true });
   }
 });
