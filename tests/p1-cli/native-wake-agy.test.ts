@@ -417,9 +417,36 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
     });
     assert.ok(await readAgyRegistration(fx.profilePath, CONV));
 
-    // 1. AMBIGUOUS FAILED REGISTRATION PROBE + POSTCHECK FAILURE WITNESS:
-    //    Re-registration's metadata probe fails ambiguously AND listener swaps after the probe.
-    //    Postcheck MUST still run, retire the previously saved registration, and set wake_unavailable_reason!
+    // 1. HELD EXECUTABLE-VALIDATION WITNESS (C2 #2):
+    //    Listener changes while executable validation runs -> repeated pre-metadata listener check
+    //    catches it and throws agy_endpoint_mismatch with ZERO vendor calls!
+    let validationSwapped = false;
+    const heldValRunnerCalls: string[] = [];
+    await assert.rejects(
+      registerAgyWake({
+        profilePath: fx.profilePath,
+        hostSessionId: CONV,
+        credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+        endpointInspector: async () =>
+          validationSwapped ? { ...endpoint, pid: endpoint.pid + 55 } : endpoint,
+        vendorVerifier: async () => {
+          validationSwapped = true;
+          return { ok: true, googleSigned: false };
+        },
+        approvedDigests: fx.approvedDigests,
+        runner: async (_exe, args) => {
+          heldValRunnerCalls.push(args.join(" "));
+          return { stdout: "", stderr: "" };
+        },
+      }),
+      { code: "agy_endpoint_mismatch" },
+    );
+    assert.equal(heldValRunnerCalls.length, 0, "listener swap during executable validation must launch ZERO vendor calls");
+
+    // 2. AMBIGUOUS FAILED REGISTRATION PROBE + POSTCHECK FAILURE WITNESS:
+    //    Re-registration's metadata probe fails ambiguously AND listener swaps after the probe
+    //    (after check #1 pre-validation and check #2 pre-metadata both saw the original endpoint).
+    //    Postcheck (check #3) MUST still run, retire the previously saved registration, and set wake_unavailable_reason!
     let regInspectCalls = 0;
     await assert.rejects(
       registerAgyWake({
@@ -428,7 +455,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
         credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
         endpointInspector: async () => {
           regInspectCalls += 1;
-          return regInspectCalls === 1 ? endpoint : { ...endpoint, pid: endpoint.pid + 77 };
+          return regInspectCalls <= 2 ? endpoint : { ...endpoint, pid: endpoint.pid + 77 };
         },
         vendorVerifier: APPROVED_TEST_VERIFIER,
         approvedDigests: fx.approvedDigests,
@@ -438,7 +465,7 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
       }),
       { code: "agy_endpoint_mismatch" },
     );
-    assert.equal(regInspectCalls, 2, "failed registration probe must still run postcheck");
+    assert.equal(regInspectCalls, 3, "failed registration probe must run pre-validation, pre-metadata, and post-probe checks");
     assert.equal(await readAgyRegistration(fx.profilePath, CONV), null, "affected saved registration must be deleted");
     const retiredAfterReg = await readReceiveBinding(fx.profilePath, CONV);
     assert.equal(retiredAfterReg?.wake_unavailable_reason, "agy_endpoint_changed_during_registration");
@@ -544,6 +571,161 @@ test("C2 witness: ambiguous failed registration probe still runs postcheck & ret
       assert.equal(retryDecision.code, "agy_re_registration_required");
     }
     assert.equal(retryRunnerCalls.length, 0, "retired route retry must launch ZERO credential-bearing calls");
+
+    // 3. KEEP RETIREMENT THROUGH OPT-OUT (--mode turn) AND RE-ENABLE (--mode wake) WITH SURVIVING RECORD (C2 #1):
+    //    Refuse deletion on turn opt-out while a REAL VALID 0600 registration record survives on disk,
+    //    switch back to wake, and verify ZERO token-bearing calls before verified re-registration!
+    await rm(regPath, { recursive: true, force: true });
+    await registerAgyWake({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+      endpointInspector: makeInspector(endpoint),
+      vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
+      runner: makeSessionRunner([fx.cwd]),
+    });
+    assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record exists before turn opt-out");
+
+    await assert.rejects(
+      configureAgentReceive({
+        profilePath: fx.profilePath,
+        mode: "turn",
+        provider: "agy",
+        hostSessionId: CONV,
+        cwd: fx.cwd,
+        deleteAgyRegistration: async () => {
+          throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        },
+        execution,
+      }),
+      { code: "agy_registration_cleanup_failed" },
+    );
+    // Turn mode is persisted, valid 0600 record still survives on disk, AND retirement marker is durably set!
+    assert.ok(await readAgyRegistration(fx.profilePath, CONV), "valid 0600 record survived refused delete");
+    const turnWithSurviving = await readReceiveBinding(fx.profilePath, CONV);
+    assert.equal(turnWithSurviving?.requested_mode, "turn");
+    assert.equal(turnWithSurviving?.wake_unavailable_reason, "agy_registration_cleanup_failed");
+
+    // Re-enabling --mode wake MUST keep retirement active and refuse surviving record with 0 token-bearing calls!
+    const reenabledAfterSurviving = await configureAgentReceive({
+      profilePath: fx.profilePath,
+      mode: "wake",
+      provider: "agy",
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      experimentalAgyAgentapi: true,
+      execution,
+    });
+    assert.equal(reenabledAfterSurviving.wake_route, "none");
+    assert.equal(reenabledAfterSurviving.wake_unavailable_reason, "agy_registration_cleanup_failed");
+
+    const survivingRetryCalls: string[] = [];
+    const survivingBridge = new NativeWakeBridge({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      adapter: new AgyAgentApiAdapter({
+        profilePath: fx.profilePath,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fx.approvedDigests,
+        endpointInspector: makeInspector(endpoint),
+        runner: async (_exe, args) => {
+          survivingRetryCalls.push(args.join(" "));
+          return { stdout: "", stderr: "" };
+        },
+      }),
+      expectedProvider: "agy",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      now: () => clock,
+    });
+    survivingBridge.notifyArrival();
+    clock += 16 * 60_000;
+    const survivingDecision = await survivingBridge.tick();
+    assert.equal(survivingDecision.action, "binding_inactive");
+    if (survivingDecision.action === "binding_inactive") {
+      assert.equal(survivingDecision.code, "agy_re_registration_required");
+    }
+    assert.equal(survivingRetryCalls.length, 0, "surviving record after failed turn cleanup must launch ZERO token-bearing calls");
+
+    // 4. TIMEOUT WITHOUT COMPLETED POSTCHECK WITNESS (C2 #3):
+    //    When a token-bearing call times out and postcheck is unavailable, fail safe by retiring
+    //    the route locally (wake_unavailable_reason: "agy_dispatch_timeout") and prove 0 token-bearing
+    //    calls on retry!
+    await registerAgyWake({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      credentialsJson: JSON.stringify({ ls_address: CANONICAL_LS, csrf_token: SECRET_CSRF }),
+      endpointInspector: makeInspector(endpoint),
+      vendorVerifier: APPROVED_TEST_VERIFIER,
+      approvedDigests: fx.approvedDigests,
+      runner: makeSessionRunner([fx.cwd]),
+    });
+    let timeoutInspectCalls = 0;
+    const timeoutBridge = new NativeWakeBridge({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      adapter: new AgyAgentApiAdapter({
+        profilePath: fx.profilePath,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fx.approvedDigests,
+        endpointInspector: async () => {
+          timeoutInspectCalls += 1;
+          // Post-send check is unavailable (returns null) after send-message times out.
+          return timeoutInspectCalls <= 2 ? endpoint : null;
+        },
+        timeoutMs: 250,
+        runner: async (_exe, args) => {
+          if (args[1] === "get-conversation-metadata") {
+            return { stdout: makeMetadataJson([fx.cwd]), stderr: "" };
+          }
+          await delay(300);
+          throw Object.assign(new Error("agy_child_timeout"), { code: "ETIMEDOUT" });
+        },
+      }),
+      expectedProvider: "agy",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      now: () => clock,
+    });
+    timeoutBridge.notifyArrival();
+    clock += 16 * 60_000;
+    const timeoutDecision = await timeoutBridge.tick();
+    assert.equal(timeoutDecision.action, "error");
+    if (timeoutDecision.action === "error") assert.equal(timeoutDecision.code, "agy_dispatch_timeout");
+    const bindingAfterTimeout = await readReceiveBinding(fx.profilePath, CONV);
+    assert.equal(bindingAfterTimeout?.wake_unavailable_reason, "agy_dispatch_timeout");
+    assert.equal(receiveStatus(bindingAfterTimeout).wake_route, "none");
+    assert.equal(await readAgyRegistration(fx.profilePath, CONV), null);
+
+    // Retry after timeout retirement launches ZERO token-bearing calls!
+    const postTimeoutCalls: string[] = [];
+    const postTimeoutRetryBridge = new NativeWakeBridge({
+      profilePath: fx.profilePath,
+      hostSessionId: CONV,
+      cwd: fx.cwd,
+      adapter: new AgyAgentApiAdapter({
+        profilePath: fx.profilePath,
+        vendorVerifier: APPROVED_TEST_VERIFIER,
+        approvedDigests: fx.approvedDigests,
+        endpointInspector: makeInspector(endpoint),
+        runner: async (_exe, args) => {
+          postTimeoutCalls.push(args.join(" "));
+          return { stdout: "", stderr: "" };
+        },
+      }),
+      expectedProvider: "agy",
+      expectedSeat: { workspaceId: WS, principalId: AGENT },
+      now: () => clock,
+    });
+    postTimeoutRetryBridge.notifyArrival();
+    clock += 16 * 60_000;
+    const postTimeoutRetryDecision = await postTimeoutRetryBridge.tick();
+    assert.equal(postTimeoutRetryDecision.action, "binding_inactive");
+    if (postTimeoutRetryDecision.action === "binding_inactive") {
+      assert.equal(postTimeoutRetryDecision.code, "agy_re_registration_required");
+    }
+    assert.equal(postTimeoutCalls.length, 0, "retry after timeout retirement must launch ZERO token-bearing calls");
   } finally {
     await fx.cleanup();
   }

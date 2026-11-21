@@ -1579,6 +1579,32 @@ export async function registerAgyWake(options: {
         }
       }
 
+      // C2: Repeat the exact listener check IMMEDIATELY before the first token-bearing metadata call
+      // (closing the gap while executable validation ran).
+      const preMetaRem = mainDeadlineMs - Date.now();
+      if (preMetaRem <= 0) {
+        throw new AgentSetupError("agy_dispatch_timeout", "Antigravity registration exceeded its bounded budget.");
+      }
+      const preMetaEndpoint = await inspector({
+        host: canonicalAddr.host,
+        port: canonicalAddr.port,
+        deadlineMs: mainDeadlineMs,
+        timeoutMs: preMetaRem,
+      });
+      if (
+        !preMetaEndpoint ||
+        preMetaEndpoint.canonical_address !== canonicalAddr.canonical ||
+        preMetaEndpoint.pid !== endpoint.pid ||
+        preMetaEndpoint.uid !== endpoint.uid ||
+        preMetaEndpoint.start_time !== endpoint.start_time ||
+        preMetaEndpoint.executable !== pinned.path
+      ) {
+        throw new AgentSetupError(
+          "agy_endpoint_mismatch",
+          "Antigravity loopback listener changed before session verification. Retry cswarm receive register-agy.",
+        );
+      }
+
       // Verify provider session evidence BEFORE saving the 0600 credential record.
       const verified = await verifyAgyConversationSession({
         executable: pinned.path,
@@ -1987,10 +2013,15 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
       }
     }
     if (!postMetaStillMatches) {
-      // If the main metadata call itself timed out and exhausted the budget, return agy_dispatch_timeout
-      // unless the listener actually changed; still retire if endpoint could not be confirmed!
       if (!sessionCheck.ok && sessionCheck.code === "agy_dispatch_timeout") {
-        return sessionCheck;
+        // Fail safe: a token-bearing metadata call timed out before postcheck completed.
+        // Persist wake_unavailable_reason locally (no new subprocess) so next wake needs re-registration.
+        return this.retireAndReport(
+          input.hostSessionId,
+          "agy_dispatch_timeout",
+          "agy_dispatch_timeout",
+          "Antigravity wake timed out before post-call endpoint verification completed; wake route disabled. Re-run cswarm receive register-agy.",
+        );
       }
       return this.retireAndReport(
         input.hostSessionId,
@@ -2113,7 +2144,14 @@ export class AgyAgentApiAdapter implements NativeWakeAdapter {
 
     if (!postSendStillMatches) {
       if (sendFailure?.code === "agy_dispatch_timeout") {
-        return sendFailure;
+        // Fail safe: a token-bearing send-message call timed out before postcheck completed.
+        // Persist wake_unavailable_reason locally (no new subprocess) so next wake needs re-registration.
+        return this.retireAndReport(
+          input.hostSessionId,
+          "agy_dispatch_timeout",
+          "agy_dispatch_timeout",
+          "Antigravity wake timed out before post-call endpoint verification completed; wake route disabled. Re-run cswarm receive register-agy.",
+        );
       }
       return this.retireAndReport(
         input.hostSessionId,
