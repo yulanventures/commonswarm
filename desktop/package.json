@@ -9,9 +9,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p tsconfig.preload.json && node scripts/finalize-preload.mjs",
     "start": "npm run build && electron .",
     "test": "node --import tsx --test src/policy.test.ts",
+    "witness": "npm run build && electron scripts/witness.mjs",
     "dist": "npm run build && electron-builder --mac --config electron-builder.yml"
   },
   "devDependencies": {

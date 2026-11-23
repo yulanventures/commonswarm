@@ -1,21 +1,23 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   app,
   BrowserWindow,
   Menu,
   screen,
-  session,
-  shell,
   type MenuItemConstructorOptions,
 } from "electron";
 import {
-  classifyNavigation,
+  attachWindowHandlers,
+  configurePermissions,
+  getPreloadAdditionalArguments,
+  getPreloadPath,
+  openExternalSafely,
+} from "./handlers.js";
+import {
   getAllowedDevOrigin,
   HELP_URL,
-  isAllowedExternalUrl,
-  isAppOriginUrl,
   resolveAppUrl,
   type AppOriginOptions,
 } from "./policy.js";
@@ -37,13 +39,9 @@ interface WindowState {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const offlinePagePath = path.resolve(currentDir, "..", "static", "offline.html");
+const offlinePageUrl = pathToFileURL(offlinePagePath).href;
 
 let mainWindow: BrowserWindow | null = null;
-
-function openExternalSafely(rawUrl: string): void {
-  if (!isAllowedExternalUrl(rawUrl)) return;
-  void shell.openExternal(rawUrl);
-}
 
 function windowStatePath(): string {
   return path.join(app.getPath("userData"), "window-state.json");
@@ -185,19 +183,6 @@ function buildAppMenu(): Menu {
   return Menu.buildFromTemplate(template);
 }
 
-function configurePermissions(policyOptions: AppOriginOptions): void {
-  const defaultSession = session.defaultSession;
-
-  defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
-    const requestingUrl = details.requestingUrl || webContents.getURL();
-    callback(permission === "notifications" && isAppOriginUrl(requestingUrl, policyOptions));
-  });
-
-  defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    return permission === "notifications" && isAppOriginUrl(requestingOrigin, policyOptions);
-  });
-}
-
 function createMainWindow(appUrl: string, policyOptions: AppOriginOptions): BrowserWindow {
   const saved = loadWindowState();
 
@@ -213,6 +198,8 @@ function createMainWindow(appUrl: string, policyOptions: AppOriginOptions): Brow
     backgroundColor: "#111317",
     show: false,
     webPreferences: {
+      preload: getPreloadPath(),
+      additionalArguments: getPreloadAdditionalArguments(policyOptions),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -267,34 +254,7 @@ function createMainWindow(appUrl: string, policyOptions: AppOriginOptions): Brow
       .catch(() => {});
   };
 
-  const handleNavigation = (event: { preventDefault: () => void }, url: string): void => {
-    const disposition = classifyNavigation(url, {
-      ...policyOptions,
-      source: "navigate",
-      currentUrl: win.webContents.getURL(),
-    });
-    if (disposition === "in_app") return;
-    event.preventDefault();
-    if (disposition === "external") {
-      openExternalSafely(url);
-    }
-  };
-
-  win.webContents.on("will-navigate", handleNavigation);
-  win.webContents.on("will-redirect", handleNavigation);
-
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    const disposition = classifyNavigation(url, {
-      ...policyOptions,
-      source: "new_window",
-    });
-    if (disposition === "in_app") {
-      void win.loadURL(url);
-    } else if (disposition === "external") {
-      openExternalSafely(url);
-    }
-    return { action: "deny" };
-  });
+  attachWindowHandlers(win, policyOptions, { offlinePageUrl });
 
   win.webContents.on("did-fail-load", (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === ERR_ABORTED) return;
