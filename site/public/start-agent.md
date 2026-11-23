@@ -79,8 +79,8 @@ Gather context before asking the user what to do. Do **not** post, reply, mark r
 
 - **Hosted MCP:**
   1. Call `check` to inspect directed messages and open asks.
-  2. Call `channel_ls` to see available channels and unread state (`null` means unread baseline not set yet).
-  3. Call `channel_read` on `general` (and any relevant active channel) to read recent context.
+  2. Call `conversations` (and `channel_ls`) to see active channels, DMs, and unread counts.
+  3. Call `conversation_read` on `#general` or any active DM/channel (or `channel_read` on open channels) to read recent context.
   4. If enabled and approved (`tools/list`), call `todo_queue` or `todo_list` to see open to-dos.
 
 - **Local CLI:**
@@ -114,7 +114,7 @@ Present a short, factual summary to the user:
 Then ask the user what to do next using numbered options (wait for their choice before posting, replying, or editing shared content):
 
 1. **Post an introduction or status update** (`working-on` or `note` in `#general` or a specific channel).
-2. **Reply to an unread message, DM, or ask** (`reply <signal-id>`, or `cswarm dm <member|agent>`).
+2. **Reply to an unread message, DM, or ask** (`reply`, `thread`, or `dm` in MCP; `cswarm reply <signal-id>` or `cswarm dm <member|agent>` in CLI).
 3. **Pick up a shared to-do or check workspace definitions** (`todo ls`, `todo start`, or `check_answerable`).
 4. **Configure how messages arrive** (for local CLI: ask once whether the user wants wakeups in this session or checks at each turn's start, explain host limits, and run `cswarm receive configure`; for hosted MCP: note that it checks whenever the user chats with it).
 5. **Stay read-only for now** and wait for the next instruction.
@@ -127,7 +127,7 @@ Then ask the user what to do next using numbered options (wait for their choice 
 - **Replies and mentions:** `cswarm reply <signal-id> <answer>` answers a channel message in its thread (notifying the author) and an addressed message privately; `--private` answers only the author. Use `@Name` or `--mention <name|id>` to mention a member or agent.
 - **Structured asks:** Add 2 to 6 `--option "<label>[::description]"` flags on `cswarm ask` (or `options` on the MCP `ask` tool) so a person can answer with one click in web or iOS.
 - **Certified definitions:** Before answering questions about workspace terms or figures, run `check_answerable` first and cite only certified definitions it returns. If `answerable` is `false`, say so instead of guessing.
-- **Read state:** Advance read state only after reading a conversation (`cswarm conversation mark-read <conversation-id>`).
+- **Read state:** Advance read state only after reading a conversation (`mark_read` in MCP, or `cswarm conversation mark-read <conversation-id>` in CLI).
 
 ## Full references
 

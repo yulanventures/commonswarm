@@ -138,6 +138,22 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         if (readRefusal) return send(403, { error: "forbidden", message: "Read refused." });
         return send(200, { signals: body.after_id ? incoming.filter(row => row.id > body.after_id) : incoming, capabilities: { cursor_after: 1, sender_owner_relation: 1 } });
       }
+      if (body.resource === "conversation_history") {
+        const cid = String(body.conversation_id ?? "").toLowerCase();
+        const kind = cid === "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" ? "dm"
+          : cid === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" ? "public_channel"
+          : null;
+        if (kind === null) {
+          return send(404, { error: "conversation_not_found", message: "Conversation not found." });
+        }
+        return send(200, {
+          conversation: { conversation_id: cid, kind, ...(kind === "public_channel" ? { slug: "ops" } : {}) },
+          messages: [],
+          has_more: false,
+          next_before: null,
+          next_after: null,
+        });
+      }
       if (body.command?.kind === "ack_agent_delivery" && body.command?.unclaimed === true) {
         // One entry per observed id, whether check sent them batched or singly.
         const batch = Array.isArray(body.command.signal_ids) ? body.command.signal_ids as string[] : null;
@@ -1316,4 +1332,52 @@ test("MCP whoami and members surface workspace lead identity when present", () =
     members: [{ user_id: OWNER, name: "Tom" }],
     agents: [{ principal_id: AGENT, name: "Mr. Marketing" }],
   });
+});
+
+test("HezSec C3: stdio thread keeps inline @tags as body text on DMs and resolves workspace mentions only on channels", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  const DM_CONV = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const CHAN_CONV = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const ROOT = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    // Inline @Owner in a DM thread stays plain body text (no mentions metadata attached).
+    const dmRes = await f.call("thread", {
+      conversation_id: DM_CONV,
+      thread_root_id: ROOT,
+      body: "Follow up @Owner in this DM thread",
+      request_id: "c3dmthr01",
+    });
+    assert.equal(dmRes.result.isError, false);
+    const dmPost = f.posts.at(-1)!;
+    assert.equal(dmPost.command.conversation_id, DM_CONV);
+    assert.equal(dmPost.command.thread_root_id, ROOT);
+    assert.equal(Object.hasOwn(dmPost.command, "mentions"), false, "DM thread must not attach workspace mentions for inline @tags");
+
+    // Explicit mentions array in a DM thread is refused cleanly with conversation_mentions without sending.
+    const sentBefore = f.posts.length;
+    const dmExplicit = await f.call("thread", {
+      conversation_id: DM_CONV,
+      thread_root_id: ROOT,
+      body: "Explicit mention in DM",
+      mentions: ["Owner"],
+      request_id: "c3dmthr02",
+    });
+    assert.equal(dmExplicit.result.isError, true);
+    assert.equal(dmExplicit.value.error, "conversation_mentions");
+    assert.equal(f.posts.length, sentBefore);
+
+    // Channel thread resolves inline @Owner into workspace mentions metadata.
+    const chanRes = await f.call("thread", {
+      conversation_id: CHAN_CONV,
+      thread_root_id: ROOT,
+      body: "Channel reply @Owner",
+      request_id: "c3chthr01",
+    });
+    assert.equal(chanRes.result.isError, false);
+    const chanPost = f.posts.at(-1)!;
+    assert.equal(chanPost.command.conversation_id, CHAN_CONV);
+    assert.deepEqual(chanPost.command.mentions, [{ kind: "user", id: OWNER }]);
+  } finally {
+    await f.close();
+  }
 });
