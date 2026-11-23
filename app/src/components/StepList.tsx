@@ -6,6 +6,12 @@ interface StepListProps {
   steps: AgentStep[];
 }
 
+function formatPhoneStepTarget(target: string): string {
+  if (target.includes(' ')) return target;
+  const parts = target.split('/');
+  return parts.length > 2 ? parts.slice(-2).join('/') : target;
+}
+
 function StepResultView({ result }: { result: StepResult }) {
   switch (result.kind) {
     case 'info':
@@ -27,20 +33,20 @@ function StepResultView({ result }: { result: StepResult }) {
 export function StepList({ steps }: StepListProps) {
   const isPhone = useIsPhone();
   const expandedSteps = useAppStore((state) => state.expandedSteps);
-  const visibleSteps = isPhone
-    ? steps.filter((step) => step.showOnPhone !== false)
-    : steps;
+  const visibleSteps = isPhone && steps.length > 3 ? steps.slice(-3) : steps;
 
   return (
     <div className="rounded-card border border-card-border bg-raised py-1 font-mono text-sm desktop:py-1.5">
       {visibleSteps.map((step) => {
         const hasOutput = Boolean(step.output);
         const isExpanded = Boolean(expandedSteps[step.id]);
-        const glyph = step.state === 'error' ? '!' : '✓';
+        const glyph =
+          step.state === 'error' ? '!' : step.state === 'running' ? '…' : '✓';
         const glyphColor =
           step.state === 'error' ? 'text-needs-you' : 'text-working';
-        const targetText =
-          isPhone && step.phoneTarget ? step.phoneTarget : step.target;
+        const targetText = isPhone
+          ? formatPhoneStepTarget(step.target)
+          : step.target;
 
         const rowInner = (
           <>
