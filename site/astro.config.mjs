@@ -64,4 +64,11 @@ export default defineConfig({
     inlineStylesheets: "auto",
   },
   compressHTML: true,
+  vite: {
+    server: {
+      fs: {
+        allow: [".."],
+      },
+    },
+  },
 });
