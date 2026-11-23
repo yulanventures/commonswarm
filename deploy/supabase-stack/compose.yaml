@@ -48,6 +48,10 @@ services:
       - shared_buffers=512MB
       - -c
       - log_statement=none
+      - -c
+      - cron.use_background_workers=on
+      - -c
+      - max_worker_processes=20
     volumes:
       - ${COMMONSWARM_POSTGRES_DATA_DIR:-/var/lib/commonswarm/postgres}:/var/lib/postgresql/data
       - ${COMMONSWARM_DB_CERT_FILE:-/etc/commonswarm/pg-tls/server.crt}:/etc/postgresql-custom/server.crt:ro

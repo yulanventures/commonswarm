@@ -713,3 +713,70 @@ test("database pass file authenticates passwords with spaces and punctuation", a
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function parsePostgresCommand(composeText: string): string[] {
+  const lines = composeText.split(/\r?\n/);
+  const serviceStart = lines.findIndex((line) => line === "  postgres:");
+  assert.ok(serviceStart >= 0, "postgres service missing from deploy/supabase-stack/compose.yaml");
+  let commandStart = -1;
+  for (let i = serviceStart + 1; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (/^(?:[a-z0-9_-]+:|  [a-z0-9_-]+:)/.test(line)) break;
+    if (line === "    command:") {
+      commandStart = i + 1;
+      break;
+    }
+  }
+  assert.ok(commandStart >= 0, "postgres command list missing from deploy/supabase-stack/compose.yaml");
+  const args: string[] = [];
+  for (let i = commandStart; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (!line.startsWith("      - ")) break;
+    args.push(line.slice("      - ".length).trim());
+  }
+  assert.ok(args.length > 0, "postgres command list is empty");
+  return args;
+}
+
+function postgresConfigFlags(command: readonly string[]): Map<string, string> {
+  const settings = new Map<string, string>();
+  for (let i = 0; i < command.length; i += 1) {
+    if (command[i] !== "-c") continue;
+    const entry = command[i + 1];
+    assert.ok(entry && entry.includes("="), `malformed -c entry at index ${i}`);
+    const eq = entry.indexOf("=");
+    settings.set(entry.slice(0, eq), entry.slice(eq + 1));
+    i += 1;
+  }
+  return settings;
+}
+
+test("postgres compose command enables pg_cron background workers with worker headroom and no trust HBA", () => {
+  const command = parsePostgresCommand(compose);
+  assert.equal(command[0], "postgres");
+  const settings = postgresConfigFlags(command);
+  assert.equal(
+    settings.get("cron.use_background_workers"),
+    "on",
+    "compose.yaml must pass -c cron.use_background_workers=on so pg_cron does not open unauthenticated local logins",
+  );
+  const rawWorkers = settings.get("max_worker_processes");
+  assert.ok(rawWorkers && /^\d+$/.test(rawWorkers), "compose.yaml must pass an explicit integer -c max_worker_processes=<N>");
+  const workers = Number(rawWorkers);
+  assert.ok(
+    workers >= 16,
+    `max_worker_processes=${workers} is too low; leave headroom above Postgres defaults for pg_cron launcher and job workers`,
+  );
+
+  const activeHbaLines = pgHba
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  assert.ok(
+    activeHbaLines.some((line) => /^local\s+all\s+all\s+scram-sha-256$/.test(line)),
+    "pg_hba.conf must keep SCRAM authentication on local connections",
+  );
+  for (const line of activeHbaLines) {
+    assert.doesNotMatch(line, /\btrust\b/, `pg_hba.conf must not use trust authentication: ${line}`);
+  }
+});
