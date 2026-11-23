@@ -19,6 +19,7 @@ import type { AgentAccessStatus, Signal } from "./commonswarm";
 export interface HomeWorkspace { id: string; name: string }
 export interface HomeMapAgent extends RailAgent {
   oldestUnobservedAt?: string | null;
+  unseenCount?: number | null;
   work?: AgentWorkStatus;
 }
 const connectionUuid = (value: unknown): value is string => typeof value === "string" &&
@@ -99,10 +100,21 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     const policy = homeConnectionPolicy(row);
     const workingOn = input.signals.filter(item => item.fromKind === "agent" && item.from === row.principalId && item.kind === "working-on" && Date.parse(item.until ?? "") > input.now)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
+    const workingOnPrivate = Boolean(
+      workingOn && (
+        (workingOn as { channelVisibility?: string }).channelVisibility === "private"
+        || workingOn.to
+        || workingOn.toAgent
+        || (workingOn as { recipientUserIds?: unknown[] }).recipientUserIds?.length
+        || (workingOn as { recipientAgentIds?: unknown[] }).recipientAgentIds?.length
+      ),
+    );
     const facts: HomeAgentStatusInput = { own: yours, ownerName: owner?.name ?? null, ownerFirstName: names.get(row.ownerUserId) ?? null,
       mayManage: !!me && (elevated || yours), sample: input.sample, transport: work?.facts.transport ?? row.transport,
       turnOnly: work?.facts.turn_only ?? row.turnOnly, presence: row.presence,
+      wake: work?.facts.wake,
       oldestUnobservedAt: work?.facts.messages_waiting_since ?? row.oldestUnobservedAt,
+      unseenCount: work?.facts.messages_waiting_count ?? row.unseenCount ?? null,
       revoked: work?.facts.connection === "removed",
       connection: work?.facts.connection,
       ...(Object.keys(policy).length ? { connectionPolicy: policy } : {}),
@@ -115,7 +127,8 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
         suspendedAt: access.suspendedAt, revokedAt: access.grantRevokedAt ?? (homeConnectionTokenMatches(row, access) ? access.revokedAt : null) } : null,
       serverWork: work?.work, lastActionAt: work?.facts.last_activity_at,
       doingTodo: work?.facts.doing ? { title: work.facts.doing.title ?? "a to-do", since: work.facts.doing.since } : null,
-      workingOn: workingOn ? { body: workingOn.body, createdAt: workingOn.createdAt, until: workingOn.until! }
+      workingOn: workingOn
+        ? { ...(workingOnPrivate ? {} : { body: workingOn.body }), createdAt: workingOn.createdAt, until: workingOn.until! }
         : work?.facts.working_on ? { createdAt: work.facts.working_on.at, until: work.facts.working_on.until } : null };
     const labelInput = { name: raw, ownerId: owner ? row.ownerUserId : null, ownerName: owner?.name, ownerFirstName: names.get(row.ownerUserId), yours };
     return { id: row.principalId, name: raw, label: agentLabel(labelInput), nestedLabel: agentLabel(labelInput, { nested: true }),

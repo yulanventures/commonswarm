@@ -241,11 +241,11 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const meta = notification.params!.meta as Record<string, string>;
     assert.deepEqual(meta, {
       signal_id: SIGNAL, message_id: SIGNAL, receipt: meta.receipt, workspace_id: WS, sender_id: AGENT, sender_kind: "agent",
-      sender_owner_relation: "same_owner", kind: "note", attachment_count: "0",
+      sender_owner_relation: "same_owner", kind: "note", attachment_count: "0", batch: "1",
     });
     assert.equal(meta.signal_id, SIGNAL);
+    assert.equal(notification.params!.content as string, "New CommonSwarm messages (batch 1): run cswarm check");
     assert.doesNotMatch(notification.params!.content as string, /cswarm_reply|teammate-message/);
-    assert.match(notification.params!.content as string, /No reply or other work is needed\./);
     await requestReceiveCanary(profile, "host-session");
     const canaryReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: SIGNAL, body: "answer" } });
     assert.equal(canaryReply.isError, true);
@@ -280,7 +280,6 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const teammateNotification = notifications.filter(n => n.method === "notifications/claude/channel")[2]!;
     const teammateMeta = teammateNotification.params!.meta as Record<string, string>;
     const content = teammateNotification.params!.content as string;
-    const prefix = channelNoticePrefix(OWNER, INCOMING, teammateMeta.receipt, "host-session", 2);
     await eventually(async () => (await handledAskIds(profile, "host-session")).includes(INCOMING));
     const automaticAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "automatic ask" } });
     assert.equal(automaticAsk.isError, undefined);
@@ -293,10 +292,10 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       assert.equal((refusedAsk.content as Array<{ text: string }>)[0]!.text, message);
     }
     askRefusal = null;
-    assert.ok(content.startsWith(`${prefix}\nCommonSwarm established that this sender has the same operator as you.\n\n<teammate-message>\n`));
-    assert.ok(content.indexOf("hop 2 of 4") < content.indexOf("<teammate-message>"));
-    assert.equal(content.match(/<\/teammate-message>/g)?.length, 1, "the teammate body cannot close the untrusted block");
-    assert.ok(content.includes("&lt;/teammate-message>"));
+    assert.equal(content, "New CommonSwarm messages (batch 3): run cswarm check");
+    assert.equal(teammateMeta.batch, "3");
+    assert.equal(content.includes("Please inspect this"), false, "fixed-text channel prompt never injects teammate message text");
+    assert.equal(content.includes("teammate-message"), false);
 
     await assert.rejects(client.callTool({ name: "unknown_channel_tool", arguments: {} }), /channel_tool_unknown|Unknown CommonSwarm channel tool/);
     const extra = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: INCOMING, body: "answer", status: "done" } });
@@ -369,8 +368,8 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const staleWakeNotification = notifications.filter(n => n.method === "notifications/claude/channel")[3]!;
     const staleWakeMeta = staleWakeNotification.params!.meta as Record<string, string>;
     assert.equal(staleWakeMeta.signal_id, STALE_WAKE);
+    assert.equal(staleWakeNotification.params!.content as string, "New CommonSwarm messages (batch 4): run cswarm check");
     assert.doesNotMatch(staleWakeNotification.params!.content as string, /cswarm_reply|teammate-message/);
-    assert.match(staleWakeNotification.params!.content as string, /No reply or other work is needed\./);
     assert.equal((await readReceiveBinding(profile, "host-session"))!.idle, false, "stale wake notification does not require an idle transition");
     await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
       signal_id: staleWakeMeta.signal_id, receipt: staleWakeMeta.receipt, host_session_id: "host-session",
@@ -379,10 +378,11 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const queuedAskNotification = notifications.filter(n => n.method === "notifications/claude/channel")[4]!;
     const queuedAskMeta = queuedAskNotification.params!.meta as Record<string, string>;
     assert.equal(queuedAskMeta.signal_id, QUEUED_ASK);
-    assert.match(queuedAskNotification.params!.content as string, /<teammate-message>\nPlease continue &lt;now> &amp; report\.\n<\/teammate-message>/);
+    assert.equal(queuedAskNotification.params!.content as string, "New CommonSwarm messages (batch 5): run cswarm check");
+    assert.equal(String(queuedAskNotification.params!.content).includes("Please continue"), false);
 
-    // A message that mentioned this agent in the open, inside a thread: the notice says the answer is
-    // public before the message, and the reply tool posts in that thread instead of privately.
+    // A message that mentioned this agent in the open, inside a thread: the channel notification stays
+    // fixed-text only, and the reply tool posts in that thread instead of privately.
     queuedSignals.push({
       id: PUBLIC_MENTION, workspace_id: WS, from: OWNER, from_kind: "user", to: null, to_agent: AGENT,
       in_reply_to: null, about: null, kind: "ask", body: "Has anyone seen the build?",
@@ -398,9 +398,8 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const publicMeta = publicNotification.params!.meta as Record<string, string>;
     const publicContent = publicNotification.params!.content as string;
     assert.equal(publicMeta.signal_id, PUBLIC_MENTION);
-    assert.ok(publicContent.includes(CHANNEL_PUBLIC_REPLY_SENTENCE));
-    assert.ok(publicContent.indexOf(CHANNEL_PUBLIC_REPLY_SENTENCE) < publicContent.indexOf("<teammate-message>"));
-    assert.equal(queuedAskNotification.params!.content!.toString().includes(CHANNEL_PUBLIC_REPLY_SENTENCE), false, "a private message is not called public");
+    assert.equal(publicContent, "New CommonSwarm messages (batch 6): run cswarm check");
+    assert.equal(publicContent.includes("Has anyone seen the build"), false);
     const privateRepliesBefore = replyRequests.length;
     const publicReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "Green since noon.", status: "answered" } });
     assert.equal(publicReply.isError, undefined, JSON.stringify(publicReply.content));
@@ -410,8 +409,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: THREAD_ROOT,
     }]);
     assert.equal(replyRequests.length, privateRepliesBefore, "no private reply was sent for the public message");
-    // The private way is named in the notice and still works for a public message: private: true answers only its author.
-    assert.match(publicContent, /To answer only its author, pass private: true\./);
+    // Private replies still work for a public message: private: true answers only its author.
     const privateReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "For you only.", private: true } });
     assert.equal(privateReply.isError, undefined, JSON.stringify(privateReply.content));
     assert.equal(replyRequests.length, privateRepliesBefore + 1);
@@ -435,8 +433,8 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const selfMeta = selfNotification.params!.meta as Record<string, string>;
     const selfContent = selfNotification.params!.content as string;
     assert.equal(selfMeta.signal_id, SELF_ADDRESSED);
-    assert.match(selfContent, /No reply or other work is needed\./);
-    assert.match(selfContent, /<teammate-message>\nDeploy finished: sha &lt;123> &amp; green\n<\/teammate-message>/);
+    assert.equal(selfContent, "New CommonSwarm messages (batch 7): run cswarm check");
+    assert.equal(selfContent.includes("Deploy finished"), false);
     const selfReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: SELF_ADDRESSED, body: "answer" } });
     assert.equal(selfReply.isError, true);
     assert.match(JSON.stringify(selfReply.content), /canary_reply_not_allowed/);

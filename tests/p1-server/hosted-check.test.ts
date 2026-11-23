@@ -1016,3 +1016,154 @@ test("rollback injection leaves neither cursor nor batch", async () => {
   const positive = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(positive.status, 200, "positive control: normal transaction persists");
 });
+
+test("C2 hosted presence & activity: DM-only check, ack, and outbound DM reply stay hidden from outsiders; participant and public post/mention controls advance", async () => {
+  const fixture = await seedFixture();
+  const outsider = randomUUID();
+  await sql`INSERT INTO auth.users (id, aud, role, email) VALUES (${outsider}::uuid, 'authenticated', 'authenticated', ${`outsider-${outsider}@example.test`})`;
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${outsider}::uuid, 'Outsider')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${fixture.workspace}::uuid, ${outsider}::uuid, 'member')`;
+
+  const readPresenceRow = async () => {
+    const [row] = await sql<{ last_command_at: Date | null; turn_at: Date | null; watcher_at: Date | null; channel_at: Date | null; listener_at: Date | null }[]>`
+      SELECT last_command_at, turn_at, watcher_at, channel_at, listener_at
+      FROM swarm.agent_presence
+      WHERE workspace_id = ${fixture.workspace}::uuid AND principal_id = ${fixture.principalA}::uuid
+    `;
+    return row ?? null;
+  };
+  const rosterSeatAs = async (viewerId: string) => await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewerId, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ roster: { agents: Array<{ principal_id: string; last_activity_at: string | null; messages_waiting: { count: number; since: string | null } }> } }[]>`
+      SELECT swarm_read.workspace_roster(${fixture.workspace}::uuid) AS roster`;
+    return row!.roster.agents.find((a) => a.principal_id === fixture.principalA)!;
+  });
+  const homeSeatAs = async (viewerId: string) => await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewerId, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ overview: { workspaces: Array<{ workspace_id: string; people: Array<{ agents: Array<{ principal_id: string; status: { facts: { last_activity_at: string | null; messages_waiting_count: number; messages_waiting_since: string | null } } }> }> }> } }[]>`
+      SELECT swarm_read.home_overview() AS overview`;
+    return row!.overview.workspaces.find((w) => w.workspace_id === fixture.workspace)!.people.flatMap((p) => p.agents)
+      .find((a) => a.principal_id === fixture.principalA)!.status.facts;
+  });
+
+  // 1. DM-only check & ack witness: owner sends a channel-less DM ask to principalA.
+  const dmId = signalIdOf(await runHarness<HarnessResult>(fixture, {
+    operation: "public",
+    ownerJwt: fixture.ownerJwt,
+    command: {
+      ...unaddressedPost,
+      signal_kind: "ask",
+      body: `private dm ask ${randomUUID()}`,
+      to_agent_principal_id: fixture.principalA,
+    },
+  }));
+  assert.ok(dmId);
+  assert.deepEqual((await rosterSeatAs(outsider)).messages_waiting, { count: 0, since: null }, "DM-only unseen count hidden from outsider in roster");
+  assert.equal((await homeSeatAs(outsider)).messages_waiting_count, 0, "DM-only unseen count hidden from outsider in home_overview");
+
+  const dmOpen = await runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(dmOpen.status, 200);
+  assert.equal((dmOpen.body.signals as Array<{ id: string }>).length, 1);
+  assert.equal(await readPresenceRow(), null, "DM-only hosted check open must NOT write workspace-visible agent_presence");
+  assert.equal((await rosterSeatAs(outsider)).last_activity_at, null, "DM-only hosted check batch must NOT advance outsider roster last_activity_at");
+  assert.equal((await homeSeatAs(outsider)).last_activity_at, null, "DM-only hosted check batch must NOT advance outsider home_overview last_activity_at");
+
+  const dmAck = await runHarness<HarnessResult>(fixture, { operation: "single", ack: dmOpen.body.batch_id });
+  assert.equal(dmAck.status, 200);
+  assert.equal(await readPresenceRow(), null, "DM-only hosted check ack must NOT write workspace-visible agent_presence");
+  assert.equal((await rosterSeatAs(outsider)).last_activity_at, null, "DM-only hosted check ack must NOT advance outsider roster last_activity_at");
+  assert.equal((await homeSeatAs(outsider)).last_activity_at, null, "DM-only hosted check ack must NOT advance outsider home_overview last_activity_at");
+
+  // 2. Outbound private DM reply witness (no coarse-presence write):
+  //    principalA replies privately in the DM -> agent_presence stays null, DM participant (owner) sees last_activity_at,
+  //    and unrelated member (outsider) stays null across BOTH workspace_roster and home_overview.
+  const dmReply = await runHarness<HarnessResult>(fixture, {
+    operation: "seat-post",
+    tool: "reply",
+    command: {
+      ...unaddressedPost,
+      signal_kind: "note",
+      body: `private reply ${randomUUID()}`,
+      in_reply_to: dmId,
+    },
+  });
+  assert.equal(dmReply.status, 200, JSON.stringify(dmReply.body));
+  assert.equal(await readPresenceRow(), null, "outbound DM reply must NOT write workspace-visible agent_presence");
+  assert.ok((await rosterSeatAs(fixture.owner)).last_activity_at !== null, "DM participant sees outbound reply activity in workspace_roster");
+  assert.ok((await homeSeatAs(fixture.owner)).last_activity_at !== null, "DM participant sees outbound reply activity in home_overview");
+  assert.equal((await rosterSeatAs(outsider)).last_activity_at, null, "unrelated member roster last_activity_at stays fixed after outbound DM reply");
+  assert.equal((await homeSeatAs(outsider)).last_activity_at, null, "unrelated member home_overview last_activity_at stays fixed after outbound DM reply");
+
+  // 3. Public control (inbound #general @mention + check): outsider sees unseen count before check and activity after check.
+  const [mentionPosted] = await runHarness<HarnessResult[]>(fixture, {
+    operation: "post-signals",
+    ownerJwt: fixture.ownerJwt,
+    count: 1,
+    recipientPrincipal: fixture.principalA,
+    untilMs: 10 * 60 * 1000,
+    mention: true,
+  });
+  assert.equal(mentionPosted?.status, 200, JSON.stringify(mentionPosted));
+  const publicMentionId = (mentionPosted?.body.signal as { id?: string } | undefined)?.id;
+  assert.ok(publicMentionId);
+  assert.equal((await rosterSeatAs(outsider)).messages_waiting.count, 1, "public control: outsider sees public #general mention unseen count in roster");
+  assert.equal((await homeSeatAs(outsider)).messages_waiting_count, 1, "public control: outsider sees public #general mention unseen count in home_overview");
+
+  const publicOpen = await runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(publicOpen.status, 200);
+  assert.equal((publicOpen.body.signals as Array<{ id: string }>).length, 1);
+  const presenceAfterPublic = await readPresenceRow();
+  assert.ok(presenceAfterPublic?.last_command_at instanceof Date, "public control: public mention check writes last_command_at");
+  assert.ok(presenceAfterPublic?.turn_at instanceof Date, "public control: public mention check writes turn_at");
+  assert.equal(presenceAfterPublic?.watcher_at, null, "hosted check never sets push watcher_at");
+  assert.equal(presenceAfterPublic?.channel_at, null, "hosted check never sets push channel_at");
+  assert.equal(presenceAfterPublic?.listener_at, null, "hosted check never sets push listener_at");
+  const outsiderAfterMentionCheck = (await rosterSeatAs(outsider)).last_activity_at;
+  assert.ok(outsiderAfterMentionCheck !== null, "public control: outsider sees roster last_activity_at advance after public check");
+  assert.ok((await homeSeatAs(outsider)).last_activity_at !== null, "public control: outsider sees home_overview last_activity_at advance after public check");
+
+  // 4. Outbound public post control (with no coarse-presence write needed to prove outgoing signal visibility):
+  //    set presence back 5 minutes, verify a second outbound DM reply leaves outsider's timestamp fixed,
+  //    then an outbound unaddressed #general post advances outsider's timestamp.
+  await sql`UPDATE swarm.agent_presence
+    SET last_command_at = statement_timestamp() - interval '5 minutes',
+        turn_at = statement_timestamp() - interval '5 minutes'
+    WHERE workspace_id = ${fixture.workspace}::uuid AND principal_id = ${fixture.principalA}::uuid`;
+  const baselineRosterTs = (await rosterSeatAs(outsider)).last_activity_at!;
+  const baselineHomeTs = (await homeSeatAs(outsider)).last_activity_at!;
+  await sql`SELECT pg_sleep(0.05)`;
+  const secondDmReply = await runHarness<HarnessResult>(fixture, {
+    operation: "seat-post",
+    tool: "reply",
+    command: {
+      ...unaddressedPost,
+      signal_kind: "note",
+      body: `second private reply ${randomUUID()}`,
+      in_reply_to: dmId,
+    },
+  });
+  assert.equal(secondDmReply.status, 200, JSON.stringify(secondDmReply.body));
+  assert.equal(Date.parse((await rosterSeatAs(outsider)).last_activity_at!), Date.parse(baselineRosterTs),
+    "second outbound DM reply must leave outsider roster last_activity_at fixed at baseline");
+  assert.equal(Date.parse((await homeSeatAs(outsider)).last_activity_at!), Date.parse(baselineHomeTs),
+    "second outbound DM reply must leave outsider home_overview last_activity_at fixed at baseline");
+  assert.ok(Date.parse((await rosterSeatAs(fixture.owner)).last_activity_at!) > Date.parse(baselineRosterTs),
+    "DM participant sees second outbound DM reply advance roster last_activity_at");
+
+  const publicPost = await runHarness<HarnessResult>(fixture, {
+    operation: "seat-post",
+    tool: "note",
+    command: {
+      ...unaddressedPost,
+      signal_kind: "note",
+      body: `public general update ${randomUUID()}`,
+    },
+  });
+  assert.equal(publicPost.status, 200, JSON.stringify(publicPost.body));
+  assert.ok(Date.parse((await rosterSeatAs(outsider)).last_activity_at!) > Date.parse(baselineRosterTs),
+    "public control: outbound #general post advances outsider roster last_activity_at");
+  assert.ok(Date.parse((await homeSeatAs(outsider)).last_activity_at!) > Date.parse(baselineHomeTs),
+    "public control: outbound #general post advances outsider home_overview last_activity_at");
+});
