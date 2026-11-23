@@ -174,7 +174,7 @@ export function attachWindowHandlers(
     return captureDocumentIdentity(mainFrame, documentGeneration);
   };
 
-  const onLinkActivated = (event: IpcMainEvent, rawUrl: unknown): void => {
+  const onLinkActivated = (event: IpcMainEvent, rawUrl: unknown, rawActivatedAt: unknown): void => {
     if (webContents.isDestroyed() || event.sender !== webContents) return;
     const senderFrame = event.senderFrame;
     if (!isOwnMainFrame(senderFrame, webContents) || !isLiveFrame(senderFrame)) return;
@@ -185,6 +185,7 @@ export function attachWindowHandlers(
     ticketState = recordLinkActivation(ticketState, {
       ...policyOptions,
       rawUrl,
+      rawActivatedAt,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
       senderDocument,
@@ -192,16 +193,21 @@ export function attachWindowHandlers(
     });
   };
 
-  const onActivationWithoutLink = (event: IpcMainEvent): void => {
+  const onActivationWithoutLink = (event: IpcMainEvent, rawActivatedAt: unknown): void => {
     if (webContents.isDestroyed() || event.sender !== webContents) return;
     const senderFrame = event.senderFrame;
     if (!isOwnMainFrame(senderFrame, webContents) || !isLiveFrame(senderFrame)) return;
 
+    const senderDocument = captureDocumentIdentity(senderFrame, documentGeneration);
+    if (!isSameDocumentIdentity(senderDocument, getCurrentMainDocumentIdentity())) return;
+
     ticketState = clearLinkTicketOnActivationWithoutLink(ticketState, {
       ...policyOptions,
+      rawActivatedAt,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
-      senderOrigin: senderFrame.origin,
+      senderDocument,
+      now: Date.now(),
     });
   };
 
@@ -387,13 +393,13 @@ export function attachWindowHandlers(
   webContents.on("did-navigate", () => {
     pendingMainNav = null;
     documentGeneration += 1;
-    ticketState = retireLinkTicketOnDocumentChange(ticketState);
+    ticketState = retireLinkTicketOnDocumentChange(ticketState, Date.now());
   });
 
   webContents.on("render-process-gone", () => {
     pendingMainNav = null;
     documentGeneration += 1;
-    ticketState = retireLinkTicketOnDocumentChange(ticketState);
+    ticketState = retireLinkTicketOnDocumentChange(ticketState, Date.now());
   });
 
   webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _validatedURL, isMainFrame) => {

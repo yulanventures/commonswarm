@@ -141,11 +141,12 @@ function handleTrustedActivation(event: MouseEvent, requiredButton: number): voi
   if (event.isTrusted !== true) return;
   if (event.button !== requiredButton) return;
 
+  const activatedAt = Date.now();
   const linkUrl = findActivatedLinkUrl(event);
   if (linkUrl !== null) {
-    ipcRenderer.send(IPC_LINK_ACTIVATED, linkUrl);
+    ipcRenderer.send(IPC_LINK_ACTIVATED, linkUrl, activatedAt);
   } else {
-    ipcRenderer.send(IPC_ACTIVATION_WITHOUT_LINK);
+    ipcRenderer.send(IPC_ACTIVATION_WITHOUT_LINK, activatedAt);
   }
 }
 

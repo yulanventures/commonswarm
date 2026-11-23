@@ -4,6 +4,7 @@ export const HELP_URL = "https://commonswarm.com/support";
 export const OVERRIDE_ENV_VAR = "COMMONSWARM_DESKTOP_URL";
 
 export const LINK_TICKET_WINDOW_MS = 1000;
+export const MAX_ACTIVATION_FUTURE_SKEW_MS = 50;
 export const MAX_EXTERNAL_URL_LENGTH = 2048;
 export const IPC_LINK_ACTIVATED = "desktop:link-activated";
 export const IPC_ACTIVATION_WITHOUT_LINK = "desktop:activation-without-link";
@@ -133,21 +134,29 @@ export interface DocumentIdentity {
 export interface LinkActivationTicket {
   readonly url: string;
   readonly document: DocumentIdentity;
-  readonly issuedAt: number;
+  readonly activatedAt: number;
+}
+
+export interface DocumentRefusal {
+  readonly document: DocumentIdentity;
+  readonly refusedAt: number;
 }
 
 export interface LinkTicketState {
   readonly ticket: LinkActivationTicket | null;
-  readonly discardActivationsUntil: number | null;
+  readonly lastRefusal: DocumentRefusal | null;
+  readonly retiredAt: number | null;
 }
 
 export const INITIAL_LINK_TICKET_STATE: LinkTicketState = Object.freeze({
   ticket: null,
-  discardActivationsUntil: null,
+  lastRefusal: null,
+  retiredAt: null,
 });
 
 export interface RecordLinkActivationInput extends AppOriginOptions {
   readonly rawUrl: unknown;
+  readonly rawActivatedAt: unknown;
   readonly senderMatchesWindow: boolean;
   readonly senderIsMainFrame: boolean;
   readonly senderDocument: DocumentIdentity | null;
@@ -155,9 +164,11 @@ export interface RecordLinkActivationInput extends AppOriginOptions {
 }
 
 export interface ClearLinkTicketInput extends AppOriginOptions {
+  readonly rawActivatedAt: unknown;
   readonly senderMatchesWindow: boolean;
   readonly senderIsMainFrame: boolean;
-  readonly senderOrigin: string | null | undefined;
+  readonly senderDocument: DocumentIdentity | null;
+  readonly now: number;
 }
 
 export interface ConsumeTicketInput {
@@ -381,9 +392,28 @@ export function normalizeTicketUrl(rawUrl: unknown): string | null {
 }
 
 /**
+ * Validate a trusted activation timestamp against the main-process wall clock.
+ * Requires a finite non-negative safe integer that is neither further in the future than
+ * MAX_ACTIVATION_FUTURE_SKEW_MS nor older than LINK_TICKET_WINDOW_MS from now.
+ */
+export function validateActivationTimestamp(
+  rawActivatedAt: unknown,
+  now: number,
+): number | null {
+  if (typeof now !== "number" || !Number.isFinite(now)) return null;
+  if (typeof rawActivatedAt !== "number" || !Number.isSafeInteger(rawActivatedAt)) return null;
+  if (rawActivatedAt < 0) return null;
+  if (rawActivatedAt > now + MAX_ACTIVATION_FUTURE_SKEW_MS) return null;
+  if (now - rawActivatedAt >= LINK_TICKET_WINDOW_MS) return null;
+  return rawActivatedAt;
+}
+
+/**
  * Record a link-activation ticket from a validated main-frame IPC message.
  * Ignores invalid senders, non-main frames, foreign origins, invalid/oversized URLs,
- * and messages arriving during an active out-of-order discard window.
+ * invalid/stale/future click timestamps, activations at or before document retirement,
+ * activations not strictly after the latest refused external attempt for this document,
+ * and older out-of-order activations behind a newer live ticket on the same document.
  */
 export function recordLinkActivation(
   state: LinkTicketState,
@@ -395,53 +425,104 @@ export function recordLinkActivation(
   if (!isAppOriginUrl(input.senderDocument.origin, input)) {
     return state;
   }
-  if (!Number.isFinite(input.now)) {
+  const activatedAt = validateActivationTimestamp(input.rawActivatedAt, input.now);
+  if (activatedAt === null) {
     return state;
   }
-  if (state.discardActivationsUntil !== null && input.now < state.discardActivationsUntil) {
-    return { ticket: null, discardActivationsUntil: state.discardActivationsUntil };
+  if (state.retiredAt !== null && activatedAt <= state.retiredAt) {
+    return state;
+  }
+  if (
+    state.lastRefusal !== null &&
+    isSameDocumentIdentity(state.lastRefusal.document, input.senderDocument) &&
+    activatedAt <= state.lastRefusal.refusedAt
+  ) {
+    return state;
   }
   const normalizedUrl = normalizeTicketUrl(input.rawUrl);
   if (!normalizedUrl) {
+    return state;
+  }
+  if (
+    state.ticket !== null &&
+    isSameDocumentIdentity(state.ticket.document, input.senderDocument) &&
+    activatedAt < state.ticket.activatedAt
+  ) {
     return state;
   }
   return {
     ticket: {
       url: normalizedUrl,
       document: input.senderDocument,
-      issuedAt: input.now,
+      activatedAt,
     },
-    discardActivationsUntil: null,
+    lastRefusal: state.lastRefusal,
+    retiredAt: state.retiredAt,
   };
 }
 
 /**
  * Clear any stored ticket after a trusted main-frame activation that was not on a link.
+ * Applies the same sender, origin, click-time, retirement, and refusal validation rules;
+ * can only clear an existing ticket, never arm one.
  */
 export function clearLinkTicketOnActivationWithoutLink(
   state: LinkTicketState,
   input: ClearLinkTicketInput,
 ): LinkTicketState {
-  if (!input.senderMatchesWindow || !input.senderIsMainFrame) {
+  if (!input.senderMatchesWindow || !input.senderIsMainFrame || !input.senderDocument) {
     return state;
   }
-  if (!input.senderOrigin || !isAppOriginUrl(input.senderOrigin, input)) {
+  if (!isAppOriginUrl(input.senderDocument.origin, input)) {
+    return state;
+  }
+  const activatedAt = validateActivationTimestamp(input.rawActivatedAt, input.now);
+  if (activatedAt === null) {
+    return state;
+  }
+  if (state.retiredAt !== null && activatedAt <= state.retiredAt) {
+    return state;
+  }
+  if (
+    state.lastRefusal !== null &&
+    isSameDocumentIdentity(state.lastRefusal.document, input.senderDocument) &&
+    activatedAt <= state.lastRefusal.refusedAt
+  ) {
     return state;
   }
   if (state.ticket === null) return state;
+  if (
+    isSameDocumentIdentity(state.ticket.document, input.senderDocument) &&
+    activatedAt < state.ticket.activatedAt
+  ) {
+    return state;
+  }
   return { ...state, ticket: null };
 }
 
 /**
- * Retire any stored ticket when the main-frame document changes (navigation, reload, or crash).
+ * Retire any stored ticket when the main-frame document changes (navigation, reload, or crash)
+ * and fence any in-flight activation whose click time is not after the retirement time.
  */
-export function retireLinkTicketOnDocumentChange(state: LinkTicketState): LinkTicketState {
-  if (state.ticket === null) return state;
-  return { ...state, ticket: null };
+export function retireLinkTicketOnDocumentChange(
+  state: LinkTicketState,
+  now: number,
+): LinkTicketState {
+  const retiredAt = Number.isFinite(now)
+    ? state.retiredAt !== null
+      ? Math.max(state.retiredAt, now)
+      : now
+    : state.retiredAt;
+  return {
+    ticket: null,
+    lastRefusal: null,
+    retiredAt,
+  };
 }
 
 /**
  * Check whether a ticket authorizes an external open for rawTargetUrl from currentDocument at now.
+ * Ticket expiry is always measured from the trusted click time (ticket.activatedAt + LINK_TICKET_WINDOW_MS).
  */
 export function isTicketValidForDestination(
   ticket: LinkActivationTicket | null | undefined,
@@ -452,8 +533,7 @@ export function isTicketValidForDestination(
   if (!ticket || !currentDocument || typeof now !== "number" || !Number.isFinite(now)) {
     return false;
   }
-  const age = now - ticket.issuedAt;
-  if (age < 0 || age >= LINK_TICKET_WINDOW_MS) {
+  if (validateActivationTimestamp(ticket.activatedAt, now) === null) {
     return false;
   }
   if (!isSameDocumentIdentity(ticket.document, currentDocument)) {
@@ -468,9 +548,8 @@ export function isTicketValidForDestination(
 
 /**
  * Consume any pending ticket after a main-frame navigation or window-open decision.
- * If an external attempt found no live matching-document ticket, suppress incoming
- * activation IPCs for the rest of the ticket window so a late out-of-order IPC cannot
- * arm a future open.
+ * Every refused external attempt, regardless of prior ticket state, records the refusal time
+ * for that document so no activation whose click time is at or before the refusal can arm a ticket.
  */
 export function consumeTicketAfterAttempt(
   state: LinkTicketState,
@@ -480,24 +559,28 @@ export function consumeTicketAfterAttempt(
     return state;
   }
 
-  let discardActivationsUntil = state.discardActivationsUntil;
-  if (input.disposition === "blocked" && isAllowedExternalUrl(input.rawUrl) && Number.isFinite(input.now)) {
-    const hadLiveTicketForDoc =
-      state.ticket !== null &&
-      isSameDocumentIdentity(state.ticket.document, input.currentDocument) &&
-      input.now - state.ticket.issuedAt >= 0 &&
-      input.now - state.ticket.issuedAt < LINK_TICKET_WINDOW_MS;
-
-    if (!hadLiveTicketForDoc) {
-      const until = input.now + LINK_TICKET_WINDOW_MS;
-      discardActivationsUntil =
-        discardActivationsUntil !== null ? Math.max(discardActivationsUntil, until) : until;
-    }
+  let lastRefusal = state.lastRefusal;
+  if (
+    input.disposition === "blocked" &&
+    isAllowedExternalUrl(input.rawUrl) &&
+    input.currentDocument !== null &&
+    Number.isFinite(input.now)
+  ) {
+    const prevRefusedAt =
+      lastRefusal !== null && isSameDocumentIdentity(lastRefusal.document, input.currentDocument)
+        ? lastRefusal.refusedAt
+        : null;
+    const refusedAt = prevRefusedAt !== null ? Math.max(prevRefusedAt, input.now) : input.now;
+    lastRefusal = {
+      document: input.currentDocument,
+      refusedAt,
+    };
   }
 
   return {
     ticket: null,
-    discardActivationsUntil,
+    lastRefusal,
+    retiredAt: state.retiredAt,
   };
 }
 

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import {
   attachWindowHandlers,
   configurePermissions,
@@ -14,6 +14,7 @@ import {
   CONTEXT_MENU_COPY_LINK_LABEL,
   CONTEXT_MENU_OPEN_LINK_LABEL,
   getAllowedDevOrigin,
+  IPC_LINK_ACTIVATED,
   LINK_TICKET_WINDOW_MS,
   OVERRIDE_ENV_VAR,
   resolveAppUrl,
@@ -31,8 +32,6 @@ const SAME_ORIGIN_SUBFRAME_TOP_URL = "https://example.com/same-origin-subframe-t
 const UNEXPECTED_REDIRECT_URL = "https://example.com/unexpected-redirect";
 const SIGN_IN_FIRST_URL = "https://api.commonswarm.com/auth/v1/authorize?provider=github";
 const SIGN_IN_SECOND_URL = "https://github.com/login/oauth/authorize?client_id=witness";
-
-const DISCARD_COOLDOWN_MS = LINK_TICKET_WINDOW_MS + 100;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -288,6 +287,8 @@ async function main() {
 
   const openedExternalUrls = [];
   const originalOpenExternal = shell.openExternal;
+  const originalIpcMainOn = ipcMain.on;
+  const originalIpcMainOff = ipcMain.off;
   const openExternalStub = async (url) => {
     openedExternalUrls.push(url);
   };
@@ -364,6 +365,7 @@ async function main() {
     <a id="redirect-link" href="${EXTERNAL_LINK_URL}" style="display:block;width:240px;height:36px;margin:8px 20px;">Redirecting link</a>
     <a id="signin-link" href="${SIGN_IN_FIRST_URL}" style="display:block;width:240px;height:36px;margin:8px 20px;">Sign in</a>
     <button id="inert-button" type="button" style="display:block;width:240px;height:36px;margin:8px 20px;">Inert button</button>
+    <a id="external-link-b" href="${EXTERNAL_LINK_B_URL}" style="display:block;width:240px;height:36px;margin:8px 20px;">External link B</a>
   </body>
 </html>`);
         return;
@@ -500,18 +502,170 @@ async function main() {
       return promise;
     };
 
+    const activationDeliveredWaiters = [];
+    let activeActivationHold = null;
+    const wrappedIpcListeners = new Map();
+    let productionLinkActivatedListenerWrapped = false;
+
+    const notifyActivationDelivered = (record) => {
+      for (let i = activationDeliveredWaiters.length - 1; i >= 0; i -= 1) {
+        const waiter = activationDeliveredWaiters[i];
+        if (!waiter.predicate || waiter.predicate(record)) {
+          activationDeliveredWaiters.splice(i, 1);
+          clearTimeout(waiter.timer);
+          waiter.resolve(record);
+        }
+      }
+    };
+
+    const waitForActivationDelivered = (
+      predicate,
+      description = "link-activated IPC delivery",
+      timeoutMs = 4000,
+    ) => {
+      let waiter;
+      const promise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = activationDeliveredWaiters.indexOf(waiter);
+          if (idx !== -1) activationDeliveredWaiters.splice(idx, 1);
+          reject(new Error(`timed out waiting for ${description}`));
+        }, timeoutMs);
+        waiter = { predicate, resolve, timer };
+        activationDeliveredWaiters.push(waiter);
+      });
+      promise.cancel = () => {
+        const idx = activationDeliveredWaiters.indexOf(waiter);
+        if (idx !== -1) activationDeliveredWaiters.splice(idx, 1);
+        clearTimeout(waiter.timer);
+      };
+      return promise;
+    };
+
+    // Witness-only IPC delivery wrapper on ipcMain (no production test hook).
+    // Wraps registration of desktop:link-activated so a check can queue a real message
+    // before it reaches the registered production handler, then release the untouched
+    // original IpcMainEvent and payload directly into that registered handler.
+    const armActivationHold = (predicate, description = "held link-activated IPC", timeoutMs = 4000) => {
+      assert.equal(activeActivationHold, null, "overlapping IPC activation hold in witness");
+      let settled = false;
+      let resolveHeld;
+      let rejectHeld;
+      const heldPromise = new Promise((resolve, reject) => {
+        resolveHeld = resolve;
+        rejectHeld = reject;
+      });
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          if (activeActivationHold === hold) activeActivationHold = null;
+          rejectHeld(new Error(`timed out waiting for ${description}`));
+        }
+      }, timeoutMs);
+
+      const hold = {
+        predicate,
+        capture(entry) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (activeActivationHold === hold) activeActivationHold = null;
+          resolveHeld(entry);
+        },
+        waitForHeld() {
+          return heldPromise;
+        },
+        disarm() {
+          clearTimeout(timer);
+          if (activeActivationHold === hold) activeActivationHold = null;
+          settled = true;
+        },
+      };
+      activeActivationHold = hold;
+      return hold;
+    };
+
+    const boundIpcMainOn = originalIpcMainOn.bind(ipcMain);
+    const boundIpcMainOff = originalIpcMainOff.bind(ipcMain);
+    const wrappedIpcMainOn = (channel, listener) => {
+      if (channel !== IPC_LINK_ACTIVATED) {
+        return boundIpcMainOn(channel, listener);
+      }
+      productionLinkActivatedListenerWrapped = true;
+      const wrapper = (event, ...args) => {
+        const [url, activatedAt] = args;
+        if (
+          activeActivationHold &&
+          (!activeActivationHold.predicate || activeActivationHold.predicate(event, args))
+        ) {
+          const entry = {
+            channel,
+            event,
+            args,
+            url,
+            activatedAt,
+            released: false,
+            release: () => {
+              if (entry.released) return;
+              entry.released = true;
+              listener(event, ...args);
+              notifyActivationDelivered({ url, activatedAt, held: true });
+            },
+          };
+          activeActivationHold.capture(entry);
+          return;
+        }
+        listener(event, ...args);
+        notifyActivationDelivered({ url, activatedAt, held: false });
+      };
+      wrappedIpcListeners.set(listener, wrapper);
+      return boundIpcMainOn(channel, wrapper);
+    };
+    const wrappedIpcMainOff = (channel, listener) => {
+      const wrapper = wrappedIpcListeners.get(listener);
+      if (wrapper) {
+        wrappedIpcListeners.delete(listener);
+        return boundIpcMainOff(channel, wrapper);
+      }
+      return boundIpcMainOff(channel, listener);
+    };
+    try {
+      ipcMain.on = wrappedIpcMainOn;
+    } catch {
+      Object.defineProperty(ipcMain, "on", {
+        configurable: true,
+        writable: true,
+        value: wrappedIpcMainOn,
+      });
+    }
+    try {
+      ipcMain.off = wrappedIpcMainOff;
+    } catch {
+      Object.defineProperty(ipcMain, "off", {
+        configurable: true,
+        writable: true,
+        value: wrappedIpcMainOff,
+      });
+    }
+    assert.equal(ipcMain.on, wrappedIpcMainOn, "failed to wrap ipcMain.on in witness");
+    assert.equal(ipcMain.off, wrappedIpcMainOff, "failed to wrap ipcMain.off in witness");
+
     attachWindowHandlers(win, policyOptions, { presentContextMenu });
     assert.equal(
       productionWindowOpenHandlerWrapped,
       true,
       "attachWindowHandlers must register setWindowOpenHandler",
     );
+    assert.equal(
+      productionLinkActivatedListenerWrapped,
+      true,
+      "attachWindowHandlers must register desktop:link-activated on ipcMain",
+    );
 
     await win.loadURL(appUrl);
     await waitForTwoFrames(win);
 
     // -------------------------------------------------------------------------
-    // Phase 1: Subframe-free checks (b, c, k, m, l, d, h, i, n, j, o, q)
+    // Phase 1: Subframe-free checks (b, c, k, m, l, d, h, i, n, j, o, q, s, t, u)
     // -------------------------------------------------------------------------
 
     // (b) Main-frame redirect to a foreign https origin is cancelled and opens nothing
@@ -842,7 +996,6 @@ async function main() {
       "real click on inert button followed immediately by location.href to external https URL is cancelled and opens nothing",
       async () => {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         await win.webContents.mainFrame.executeJavaScript(`(() => {
@@ -892,7 +1045,6 @@ async function main() {
       "real click on inert button followed immediately by window.open to external https URL opens nothing",
       async () => {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         await win.webContents.mainFrame.executeJavaScript(`(() => {
@@ -946,7 +1098,6 @@ async function main() {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
 
         // Part 1: hover on external-link A, focus on inert-button, press Enter
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         const linkCoords = await getElementCenter(win, "external-link");
@@ -1050,7 +1201,6 @@ async function main() {
         }
 
         // Part 2 (mirror): focus on external-link A, real click on inert-button whose handler navigates to A
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         const btnCoords = await getElementCenter(win, "inert-button");
@@ -1116,8 +1266,6 @@ async function main() {
       "real click on external link A whose click handler redirects to B opens neither B nor A",
       async () => {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
-        // Wait past any prior no-ticket discard window so clicking link A issues a real ticket.
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         await win.webContents.mainFrame.executeJavaScript(`(() => {
@@ -1204,7 +1352,6 @@ async function main() {
       "forged activation (dispatchEvent MouseEvent and a.click()) followed by navigation to A opens nothing",
       async () => {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         // Synthetic MouseEvent dispatchEvent + location.href = A
@@ -1239,7 +1386,6 @@ async function main() {
         }
 
         // Synthetic a.click() + location.href = A
-        await sleep(DISCARD_COOLDOWN_MS);
         const navPromise2 = waitForEvent(
           win.webContents,
           "will-frame-navigate",
@@ -1281,7 +1427,6 @@ async function main() {
         assert.equal(win.webContents.mainFrame.frames.length, 0);
 
         for (const delayMs of [0, 150]) {
-          await sleep(DISCARD_COOLDOWN_MS);
           openedExternalUrls.length = 0;
 
           await win.webContents.mainFrame.executeJavaScript(`(() => {
@@ -1342,6 +1487,309 @@ async function main() {
       },
     );
 
+    // (s) Held activation processed after retirement (same-URL reload)
+    await runCheck(
+      "s",
+      "held activation IPC released into registered handler after same-URL reload opens nothing",
+      async () => {
+        assert.equal(win.webContents.mainFrame.frames.length, 0);
+        openedExternalUrls.length = 0;
+
+        await win.webContents.mainFrame.executeJavaScript(`(() => {
+          const link = document.getElementById("external-link");
+          window.__sClick = { ran: false, isTrusted: null };
+          window.__sListener = (event) => {
+            event.preventDefault();
+            window.__sClick = { ran: true, isTrusted: event.isTrusted === true };
+          };
+          link.addEventListener("click", window.__sListener, { once: true });
+        })()`);
+
+        const hold = armActivationHold(
+          (_event, args) => args[0] === EXTERNAL_LINK_URL,
+          "[s] held desktop:link-activated for link A",
+        );
+        let navPromise = null;
+        try {
+          await realClickElement(win, "external-link");
+          const sClick = await waitForCondition(
+            () => win.webContents.mainFrame.executeJavaScript("window.__sClick && window.__sClick.ran ? window.__sClick : null"),
+            "[s] external-link click handler to run",
+          );
+          assert.equal(sClick.ran, true, "[s]: click on external-link must run");
+          assert.equal(sClick.isTrusted, true, "[s]: click on external-link must be trusted");
+
+          const heldEntry = await hold.waitForHeld();
+          assert.equal(heldEntry.url, EXTERNAL_LINK_URL, "[s]: held message must carry link A URL");
+          assert.equal(
+            Number.isSafeInteger(heldEntry.activatedAt),
+            true,
+            `[s]: held message must carry integer click time, got ${String(heldEntry.activatedAt)}`,
+          );
+
+          await reloadAndWait(win);
+          assert.equal(win.webContents.getURL(), appUrl, "[s]: reload must stay on same appUrl");
+
+          const elapsedBeforeRelease = Date.now() - heldEntry.activatedAt;
+          assert.ok(
+            elapsedBeforeRelease < LINK_TICKET_WINDOW_MS,
+            `[s]: reload (${elapsedBeforeRelease}ms) must finish inside ${LINK_TICKET_WINDOW_MS}ms lifetime so refusal is by retirement`,
+          );
+
+          // Deliver the held message with its untouched IpcMainEvent into the registered production handler.
+          heldEntry.release();
+
+          navPromise = waitForEvent(
+            win.webContents,
+            "will-frame-navigate",
+            (details) => details.isMainFrame && details.url === EXTERNAL_LINK_URL,
+          );
+          await win.webContents.mainFrame.executeJavaScript(
+            `window.location.href = ${JSON.stringify(EXTERNAL_LINK_URL)}`,
+          );
+          const [navDetails] = await navPromise;
+          const elapsedAtNav = Date.now() - heldEntry.activatedAt;
+          assert.ok(
+            elapsedAtNav < LINK_TICKET_WINDOW_MS,
+            `[s]: post-release navigation (${elapsedAtNav}ms) must stay inside ${LINK_TICKET_WINDOW_MS}ms lifetime`,
+          );
+          await sleep(150);
+
+          assert.equal(navDetails.defaultPrevented, true, "[s]: navigation to A after retired held activation must be cancelled");
+          assert.equal(
+            openedExternalUrls.length,
+            0,
+            `[s]: expected 0 external opens after releasing held pre-reload activation, got ${JSON.stringify(openedExternalUrls)}`,
+          );
+          assert.equal(win.webContents.getURL(), appUrl);
+        } finally {
+          hold.disarm();
+          if (navPromise) navPromise.cancel();
+          await win.webContents.mainFrame.executeJavaScript(`(() => {
+            const link = document.getElementById("external-link");
+            if (link && window.__sListener) link.removeEventListener("click", window.__sListener);
+            window.__sListener = null;
+          })()`).catch(() => {});
+        }
+      },
+    );
+
+    // (t) Delayed activation after a refused attempt with an unrelated live ticket
+    await runCheck(
+      "t",
+      "delayed activation for B after refused attempt to B while A has live ticket opens nothing, and a fresh click still opens once",
+      async () => {
+        assert.equal(win.webContents.mainFrame.frames.length, 0);
+        openedExternalUrls.length = 0;
+
+        await win.webContents.mainFrame.executeJavaScript(`(() => {
+          const linkA = document.getElementById("external-link");
+          const linkB = document.getElementById("external-link-b");
+          window.__tClickA = { ran: false, isTrusted: null };
+          window.__tClickB = { ran: false, isTrusted: null };
+          window.__tListenerA = (event) => {
+            event.preventDefault();
+            window.__tClickA = { ran: true, isTrusted: event.isTrusted === true };
+          };
+          window.__tListenerB = (event) => {
+            event.preventDefault();
+            window.__tClickB = { ran: true, isTrusted: event.isTrusted === true };
+          };
+          linkA.addEventListener("click", window.__tListenerA, { once: true });
+          linkB.addEventListener("click", window.__tListenerB, { once: true });
+        })()`);
+
+        const deliveredAPromise = waitForActivationDelivered(
+          (record) => record.url === EXTERNAL_LINK_URL && record.held === false,
+          "[t] link A activation IPC delivery",
+        );
+        let holdB = null;
+        let navPromiseB1 = null;
+        let navPromiseB2 = null;
+        try {
+          // 1. Real click on link A -> issues live ticket for A
+          await realClickElement(win, "external-link");
+          const clickA = await waitForCondition(
+            () => win.webContents.mainFrame.executeJavaScript("window.__tClickA && window.__tClickA.ran ? window.__tClickA : null"),
+            "[t] link A click handler to run",
+          );
+          assert.equal(clickA.ran, true, "[t]: click on link A must run");
+          assert.equal(clickA.isTrusted, true, "[t]: click on link A must be trusted");
+          const deliveredA = await deliveredAPromise;
+          assert.equal(Number.isSafeInteger(deliveredA.activatedAt), true);
+
+          // 2. Hold the activation IPC for a real click on link B
+          holdB = armActivationHold(
+            (_event, args) => args[0] === EXTERNAL_LINK_B_URL,
+            "[t] held desktop:link-activated for link B",
+          );
+          await realClickElement(win, "external-link-b");
+          const clickB = await waitForCondition(
+            () => win.webContents.mainFrame.executeJavaScript("window.__tClickB && window.__tClickB.ran ? window.__tClickB : null"),
+            "[t] link B click handler to run",
+          );
+          assert.equal(clickB.ran, true, "[t]: click on link B must run");
+          assert.equal(clickB.isTrusted, true, "[t]: click on link B must be trusted");
+
+          const heldB = await holdB.waitForHeld();
+          assert.equal(heldB.url, EXTERNAL_LINK_B_URL, "[t]: held message must carry link B URL");
+          assert.equal(Number.isSafeInteger(heldB.activatedAt), true);
+
+          // 3. Script attempts B while A's ticket is still live -> refused, burns A's ticket, records refusal
+          navPromiseB1 = waitForEvent(
+            win.webContents,
+            "will-frame-navigate",
+            (details) => details.isMainFrame && details.url === EXTERNAL_LINK_B_URL,
+          );
+          await win.webContents.mainFrame.executeJavaScript(
+            `window.location.href = ${JSON.stringify(EXTERNAL_LINK_B_URL)}`,
+          );
+          const [navDetailsB1] = await navPromiseB1;
+          assert.ok(
+            Date.now() - deliveredA.activatedAt < LINK_TICKET_WINDOW_MS,
+            "[t]: first script attempt to B must occur while link A's ticket is still live",
+          );
+          assert.equal(navDetailsB1.defaultPrevented, true, "[t]: first script attempt to B must be cancelled");
+          assert.equal(openedExternalUrls.length, 0, "[t]: first script attempt to B must open nothing");
+
+          // 4. Release B's held activation into the registered production handler inside 1s lifetime
+          assert.ok(
+            Date.now() - heldB.activatedAt < LINK_TICKET_WINDOW_MS,
+            "[t]: release of B's activation must stay inside 1s ticket lifetime",
+          );
+          heldB.release();
+
+          // 5. Script attempts B again inside 1s of B's click -> still refused, nothing opens
+          navPromiseB2 = waitForEvent(
+            win.webContents,
+            "will-frame-navigate",
+            (details) => details.isMainFrame && details.url === EXTERNAL_LINK_B_URL,
+          );
+          await win.webContents.mainFrame.executeJavaScript(
+            `window.location.href = ${JSON.stringify(EXTERNAL_LINK_B_URL)}`,
+          );
+          const [navDetailsB2] = await navPromiseB2;
+          const elapsedFromB = Date.now() - heldB.activatedAt;
+          assert.ok(
+            elapsedFromB < LINK_TICKET_WINDOW_MS,
+            `[t]: second script attempt to B (${elapsedFromB}ms) must stay inside ${LINK_TICKET_WINDOW_MS}ms lifetime`,
+          );
+          await sleep(150);
+
+          assert.equal(navDetailsB2.defaultPrevented, true, "[t]: second script attempt to B after released activation must be cancelled");
+          assert.equal(
+            openedExternalUrls.length,
+            0,
+            `[t]: delayed activation for B after refusal must open nothing, got ${JSON.stringify(openedExternalUrls)}`,
+          );
+          assert.equal(win.webContents.getURL(), appUrl);
+
+          // 6. Positive control: a genuinely fresh click on link B after the refusal opens once
+          await realClickElement(win, "external-link-b");
+          await waitForCondition(
+            () => openedExternalUrls.length > 0,
+            "[t] fresh click on link B after refusal to open once",
+          );
+          await sleep(100);
+          assert.deepEqual(
+            openedExternalUrls,
+            [EXTERNAL_LINK_B_URL],
+            `[t]: fresh click on link B after refusal must open once, got ${JSON.stringify(openedExternalUrls)}`,
+          );
+          assert.equal(win.webContents.getURL(), appUrl);
+        } finally {
+          deliveredAPromise.cancel();
+          if (holdB) holdB.disarm();
+          if (navPromiseB1) navPromiseB1.cancel();
+          if (navPromiseB2) navPromiseB2.cancel();
+          await win.webContents.mainFrame.executeJavaScript(`(() => {
+            const linkA = document.getElementById("external-link");
+            const linkB = document.getElementById("external-link-b");
+            if (linkA && window.__tListenerA) linkA.removeEventListener("click", window.__tListenerA);
+            if (linkB && window.__tListenerB) linkB.removeEventListener("click", window.__tListenerB);
+            window.__tListenerA = null;
+            window.__tListenerB = null;
+          })()`).catch(() => {});
+        }
+      },
+    );
+
+    // (u) Stale activation held past ticket lifetime opens nothing
+    await runCheck(
+      "u",
+      "activation IPC held longer than ticket lifetime and released into registered handler opens nothing",
+      async () => {
+        assert.equal(win.webContents.mainFrame.frames.length, 0);
+        openedExternalUrls.length = 0;
+
+        await win.webContents.mainFrame.executeJavaScript(`(() => {
+          const link = document.getElementById("external-link");
+          window.__uClick = { ran: false, isTrusted: null };
+          window.__uListener = (event) => {
+            event.preventDefault();
+            window.__uClick = { ran: true, isTrusted: event.isTrusted === true };
+          };
+          link.addEventListener("click", window.__uListener, { once: true });
+        })()`);
+
+        const hold = armActivationHold(
+          (_event, args) => args[0] === EXTERNAL_LINK_URL,
+          "[u] held desktop:link-activated for link A",
+        );
+        let navPromise = null;
+        try {
+          await realClickElement(win, "external-link");
+          const uClick = await waitForCondition(
+            () => win.webContents.mainFrame.executeJavaScript("window.__uClick && window.__uClick.ran ? window.__uClick : null"),
+            "[u] external-link click handler to run",
+          );
+          assert.equal(uClick.ran, true, "[u]: click on external-link must run");
+          assert.equal(uClick.isTrusted, true, "[u]: click on external-link must be trusted");
+
+          const heldEntry = await hold.waitForHeld();
+          assert.equal(heldEntry.url, EXTERNAL_LINK_URL, "[u]: held message must carry link A URL");
+          assert.equal(Number.isSafeInteger(heldEntry.activatedAt), true);
+
+          await sleep(LINK_TICKET_WINDOW_MS + 100);
+          const ageAtRelease = Date.now() - heldEntry.activatedAt;
+          assert.ok(
+            ageAtRelease >= LINK_TICKET_WINDOW_MS,
+            `[u]: held activation age (${ageAtRelease}ms) must exceed ${LINK_TICKET_WINDOW_MS}ms lifetime before release`,
+          );
+
+          // Deliver the stale message into the registered production handler.
+          heldEntry.release();
+
+          navPromise = waitForEvent(
+            win.webContents,
+            "will-frame-navigate",
+            (details) => details.isMainFrame && details.url === EXTERNAL_LINK_URL,
+          );
+          await win.webContents.mainFrame.executeJavaScript(
+            `window.location.href = ${JSON.stringify(EXTERNAL_LINK_URL)}`,
+          );
+          const [navDetails] = await navPromise;
+          await sleep(150);
+
+          assert.equal(navDetails.defaultPrevented, true, "[u]: navigation after stale activation release must be cancelled");
+          assert.equal(
+            openedExternalUrls.length,
+            0,
+            `[u]: stale activation must open nothing, got ${JSON.stringify(openedExternalUrls)}`,
+          );
+          assert.equal(win.webContents.getURL(), appUrl);
+        } finally {
+          hold.disarm();
+          if (navPromise) navPromise.cancel();
+          await win.webContents.mainFrame.executeJavaScript(`(() => {
+            const link = document.getElementById("external-link");
+            if (link && window.__uListener) link.removeEventListener("click", window.__uListener);
+            window.__uListener = null;
+          })()`).catch(() => {});
+        }
+      },
+    );
+
     // -------------------------------------------------------------------------
     // Phase 2: Same-origin subframe check (r)
     // -------------------------------------------------------------------------
@@ -1357,7 +1805,6 @@ async function main() {
           );
 
           // Part 1: real click on external target="_blank" link inside same-origin iframe
-          await sleep(DISCARD_COOLDOWN_MS);
           openedExternalUrls.length = 0;
           await sameOriginFrame.executeJavaScript(`(() => {
             const link = document.getElementById("so-ext-blank");
@@ -1398,7 +1845,6 @@ async function main() {
           }
 
           // Part 2: real click on target="_top" external link inside same-origin iframe
-          await sleep(DISCARD_COOLDOWN_MS);
           openedExternalUrls.length = 0;
           await sameOriginFrame.executeJavaScript(`(() => {
             const link = document.getElementById("so-ext-top");
@@ -1553,7 +1999,6 @@ async function main() {
       "g",
       "subframe window.open(..., noreferrer) immediately after real main-frame click opens nothing",
       async () => {
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
         const foreignFrame = win.webContents.mainFrame.frames.find(
           (f) => !f.isDestroyed() && f.origin === foreign.origin,
@@ -1617,7 +2062,6 @@ async function main() {
           "foreign links subframe",
         );
 
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
 
         // Real click on target="_top" external link inside foreign subframe
@@ -1655,7 +2099,6 @@ async function main() {
         }
 
         // Real click on target="_blank" external link inside foreign subframe
-        await sleep(DISCARD_COOLDOWN_MS);
         openedExternalUrls.length = 0;
         await foreignFrame.executeJavaScript(`(() => {
           const link = document.getElementById("foreign-ext-blank");
@@ -1698,6 +2141,12 @@ async function main() {
     clearTimeout(globalTimeout);
     try {
       shell.openExternal = originalOpenExternal;
+    } catch {
+      // Ignore restore failure during shutdown.
+    }
+    try {
+      ipcMain.on = originalIpcMainOn;
+      ipcMain.off = originalIpcMainOff;
     } catch {
       // Ignore restore failure during shutdown.
     }

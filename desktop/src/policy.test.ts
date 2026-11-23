@@ -19,6 +19,7 @@ import {
   isSameDocumentIdentity,
   isTicketValidForDestination,
   LINK_TICKET_WINDOW_MS,
+  MAX_ACTIVATION_FUTURE_SKEW_MS,
   MAX_EXTERNAL_URL_LENGTH,
   normalizeTicketUrl,
   OVERRIDE_ENV_VAR,
@@ -26,6 +27,7 @@ import {
   resolveAppUrl,
   retireLinkTicketOnDocumentChange,
   SIGN_IN_HOSTS,
+  validateActivationTimestamp,
   type DocumentIdentity,
   type LinkActivationTicket,
 } from "./policy.js";
@@ -55,7 +57,7 @@ function makeTicket(
   return {
     url: normalized,
     document: DOC_1,
-    issuedAt: NOW - 50,
+    activatedAt: NOW - 50,
     ...overrides,
   };
 }
@@ -410,6 +412,7 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
   for (const source of ["navigate", "new_window"] as const) {
     let state = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl: "https://EXAMPLE.COM:443/docs",
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
       senderDocument: DOC_1,
@@ -417,6 +420,7 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
     });
     assert.ok(state.ticket, "expected ticket to be issued");
     assert.equal(state.ticket.url, targetA);
+    assert.equal(state.ticket.activatedAt, NOW);
 
     const opts = {
       source,
@@ -453,6 +457,7 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
   // 4. First mismatched navigation burns the ticket so a subsequent attempt to the original URL is also refused
   let mismatchState = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
     rawUrl: targetA,
+    rawActivatedAt: NOW,
     senderMatchesWindow: true,
     senderIsMainFrame: true,
     senderDocument: DOC_1,
@@ -481,8 +486,8 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
     "blocked",
   );
 
-  // 5. Stale ticket (>= 1000ms) or future-dated ticket is refused
-  const freshTicket = makeTicket(targetA, { issuedAt: NOW });
+  // 5. Stale ticket (>= 1000ms from click time) or future-dated ticket beyond tolerance is refused
+  const freshTicket = makeTicket(targetA, { activatedAt: NOW });
   assert.equal(
     classifyNavigation(targetA, {
       ...APP_NAV_NO_TICKET,
@@ -508,7 +513,11 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
     "blocked",
   );
   assert.equal(
-    isTicketValidForDestination(freshTicket, targetA, DOC_1, NOW - 1),
+    isTicketValidForDestination(freshTicket, targetA, DOC_1, NOW - MAX_ACTIVATION_FUTURE_SKEW_MS),
+    true,
+  );
+  assert.equal(
+    isTicketValidForDestination(freshTicket, targetA, DOC_1, NOW - MAX_ACTIVATION_FUTURE_SKEW_MS - 1),
     false,
   );
 
@@ -543,15 +552,41 @@ test("link-activation tickets bind external opens to exact normalized URL, fresh
     );
   }
 
-  // Document-change retirement clears any unspent ticket
-  const retired = retireLinkTicketOnDocumentChange({
-    ticket: freshTicket,
-    discardActivationsUntil: null,
-  });
+  // Document-change retirement clears any unspent ticket and fences pre-retirement activations
+  const retired = retireLinkTicketOnDocumentChange(
+    {
+      ticket: freshTicket,
+      lastRefusal: null,
+      retiredAt: null,
+    },
+    NOW + 25,
+  );
   assert.equal(retired.ticket, null);
+  assert.equal(retired.retiredAt, NOW + 25);
+  assert.equal(
+    recordLinkActivation(retired, {
+      rawUrl: targetA,
+      rawActivatedAt: NOW + 25,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1_RELOADED,
+      now: NOW + 30,
+    }).ticket,
+    null,
+  );
+  assert.ok(
+    recordLinkActivation(retired, {
+      rawUrl: targetA,
+      rawActivatedAt: NOW + 26,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1_RELOADED,
+      now: NOW + 30,
+    }).ticket,
+  );
 });
 
-test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, and untrusted senders", () => {
+test("recordLinkActivation rejects invalid URLs, invalid/future/stale timestamps, credentials, oversized URLs, and untrusted senders", () => {
   const invalidUrls: unknown[] = [
     "http://example.com/docs",
     "javascript:alert(1)",
@@ -574,6 +609,7 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
     assert.equal(normalizeTicketUrl(rawUrl), null, `expected normalizeTicketUrl to reject ${String(rawUrl)}`);
     const next = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl,
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
       senderDocument: DOC_1,
@@ -582,11 +618,54 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
     assert.equal(next.ticket, null, `expected no ticket for ${String(rawUrl)}`);
   }
 
-  // Untrusted senders never issue a ticket
+  // Invalid, future, and stale activation timestamps are rejected
   const validUrl = "https://example.com/valid";
+  const invalidTimestamps: unknown[] = [
+    null,
+    undefined,
+    "10000",
+    NaN,
+    Infinity,
+    -Infinity,
+    -1,
+    NOW + 0.5,
+    Number.MAX_SAFE_INTEGER + 1,
+    NOW + MAX_ACTIVATION_FUTURE_SKEW_MS + 1,
+    NOW + 5000,
+    NOW - LINK_TICKET_WINDOW_MS,
+    NOW - LINK_TICKET_WINDOW_MS - 500,
+  ];
+  for (const rawActivatedAt of invalidTimestamps) {
+    assert.equal(
+      validateActivationTimestamp(rawActivatedAt, NOW),
+      null,
+      `expected validateActivationTimestamp to reject ${String(rawActivatedAt)}`,
+    );
+    assert.equal(
+      recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+        rawUrl: validUrl,
+        rawActivatedAt,
+        senderMatchesWindow: true,
+        senderIsMainFrame: true,
+        senderDocument: DOC_1,
+        now: NOW,
+      }).ticket,
+      null,
+      `expected no ticket for timestamp ${String(rawActivatedAt)}`,
+    );
+  }
+
+  // Within future tolerance is accepted
+  assert.equal(
+    validateActivationTimestamp(NOW + MAX_ACTIVATION_FUTURE_SKEW_MS, NOW),
+    NOW + MAX_ACTIVATION_FUTURE_SKEW_MS,
+  );
+
+  // Untrusted senders never issue a ticket
   assert.equal(
     recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl: validUrl,
+      rawActivatedAt: NOW,
       senderMatchesWindow: false,
       senderIsMainFrame: true,
       senderDocument: DOC_1,
@@ -597,6 +676,7 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
   assert.equal(
     recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl: validUrl,
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: false,
       senderDocument: DOC_1,
@@ -607,6 +687,7 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
   assert.equal(
     recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl: validUrl,
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
       senderDocument: { ...DOC_1, origin: "https://foreign.example" },
@@ -617,6 +698,7 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
   assert.equal(
     recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
       rawUrl: validUrl,
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
       senderDocument: null,
@@ -625,9 +707,10 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
     null,
   );
 
-  // activation-without-link clears ticket for app main frame and ignores untrusted callers
+  // activation-without-link validates click time, respects fences, clears for app main frame, and never arms
   const armed = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
     rawUrl: validUrl,
+    rawActivatedAt: NOW,
     senderMatchesWindow: true,
     senderIsMainFrame: true,
     senderDocument: DOC_1,
@@ -636,102 +719,306 @@ test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, an
   assert.ok(armed.ticket);
 
   assert.equal(
+    clearLinkTicketOnActivationWithoutLink(INITIAL_LINK_TICKET_STATE, {
+      rawActivatedAt: NOW,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW,
+    }).ticket,
+    null,
+  );
+  assert.equal(
     clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW,
       senderMatchesWindow: false,
       senderIsMainFrame: true,
-      senderOrigin: APP_ORIGIN,
+      senderDocument: DOC_1,
+      now: NOW,
     }).ticket,
     armed.ticket,
   );
   assert.equal(
     clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: false,
-      senderOrigin: APP_ORIGIN,
+      senderDocument: DOC_1,
+      now: NOW,
     }).ticket,
     armed.ticket,
   );
   assert.equal(
     clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
-      senderOrigin: "https://foreign.example",
+      senderDocument: { ...DOC_1, origin: "https://foreign.example" },
+      now: NOW,
+    }).ticket,
+    armed.ticket,
+  );
+  // Stale, future, or older-than-ticket non-link activation is ignored
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW - LINK_TICKET_WINDOW_MS,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW,
     }).ticket,
     armed.ticket,
   );
   assert.equal(
     clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW + MAX_ACTIVATION_FUTURE_SKEW_MS + 1,
       senderMatchesWindow: true,
       senderIsMainFrame: true,
-      senderOrigin: APP_ORIGIN,
+      senderDocument: DOC_1,
+      now: NOW,
+    }).ticket,
+    armed.ticket,
+  );
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW - 1,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW + 5,
+    }).ticket,
+    armed.ticket,
+  );
+  // Valid fresh non-link activation clears ticket
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      rawActivatedAt: NOW + 5,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW + 10,
     }).ticket,
     null,
   );
 });
 
-test("out-of-order external attempt without a ticket suppresses late activation IPCs for the rest of the window", () => {
-  const targetA = "https://example.com/out-of-order";
+test("click-time ticket lifetime and refusal fencing reject stale, future, and pre-refusal activations regardless of ticket state", () => {
+  const targetA = "https://example.com/link-a";
+  const targetB = "https://example.com/link-b";
 
-  // External navigation reaches main before IPC arrives -> blocked and activates discard window
-  const disposition = classifyNavigation(targetA, APP_NAV_NO_TICKET);
-  assert.equal(disposition, "blocked");
-
-  let state = consumeTicketAfterAttempt(INITIAL_LINK_TICKET_STATE, {
-    disposition,
+  // 1. Expiry is click time plus lifetime regardless of arrival time
+  const delayedClickAt = NOW;
+  const arrivedAt = NOW + 400;
+  const delayedState = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
     rawUrl: targetA,
-    source: "navigate",
-    currentDocument: DOC_1,
-    now: NOW,
-  });
-  assert.equal(state.ticket, null);
-  assert.equal(state.discardActivationsUntil, NOW + LINK_TICKET_WINDOW_MS);
-
-  // Late IPC arrives 10ms later -> discarded, does NOT arm a future open
-  state = recordLinkActivation(state, {
-    rawUrl: targetA,
+    rawActivatedAt: delayedClickAt,
     senderMatchesWindow: true,
     senderIsMainFrame: true,
     senderDocument: DOC_1,
-    now: NOW + 10,
+    now: arrivedAt,
   });
-  assert.equal(state.ticket, null);
+  assert.ok(delayedState.ticket, "delayed click still inside 1000ms lifetime should issue ticket");
+  assert.equal(delayedState.ticket.activatedAt, delayedClickAt);
   assert.equal(
     classifyNavigation(targetA, {
       ...APP_NAV_NO_TICKET,
-      linkTicket: state.ticket,
-      now: NOW + 20,
+      linkTicket: delayedState.ticket,
+      now: delayedClickAt + LINK_TICKET_WINDOW_MS - 1,
+    }),
+    "external",
+    "ticket must remain valid 1ms before clickTime + LINK_TICKET_WINDOW_MS",
+  );
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: delayedState.ticket,
+      now: delayedClickAt + LINK_TICKET_WINDOW_MS,
     }),
     "blocked",
+    "ticket must expire at clickTime + LINK_TICKET_WINDOW_MS, not arrivalTime + LINK_TICKET_WINDOW_MS",
   );
 
-  // Still discarded at NOW + 999ms
-  state = recordLinkActivation(state, {
+  // 2. An activation delayed past the lifetime issues nothing (even with no prior refusal)
+  const staleState = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
     rawUrl: targetA,
-    senderMatchesWindow: true,
-    senderIsMainFrame: true,
-    senderDocument: DOC_1,
-    now: NOW + LINK_TICKET_WINDOW_MS - 1,
-  });
-  assert.equal(state.ticket, null);
-
-  // Once the discard window ends, a fresh activation issues a valid ticket again
-  state = recordLinkActivation(state, {
-    rawUrl: targetA,
+    rawActivatedAt: NOW,
     senderMatchesWindow: true,
     senderIsMainFrame: true,
     senderDocument: DOC_1,
     now: NOW + LINK_TICKET_WINDOW_MS,
   });
-  assert.ok(state.ticket);
-  assert.equal(state.ticket.url, targetA);
+  assert.equal(staleState.ticket, null, "activation delayed to/past lifetime must issue no ticket");
   assert.equal(
-    classifyNavigation(targetA, {
-      ...APP_NAV_NO_TICKET,
-      linkTicket: state.ticket,
-      now: NOW + LINK_TICKET_WINDOW_MS + 10,
-    }),
-    "external",
+    recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: targetA,
+      rawActivatedAt: NOW,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW + LINK_TICKET_WINDOW_MS + 500,
+    }).ticket,
+    null,
+    "activation delayed well past lifetime must issue no ticket",
   );
+
+  // 3. Delayed activation inside lifetime after a refused attempt that saw NO ticket issues nothing (navigate and new_window)
+  for (const source of ["navigate", "new_window"] as const) {
+    const baseOpts = source === "new_window" ? APP_NEW_WINDOW_NO_TICKET : APP_NAV_NO_TICKET;
+    const clickAt = NOW;
+    const refusedAt = NOW + 50;
+
+    const refusedDisposition = classifyNavigation(targetA, {
+      ...baseOpts,
+      linkTicket: null,
+      now: refusedAt,
+    });
+    assert.equal(refusedDisposition, "blocked");
+
+    let state = consumeTicketAfterAttempt(INITIAL_LINK_TICKET_STATE, {
+      disposition: refusedDisposition,
+      rawUrl: targetA,
+      source,
+      currentDocument: DOC_1,
+      now: refusedAt,
+    });
+    assert.equal(state.ticket, null);
+    assert.equal(state.lastRefusal?.refusedAt, refusedAt);
+
+    // Late activation clicked BEFORE refusal (arrives inside 1s lifetime) issues nothing
+    state = recordLinkActivation(state, {
+      rawUrl: targetA,
+      rawActivatedAt: clickAt,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: refusedAt + 20,
+    });
+    assert.equal(state.ticket, null, `${source}: pre-refusal activation (no prior ticket) must issue nothing`);
+
+    // Activation at exact refusal millisecond (not strictly AFTER) also issues nothing
+    state = recordLinkActivation(state, {
+      rawUrl: targetA,
+      rawActivatedAt: refusedAt,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: refusedAt + 25,
+    });
+    assert.equal(state.ticket, null, `${source}: activation equal to refusal time must issue nothing`);
+
+    // A genuinely fresh click AFTER the refusal opens once and is consumed
+    const freshClickAt = refusedAt + 1;
+    state = recordLinkActivation(state, {
+      rawUrl: targetA,
+      rawActivatedAt: freshClickAt,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: freshClickAt + 5,
+    });
+    assert.ok(state.ticket, `${source}: fresh click after refusal must issue a ticket`);
+    const freshDisposition = classifyNavigation(targetA, {
+      ...baseOpts,
+      linkTicket: state.ticket,
+      now: freshClickAt + 10,
+    });
+    assert.equal(freshDisposition, "external", `${source}: fresh click after refusal must open once`);
+    state = consumeTicketAfterAttempt(state, {
+      disposition: freshDisposition,
+      rawUrl: targetA,
+      source,
+      currentDocument: DOC_1,
+      now: freshClickAt + 10,
+    });
+    assert.equal(state.ticket, null);
+    assert.equal(
+      classifyNavigation(targetA, {
+        ...baseOpts,
+        linkTicket: state.ticket,
+        now: freshClickAt + 15,
+      }),
+      "blocked",
+      `${source}: second attempt after fresh click is consumed must be blocked`,
+    );
+  }
+
+  // 4. Delayed activation inside lifetime after a refused attempt that saw a LIVE TICKET for a DIFFERENT URL issues nothing
+  for (const source of ["navigate", "new_window"] as const) {
+    const baseOpts = source === "new_window" ? APP_NEW_WINDOW_NO_TICKET : APP_NAV_NO_TICKET;
+
+    // Live ticket for A
+    let state = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: targetA,
+      rawActivatedAt: NOW,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW + 5,
+    });
+    assert.equal(state.ticket?.url, targetA);
+
+    // Click B occurs at NOW + 20, message is delayed in flight
+    const clickBAt = NOW + 20;
+    const refusedAt = NOW + 40;
+
+    // Attempt B while A's ticket is live -> refused and burns A's ticket AND records refusal
+    const refusedDisposition = classifyNavigation(targetB, {
+      ...baseOpts,
+      linkTicket: state.ticket,
+      now: refusedAt,
+    });
+    assert.equal(refusedDisposition, "blocked");
+    state = consumeTicketAfterAttempt(state, {
+      disposition: refusedDisposition,
+      rawUrl: targetB,
+      source,
+      currentDocument: DOC_1,
+      now: refusedAt,
+    });
+    assert.equal(state.ticket, null, `${source}: refused attempt for B must burn live ticket for A`);
+    assert.equal(state.lastRefusal?.refusedAt, refusedAt);
+
+    // Delayed activation for B arrives inside 1s lifetime -> refused because clickBAt <= refusedAt
+    state = recordLinkActivation(state, {
+      rawUrl: targetB,
+      rawActivatedAt: clickBAt,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: refusedAt + 30,
+    });
+    assert.equal(state.ticket, null, `${source}: delayed activation for B after refusal with live ticket A must issue nothing`);
+
+    // Attempt B again inside 1s -> blocked
+    assert.equal(
+      classifyNavigation(targetB, {
+        ...baseOpts,
+        linkTicket: state.ticket,
+        now: refusedAt + 40,
+      }),
+      "blocked",
+    );
+
+    // Fresh click on B AFTER the refusal still opens once
+    const freshBAt = refusedAt + 50;
+    state = recordLinkActivation(state, {
+      rawUrl: targetB,
+      rawActivatedAt: freshBAt,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: freshBAt + 5,
+    });
+    assert.ok(state.ticket, `${source}: fresh click on B after refusal must issue a ticket`);
+    assert.equal(
+      classifyNavigation(targetB, {
+        ...baseOpts,
+        linkTicket: state.ticket,
+        now: freshBAt + 10,
+      }),
+      "external",
+    );
+  }
 });
 
 test("classifyNavigation blocks new_window when mainFrameHasSubframes is true or omitted, and allows without subframes", () => {
