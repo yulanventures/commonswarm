@@ -11,6 +11,8 @@ import {
 import {
   attachWindowHandlers,
   configurePermissions,
+  getPreloadAdditionalArguments,
+  getPreloadPath,
   openExternalSafely,
 } from "./handlers.js";
 import {
@@ -196,6 +198,8 @@ function createMainWindow(appUrl: string, policyOptions: AppOriginOptions): Brow
     backgroundColor: "#111317",
     show: false,
     webPreferences: {
+      preload: getPreloadPath(),
+      additionalArguments: getPreloadAdditionalArguments(policyOptions),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

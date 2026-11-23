@@ -1,29 +1,75 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  clipboard,
+  ipcMain,
+  Menu,
   session,
   shell,
   type BrowserWindow,
+  type IpcMainEvent,
+  type MenuItemConstructorOptions,
   type Session,
   type WebContents,
   type WebFrameMain,
 } from "electron";
 import {
+  buildContextMenuDescriptor,
+  canExecuteContextMenuLinkAction,
   classifyNavigation,
+  clearLinkTicketOnActivationWithoutLink,
+  consumeTicketAfterAttempt,
+  DEV_ORIGIN_ARG_PREFIX,
+  getAllowedDevOrigin,
+  INITIAL_LINK_TICKET_STATE,
+  IPC_ACTIVATION_WITHOUT_LINK,
+  IPC_LINK_ACTIVATED,
   isAllowedExternalUrl,
   isAllowedSignInUrl,
   isAppOriginUrl,
   isPermissionAllowed,
+  isSameDocumentIdentity,
+  recordLinkActivation,
+  retireLinkTicketOnDocumentChange,
   type AppOriginOptions,
+  type DocumentIdentity,
+  type LinkTicketState,
 } from "./policy.js";
 
-const USER_GESTURE_WINDOW_MS = 1000;
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const PRELOAD_PATH = path.join(currentDir, "preload.cjs");
 
 interface PendingMainNavigation {
   trusted: boolean;
   fromUrl: string;
 }
 
+export type ContextMenuPresenter = (
+  template: MenuItemConstructorOptions[],
+  win: BrowserWindow,
+) => void;
+
 export interface AttachWindowHandlersOptions {
   readonly offlinePageUrl?: string | null;
+  readonly presentContextMenu?: ContextMenuPresenter;
+}
+
+/**
+ * Absolute path to the compiled sandboxed preload script, resolved from the app's own files.
+ */
+export function getPreloadPath(): string {
+  return PRELOAD_PATH;
+}
+
+/**
+ * Additional renderer arguments to scope the preload to the active unpackaged dev origin (if any).
+ * Always empty in packaged builds.
+ */
+export function getPreloadAdditionalArguments(policyOptions: AppOriginOptions): string[] {
+  if (!policyOptions.allowedDevOrigin) return [];
+  const devOrigin = getAllowedDevOrigin(policyOptions.allowedDevOrigin, false);
+  if (!devOrigin) return [];
+  return [`${DEV_ORIGIN_ARG_PREFIX}${devOrigin}`];
 }
 
 export function openExternalSafely(rawUrl: string): void {
@@ -56,14 +102,32 @@ export function configurePermissions(
   });
 }
 
+function isLiveFrame(frame: WebFrameMain | null | undefined): frame is WebFrameMain {
+  return frame != null && !frame.isDestroyed() && !frame.detached;
+}
+
 function isOwnMainFrame(
   frame: WebFrameMain | null | undefined,
   webContents: WebContents,
 ): boolean {
-  if (!frame || frame.isDestroyed()) return false;
+  if (webContents.isDestroyed() || !isLiveFrame(frame)) return false;
   const mainFrame = webContents.mainFrame;
-  if (!mainFrame || mainFrame.isDestroyed()) return false;
+  if (!isLiveFrame(mainFrame)) return false;
   return frame.parent === null && frame.frameTreeNodeId === mainFrame.frameTreeNodeId;
+}
+
+function captureDocumentIdentity(
+  frame: WebFrameMain,
+  documentGeneration: number,
+): DocumentIdentity {
+  return {
+    frameTreeNodeId: frame.frameTreeNodeId,
+    processId: frame.processId,
+    routingId: frame.routingId,
+    frameToken: frame.frameToken,
+    origin: frame.origin,
+    documentGeneration,
+  };
 }
 
 function isOfflinePageUrl(rawUrl: string | null | undefined, offlinePageUrl: string | null | undefined): boolean {
@@ -93,42 +157,133 @@ export function attachWindowHandlers(
 ): void {
   const { webContents } = win;
 
-  let lastGestureAt: number | null = null;
+  const presentContextMenu: ContextMenuPresenter =
+    options.presentContextMenu ??
+    ((template, targetWin) => {
+      Menu.buildFromTemplate(template).popup({ window: targetWin });
+    });
+
+  let documentGeneration = 0;
+  let ticketState: LinkTicketState = INITIAL_LINK_TICKET_STATE;
   let pendingMainNav: PendingMainNavigation | null = null;
 
-  const markUserGesture = (): void => {
-    lastGestureAt = Date.now();
+  const getCurrentMainDocumentIdentity = (): DocumentIdentity | null => {
+    if (webContents.isDestroyed()) return null;
+    const mainFrame = webContents.mainFrame;
+    if (!isLiveFrame(mainFrame)) return null;
+    return captureDocumentIdentity(mainFrame, documentGeneration);
   };
 
-  const hasRecentUserGesture = (): boolean => {
-    return lastGestureAt !== null && Date.now() - lastGestureAt <= USER_GESTURE_WINDOW_MS;
+  const onLinkActivated = (event: IpcMainEvent, rawUrl: unknown): void => {
+    if (webContents.isDestroyed() || event.sender !== webContents) return;
+    const senderFrame = event.senderFrame;
+    if (!isOwnMainFrame(senderFrame, webContents) || !isLiveFrame(senderFrame)) return;
+
+    const senderDocument = captureDocumentIdentity(senderFrame, documentGeneration);
+    if (!isSameDocumentIdentity(senderDocument, getCurrentMainDocumentIdentity())) return;
+
+    ticketState = recordLinkActivation(ticketState, {
+      ...policyOptions,
+      rawUrl,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument,
+      now: Date.now(),
+    });
   };
 
-  const consumeUserGesture = (): void => {
-    lastGestureAt = null;
+  const onActivationWithoutLink = (event: IpcMainEvent): void => {
+    if (webContents.isDestroyed() || event.sender !== webContents) return;
+    const senderFrame = event.senderFrame;
+    if (!isOwnMainFrame(senderFrame, webContents) || !isLiveFrame(senderFrame)) return;
+
+    ticketState = clearLinkTicketOnActivationWithoutLink(ticketState, {
+      ...policyOptions,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderOrigin: senderFrame.origin,
+    });
   };
 
-  webContents.on("input-event", (_event, inputEvent) => {
-    if (
-      inputEvent.type === "mouseUp" ||
-      inputEvent.type === "gestureTap" ||
-      inputEvent.type === "touchEnd" ||
-      inputEvent.type === "pointerUp"
-    ) {
-      const button = "button" in inputEvent ? (inputEvent as { button?: string }).button : undefined;
-      if (button === "right") return;
-      markUserGesture();
-    }
-  });
+  ipcMain.on(IPC_LINK_ACTIVATED, onLinkActivated);
+  ipcMain.on(IPC_ACTIVATION_WITHOUT_LINK, onActivationWithoutLink);
 
-  webContents.on("before-input-event", (_event, input) => {
-    if (
-      input.type === "keyDown" &&
-      !input.isAutoRepeat &&
-      (input.key === "Enter" || input.key === " ")
-    ) {
-      markUserGesture();
-    }
+  let cleanedUp = false;
+  const cleanupIpc = (): void => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    ipcMain.off(IPC_LINK_ACTIVATED, onLinkActivated);
+    ipcMain.off(IPC_ACTIVATION_WITHOUT_LINK, onActivationWithoutLink);
+  };
+  win.once("closed", cleanupIpc);
+  webContents.once("destroyed", cleanupIpc);
+
+  webContents.on("context-menu", (_event, params) => {
+    const frame = params.frame;
+    const frameIsAppMainFrame = isOwnMainFrame(frame, webContents) && isLiveFrame(frame);
+    const capturedDocument = frameIsAppMainFrame
+      ? captureDocumentIdentity(frame, documentGeneration)
+      : null;
+
+    const descriptor = buildContextMenuDescriptor({
+      ...policyOptions,
+      frameIsAppMainFrame,
+      frameOrigin: capturedDocument?.origin ?? null,
+      linkUrl: params.linkURL,
+      isEditable: params.isEditable,
+      hasSelection: params.selectionText.trim().length > 0,
+      editFlags: params.editFlags,
+    });
+
+    if (descriptor.length === 0) return;
+
+    const template: MenuItemConstructorOptions[] = descriptor.map((item) => {
+      if (item.type === "separator") {
+        return { type: "separator" };
+      }
+      if (item.id === "open-link" && item.linkUrl) {
+        const targetLinkUrl = item.linkUrl;
+        return {
+          label: item.label,
+          click: () => {
+            if (
+              canExecuteContextMenuLinkAction({
+                ...policyOptions,
+                capturedDocument,
+                currentDocument: getCurrentMainDocumentIdentity(),
+                linkUrl: targetLinkUrl,
+              })
+            ) {
+              openExternalSafely(targetLinkUrl);
+            }
+          },
+        };
+      }
+      if (item.id === "copy-link" && item.linkUrl) {
+        const targetLinkUrl = item.linkUrl;
+        return {
+          label: item.label,
+          click: () => {
+            if (
+              canExecuteContextMenuLinkAction({
+                ...policyOptions,
+                capturedDocument,
+                currentDocument: getCurrentMainDocumentIdentity(),
+                linkUrl: targetLinkUrl,
+              })
+            ) {
+              void clipboard.writeText(targetLinkUrl).catch(() => {});
+            }
+          },
+        };
+      }
+      return {
+        role: item.role,
+        enabled: item.enabled,
+      };
+    });
+
+    presentContextMenu(template, win);
   });
 
   webContents.on("will-attach-webview", (event) => {
@@ -141,10 +296,12 @@ export function attachWindowHandlers(
       (details.frame === null || isOwnMainFrame(details.frame, webContents));
 
     const initiator = details.initiator;
-    const initiatorAlive = initiator != null && !initiator.isDestroyed();
+    const initiatorAlive = isLiveFrame(initiator);
     const initiatorIsMainFrame = initiatorAlive && isOwnMainFrame(initiator, webContents);
     const initiatorOrigin = initiatorAlive ? initiator.origin : null;
     const initiatorUrl = initiatorAlive ? initiator.url : null;
+    const currentDocument = getCurrentMainDocumentIdentity();
+    const now = Date.now();
 
     const disposition = classifyNavigation(details.url, {
       ...policyOptions,
@@ -155,11 +312,21 @@ export function attachWindowHandlers(
       initiatorUrl,
       initiatorIsOfflinePage:
         initiatorIsMainFrame && isOfflinePageUrl(initiatorUrl, options.offlinePageUrl),
-      hasUserGesture: hasRecentUserGesture(),
+      linkTicket: ticketState.ticket,
+      currentDocument,
+      now,
     });
 
     if (disposition === "ignore") return;
-    consumeUserGesture();
+
+    ticketState = consumeTicketAfterAttempt(ticketState, {
+      disposition,
+      rawUrl: details.url,
+      source: "navigate",
+      currentDocument,
+      now,
+    });
+
     if (disposition === "in_app") {
       pendingMainNav = { trusted: true, fromUrl: details.url };
       return;
@@ -205,7 +372,6 @@ export function attachWindowHandlers(
       initiatorIsMainFrame,
       continuingTrustedNavigation: pendingMainNav?.trusted === true,
       previousNavigationUrl: pendingMainNav?.fromUrl ?? null,
-      hasUserGesture: false,
     });
 
     if (disposition === "ignore") return;
@@ -220,6 +386,14 @@ export function attachWindowHandlers(
 
   webContents.on("did-navigate", () => {
     pendingMainNav = null;
+    documentGeneration += 1;
+    ticketState = retireLinkTicketOnDocumentChange(ticketState);
+  });
+
+  webContents.on("render-process-gone", () => {
+    pendingMainNav = null;
+    documentGeneration += 1;
+    ticketState = retireLinkTicketOnDocumentChange(ticketState);
   });
 
   webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _validatedURL, isMainFrame) => {
@@ -230,7 +404,7 @@ export function attachWindowHandlers(
 
   webContents.setWindowOpenHandler((details) => {
     const mainFrame = webContents.mainFrame;
-    const mainFrameAlive = mainFrame != null && !mainFrame.isDestroyed();
+    const mainFrameAlive = isLiveFrame(mainFrame);
     const mainFrameHasSubframes = !mainFrameAlive || mainFrame.frames.length > 0;
     const focusedFrame = webContents.focusedFrame;
     const focusedIsSubframe = focusedFrame !== null && !isOwnMainFrame(focusedFrame, webContents);
@@ -250,6 +424,8 @@ export function attachWindowHandlers(
       : mainFrameAlive
         ? mainFrame.url
         : null;
+    const currentDocument = getCurrentMainDocumentIdentity();
+    const now = Date.now();
 
     const disposition = classifyNavigation(details.url, {
       ...policyOptions,
@@ -258,11 +434,20 @@ export function attachWindowHandlers(
       initiatorIsMainFrame: isMainFrame,
       initiatorOrigin,
       initiatorUrl,
-      hasUserGesture: hasRecentUserGesture(),
+      linkTicket: ticketState.ticket,
+      currentDocument,
+      now,
       mainFrameHasSubframes,
     });
 
-    consumeUserGesture();
+    ticketState = consumeTicketAfterAttempt(ticketState, {
+      disposition,
+      rawUrl: details.url,
+      source: "new_window",
+      currentDocument,
+      now,
+    });
+
     if (disposition === "in_app") {
       pendingMainNav = { trusted: true, fromUrl: details.url };
       void win.loadURL(details.url);

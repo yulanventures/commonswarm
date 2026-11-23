@@ -3,6 +3,15 @@ export const APP_ORIGIN = "https://commonswarm.com";
 export const HELP_URL = "https://commonswarm.com/support";
 export const OVERRIDE_ENV_VAR = "COMMONSWARM_DESKTOP_URL";
 
+export const LINK_TICKET_WINDOW_MS = 1000;
+export const MAX_EXTERNAL_URL_LENGTH = 2048;
+export const IPC_LINK_ACTIVATED = "desktop:link-activated";
+export const IPC_ACTIVATION_WITHOUT_LINK = "desktop:activation-without-link";
+export const DEV_ORIGIN_ARG_PREFIX = "--commonswarm-dev-origin=";
+
+export const CONTEXT_MENU_OPEN_LINK_LABEL = "Open Link in Browser";
+export const CONTEXT_MENU_COPY_LINK_LABEL = "Copy Link";
+
 export type NavigationDisposition = "in_app" | "external" | "blocked" | "ignore";
 export type NavigationSource = "navigate" | "redirect" | "new_window";
 
@@ -106,6 +115,59 @@ export interface AppOriginOptions {
   readonly allowedDevOrigin?: string | null;
 }
 
+/**
+ * Identity of a live main-frame document.
+ * Combines Chromium frame/process identifiers with a monotonic documentGeneration
+ * counter incremented on every main-frame cross-document navigation (did-navigate)
+ * and render-process-gone event so a same-URL reload always produces a new identity.
+ */
+export interface DocumentIdentity {
+  readonly frameTreeNodeId: number;
+  readonly processId: number;
+  readonly routingId: number;
+  readonly frameToken: string;
+  readonly origin: string;
+  readonly documentGeneration: number;
+}
+
+export interface LinkActivationTicket {
+  readonly url: string;
+  readonly document: DocumentIdentity;
+  readonly issuedAt: number;
+}
+
+export interface LinkTicketState {
+  readonly ticket: LinkActivationTicket | null;
+  readonly discardActivationsUntil: number | null;
+}
+
+export const INITIAL_LINK_TICKET_STATE: LinkTicketState = Object.freeze({
+  ticket: null,
+  discardActivationsUntil: null,
+});
+
+export interface RecordLinkActivationInput extends AppOriginOptions {
+  readonly rawUrl: unknown;
+  readonly senderMatchesWindow: boolean;
+  readonly senderIsMainFrame: boolean;
+  readonly senderDocument: DocumentIdentity | null;
+  readonly now: number;
+}
+
+export interface ClearLinkTicketInput extends AppOriginOptions {
+  readonly senderMatchesWindow: boolean;
+  readonly senderIsMainFrame: boolean;
+  readonly senderOrigin: string | null | undefined;
+}
+
+export interface ConsumeTicketInput {
+  readonly disposition: NavigationDisposition;
+  readonly rawUrl: string;
+  readonly source: NavigationSource;
+  readonly currentDocument: DocumentIdentity | null;
+  readonly now: number;
+}
+
 export interface NavigationPolicyOptions extends AppOriginOptions {
   readonly source: NavigationSource;
   /**
@@ -139,9 +201,17 @@ export interface NavigationPolicyOptions extends AppOriginOptions {
    */
   readonly previousNavigationUrl?: string | null;
   /**
-   * Whether a real browser-level user gesture authorized an explicit external open.
+   * Current one-time link-activation ticket, bound to an exact URL and document lifetime.
    */
-  readonly hasUserGesture?: boolean;
+  readonly linkTicket?: LinkActivationTicket | null;
+  /**
+   * Live main-frame document identity at the moment of the navigation or window-open check.
+   */
+  readonly currentDocument?: DocumentIdentity | null;
+  /**
+   * Current timestamp in milliseconds (for deterministic ticket expiry evaluation).
+   */
+  readonly now?: number;
   /**
    * For source === "new_window": whether the window's main frame currently has any subframes.
    * Must be explicitly false for any window-open request to be honoured (fails closed when true or omitted).
@@ -153,6 +223,50 @@ export interface PermissionPolicyOptions extends AppOriginOptions {
   readonly permission: string;
   readonly requestingUrl?: string | null;
   readonly isMainFrame: boolean;
+}
+
+export type ContextMenuActionId =
+  | "open-link"
+  | "copy-link"
+  | "undo"
+  | "redo"
+  | "cut"
+  | "copy"
+  | "paste"
+  | "selectAll"
+  | "separator";
+
+export interface ContextMenuDescriptorItem {
+  readonly id: ContextMenuActionId;
+  readonly label?: string;
+  readonly role?: "undo" | "redo" | "cut" | "copy" | "paste" | "selectAll";
+  readonly type?: "separator";
+  readonly enabled?: boolean;
+  readonly linkUrl?: string;
+}
+
+export interface ContextMenuEditFlags {
+  readonly canUndo?: boolean;
+  readonly canRedo?: boolean;
+  readonly canCut?: boolean;
+  readonly canCopy?: boolean;
+  readonly canPaste?: boolean;
+  readonly canSelectAll?: boolean;
+}
+
+export interface ContextMenuPolicyInput extends AppOriginOptions {
+  readonly frameIsAppMainFrame: boolean;
+  readonly frameOrigin: string | null | undefined;
+  readonly linkUrl: string | null | undefined;
+  readonly isEditable: boolean;
+  readonly hasSelection: boolean;
+  readonly editFlags?: ContextMenuEditFlags;
+}
+
+export interface ContextMenuLinkActionCheck extends AppOriginOptions {
+  readonly capturedDocument: DocumentIdentity | null;
+  readonly currentDocument: DocumentIdentity | null;
+  readonly linkUrl: string | null | undefined;
 }
 
 function parseUrl(raw: string): URL | null {
@@ -235,6 +349,158 @@ export function isAllowedSignInUrl(rawUrl: string): boolean {
   return parsed !== null && isAllowedSignInParsedUrl(parsed);
 }
 
+export function isSameDocumentIdentity(
+  a: DocumentIdentity | null | undefined,
+  b: DocumentIdentity | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return (
+    a.frameTreeNodeId === b.frameTreeNodeId &&
+    a.processId === b.processId &&
+    a.routingId === b.routingId &&
+    a.frameToken === b.frameToken &&
+    a.origin === b.origin &&
+    a.documentGeneration === b.documentGeneration
+  );
+}
+
+/**
+ * Normalize an external https: URL for ticket binding and exact comparison.
+ * Rejects non-strings, non-https schemes, credentials, empty hostnames, and URLs >= 2,048 chars.
+ */
+export function normalizeTicketUrl(rawUrl: unknown): string | null {
+  if (typeof rawUrl !== "string") return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.length >= MAX_EXTERNAL_URL_LENGTH) return null;
+  const parsed = parseUrl(trimmed);
+  if (!parsed || hasCredentials(parsed)) return null;
+  if (parsed.protocol !== "https:" || parsed.hostname.length === 0) return null;
+  const normalized = parsed.href;
+  if (normalized.length >= MAX_EXTERNAL_URL_LENGTH) return null;
+  return normalized;
+}
+
+/**
+ * Record a link-activation ticket from a validated main-frame IPC message.
+ * Ignores invalid senders, non-main frames, foreign origins, invalid/oversized URLs,
+ * and messages arriving during an active out-of-order discard window.
+ */
+export function recordLinkActivation(
+  state: LinkTicketState,
+  input: RecordLinkActivationInput,
+): LinkTicketState {
+  if (!input.senderMatchesWindow || !input.senderIsMainFrame || !input.senderDocument) {
+    return state;
+  }
+  if (!isAppOriginUrl(input.senderDocument.origin, input)) {
+    return state;
+  }
+  if (!Number.isFinite(input.now)) {
+    return state;
+  }
+  if (state.discardActivationsUntil !== null && input.now < state.discardActivationsUntil) {
+    return { ticket: null, discardActivationsUntil: state.discardActivationsUntil };
+  }
+  const normalizedUrl = normalizeTicketUrl(input.rawUrl);
+  if (!normalizedUrl) {
+    return state;
+  }
+  return {
+    ticket: {
+      url: normalizedUrl,
+      document: input.senderDocument,
+      issuedAt: input.now,
+    },
+    discardActivationsUntil: null,
+  };
+}
+
+/**
+ * Clear any stored ticket after a trusted main-frame activation that was not on a link.
+ */
+export function clearLinkTicketOnActivationWithoutLink(
+  state: LinkTicketState,
+  input: ClearLinkTicketInput,
+): LinkTicketState {
+  if (!input.senderMatchesWindow || !input.senderIsMainFrame) {
+    return state;
+  }
+  if (!input.senderOrigin || !isAppOriginUrl(input.senderOrigin, input)) {
+    return state;
+  }
+  if (state.ticket === null) return state;
+  return { ...state, ticket: null };
+}
+
+/**
+ * Retire any stored ticket when the main-frame document changes (navigation, reload, or crash).
+ */
+export function retireLinkTicketOnDocumentChange(state: LinkTicketState): LinkTicketState {
+  if (state.ticket === null) return state;
+  return { ...state, ticket: null };
+}
+
+/**
+ * Check whether a ticket authorizes an external open for rawTargetUrl from currentDocument at now.
+ */
+export function isTicketValidForDestination(
+  ticket: LinkActivationTicket | null | undefined,
+  rawTargetUrl: string,
+  currentDocument: DocumentIdentity | null | undefined,
+  now: number | undefined,
+): boolean {
+  if (!ticket || !currentDocument || typeof now !== "number" || !Number.isFinite(now)) {
+    return false;
+  }
+  const age = now - ticket.issuedAt;
+  if (age < 0 || age >= LINK_TICKET_WINDOW_MS) {
+    return false;
+  }
+  if (!isSameDocumentIdentity(ticket.document, currentDocument)) {
+    return false;
+  }
+  const normalizedTarget = normalizeTicketUrl(rawTargetUrl);
+  if (!normalizedTarget) {
+    return false;
+  }
+  return ticket.url === normalizedTarget;
+}
+
+/**
+ * Consume any pending ticket after a main-frame navigation or window-open decision.
+ * If an external attempt found no live matching-document ticket, suppress incoming
+ * activation IPCs for the rest of the ticket window so a late out-of-order IPC cannot
+ * arm a future open.
+ */
+export function consumeTicketAfterAttempt(
+  state: LinkTicketState,
+  input: ConsumeTicketInput,
+): LinkTicketState {
+  if (input.disposition === "ignore" || input.source === "redirect") {
+    return state;
+  }
+
+  let discardActivationsUntil = state.discardActivationsUntil;
+  if (input.disposition === "blocked" && isAllowedExternalUrl(input.rawUrl) && Number.isFinite(input.now)) {
+    const hadLiveTicketForDoc =
+      state.ticket !== null &&
+      isSameDocumentIdentity(state.ticket.document, input.currentDocument) &&
+      input.now - state.ticket.issuedAt >= 0 &&
+      input.now - state.ticket.issuedAt < LINK_TICKET_WINDOW_MS;
+
+    if (!hadLiveTicketForDoc) {
+      const until = input.now + LINK_TICKET_WINDOW_MS;
+      discardActivationsUntil =
+        discardActivationsUntil !== null ? Math.max(discardActivationsUntil, until) : until;
+    }
+  }
+
+  return {
+    ticket: null,
+    discardActivationsUntil,
+  };
+}
+
 function isAppInitiator(options: NavigationPolicyOptions): boolean {
   if (!options.initiatorIsMainFrame) return false;
   if (!options.initiatorOrigin || !isAppOriginUrl(options.initiatorOrigin, options)) {
@@ -274,7 +540,8 @@ function isTrustedRedirectHop(
  *     URL continuing to SIGN_IN_HOSTS or returning to app origin; bundled offline page retrying app origin
  *   - "redirect": continuation of a trusted main-frame navigation to app origin or SIGN_IN_HOSTS
  *   - "new_window": app main frame with no subframes opening an app-origin URL (loaded in the main window)
- * - "external": well-formed https: URL without credentials on an explicit user-gesture open
+ * - "external": well-formed https: URL without credentials when a fresh, single-use link-activation
+ *   ticket issued by the current main-frame document matches the exact normalized destination
  *   ("navigate" or "new_window") initiated by the app's own main frame at the app origin
  *   (and for "new_window", only when mainFrameHasSubframes is explicitly false).
  *   Redirects never return "external".
@@ -310,7 +577,15 @@ export function classifyNavigation(
     if (!isAppInitiator(options)) return "blocked";
     if (options.mainFrameHasSubframes !== false) return "blocked";
     if (targetIsAppOrigin) return "in_app";
-    if (options.hasUserGesture === true && isAllowedExternalUrl(parsed.href)) {
+    if (
+      isAllowedExternalUrl(parsed.href) &&
+      isTicketValidForDestination(
+        options.linkTicket,
+        parsed.href,
+        options.currentDocument,
+        options.now,
+      )
+    ) {
       return "external";
     }
     return "blocked";
@@ -319,7 +594,15 @@ export function classifyNavigation(
   // source === "navigate"
   if (isAppInitiator(options)) {
     if (targetIsAppOrigin || isAllowedSignInParsedUrl(parsed)) return "in_app";
-    if (options.hasUserGesture === true && isAllowedExternalUrl(parsed.href)) {
+    if (
+      isAllowedExternalUrl(parsed.href) &&
+      isTicketValidForDestination(
+        options.linkTicket,
+        parsed.href,
+        options.currentDocument,
+        options.now,
+      )
+    ) {
       return "external";
     }
     return "blocked";
@@ -335,6 +618,74 @@ export function classifyNavigation(
   }
 
   return "blocked";
+}
+
+/**
+ * Pure descriptor builder for the native context menu.
+ * Returns "Open Link in Browser" and "Copy Link" only when the menu was invoked
+ * in the app's own live main frame at the app origin on a well-formed https: link
+ * without credentials, plus standard editing items when editable or text is selected.
+ */
+export function buildContextMenuDescriptor(
+  input: ContextMenuPolicyInput,
+): ContextMenuDescriptorItem[] {
+  const items: ContextMenuDescriptorItem[] = [];
+
+  const allowLinkActions =
+    input.frameIsAppMainFrame === true &&
+    typeof input.frameOrigin === "string" &&
+    isAppOriginUrl(input.frameOrigin, input) &&
+    typeof input.linkUrl === "string" &&
+    isAllowedExternalUrl(input.linkUrl);
+
+  if (allowLinkActions && typeof input.linkUrl === "string") {
+    items.push(
+      {
+        id: "open-link",
+        label: CONTEXT_MENU_OPEN_LINK_LABEL,
+        linkUrl: input.linkUrl,
+      },
+      {
+        id: "copy-link",
+        label: CONTEXT_MENU_COPY_LINK_LABEL,
+        linkUrl: input.linkUrl,
+      },
+    );
+  }
+
+  if (input.isEditable) {
+    if (items.length > 0) {
+      items.push({ id: "separator", type: "separator" });
+    }
+    items.push(
+      { id: "undo", role: "undo", enabled: input.editFlags?.canUndo ?? true },
+      { id: "redo", role: "redo", enabled: input.editFlags?.canRedo ?? true },
+      { id: "separator", type: "separator" },
+      { id: "cut", role: "cut", enabled: input.editFlags?.canCut ?? true },
+      { id: "copy", role: "copy", enabled: input.editFlags?.canCopy ?? true },
+      { id: "paste", role: "paste", enabled: input.editFlags?.canPaste ?? true },
+      { id: "selectAll", role: "selectAll", enabled: input.editFlags?.canSelectAll ?? true },
+    );
+  } else if (input.hasSelection) {
+    if (items.length > 0) {
+      items.push({ id: "separator", type: "separator" });
+    }
+    items.push({ id: "copy", role: "copy", enabled: input.editFlags?.canCopy ?? true });
+  }
+
+  return items;
+}
+
+/**
+ * Re-check when a context-menu link item is chosen: the exact same main-frame document
+ * must still be live at the app origin, and the link URL must still be an allowed https: URL.
+ */
+export function canExecuteContextMenuLinkAction(input: ContextMenuLinkActionCheck): boolean {
+  if (!input.capturedDocument || !input.currentDocument) return false;
+  if (!isSameDocumentIdentity(input.capturedDocument, input.currentDocument)) return false;
+  if (!isAppOriginUrl(input.currentDocument.origin, input)) return false;
+  if (typeof input.linkUrl !== "string" || !isAllowedExternalUrl(input.linkUrl)) return false;
+  return true;
 }
 
 /**

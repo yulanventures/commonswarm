@@ -3,61 +3,114 @@ import test from "node:test";
 import {
   APP_ORIGIN,
   APP_URL,
+  buildContextMenuDescriptor,
+  canExecuteContextMenuLinkAction,
   classifyNavigation,
+  clearLinkTicketOnActivationWithoutLink,
+  consumeTicketAfterAttempt,
+  CONTEXT_MENU_COPY_LINK_LABEL,
+  CONTEXT_MENU_OPEN_LINK_LABEL,
   getAllowedDevOrigin,
+  INITIAL_LINK_TICKET_STATE,
   isAllowedExternalUrl,
   isAllowedSignInUrl,
   isAppOriginUrl,
   isPermissionAllowed,
+  isSameDocumentIdentity,
+  isTicketValidForDestination,
+  LINK_TICKET_WINDOW_MS,
+  MAX_EXTERNAL_URL_LENGTH,
+  normalizeTicketUrl,
   OVERRIDE_ENV_VAR,
+  recordLinkActivation,
   resolveAppUrl,
+  retireLinkTicketOnDocumentChange,
   SIGN_IN_HOSTS,
+  type DocumentIdentity,
+  type LinkActivationTicket,
 } from "./policy.js";
 
-const APP_NAV_NO_GESTURE = {
+const DOC_1: DocumentIdentity = Object.freeze({
+  frameTreeNodeId: 10,
+  processId: 4,
+  routingId: 2,
+  frameToken: "frame-token-1",
+  origin: APP_ORIGIN,
+  documentGeneration: 1,
+});
+
+const DOC_1_RELOADED: DocumentIdentity = Object.freeze({
+  ...DOC_1,
+  documentGeneration: 2,
+});
+
+const NOW = 10_000;
+
+function makeTicket(
+  url: string,
+  overrides: Partial<LinkActivationTicket> = {},
+): LinkActivationTicket {
+  const normalized = normalizeTicketUrl(url);
+  assert.ok(normalized, `expected test ticket URL to normalize: ${url}`);
+  return {
+    url: normalized,
+    document: DOC_1,
+    issuedAt: NOW - 50,
+    ...overrides,
+  };
+}
+
+const APP_NAV_NO_TICKET = {
   source: "navigate",
   isMainFrame: true,
   initiatorIsMainFrame: true,
   initiatorOrigin: APP_ORIGIN,
   initiatorUrl: APP_URL,
-  hasUserGesture: false,
+  currentDocument: DOC_1,
+  now: NOW,
 } as const;
 
-const APP_NAV_WITH_GESTURE = {
-  ...APP_NAV_NO_GESTURE,
-  hasUserGesture: true,
-} as const;
-
-const APP_NEW_WINDOW_NO_GESTURE = {
+const APP_NEW_WINDOW_NO_TICKET = {
   source: "new_window",
   isMainFrame: true,
   initiatorIsMainFrame: true,
   initiatorOrigin: APP_ORIGIN,
   initiatorUrl: APP_URL,
-  hasUserGesture: false,
+  currentDocument: DOC_1,
+  now: NOW,
   mainFrameHasSubframes: false,
 } as const;
 
-const APP_NEW_WINDOW_WITH_GESTURE = {
-  ...APP_NEW_WINDOW_NO_GESTURE,
-  hasUserGesture: true,
-} as const;
+function appNavWithTicket(url: string, overrides: Partial<LinkActivationTicket> = {}) {
+  return {
+    ...APP_NAV_NO_TICKET,
+    linkTicket: makeTicket(url, overrides),
+  };
+}
+
+function appNewWindowWithTicket(url: string, overrides: Partial<LinkActivationTicket> = {}) {
+  return {
+    ...APP_NEW_WINDOW_NO_TICKET,
+    linkTicket: makeTicket(url, overrides),
+  };
+}
 
 test("classifyNavigation allows the CommonSwarm app origin on any path from app main frame", () => {
-  for (const opts of [
-    APP_NAV_NO_GESTURE,
-    APP_NAV_WITH_GESTURE,
-    APP_NEW_WINDOW_NO_GESTURE,
-    APP_NEW_WINDOW_WITH_GESTURE,
+  for (const url of [
+    "https://commonswarm.com",
+    "https://commonswarm.com/app",
+    "https://commonswarm.com/invite?token=abc#section",
+    "https://commonswarm.com/support",
   ]) {
-    assert.equal(classifyNavigation("https://commonswarm.com", opts), "in_app");
-    assert.equal(classifyNavigation("https://commonswarm.com/app", opts), "in_app");
-    assert.equal(classifyNavigation("https://commonswarm.com/invite?token=abc#section", opts), "in_app");
-    assert.equal(classifyNavigation("https://commonswarm.com/support", opts), "in_app");
+    assert.equal(classifyNavigation(url, APP_NAV_NO_TICKET), "in_app");
+    assert.equal(classifyNavigation(url, appNavWithTicket(url)), "in_app");
+    assert.equal(classifyNavigation(url, APP_NEW_WINDOW_NO_TICKET), "in_app");
+    assert.equal(classifyNavigation(url, appNewWindowWithTicket(url)), "in_app");
   }
 });
 
 test("classifyNavigation ignores subframe navigations and redirects and blocks subframe new_window", () => {
+  const ticket = makeTicket("https://foreign.example/frame");
   for (const url of [
     "https://foreign.example/frame",
     "https://commonswarm.com/app",
@@ -71,7 +124,9 @@ test("classifyNavigation ignores subframe navigations and redirects and blocks s
         isMainFrame: false,
         initiatorIsMainFrame: false,
         initiatorOrigin: "https://foreign.example",
-        hasUserGesture: true,
+        linkTicket: ticket,
+        currentDocument: DOC_1,
+        now: NOW,
       }),
       "ignore",
       `expected subframe navigate to ${url} to be ignored`,
@@ -82,7 +137,9 @@ test("classifyNavigation ignores subframe navigations and redirects and blocks s
         isMainFrame: false,
         continuingTrustedNavigation: true,
         previousNavigationUrl: APP_URL,
-        hasUserGesture: true,
+        linkTicket: ticket,
+        currentDocument: DOC_1,
+        now: NOW,
       }),
       "ignore",
       `expected subframe redirect to ${url} to be ignored`,
@@ -93,7 +150,9 @@ test("classifyNavigation ignores subframe navigations and redirects and blocks s
         isMainFrame: false,
         initiatorIsMainFrame: false,
         initiatorOrigin: "https://foreign.example",
-        hasUserGesture: true,
+        linkTicket: ticket,
+        currentDocument: DOC_1,
+        now: NOW,
       }),
       "blocked",
       `expected subframe new_window to ${url} to be blocked`,
@@ -155,12 +214,15 @@ test("classifyNavigation cancels main-frame navigations started by non-app or no
       "https://accounts.google.com/o/oauth2/v2/auth?client_id=abc",
       "https://example.com/external",
     ]) {
+      const ticket = makeTicket(target);
       assert.equal(
         classifyNavigation(target, {
           source: "navigate",
           isMainFrame: true,
           ...init,
-          hasUserGesture: true,
+          linkTicket: ticket,
+          currentDocument: DOC_1,
+          now: NOW,
         }),
         "blocked",
         `expected main-frame nav to ${target} from ${init.label} to be blocked`,
@@ -170,7 +232,9 @@ test("classifyNavigation cancels main-frame navigations started by non-app or no
           source: "new_window",
           isMainFrame: true,
           ...init,
-          hasUserGesture: true,
+          linkTicket: ticket,
+          currentDocument: DOC_1,
+          now: NOW,
           mainFrameHasSubframes: false,
         }),
         "blocked",
@@ -192,30 +256,31 @@ test("classifyNavigation allows every allow-listed sign-in host path on navigate
         : pathEntry.prefix;
       const target = `https://${entry.host}${samplePath}`;
       assert.equal(
-        classifyNavigation(target, APP_NAV_NO_GESTURE),
+        classifyNavigation(target, APP_NAV_NO_TICKET),
         "in_app",
         `expected ${target} to be in_app on navigate from app main frame`,
       );
       assert.equal(
-        classifyNavigation(target, APP_NEW_WINDOW_WITH_GESTURE),
+        classifyNavigation(target, appNewWindowWithTicket(target)),
         "external",
-        `expected ${target} to be external for new_window with user gesture`,
+        `expected ${target} to be external for new_window with matching ticket`,
       );
       assert.equal(
-        classifyNavigation(target, APP_NEW_WINDOW_NO_GESTURE),
+        classifyNavigation(target, APP_NEW_WINDOW_NO_TICKET),
         "blocked",
-        `expected ${target} to be blocked for new_window without user gesture`,
+        `expected ${target} to be blocked for new_window without ticket`,
       );
     }
+    const unlisted = `https://${entry.host}/not-an-auth-path`;
     assert.equal(
-      classifyNavigation(`https://${entry.host}/not-an-auth-path`, APP_NAV_WITH_GESTURE),
+      classifyNavigation(unlisted, appNavWithTicket(unlisted)),
       "external",
-      `expected unlisted path on ${entry.host} to be external with gesture`,
+      `expected unlisted path on ${entry.host} to be external with matching ticket`,
     );
     assert.equal(
-      classifyNavigation(`https://${entry.host}/not-an-auth-path`, APP_NAV_NO_GESTURE),
+      classifyNavigation(unlisted, APP_NAV_NO_TICKET),
       "blocked",
-      `expected unlisted path on ${entry.host} to be blocked without gesture`,
+      `expected unlisted path on ${entry.host} to be blocked without ticket`,
     );
   }
 });
@@ -231,13 +296,18 @@ test("classifyNavigation never opens shell.openExternal on any redirect and canc
     "http://commonswarm.com/app",
     "file:///etc/passwd",
   ]) {
+    const ticket = normalizeTicketUrl(unexpectedTarget)
+      ? makeTicket(unexpectedTarget)
+      : makeTicket("https://example.com/fallback");
     assert.equal(
       classifyNavigation(unexpectedTarget, {
         source: "redirect",
         isMainFrame: true,
         continuingTrustedNavigation: true,
         previousNavigationUrl: "https://api.commonswarm.com/auth/v1/authorize?provider=github",
-        hasUserGesture: true,
+        linkTicket: ticket,
+        currentDocument: DOC_1,
+        now: NOW,
       }),
       "blocked",
       `expected redirect to ${unexpectedTarget} to be blocked (never external)`,
@@ -308,7 +378,7 @@ test("classifyNavigation allows the full OAuth navigate and redirect chain and b
     previousUrl = step.url;
   }
 
-  // While on a sign-in host, arbitrary external links cannot invoke shell.openExternal even with a user gesture
+  // While on a sign-in host, arbitrary external links cannot invoke shell.openExternal even with a ticket
   assert.equal(
     classifyNavigation("https://example.com/terms", {
       source: "navigate",
@@ -316,28 +386,352 @@ test("classifyNavigation allows the full OAuth navigate and redirect chain and b
       initiatorIsMainFrame: true,
       initiatorOrigin: "https://github.com",
       initiatorUrl: "https://github.com/login",
-      hasUserGesture: true,
+      linkTicket: makeTicket("https://example.com/terms"),
+      currentDocument: DOC_1,
+      now: NOW,
     }),
     "blocked",
   );
 });
 
-test("classifyNavigation requires a real user gesture to open external https links", () => {
-  const externalUrls = [
-    "https://example.com/docs",
-    "https://docs.github.com/en",
-    "https://github.com/yulanventures/commonswarm/pull/1",
-    "https://github.com/login/../yulanventures/commonswarm/pull/1",
-    "https://commonswarm.com.evil.example/app",
-    "https://commonswarm.com:8443/app",
+test("link-activation tickets bind external opens to exact normalized URL, fresh window, single use, and document lifetime", () => {
+  const targetA = "https://example.com/docs";
+  const targetB = "https://example.com/other";
+
+  // 1. External open with no ticket is refused for navigate and new_window
+  assert.equal(classifyNavigation(targetA, APP_NAV_NO_TICKET), "blocked");
+  assert.equal(classifyNavigation(targetA, APP_NEW_WINDOW_NO_TICKET), "blocked");
+
+  // 2. Ticket for a different URL is refused for navigate and new_window
+  assert.equal(classifyNavigation(targetB, appNavWithTicket(targetA)), "blocked");
+  assert.equal(classifyNavigation(targetB, appNewWindowWithTicket(targetA)), "blocked");
+
+  // 3. Matching fresh ticket allowed once, then refused after consumption (navigate and new_window)
+  for (const source of ["navigate", "new_window"] as const) {
+    let state = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: "https://EXAMPLE.COM:443/docs",
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW,
+    });
+    assert.ok(state.ticket, "expected ticket to be issued");
+    assert.equal(state.ticket.url, targetA);
+
+    const opts = {
+      source,
+      isMainFrame: true,
+      initiatorIsMainFrame: true,
+      initiatorOrigin: APP_ORIGIN,
+      initiatorUrl: APP_URL,
+      linkTicket: state.ticket,
+      currentDocument: DOC_1,
+      now: NOW + 100,
+      ...(source === "new_window" ? { mainFrameHasSubframes: false } : {}),
+    } as const;
+
+    const first = classifyNavigation(targetA, opts);
+    assert.equal(first, "external", `expected matching fresh ticket to allow ${source}`);
+
+    state = consumeTicketAfterAttempt(state, {
+      disposition: first,
+      rawUrl: targetA,
+      source,
+      currentDocument: DOC_1,
+      now: NOW + 100,
+    });
+    assert.equal(state.ticket, null, "ticket must be consumed on first decision");
+
+    const second = classifyNavigation(targetA, {
+      ...opts,
+      linkTicket: state.ticket,
+      now: NOW + 110,
+    });
+    assert.equal(second, "blocked", `expected second ${source} attempt after consumption to be refused`);
+  }
+
+  // 4. First mismatched navigation burns the ticket so a subsequent attempt to the original URL is also refused
+  let mismatchState = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+    rawUrl: targetA,
+    senderMatchesWindow: true,
+    senderIsMainFrame: true,
+    senderDocument: DOC_1,
+    now: NOW,
+  });
+  const mismatchDisposition = classifyNavigation(targetB, {
+    ...APP_NAV_NO_TICKET,
+    linkTicket: mismatchState.ticket,
+    now: NOW + 20,
+  });
+  assert.equal(mismatchDisposition, "blocked");
+  mismatchState = consumeTicketAfterAttempt(mismatchState, {
+    disposition: mismatchDisposition,
+    rawUrl: targetB,
+    source: "navigate",
+    currentDocument: DOC_1,
+    now: NOW + 20,
+  });
+  assert.equal(mismatchState.ticket, null);
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: mismatchState.ticket,
+      now: NOW + 30,
+    }),
+    "blocked",
+  );
+
+  // 5. Stale ticket (>= 1000ms) or future-dated ticket is refused
+  const freshTicket = makeTicket(targetA, { issuedAt: NOW });
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: freshTicket,
+      now: NOW + LINK_TICKET_WINDOW_MS - 1,
+    }),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: freshTicket,
+      now: NOW + LINK_TICKET_WINDOW_MS,
+    }),
+    "blocked",
+  );
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NEW_WINDOW_NO_TICKET,
+      linkTicket: freshTicket,
+      now: NOW + LINK_TICKET_WINDOW_MS,
+    }),
+    "blocked",
+  );
+  assert.equal(
+    isTicketValidForDestination(freshTicket, targetA, DOC_1, NOW - 1),
+    false,
+  );
+
+  // 6. Ticket from a previous document (same-URL reload or any identity field change) is refused
+  const changedDocs: DocumentIdentity[] = [
+    DOC_1_RELOADED,
+    { ...DOC_1, frameToken: "frame-token-2" },
+    { ...DOC_1, routingId: DOC_1.routingId + 1 },
+    { ...DOC_1, processId: DOC_1.processId + 1 },
+    { ...DOC_1, frameTreeNodeId: DOC_1.frameTreeNodeId + 1 },
+    { ...DOC_1, origin: "https://other.example" },
+  ];
+  for (const nextDoc of changedDocs) {
+    assert.equal(isSameDocumentIdentity(DOC_1, nextDoc), false);
+    assert.equal(
+      classifyNavigation(targetA, {
+        ...APP_NAV_NO_TICKET,
+        linkTicket: freshTicket,
+        currentDocument: nextDoc,
+        now: NOW + 10,
+      }),
+      "blocked",
+    );
+    assert.equal(
+      classifyNavigation(targetA, {
+        ...APP_NEW_WINDOW_NO_TICKET,
+        linkTicket: freshTicket,
+        currentDocument: nextDoc,
+        now: NOW + 10,
+      }),
+      "blocked",
+    );
+  }
+
+  // Document-change retirement clears any unspent ticket
+  const retired = retireLinkTicketOnDocumentChange({
+    ticket: freshTicket,
+    discardActivationsUntil: null,
+  });
+  assert.equal(retired.ticket, null);
+});
+
+test("recordLinkActivation rejects invalid URLs, credentials, oversized URLs, and untrusted senders", () => {
+  const invalidUrls: unknown[] = [
+    "http://example.com/docs",
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    "mailto:ops@commonswarm.com",
+    "https://user:pass@example.com/docs",
+    "https://user@example.com/docs",
+    "https://github.com@evil.example/login",
+    "",
+    "   ",
+    "not a url",
+    null,
+    undefined,
+    42,
+    { href: "https://example.com" },
+    `https://example.com/${"a".repeat(MAX_EXTERNAL_URL_LENGTH)}`,
   ];
 
-  for (const url of externalUrls) {
-    assert.equal(classifyNavigation(url, APP_NAV_WITH_GESTURE), "external", `navigate+gesture ${url}`);
-    assert.equal(classifyNavigation(url, APP_NAV_NO_GESTURE), "blocked", `navigate no gesture ${url}`);
-    assert.equal(classifyNavigation(url, APP_NEW_WINDOW_WITH_GESTURE), "external", `new_window+gesture ${url}`);
-    assert.equal(classifyNavigation(url, APP_NEW_WINDOW_NO_GESTURE), "blocked", `new_window no gesture ${url}`);
+  for (const rawUrl of invalidUrls) {
+    assert.equal(normalizeTicketUrl(rawUrl), null, `expected normalizeTicketUrl to reject ${String(rawUrl)}`);
+    const next = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW,
+    });
+    assert.equal(next.ticket, null, `expected no ticket for ${String(rawUrl)}`);
   }
+
+  // Untrusted senders never issue a ticket
+  const validUrl = "https://example.com/valid";
+  assert.equal(
+    recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: validUrl,
+      senderMatchesWindow: false,
+      senderIsMainFrame: true,
+      senderDocument: DOC_1,
+      now: NOW,
+    }).ticket,
+    null,
+  );
+  assert.equal(
+    recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: validUrl,
+      senderMatchesWindow: true,
+      senderIsMainFrame: false,
+      senderDocument: DOC_1,
+      now: NOW,
+    }).ticket,
+    null,
+  );
+  assert.equal(
+    recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: validUrl,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: { ...DOC_1, origin: "https://foreign.example" },
+      now: NOW,
+    }).ticket,
+    null,
+  );
+  assert.equal(
+    recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+      rawUrl: validUrl,
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderDocument: null,
+      now: NOW,
+    }).ticket,
+    null,
+  );
+
+  // activation-without-link clears ticket for app main frame and ignores untrusted callers
+  const armed = recordLinkActivation(INITIAL_LINK_TICKET_STATE, {
+    rawUrl: validUrl,
+    senderMatchesWindow: true,
+    senderIsMainFrame: true,
+    senderDocument: DOC_1,
+    now: NOW,
+  });
+  assert.ok(armed.ticket);
+
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      senderMatchesWindow: false,
+      senderIsMainFrame: true,
+      senderOrigin: APP_ORIGIN,
+    }).ticket,
+    armed.ticket,
+  );
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      senderMatchesWindow: true,
+      senderIsMainFrame: false,
+      senderOrigin: APP_ORIGIN,
+    }).ticket,
+    armed.ticket,
+  );
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderOrigin: "https://foreign.example",
+    }).ticket,
+    armed.ticket,
+  );
+  assert.equal(
+    clearLinkTicketOnActivationWithoutLink(armed, {
+      senderMatchesWindow: true,
+      senderIsMainFrame: true,
+      senderOrigin: APP_ORIGIN,
+    }).ticket,
+    null,
+  );
+});
+
+test("out-of-order external attempt without a ticket suppresses late activation IPCs for the rest of the window", () => {
+  const targetA = "https://example.com/out-of-order";
+
+  // External navigation reaches main before IPC arrives -> blocked and activates discard window
+  const disposition = classifyNavigation(targetA, APP_NAV_NO_TICKET);
+  assert.equal(disposition, "blocked");
+
+  let state = consumeTicketAfterAttempt(INITIAL_LINK_TICKET_STATE, {
+    disposition,
+    rawUrl: targetA,
+    source: "navigate",
+    currentDocument: DOC_1,
+    now: NOW,
+  });
+  assert.equal(state.ticket, null);
+  assert.equal(state.discardActivationsUntil, NOW + LINK_TICKET_WINDOW_MS);
+
+  // Late IPC arrives 10ms later -> discarded, does NOT arm a future open
+  state = recordLinkActivation(state, {
+    rawUrl: targetA,
+    senderMatchesWindow: true,
+    senderIsMainFrame: true,
+    senderDocument: DOC_1,
+    now: NOW + 10,
+  });
+  assert.equal(state.ticket, null);
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: state.ticket,
+      now: NOW + 20,
+    }),
+    "blocked",
+  );
+
+  // Still discarded at NOW + 999ms
+  state = recordLinkActivation(state, {
+    rawUrl: targetA,
+    senderMatchesWindow: true,
+    senderIsMainFrame: true,
+    senderDocument: DOC_1,
+    now: NOW + LINK_TICKET_WINDOW_MS - 1,
+  });
+  assert.equal(state.ticket, null);
+
+  // Once the discard window ends, a fresh activation issues a valid ticket again
+  state = recordLinkActivation(state, {
+    rawUrl: targetA,
+    senderMatchesWindow: true,
+    senderIsMainFrame: true,
+    senderDocument: DOC_1,
+    now: NOW + LINK_TICKET_WINDOW_MS,
+  });
+  assert.ok(state.ticket);
+  assert.equal(state.ticket.url, targetA);
+  assert.equal(
+    classifyNavigation(targetA, {
+      ...APP_NAV_NO_TICKET,
+      linkTicket: state.ticket,
+      now: NOW + LINK_TICKET_WINDOW_MS + 10,
+    }),
+    "external",
+  );
 });
 
 test("classifyNavigation blocks new_window when mainFrameHasSubframes is true or omitted, and allows without subframes", () => {
@@ -351,14 +745,14 @@ test("classifyNavigation blocks new_window when mainFrameHasSubframes is true or
   for (const url of targets) {
     assert.equal(
       classifyNavigation(url, {
-        ...APP_NEW_WINDOW_WITH_GESTURE,
+        ...appNewWindowWithTicket(url),
         mainFrameHasSubframes: true,
       }),
       "blocked",
-      `expected new_window to ${url} to be dropped when a subframe is present even with a gesture`,
+      `expected new_window to ${url} to be dropped when a subframe is present even with a ticket`,
     );
 
-    const { mainFrameHasSubframes: _omitted, ...withoutSubframeFlag } = APP_NEW_WINDOW_WITH_GESTURE;
+    const { mainFrameHasSubframes: _omitted, ...withoutSubframeFlag } = appNewWindowWithTicket(url);
     assert.equal(
       classifyNavigation(url, withoutSubframeFlag),
       "blocked",
@@ -368,28 +762,28 @@ test("classifyNavigation blocks new_window when mainFrameHasSubframes is true or
 
   assert.equal(
     classifyNavigation("https://example.com/from-frame", {
-      ...APP_NEW_WINDOW_WITH_GESTURE,
+      ...appNewWindowWithTicket("https://example.com/from-frame"),
       mainFrameHasSubframes: false,
     }),
     "external",
   );
   assert.equal(
     classifyNavigation("https://commonswarm.com/app", {
-      ...APP_NEW_WINDOW_WITH_GESTURE,
+      ...APP_NEW_WINDOW_NO_TICKET,
       mainFrameHasSubframes: false,
     }),
     "in_app",
   );
   assert.equal(
     classifyNavigation("https://example.com/from-frame", {
-      ...APP_NEW_WINDOW_NO_GESTURE,
+      ...APP_NEW_WINDOW_NO_TICKET,
       mainFrameHasSubframes: false,
     }),
     "blocked",
   );
 });
 
-test("classifyNavigation blocks non-https, dangerous schemes, credentials, and malformed input even with a gesture", () => {
+test("classifyNavigation blocks non-https, dangerous schemes, credentials, and malformed input even with a ticket", () => {
   const blockedUrls = [
     "http://commonswarm.com",
     "http://commonswarm.com/app",
@@ -411,9 +805,18 @@ test("classifyNavigation blocks non-https, dangerous schemes, credentials, and m
     "://missing-scheme",
   ];
 
+  const validTicket = makeTicket("https://example.com/valid");
   for (const url of blockedUrls) {
-    assert.equal(classifyNavigation(url, APP_NAV_WITH_GESTURE), "blocked", `navigate ${url}`);
-    assert.equal(classifyNavigation(url, APP_NEW_WINDOW_WITH_GESTURE), "blocked", `new_window ${url}`);
+    assert.equal(
+      classifyNavigation(url, { ...APP_NAV_NO_TICKET, linkTicket: validTicket }),
+      "blocked",
+      `navigate ${url}`,
+    );
+    assert.equal(
+      classifyNavigation(url, { ...APP_NEW_WINDOW_NO_TICKET, linkTicket: validTicket }),
+      "blocked",
+      `new_window ${url}`,
+    );
     assert.equal(
       classifyNavigation(url, {
         source: "redirect",
@@ -435,12 +838,123 @@ test("classifyNavigation allows bundled offline page to retry only the app origi
     initiatorOrigin: "null",
     initiatorUrl: "file:///app/static/offline.html?target=https%3A%2F%2Fcommonswarm.com%2Fapp",
     initiatorIsOfflinePage: true,
-    hasUserGesture: true,
+    linkTicket: makeTicket("https://example.com/docs"),
+    currentDocument: DOC_1,
+    now: NOW,
   } as const;
 
   assert.equal(classifyNavigation("https://commonswarm.com/app", offlineOpts), "in_app");
   assert.equal(classifyNavigation("https://api.commonswarm.com/auth/v1/authorize", offlineOpts), "blocked");
   assert.equal(classifyNavigation("https://example.com/docs", offlineOpts), "blocked");
+});
+
+test("buildContextMenuDescriptor returns Open Link in Browser only for an https link in the app main frame", () => {
+  const linkUrl = "https://example.com/docs";
+
+  // App main frame + https link -> Open Link in Browser + Copy Link only
+  const mainLinkMenu = buildContextMenuDescriptor({
+    frameIsAppMainFrame: true,
+    frameOrigin: APP_ORIGIN,
+    linkUrl,
+    isEditable: false,
+    hasSelection: false,
+  });
+  assert.deepEqual(
+    mainLinkMenu.map((item) => item.label),
+    [CONTEXT_MENU_OPEN_LINK_LABEL, CONTEXT_MENU_COPY_LINK_LABEL],
+  );
+  assert.equal(mainLinkMenu[0]?.linkUrl, linkUrl);
+
+  // App main frame + https link + selection -> link items, separator, copy
+  const withSelection = buildContextMenuDescriptor({
+    frameIsAppMainFrame: true,
+    frameOrigin: APP_ORIGIN,
+    linkUrl,
+    isEditable: false,
+    hasSelection: true,
+  });
+  assert.deepEqual(
+    withSelection.map((item) => item.id),
+    ["open-link", "copy-link", "separator", "copy"],
+  );
+
+  // App main frame + editable without link -> standard editing items only, no open-link
+  const editableOnly = buildContextMenuDescriptor({
+    frameIsAppMainFrame: true,
+    frameOrigin: APP_ORIGIN,
+    linkUrl: "",
+    isEditable: true,
+    hasSelection: false,
+  });
+  assert.ok(!editableOnly.some((item) => item.id === "open-link" || item.id === "copy-link"));
+  assert.deepEqual(
+    editableOnly.map((item) => item.id),
+    ["undo", "redo", "separator", "cut", "copy", "paste", "selectAll"],
+  );
+
+  // Subframe, foreign origin, non-https, or credentials -> never includes Open Link in Browser
+  const deniedCases = [
+    { frameIsAppMainFrame: false, frameOrigin: APP_ORIGIN, linkUrl },
+    { frameIsAppMainFrame: false, frameOrigin: "https://foreign.example", linkUrl },
+    { frameIsAppMainFrame: true, frameOrigin: "https://foreign.example", linkUrl },
+    { frameIsAppMainFrame: true, frameOrigin: "https://github.com", linkUrl },
+    { frameIsAppMainFrame: true, frameOrigin: null, linkUrl },
+    { frameIsAppMainFrame: true, frameOrigin: APP_ORIGIN, linkUrl: "http://example.com/docs" },
+    { frameIsAppMainFrame: true, frameOrigin: APP_ORIGIN, linkUrl: "https://user:pass@example.com/docs" },
+    { frameIsAppMainFrame: true, frameOrigin: APP_ORIGIN, linkUrl: "javascript:alert(1)" },
+    { frameIsAppMainFrame: true, frameOrigin: APP_ORIGIN, linkUrl: "file:///etc/passwd" },
+    { frameIsAppMainFrame: true, frameOrigin: APP_ORIGIN, linkUrl: "" },
+  ];
+  for (const input of deniedCases) {
+    const items = buildContextMenuDescriptor({
+      ...input,
+      isEditable: false,
+      hasSelection: false,
+    });
+    assert.equal(items.length, 0, `expected empty menu for ${JSON.stringify(input)}`);
+  }
+
+  // Re-check at click time: requires exact same document, live app origin, and allowed https URL
+  assert.equal(
+    canExecuteContextMenuLinkAction({
+      capturedDocument: DOC_1,
+      currentDocument: DOC_1,
+      linkUrl,
+    }),
+    true,
+  );
+  assert.equal(
+    canExecuteContextMenuLinkAction({
+      capturedDocument: DOC_1,
+      currentDocument: DOC_1_RELOADED,
+      linkUrl,
+    }),
+    false,
+  );
+  assert.equal(
+    canExecuteContextMenuLinkAction({
+      capturedDocument: DOC_1,
+      currentDocument: null,
+      linkUrl,
+    }),
+    false,
+  );
+  assert.equal(
+    canExecuteContextMenuLinkAction({
+      capturedDocument: DOC_1,
+      currentDocument: { ...DOC_1, origin: "https://foreign.example" },
+      linkUrl,
+    }),
+    false,
+  );
+  assert.equal(
+    canExecuteContextMenuLinkAction({
+      capturedDocument: DOC_1,
+      currentDocument: DOC_1,
+      linkUrl: "https://user:pass@example.com/docs",
+    }),
+    false,
+  );
 });
 
 test("resolveAppUrl accepts override only when unpackaged and only for allowed origins", () => {
@@ -530,6 +1044,7 @@ test("allowedDevOrigin permits only the matching local dev origin in unpackaged 
   assert.equal(getAllowedDevOrigin("http://127.0.0.1:4321/app", true), null);
   assert.equal(getAllowedDevOrigin("https://commonswarm.com/app", false), null);
 
+  const devDoc: DocumentIdentity = { ...DOC_1, origin: devOrigin };
   const fromDevMain = {
     source: "navigate",
     isMainFrame: true,
@@ -537,6 +1052,8 @@ test("allowedDevOrigin permits only the matching local dev origin in unpackaged 
     initiatorOrigin: devOrigin,
     initiatorUrl: "http://127.0.0.1:4321/app",
     allowedDevOrigin: devOrigin,
+    currentDocument: devDoc,
+    now: NOW,
   } as const;
 
   assert.equal(classifyNavigation("http://127.0.0.1:4321/invite", fromDevMain), "in_app");
