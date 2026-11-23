@@ -773,10 +773,17 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       assert.equal(viewerCanonJson.includes("SECRET_UI_ACTION_DM_ANSWER"), false);
       assert.equal(viewerCanonJson.includes("Secret Choice Label"), false);
       assert.equal(viewerCanonJson.includes("SECRET_LEGACY_AGENT_ONLY_ANSWER"), false);
+      // Revoking Scout's seat auto-clears openAskId as 'agent_removed' while keeping all 3 unauthorized
+      // answered asks excluded (answered asks never fall back to autocleared_asks).
+      assert.equal(viewerCanonKeys.has(`ask:${openAskId}`), true, "open ask from removed agent appears as agent_removed");
+      assert.equal(
+        viewerCanonPage.r.items.find((i) => i.item_key === `ask:${openAskId}`)?.outcome_kind,
+        "agent_removed",
+      );
       assert.equal(
         viewerCanonPage.r.total,
-        expectedTotal + 1,
-        "viewer total includes ONLY crossPrivAskId (viewer IS in #private-vault) and excludes all 3 unauthorized answers",
+        expectedTotal + 2,
+        "viewer total includes ONLY crossPrivAskId (viewer IS in #private-vault) plus auto-cleared openAskId, excluding all 3 unauthorized answers",
       );
       await tx`ROLLBACK TO SAVEPOINT sp_viewer_canon_check`;
 

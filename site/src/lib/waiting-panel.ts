@@ -9,7 +9,7 @@
 import { buildChoiceCard } from "./choice-card";
 import { cleanOtherText, OTHER_TEXT_MAX, splitChoicePrompt, STALE_ASK_CLOSE_BODY, type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
 import { formatWhen, initials, personFirstName, personTint } from "./home-names";
-import type { WaitingArchivedEntry } from "./home/contract";
+import type { WaitingArchivedEntry, WaitingArchivedOutcomeKind } from "./home/contract";
 import { agentOrb, personAvatar } from "./home-primitives";
 import type { AgentVM, PersonVM } from "./home-types";
 import {
@@ -111,7 +111,7 @@ export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "age
 export type WaitingTodoPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace";
 export type WaitingPanelTab = "active" | "archived";
 export type WaitingArchivedPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace" | "redacted";
-export type WaitingArchivedOutcomeKind = "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined" | "dismissed";
+export type { WaitingArchivedOutcomeKind };
 
 export interface WaitingDismissedPlaceholder {
   key: string;
@@ -920,9 +920,9 @@ function buildArchivedCard(
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
 
   const tone =
-    item.outcomeKind === "cleared_stale" || item.outcomeKind === "dropped" || item.outcomeKind === "declined" || item.outcomeKind === "dismissed"
-      ? "muted"
-      : "positive";
+    item.outcomeKind === "answered" || item.outcomeKind === "done" || item.outcomeKind === "accepted"
+      ? "positive"
+      : "muted";
   const outcome = node(doc, "div", "cs-waiting-archived__outcome");
   outcome.dataset.waitingArchivedOutcome = item.outcomeKind;
   outcome.dataset.outcomeTone = tone;
