@@ -1905,7 +1905,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:327",
+          "citation": "src/cli.ts:428",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1919,7 +1919,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:2785",
+          "citation": "src/cli.ts:2956",
           "detail": "One 250ms pause before the single retry of the post-mint identity confirmation read after a transport or read timeout.",
           "operation": {
             "name": "setup-identity-confirm-retry",
@@ -1933,7 +1933,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7848",
+          "citation": "src/cli.ts:9115",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1947,7 +1947,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8639",
+          "citation": "src/cli.ts:9920",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1963,7 +1963,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cli.ts:5355-5360; src/cloud/wake-lease.ts:69,72",
+          "citation": "src/cli.ts:6256-6260; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1979,7 +1979,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3475",
+          "citation": "src/cli.ts:3673",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1995,7 +1995,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-channel.ts:215",
+          "citation": "src/cloud/agent-channel.ts:428",
           "detail": "DeliveryCommandClient deadline on the receive-channel loop.",
           "operation": {
             "name": "channel-delivery-deadline",
@@ -2011,7 +2011,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:408",
+          "citation": "src/cloud/agent-channel.ts:698",
           "detail": "Local receive-channel heartbeat interval.",
           "operation": {
             "name": "channel-heartbeat",
@@ -2027,7 +2027,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-channel.ts:216",
+          "citation": "src/cloud/agent-channel.ts:429",
           "detail": "ThinCommandClient signal request timeout on the receive-channel loop.",
           "operation": {
             "name": "channel-signal-timeout",
@@ -2065,7 +2065,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8690; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:9969; src/onboarding-cli.ts:104",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2080,7 +2080,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:2; src/cloud/agent-receive.ts:148",
+          "citation": "src/cloud/agent-check-budget.ts:2; src/cloud/agent-receive.ts:206",
           "detail": "Claude Code hook ceiling, in seconds; it includes client start-up plus check.",
           "operation": {
             "name": "claude-hook",
@@ -2156,7 +2156,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-receive.ts:148",
+          "citation": "src/cloud/agent-receive.ts:206",
           "detail": "Claude hook timeout property, in seconds.",
           "operation": {
             "name": "claude-hook-site",
@@ -2170,7 +2170,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-receive.ts:83-91",
+          "citation": "src/cloud/agent-receive.ts:119-125",
           "detail": "Receive binding update file lock.",
           "operation": {
             "name": "receive-update-lock",
@@ -2184,7 +2184,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-receive.ts:249-257",
+          "citation": "src/cloud/agent-receive.ts:347-415",
           "detail": "Receive configuration file lock.",
           "operation": {
             "name": "receive-config-lock",
@@ -3491,7 +3491,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/onboarding-cli.ts:76",
+          "citation": "src/onboarding-cli.ts:80",
           "detail": "Local hook-stdin drain ceiling before checking a host event.",
           "operation": {
             "name": "hook-stdin",
@@ -3505,7 +3505,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7200",
+          "citation": "src/cli.ts:8383",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3519,7 +3519,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7401",
+          "citation": "src/cli.ts:8635",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -4044,7 +4044,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8852",
+          "citation": "src/cli.ts:10002",
           "detail": "Hard process ceiling for cswarm hook status (budget plus stdin read).",
           "operation": {
             "name": "hook-status-hard-exit",
@@ -4183,7 +4183,7 @@
             "/functions/v1/read",
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-check-budget.ts:23; src/onboarding-cli.ts:212; src/mcp/server.ts:315",
+          "citation": "src/cloud/agent-check-budget.ts:23; src/onboarding-cli.ts:257; src/mcp/server.ts:315",
           "detail": "Whole check run directly (cswarm check without --hook, the stdio MCP check tool): the same work as AGENT_CHECK_TIMEOUT_MS plus observing the page.",
           "operation": {
             "name": "check-direct",
@@ -4205,7 +4205,7 @@
             "/functions/v1/read",
             "/functions/v1/command"
           ],
-          "citation": "src/onboarding-cli.ts:212",
+          "citation": "src/onboarding-cli.ts:257",
           "detail": "cswarm check passes AGENT_CHECK_DIRECT_TIMEOUT_MS; --hook keeps the host-hook budget.",
           "operation": {
             "name": "check-direct-site",
@@ -4370,7 +4370,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cli.ts:8396",
+          "citation": "src/cli.ts:8602",
           "detail": "1-second local native-wake scheduler tick in runConfiguredListener for debounce/retry progression.",
           "operation": {
             "name": "listener-native-wake-tick",
@@ -4398,7 +4398,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-codex.ts:380",
+          "citation": "src/cloud/native-wake-codex.ts:394",
           "detail": "5-second local standalone Codex wake-bridge heartbeat interval.",
           "operation": {
             "name": "codex-wake-heartbeat",
@@ -4414,7 +4414,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/native-wake-codex.ts:262",
+          "citation": "src/cloud/native-wake-codex.ts:264",
           "detail": "ThinCommandClient signal request timeout for self-addressed Codex idle canary emission.",
           "operation": {
             "name": "codex-wake-canary-timeout",
@@ -4430,7 +4430,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake.ts:206",
+          "citation": "src/cloud/native-wake.ts:240",
           "detail": "2-second local file-lock acquisition timeout for wake-state-<scope> updates.",
           "operation": {
             "name": "native-wake-state-lock",
@@ -4444,7 +4444,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake.ts:605",
+          "citation": "src/cloud/native-wake.ts:680",
           "detail": "2-second local file-lock acquisition timeout for atomic wake slot reservation.",
           "operation": {
             "name": "native-wake-reserve-lock",
@@ -4458,7 +4458,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake.ts:665",
+          "citation": "src/cloud/native-wake.ts:741",
           "detail": "20-second local receive-<scope> dispatch lock timeout serializing opt-out against codex queue.",
           "operation": {
             "name": "native-wake-dispatch-lock",
@@ -4468,11 +4468,39 @@
             "reason": "Local filesystem lock timeout, not a network request timeout."
           }
         },
+        "src/cloud/github-ci-stamps.ts:GITHUB_CI_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/github-ci-stamps.ts:37",
+          "detail": "10-second per-request timeout for read-only GitHub Actions/Checks/Statuses GET calls.",
+          "operation": {
+            "name": "github-ci-readonly-get",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "External read-only GitHub API GET timeout, not a CommonSwarm Cloud API request."
+          }
+        },
+        "src/cloud/github-ci-stamps.ts:timeoutMs": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/cloud/github-ci-stamps.ts:790",
+          "detail": "AbortSignal.timeout(timeoutMs) bound on read-only GitHub CI GET requests.",
+          "operation": {
+            "name": "github-ci-readonly-get-signal",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "External read-only GitHub API GET timeout, not a CommonSwarm Cloud API request."
+          }
+        },
         "src/cloud/native-wake-claude.ts:CLAUDE_SOCKET_TIMEOUT_MS": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:76",
+          "citation": "src/cloud/native-wake-claude.ts:80",
           "detail": "Local Unix domain socket connect/write timeout for Claude inbox wake.",
           "operation": {
             "name": "claude-socket-dispatch",
@@ -4486,7 +4514,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:140",
+          "citation": "src/cloud/native-wake-claude.ts:147",
           "detail": "Local receive-binding file lock timeout during Claude wake socket registration and hook refresh.",
           "operation": {
             "name": "claude-wake-lock-timeout",
@@ -4500,7 +4528,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:940",
+          "citation": "src/cloud/native-wake-claude.ts:1261",
           "detail": "Local Claude wake bridge heartbeat interval.",
           "operation": {
             "name": "claude-wake-heartbeat",
@@ -4516,7 +4544,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/native-wake-claude.ts:819",
+          "citation": "src/cloud/native-wake-claude.ts:1118",
           "detail": "ThinCommandClient signal request timeout on Claude wake canary send.",
           "operation": {
             "name": "claude-wake-canary-timeout",
@@ -4532,7 +4560,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:533",
+          "citation": "src/cloud/native-wake-claude.ts:545",
           "detail": "Local receive-binding file lock timeout during Claude wake socket registration.",
           "operation": {
             "name": "claude-wake-register-lock",
@@ -4546,7 +4574,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-claude.ts:611",
+          "citation": "src/cloud/native-wake-claude.ts:623",
           "detail": "Local receive-binding file lock timeout during Claude hook socket token refresh.",
           "operation": {
             "name": "claude-wake-hook-refresh-lock",
@@ -4560,7 +4588,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:47",
+          "citation": "src/cloud/agent-channel.ts:49",
           "detail": "2-second bound on MCP stdio channel notification write under the shared receive lock so a stalled stdout drain cannot starve opt-out.",
           "operation": {
             "name": "claude-channel-notify-timeout",
@@ -4574,7 +4602,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:48",
+          "citation": "src/cloud/agent-channel.ts:50",
           "detail": "10-second bound on non-notification MCP stdio RPC writes in BoundedStdioServerTransport.",
           "operation": {
             "name": "claude-channel-rpc-write-timeout",
@@ -4588,7 +4616,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:227",
+          "citation": "src/cloud/agent-channel.ts:256",
           "detail": "BoundedStdioServerTransport constructor option bounding MCP channel notification write under the receive lock.",
           "operation": {
             "name": "claude-channel-transport-notify-option",
@@ -4602,7 +4630,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:375",
+          "citation": "src/cloud/agent-channel.ts:368",
           "detail": "Configurable local timeout bounding MCP channel notification write under the receive lock.",
           "operation": {
             "name": "claude-channel-notify-option",
@@ -4616,7 +4644,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:615",
+          "citation": "src/cloud/agent-channel.ts:796",
           "detail": "Timer racing server.notification against notifyTimeoutMs so stalled stdio transports are terminated before releasing the receive lock.",
           "operation": {
             "name": "claude-channel-notify-timer",
@@ -4644,7 +4672,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/claude-peer-auth.ts:44",
+          "citation": "src/cloud/claude-peer-auth.ts:45",
           "detail": "spawnSync timeout option for /usr/bin/xcode-select -p probe.",
           "operation": {
             "name": "claude-peer-auth-xcode-select-spawn",
