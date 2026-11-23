@@ -148,6 +148,7 @@ tests/review-checks.test.ts
 tests/github-ci-stamps.test.ts
 tests/engine-core.test.ts
 tests/engine-acp.test.ts
+tests/engine-seat-lock.test.ts
 tests/local-auth-users-concurrency.test.ts
 tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts
