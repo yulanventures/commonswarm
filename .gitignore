@@ -37,3 +37,7 @@ uxtest/rounds/*/*
 dist-chatgpt/
 app/node_modules
 app/dist
+
+desktop/node_modules
+desktop/dist
+desktop/release

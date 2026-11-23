@@ -40,6 +40,7 @@
  */
 
 import pkg from "../../../package.json" with { type: "json" };
+import desktopPkg from "../../../desktop/package.json" with { type: "json" };
 import { CLIENT_PROTOCOL_VERSION } from "../../../src/cloud/config.ts";
 import { INSTALL_HOST } from "./install.ts";
 
@@ -47,6 +48,12 @@ if (typeof pkg.version !== "string" || !pkg.version) {
   throw new Error(
     "release: repo-root package.json has no readable `version`. /download states the " +
       "shipping CLI version and must not render a blank or a guess.",
+  );
+}
+if (typeof desktopPkg.version !== "string" || !desktopPkg.version) {
+  throw new Error(
+    "release: desktop/package.json has no readable `version`. /download states the " +
+      "shipping Mac app version and must not render a blank or a guess.",
   );
 }
 if (typeof CLIENT_PROTOCOL_VERSION !== "string" || !CLIENT_PROTOCOL_VERSION) {
@@ -58,6 +65,20 @@ if (typeof CLIENT_PROTOCOL_VERSION !== "string" || !CLIENT_PROTOCOL_VERSION) {
 
 /** The shipping CLI version — sole source, the repo-root package.json `version`. */
 export const CLI_VERSION: string = pkg.version;
+
+/** The shipping Mac desktop app version — sole source, desktop/package.json `version`. */
+export const DESKTOP_VERSION: string = desktopPkg.version;
+
+/** GitHub releases page for all CommonSwarm builds. */
+export const RELEASES_URL = "https://github.com/yulanventures/commonswarm/releases";
+
+/** Direct download URL for the Apple silicon (.dmg) Mac app build. */
+export const DESKTOP_MAC_ARM64_URL =
+  `${RELEASES_URL}/download/desktop-v${DESKTOP_VERSION}/CommonSwarm-${DESKTOP_VERSION}-arm64.dmg`;
+
+/** Direct download URL for the Intel (.dmg) Mac app build. */
+export const DESKTOP_MAC_X64_URL =
+  `${RELEASES_URL}/download/desktop-v${DESKTOP_VERSION}/CommonSwarm-${DESKTOP_VERSION}.dmg`;
 
 /** The protocol version, passed through from its one source (src/cloud/config.ts). */
 export { CLIENT_PROTOCOL_VERSION };
