@@ -11,13 +11,14 @@
  *   - Strictly READ-ONLY against GitHub: issues ONLY HTTP GET requests with `redirect: "error"`.
  *   - Trusted publisher & expected-suite policy: machine-written stamps (non-`--dry-run`)
  *     REQUIRE an explicit trusted policy pinning the exact expected suites AND their workflow
- *     path, GitHub App (`app_slug`/`app_id`), or commit-status publisher (`creator_login`/
- *     `creator_id`). Same-name results from untrusted publishers are strictly ignored.
+ *     path or GitHub App (`app_slug`/`app_id`). Commit-status rules are diagnostic (`--dry-run`)
+ *     only and never produce stamps. Same-name results from untrusted publishers are strictly ignored.
  *   - Completeness & immutable ordering: fails closed on ANY `Link: rel="next"` continuation
  *     (even on short pages), missing/invalid/mismatched `total_count`, or missing/invalid
  *     creation timestamps; uses `run_attempt` within the same workflow `run_id` and immutable
  *     `created_at` / provider `id` across distinct runs (never mutable `updated_at`/`completed_at`).
  */
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { CloudTarget } from "./config.js";
@@ -41,6 +42,7 @@ export type GithubCiSource = (typeof GITHUB_CI_SOURCES)[number];
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
 const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 const TOKEN_FILE_MAX_BYTES = 4096;
 const POLICY_FILE_MAX_BYTES = 64 * 1024;
@@ -127,6 +129,11 @@ export interface GithubCiPolicy {
   required: GithubCiSuiteRule[];
 }
 
+export interface LoadedGithubCiPolicy {
+  policy: GithubCiPolicy;
+  sha256: string;
+}
+
 export type GithubCiSuiteState = "pass" | "fail" | "pending";
 
 export interface GithubCiSuiteResult {
@@ -163,6 +170,7 @@ export interface GithubCiSyncResult {
   repo: string;
   ref: string;
   head_sha: string;
+  policy_sha256: string | null;
   evaluation: GithubCiEvaluation;
   note: string;
   review_check: ReviewCheckRecord;
@@ -249,7 +257,7 @@ async function readBoundedLocalFileNoFollow(options: {
   missingCode: string;
   unsafeCode: string;
   label: string;
-}): Promise<string> {
+}): Promise<Buffer> {
   const myUid = process.getuid ? process.getuid() : null;
   const openFlags =
     fsConstants.O_RDONLY |
@@ -299,7 +307,7 @@ async function readBoundedLocalFileNoFollow(options: {
     if (offset > options.maxBytes) {
       throw new GithubCiError(options.unsafeCode, `${options.label} exceeded ${options.maxBytes} bytes.`, 400);
     }
-    return buf.subarray(0, offset).toString("utf8");
+    return buf.subarray(0, offset);
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -314,7 +322,7 @@ export async function readGithubTokenFromFile(filePath: string): Promise<string>
     unsafeCode: "github_token_file_unsafe",
     label: "GitHub token file",
   });
-  return validateGithubToken(content);
+  return validateGithubToken(content.toString("utf8"));
 }
 
 export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
@@ -438,8 +446,24 @@ export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
   return { version: 1, repo, required: rules };
 }
 
-export async function readGithubCiPolicyFile(filePath: string): Promise<GithubCiPolicy> {
-  const raw = await readBoundedLocalFileNoFollow({
+function policyHasCommitStatusRule(policy: GithubCiPolicy | null): boolean {
+  return policy !== null && policy.required.some((rule) => rule.kind === "commit_status");
+}
+
+function normalizePolicySha256(raw: string): string {
+  const trimmed = raw.trim().toLowerCase();
+  if (!SHA256_HEX_RE.test(trimmed)) {
+    throw new GithubCiError(
+      "github_policy_invalid",
+      "GitHub CI policy SHA-256 digest must be 64 hexadecimal characters.",
+      400,
+    );
+  }
+  return trimmed;
+}
+
+export async function readGithubCiPolicyFileWithDigest(filePath: string): Promise<LoadedGithubCiPolicy> {
+  const rawBytes = await readBoundedLocalFileNoFollow({
     filePath,
     maxBytes: POLICY_FILE_MAX_BYTES,
     requirePrivate0600: false,
@@ -449,11 +473,17 @@ export async function readGithubCiPolicyFile(filePath: string): Promise<GithubCi
   });
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(rawBytes.toString("utf8"));
   } catch {
     throw new GithubCiError("github_policy_invalid", "GitHub CI policy file is not valid JSON.", 400);
   }
-  return parseGithubCiPolicy(parsed);
+  const policy = parseGithubCiPolicy(parsed);
+  const sha256 = createHash("sha256").update(rawBytes).digest("hex");
+  return { policy, sha256 };
+}
+
+export async function readGithubCiPolicyFile(filePath: string): Promise<GithubCiPolicy> {
+  return (await readGithubCiPolicyFileWithDigest(filePath)).policy;
 }
 
 function parseRequiredTimestampMs(raw: unknown, field: string): { iso: string; ms: number } {
@@ -908,7 +938,7 @@ export async function readGithubCiForCommit(options: {
   }
 
   if (activeSources.has("checks")) {
-    const checksUrl = `${apiBaseUrl}/repos/${encodedOwner}/${encodedName}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`;
+    const checksUrl = `${apiBaseUrl}/repos/${encodedOwner}/${encodedName}/commits/${encodeURIComponent(headSha)}/check-runs?filter=all&per_page=100`;
     const { payload, hasNextPage } = await githubReadOnlyGetJson({
       url: checksUrl,
       token,
@@ -1347,11 +1377,12 @@ export function evaluateGithubCiRuns(options: {
     decision = "pass";
   }
 
+  const hasCommitStatusPolicy = policyHasCommitStatusRule(policy);
   return {
     head_sha: expectedHeadSha,
     policy_enforced: policy !== null,
     decision,
-    verdict: policy !== null && decision !== "pending" ? decision : null,
+    verdict: policy !== null && !hasCommitStatusPolicy && decision !== "pending" ? decision : null,
     suites: selectedSuites,
     missing_suites: missingSuites,
     ignored_stale_head: ignoredStaleHead,
@@ -1365,9 +1396,14 @@ function sanitizeStampNoteSegment(value: string): string {
   return value.replaceAll(/[\x00-\x1f\x7f]+/g, " ").trim();
 }
 
-export function formatGithubCiStampNote(evaluation: GithubCiEvaluation): string {
+export function formatGithubCiStampNote(
+  evaluation: GithubCiEvaluation,
+  policySha256?: string | null,
+): string {
   const shortSha = evaluation.head_sha.slice(0, 9);
   const prefix = `GitHub CI ${evaluation.decision} @ ${shortSha}`;
+  const normalizedPolicySha = policySha256 ? normalizePolicySha256(policySha256) : null;
+  const suffix = normalizedPolicySha ? ` · policy sha256:${normalizedPolicySha.slice(0, 12)}` : "";
   const parts: string[] = evaluation.suites.map((suite) => {
     const suiteName = sanitizeStampNoteSegment(suite.suite) || "unnamed";
     const rawOutcome = suite.status === "completed" ? (suite.conclusion ?? "unknown") : suite.status;
@@ -1378,12 +1414,10 @@ export function formatGithubCiStampNote(evaluation: GithubCiEvaluation): string 
     const missingName = sanitizeStampNoteSegment(missing) || "unnamed";
     parts.push(`${missingName} (missing)`);
   }
-  if (parts.length === 0) {
-    return `${prefix}: no runs on head`;
-  }
-  const full = `${prefix}: ${parts.join("; ")}`;
-  if (full.length <= GITHUB_CI_NOTE_MAX) return full;
-  return `${full.slice(0, GITHUB_CI_NOTE_MAX - 3)}...`;
+  const body = parts.length === 0 ? `${prefix}: no runs on head` : `${prefix}: ${parts.join("; ")}`;
+  const maxBodyLen = GITHUB_CI_NOTE_MAX - suffix.length;
+  if (body.length <= maxBodyLen) return `${body}${suffix}`;
+  return `${body.slice(0, maxBodyLen - 3)}...${suffix}`;
 }
 
 export async function syncGithubCiToReviewCheck(options: {
@@ -1395,6 +1429,7 @@ export async function syncGithubCiToReviewCheck(options: {
   ref?: string;
   expectedHeadSha?: string;
   policy?: GithubCiPolicy | null;
+  policySha256?: string | null;
   requiredSuites?: readonly string[];
   source?: GithubCiSource;
   apiBaseUrl?: string;
@@ -1412,6 +1447,12 @@ export async function syncGithubCiToReviewCheck(options: {
   const apiBaseUrl = normalizeGithubApiBaseUrl(options.apiBaseUrl);
   const dryRun = Boolean(options.dryRun);
   const policy = options.policy ? parseGithubCiPolicy(options.policy) : null;
+  const resolvedPolicySha256 =
+    policy === null
+      ? null
+      : options.policySha256 !== undefined && options.policySha256 !== null
+      ? normalizePolicySha256(options.policySha256)
+      : createHash("sha256").update(JSON.stringify(policy)).digest("hex");
 
   // Enforce origin & policy boundaries BEFORE making external requests.
   if (!dryRun) {
@@ -1426,6 +1467,13 @@ export async function syncGithubCiToReviewCheck(options: {
       throw new GithubCiError(
         "github_policy_required",
         "Stamping a review check from GitHub CI requires a trusted --policy-file pinning required suites and publisher identities (or pass --dry-run for diagnostic inspection).",
+        400,
+      );
+    }
+    if (policyHasCommitStatusRule(policy)) {
+      throw new GithubCiError(
+        "github_policy_status_diagnostic_only",
+        "GitHub commit-status evidence is diagnostic only and cannot stamp a review check; use --dry-run to inspect commit statuses.",
         400,
       );
     }
@@ -1505,7 +1553,7 @@ export async function syncGithubCiToReviewCheck(options: {
     policy,
     ...(policy === null && options.requiredSuites ? { requiredSuites: options.requiredSuites } : {}),
   });
-  const note = formatGithubCiStampNote(evaluation);
+  const note = formatGithubCiStampNote(evaluation, resolvedPolicySha256);
 
   if (dryRun || evaluation.verdict === null) {
     return {
@@ -1515,6 +1563,7 @@ export async function syncGithubCiToReviewCheck(options: {
       repo: check.subject.repo,
       ref: check.subject.ref,
       head_sha: pinnedHeadSha,
+      policy_sha256: resolvedPolicySha256,
       evaluation,
       note,
       review_check: check,
@@ -1540,6 +1589,7 @@ export async function syncGithubCiToReviewCheck(options: {
     repo: check.subject.repo,
     ref: check.subject.ref,
     head_sha: pinnedHeadSha,
+    policy_sha256: resolvedPolicySha256,
     evaluation,
     note,
     review_check: stamped.review_check,

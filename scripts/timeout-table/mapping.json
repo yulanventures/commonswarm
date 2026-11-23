@@ -4472,7 +4472,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/github-ci-stamps.ts:36",
+          "citation": "src/cloud/github-ci-stamps.ts:37",
           "detail": "10-second per-request timeout for read-only GitHub Actions/Checks/Statuses GET calls.",
           "operation": {
             "name": "github-ci-readonly-get",
@@ -4486,7 +4486,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/github-ci-stamps.ts:760",
+          "citation": "src/cloud/github-ci-stamps.ts:790",
           "detail": "AbortSignal.timeout(timeoutMs) bound on read-only GitHub CI GET requests.",
           "operation": {
             "name": "github-ci-readonly-get-signal",

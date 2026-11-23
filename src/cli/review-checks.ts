@@ -8,7 +8,7 @@ import {
   GithubCiError,
   isTrustedGithubApiOrigin,
   normalizeGithubApiBaseUrl,
-  readGithubCiPolicyFile,
+  readGithubCiPolicyFileWithDigest,
   readGithubTokenFromFile,
   renderGithubCiSyncResult,
   syncGithubCiToReviewCheck,
@@ -231,7 +231,7 @@ export async function executeCheckCiCli(
   if (!checkId && !subject) {
     throw new ReviewCheckError(
       "invalid_request",
-      "Usage: cswarm check ci <check-id|owner/repo#pr> [--head-sha <sha>] [--suite <name>] [--source all|actions|checks|statuses] [--dry-run]",
+      "Usage: cswarm check ci <check-id|owner/repo#pr> [--head-sha <sha>] [--policy-file <path>] [--suite <name>] [--source all|actions|checks|statuses] [--dry-run]",
       400,
     );
   }
@@ -277,7 +277,7 @@ export async function executeCheckCiCli(
   }
 
   const policyFile = args.optional("policy-file");
-  const policy = policyFile ? await readGithubCiPolicyFile(policyFile) : null;
+  const loadedPolicy = policyFile ? await readGithubCiPolicyFileWithDigest(policyFile) : null;
 
   const requiredSuites = args
     .all("suite")
@@ -292,7 +292,8 @@ export async function executeCheckCiCli(
     ...(checkId ? { checkId } : {}),
     ...(subject ? { repo: subject.repo, ref: subject.ref } : {}),
     ...(args.optional("head-sha") ? { expectedHeadSha: args.optional("head-sha") } : {}),
-    policy,
+    policy: loadedPolicy?.policy ?? null,
+    ...(loadedPolicy ? { policySha256: loadedPolicy.sha256 } : {}),
     ...(requiredSuites.length > 0 ? { requiredSuites } : {}),
     ...(rawSource ? { source: rawSource as GithubCiSource } : {}),
     apiBaseUrl,

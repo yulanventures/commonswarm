@@ -11540,6 +11540,7 @@ export type AgentCommandVariant = {
   id: string;
   handler: AgentCommandHandler;
   help: readonly string[];
+  description?: string;
 };
 
 const selectedVariantsBrand = Symbol("declared command variants");
@@ -11664,8 +11665,9 @@ function commandVariant(
   id: string,
   handler: AgentCommandHandler,
   help: readonly string[],
+  description?: string,
 ): AgentCommandVariant {
-  return { id, handler, help };
+  return description === undefined ? { id, handler, help } : { id, handler, help, description };
 }
 
 function selectedVariants<const Variants extends Readonly<Record<string, AgentCommandVariant>>>(
@@ -11741,7 +11743,7 @@ export function commandHelpLines(verb?: string, action?: string): string {
         for (const hint of hints) {
           const visibleHint = visibleUsageHint(hint, accepted);
           lines.push(`  ${visibleHint}`);
-          lines.push(`    ${helpDescription(entry)}`);
+          lines.push(`    ${variant.description ?? helpDescription(entry)}`);
         }
         const shown = new Set(hints.flatMap(hint => [...visibleUsageHint(hint, accepted).matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
         const extra = [...new Set(accepted)].filter(flag => !shown.has(flag));
@@ -11956,7 +11958,12 @@ const checkVariants = {
   open: commandVariant("open", runCheckOpen, ["cswarm check open <owner/repo>#<pr> --head-sha <sha> --seat <name|uuid> [--seat ...] [--subject-repo <repo> --pr <ref>] [--conversation-id <uuid>] [--thread-root-id <uuid>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
   stamp: commandVariant("stamp", runCheckStamp, ["cswarm check stamp <check-id|owner/repo#pr> --head-sha <sha> --verdict <pass|hold> [--note <text>] [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
   status: commandVariant("status", runCheckStatus, ["cswarm check status [<check-id|owner/repo#pr>] [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--conversation-id <uuid>] [--thread-root-id <uuid>] [--limit <n>] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
-  ci: commandVariant("ci", runCheckCi, ["cswarm check ci <check-id|owner/repo#pr> [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--head-sha <sha>] [--policy-file <path>] [--suite <name>] [--source all|actions|checks|statuses] [--github-api-url <url>] [--github-token-file <path> | --github-token-stdin] [--dry-run] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"]),
+  ci: commandVariant(
+    "ci",
+    runCheckCi,
+    ["cswarm check ci <check-id|owner/repo#pr> [--check-id <uuid>] [--subject-repo <repo> --pr <ref>] [--head-sha <sha>] [--policy-file <path>] [--suite <name>] [--source all|actions|checks|statuses] [--github-api-url <url>] [--github-token-file <path> | --github-token-stdin] [--dry-run] [--profile <absolute-path>] [--host-session-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--force-file-store] [--session-context <value>] [--json]"],
+    "Sync GitHub CI results into a review check; the stamp is the calling seat's attestation under the --policy-file it supplies. Keep the policy file in trusted configuration, never in the pull request or checkout under review.",
+  ),
 };
 const resumeVariants = {
   inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),

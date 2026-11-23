@@ -28,6 +28,7 @@
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,12 +38,14 @@ import { promisify } from "node:util";
 import {
   evaluateGithubCiRuns,
   formatGithubCiStampNote,
+  GITHUB_CI_NOTE_MAX,
   GithubCiError,
   normalizeGithubApiBaseUrl,
   normalizeGithubRepo,
   parseGithubCiPolicy,
   readGithubCiForCommit,
   readGithubCiPolicyFile,
+  readGithubCiPolicyFileWithDigest,
   readGithubTokenFromFile,
   syncGithubCiToReviewCheck,
   TRUSTED_GITHUB_API_ORIGIN,
@@ -1393,54 +1396,217 @@ test("workflow_dispatch commit statuses witness: trusted publisher policy, exact
 
   try {
     // 1. Focused "server suite / mobile-audit (focused)" must NOT satisfy exact context "server suite / mobile-audit"!
+    const focusedPolicy: GithubCiPolicy = {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        { kind: "commit_status", context: "server suite / p1-cli", creator_login: "github-actions[bot]" },
+        { kind: "commit_status", context: "server suite / mobile-audit", creator_login: "github-actions[bot]" },
+      ],
+    };
+    await assert.rejects(
+      () => syncGithubCiToReviewCheck({
+        target: csTarget,
+        bearer: AGENT_TOKEN,
+        workspaceId: WS,
+        checkId: CHECK_ID,
+        policy: focusedPolicy,
+        githubToken: GH_SECRET,
+        githubFetcher: trustedGhFetcher,
+      }),
+      (err: unknown) => err instanceof GithubCiError && err.code === "github_policy_status_diagnostic_only" && err.status === 400,
+    );
     const focusedNotFull = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      policy: {
-        version: 1,
-        repo: "yulanventures/commonswarm",
-        required: [
-          { kind: "commit_status", context: "server suite / p1-cli", creator_login: "github-actions[bot]" },
-          { kind: "commit_status", context: "server suite / mobile-audit", creator_login: "github-actions[bot]" },
-        ],
-      },
+      policy: focusedPolicy,
+      dryRun: true,
       githubToken: GH_SECRET,
       githubFetcher: trustedGhFetcher,
     });
     assert.equal(focusedNotFull.stamped, false);
-    assert.equal(focusedNotFull.action, "pending");
+    assert.equal(focusedNotFull.action, "dry_run");
+    assert.equal(focusedNotFull.evaluation.decision, "pending");
+    assert.equal(focusedNotFull.evaluation.verdict, null);
     assert.deepEqual(focusedNotFull.evaluation.missing_suites, ["server suite / mobile-audit"]);
     assert.equal(stampedCommands.length, 0);
 
     // 2. Spoofed "server suite / unit" from random-writer + stale SHA_OLD "server suite / site" both rejected -> pending!
+    const spoofAndStalePolicy: GithubCiPolicy = {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        { kind: "commit_status", context: "server suite / unit", creator_login: "github-actions[bot]" },
+        { kind: "commit_status", context: "server suite / site", creator_login: "github-actions[bot]" },
+      ],
+    };
+    await assert.rejects(
+      () => syncGithubCiToReviewCheck({
+        target: csTarget,
+        bearer: AGENT_TOKEN,
+        workspaceId: WS,
+        checkId: CHECK_ID,
+        policy: spoofAndStalePolicy,
+        githubToken: GH_SECRET,
+        githubFetcher: trustedGhFetcher,
+      }),
+      (err: unknown) => err instanceof GithubCiError && err.code === "github_policy_status_diagnostic_only" && err.status === 400,
+    );
     const spoofAndStale = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
       checkId: CHECK_ID,
-      policy: {
-        version: 1,
-        repo: "yulanventures/commonswarm",
-        required: [
-          { kind: "commit_status", context: "server suite / unit", creator_login: "github-actions[bot]" },
-          { kind: "commit_status", context: "server suite / site", creator_login: "github-actions[bot]" },
-        ],
-      },
+      policy: spoofAndStalePolicy,
+      dryRun: true,
       githubToken: GH_SECRET,
       githubFetcher: trustedGhFetcher,
     });
     assert.equal(spoofAndStale.stamped, false);
-    assert.equal(spoofAndStale.action, "pending");
+    assert.equal(spoofAndStale.action, "dry_run");
+    assert.equal(spoofAndStale.evaluation.decision, "pending");
+    assert.equal(spoofAndStale.evaluation.verdict, null);
     assert.equal(spoofAndStale.evaluation.ignored_untrusted_publisher, 1);
     assert.equal(spoofAndStale.evaluation.ignored_stale_head, 1);
     assert.deepEqual(spoofAndStale.evaluation.missing_suites, ["server suite / unit", "server suite / site"]);
     assert.equal(stampedCommands.length, 0);
 
     // 3. Trusted dispatch statuses ("server suite / p1-cli" latest created_at success + "server suite / server" success)
-    // with exact context + creator_login + target_url_prefix stamp pass!
-    const passed = await syncGithubCiToReviewCheck({
+    // are diagnostic-only: non-dry-run stamping is refused, while dry-run reports pass decision with verdict=null.
+    const trustedStatusPolicy: GithubCiPolicy = {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        {
+          kind: "commit_status",
+          context: "server suite / p1-cli",
+          creator_login: "github-actions[bot]",
+          target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
+        },
+        {
+          kind: "commit_status",
+          context: "server suite / server",
+          creator_login: "github-actions[bot]",
+          target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
+        },
+      ],
+    };
+    await assert.rejects(
+      () => syncGithubCiToReviewCheck({
+        target: csTarget,
+        bearer: AGENT_TOKEN,
+        workspaceId: WS,
+        checkId: CHECK_ID,
+        policy: trustedStatusPolicy,
+        githubToken: GH_SECRET,
+        githubFetcher: trustedGhFetcher,
+      }),
+      (err: unknown) => err instanceof GithubCiError && err.code === "github_policy_status_diagnostic_only" && err.status === 400,
+    );
+    assert.equal(stampedCommands.length, 0);
+
+    const passedDryRun = await syncGithubCiToReviewCheck({
+      target: csTarget,
+      bearer: AGENT_TOKEN,
+      workspaceId: WS,
+      checkId: CHECK_ID,
+      policy: trustedStatusPolicy,
+      dryRun: true,
+      githubToken: GH_SECRET,
+      githubFetcher: trustedGhFetcher,
+    });
+    assert.equal(passedDryRun.stamped, false);
+    assert.equal(passedDryRun.action, "dry_run");
+    assert.equal(passedDryRun.evaluation.decision, "pass");
+    assert.equal(passedDryRun.evaluation.verdict, null);
+    assert.equal(passedDryRun.evaluation.ignored_stale_head, 1);
+    assert.equal(passedDryRun.evaluation.ignored_superseded_runs, 1);
+    assert.equal(stampedCommands.length, 0);
+    assert.match(passedDryRun.note, /server suite \/ p1-cli \(attempt 2, success, run 44858176467\)/);
+    assert.match(passedDryRun.note, /server suite \/ server \(attempt 1, success, run 44858179999\)/);
+  } finally {
+    await new Promise<void>((r) => ghServer.close(() => r()));
+    await new Promise<void>((r) => csServer.close(() => r()));
+  }
+});
+
+test("Fix A: check-runs requests filter=all and older completed success cannot hide a newer pending check run", async () => {
+  const recordedUrls: string[] = [];
+  const stampedCommands: Array<Record<string, unknown>> = [];
+  const currentCheck = makeCheckRecord({ head_sha: SHA_NEW });
+
+  const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const reqUrl = req.url ?? "";
+    recordedUrls.push(reqUrl);
+    if (reqUrl.includes(`/commits/${SHA_NEW}/check-runs`)) {
+      const parsed = new URL(reqUrl, "http://127.0.0.1");
+      const olderCompletedSuccess = {
+        id: 7101,
+        name: "unit",
+        app: { id: 15368, slug: "github-actions" },
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-11-20T20:00:00Z",
+        completed_at: "2026-11-20T20:10:00Z",
+        html_url: null,
+      };
+      const newerPending = {
+        id: 7102,
+        name: "unit",
+        app: { id: 15368, slug: "github-actions" },
+        head_sha: SHA_NEW,
+        status: "in_progress",
+        conclusion: null,
+        started_at: "2026-11-20T20:05:00Z",
+        completed_at: null,
+        html_url: null,
+      };
+      // Mirror GitHub's default filter=latest behavior: only filter=all exposes the newer pending run.
+      const check_runs = parsed.searchParams.get("filter") === "all"
+        ? [olderCompletedSuccess, newerPending]
+        : [olderCompletedSuccess];
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+        total_count: check_runs.length,
+        check_runs,
+      }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  const csServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read" && body.resource === "review_checks") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ review_check: currentCheck }));
+        return;
+      }
+      if (req.url === "/functions/v1/command" && body.command?.kind === "review_check_stamp") {
+        stampedCommands.push(body.command);
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          review_check: currentCheck,
+          satisfied_now: false,
+          satisfied_signal_id: null,
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
+  const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
+
+  try {
+    const res = await syncGithubCiToReviewCheck({
       target: csTarget,
       bearer: AGENT_TOKEN,
       workspaceId: WS,
@@ -1448,35 +1614,444 @@ test("workflow_dispatch commit statuses witness: trusted publisher policy, exact
       policy: {
         version: 1,
         repo: "yulanventures/commonswarm",
-        required: [
-          {
-            kind: "commit_status",
-            context: "server suite / p1-cli",
-            creator_login: "github-actions[bot]",
-            target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
-          },
-          {
-            kind: "commit_status",
-            context: "server suite / server",
-            creator_login: "github-actions[bot]",
-            target_url_prefix: "https://github.com/yulanventures/commonswarm/actions/runs/",
-          },
-        ],
+        required: [{ kind: "check_run", suite: "unit", app_slug: "github-actions" }],
       },
       githubToken: GH_SECRET,
-      githubFetcher: trustedGhFetcher,
+      githubFetcher: makeTrustedGithubProxyFetcher(ghUrl),
     });
-    assert.equal(passed.stamped, true);
-    assert.equal(passed.action, "pass");
-    assert.equal(passed.evaluation.ignored_stale_head, 1);
-    assert.equal(passed.evaluation.ignored_superseded_runs, 1);
-    assert.equal(stampedCommands.length, 1);
-    assert.equal(stampedCommands[0]!.verdict, "pass");
-    assert.equal(stampedCommands[0]!.head_sha, SHA_NEW);
-    assert.match(String(stampedCommands[0]!.note), /server suite \/ p1-cli \(attempt 2, success, run 44858176467\)/);
-    assert.match(String(stampedCommands[0]!.note), /server suite \/ server \(attempt 1, success, run 44858179999\)/);
+
+    assert.equal(recordedUrls.length, 1);
+    const parsedUrl = new URL(recordedUrls[0]!, "http://127.0.0.1");
+    assert.equal(parsedUrl.searchParams.get("filter"), "all", "check-runs request must pass filter=all");
+    assert.equal(parsedUrl.searchParams.get("per_page"), "100");
+    assert.equal(res.stamped, false);
+    assert.equal(res.action, "pending");
+    assert.equal(res.evaluation.decision, "pending");
+    assert.equal(res.evaluation.verdict, null);
+    assert.equal(res.evaluation.suites[0]!.run_id, 7102);
+    assert.equal(stampedCommands.length, 0);
   } finally {
     await new Promise<void>((r) => ghServer.close(() => r()));
     await new Promise<void>((r) => csServer.close(() => r()));
+  }
+});
+
+test("Fix B: commit-status policies are diagnostic only (refused for stamping before GitHub fetch, null verdict in evaluator, dry-run reports diagnostics)", async () => {
+  const statusPolicy: GithubCiPolicy = {
+    version: 1,
+    repo: "yulanventures/commonswarm",
+    required: [{ kind: "commit_status", context: "server suite / server", creator_login: "github-actions[bot]" }],
+  };
+
+  // Defense-in-depth in evaluateGithubCiRuns: verdict is always null whenever any rule is commit_status.
+  const evalPass = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: statusPolicy,
+    workflowRuns: [],
+    checkRuns: [],
+    commitStatuses: [{
+      id: 9101,
+      context: "server suite / server",
+      state: "success",
+      head_sha: SHA_NEW,
+      creator_login: "github-actions[bot]",
+      creator_id: 41898282,
+      description: "dispatch run 300: success",
+      target_url: "https://github.com/yulanventures/commonswarm/actions/runs/300",
+      created_at: "2026-11-21T03:15:00Z",
+      updated_at: "2026-11-21T03:15:00Z",
+    }],
+  });
+  assert.equal(evalPass.decision, "pass");
+  assert.equal(evalPass.verdict, null);
+  assert.equal(evalPass.suites.length, 1);
+
+  const evalMixed = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [
+        { kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" },
+        { kind: "commit_status", context: "server suite / server", creator_login: "github-actions[bot]" },
+      ],
+    },
+    workflowRuns: [{
+      id: 9102,
+      name: "p1-cli",
+      path: ".github/workflows/server-suite.yml",
+      workflow_id: 10,
+      head_sha: SHA_NEW,
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "success",
+      created_at: "2026-11-21T03:10:00Z",
+      updated_at: "2026-11-21T03:12:00Z",
+      html_url: null,
+    }],
+    checkRuns: [],
+    commitStatuses: [{
+      id: 9103,
+      context: "server suite / server",
+      state: "success",
+      head_sha: SHA_NEW,
+      creator_login: "github-actions[bot]",
+      creator_id: 41898282,
+      description: "dispatch run 301: success",
+      target_url: "https://github.com/yulanventures/commonswarm/actions/runs/301",
+      created_at: "2026-11-21T03:15:00Z",
+      updated_at: "2026-11-21T03:15:00Z",
+    }],
+  });
+  assert.equal(evalMixed.decision, "pass");
+  assert.equal(evalMixed.verdict, null);
+
+  let mode: "older_success_posted_late" | "newer_failure_posted_late" | "newest_success" = "older_success_posted_late";
+  let ghRequests = 0;
+  const stampedCommands: Array<Record<string, unknown>> = [];
+  const currentCheck = makeCheckRecord({ head_sha: SHA_NEW });
+
+  const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    ghRequests += 1;
+    if (req.url?.includes(`/commits/${SHA_NEW}/statuses`)) {
+      const payloads = {
+        // (1) Older run 100 posts success AFTER newer run 200 already posted failure.
+        older_success_posted_late: [
+          {
+            id: 9201,
+            context: "server suite / server",
+            state: "failure",
+            description: "dispatch run 200: failure",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/200",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:05:00Z",
+            updated_at: "2026-11-21T03:05:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+          {
+            id: 9202,
+            context: "server suite / server",
+            state: "success",
+            description: "dispatch run 100: success",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/100",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:10:00Z",
+            updated_at: "2026-11-21T03:10:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+        ],
+        // (2) Reverse order: newer run 200 posts failure after older run 100 posted success.
+        newer_failure_posted_late: [
+          {
+            id: 9203,
+            context: "server suite / server",
+            state: "success",
+            description: "dispatch run 100: success",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/100",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:05:00Z",
+            updated_at: "2026-11-21T03:05:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+          {
+            id: 9204,
+            context: "server suite / server",
+            state: "failure",
+            description: "dispatch run 200: failure",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/200",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:10:00Z",
+            updated_at: "2026-11-21T03:10:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+        ],
+        // (3) Control: newest status is a success; still never stamps, dry-run reports pass.
+        newest_success: [
+          {
+            id: 9205,
+            context: "server suite / server",
+            state: "failure",
+            description: "dispatch run 200: failure",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/200",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:05:00Z",
+            updated_at: "2026-11-21T03:05:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+          {
+            id: 9206,
+            context: "server suite / server",
+            state: "success",
+            description: "dispatch run 300: success",
+            target_url: "https://github.com/yulanventures/commonswarm/actions/runs/300",
+            creator: { login: "github-actions[bot]", id: 41898282 },
+            created_at: "2026-11-21T03:15:00Z",
+            updated_at: "2026-11-21T03:15:00Z",
+            url: `https://api.github.com/repos/yulanventures/commonswarm/statuses/${SHA_NEW}`,
+          },
+        ],
+      };
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(payloads[mode]));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  const csServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read" && body.resource === "review_checks") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ review_check: currentCheck }));
+        return;
+      }
+      if (req.url === "/functions/v1/command" && body.command?.kind === "review_check_stamp") {
+        stampedCommands.push(body.command);
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          review_check: currentCheck,
+          satisfied_now: false,
+          satisfied_signal_id: null,
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
+  const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
+  const trustedGhFetcher = makeTrustedGithubProxyFetcher(ghUrl);
+
+  try {
+    for (const scenario of ["older_success_posted_late", "newer_failure_posted_late", "newest_success"] as const) {
+      mode = scenario;
+      const ghBeforeRefusal = ghRequests;
+      await assert.rejects(
+        () => syncGithubCiToReviewCheck({
+          target: csTarget,
+          bearer: AGENT_TOKEN,
+          workspaceId: WS,
+          checkId: CHECK_ID,
+          policy: statusPolicy,
+          githubToken: GH_SECRET,
+          githubFetcher: trustedGhFetcher,
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof GithubCiError);
+          assert.equal(err.code, "github_policy_status_diagnostic_only");
+          assert.equal(err.status, 400);
+          assert.match(err.message, /diagnostic only/i);
+          assert.match(err.message, /--dry-run/);
+          return true;
+        },
+      );
+      assert.equal(ghRequests, ghBeforeRefusal, `${scenario}: refusal must happen before any GitHub request`);
+      assert.equal(stampedCommands.length, 0, `${scenario}: zero stamp requests allowed`);
+
+      const dryRes = await syncGithubCiToReviewCheck({
+        target: csTarget,
+        bearer: AGENT_TOKEN,
+        workspaceId: WS,
+        checkId: CHECK_ID,
+        policy: statusPolicy,
+        dryRun: true,
+        githubToken: GH_SECRET,
+        githubFetcher: trustedGhFetcher,
+      });
+      assert.equal(dryRes.stamped, false);
+      assert.equal(dryRes.action, "dry_run");
+      assert.equal(dryRes.evaluation.verdict, null);
+      if (scenario === "newer_failure_posted_late") {
+        assert.equal(dryRes.evaluation.decision, "hold");
+      } else {
+        assert.equal(dryRes.evaluation.decision, "pass");
+      }
+      assert.equal(stampedCommands.length, 0, `${scenario}: dry-run must never stamp`);
+    }
+  } finally {
+    await new Promise<void>((r) => ghServer.close(() => r()));
+    await new Promise<void>((r) => csServer.close(() => r()));
+  }
+});
+
+test("Fix C: policy file SHA-256 digest is recorded in JSON result and stamp note, survives truncation, and CLI help documents policy attestation", async () => {
+  const stampedCommands: Array<Record<string, unknown>> = [];
+  let currentCheck = makeCheckRecord({ head_sha: SHA_NEW });
+
+  const ghServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    if (req.url?.includes("/actions/runs")) {
+      const workflow_runs = [{
+        id: 9301,
+        name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
+        head_sha: SHA_NEW,
+        run_attempt: 1,
+        status: "completed",
+        conclusion: "success",
+        created_at: "2026-11-20T20:02:00Z",
+        updated_at: "2026-11-20T20:05:00Z",
+        html_url: null,
+      }];
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 1, workflow_runs }));
+      return;
+    }
+    if (req.url?.includes("/check-runs")) {
+      const check_runs = [{
+        id: 9302,
+        name: "unit",
+        app: { id: 15368, slug: "github-actions" },
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-11-20T20:02:00Z",
+        completed_at: "2026-11-20T20:05:00Z",
+        html_url: null,
+      }];
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 1, check_runs }));
+      return;
+    }
+    if (req.url?.includes("/statuses")) {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([]));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  const csServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.url === "/functions/v1/read" && body.resource === "review_checks") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ review_check: currentCheck }));
+        return;
+      }
+      if (req.url === "/functions/v1/command" && body.command?.kind === "review_check_stamp") {
+        stampedCommands.push(body.command);
+        currentCheck = makeCheckRecord({ status: "satisfied", satisfied: true });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          review_check: currentCheck,
+          satisfied_now: true,
+          satisfied_signal_id: "99999999-9999-4999-8999-999999999999",
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+
+  await new Promise<void>((r) => ghServer.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => csServer.listen(0, "127.0.0.1", r));
+  const ghUrl = `http://127.0.0.1:${(ghServer.address() as { port: number }).port}`;
+  const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
+  const trustedGhFetcher = makeTrustedGithubProxyFetcher(ghUrl);
+
+  const root = await mkdtemp(join(tmpdir(), "cs-gh-policy-sha-"));
+  try {
+    const policyBytesA = Buffer.from(JSON.stringify(TRUSTED_MIXED_POLICY, null, 2), "utf8");
+    const policyB: GithubCiPolicy = {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "workflow_run", suite: "p1-cli", workflow_path: ".github/workflows/server-suite.yml" }],
+    };
+    const policyBytesB = Buffer.from(JSON.stringify(policyB), "utf8");
+    const expectedShaA = createHash("sha256").update(policyBytesA).digest("hex");
+    const expectedShaB = createHash("sha256").update(policyBytesB).digest("hex");
+    assert.notEqual(expectedShaA, expectedShaB);
+
+    const policyFileA = join(root, "policy-a.json");
+    const policyFileB = join(root, "policy-b.json");
+    await writeFile(policyFileA, policyBytesA, { mode: 0o644 });
+    await chmod(policyFileA, 0o644);
+    await writeFile(policyFileB, policyBytesB, { mode: 0o644 });
+    await chmod(policyFileB, 0o644);
+
+    const loadedA = await readGithubCiPolicyFileWithDigest(policyFileA);
+    const loadedB = await readGithubCiPolicyFileWithDigest(policyFileB);
+    assert.equal(loadedA.sha256, expectedShaA);
+    assert.equal(loadedB.sha256, expectedShaB);
+
+    const outA = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", CHECK_ID], { "policy-file": policyFileA, json: true }),
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: fetch },
+      { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+    );
+    const jsonA = JSON.parse(outA);
+    assert.equal(jsonA.stamped, true);
+    assert.equal(jsonA.policy_sha256, expectedShaA);
+    assert.ok(jsonA.note.endsWith(` · policy sha256:${expectedShaA.slice(0, 12)}`));
+    assert.equal(stampedCommands.length, 1);
+    assert.equal(stampedCommands[0]!.note, jsonA.note);
+
+    const outB = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", CHECK_ID], { "policy-file": policyFileB, json: true }),
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: fetch },
+      { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+    );
+    const jsonB = JSON.parse(outB);
+    assert.equal(jsonB.stamped, true);
+    assert.equal(jsonB.policy_sha256, expectedShaB);
+    assert.notEqual(jsonB.policy_sha256, jsonA.policy_sha256);
+    assert.ok(jsonB.note.endsWith(` · policy sha256:${expectedShaB.slice(0, 12)}`));
+    assert.equal(stampedCommands.length, 2);
+    assert.equal(stampedCommands[1]!.note, jsonB.note);
+
+    // Dry-run without a policy file reports policy_sha256: null and omits the policy suffix.
+    const noPolicyOut = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", CHECK_ID], { "dry-run": true, json: true }),
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: fetch },
+      { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+    );
+    const noPolicyJson = JSON.parse(noPolicyOut);
+    assert.equal(noPolicyJson.policy_sha256, null);
+    assert.equal(noPolicyJson.note.includes("policy sha256:"), false);
+
+    // Long suite details truncate suite text within GITHUB_CI_NOTE_MAX, never the policy suffix.
+    const longSuites = Array.from({ length: 40 }, (_, idx) => ({
+      source: "workflow_run" as const,
+      suite: `very-long-suite-name-${idx}-${"x".repeat(60)}`,
+      publisher: ".github/workflows/server-suite.yml",
+      head_sha: SHA_NEW,
+      run_id: 10_000 + idx,
+      run_attempt: 1,
+      status: "completed",
+      conclusion: "success",
+      state: "pass" as const,
+      created_at: "2026-11-20T20:02:00Z",
+      html_url: null,
+    }));
+    const truncatedNote = formatGithubCiStampNote(
+      {
+        head_sha: SHA_NEW,
+        policy_enforced: true,
+        decision: "pass",
+        verdict: "pass",
+        suites: longSuites,
+        missing_suites: [],
+        ignored_stale_head: 0,
+        ignored_untrusted_publisher: 0,
+        ignored_superseded_attempts: 0,
+        ignored_superseded_runs: 0,
+      },
+      expectedShaA,
+    );
+    assert.equal(truncatedNote.length, GITHUB_CI_NOTE_MAX);
+    assert.ok(truncatedNote.endsWith(`... · policy sha256:${expectedShaA.slice(0, 12)}`));
+
+    // CLI help documents that the stamp is the calling seat's attestation under --policy-file.
+    const helpRes = await execFileAsync(process.execPath, [CLI, "check", "--help"], { encoding: "utf8" });
+    assert.match(helpRes.stdout, /--policy-file/);
+    assert.match(helpRes.stdout, /calling seat's attestation/i);
+    assert.match(helpRes.stdout, /trusted configuration/i);
+  } finally {
+    await new Promise<void>((r) => ghServer.close(() => r()));
+    await new Promise<void>((r) => csServer.close(() => r()));
+    await rm(root, { recursive: true, force: true });
   }
 });
