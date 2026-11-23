@@ -23,7 +23,7 @@ export type JournalRecord =
   | { readonly type: "message_settled"; readonly messageId: string; readonly at: number };
 
 export type Effect =
-  | { readonly type: "start_turn"; readonly messageId: string; readonly text: string }
+  | { readonly type: "start_turn"; readonly messageId: string; readonly text: string; readonly leaseId: string }
   | { readonly type: "post_reply"; readonly messageId: string; readonly command: ReplyCommand }
   | { readonly type: "mark_seen"; readonly messageId: string; readonly leaseId: string }
   | { readonly type: "report_unknown_outcome"; readonly messageId: string; readonly commandId: string; readonly owedAt: number; readonly at: number };
@@ -264,8 +264,7 @@ export function decideNext(state: EngineState, at: number): Decision {
   return {
     records: [{ type: "turn_started", messageId: next.messageId, replyTarget: next.replyTarget, at }],
     effects: [
-      { type: "mark_seen", messageId: next.messageId, leaseId: next.leaseId },
-      { type: "start_turn", messageId: next.messageId, text: next.text },
+      { type: "start_turn", messageId: next.messageId, text: next.text, leaseId: next.leaseId },
     ],
   };
 }

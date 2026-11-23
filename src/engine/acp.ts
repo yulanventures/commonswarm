@@ -71,17 +71,22 @@ function assertPositiveMs(value: number, label: string): void {
   if (!Number.isFinite(value) || value <= 0) throw new RangeError(`${label} must be a positive finite number`);
 }
 
-function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+type GroupProbe = "empty" | "alive" | "eperm";
+
+function killProcessGroup(pid: number, signal: NodeJS.Signals, includePidFallback = true): void {
   try { process.kill(-pid, signal); } catch (err) {
-    if ((err as NodeJS.ErrnoException | null)?.code !== "ESRCH") {
+    if (includePidFallback && (err as NodeJS.ErrnoException | null)?.code !== "ESRCH") {
       try { process.kill(pid, signal); } catch { /* already gone */ }
     }
   }
 }
 
-function isProcessGroupAlive(pid: number): boolean {
-  try { process.kill(-pid, 0); return true; } catch (err) {
-    return (err as NodeJS.ErrnoException | null)?.code === "EPERM";
+function probeProcessGroup(pid: number): GroupProbe {
+  try { process.kill(-pid, 0); return "alive"; } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code === "ESRCH") return "empty";
+    if (code === "EPERM") return "eperm";
+    return "alive";
   }
 }
 
@@ -121,6 +126,7 @@ export class AcpClient {
   private stderrTail: Buffer = Buffer.alloc(0);
   private exited = false;
   private closed = false;
+  private groupContainedFlag = false;
   private closePromise: Promise<void> | null = null;
 
   private constructor(child: ChildStdio, options: AcpClientOptions) {
@@ -141,8 +147,13 @@ export class AcpClient {
         settled = true;
         this.exited = true;
         const cancelError = this.activeTurn?.cancelError ?? null;
-        this.takeInFlight()?.(cancelError ?? err);
+        const reject = this.takeInFlight();
         resolve();
+        if (this.closed) {
+          reject?.(cancelError ?? err);
+        } else {
+          void this.close().then(() => reject?.(cancelError ?? err));
+        }
       };
       this.child.once("error", () => done(new AcpError("spawn_failed", "ACP child failed to start")));
       this.child.once("exit", (code, signal) => {
@@ -186,14 +197,22 @@ export class AcpClient {
   get currentSessionId(): string | null { return this.sessionId; }
   get isClosed(): boolean { return this.closed; }
   get isExited(): boolean { return this.exited; }
+  get groupContained(): boolean { return this.groupContainedFlag; }
   getStderrTail(): string { return this.stderrTail.toString("utf8"); }
 
-  async prompt(text: string): Promise<string> {
+  async prompt(text: string, onHandedOver?: () => void): Promise<string> {
     if (this.closed || this.exited || this.sessionId === null) throw new AcpError("closed", "ACP session is closed");
     if (this.activeTurn !== null || this.pending !== null) throw new AcpError("busy", "ACP turn already in progress");
 
     const id = this.nextId++;
     return new Promise<string>((resolve, reject) => {
+      let handedOver = false;
+      const fireHandedOver = (): void => {
+        if (handedOver) return;
+        handedOver = true;
+        onHandedOver?.();
+      };
+
       const timer = setTimeout(() => {
         const current = this.activeTurn;
         if (current?.requestId !== id || current.cancelError !== null) return;
@@ -215,6 +234,7 @@ export class AcpClient {
         id,
         resolve: (result) => {
           if (this.activeTurn !== turn) return;
+          fireHandedOver();
           const cancelError = turn.cancelError;
           this.clearActiveTurn();
           const stopReason = isRecord(result) ? asStopReason(result.stopReason) : null;
@@ -235,7 +255,20 @@ export class AcpClient {
         },
       };
 
-      if (!this.writeJson({ jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId: this.sessionId, prompt: [{ type: "text", text }] } })) {
+      const wrote = this.writeJson(
+        { jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId: this.sessionId, prompt: [{ type: "text", text }] } },
+        (err) => {
+          if (err !== null) {
+            if (this.activeTurn === turn) {
+              this.takeInFlight();
+              reject(new AcpError("closed", "ACP session is closed"));
+            }
+            return;
+          }
+          fireHandedOver();
+        },
+      );
+      if (!wrote) {
         this.takeInFlight();
         reject(new AcpError("closed", "ACP session is closed"));
       }
@@ -258,20 +291,56 @@ export class AcpClient {
     this.closePromise = (async () => {
       try { this.child.stdin.end(); } catch { /* already closed */ }
       const pid = this.child.pid;
-      if (pid !== undefined && (!this.exited || isProcessGroupAlive(pid))) {
-        killProcessGroup(pid, "SIGTERM");
-        const graceTimer = setTimeout(() => {
-          killProcessGroup(pid, "SIGKILL");
-          this.destroyStdio();
-        }, this.killGraceMs);
-        try { await this.exitPromise; } finally { clearTimeout(graceTimer); }
-        if (isProcessGroupAlive(pid)) killProcessGroup(pid, "SIGKILL");
+      if (pid !== undefined) {
+        if (!this.exited) {
+          killProcessGroup(pid, "SIGTERM", true);
+          const graceTimer = setTimeout(() => {
+            killProcessGroup(pid, "SIGKILL", true);
+            this.destroyStdio();
+          }, this.killGraceMs);
+          try { await this.exitPromise; } finally { clearTimeout(graceTimer); }
+        } else {
+          await this.exitPromise;
+        }
+        if (probeProcessGroup(pid) !== "empty") {
+          killProcessGroup(pid, "SIGKILL", false);
+          this.groupContainedFlag = await this.waitForGroupEmpty(pid);
+        } else {
+          this.groupContainedFlag = true;
+        }
       } else {
         await this.exitPromise;
+        this.groupContainedFlag = true;
       }
       this.destroyStdio();
     })();
     return this.closePromise;
+  }
+
+  private async waitForGroupEmpty(pid: number): Promise<boolean> {
+    if (probeProcessGroup(pid) === "empty") return true;
+    const graceMs = this.killGraceMs;
+    const startedAt = Date.now();
+    const endAt = startedAt + graceMs;
+    const halfwayAt = startedAt + Math.floor(graceMs / 2);
+    let resentKill = false;
+    const maxStep = Math.max(1, Math.floor(graceMs / 10));
+    let step = Math.max(1, Math.floor(graceMs / 50));
+
+    for (;;) {
+      const probe = probeProcessGroup(pid);
+      if (probe === "empty") return true;
+      const now = Date.now();
+      if (!resentKill && probe === "alive" && now >= halfwayAt) {
+        resentKill = true;
+        killProcessGroup(pid, "SIGKILL", false);
+      }
+      const remaining = endAt - now;
+      if (remaining <= 0) return probeProcessGroup(pid) === "empty";
+      const delayMs = Math.min(remaining, step);
+      await new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
+      step = Math.min(maxStep, step * 2);
+    }
   }
 
   private async handshake(options: AcpClientOptions): Promise<void> {
@@ -335,8 +404,21 @@ export class AcpClient {
     return false;
   }
 
-  private writeJson(frame: Record<string, unknown>): boolean {
-    try { this.child.stdin.write(`${JSON.stringify(frame)}\n`); return true; } catch { return false; }
+  private writeJson(frame: Record<string, unknown>, onWritten?: (err: Error | null) => void): boolean {
+    if (this.child.stdin.destroyed || this.child.stdin.writableEnded || !this.child.stdin.writable) {
+      return false;
+    }
+    try {
+      const payload = `${JSON.stringify(frame)}\n`;
+      if (onWritten === undefined) {
+        this.child.stdin.write(payload);
+      } else {
+        this.child.stdin.write(payload, (err) => onWritten(err ?? null));
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private appendStderr(chunk: Buffer): void {

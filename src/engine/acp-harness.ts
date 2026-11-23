@@ -31,6 +31,7 @@ export class AcpHarness implements HarnessPort {
   private opening: Promise<AcpClient> | null = null;
   private turnInFlight = false;
   private closed = false;
+  private allClosedContained = true;
   private lastStderrTail = "";
 
   constructor(options: AcpHarnessOptions) {
@@ -44,11 +45,17 @@ export class AcpHarness implements HarnessPort {
     return this.prepared?.executable ?? null;
   }
 
+  get groupContained(): boolean {
+    if (this.opening !== null) return false;
+    if (this.session !== null) return this.allClosedContained && this.session.groupContained;
+    return this.allClosedContained;
+  }
+
   getStderrTail(): string {
     return this.session !== null ? this.session.getStderrTail() : this.lastStderrTail;
   }
 
-  async runTurn(text: string): Promise<string> {
+  async runTurn(text: string, onHandedOver?: () => void): Promise<string> {
     if (this.closed) {
       throw new AcpError("closed", "ACP harness is closed");
     }
@@ -59,7 +66,7 @@ export class AcpHarness implements HarnessPort {
     this.turnInFlight = true;
     try {
       const client = await this.ensureSession();
-      return await client.prompt(text);
+      return await client.prompt(text, onHandedOver);
     } catch (err) {
       const keepSession =
         !this.closed &&
@@ -87,8 +94,7 @@ export class AcpHarness implements HarnessPort {
     if (inflightOpen !== null) {
       const opened = await inflightOpen.catch(() => null);
       if (opened !== null && opened !== this.session) {
-        this.lastStderrTail = opened.getStderrTail();
-        await opened.close().catch(() => {});
+        await this.closeClient(opened);
       }
     }
     await this.resetSession();
@@ -124,8 +130,7 @@ export class AcpHarness implements HarnessPort {
     try {
       const client = await openPromise;
       if (this.closed) {
-        this.lastStderrTail = client.getStderrTail();
-        await client.close().catch(() => {});
+        await this.closeClient(client);
         throw new AcpError("closed", "ACP harness is closed");
       }
       this.session = client;
@@ -137,12 +142,17 @@ export class AcpHarness implements HarnessPort {
     }
   }
 
+  private async closeClient(client: AcpClient): Promise<void> {
+    await client.close().catch(() => {});
+    this.lastStderrTail = client.getStderrTail();
+    if (!client.groupContained) this.allClosedContained = false;
+  }
+
   private async resetSession(): Promise<void> {
     const current = this.session;
     this.session = null;
     if (current !== null) {
-      this.lastStderrTail = current.getStderrTail();
-      await current.close().catch(() => {});
+      await this.closeClient(current);
     }
   }
 }

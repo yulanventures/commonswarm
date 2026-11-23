@@ -113,6 +113,9 @@ rl.on("line", (line) => {
 
   if (msg.method === "initialize") {
     recorded.initializeParams = msg.params;
+    if (scenario === "exit-on-handshake") {
+      process.exit(17);
+    }
     send({
       jsonrpc: "2.0",
       id: msg.id,
@@ -123,6 +126,9 @@ rl.on("line", (line) => {
 
   if (msg.method === "session/new") {
     recorded.newSessionParams = msg.params;
+    if (scenario === "exit-on-session-new") {
+      process.exit(18);
+    }
     send({
       jsonrpc: "2.0",
       id: msg.id,
@@ -257,6 +263,39 @@ async function handlePrompt(id, params) {
     );
     emitEvent({ event: "prompt_started", childPid: process.pid, grandchildPid: grandchild.pid });
     // Never respond to session/prompt.
+    return;
+  }
+
+  if (scenario === "exit-on-term-delayed-grandchild" || scenario === "self-exit-with-grandchild") {
+    const grandchild = spawn(
+      process.execPath,
+      [
+        "-e",
+        "process.on('SIGTERM', () => { setTimeout(() => process.exit(0), 5000); }); process.stdout.write('ready\\n'); setInterval(() => {}, 60000);",
+      ],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    await new Promise((resolve) => {
+      grandchild.stdout.once("data", () => {
+        grandchild.stdout.destroy();
+        resolve();
+      });
+    });
+    emitEvent({ event: "prompt_started", childPid: process.pid, grandchildPid: grandchild.pid });
+    if (scenario === "self-exit-with-grandchild") {
+      if (obsSocket && !obsSocket.destroyed) {
+        obsSocket.end(() => process.exit(1));
+      } else {
+        process.exit(1);
+      }
+    }
+    return;
+  }
+
+  if (scenario === "handover-observe") {
+    emitEvent({ event: "prompt_received", promptText });
+    sendChunk(SESSION_ID, "handed:" + promptText);
+    send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
     return;
   }
 
@@ -1050,14 +1089,15 @@ test("7b. interrupt() when stand-in ignores cancel rejects as interrupted after 
     (err: unknown) => err instanceof AcpError && err.code === "interrupted",
   );
   assert.equal(client.isClosed, true);
+  assert.equal(client.groupContained, true);
+  assert.equal(isPidAlive(cChildPid), false, "child process survived close");
+  assert.equal(isPidAlive(cGrandchildPid), false, "grandchild process survived close");
 
   await clientChannel.waitForDisconnect(1);
   assert.deepEqual(
     clientChannel.events.filter((ev) => ev.event === "cancel_seen").map((ev) => ev.params),
     [{ sessionId: "sess-main-1" }],
   );
-  assert.equal(isPidAlive(cChildPid), false, "child process survived close");
-  assert.equal(isPidAlive(cGrandchildPid), false, "grandchild process survived close");
 
   // AcpHarness: reaps unresponsive child/grandchild and opens a fresh session on the next turn.
   const harnessChannel = await StandinChannel.open(dir, t, "obs-7b-harness.sock");
@@ -1086,13 +1126,15 @@ test("7b. interrupt() when stand-in ignores cancel rejects as interrupted after 
     () => hTurnPromise,
     (err: unknown) => err instanceof AcpError && err.code === "interrupted",
   );
+  assert.equal(harness.groupContained, true);
+  assert.equal(isPidAlive(hChildPid), false, "child process survived close");
+  assert.equal(isPidAlive(hGrandchildPid), false, "grandchild process survived close");
+
   await harnessChannel.waitForDisconnect(1);
   assert.deepEqual(
     harnessChannel.events.filter((ev) => ev.event === "cancel_seen").map((ev) => ev.params),
     [{ sessionId: "sess-main-1" }],
   );
-  assert.equal(isPidAlive(hChildPid), false, "child process survived close");
-  assert.equal(isPidAlive(hGrandchildPid), false, "grandchild process survived close");
 
   const reopened = JSON.parse(await harness.runTurn("after reopen")) as {
     pid: number;
@@ -1236,4 +1278,191 @@ test("10. real EngineRunner with AcpHarness and fake cloud delivers 3 replies in
       { replyTarget: { kind: "private", inReplyTo: "m-4" }, body: TURN_FAILED_REPLY, status: "failed" },
     ],
   );
+});
+
+test("11. onHandedOver fires once after session/prompt is written and never when child fails to start", async (t) => {
+  const { dir, standinPath } = await makeTempStandin(t);
+
+  // 11a. Fires once per turn after handshake completes and prompt is handed to the stand-in.
+  const channel = await StandinChannel.open(dir, t, "obs-11a.sock");
+  const harness = new AcpHarness({
+    launch: {
+      executable: process.execPath,
+      args: [standinPath, "handover-observe", "", channel.socketPath],
+      cwd: dir,
+    },
+    handshakeTimeoutMs: 5_000,
+    turnBudgetMs: 5_000,
+    killGraceMs: 500,
+  });
+  t.after(() => harness.close());
+
+  let turn1Handovers = 0;
+  const promptPromise = channel.waitForEvent("prompt_received");
+  const reply1Promise = harness.runTurn("first prompt", () => {
+    turn1Handovers += 1;
+  });
+
+  const received = await promptPromise;
+  assert.equal(received.promptText, "first prompt");
+  const reply1 = await reply1Promise;
+  assert.equal(reply1, "handed:first prompt");
+  assert.equal(turn1Handovers, 1);
+
+  let turn2Handovers = 0;
+  const reply2 = await harness.runTurn("second prompt", () => {
+    turn2Handovers += 1;
+  });
+  assert.equal(reply2, "handed:second prompt");
+  assert.equal(turn2Handovers, 1);
+
+  // 11b. Never fires when the child exits during initialize or session/new.
+  for (const scenario of ["exit-on-handshake", "exit-on-session-new"] as const) {
+    const exitHarness = new AcpHarness({
+      launch: {
+        executable: process.execPath,
+        args: [standinPath, scenario],
+        cwd: dir,
+      },
+      handshakeTimeoutMs: 5_000,
+      turnBudgetMs: 5_000,
+      killGraceMs: 500,
+    });
+    t.after(() => exitHarness.close());
+
+    let exitHandovers = 0;
+    await assert.rejects(
+      () => exitHarness.runTurn("will fail", () => { exitHandovers += 1; }),
+      (err: unknown) => err instanceof AcpError && err.code === "child_exited",
+    );
+    assert.equal(exitHandovers, 0);
+  }
+
+  // 11c. Never fires when the executable does not exist / cannot spawn.
+  const badHarness = new AcpHarness({
+    launch: {
+      executable: join(dir, "does-not-exist"),
+      args: [],
+      cwd: dir,
+    },
+    handshakeTimeoutMs: 5_000,
+    turnBudgetMs: 5_000,
+    killGraceMs: 500,
+  });
+  t.after(() => badHarness.close());
+
+  let badHandovers = 0;
+  await assert.rejects(
+    () => badHarness.runTurn("cannot start", () => { badHandovers += 1; }),
+  );
+  assert.equal(badHandovers, 0);
+});
+
+test("12. close() waits until a grandchild ignoring SIGTERM is gone (explicit close and mid-turn child exit)", async (t) => {
+  const { dir, standinPath } = await makeTempStandin(t);
+
+  const pidsToReap: number[] = [];
+  t.after(() => {
+    for (const pid of pidsToReap) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already dead.
+      }
+    }
+  });
+
+  // 12a. Direct AcpClient.close(): child exits on SIGTERM while grandchild ignores SIGTERM and delays exit.
+  const cChannel = await StandinChannel.open(dir, t, "obs-12a.sock");
+  const cPrepared = await prepareLaunch({
+    executable: process.execPath,
+    args: [standinPath, "exit-on-term-delayed-grandchild", "", cChannel.socketPath],
+    cwd: dir,
+  });
+  const client = await AcpClient.open({
+    ...cPrepared,
+    handshakeTimeoutMs: 5_000,
+    turnBudgetMs: 10_000,
+    killGraceMs: 250,
+  });
+  t.after(() => client.close());
+
+  const cStartedPromise = cChannel.waitForEvent("prompt_started");
+  const cTurnPromise = client.prompt("spawn delayed grandchild");
+  const cTurnRejection = assert.rejects(
+    () => cTurnPromise,
+    (err: unknown) => err instanceof AcpError && err.code === "closed",
+  );
+  const cStarted = await cStartedPromise;
+  const cChildPid = cStarted.childPid as number;
+  const cGrandchildPid = cStarted.grandchildPid as number;
+  pidsToReap.push(cGrandchildPid, cChildPid);
+  assert.equal(isPidAlive(cGrandchildPid), true);
+
+  await client.close();
+  assert.equal(client.groupContained, true);
+  assert.equal(isPidAlive(cChildPid), false, "child process survived close");
+  assert.equal(isPidAlive(cGrandchildPid), false, "grandchild process survived close");
+  await cTurnRejection;
+
+  // 12b. AcpHarness.close(): surfaces groupContained and waits for delayed grandchild.
+  const hChannel = await StandinChannel.open(dir, t, "obs-12b.sock");
+  const harness = new AcpHarness({
+    launch: {
+      executable: process.execPath,
+      args: [standinPath, "exit-on-term-delayed-grandchild", "", hChannel.socketPath],
+      cwd: dir,
+    },
+    handshakeTimeoutMs: 5_000,
+    turnBudgetMs: 10_000,
+    killGraceMs: 250,
+  });
+  t.after(() => harness.close());
+
+  const hStartedPromise = hChannel.waitForEvent("prompt_started");
+  const hTurnPromise = harness.runTurn("spawn delayed grandchild");
+  const hTurnRejection = assert.rejects(() => hTurnPromise);
+  const hStarted = await hStartedPromise;
+  const hChildPid = hStarted.childPid as number;
+  const hGrandchildPid = hStarted.grandchildPid as number;
+  pidsToReap.push(hGrandchildPid, hChildPid);
+  assert.equal(isPidAlive(hGrandchildPid), true);
+
+  await harness.close();
+  assert.equal(harness.groupContained, true);
+  assert.equal(isPidAlive(hChildPid), false, "child process survived harness close");
+  assert.equal(isPidAlive(hGrandchildPid), false, "grandchild process survived harness close");
+  await hTurnRejection;
+
+  // 12c. Child exits by itself mid-turn leaving a grandchild ignoring SIGTERM: emptiness wait runs before session closes.
+  const sChannel = await StandinChannel.open(dir, t, "obs-12c.sock");
+  const sPrepared = await prepareLaunch({
+    executable: process.execPath,
+    args: [standinPath, "self-exit-with-grandchild", "", sChannel.socketPath],
+    cwd: dir,
+  });
+  const selfExitClient = await AcpClient.open({
+    ...sPrepared,
+    handshakeTimeoutMs: 5_000,
+    turnBudgetMs: 10_000,
+    killGraceMs: 250,
+  });
+  t.after(() => selfExitClient.close());
+
+  const sStartedPromise = sChannel.waitForEvent("prompt_started");
+  const sTurnPromise = selfExitClient.prompt("self exit with grandchild");
+  const sTurnRejection = assert.rejects(
+    () => sTurnPromise,
+    (err: unknown) => err instanceof AcpError && err.code === "child_exited",
+  );
+  const sStarted = await sStartedPromise;
+  const sChildPid = sStarted.childPid as number;
+  const sGrandchildPid = sStarted.grandchildPid as number;
+  pidsToReap.push(sGrandchildPid, sChildPid);
+
+  await sTurnRejection;
+  assert.equal(selfExitClient.isClosed, true);
+  assert.equal(selfExitClient.groupContained, true);
+  assert.equal(isPidAlive(sChildPid), false, "self-exited child survived close");
+  assert.equal(isPidAlive(sGrandchildPid), false, "grandchild of self-exited child survived close");
 });

@@ -26,7 +26,7 @@ export class AuthorityLostError extends Error {
 }
 
 export interface HarnessPort {
-  runTurn(text: string): Promise<string>;
+  runTurn(text: string, onHandedOver?: () => void): Promise<string>;
   interrupt(): Promise<void> | void;
   close?(): Promise<void> | void;
 }

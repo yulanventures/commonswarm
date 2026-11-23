@@ -172,7 +172,10 @@ export class EngineRunner {
 
   private async raceAuthority<T>(fn: () => Promise<T>): Promise<RaceOutcome<T>> {
     if (this.authorityLost) return { kind: "authority_lost" };
-    const p = Promise.resolve().then(fn);
+    const p = Promise.resolve().then(() => {
+      if (this.authorityLost) return undefined as unknown as T;
+      return fn();
+    });
     p.catch(() => {});
     const outcome = await Promise.race([
       p.then((value) => ({ kind: "ok" as const, value }), (err: unknown) => ({ kind: "err" as const, err })),
@@ -360,11 +363,24 @@ export class EngineRunner {
     const startEffect = findEffect(effects, "start_turn");
     if (!startEffect) return true;
 
-    const seenEffect = findEffect(effects, "mark_seen");
-    if (seenEffect && !(await this.executeMarkSeen(seenEffect.messageId, seenEffect.leaseId))) return false;
+    let handedOver = false;
+    let markSeenPromise: Promise<boolean> | null = null;
+    const onHandedOver = (): void => {
+      if (handedOver || this.authorityLost || this.failed) return;
+      handedOver = true;
+      markSeenPromise = this.executeMarkSeen(startEffect.messageId, startEffect.leaseId);
+    };
 
-    const turnOutcome = await this.raceAuthority(() => this.options.harness.runTurn(startEffect.text));
-    if (turnOutcome.kind === "authority_lost") return false;
+    const turnOutcome = await this.raceAuthority(() => this.options.harness.runTurn(startEffect.text, onHandedOver));
+    if (turnOutcome.kind === "authority_lost") {
+      if (markSeenPromise !== null) await markSeenPromise;
+      return false;
+    }
+
+    if (markSeenPromise !== null) {
+      const seenOk = await markSeenPromise;
+      if (!seenOk || this.authorityLost || this.failed) return false;
+    }
 
     let replyText: string | null = null;
     let harnessError: string | null = null;

@@ -885,8 +885,9 @@ test("12. real EngineRunner + openCloudLink + fake edge + stand-in harness proce
     }));
     const prompts: string[] = [];
     const harness: HarnessPort = {
-      async runTurn(text: string): Promise<string> {
+      async runTurn(text: string, onHandedOver?: () => void): Promise<string> {
         prompts.push(text);
+        onHandedOver?.();
         return `reply:${text}`;
       },
       interrupt() {},

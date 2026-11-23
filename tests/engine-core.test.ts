@@ -127,6 +127,8 @@ interface CloudConnectionOptions {
   readonly failPostReply?: readonly FailureMode[];
   readonly alwaysFailClaim?: FailureMode;
   readonly alwaysFailPostReply?: FailureMode;
+  readonly timeline?: string[];
+  readonly beforeMarkSeen?: () => Promise<void> | void;
 }
 
 interface ConnectedCloud extends CloudPort {
@@ -219,6 +221,7 @@ class FakeCloud {
 
     const recordCall = (op: string): void => {
       recordedCalls.push(op);
+      options.timeline?.push(op);
       if (refused) callsAfterRefusalCount += 1;
     };
 
@@ -293,6 +296,7 @@ class FakeCloud {
       markSeen: async (messageId: string, leaseId: string): Promise<void> => {
         if (disconnected) return never();
         recordCall("markSeen");
+        if (options.beforeMarkSeen) await options.beforeMarkSeen();
         const mode = nextFailure(markSeenFailures);
         if (mode) throwForMode(mode, "markSeen");
 
@@ -316,6 +320,7 @@ class FakeCloud {
         msg.leaseId = null;
         msg.leasedBySession = null;
         this.seen.push({ messageId, leaseId, sessionId });
+        options.timeline?.push("markSeen:settled");
         this.flushSeenWaiters(messageId);
       },
       postReply: async (command: ReplyCommand): Promise<void> => {
@@ -387,6 +392,7 @@ interface PendingTurn {
   readonly text: string;
   readonly resolve: (reply: string) => void;
   readonly reject: (err: Error) => void;
+  readonly handOver: () => void;
 }
 
 class FakeHarness implements HarnessPort {
@@ -396,19 +402,52 @@ class FakeHarness implements HarnessPort {
   closed = 0;
 
   private readonly autoReply: boolean;
+  private readonly autoHandover: boolean;
+  private readonly failBeforeHandover?: Error;
+  private readonly timeline?: string[];
   private turnWaiters: Array<{ index: number; resolve: (turn: PendingTurn) => void }> = [];
 
-  constructor(options: { autoReply?: boolean } = {}) {
+  constructor(
+    options: {
+      autoReply?: boolean;
+      autoHandover?: boolean;
+      failBeforeHandover?: Error;
+      timeline?: string[];
+    } = {},
+  ) {
     this.autoReply = options.autoReply ?? true;
+    this.autoHandover = options.autoHandover ?? true;
+    this.failBeforeHandover = options.failBeforeHandover;
+    this.timeline = options.timeline;
   }
 
-  runTurn(text: string): Promise<string> {
+  runTurn(text: string, onHandedOver?: () => void): Promise<string> {
     this.started.push(text);
+    if (this.failBeforeHandover) {
+      this.timeline?.push("failBeforeHandover");
+      return Promise.reject(this.failBeforeHandover);
+    }
+    const handOver = (): void => {
+      this.timeline?.push("handover");
+      onHandedOver?.();
+    };
+    if (this.autoHandover) {
+      handOver();
+    }
     if (this.autoReply) {
+      this.timeline?.push("turn:resolved");
       return Promise.resolve(`reply:${text}`);
     }
     return new Promise<string>((resolve, reject) => {
-      const turn: PendingTurn = { text, resolve, reject };
+      const turn: PendingTurn = {
+        text,
+        resolve: (reply: string) => {
+          this.timeline?.push("turn:resolved");
+          resolve(reply);
+        },
+        reject,
+        handOver,
+      };
       this.turns.push(turn);
       const remaining: Array<{ index: number; resolve: (turn: PendingTurn) => void }> = [];
       for (const waiter of this.turnWaiters) {
@@ -565,6 +604,7 @@ test("3. crash mid-turn after seen landed: not replayed, one restart reply acros
   });
   await runner1.start();
   await harness1.waitForTurn(0);
+  await cloud.waitForSeen("m-1");
   assert.equal(cloud.getMessage("m-1")?.seen, true);
   cloud1.disconnect();
   // Abandon runner1 without calling stop().
@@ -1014,7 +1054,7 @@ test("9. lost authority on claim, markSeen, and postReply stops at once with zer
     assert.equal(cloud.protocolErrors.length, 0);
   }
 
-  // 9b. AuthorityLostError on markSeen (turn_started was journaled before markSeen)
+  // 9b. AuthorityLostError on markSeen (turn_started was journaled and handed over before markSeen)
   {
     const dir = await makeTempDir(t);
     const journalPath = join(dir, "journal.ndjson");
@@ -1038,7 +1078,7 @@ test("9. lost authority on claim, markSeen, and postReply stops at once with zer
     assert.equal(harness1.interrupted, 1);
     assert.equal(harness1.closed, 1);
     assert.equal(conn1.callsAfterRefusal, 0);
-    assert.deepEqual(harness1.started, []);
+    assert.deepEqual(harness1.started, ["msg-1"]);
     assert.equal(cloud.getMessage("m-1")?.seen, false);
 
     cloud.newSession();
@@ -1438,4 +1478,193 @@ test("13. journal safety: torn last line ignored, corrupt middle refused, symlin
       return true;
     },
   );
+});
+
+test("14. normal turn order: handover precedes markSeen, turn is not blocked on markSeen, and markSeen settles before postReply", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  const timeline: string[] = [];
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
+
+  let markSeenStarted!: () => void;
+  const markSeenStartedPromise = new Promise<void>((resolve) => {
+    markSeenStarted = resolve;
+  });
+  let releaseMarkSeen!: () => void;
+  const markSeenGate = new Promise<void>((resolve) => {
+    releaseMarkSeen = resolve;
+  });
+
+  const conn = cloud.connect({
+    timeline,
+    beforeMarkSeen: async () => {
+      markSeenStarted();
+      await markSeenGate;
+    },
+  });
+  const harness = new FakeHarness({ autoReply: false, timeline });
+  const runner = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness,
+    cloud: conn,
+    clock: makeClock(1_000),
+  });
+  await runner.start();
+
+  // Turn runs without blocking on markSeen, and can even finish while markSeen is still in flight.
+  const turn = await harness.waitForTurn(0);
+  await markSeenStartedPromise;
+  turn.resolve("reply:msg-1");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(cloud.replies.length, 0, "postReply must wait for in-flight markSeen to settle");
+  assert.equal(conn.calls.includes("postReply"), false);
+
+  releaseMarkSeen();
+  await cloud.waitForReplies(1);
+  assert.deepEqual(await runner.stop(), { reason: "stopped" });
+
+  assert.deepEqual(timeline.slice(0, 6), [
+    "claim",
+    "handover",
+    "markSeen",
+    "turn:resolved",
+    "markSeen:settled",
+    "postReply",
+  ]);
+  assert.equal(cloud.protocolErrors.length, 0);
+});
+
+test("15. harness fails before handover: no markSeen during turn, one fixed failure reply, redelivery is acked without running", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  const operator = new FakeOperator();
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
+
+  const conn1 = cloud.connect();
+  const harness1 = new FakeHarness({
+    failBeforeHandover: new Error("harness failed to start"),
+  });
+  const runner1 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness1,
+    cloud: conn1,
+    clock: makeClock(1_000),
+    operator,
+  });
+  await runner1.start();
+  await cloud.waitForReplies(1);
+  assert.deepEqual(await runner1.stop(), { reason: "stopped" });
+
+  assert.equal(conn1.calls.includes("markSeen"), false);
+  assert.equal(cloud.seen.length, 0);
+  assert.equal(cloud.getMessage("m-1")?.seen, false);
+  const firstLease = cloud.getMessage("m-1")?.leaseId;
+  assert.ok(firstLease);
+  assert.equal(cloud.replies.length, 1);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("m-1"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, TURN_FAILED_REPLY);
+
+  // Server reclaims unacked lease on new session and redelivers m-1; engine acknowledges it and does not run it.
+  cloud.newSession();
+  const harness2 = new FakeHarness({ autoReply: true });
+  const runner2 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness2,
+    cloud: cloud.connect(),
+    clock: makeClock(2_000),
+  });
+  await runner2.start();
+  await cloud.waitForSeen("m-1");
+  cloud.enqueue({ id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") });
+  await cloud.waitForReplies(2);
+  assert.deepEqual(await runner2.stop(), { reason: "stopped" });
+
+  assert.deepEqual(harness2.started, ["msg-2"]);
+  assert.equal(cloud.getMessage("m-1")?.seen, true);
+  assert.notEqual(cloud.getMessage("m-1")?.seenLeaseId, firstLease);
+  assert.equal(cloud.replies.length, 2);
+  assert.equal(cloud.replies[1].body, "reply:msg-2");
+  assert.equal(cloud.replies[1].status, "answered");
+  assert.equal(cloud.protocolErrors.length, 0);
+});
+
+test("16. crash after turn_started is journaled and before handover: recovers interrupted once and does not run", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
+
+  const conn1 = cloud.connect();
+  const harness1 = new FakeHarness({ autoReply: false, autoHandover: false });
+  const runner1 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness1,
+    cloud: conn1,
+    clock: makeClock(1_000),
+  });
+  await runner1.start();
+  await harness1.waitForTurn(0);
+
+  // turn_started is durably journaled, handover never happened, and m-1 is not seen.
+  const midJournal = await Journal.open(journalPath);
+  assert.deepEqual(
+    midJournal.records.map((r) => r.type),
+    ["message_accepted", "turn_started"],
+  );
+  await midJournal.close();
+  assert.equal(conn1.calls.includes("markSeen"), false);
+  assert.equal(cloud.getMessage("m-1")?.seen, false);
+  const firstLease = cloud.getMessage("m-1")?.leaseId;
+  assert.ok(firstLease);
+  conn1.disconnect();
+  // Abandon runner1 without calling stop().
+
+  cloud.newSession();
+  const harness2 = new FakeHarness({ autoReply: true });
+  const runner2 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness2,
+    cloud: cloud.connect(),
+    clock: makeClock(2_000),
+  });
+  await runner2.start();
+  await cloud.waitForSeen("m-1");
+  await cloud.waitForReplies(1);
+  assert.deepEqual(await runner2.stop(), { reason: "stopped" });
+
+  // A second restart must not post a duplicate interrupted reply.
+  cloud.newSession();
+  const harness3 = new FakeHarness({ autoReply: true });
+  const runner3 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness3,
+    cloud: cloud.connect(),
+    clock: makeClock(3_000),
+  });
+  await runner3.start();
+  cloud.enqueue({ id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") });
+  await cloud.waitForReplies(2);
+  assert.deepEqual(await runner3.stop(), { reason: "stopped" });
+
+  assert.deepEqual(harness2.started, []);
+  assert.deepEqual(harness3.started, ["msg-2"]);
+  assert.equal(cloud.getMessage("m-1")?.seen, true);
+  assert.notEqual(cloud.getMessage("m-1")?.seenLeaseId, firstLease);
+  assert.equal(cloud.replies.length, 2);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("m-1"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, RESTART_INTERRUPTED_REPLY);
+  assert.deepEqual(cloud.replies[1].replyTarget, privateTarget("m-2"));
+  assert.equal(cloud.replies[1].status, "answered");
+  assert.equal(cloud.replies[1].body, "reply:msg-2");
+  assert.equal(cloud.protocolErrors.length, 0);
 });
