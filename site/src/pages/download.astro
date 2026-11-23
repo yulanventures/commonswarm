@@ -1,11 +1,11 @@
 ---
 /*
- * /download — the install page.
+ * /download — the download page (Mac app first, then cswarm terminal install, then all builds).
  *
- * ONE CONSTANT, TWO CONSUMERS. INSTALL_CMD is declared here and passed down, because the
- * string that is DISPLAYED and the string that is COPIED must be the same object. SITE-BRIEF
- * calls this out as load-bearing: a command block and the promise around it drift apart the
- * moment they live in two files.
+ * ONE CONSTANT, TWO CONSUMERS. INSTALL_CMD is declared in src/lib/install.ts and passed down,
+ * because the string that is DISPLAYED and the string that is COPIED must be the same object.
+ * SITE-BRIEF calls this out as load-bearing: a command block and the promise around it drift
+ * apart the moment they live in two files.
  *
  * THE HOST IS REAL AND THE COMMAND RESOLVES. It did not always: this page shipped showing
  * install.sh's own documentation placeholder, `curl -fsSL https://<host>/install.sh | sh`,
@@ -18,54 +18,215 @@
  * answers 200 and installs as root. One constant, one place, verified against the deployed
  * site.
  *
+ * MAC APP URLS DERIVE FROM DESKTOP_VERSION. src/lib/release.ts reads desktop/package.json
+ * and composes the Apple silicon and Intel .dmg URLs under the desktop-v<version> release tag.
+ * Do not hand-write desktop version numbers or download URLs here.
+ *
  * FOOTER. This page used to ship its own (PageFoot.astro), written to avoid the then-shared
  * Footer.astro whose nav was a list of landing-page hashes that pointed at nothing from
  * /download. That reason is gone: SiteFooter's Product column is now real routes, so the
  * page passes no footer at all and takes Base's default. PageFoot is deleted — it also
  * claimed the repository is "private during dogfood", which is no longer true.
  *
- * ============================ THE SECTION ORDER IS THE FUNNEL ============================
- * It changed this pass, and the old one is worth naming because it looked reasonable:
+ * PAGE ORDER:
+ *     Download CommonSwarm  ->  Mac  ->  Terminal (install -> after -> what happens -> other ways)  ->  All builds
  *
- *     install  ->  what happens on your machine  ->  other ways in  ->  once it's installed
- *
- * That put both of the page's reference sections — 6 walkthrough steps and 4 alternative
- * install routes, roughly two screens — BETWEEN the command someone just copied and the
- * command they run next. Someone who has installed the thing and is looking for step two
- * scrolls past the transparency argument they no longer need and a card explaining that
- * there is no npm package. The one section that moves a reader FORWARD was last on the page.
- *
- *     install  ->  once it's installed  ->  what happens on your machine  ->  other ways in
- *
- * The funnel is now complete in the first two sections — copy the command, then the two
- * commands that follow it — and the reference material sits under it for the two readers who
- * want it: the one who has not pasted yet and wants to know what the script does, and the one
- * who does not want a one-liner at all. Neither of them is mid-install.
- *
- * The suspicious reader is not left unserved by the demotion: the "what happens" section is
- * one anchor away — see the link under the copy button in InstallPanel.astro, which is what
- * pays for this order.
+ * Inside the Terminal flow, the funnel still completes immediately — copy the command, then
+ * what to run next, with the transparency walkthrough and alternative routes below.
  */
 
 import Base from "../layouts/Base.astro";
+import Button from "../components/ui/Button.astro";
 import InstallPanel from "../components/download/InstallPanel.astro";
 import WhatHappens from "../components/download/WhatHappens.astro";
 import OtherWays from "../components/download/OtherWays.astro";
 import AfterInstall from "../components/download/AfterInstall.astro";
 import { INSTALL_CMD } from "../lib/install.ts";
+import {
+  DESKTOP_MAC_ARM64_URL,
+  DESKTOP_MAC_X64_URL,
+  DESKTOP_VERSION,
+  RELEASES_URL,
+} from "../lib/release.ts";
 
 /* The single source of truth for the install command, character for character.
    It lives in src/lib/install.ts because six files used to spell the host out
    themselves and the site shipped with `<host>` in the one command a stranger
    was invited to run. */
 
-const title = "Install the cswarm CLI";
-const description = "Install cswarm for an agent that runs on your computer. Follow the setup steps for your system.";
+const title = "Download CommonSwarm";
+const description =
+  "Download the CommonSwarm Mac app or install the cswarm command-line tool.";
 ---
 
 <Base title={title} description={description} path="/download">
+  <header class="dl-head">
+    <div class="page dl-head__inner">
+      <h1 class="h-display dl-head__h">Download CommonSwarm</h1>
+    </div>
+  </header>
+
+  <section class="dl-mac" id="mac" aria-labelledby="dl-mac-title">
+    <div class="page dl-mac__inner">
+      <div class="dl-mac__card">
+        <h2 class="dl-mac__h" id="dl-mac-title">Mac</h2>
+        <div class="dl-mac__cta">
+          <Button variant="primary" size="lg" href={DESKTOP_MAC_ARM64_URL} class="dl-mac__btn">
+            <span class="dl-mac__btn-main">Download for Mac</span>
+            <span class="dl-mac__btn-sub">Apple silicon · v{DESKTOP_VERSION}</span>
+          </Button>
+        </div>
+        <p class="dl-mac__intel">
+          On an Intel Mac? <a href={DESKTOP_MAC_X64_URL}>Download the Intel build.</a>
+        </p>
+        <p class="dl-mac__note">
+          This preview is not yet verified by Apple: after opening it once, allow it under System
+          Settings &gt; Privacy &amp; Security.
+        </p>
+      </div>
+    </div>
+  </section>
+
   <InstallPanel cmd={INSTALL_CMD} />
   <AfterInstall />
   <WhatHappens />
   <OtherWays cmd={INSTALL_CMD} />
+
+  <section class="dl-releases" aria-label="All builds">
+    <div class="page dl-releases__inner">
+      <p class="dl-releases__line">
+        All builds are on the <a href={RELEASES_URL}>GitHub releases page</a>.
+      </p>
+    </div>
+  </section>
 </Base>
+
+<style>
+  .dl-head {
+    padding-block: clamp(var(--s-12), 7vw, var(--s-20)) var(--s-8);
+  }
+
+  .dl-head__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .dl-head__h {
+    margin: 0;
+  }
+
+  .dl-mac {
+    padding-block: 0 var(--s-8);
+  }
+
+  .dl-mac__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .dl-mac__card {
+    width: 100%;
+    max-width: 46rem;
+    padding: var(--pad-card-lg);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+  }
+
+  .dl-mac__h {
+    margin: 0 0 var(--s-5);
+    color: var(--text);
+    font-size: var(--t-2xl);
+    line-height: var(--lh-2xl);
+    letter-spacing: var(--track-head);
+    font-weight: var(--weight-head);
+  }
+
+  .dl-mac__cta {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .dl-mac__cta :global(.dl-mac__btn) {
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 3.75rem;
+    padding: 0.85rem 1.75rem;
+    white-space: normal;
+    text-align: center;
+  }
+
+  .dl-mac__btn-main {
+    font-size: var(--t-base);
+    font-weight: var(--weight-semibold);
+    line-height: 1.2;
+  }
+
+  .dl-mac__btn-sub {
+    font-size: var(--t-xs);
+    font-weight: var(--weight-regular);
+    line-height: 1.2;
+    color: inherit;
+  }
+
+  .dl-mac__intel {
+    margin: var(--s-4) 0 0;
+    font-size: var(--t-sm);
+    line-height: var(--lh-base);
+    color: var(--text-muted);
+  }
+
+  .dl-mac__intel a,
+  .dl-releases__line a {
+    color: var(--text);
+    font-weight: var(--weight-medium);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--dur-2) var(--ease-standard);
+  }
+
+  .dl-mac__intel a:hover,
+  .dl-releases__line a:hover {
+    text-decoration-color: currentColor;
+  }
+
+  .dl-mac__note {
+    margin: var(--s-4) 0 0;
+    font-size: var(--t-sm);
+    line-height: var(--lh-base);
+    color: var(--text-muted);
+    max-inline-size: 62ch;
+  }
+
+  .dl-releases {
+    padding-block: 0 var(--s-16);
+  }
+
+  .dl-releases__inner {
+    display: flex;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .dl-releases__line {
+    margin: 0;
+    font-size: var(--t-sm);
+    line-height: var(--lh-base);
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 40rem) {
+    .dl-mac__card {
+      padding: var(--s-5);
+    }
+
+    .dl-mac__cta :global(.dl-mac__btn) {
+      width: 100%;
+    }
+  }
+</style>
