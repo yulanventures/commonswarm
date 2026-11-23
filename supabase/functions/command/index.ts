@@ -16351,7 +16351,7 @@ class LocalAuditedRefused extends Error {
   }
 }
 class LocalCommandRefused extends Error {
-  constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
+  constructor(readonly result: HttpResult, readonly audit: Audit | null = null) { super('Local credential operation refused'); }
 }
 
 async function handleTransaction(
@@ -16368,12 +16368,14 @@ async function handleTransaction(
   let recoverSavedPending = false;
   let localCredentialDenied = false;
   let renewalSupersededAlert: { workspaceId: string; principalId: string } | null = null;
+  let refusedAudit: Audit | null = null;
   const timer = new CommandTimer();
   const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
     timer.attempt();
     recoverSavedPending = false;
     localCredentialDenied = false;
     renewalSupersededAlert = null;
+    refusedAudit = null;
     const captureRenewalSuperseded = (workspaceId: string, principalId: string) => {
       renewalSupersededAlert = { workspaceId, principalId };
     };
@@ -18036,8 +18038,9 @@ async function handleTransaction(
       if (viewer === null) {
         return { status: 403, body: { error: "forbidden" } };
       }
+      const dismissalCmd = command as WaitingDismissalCommand;
       const outcome = await applyWaitingDismissalCommand(
-        tx, route.workspaceId, viewer, command as WaitingDismissalCommand,
+        tx, route.workspaceId, viewer, dismissalCmd,
       );
       if (!outcome.ok) {
         await insertAudit(tx, {
@@ -18075,6 +18078,28 @@ async function handleTransaction(
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash,
       });
+      // C1: Re-verify live item eligibility after the final fresh-write wait (receipt + audit).
+      // On refusal, throw LocalCommandRefused to roll back the dismissal mutation, receipt, and
+      // accepted audit row, then record the refusal audit outside the rolled-back transaction.
+      const finalRefusal = await reauthorizeWaitingDismissalReplay(
+        tx,
+        route.workspaceId,
+        viewer,
+        dismissalCmd.item_kind,
+        dismissalCmd.item_id,
+      );
+      if (finalRefusal !== null) {
+        throw new LocalCommandRefused(finalRefusal, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: "authz",
+          reason: "waiting_item_not_found",
+          detail: ignoredIdentity,
+          hash,
+        });
+      }
       return { status: 200, body: { status: "accepted", ...response } };
     }
 
@@ -20357,7 +20382,10 @@ async function handleTransaction(
     if (error instanceof LocalCredentialDenied) return error.credentialInvalid
       ? {status:401,body:{error:'unauthenticated'}}
       : {status:403,body:{error:'forbidden'}};
-    if (error instanceof LocalCommandRefused) return error.result;
+    if (error instanceof LocalCommandRefused) {
+      refusedAudit = error.audit;
+      return error.result;
+    }
     if (error instanceof HouseholdContentServiceUpdating) {
       return { status: 503, headers: { "retry-after": "1" }, body: HouseholdContentServiceUpdating.body };
     }
@@ -20367,6 +20395,14 @@ async function handleTransaction(
   const slow = slowCommandLine({ commandKind: kind, knownKinds: SLOW_LOG_COMMAND_KINDS, timer, status: response.status,
     requestId: commandRequestIds.get(body) ?? crypto.randomUUID() });
   if (slow !== null) console.log(slow);
+  if (refusedAudit !== null) {
+    const auditToRecord = refusedAudit;
+    try {
+      await withBestEffortAlertTransaction((auditTx) => insertAudit(auditTx, auditToRecord));
+    } catch (auditError) {
+      console.error("rolled_back_refusal_audit_failed", safeError(auditError));
+    }
+  }
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
     await reportRevokedLocalCredential(withBestEffortAlertTransaction, agentTokenHash);

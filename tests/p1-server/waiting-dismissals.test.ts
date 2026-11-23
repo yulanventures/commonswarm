@@ -1039,3 +1039,281 @@ test("served command edge: C1/C2 replay reauthorization, uniform 404, audit priv
     }
   }
 });
+
+test("served command edge: C1 audit-insert wait revocation rolls back dismissal/restore and receipt for private-channel and DM access loss", async () => {
+  const outsideOwner = await createUser("wd-audit-owner");
+  const outsideAdmin = await createUser("wd-audit-admin");
+  const member = await createUser("wd-audit-member");
+  const peer = await createUser("wd-audit-peer");
+  const wsId = randomUUID();
+  const privChDismissId = randomUUID();
+  const privConvDismissId = randomUUID();
+  const privChRestoreId = randomUUID();
+  const privConvRestoreId = randomUUID();
+  const dmConvId = randomUUID();
+  const privDismissAskId = randomUUID();
+  const dmDismissAskId = randomUUID();
+  const privRestoreAskId = randomUUID();
+
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES
+        (${outsideOwner.id}::uuid, 'AuditOwner'),
+        (${outsideAdmin.id}::uuid, 'AuditAdmin'),
+        (${member.id}::uuid, 'AuditMember'),
+        (${peer.id}::uuid, 'AuditPeer')
+    `;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${wsId}::uuid, 'AuditWaitDismissWS', ${outsideOwner.id}::uuid)`;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES
+        (${wsId}::uuid, ${outsideOwner.id}::uuid, 'owner'),
+        (${wsId}::uuid, ${outsideAdmin.id}::uuid, 'admin'),
+        (${wsId}::uuid, ${member.id}::uuid, 'member'),
+        (${wsId}::uuid, ${peer.id}::uuid, 'member')
+    `;
+    await tx`
+      INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
+      VALUES
+        (${privChDismissId}::uuid, ${wsId}::uuid, 'audit-priv-dismiss', 'private', ${member.id}::uuid, 'user'),
+        (${privChRestoreId}::uuid, ${wsId}::uuid, 'audit-priv-restore', 'private', ${member.id}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
+      VALUES
+        (${privChDismissId}::uuid, ${wsId}::uuid, 'user', ${member.id}::uuid, ${member.id}::uuid, 'user'),
+        (${privChDismissId}::uuid, ${wsId}::uuid, 'user', ${peer.id}::uuid, ${member.id}::uuid, 'user'),
+        (${privChRestoreId}::uuid, ${wsId}::uuid, 'user', ${member.id}::uuid, ${member.id}::uuid, 'user'),
+        (${privChRestoreId}::uuid, ${wsId}::uuid, 'user', ${peer.id}::uuid, ${member.id}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
+      VALUES
+        (${privConvDismissId}::uuid, ${wsId}::uuid, 'private_channel', ${privChDismissId}::uuid, 'user', ${member.id}::uuid),
+        (${privConvRestoreId}::uuid, ${wsId}::uuid, 'private_channel', ${privChRestoreId}::uuid, 'user', ${member.id}::uuid),
+        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${peer.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
+      VALUES
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${member.id}::uuid),
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${peer.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
+      VALUES
+        (${privDismissAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Audit-wait private dismiss ask?', ${privChDismissId}::uuid, '9999-12-31T23:59:59Z'),
+        (${privRestoreAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Audit-wait private restore ask?', ${privChRestoreId}::uuid, '9999-12-31T23:59:59Z'),
+        (${dmDismissAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Audit-wait DM dismiss ask?', NULL, '9999-12-31T23:59:59Z')
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
+      VALUES
+        (${wsId}::uuid, ${privConvDismissId}::uuid, ${privDismissAskId}::uuid, 'conversation'),
+        (${wsId}::uuid, ${privConvRestoreId}::uuid, ${privRestoreAskId}::uuid, 'conversation'),
+        (${wsId}::uuid, ${dmConvId}::uuid, ${dmDismissAskId}::uuid, 'conversation')
+    `;
+  });
+
+  const runHeldAtAuditInsert = async (
+    command: Row,
+    commandId: string,
+    revokeAccess: () => Promise<void>,
+  ): Promise<{ status: number; body: Row }> => {
+    let lockAcquired!: () => void;
+    let releaseLock!: () => void;
+    const lockReady = new Promise<void>((resolve) => { lockAcquired = resolve; });
+    const waitToRelease = new Promise<void>((resolve) => { releaseLock = resolve; });
+
+    // EXCLUSIVE MODE on swarm.audit_log blocks the fresh command's final INSERT INTO swarm.audit_log
+    // (which requires ROW EXCLUSIVE) AFTER both the SQL dismissal write AND the idempotency_keys
+    // receipt INSERT have already executed in that transaction, without blocking membership revokes.
+    const lockHolder = sql.begin(async (tx) => {
+      await tx`LOCK TABLE swarm.audit_log IN EXCLUSIVE MODE`;
+      lockAcquired();
+      await waitToRelease;
+    });
+
+    await lockReady;
+    const pendingResp = sendCommand(member.jwt, wsId, command, commandId);
+
+    let sawAuditWaiter = false;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const waiters = await sql<{ cnt: string }[]>`
+        SELECT count(*)::text AS cnt
+        FROM pg_locks
+        WHERE relation = 'swarm.audit_log'::regclass
+          AND NOT granted
+      `;
+      if (Number(waiters[0]!.cnt) > 0) {
+        sawAuditWaiter = true;
+        break;
+      }
+      await delay(25);
+    }
+    assert.equal(sawAuditWaiter, true, "command transaction must reach and wait on the audit_log INSERT");
+
+    await revokeAccess();
+    releaseLock();
+    await lockHolder;
+    return await pendingResp;
+  };
+
+  try {
+    const unknownResp = await sendCommand(outsideOwner.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: randomUUID(),
+    });
+    assert.equal(unknownResp.status, 404);
+
+    // 1. Private-channel access retired while fresh dismiss waits on audit_log INSERT.
+    const privDismissCmdId = randomUUID();
+    const privDismissResp = await runHeldAtAuditInsert(
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: privDismissAskId },
+      privDismissCmdId,
+      async () => {
+        await sql`
+          DELETE FROM swarm.channel_members
+          WHERE workspace_id = ${wsId}::uuid AND channel_id = ${privChDismissId}::uuid AND user_id = ${member.id}::uuid
+        `;
+      },
+    );
+    assert.deepEqual(privDismissResp, unknownResp, "private-channel loss during audit wait must return uniform 404");
+
+    const [privActiveRow] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.waiting_dismissals
+      WHERE workspace_id = ${wsId}::uuid
+        AND user_id = ${member.id}::uuid
+        AND item_kind = 'ask'
+        AND item_id = ${privDismissAskId}::uuid
+        AND restored_at IS NULL
+    `;
+    assert.equal(Number(privActiveRow!.cnt), 0, "rolled-back private-channel dismiss must leave zero active dismissal rows");
+
+    const [privReceipt] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.idempotency_keys
+      WHERE workspace_id = ${wsId}::uuid AND command_id = ${privDismissCmdId}
+    `;
+    assert.equal(Number(privReceipt!.cnt), 0, "rolled-back private-channel dismiss must leave zero accepted receipts");
+
+    // 2. DM membership retired while fresh dismiss waits on audit_log INSERT.
+    const dmDismissCmdId = randomUUID();
+    const dmDismissResp = await runHeldAtAuditInsert(
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: dmDismissAskId },
+      dmDismissCmdId,
+      async () => {
+        await sql`
+          UPDATE swarm.conversation_members
+          SET left_at = now()
+          WHERE workspace_id = ${wsId}::uuid AND conversation_id = ${dmConvId}::uuid AND member_user_id = ${member.id}::uuid
+        `;
+      },
+    );
+    assert.deepEqual(dmDismissResp, unknownResp, "DM loss during audit wait must return uniform 404");
+
+    const [dmActiveRow] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.waiting_dismissals
+      WHERE workspace_id = ${wsId}::uuid
+        AND user_id = ${member.id}::uuid
+        AND item_kind = 'ask'
+        AND item_id = ${dmDismissAskId}::uuid
+        AND restored_at IS NULL
+    `;
+    assert.equal(Number(dmActiveRow!.cnt), 0, "rolled-back DM dismiss must leave zero active dismissal rows");
+
+    const [dmReceipt] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.idempotency_keys
+      WHERE workspace_id = ${wsId}::uuid AND command_id = ${dmDismissCmdId}
+    `;
+    assert.equal(Number(dmReceipt!.cnt), 0, "rolled-back DM dismiss must leave zero accepted receipts");
+
+    // 3. Private-channel access retired while fresh restore waits on audit_log INSERT.
+    const seedDismiss = await sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: privRestoreAskId,
+    });
+    assert.equal(seedDismiss.status, 200);
+
+    const privRestoreCmdId = randomUUID();
+    const privRestoreResp = await runHeldAtAuditInsert(
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: privRestoreAskId },
+      privRestoreCmdId,
+      async () => {
+        await sql`
+          DELETE FROM swarm.channel_members
+          WHERE workspace_id = ${wsId}::uuid AND channel_id = ${privChRestoreId}::uuid AND user_id = ${member.id}::uuid
+        `;
+      },
+    );
+    assert.deepEqual(privRestoreResp, unknownResp, "private-channel loss during restore audit wait must return uniform 404");
+
+    const [stillDismissedRow] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.waiting_dismissals
+      WHERE workspace_id = ${wsId}::uuid
+        AND user_id = ${member.id}::uuid
+        AND item_kind = 'ask'
+        AND item_id = ${privRestoreAskId}::uuid
+        AND restored_at IS NULL
+    `;
+    assert.equal(Number(stillDismissedRow!.cnt), 1, "rolled-back restore must leave the dismissal row unchanged");
+
+    const [restoreReceipt] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.idempotency_keys
+      WHERE workspace_id = ${wsId}::uuid AND command_id = ${privRestoreCmdId}
+    `;
+    assert.equal(Number(restoreReceipt!.cnt), 0, "rolled-back restore must leave zero accepted receipts");
+
+    // 4. Internal audit has refusal rows (and only the 1 pre-seeded accepted dismiss), while
+    //    swarm_read.audit_log exposes ZERO dismissal/restore rows to outside owner or admin.
+    const [acceptedAuditCount] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid
+        AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+        AND outcome = 'accepted'
+    `;
+    assert.equal(Number(acceptedAuditCount!.cnt), 1, "rolled-back attempts must not commit accepted audit rows");
+
+    const [refusalAuditCount] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid
+        AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+        AND outcome = 'authz'
+        AND reason = 'waiting_item_not_found'
+    `;
+    assert.ok(Number(refusalAuditCount!.cnt) >= 4, "internal audit must record rolled-back refusal rows");
+
+    for (const auditor of [outsideOwner, outsideAdmin]) {
+      const visible = await sql.begin(async (tx) => {
+        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: auditor.id })}, true)`;
+        await tx`SET LOCAL ROLE authenticated`;
+        return tx<{ command_kind: string }[]>`
+          SELECT command_kind
+          FROM swarm_read.audit_log
+          WHERE workspace_id = ${wsId}::uuid
+            AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+        `;
+      });
+      assert.equal(visible.length, 0, "rolled-back dismissal refusals must remain out of swarm_read.audit_log");
+    }
+  } finally {
+    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
+    await sql`
+      DELETE FROM swarm.users
+      WHERE user_id IN (${outsideOwner.id}::uuid, ${outsideAdmin.id}::uuid, ${member.id}::uuid, ${peer.id}::uuid)
+    `;
+    for (const u of [outsideOwner, outsideAdmin, member, peer]) {
+      await admin.auth.admin.deleteUser(u.id);
+    }
+  }
+});

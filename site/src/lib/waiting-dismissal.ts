@@ -65,13 +65,25 @@ interface ArchivedRestoreEntry {
 export type WaitingAccessLossEvent =
   | { kind: "conversation"; workspaceId: string; conversationId: string; channelId: string | null }
   | { kind: "channel"; workspaceId: string; channelId: string }
-  | { kind: "workspace"; workspaceId: string }
+  | { kind: "workspace"; workspaceId: string; fromWaitingRefresh?: boolean }
   | { kind: "all" };
 
 export interface WaitingDismissalPorts {
-  sendDismiss: (workspaceId: string, itemKind: WaitingDismissalItemKind, itemId: string) => Promise<WaitingDismissalResult>;
-  sendRestore: (workspaceId: string, itemKind: WaitingDismissalItemKind, itemId: string) => Promise<WaitingDismissalResult>;
-  resolveReviewOfferId?: (workspaceId: string, todoId: string) => Promise<string | null>;
+  sendDismiss: (
+    workspaceId: string,
+    itemKind: WaitingDismissalItemKind,
+    itemId: string,
+    isAlive?: () => boolean,
+  ) => Promise<WaitingDismissalResult>;
+  sendRestore: (
+    workspaceId: string,
+    itemKind: WaitingDismissalItemKind,
+    itemId: string,
+    isAlive?: () => boolean,
+  ) => Promise<WaitingDismissalResult>;
+  resolveReviewOfferId?: (workspaceId: string, todoId: string, isAlive?: () => boolean) => Promise<string | null>;
+  /** Optional snapshot of the caller's account/auth lifetime captured at the moment the person acts. */
+  captureAccountGuard?: () => () => boolean;
   isAlive: () => boolean;
   removeCardFromClient: (target: WaitingDismissTarget) => void;
   onRetireAccessLoss?: (event: WaitingAccessLossEvent) => void;
@@ -88,6 +100,7 @@ export interface WaitingDismissalPorts {
 
 export interface WaitingDismissalController {
   accessGeneration(): number;
+  workspaceAccessGeneration(workspaceId: string): number;
   has(key: string): boolean;
   pendingDismissCardIds(workspaceId: string): Set<string>;
   placeholdersFor(placeKey: string, scope: WaitingScope): WaitingDismissedPlaceholder[];
@@ -98,12 +111,16 @@ export interface WaitingDismissalController {
   restoreArchived(item: WaitingArchivedItem): Promise<void>;
   retireForConversation(workspaceId: string, conversationId: string, channelId?: string | null): boolean;
   retireForChannel(workspaceId: string, channelId: string): boolean;
-  retireForWorkspace(workspaceId: string): boolean;
+  retireForWorkspace(workspaceId: string, options?: { fromWaitingRefresh?: boolean }): boolean;
   retireAll(notify?: boolean): void;
 }
 
+function normId(id: string): string {
+  return id.trim().toLowerCase();
+}
+
 function sameId(a: string | null | undefined, b: string | null | undefined): boolean {
-  return Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
+  return Boolean(a && b && normId(a) === normId(b));
 }
 
 function isNotFoundResult(result: WaitingDismissalResult): boolean {
@@ -112,6 +129,11 @@ function isNotFoundResult(result: WaitingDismissalResult): boolean {
 
 export function createWaitingDismissalController(ports: WaitingDismissalPorts): WaitingDismissalController {
   let accessGen = 0;
+  let globalGen = 0;
+  const workspaceGens = new Map<string, number>();
+  const workspaceAnyLossGens = new Map<string, number>();
+  const channelGens = new Map<string, number>();
+  const conversationGens = new Map<string, number>();
   const rows = new Map<string, WaitingDismissRow>();
   const archivedRestoring = new Map<string, ArchivedRestoreEntry>();
   let surveyDismissedKey: string | null = null;
@@ -121,12 +143,57 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     if (surveyDismissedKey === key) surveyDismissedKey = null;
   };
 
+  const createActionAlive = (
+    workspaceId: string,
+    channelId: string | null,
+    conversationId: string | null,
+    wildcardPlacement: boolean,
+    entryAlive: () => boolean,
+  ): (() => boolean) => {
+    const accountAlive = ports.captureAccountGuard ? ports.captureAccountGuard() : ports.isAlive;
+    const normWs = normId(workspaceId);
+    const chKey = channelId ? `${normWs}:${normId(channelId)}` : null;
+    const convKey = conversationId ? `${normWs}:${normId(conversationId)}` : null;
+    const capturedGlobalGen = globalGen;
+    const capturedWsGen = workspaceGens.get(normWs) ?? 0;
+    const capturedChGen = chKey !== null ? (channelGens.get(chKey) ?? 0) : null;
+    const capturedConvGen = convKey !== null ? (conversationGens.get(convKey) ?? 0) : null;
+    const capturedAnyLossGen = wildcardPlacement ? (workspaceAnyLossGens.get(normWs) ?? 0) : null;
+    return (): boolean =>
+      ports.isAlive() &&
+      accountAlive() &&
+      entryAlive() &&
+      globalGen === capturedGlobalGen &&
+      (workspaceGens.get(normWs) ?? 0) === capturedWsGen &&
+      (capturedChGen === null || (channelGens.get(chKey!) ?? 0) === capturedChGen) &&
+      (capturedConvGen === null || (conversationGens.get(convKey!) ?? 0) === capturedConvGen) &&
+      (capturedAnyLossGen === null || (workspaceAnyLossGens.get(normWs) ?? 0) === capturedAnyLossGen);
+  };
+
   const retireMatching = (
     predicate: (row: WaitingDismissRow) => boolean,
     archivedPredicate: (entry: ArchivedRestoreEntry) => boolean,
     event: WaitingAccessLossEvent,
   ): boolean => {
     accessGen += 1;
+    if (event.kind === "workspace") {
+      const normWs = normId(event.workspaceId);
+      workspaceGens.set(normWs, accessGen);
+      workspaceAnyLossGens.set(normWs, accessGen);
+    } else if (event.kind === "channel") {
+      const normWs = normId(event.workspaceId);
+      workspaceAnyLossGens.set(normWs, accessGen);
+      channelGens.set(`${normWs}:${normId(event.channelId)}`, accessGen);
+    } else if (event.kind === "conversation") {
+      const normWs = normId(event.workspaceId);
+      const normConv = normId(event.conversationId);
+      workspaceAnyLossGens.set(normWs, accessGen);
+      conversationGens.set(`${normWs}:${normConv}`, accessGen);
+      channelGens.set(`${normWs}:${normConv}`, accessGen);
+      if (event.channelId !== null) {
+        channelGens.set(`${normWs}:${normId(event.channelId)}`, accessGen);
+      }
+    }
     let changed = false;
     for (const [key, row] of rows.entries()) {
       if (predicate(row)) {
@@ -149,6 +216,8 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
   return {
     accessGeneration: () => accessGen,
+    workspaceAccessGeneration: (workspaceId: string) =>
+      Math.max(globalGen, workspaceAnyLossGens.get(normId(workspaceId)) ?? 0),
     has: (key) => rows.has(key),
 
     pendingDismissCardIds(workspaceId: string): Set<string> {
@@ -221,7 +290,13 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.render();
       ports.onDismissedRendered?.(key);
 
-      const alive = (): boolean => ports.isAlive() && !row.retired;
+      const alive = createActionAlive(
+        target.workspaceId,
+        target.channelId,
+        target.conversationId,
+        target.placementKind === "unknown",
+        () => !row.retired,
+      );
 
       const runDismiss = async (): Promise<boolean> => {
         let resolvedItemId = row.itemId;
@@ -234,7 +309,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
             return false;
           }
           try {
-            const offerId = await ports.resolveReviewOfferId(target.workspaceId, target.cardId);
+            const offerId = await ports.resolveReviewOfferId(target.workspaceId, target.cardId, alive);
             if (!alive()) return false;
             if (!offerId) {
               deleteRow(key);
@@ -255,9 +330,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           row.itemId = resolvedItemId;
         }
 
+        if (!alive()) return false;
         let result: WaitingDismissalResult;
         try {
-          result = await ports.sendDismiss(target.workspaceId, target.itemKind, resolvedItemId);
+          result = await ports.sendDismiss(target.workspaceId, target.itemKind, resolvedItemId, alive);
         } catch {
           result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
         }
@@ -293,14 +369,20 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       row.pendingUndo = true;
       ports.render();
 
-      const alive = (): boolean => ports.isAlive() && !row.retired;
+      const alive = createActionAlive(
+        row.workspaceId,
+        row.channelId,
+        row.conversationId,
+        row.placementKind === "unknown",
+        () => !row.retired,
+      );
 
       const dismissSucceeded = row.inFlightDismiss ? await row.inFlightDismiss : row.dismissResolved;
       if (!alive() || !dismissSucceeded || !row.itemId) return;
 
       let result: WaitingDismissalResult;
       try {
-        result = await ports.sendRestore(row.workspaceId, row.itemKind, row.itemId);
+        result = await ports.sendRestore(row.workspaceId, row.itemKind, row.itemId, alive);
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
@@ -333,13 +415,21 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.clearArchivedError(item.itemKey);
       ports.render();
 
+      const alive = createActionAlive(
+        item.workspaceId,
+        item.channelId ?? null,
+        item.conversationId ?? null,
+        item.placement === "redacted",
+        () => !entry.retired,
+      );
+
       let result: WaitingDismissalResult;
       try {
-        result = await ports.sendRestore(item.workspaceId, item.kind, item.id);
+        result = await ports.sendRestore(item.workspaceId, item.kind, item.id, alive);
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
-      if (!ports.isAlive() || entry.retired) return;
+      if (!alive()) return;
 
       archivedRestoring.delete(item.itemKey);
       if (!result.ok && !isNotFoundResult(result)) {
@@ -355,11 +445,13 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         (row) =>
           sameId(row.workspaceId, workspaceId) &&
           (sameId(row.conversationId, conversationId) ||
+            sameId(row.channelId, conversationId) ||
             (channelId !== null && sameId(row.channelId, channelId)) ||
             row.placementKind === "unknown"),
         (entry) =>
           sameId(entry.workspaceId, workspaceId) &&
           (sameId(entry.conversationId, conversationId) ||
+            sameId(entry.channelId, conversationId) ||
             (channelId !== null && sameId(entry.channelId, channelId)) ||
             entry.placement === "redacted"),
         { kind: "conversation", workspaceId, conversationId, channelId },
@@ -378,16 +470,17 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       );
     },
 
-    retireForWorkspace(workspaceId: string): boolean {
+    retireForWorkspace(workspaceId: string, options?: { fromWaitingRefresh?: boolean }): boolean {
       return retireMatching(
         (row) => sameId(row.workspaceId, workspaceId),
         (entry) => sameId(entry.workspaceId, workspaceId),
-        { kind: "workspace", workspaceId },
+        { kind: "workspace", workspaceId, ...(options?.fromWaitingRefresh ? { fromWaitingRefresh: true } : {}) },
       );
     },
 
     retireAll(notify = false): void {
       accessGen += 1;
+      globalGen = accessGen;
       for (const row of rows.values()) row.retired = true;
       rows.clear();
       surveyDismissedKey = null;

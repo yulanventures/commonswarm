@@ -2155,3 +2155,66 @@ test("C3 dismissal controller: Undo reloads without inserting a saved card; acce
   assert.equal(cardErrors.has(genAsk.id), false, "404 dismiss reloads with no error");
   assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null);
 });
+
+test("waiting-dismissal controller (C3): passes scoped action lifetime guard to send ports and bumps workspaceAccessGeneration", async () => {
+  const capturedGuards = [];
+  let pendingResolve = null;
+  const ctrl = createWaitingDismissalController({
+    sendDismiss: (_ws, _kind, _id, isAlive) => {
+      capturedGuards.push({ op: "dismiss", isAlive });
+      return new Promise(resolve => { pendingResolve = resolve; });
+    },
+    sendRestore: (_ws, _kind, _id, isAlive) => {
+      capturedGuards.push({ op: "restore", isAlive });
+      return new Promise(resolve => { pendingResolve = resolve; });
+    },
+    isAlive: () => true,
+    removeCardFromClient: () => {},
+    reloadWaiting: () => {},
+    invalidateArchived: () => {},
+    setCardError: () => {},
+    setStatusError: () => {},
+    setArchivedError: () => {},
+    clearArchivedError: () => {},
+    render: () => {},
+  });
+
+  const ws1Before = ctrl.workspaceAccessGeneration("ws-1");
+  const ws2Before = ctrl.workspaceAccessGeneration("ws-2");
+
+  const dismissP = ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: "ask-dm", cardId: "ask-dm",
+    workspaceId: "ws-1", channelId: null, conversationId: "conv-dm", placementKind: "dm",
+    position: 0, placeKey: "ws-1:general", scope: "workspace",
+  });
+  assert.equal(capturedGuards.length, 1);
+  assert.equal(capturedGuards[0].isAlive(), true, "guard starts alive");
+
+  // Unrelated channel loss in ws-2 leaves ws-1 DM guard alive and ws-1 generation unchanged.
+  ctrl.retireForChannel("ws-2", "ch-other");
+  assert.equal(capturedGuards[0].isAlive(), true);
+  assert.equal(ctrl.workspaceAccessGeneration("ws-1"), ws1Before);
+  assert.ok(ctrl.workspaceAccessGeneration("ws-2") > ws2Before);
+
+  // Losing conv-dm retires the in-flight guard synchronously and bumps ws-1 generation.
+  ctrl.retireForConversation("ws-1", "conv-dm", null);
+  assert.equal(capturedGuards[0].isAlive(), false, "conversation loss retires in-flight transport guard");
+  assert.ok(ctrl.workspaceAccessGeneration("ws-1") > ws1Before);
+  pendingResolve({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await dismissP;
+
+  // Archived Restore also passes a scoped lifetime guard retired by channel loss.
+  const restoreP = ctrl.restoreArchived({
+    itemKey: "ask:ask-priv", kind: "ask", id: "ask-priv", todoId: null, askKind: "choice",
+    workspaceId: "ws-1", workspaceName: "Home", title: "Secret?", from: null,
+    outcomeKind: "dismissed", outcomeText: "Dismissed", archivedAt: "2026-11-23T12:00:00Z",
+    when: "now", answeredBy: null, placement: "channel", channelId: "ch-priv",
+    conversationId: null, conversationKind: null, channelLabel: "#secret", href: null,
+  });
+  assert.equal(capturedGuards.length, 2);
+  assert.equal(capturedGuards[1].isAlive(), true);
+  ctrl.retireForChannel("ws-1", "ch-priv");
+  assert.equal(capturedGuards[1].isAlive(), false, "channel loss retires Archived Restore transport guard");
+  pendingResolve({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await restoreP;
+});

@@ -5785,7 +5785,7 @@ import "../../styles/kylon-image-viewer.css";
     const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
     const homeServer = (
       pinned?: PinnedAccountContext | null,
-      options?: { accountRouted?: boolean },
+      options?: { accountRouted?: boolean; isAlive?: () => boolean },
     ): HomeServer | null => {
       if (!sampleMode) return session ? createHomeServer(session, {}, pinned, options) : null;
       // Fixture data uses this sample workspace's identities. This adapter is never used by a signed-in workspace.
@@ -6961,7 +6961,10 @@ import "../../styles/kylon-image-viewer.css";
       waitingArchivedChannels.clear();
     };
 
-    const pruneRetiredWaitingArchivedScopes = (keepIds?: ReadonlySet<string>): void => {
+    const pruneRetiredWaitingArchivedScopes = (
+      keepIds?: ReadonlySet<string>,
+      previousWorkspaceIds?: ReadonlyArray<string>,
+    ): void => {
       const memberIds = new Set(workspaces.map(ws => ws.id));
       const liveIds = keepIds ?? memberIds;
       for (const [wsId, st] of waitingArchivedByWorkspace) {
@@ -6975,6 +6978,10 @@ import "../../styles/kylon-image-viewer.css";
       for (const wsId of waitingPanelAsks.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
       for (const wsId of waitingPanelPlainAsks.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
       for (const wsId of waitingPanelTodos.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      for (const wsId of homeOverviewCounts.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      if (previousWorkspaceIds) {
+        for (const wsId of previousWorkspaceIds) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      }
       for (const wsId of retiredWorkspaces) {
         waitingDismissalCtrl.retireForWorkspace(wsId);
       }
@@ -7727,8 +7734,8 @@ import "../../styles/kylon-image-viewer.css";
       return { activeSession, pinned, isAlive };
     };
 
-    const pruneWaitingCacheForAccessLoss = (event: WaitingAccessLossEvent): void => {
-      if (event.kind === "all") return;
+    const pruneWaitingCacheForAccessLoss = (event: WaitingAccessLossEvent): boolean => {
+      if (event.kind === "all") return false;
       const eq = (a: string | null | undefined, b: string | null | undefined): boolean =>
         Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
       const matchesAsk = (conv: WaitingConversation): boolean => {
@@ -7737,6 +7744,7 @@ import "../../styles/kylon-image-viewer.css";
         if (event.kind === "channel") return conv.kind === "channel" && eq(conv.channelId, event.channelId);
         return (
           ((conv.kind === "dm" || conv.kind === "group_dm") && eq(conv.conversationId, event.conversationId)) ||
+          (conv.kind === "channel" && eq(conv.channelId, event.conversationId)) ||
           (event.channelId !== null && conv.kind === "channel" && eq(conv.channelId, event.channelId))
         );
       };
@@ -7745,10 +7753,12 @@ import "../../styles/kylon-image-viewer.css";
         if (event.kind === "channel") return todo.placement === "channel" && eq(todo.channelId, event.channelId);
         return (
           ((todo.placement === "dm" || todo.placement === "group_dm") && eq(todo.conversationId, event.conversationId)) ||
+          (todo.placement === "channel" && eq(todo.channelId, event.conversationId)) ||
           (event.channelId !== null && todo.placement === "channel" && eq(todo.channelId, event.channelId))
         );
       };
       const wsId = event.workspaceId;
+      let pruned = false;
       const removedAskIds = new Set<string>();
       const prevAsks = waitingPanelAsks.get(wsId);
       if (prevAsks) {
@@ -7756,6 +7766,7 @@ import "../../styles/kylon-image-viewer.css";
           if (matchesAsk(item.conversation)) { removedAskIds.add(item.id); return false; }
           return true;
         });
+        if (nextAsks.length !== prevAsks.length || event.kind === "workspace") pruned = true;
         if (event.kind === "workspace") waitingPanelAsks.delete(wsId);
         else waitingPanelAsks.set(wsId, nextAsks);
       }
@@ -7765,6 +7776,7 @@ import "../../styles/kylon-image-viewer.css";
           if (matchesAsk(item.conversation)) { waitingPlainErrors.delete(item.id); return false; }
           return true;
         });
+        if (nextPlain.length !== prevPlain.length || event.kind === "workspace") pruned = true;
         if (event.kind === "workspace") waitingPanelPlainAsks.delete(wsId);
         else waitingPanelPlainAsks.set(wsId, nextPlain);
       }
@@ -7774,6 +7786,7 @@ import "../../styles/kylon-image-viewer.css";
           if (matchesTodo(item)) { waitingTodoErrors.delete(item.id); return false; }
           return true;
         });
+        if (nextTodos.length !== prevTodos.length || event.kind === "workspace") pruned = true;
         if (event.kind === "workspace") waitingPanelTodos.delete(wsId);
         else waitingPanelTodos.set(wsId, nextTodos);
       }
@@ -7797,29 +7810,70 @@ import "../../styles/kylon-image-viewer.css";
       if (event.kind === "workspace") {
         waitingPanelLoadedWorkspaces.delete(wsId);
         waitingPanelTruncatedWorkspaces.delete(wsId);
+        homeOverviewCounts.delete(wsId);
+      } else if (pruned) {
+        homeOverviewCounts.set(wsId, null);
       }
+      return pruned;
+    };
+
+    let waitingAccessLossRefreshQueued = false;
+    const retireActiveWaitingReads = (workspaceId?: string): void => {
+      // C3: Retire any in-flight refreshWaitingCounts so pre-loss reads can neither
+      // repaint stale private rows nor block the fresh authorized read from starting.
+      waitingGeneration += 1;
+      waitingInFlight = false;
+      waitingAgain = false;
+      window.clearTimeout(waitingTimer);
+      waitingTimer = undefined;
+      if (workspaceId) waitingWorkspaceChannels.delete(workspaceId);
+      if (typeof catchUpGeneration !== "undefined" && homeRoute.view === "catchup") {
+        catchUpGeneration += 1;
+      }
+    };
+    const scheduleWaitingAccessLossRefresh = (): void => {
+      if (waitingAccessLossRefreshQueued) return;
+      waitingAccessLossRefreshQueued = true;
+      const authGen = waitingAuthGeneration;
+      queueMicrotask(() => {
+        waitingAccessLossRefreshQueued = false;
+        if (sampleMode || !session || authGen !== waitingAuthGeneration) return;
+        if (homeRoute.view === "catchup") {
+          if (typeof loadCatchUp === "function") void loadCatchUp();
+        } else {
+          void refreshWaitingCounts();
+        }
+      });
     };
 
     const waitingDismissalCtrl = createWaitingDismissalController({
-      sendDismiss: async (workspaceId, itemKind, itemId) => {
+      captureAccountGuard: () => waitingActionContext()?.isAlive ?? (() => false),
+      sendDismiss: async (workspaceId, itemKind, itemId, actionAlive) => {
         const ctx = waitingActionContext();
-        if (!ctx) return { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
+        if (!ctx || (actionAlive && !actionAlive())) {
+          return { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
+        }
+        const isAlive = (): boolean => ctx.isAlive() && (!actionAlive || actionAlive());
         return dismissWaitingItem(ctx.activeSession, uuid(), workspaceId, itemKind, itemId, {
           pinned: ctx.pinned,
           accountWideWorkspace: true,
-          isAlive: ctx.isAlive,
+          isAlive,
         });
       },
-      sendRestore: async (workspaceId, itemKind, itemId) => {
+      sendRestore: async (workspaceId, itemKind, itemId, actionAlive) => {
         const ctx = waitingActionContext();
-        if (!ctx) return { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
+        if (!ctx || (actionAlive && !actionAlive())) {
+          return { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
+        }
+        const isAlive = (): boolean => ctx.isAlive() && (!actionAlive || actionAlive());
         return restoreWaitingItem(ctx.activeSession, uuid(), workspaceId, itemKind, itemId, {
           pinned: ctx.pinned,
           accountWideWorkspace: true,
-          isAlive: ctx.isAlive,
+          isAlive,
         });
       },
-      resolveReviewOfferId: async (workspaceId, todoId) => {
+      resolveReviewOfferId: async (workspaceId, todoId, actionAlive) => {
+        if (actionAlive && !actionAlive()) return null;
         if (workspaceId === activeWorkspaceId) {
           const cached = homeTodoRead?.todo.todo_id === todoId
             ? homeTodoRead.todo
@@ -7827,11 +7881,12 @@ import "../../styles/kylon-image-viewer.css";
           if (cached?.offer?.offer_id) return cached.offer.offer_id;
         }
         const ctx = waitingActionContext();
-        if (!ctx) return null;
-        const server = homeServer(ctx.pinned, { accountRouted: true });
+        if (!ctx || (actionAlive && !actionAlive())) return null;
+        const isAlive = (): boolean => ctx.isAlive() && (!actionAlive || actionAlive());
+        const server = homeServer(ctx.pinned, { accountRouted: true, isAlive });
         if (!server) return null;
         const read = await server.readTodo(workspaceId, todoId);
-        if (!ctx.isAlive()) return null;
+        if (!isAlive()) return null;
         return read.todo.offer?.offer_id ?? null;
       },
       isAlive: () => waitingActionContext() !== null,
@@ -7865,7 +7920,15 @@ import "../../styles/kylon-image-viewer.css";
         adjustCatchUpCountOptimistic(target.workspaceId, target.cardId, -1);
       },
       onRetireAccessLoss: (event) => {
-        pruneWaitingCacheForAccessLoss(event);
+        const pruned = pruneWaitingCacheForAccessLoss(event);
+        if (event.kind === "all" || (event.kind === "workspace" && event.fromWaitingRefresh)) return;
+        retireActiveWaitingReads(event.workspaceId);
+        if (pruned || event.kind === "workspace") {
+          syncWaitingButtons();
+          renderHomeRail();
+          renderWaitingPanelView();
+        }
+        scheduleWaitingAccessLossRefresh();
       },
       reloadWaiting: async () => {
         await refreshWaitingCounts();
@@ -8468,12 +8531,22 @@ import "../../styles/kylon-image-viewer.css";
         if (typeof clearWaitingData === "function") clearWaitingData();
       }
       const isAlive = typeof waitingActionGuard === "function" ? waitingActionGuard(viewer, authGen) : () => homeViewerId() === viewer;
+      const wsAccessGen = (wsId: string): number =>
+        typeof waitingDismissalCtrl !== "undefined" ? waitingDismissalCtrl.workspaceAccessGeneration(wsId) : 0;
+      const wsAccessGens = new Map(
+        workspaces.map(ws => [ws.id, wsAccessGen(ws.id)]),
+      );
+      const capturedWsGen = (wsId: string): number =>
+        wsAccessGens.get(wsId) ?? wsAccessGen(wsId);
       const live = (): boolean =>
         generation === waitingGeneration &&
         isAlive() &&
         homeViewerId() === viewer &&
         homeRoute.view !== "catchup" &&
         (!pinned || pinned.isCurrent());
+      const liveWorkspace = (wsId: string): boolean =>
+        live() &&
+        wsAccessGen(wsId) === capturedWsGen(wsId);
       try {
         const overview = await homeOverview(pinned?.runtime ?? null);
         // No overview on this server: nothing is counted, and nothing is drawn as a number.
@@ -8486,18 +8559,22 @@ import "../../styles/kylon-image-viewer.css";
           catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices);
         const toRead: Workspace[] = [];
         for (const workspace of workspaces) {
+          if (!liveWorkspace(workspace.id)) continue;
           const row = rows.get(workspace.id);
           if (!row) {
             counted.set(workspace.id, null);
             waitingPanelFailedWorkspaces.add(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
-            waitingDismissalCtrl.retireForWorkspace(workspace.id);
-            clearWaitingArchivedCache(workspace.id);
+            if (typeof waitingDismissalCtrl !== "undefined") {
+              waitingDismissalCtrl.retireForWorkspace(workspace.id, { fromWaitingRefresh: true });
+            }
+            if (typeof clearWaitingArchivedCache === "function") clearWaitingArchivedCache(workspace.id);
           } else if (row.needs_you.asks.length > 0 || row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0) {
             counted.set(workspace.id, null);
             toRead.push(workspace);
           } else {
             const detail = detailOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] });
+            if (!liveWorkspace(workspace.id)) continue;
             counted.set(workspace.id, homeNeedsYouCount({ workspace, state: "ready", detail }));
             waitingPanelAsks.set(workspace.id, []);
             if (typeof waitingPanelPlainAsks !== "undefined") waitingPanelPlainAsks.set(workspace.id, []);
@@ -8514,6 +8591,7 @@ import "../../styles/kylon-image-viewer.css";
           for (;;) {
             if (!live()) return;
             const workspace = toRead[next++]; if (!workspace) return;
+            if (!liveWorkspace(workspace.id)) continue;
             const row = rows.get(workspace.id)!;
             const hasAsks = row.needs_you.asks.length > 0;
             const hasTodos = row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0;
@@ -8522,6 +8600,7 @@ import "../../styles/kylon-image-viewer.css";
               ? await Promise.resolve().then(() => homeServer(pinned)?.decisionQueue(workspace.id) ?? null).catch(() => null)
               : { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] };
             if (!live()) return;
+            if (!liveWorkspace(workspace.id)) continue;
             if (!queue) {
               waitingPanelLoadedWorkspaces.delete(workspace.id);
               waitingPanelFailedWorkspaces.add(workspace.id);
@@ -8532,6 +8611,7 @@ import "../../styles/kylon-image-viewer.css";
             const ids = queue.asks.map(ask => ask.signal_id);
             const choices = ids.length ? await askChoices(workspace.id, ids, pinned).catch(() => null) : [];
             if (!live()) return;
+            if (!liveWorkspace(workspace.id)) continue;
             if (choices === null) {
               // A failed choices read must never become an exact zero or an empty channel.
               counted.set(workspace.id, null);
@@ -8625,6 +8705,7 @@ import "../../styles/kylon-image-viewer.css";
               try {
                 const fetched = await signalLocations(workspace.id, missingIds, pinned);
                 if (!live()) return;
+                if (!liveWorkspace(workspace.id)) continue;
                 for (const [sigId, loc] of fetched) {
                   const rawAsk = askById.get(sigId);
                   locations.set(sigId, {
@@ -8635,6 +8716,7 @@ import "../../styles/kylon-image-viewer.css";
                 }
               } catch {
                 if (!live()) return;
+                if (!liveWorkspace(workspace.id)) continue;
                 locationReadFailed = true;
               }
             }
@@ -8671,9 +8753,11 @@ import "../../styles/kylon-image-viewer.css";
               try {
                 todosQueue = await homeServer(pinned)?.waitingTodos(workspace.id) ?? null;
                 if (!live()) return;
+                if (!liveWorkspace(workspace.id)) continue;
                 if (!todosQueue) todosReadFailed = true;
               } catch (err) {
                 if (!live()) return;
+                if (!liveWorkspace(workspace.id)) continue;
                 if (err instanceof HomeToolsUnavailable) {
                   todosFallback = true;
                 } else {
@@ -8687,6 +8771,7 @@ import "../../styles/kylon-image-viewer.css";
             if ((hasNamedAskChannel || hasNamedTodoChannel) && workspace.id !== activeWorkspaceId && !waitingWorkspaceChannels.has(workspace.id)) {
               const wsChannels = await workspaceChannels(workspace.id, pinned).catch(() => []);
               if (!live()) return;
+              if (!liveWorkspace(workspace.id)) continue;
               waitingWorkspaceChannels.set(workspace.id, new Map(wsChannels.map(ch => [ch.channelId, ch.slug])));
             }
             const panelItems: WaitingAskItem[] = choiceNeeds.flatMap(item => {
@@ -8744,7 +8829,10 @@ import "../../styles/kylon-image-viewer.css";
               todosTruncated = row.needs_you.assigned.length >= 20 || row.needs_you.waiting.length >= 20;
             }
             if (!live()) return;
-            const pendingDismissIds = waitingDismissalCtrl.pendingDismissCardIds(workspace.id);
+            if (!liveWorkspace(workspace.id)) continue;
+            const pendingDismissIds = typeof waitingDismissalCtrl !== "undefined"
+              ? waitingDismissalCtrl.pendingDismissCardIds(workspace.id)
+              : new Set<string>();
             const filteredPanelItems = pendingDismissIds.size > 0
               ? panelItems.filter(item => !pendingDismissIds.has(item.id))
               : panelItems;
@@ -8788,7 +8876,9 @@ import "../../styles/kylon-image-viewer.css";
           }
         }));
         if (!live()) return;
-        for (const [id, count] of counted) homeOverviewCounts.set(id, count);
+        for (const [id, count] of counted) {
+          if (liveWorkspace(id)) homeOverviewCounts.set(id, count);
+        }
         renderHomeRail();
         renderWaitingPanelView();
       } catch {
@@ -9417,11 +9507,18 @@ import "../../styles/kylon-image-viewer.css";
       const catchUpPin = !sampleMode && typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && session
         ? pinAccountContext({ userId: session.user.id })
         : null;
+      const catchUpWsAccessGens = new Map(
+        workspaces.map(ws => [ws.id, typeof waitingDismissalCtrl !== "undefined" ? waitingDismissalCtrl.workspaceAccessGeneration(ws.id) : 0]),
+      );
       const live = () =>
         generation === catchUpGeneration &&
         homeRoute.view === "catchup" &&
         homeViewerId() === viewer &&
         (!catchUpPin || catchUpPin.isCurrent());
+      const liveCatchUpWorkspace = (wsId: string): boolean =>
+        live() &&
+        (typeof waitingDismissalCtrl === "undefined" ||
+          waitingDismissalCtrl.workspaceAccessGeneration(wsId) === (catchUpWsAccessGens.get(wsId) ?? 0));
       catchUpExpanded = false;
       catchUpData = initialCatchUpData(workspaces);
       for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, null);
@@ -9479,7 +9576,7 @@ import "../../styles/kylon-image-viewer.css";
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
           openTodos: null, lists: null, files: nextFiles, newMessages: null };
       }, entry => {
-        if (!live()) return;
+        if (!liveCatchUpWorkspace(entry.workspace.id)) return;
         catchUpData = catchUpData.map(previous => previous.workspace.id === entry.workspace.id ? entry : previous);
         homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
         renderHomeCatchUp();
@@ -16050,8 +16147,9 @@ import "../../styles/kylon-image-viewer.css";
             closingWorkspaceId,
             workspaces,
           );
+          const prevWorkspaceIds = workspaces.map(ws => ws.id);
           workspaces = closed.workspaces;
-          pruneRetiredWaitingArchivedScopes();
+          pruneRetiredWaitingArchivedScopes(undefined, prevWorkspaceIds);
           closeWorkspaceDetailsDialog();
           if (closed.activeWorkspaceRemains) {
             renderWorkspaceList(closed.nextWorkspace!);
@@ -20320,9 +20418,10 @@ import "../../styles/kylon-image-viewer.css";
         for (const target of all<HTMLElement>("[data-account-name], [data-rail-account]")) {
           target.textContent = who;
         }
+        const prevWorkspaceIds = workspaces.map(ws => ws.id);
         workspaces = await workspaceMemberships();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
-        pruneRetiredWaitingArchivedScopes();
+        pruneRetiredWaitingArchivedScopes(undefined, prevWorkspaceIds);
         if (workspaces.length === 0) {
           resetWorkspaceSessionState();
           const pending = readCreateIntent(session.user.id);

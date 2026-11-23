@@ -110,6 +110,7 @@ import {
   type ConversationActionResult,
   type ConversationHistoryOptions,
   type ConversationHistoryResult,
+  type ConversationKind,
   type ConversationMemberRef,
   type ConversationNotifyLevel,
   type ConversationOpenResult,
@@ -1675,6 +1676,26 @@ export async function postCommand(
     ...extra,
   });
   let credential = session;
+  if (cached && isAlive) {
+    try {
+      const initial = await boundedAuth(cached.auth.getSession());
+      if (isCancelled()) {
+        return retiredResult();
+      }
+      if (!initial.error && initial.data.session) {
+        if (initial.data.session.user.id !== session.user.id) {
+          throw new AuthRecoveryRequired();
+        }
+        credential = initial.data.session;
+      }
+    } catch (error) {
+      if (isCancelled()) return retiredResult();
+      if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
+    }
+  }
+  if (isCancelled()) {
+    return retiredResult();
+  }
   const deadline = requestDeadline();
   const fetchSignal = signal ? AbortSignal.any([deadline.controller.signal, signal]) : deadline.controller.signal;
   try {
@@ -1692,6 +1713,9 @@ export async function postCommand(
         body: wireBody,
         signal: fetchSignal,
       });
+      if (isCancelled()) {
+        return retiredResult();
+      }
       const text = await response.text();
       if (isCancelled()) {
         return retiredResult();
@@ -1724,6 +1748,9 @@ export async function postCommand(
         if (!sameCredentials(active, credential)) {
           credential = active;
         } else {
+          if (isCancelled()) {
+            return retiredResult();
+          }
           // refreshSession() reads the CURRENT token under the SDK lock; never
           // pass the rejected caller's possibly superseded refresh token.
           const refreshed = await boundedAuth(c.auth.refreshSession());
@@ -1744,6 +1771,9 @@ export async function postCommand(
             throw new AuthRecoveryRequired();
           }
           credential = refreshed.data.session;
+        }
+        if (isCancelled()) {
+          return retiredResult();
         }
         continue;
       }
