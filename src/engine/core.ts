@@ -1,105 +1,107 @@
 import { randomUUID } from "node:crypto";
-import type { IdGenerator } from "./ports.js";
+import type { IdGenerator, IncomingMessage, ReplyCommand, ReplyStatus, ReplyTarget } from "./ports.js";
 
-export const DEFAULT_QUEUE_CAP = 200;
+export type { IncomingMessage, ReplyCommand, ReplyStatus, ReplyTarget };
+
 export const MAX_MESSAGE_TEXT_BYTES = 64 * 1024;
 export const RESTART_INTERRUPTED_REPLY = "The engine restarted while working on this message.";
 export const TURN_FAILED_REPLY = "The agent could not complete this message.";
 export const MESSAGE_TOO_LONG_REPLY = "This message is too long for the agent.";
 
 export type TurnOutcome = "replied" | "failed" | "interrupted";
-export type ReplyStatus = "replied" | "failed";
 export type OwedReplyOrigin = TurnOutcome | "refused";
 
 export type JournalRecord =
-  | { readonly type: "message_accepted"; readonly messageId: string; readonly text: string; readonly at: number }
-  | { readonly type: "message_refused"; readonly messageId: string; readonly commandId: string; readonly at: number }
-  | { readonly type: "turn_started"; readonly messageId: string; readonly at: number }
-  | { readonly type: "turn_finished"; readonly messageId: string; readonly commandId: string; readonly outcome: TurnOutcome; readonly replyText: string; readonly at: number }
+  | { readonly type: "message_accepted"; readonly messageId: string; readonly text: string; readonly leaseId: string; readonly replyTarget: ReplyTarget; readonly at: number }
+  | { readonly type: "message_released"; readonly messageId: string; readonly at: number }
+  | { readonly type: "message_refused"; readonly messageId: string; readonly command: ReplyCommand; readonly at: number }
+  | { readonly type: "turn_started"; readonly messageId: string; readonly replyTarget: ReplyTarget; readonly at: number }
+  | { readonly type: "turn_finished"; readonly messageId: string; readonly outcome: TurnOutcome; readonly command: ReplyCommand; readonly at: number }
   | { readonly type: "reply_posted"; readonly messageId: string; readonly at: number }
   | { readonly type: "reply_abandoned"; readonly messageId: string; readonly commandId: string; readonly at: number }
-  | { readonly type: "message_seen"; readonly messageId: string; readonly at: number }
+  | { readonly type: "message_seen"; readonly messageId: string; readonly leaseId: string; readonly at: number }
   | { readonly type: "message_settled"; readonly messageId: string; readonly at: number };
 
 export type Effect =
   | { readonly type: "start_turn"; readonly messageId: string; readonly text: string }
-  | { readonly type: "post_reply"; readonly messageId: string; readonly commandId: string; readonly text: string; readonly status: ReplyStatus }
-  | { readonly type: "mark_seen"; readonly messageId: string }
+  | { readonly type: "post_reply"; readonly messageId: string; readonly command: ReplyCommand }
+  | { readonly type: "mark_seen"; readonly messageId: string; readonly leaseId: string }
   | { readonly type: "report_unknown_outcome"; readonly messageId: string; readonly commandId: string; readonly owedAt: number; readonly at: number };
 
-export interface QueuedMessage { readonly messageId: string; readonly text: string; readonly acceptedAt: number; }
-export interface ActiveTurn { readonly messageId: string; readonly text: string; readonly startedAt: number; }
+export interface AcceptedMessage {
+  readonly messageId: string;
+  readonly text: string;
+  readonly leaseId: string;
+  readonly replyTarget: ReplyTarget;
+  readonly acceptedAt: number;
+}
+export interface ActiveTurn {
+  readonly messageId: string;
+  readonly text: string;
+  readonly leaseId: string;
+  readonly replyTarget: ReplyTarget;
+  readonly startedAt: number;
+}
 export interface OwedReply {
   readonly messageId: string;
-  readonly commandId: string;
-  readonly text: string;
-  readonly status: ReplyStatus;
+  readonly command: ReplyCommand;
   readonly owedAt: number;
   readonly origin: OwedReplyOrigin;
 }
-export interface CoreLimits { readonly settledIdCap: number; readonly queueCap?: number; }
+export interface CoreLimits { readonly settledIdCap: number; }
 export interface RecoverOptions extends CoreLimits {
   readonly replyRetryHorizonMs: number;
   readonly generateId?: IdGenerator;
 }
-
 export interface EngineState {
-  readonly queueCap: number;
   readonly settledIdCap: number;
   readonly settled: ReadonlyMap<string, number>;
   readonly seenIds: ReadonlySet<string>;
-  readonly queue: readonly QueuedMessage[];
+  readonly pending: AcceptedMessage | null;
   readonly active: ActiveTurn | null;
   readonly owedReplies: readonly OwedReply[];
 }
-
 export interface Decision {
   readonly records: readonly JournalRecord[];
   readonly effects: readonly Effect[];
 }
-
-export interface RecoveryResult extends Decision {
-  readonly state: EngineState;
-}
+export interface RecoveryResult extends Decision { readonly state: EngineState; }
 
 const EMPTY_DECISION: Decision = { records: [], effects: [] };
 
+export function buildReplyCommand(
+  commandId: string,
+  replyTarget: ReplyTarget,
+  status: ReplyStatus,
+  body: string,
+): ReplyCommand {
+  return replyTarget.kind === "private"
+    ? { commandId, replyTarget, status, body }
+    : { commandId, replyTarget, body };
+}
+
 export function initialState(limits: CoreLimits): EngineState {
-  const queueCap = limits.queueCap ?? DEFAULT_QUEUE_CAP;
-  if (!Number.isInteger(queueCap) || queueCap < 1) {
-    throw new RangeError("Queue cap must be a positive integer");
-  }
   if (!Number.isInteger(limits.settledIdCap) || limits.settledIdCap < 1) {
     throw new RangeError("Settled id cap must be a positive integer");
   }
   return {
-    queueCap,
     settledIdCap: limits.settledIdCap,
     settled: new Map<string, number>(),
     seenIds: new Set<string>(),
-    queue: [],
+    pending: null,
     active: null,
     owedReplies: [],
   };
 }
 
-export function inFlightCount(state: EngineState): number {
-  return state.queue.length + (state.active === null ? 0 : 1);
+export function canClaim(state: EngineState): boolean {
+  return state.active === null && state.pending === null;
 }
 
-export function availableCapacity(state: EngineState): number {
-  return Math.max(0, state.queueCap - inFlightCount(state));
-}
-
-export function canAccept(state: EngineState): boolean {
-  return inFlightCount(state) < state.queueCap;
-}
-
-function isKnownMessage(state: EngineState, messageId: string): boolean {
+export function isKnownMessage(state: EngineState, messageId: string): boolean {
   return (
     state.settled.has(messageId) ||
     state.active?.messageId === messageId ||
-    state.queue.some((item) => item.messageId === messageId) ||
     state.owedReplies.some((item) => item.messageId === messageId)
   );
 }
@@ -124,30 +126,39 @@ function addSettled(
 export function reduce(state: EngineState, record: JournalRecord): EngineState {
   switch (record.type) {
     case "message_accepted": {
-      if (isKnownMessage(state, record.messageId)) return state;
+      if (isKnownMessage(state, record.messageId) || !canClaim(state)) return state;
       return {
         ...state,
-        queue: [...state.queue, { messageId: record.messageId, text: record.text, acceptedAt: record.at }],
+        pending: {
+          messageId: record.messageId,
+          text: record.text,
+          leaseId: record.leaseId,
+          replyTarget: record.replyTarget,
+          acceptedAt: record.at,
+        },
       };
     }
+    case "message_released":
+      return state.pending?.messageId === record.messageId ? { ...state, pending: null } : state;
     case "message_refused": {
-      if (isKnownMessage(state, record.messageId)) return state;
-      const owed: OwedReply = {
-        messageId: record.messageId,
-        commandId: record.commandId,
-        text: MESSAGE_TOO_LONG_REPLY,
-        status: "failed",
-        owedAt: record.at,
-        origin: "refused",
+      if (isKnownMessage(state, record.messageId) || state.pending?.messageId === record.messageId) return state;
+      return {
+        ...state,
+        owedReplies: [...state.owedReplies, { messageId: record.messageId, command: record.command, owedAt: record.at, origin: "refused" }],
       };
-      return { ...state, owedReplies: [...state.owedReplies, owed] };
     }
     case "turn_started": {
-      const queued = state.queue.find((item) => item.messageId === record.messageId);
+      const pending = state.pending?.messageId === record.messageId ? state.pending : null;
       return {
         ...state,
-        queue: state.queue.filter((item) => item.messageId !== record.messageId),
-        active: { messageId: record.messageId, text: queued ? queued.text : "", startedAt: record.at },
+        pending: pending !== null ? null : state.pending,
+        active: {
+          messageId: record.messageId,
+          text: pending ? pending.text : "",
+          leaseId: pending ? pending.leaseId : "",
+          replyTarget: record.replyTarget,
+          startedAt: record.at,
+        },
       };
     }
     case "turn_finished": {
@@ -155,15 +166,11 @@ export function reduce(state: EngineState, record: JournalRecord): EngineState {
       if (state.owedReplies.some((r) => r.messageId === record.messageId) || state.settled.has(record.messageId)) {
         return { ...state, active };
       }
-      const owed: OwedReply = {
-        messageId: record.messageId,
-        commandId: record.commandId,
-        text: record.replyText,
-        status: record.outcome === "replied" ? "replied" : "failed",
-        owedAt: record.at,
-        origin: record.outcome,
+      return {
+        ...state,
+        active,
+        owedReplies: [...state.owedReplies, { messageId: record.messageId, command: record.command, owedAt: record.at, origin: record.outcome }],
       };
-      return { ...state, active, owedReplies: [...state.owedReplies, owed] };
     }
     case "reply_posted":
     case "reply_abandoned": {
@@ -179,13 +186,13 @@ export function reduce(state: EngineState, record: JournalRecord): EngineState {
       };
     }
     case "message_seen": {
-      if (state.seenIds.has(record.messageId)) return state;
+      if (state.settled.has(record.messageId) || state.seenIds.has(record.messageId)) return state;
       const seenIds = new Set(state.seenIds);
       seenIds.add(record.messageId);
       return { ...state, seenIds };
     }
     case "message_settled": {
-      if (isKnownMessage(state, record.messageId)) return state;
+      if (isKnownMessage(state, record.messageId) || state.pending?.messageId === record.messageId) return state;
       return { ...state, settled: addSettled(state.settled, record.messageId, record.at, state.settledIdCap) };
     }
   }
@@ -205,46 +212,59 @@ export function compacted(state: EngineState): readonly JournalRecord[] {
   for (const owed of state.owedReplies) {
     records.push(
       owed.origin === "refused"
-        ? { type: "message_refused", messageId: owed.messageId, commandId: owed.commandId, at: owed.owedAt }
-        : { type: "turn_finished", messageId: owed.messageId, commandId: owed.commandId, outcome: owed.origin, replyText: owed.text, at: owed.owedAt },
+        ? { type: "message_refused", messageId: owed.messageId, command: owed.command, at: owed.owedAt }
+        : { type: "turn_finished", messageId: owed.messageId, outcome: owed.origin, command: owed.command, at: owed.owedAt },
     );
   }
   if (state.active !== null) {
-    records.push({ type: "turn_started", messageId: state.active.messageId, at: state.active.startedAt });
-    if (state.seenIds.has(state.active.messageId)) {
-      records.push({ type: "message_seen", messageId: state.active.messageId, at: state.active.startedAt });
-    }
+    records.push({ type: "turn_started", messageId: state.active.messageId, replyTarget: state.active.replyTarget, at: state.active.startedAt });
   }
-  for (const item of state.queue) {
-    records.push({ type: "message_accepted", messageId: item.messageId, text: item.text, at: item.acceptedAt });
+  if (state.pending !== null) {
+    records.push({
+      type: "message_accepted",
+      messageId: state.pending.messageId,
+      text: state.pending.text,
+      leaseId: state.pending.leaseId,
+      replyTarget: state.pending.replyTarget,
+      at: state.pending.acceptedAt,
+    });
   }
   return records;
 }
 
 export function acceptMessage(
   state: EngineState,
-  message: { readonly id: string; readonly text: string },
+  message: IncomingMessage,
   at: number,
   generateId: IdGenerator = randomUUID,
 ): Decision {
-  if (isKnownMessage(state, message.id) || !canAccept(state)) return EMPTY_DECISION;
+  if (isKnownMessage(state, message.id)) {
+    return { records: [], effects: [{ type: "mark_seen", messageId: message.id, leaseId: message.leaseId }] };
+  }
+  if (!canClaim(state)) return EMPTY_DECISION;
   if (Buffer.byteLength(message.text, "utf8") > MAX_MESSAGE_TEXT_BYTES) {
-    const commandId = generateId();
+    const command = buildReplyCommand(generateId(), message.replyTarget, "failed", MESSAGE_TOO_LONG_REPLY);
     return {
-      records: [{ type: "message_refused", messageId: message.id, commandId, at }],
-      effects: [{ type: "post_reply", messageId: message.id, commandId, text: MESSAGE_TOO_LONG_REPLY, status: "failed" }],
+      records: [{ type: "message_refused", messageId: message.id, command, at }],
+      effects: [
+        { type: "mark_seen", messageId: message.id, leaseId: message.leaseId },
+        { type: "post_reply", messageId: message.id, command },
+      ],
     };
   }
-  return { records: [{ type: "message_accepted", messageId: message.id, text: message.text, at }], effects: [] };
+  return {
+    records: [{ type: "message_accepted", messageId: message.id, text: message.text, leaseId: message.leaseId, replyTarget: message.replyTarget, at }],
+    effects: [],
+  };
 }
 
 export function decideNext(state: EngineState, at: number): Decision {
-  if (state.active !== null || state.queue.length === 0) return EMPTY_DECISION;
-  const next = state.queue[0];
+  if (state.active !== null || state.pending === null) return EMPTY_DECISION;
+  const next = state.pending;
   return {
-    records: [{ type: "turn_started", messageId: next.messageId, at }],
+    records: [{ type: "turn_started", messageId: next.messageId, replyTarget: next.replyTarget, at }],
     effects: [
-      { type: "mark_seen", messageId: next.messageId },
+      { type: "mark_seen", messageId: next.messageId, leaseId: next.leaseId },
       { type: "start_turn", messageId: next.messageId, text: next.text },
     ],
   };
@@ -258,10 +278,10 @@ export function finishTurnWithReply(
   generateId: IdGenerator = randomUUID,
 ): Decision {
   if (state.active?.messageId !== messageId) return EMPTY_DECISION;
-  const commandId = generateId();
+  const command = buildReplyCommand(generateId(), state.active.replyTarget, "answered", replyText);
   return {
-    records: [{ type: "turn_finished", messageId, commandId, outcome: "replied", replyText, at }],
-    effects: [{ type: "post_reply", messageId, commandId, text: replyText, status: "replied" }],
+    records: [{ type: "turn_finished", messageId, outcome: "replied", command, at }],
+    effects: [{ type: "post_reply", messageId, command }],
   };
 }
 
@@ -272,31 +292,23 @@ export function finishTurnWithFailure(
   generateId: IdGenerator = randomUUID,
 ): Decision {
   if (state.active?.messageId !== messageId) return EMPTY_DECISION;
-  const commandId = generateId();
+  const command = buildReplyCommand(generateId(), state.active.replyTarget, "failed", TURN_FAILED_REPLY);
   return {
-    records: [{ type: "turn_finished", messageId, commandId, outcome: "failed", replyText: TURN_FAILED_REPLY, at }],
-    effects: [{ type: "post_reply", messageId, commandId, text: TURN_FAILED_REPLY, status: "failed" }],
+    records: [{ type: "turn_finished", messageId, outcome: "failed", command, at }],
+    effects: [{ type: "post_reply", messageId, command }],
   };
 }
 
-export function retryOwedReply(
-  state: EngineState,
-  messageId: string,
-  at: number,
-  replyRetryHorizonMs: number,
-): Decision {
+export function retryOwedReply(state: EngineState, messageId: string, at: number, replyRetryHorizonMs: number): Decision {
   const owed = state.owedReplies.find((r) => r.messageId === messageId);
   if (!owed) return EMPTY_DECISION;
   if (at - owed.owedAt > replyRetryHorizonMs) {
     return {
-      records: [{ type: "reply_abandoned", messageId: owed.messageId, commandId: owed.commandId, at }],
-      effects: [{ type: "report_unknown_outcome", messageId: owed.messageId, commandId: owed.commandId, owedAt: owed.owedAt, at }],
+      records: [{ type: "reply_abandoned", messageId: owed.messageId, commandId: owed.command.commandId, at }],
+      effects: [{ type: "report_unknown_outcome", messageId: owed.messageId, commandId: owed.command.commandId, owedAt: owed.owedAt, at }],
     };
   }
-  return {
-    records: [],
-    effects: [{ type: "post_reply", messageId: owed.messageId, commandId: owed.commandId, text: owed.text, status: owed.status }],
-  };
+  return { records: [], effects: [{ type: "post_reply", messageId: owed.messageId, command: owed.command }] };
 }
 
 export function confirmReplyPosted(state: EngineState, messageId: string, at: number): Decision {
@@ -304,31 +316,26 @@ export function confirmReplyPosted(state: EngineState, messageId: string, at: nu
   return { records: [{ type: "reply_posted", messageId, at }], effects: [] };
 }
 
-export function confirmMessageSeen(state: EngineState, messageId: string, at: number): Decision {
+export function confirmMessageSeen(state: EngineState, messageId: string, leaseId: string, at: number): Decision {
   if (state.seenIds.has(messageId)) return EMPTY_DECISION;
-  return { records: [{ type: "message_seen", messageId, at }], effects: [] };
+  return { records: [{ type: "message_seen", messageId, leaseId, at }], effects: [] };
 }
 
-export function recover(
-  records: readonly JournalRecord[],
-  at: number,
-  options: RecoverOptions,
-): RecoveryResult {
+export function recover(records: readonly JournalRecord[], at: number, options: RecoverOptions): RecoveryResult {
   if (!Number.isFinite(options.replyRetryHorizonMs) || options.replyRetryHorizonMs < 0) {
     throw new RangeError("Reply retry horizon must be a non-negative finite number");
   }
   const generateId = options.generateId ?? randomUUID;
   let state = reduceAll(records, options);
   const appended: JournalRecord[] = [];
+  if (state.pending !== null) {
+    const released: JournalRecord = { type: "message_released", messageId: state.pending.messageId, at };
+    appended.push(released);
+    state = reduce(state, released);
+  }
   if (state.active !== null) {
-    const interrupted: JournalRecord = {
-      type: "turn_finished",
-      messageId: state.active.messageId,
-      commandId: generateId(),
-      outcome: "interrupted",
-      replyText: RESTART_INTERRUPTED_REPLY,
-      at,
-    };
+    const command = buildReplyCommand(generateId(), state.active.replyTarget, "failed", RESTART_INTERRUPTED_REPLY);
+    const interrupted: JournalRecord = { type: "turn_finished", messageId: state.active.messageId, outcome: "interrupted", command, at };
     appended.push(interrupted);
     state = reduce(state, interrupted);
   }
@@ -348,6 +355,23 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function isReplyTarget(value: unknown): value is ReplyTarget {
+  if (typeof value !== "object" || value === null) return false;
+  const target = value as Record<string, unknown>;
+  if (target.kind === "private") return isNonEmptyString(target.inReplyTo);
+  if (target.kind === "thread") return isNonEmptyString(target.threadRootId);
+  return false;
+}
+
+function isReplyCommand(value: unknown): value is ReplyCommand {
+  if (typeof value !== "object" || value === null) return false;
+  const cmd = value as Record<string, unknown>;
+  if (!isNonEmptyString(cmd.commandId) || !isReplyTarget(cmd.replyTarget) || typeof cmd.body !== "string") return false;
+  return cmd.replyTarget.kind === "private"
+    ? cmd.status === "answered" || cmd.status === "failed"
+    : cmd.status === undefined && !("status" in cmd);
+}
+
 export function isJournalRecord(value: unknown): value is JournalRecord {
   if (typeof value !== "object" || value === null) return false;
   const rec = value as Record<string, unknown>;
@@ -355,21 +379,21 @@ export function isJournalRecord(value: unknown): value is JournalRecord {
   if (typeof rec.at !== "number" || !Number.isFinite(rec.at)) return false;
   switch (rec.type) {
     case "message_accepted":
-      return typeof rec.text === "string";
-    case "message_refused":
-    case "reply_abandoned":
-      return isNonEmptyString(rec.commandId);
-    case "turn_started":
+      return typeof rec.text === "string" && isNonEmptyString(rec.leaseId) && isReplyTarget(rec.replyTarget);
+    case "message_released":
     case "reply_posted":
-    case "message_seen":
     case "message_settled":
       return true;
+    case "message_refused":
+      return isReplyCommand(rec.command);
+    case "turn_started":
+      return isReplyTarget(rec.replyTarget);
     case "turn_finished":
-      return (
-        isNonEmptyString(rec.commandId) &&
-        (rec.outcome === "replied" || rec.outcome === "failed" || rec.outcome === "interrupted") &&
-        typeof rec.replyText === "string"
-      );
+      return (rec.outcome === "replied" || rec.outcome === "failed" || rec.outcome === "interrupted") && isReplyCommand(rec.command);
+    case "reply_abandoned":
+      return isNonEmptyString(rec.commandId);
+    case "message_seen":
+      return isNonEmptyString(rec.leaseId);
     default:
       return false;
   }

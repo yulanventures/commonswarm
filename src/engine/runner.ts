@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
-  DEFAULT_QUEUE_CAP,
   acceptMessage,
-  availableCapacity,
+  canClaim,
   compacted,
   confirmMessageSeen,
   confirmReplyPosted,
@@ -18,19 +17,20 @@ import {
   type EngineState,
 } from "./core.js";
 import { Journal } from "./journal.js";
-import type {
-  Clock,
-  CloudPort,
-  HarnessPort,
-  IdGenerator,
-  IncomingMessage,
-  OperatorPort,
-  OperatorReportKind,
+import {
+  AuthorityLostError,
+  type Clock,
+  type CloudPort,
+  type HarnessPort,
+  type IdGenerator,
+  type IncomingMessage,
+  type OperatorPort,
+  type OperatorReportKind,
 } from "./ports.js";
 
 const MAX_OPERATOR_ERROR_CHARS = 500;
 
-export type StopReason = "stopped" | "cloud_failed" | "journal_failed" | "harness_port_failed";
+export type StopReason = "stopped" | "authority_lost" | "cloud_failed" | "journal_failed" | "harness_port_failed";
 export interface RunResult { readonly reason: StopReason; }
 
 export interface RunnerOptions {
@@ -41,10 +41,14 @@ export interface RunnerOptions {
   readonly replyRetryHorizonMs: number;
   readonly compactAfterRecords: number;
   readonly settledIdCap: number;
-  readonly queueCap?: number;
   readonly generateId?: IdGenerator;
   readonly operator?: OperatorPort;
 }
+
+type RaceOutcome<T> =
+  | { readonly kind: "ok"; readonly value: T }
+  | { readonly kind: "err"; readonly err: unknown }
+  | { readonly kind: "authority_lost" };
 
 function truncateError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
@@ -60,20 +64,21 @@ function findEffect<T extends Effect["type"]>(
 
 export class EngineRunner {
   private readonly options: RunnerOptions;
-  private readonly queueCap: number;
   private readonly generateId: IdGenerator;
   private readonly claimAbort = new AbortController();
+  private readonly authorityLostPromise: Promise<void>;
+  private resolveAuthorityLost: (() => void) | null = null;
   private journal: Journal | null = null;
   private state: EngineState;
-  private commitChain: Promise<void> = Promise.resolve();
   private recordsSinceCompact = 0;
   private started = false;
   private stopping = false;
   private failed = false;
+  private authorityLost = false;
+  private shutdownComplete = false;
   private stopReason: StopReason = "stopped";
-  private journalClosed = false;
-  private workerWake: (() => void) | null = null;
-  private claimerWake: (() => void) | null = null;
+  private interruptedHarness = false;
+  private interruptPromise: Promise<void> | null = null;
   private lifecyclePromise: Promise<RunResult> = Promise.resolve({ reason: "stopped" });
 
   constructor(options: RunnerOptions) {
@@ -84,9 +89,11 @@ export class EngineRunner {
       throw new RangeError("Compaction threshold must be a positive integer");
     }
     this.options = options;
-    this.queueCap = options.queueCap ?? DEFAULT_QUEUE_CAP;
     this.generateId = options.generateId ?? randomUUID;
-    this.state = initialState({ settledIdCap: options.settledIdCap, queueCap: this.queueCap });
+    this.state = initialState({ settledIdCap: options.settledIdCap });
+    this.authorityLostPromise = new Promise<void>((resolve) => {
+      this.resolveAuthorityLost = resolve;
+    });
   }
 
   get done(): Promise<RunResult> { return this.lifecyclePromise; }
@@ -95,56 +102,83 @@ export class EngineRunner {
   async start(): Promise<void> {
     if (this.started) throw new Error("Engine runner already started");
     this.started = true;
+    if (this.authorityLost) return this.failDuringStart("authority_lost");
 
     const journal = await Journal.open(this.options.journalPath);
     this.journal = journal;
     this.recordsSinceCompact = journal.recordCount;
+    if (this.authorityLost) return this.failDuringStart("authority_lost");
 
     const recovered = recover(journal.records, this.options.clock.now(), {
-      queueCap: this.queueCap,
       replyRetryHorizonMs: this.options.replyRetryHorizonMs,
       settledIdCap: this.options.settledIdCap,
       generateId: this.generateId,
     });
-
     if (recovered.records.length > 0) {
       try {
         await journal.appendAll(recovered.records);
         this.recordsSinceCompact += recovered.records.length;
       } catch {
-        await this.failDuringStart("journal_failed");
-        return;
+        return this.failDuringStart("journal_failed");
       }
     }
     this.state = recovered.state;
 
     for (const effect of recovered.effects) {
+      if (this.authorityLost) return this.failDuringStart("authority_lost");
       if (effect.type === "report_unknown_outcome") {
         await this.reportUnknownOutcome(effect);
       } else if (effect.type === "post_reply") {
         const failReason = await this.executePostReply(effect);
-        if (failReason !== null) {
-          await this.failDuringStart(failReason);
-          return;
-        }
+        if (failReason !== null) return this.failDuringStart(failReason);
       }
     }
 
+    if (this.authorityLost) return this.failDuringStart("authority_lost");
     if (!(await this.maybeCompact())) {
       this.lifecyclePromise = Promise.resolve(await this.finishShutdown());
       return;
     }
-
-    this.lifecyclePromise = this.runLoops();
+    this.lifecyclePromise = this.runLoop();
   }
 
   async stop(): Promise<RunResult> {
-    if (!this.started) return { reason: "stopped" };
+    if (!this.started) return { reason: this.stopReason };
     this.stopping = true;
     this.claimAbort.abort();
-    this.notifyClaimer();
-    this.notifyWorker();
     return this.lifecyclePromise;
+  }
+
+  loseAuthority(): void {
+    if (this.shutdownComplete || this.authorityLost) return;
+    this.authorityLost = true;
+    this.failed = true;
+    this.stopping = true;
+    this.stopReason = "authority_lost";
+    this.claimAbort.abort();
+    if (!this.interruptedHarness) {
+      this.interruptedHarness = true;
+      try {
+        const res = this.options.harness.interrupt();
+        if (res !== undefined) this.interruptPromise = Promise.resolve(res).catch(() => {});
+      } catch {
+        // Best-effort interrupt during authority loss.
+      }
+    }
+    const resolve = this.resolveAuthorityLost;
+    this.resolveAuthorityLost = null;
+    resolve?.();
+  }
+
+  private async raceAuthority<T>(fn: () => Promise<T>): Promise<RaceOutcome<T>> {
+    if (this.authorityLost) return { kind: "authority_lost" };
+    const p = Promise.resolve().then(fn);
+    p.catch(() => {});
+    const outcome = await Promise.race([
+      p.then((value) => ({ kind: "ok" as const, value }), (err: unknown) => ({ kind: "err" as const, err })),
+      this.authorityLostPromise.then(() => ({ kind: "authority_lost" as const })),
+    ]);
+    return this.authorityLost ? { kind: "authority_lost" } : outcome;
   }
 
   private async failDuringStart(reason: Exclude<StopReason, "stopped">): Promise<void> {
@@ -152,14 +186,7 @@ export class EngineRunner {
     this.lifecyclePromise = Promise.resolve(await this.finishShutdown());
   }
 
-  private async runLoops(): Promise<RunResult> {
-    await Promise.all([this.workerLoop(), this.claimLoop()]);
-    return this.finishShutdown();
-  }
-
   private async finishShutdown(): Promise<RunResult> {
-    await this.commitChain;
-    this.journalClosed = true;
     if (this.journal !== null) {
       try {
         await this.journal.flush();
@@ -170,30 +197,32 @@ export class EngineRunner {
           this.stopReason = "journal_failed";
         }
       }
+      this.journal = null;
     }
+    if (this.interruptPromise !== null) await this.interruptPromise;
     try {
       await this.options.harness.close?.();
     } catch {
       // Best-effort harness teardown during runner shutdown.
     }
+    this.shutdownComplete = true;
     const result: RunResult = { reason: this.stopReason };
     await this.reportOperator("runner_stopped", { reason: result.reason });
     return result;
   }
 
   private failStop(reason: Exclude<StopReason, "stopped">): void {
+    if (reason === "authority_lost") {
+      this.loseAuthority();
+      return;
+    }
     if (!this.failed) this.stopReason = reason;
     this.failed = true;
     this.stopping = true;
     this.claimAbort.abort();
-    this.notifyClaimer();
-    this.notifyWorker();
   }
 
-  private async reportOperator(
-    kind: OperatorReportKind,
-    detail: Readonly<Record<string, unknown>>,
-  ): Promise<void> {
+  private async reportOperator(kind: OperatorReportKind, detail: Readonly<Record<string, unknown>>): Promise<void> {
     try {
       await this.options.operator?.report(kind, detail);
     } catch {
@@ -201,9 +230,7 @@ export class EngineRunner {
     }
   }
 
-  private reportUnknownOutcome(
-    effect: Extract<Effect, { type: "report_unknown_outcome" }>,
-  ): Promise<void> {
+  private reportUnknownOutcome(effect: Extract<Effect, { type: "report_unknown_outcome" }>): Promise<void> {
     return this.reportOperator("unknown_reply_outcome", {
       messageId: effect.messageId,
       commandId: effect.commandId,
@@ -212,33 +239,33 @@ export class EngineRunner {
     });
   }
 
-  private async enqueueCommit<T>(task: () => Promise<T>): Promise<T> {
-    const next = this.commitChain.then(task);
-    this.commitChain = next.then(() => undefined, () => undefined);
-    return next;
+  private async commit(fn: (state: EngineState) => Decision): Promise<readonly Effect[]> {
+    if (this.journal === null) return [];
+    const decision = fn(this.state);
+    if (decision.records.length > 0) {
+      await this.journal.appendAll(decision.records);
+      this.recordsSinceCompact += decision.records.length;
+      for (const record of decision.records) this.state = reduce(this.state, record);
+    }
+    return decision.effects;
   }
 
-  private commit(fn: (state: EngineState) => Decision): Promise<readonly Effect[]> {
-    return this.enqueueCommit(async () => {
-      if (this.journalClosed || this.journal === null) return [];
-      const decision = fn(this.state);
-      if (decision.records.length > 0) {
-        await this.journal.appendAll(decision.records);
-        this.recordsSinceCompact += decision.records.length;
-        for (const record of decision.records) this.state = reduce(this.state, record);
-      }
-      return decision.effects;
-    });
+  private async tryCommit(fn: (state: EngineState) => Decision): Promise<readonly Effect[] | null> {
+    try {
+      return await this.commit(fn);
+    } catch {
+      this.failStop("journal_failed");
+      return null;
+    }
   }
 
   private async maybeCompact(): Promise<boolean> {
+    if (this.authorityLost) return false;
+    if (this.journal === null || this.state.active !== null) return true;
+    if (this.recordsSinceCompact < this.options.compactAfterRecords) return true;
     try {
-      await this.enqueueCommit(async () => {
-        if (this.journalClosed || this.journal === null || this.state.active !== null) return;
-        if (this.recordsSinceCompact < this.options.compactAfterRecords) return;
-        await this.journal.compact(compacted(this.state));
-        this.recordsSinceCompact = 0;
-      });
+      await this.journal.compact(compacted(this.state));
+      this.recordsSinceCompact = 0;
       return true;
     } catch {
       this.failStop("journal_failed");
@@ -246,14 +273,32 @@ export class EngineRunner {
     }
   }
 
+  private async executeMarkSeen(messageId: string, leaseId: string): Promise<boolean> {
+    const outcome = await this.raceAuthority(() => this.options.cloud.markSeen(messageId, leaseId));
+    if (outcome.kind === "authority_lost") return false;
+    if (outcome.kind === "err") {
+      if (outcome.err instanceof AuthorityLostError) {
+        this.loseAuthority();
+        return false;
+      }
+      // Non-authority failure: seen stays unconfirmed; continue.
+      return true;
+    }
+    return (await this.tryCommit((s) => confirmMessageSeen(s, messageId, leaseId, this.options.clock.now()))) !== null;
+  }
+
   private async executePostReply(
     initialEffect: Extract<Effect, { type: "post_reply" }>,
   ): Promise<Exclude<StopReason, "stopped"> | null> {
     let effect = initialEffect;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        await this.options.cloud.postReply(effect.messageId, effect.commandId, effect.text, effect.status);
-      } catch {
+      const outcome = await this.raceAuthority(() => this.options.cloud.postReply(effect.command));
+      if (outcome.kind === "authority_lost") return "authority_lost";
+      if (outcome.kind === "err") {
+        if (outcome.err instanceof AuthorityLostError) {
+          this.loseAuthority();
+          return "authority_lost";
+        }
         if (this.stopping || attempt === 1) return "cloud_failed";
         let retryEffects: readonly Effect[];
         try {
@@ -273,7 +318,6 @@ export class EngineRunner {
         effect = retry;
         continue;
       }
-
       try {
         await this.commit((s) => confirmReplyPosted(s, effect.messageId, this.options.clock.now()));
       } catch {
@@ -296,132 +340,82 @@ export class EngineRunner {
     return true;
   }
 
-  private async claimLoop(): Promise<void> {
-    while (!this.stopping && !this.failed) {
-      const capacity = availableCapacity(this.state);
-      if (capacity <= 0) {
-        await this.waitForClaimSlot();
+  private async claimOne(): Promise<IncomingMessage | null> {
+    if (this.authorityLost || this.stopping || this.failed) return null;
+    const outcome = await this.raceAuthority(() => this.options.cloud.claim(this.claimAbort.signal));
+    if (outcome.kind === "authority_lost") return null;
+    if (outcome.kind === "err") {
+      if (outcome.err instanceof AuthorityLostError) this.loseAuthority();
+      else if (!this.stopping) this.failStop("cloud_failed");
+      return null;
+    }
+    return outcome.value;
+  }
+
+  private async runPendingTurn(): Promise<boolean> {
+    if (this.authorityLost) return false;
+    const effects = await this.tryCommit((s) => decideNext(s, this.options.clock.now()));
+    if (effects === null) return false;
+
+    const startEffect = findEffect(effects, "start_turn");
+    if (!startEffect) return true;
+
+    const seenEffect = findEffect(effects, "mark_seen");
+    if (seenEffect && !(await this.executeMarkSeen(seenEffect.messageId, seenEffect.leaseId))) return false;
+
+    const turnOutcome = await this.raceAuthority(() => this.options.harness.runTurn(startEffect.text));
+    if (turnOutcome.kind === "authority_lost") return false;
+
+    let replyText: string | null = null;
+    let harnessError: string | null = null;
+    if (turnOutcome.kind === "ok") {
+      if (typeof turnOutcome.value !== "string") {
+        this.failStop("harness_port_failed");
+        return false;
+      }
+      replyText = turnOutcome.value;
+    } else {
+      harnessError = truncateError(turnOutcome.err);
+    }
+
+    const replyEffects = await this.tryCommit((s) =>
+      replyText !== null
+        ? finishTurnWithReply(s, startEffect.messageId, replyText, this.options.clock.now(), this.generateId)
+        : finishTurnWithFailure(s, startEffect.messageId, this.options.clock.now(), this.generateId),
+    );
+    if (replyEffects === null) return false;
+
+    if (harnessError !== null) {
+      await this.reportOperator("turn_failed", { messageId: startEffect.messageId, error: harnessError });
+    }
+    if (this.authorityLost || this.failed) return false;
+    if (!(await this.runPostReplyEffects(replyEffects))) return false;
+    return this.maybeCompact();
+  }
+
+  private async runLoop(): Promise<RunResult> {
+    while (!this.stopping && !this.failed && !this.authorityLost) {
+      if (!canClaim(this.state)) {
+        if (!(await this.runPendingTurn())) break;
         continue;
       }
+      const message = await this.claimOne();
+      if (this.authorityLost || this.stopping || this.failed || message === null) continue;
 
-      let batch: readonly IncomingMessage[];
-      try {
-        batch = await this.options.cloud.claim(capacity, this.claimAbort.signal);
-      } catch {
-        if (!this.stopping) this.failStop("cloud_failed");
-        return;
-      }
+      const acceptEffects = await this.tryCommit((s) =>
+        acceptMessage(s, message, this.options.clock.now(), this.generateId),
+      );
+      if (acceptEffects === null || this.authorityLost) break;
 
-      if (this.stopping || this.failed || batch.length === 0) continue;
-
-      let acceptedAny = false;
-      for (const message of batch) {
-        if (this.stopping || this.failed) return;
-        let effects: readonly Effect[];
-        try {
-          effects = await this.commit((s) => {
-            const decision = acceptMessage(s, message, this.options.clock.now(), this.generateId);
-            if (decision.records.some((r) => r.type === "message_accepted")) acceptedAny = true;
-            return decision;
-          });
-        } catch {
-          this.failStop("journal_failed");
-          return;
-        }
-
-        if (effects.length > 0) {
-          if (!(await this.runPostReplyEffects(effects))) return;
-          if (!(await this.maybeCompact())) return;
-        }
-      }
-
-      if (acceptedAny) this.notifyWorker();
-    }
-  }
-
-  private async workerLoop(): Promise<void> {
-    while (!this.stopping && !this.failed) {
-      if (this.state.queue.length === 0) {
-        await this.waitForWork();
+      if (acceptEffects.length > 0) {
+        const seenEffect = findEffect(acceptEffects, "mark_seen");
+        if (seenEffect && !(await this.executeMarkSeen(seenEffect.messageId, seenEffect.leaseId))) break;
+        if (!(await this.runPostReplyEffects(acceptEffects))) break;
+        if (!(await this.maybeCompact())) break;
         continue;
       }
-
-      let effects: readonly Effect[];
-      try {
-        effects = await this.commit((s) => decideNext(s, this.options.clock.now()));
-      } catch {
-        this.failStop("journal_failed");
-        return;
-      }
-
-      const startEffect = findEffect(effects, "start_turn");
-      if (!startEffect) continue;
-
-      const seenEffect = findEffect(effects, "mark_seen");
-      if (seenEffect) {
-        try {
-          await this.options.cloud.markSeen(seenEffect.messageId);
-        } catch {
-          this.failStop("cloud_failed");
-          return;
-        }
-        try {
-          await this.commit((s) => confirmMessageSeen(s, seenEffect.messageId, this.options.clock.now()));
-        } catch {
-          this.failStop("journal_failed");
-          return;
-        }
-      }
-
-      let replyText: string | null = null;
-      let harnessError: string | null = null;
-      try {
-        const result = await this.options.harness.runTurn(startEffect.text);
-        if (typeof result !== "string") {
-          this.failStop("harness_port_failed");
-          return;
-        }
-        replyText = result;
-      } catch (err) {
-        harnessError = truncateError(err);
-      }
-
-      let replyEffects: readonly Effect[];
-      try {
-        replyEffects = await this.commit((s) =>
-          replyText !== null
-            ? finishTurnWithReply(s, startEffect.messageId, replyText, this.options.clock.now(), this.generateId)
-            : finishTurnWithFailure(s, startEffect.messageId, this.options.clock.now(), this.generateId),
-        );
-      } catch {
-        this.failStop("journal_failed");
-        return;
-      }
-
-      if (harnessError !== null) {
-        await this.reportOperator("turn_failed", { messageId: startEffect.messageId, error: harnessError });
-      }
-      if (this.failed) return;
-      if (!(await this.runPostReplyEffects(replyEffects))) return;
-      if (!(await this.maybeCompact())) return;
-      this.notifyClaimer();
+      if (this.state.pending !== null && !(await this.runPendingTurn())) break;
     }
-  }
-
-  private waitForWork(): Promise<void> {
-    return new Promise<void>((resolve) => { this.workerWake = resolve; });
-  }
-  private notifyWorker(): void {
-    const wake = this.workerWake;
-    this.workerWake = null;
-    wake?.();
-  }
-  private waitForClaimSlot(): Promise<void> {
-    return new Promise<void>((resolve) => { this.claimerWake = resolve; });
-  }
-  private notifyClaimer(): void {
-    const wake = this.claimerWake;
-    this.claimerWake = null;
-    wake?.();
+    return this.finishShutdown();
   }
 }

@@ -1,8 +1,28 @@
-import type { ReplyStatus } from "./core.js";
+export type ReplyTarget =
+  | { readonly kind: "private"; readonly inReplyTo: string }
+  | { readonly kind: "thread"; readonly threadRootId: string };
+
+export type ReplyStatus = "answered" | "failed";
+
+export interface ReplyCommand {
+  readonly commandId: string;
+  readonly replyTarget: ReplyTarget;
+  readonly status?: ReplyStatus;
+  readonly body: string;
+}
 
 export interface IncomingMessage {
   readonly id: string;
   readonly text: string;
+  readonly leaseId: string;
+  readonly replyTarget: ReplyTarget;
+}
+
+export class AuthorityLostError extends Error {
+  constructor(message = "Session authority lost") {
+    super(message);
+    this.name = "AuthorityLostError";
+  }
 }
 
 export interface HarnessPort {
@@ -12,16 +32,11 @@ export interface HarnessPort {
 }
 
 export interface CloudPort {
-  // Long-polls until work arrives and resolves empty only on abort;
-  // the runner loops immediately without waiting between claims.
-  claim(limit: number, signal?: AbortSignal): Promise<readonly IncomingMessage[]>;
-  markSeen(messageId: string): Promise<void>;
-  postReply(
-    messageId: string,
-    commandId: string,
-    text: string,
-    status: ReplyStatus,
-  ): Promise<void>;
+  // Owns waiting between claims and wakes on new work; resolves with one
+  // message or null when aborted.
+  claim(signal?: AbortSignal): Promise<IncomingMessage | null>;
+  markSeen(messageId: string, leaseId: string): Promise<void>;
+  postReply(command: ReplyCommand): Promise<void>;
 }
 
 export interface Clock {

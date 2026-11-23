@@ -6,9 +6,9 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { AcpClient, AcpError, MAX_LINE_BYTES } from "../src/engine/acp.js";
 import { AcpHarness } from "../src/engine/acp-harness.js";
-import { TURN_FAILED_REPLY, type ReplyStatus } from "../src/engine/core.js";
+import { TURN_FAILED_REPLY } from "../src/engine/core.js";
 import { LaunchError, SAFE_SYSTEM_PATH, prepareLaunch } from "../src/engine/launch.js";
-import type { Clock, CloudPort, IncomingMessage } from "../src/engine/ports.js";
+import type { Clock, CloudPort, IncomingMessage, ReplyCommand } from "../src/engine/ports.js";
 import { EngineRunner } from "../src/engine/runner.js";
 
 const STANDIN_FILENAME = "engine-acp-standin.mjs";
@@ -486,8 +486,8 @@ function makeClock(start = 1_000): Clock {
 
 class FakeCloud {
   readonly pending: IncomingMessage[] = [];
-  readonly seen: string[] = [];
-  readonly replies: Array<{ messageId: string; text: string; status: ReplyStatus }> = [];
+  readonly seen: Array<{ messageId: string; leaseId: string }> = [];
+  readonly replies: ReplyCommand[] = [];
 
   private claimWaiter: (() => void) | null = null;
   private replyWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -508,9 +508,9 @@ class FakeCloud {
 
   connect(): CloudPort {
     return {
-      claim: async (limit: number, signal?: AbortSignal) => {
+      claim: async (signal?: AbortSignal) => {
         while (this.pending.length === 0) {
-          if (signal?.aborted) return [];
+          if (signal?.aborted) return null;
           await new Promise<void>((resolve) => {
             const onAbort = () => {
               if (this.claimWaiter === onWake) this.claimWaiter = null;
@@ -523,15 +523,15 @@ class FakeCloud {
             this.claimWaiter = onWake;
             signal?.addEventListener("abort", onAbort, { once: true });
           });
-          if (signal?.aborted) return [];
+          if (signal?.aborted) return null;
         }
-        return this.pending.splice(0, limit);
+        return this.pending.shift() ?? null;
       },
-      markSeen: async (messageId: string) => {
-        this.seen.push(messageId);
+      markSeen: async (messageId: string, leaseId: string) => {
+        this.seen.push({ messageId, leaseId });
       },
-      postReply: async (messageId: string, _commandId: string, text: string, status: ReplyStatus) => {
-        this.replies.push({ messageId, text, status });
+      postReply: async (command: ReplyCommand) => {
+        this.replies.push(command);
         const remaining: Array<{ count: number; resolve: () => void }> = [];
         for (const waiter of this.replyWaiters) {
           if (this.replies.length >= waiter.count) waiter.resolve();
@@ -1207,10 +1207,10 @@ test("10. real EngineRunner with AcpHarness and fake cloud delivers 3 replies in
   t.after(() => harness.close());
 
   cloud.enqueue(
-    { id: "m-1", text: "first" },
-    { id: "m-2", text: "second" },
-    { id: "m-3", text: "third" },
-    { id: "m-4", text: "FAIL_THIS_TURN" },
+    { id: "m-1", text: "first", leaseId: "lease-1", replyTarget: { kind: "private", inReplyTo: "m-1" } },
+    { id: "m-2", text: "second", leaseId: "lease-2", replyTarget: { kind: "private", inReplyTo: "m-2" } },
+    { id: "m-3", text: "third", leaseId: "lease-3", replyTarget: { kind: "private", inReplyTo: "m-3" } },
+    { id: "m-4", text: "FAIL_THIS_TURN", leaseId: "lease-4", replyTarget: { kind: "private", inReplyTo: "m-4" } },
   );
 
   const runner = new EngineRunner({
@@ -1227,10 +1227,13 @@ test("10. real EngineRunner with AcpHarness and fake cloud delivers 3 replies in
   const result = await runner.stop();
   assert.deepEqual(result, { reason: "stopped" });
 
-  assert.deepEqual(cloud.replies, [
-    { messageId: "m-1", text: "ack:first", status: "replied" },
-    { messageId: "m-2", text: "ack:second", status: "replied" },
-    { messageId: "m-3", text: "ack:third", status: "replied" },
-    { messageId: "m-4", text: TURN_FAILED_REPLY, status: "failed" },
-  ]);
+  assert.deepEqual(
+    cloud.replies.map(({ replyTarget, body, status }) => ({ replyTarget, body, status })),
+    [
+      { replyTarget: { kind: "private", inReplyTo: "m-1" }, body: "ack:first", status: "answered" },
+      { replyTarget: { kind: "private", inReplyTo: "m-2" }, body: "ack:second", status: "answered" },
+      { replyTarget: { kind: "private", inReplyTo: "m-3" }, body: "ack:third", status: "answered" },
+      { replyTarget: { kind: "private", inReplyTo: "m-4" }, body: TURN_FAILED_REPLY, status: "failed" },
+    ],
+  );
 });

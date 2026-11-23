@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import {
   MAX_MESSAGE_TEXT_BYTES,
   MESSAGE_TOO_LONG_REPLY,
@@ -21,17 +22,19 @@ import {
   TURN_FAILED_REPLY,
   compacted,
   reduceAll,
-  type ReplyStatus,
 } from "../src/engine/core.js";
 import { Journal, MAX_RECORD_BYTES } from "../src/engine/journal.js";
-import type {
-  Clock,
-  CloudPort,
-  HarnessPort,
-  IdGenerator,
-  IncomingMessage,
-  OperatorPort,
-  OperatorReportKind,
+import {
+  AuthorityLostError,
+  type Clock,
+  type CloudPort,
+  type HarnessPort,
+  type IdGenerator,
+  type IncomingMessage,
+  type OperatorPort,
+  type OperatorReportKind,
+  type ReplyCommand,
+  type ReplyTarget,
 } from "../src/engine/ports.js";
 import { EngineRunner } from "../src/engine/runner.js";
 
@@ -40,6 +43,34 @@ const TEST_RUNNER_LIMITS = {
   compactAfterRecords: 1_000,
   settledIdCap: 1_000,
 } as const;
+
+function privateTarget(inReplyTo: string): ReplyTarget {
+  return { kind: "private", inReplyTo };
+}
+
+function threadTarget(threadRootId: string): ReplyTarget {
+  return { kind: "thread", threadRootId };
+}
+
+function cloneCommand(command: ReplyCommand): ReplyCommand {
+  const replyTarget: ReplyTarget =
+    command.replyTarget.kind === "private"
+      ? { kind: "private", inReplyTo: command.replyTarget.inReplyTo }
+      : { kind: "thread", threadRootId: command.replyTarget.threadRootId };
+  if ("status" in command) {
+    return {
+      commandId: command.commandId,
+      replyTarget,
+      status: command.status,
+      body: command.body,
+    };
+  }
+  return {
+    commandId: command.commandId,
+    replyTarget,
+    body: command.body,
+  };
+}
 
 function makeIdGen(prefix = "cmd"): IdGenerator {
   let seq = 0;
@@ -72,50 +103,93 @@ function makeClock(start = 1_000): Clock {
   };
 }
 
-interface RecordedReply {
-  readonly messageId: string;
+type FailureMode = "network" | "authority";
+
+interface EnqueueInput {
+  readonly id: string;
   readonly text: string;
-  readonly status: ReplyStatus;
+  readonly replyTarget?: ReplyTarget;
 }
 
-interface RecordedReplyAttempt extends RecordedReply {
-  readonly commandId: string;
+interface ServerMessage {
+  readonly id: string;
+  readonly text: string;
+  readonly replyTarget: ReplyTarget;
+  leaseId: string | null;
+  leasedBySession: number | null;
+  seen: boolean;
+  seenLeaseId: string | null;
 }
 
 interface CloudConnectionOptions {
-  readonly throwOnClaim?: boolean;
-  readonly throwOnPostReply?: boolean;
-  readonly failPostReplyTimes?: number;
-  readonly hangPostReplyFor?: string;
-  readonly onPostReplyHang?: () => void;
-  readonly maxPerClaim?: number;
+  readonly failClaim?: readonly FailureMode[];
+  readonly failMarkSeen?: readonly FailureMode[];
+  readonly failPostReply?: readonly FailureMode[];
+  readonly alwaysFailClaim?: FailureMode;
+  readonly alwaysFailPostReply?: FailureMode;
+}
+
+interface ConnectedCloud extends CloudPort {
+  readonly sessionId: number;
+  readonly calls: readonly string[];
+  readonly callsAfterRefusal: number;
+  disconnect(): void;
+  markCutOff(): void;
 }
 
 class FakeCloud {
-  readonly pending: IncomingMessage[] = [];
-  readonly claimedIds: string[] = [];
-  readonly claimLimits: number[] = [];
-  readonly seen: string[] = [];
-  readonly replies: RecordedReply[] = [];
-  readonly replyAttempts: RecordedReplyAttempt[] = [];
+  readonly messages: ServerMessage[] = [];
+  readonly claimed: Array<{ messageId: string; leaseId: string; sessionId: number }> = [];
+  readonly seen: Array<{ messageId: string; leaseId: string; sessionId: number }> = [];
+  readonly replies: ReplyCommand[] = [];
+  readonly replyAttempts: ReplyCommand[] = [];
+  readonly idempotencyViolations: string[] = [];
+  readonly protocolErrors: string[] = [];
+  maxConcurrentUnackedLeases = 0;
 
-  private claimWaiter: (() => void) | null = null;
+  private sessionSeq = 1;
+  private leaseSeq = 0;
+  private readonly commandsById = new Map<string, ReplyCommand>();
+  private readonly claimWaiters = new Set<() => void>();
   private replyWaiters: Array<{ count: number; resolve: () => void }> = [];
-  private claimedWaiters: Array<{ count: number; resolve: () => void }> = [];
+  private seenWaiters: Array<{ messageId: string; resolve: () => void }> = [];
 
-  enqueue(...messages: readonly IncomingMessage[]): void {
-    this.pending.push(...messages);
-    const wake = this.claimWaiter;
-    this.claimWaiter = null;
-    wake?.();
+  enqueue(...items: readonly EnqueueInput[]): void {
+    for (const item of items) {
+      this.messages.push({
+        id: item.id,
+        text: item.text,
+        replyTarget: item.replyTarget ?? privateTarget(item.id),
+        leaseId: null,
+        leasedBySession: null,
+        seen: false,
+        seenLeaseId: null,
+      });
+    }
+    this.wakeClaimWaiters();
   }
 
   enqueueNumbered(count: number, startAt = 1): void {
-    const batch: IncomingMessage[] = [];
+    const batch: EnqueueInput[] = [];
     for (let i = startAt; i < startAt + count; i += 1) {
-      batch.push({ id: `m-${i}`, text: `msg-${i}` });
+      batch.push({ id: `m-${i}`, text: `msg-${i}`, replyTarget: privateTarget(`m-${i}`) });
     }
     this.enqueue(...batch);
+  }
+
+  newSession(): void {
+    this.sessionSeq += 1;
+    for (const msg of this.messages) {
+      if (!msg.seen && msg.leaseId !== null) {
+        msg.leaseId = null;
+        msg.leasedBySession = null;
+      }
+    }
+    this.wakeClaimWaiters();
+  }
+
+  getMessage(id: string): ServerMessage | undefined {
+    return this.messages.find((m) => m.id === id);
   }
 
   waitForReplies(count: number): Promise<void> {
@@ -125,109 +199,187 @@ class FakeCloud {
     });
   }
 
-  waitForClaimedCount(count: number): Promise<void> {
-    if (this.claimedIds.length >= count) return Promise.resolve();
+  waitForSeen(messageId: string): Promise<void> {
+    if (this.seen.some((s) => s.messageId === messageId)) return Promise.resolve();
     return new Promise<void>((resolve) => {
-      this.claimedWaiters.push({ count, resolve });
+      this.seenWaiters.push({ messageId, resolve });
     });
   }
 
-  connect(options: CloudConnectionOptions = {}): CloudPort & { disconnect: () => void } {
+  connect(options: CloudConnectionOptions = {}): ConnectedCloud {
+    const sessionId = this.sessionSeq;
     let disconnected = false;
-    let remainingPostFailures = options.failPostReplyTimes ?? 0;
+    let refused = false;
+    let callsAfterRefusalCount = 0;
+    const recordedCalls: string[] = [];
+    const claimFailures = [...(options.failClaim ?? [])];
+    const markSeenFailures = [...(options.failMarkSeen ?? [])];
+    const postReplyFailures = [...(options.failPostReply ?? [])];
     const never = <T>(): Promise<T> => new Promise<T>(() => {});
 
-    return {
+    const recordCall = (op: string): void => {
+      recordedCalls.push(op);
+      if (refused) callsAfterRefusalCount += 1;
+    };
+
+    const nextFailure = (
+      queue: FailureMode[],
+      always?: FailureMode,
+    ): FailureMode | undefined => (queue.length > 0 ? queue.shift() : always);
+
+    const throwForMode = (mode: FailureMode, op: string): never => {
+      if (mode === "authority") {
+        refused = true;
+        throw new AuthorityLostError(`Simulated authority loss on ${op}`);
+      }
+      throw new Error(`Simulated network error on ${op}`);
+    };
+
+    const conn: ConnectedCloud = {
+      sessionId,
+      get calls() {
+        return recordedCalls;
+      },
+      get callsAfterRefusal() {
+        return callsAfterRefusalCount;
+      },
       disconnect: () => {
         disconnected = true;
-        this.claimWaiter = null;
       },
-      claim: async (limit: number, signal?: AbortSignal) => {
+      markCutOff: () => {
+        refused = true;
+      },
+      claim: async (signal?: AbortSignal): Promise<IncomingMessage | null> => {
         if (disconnected) return never();
-        if (options.throwOnClaim) {
-          throw new Error("Simulated cloud claim failure");
-        }
-        while (this.pending.length === 0) {
+        recordCall("claim");
+        const mode = nextFailure(claimFailures, options.alwaysFailClaim);
+        if (mode) throwForMode(mode, "claim");
+
+        while (true) {
           if (disconnected) return never();
-          if (signal?.aborted) return [];
+          if (signal?.aborted) return null;
+          const next = this.messages.find((m) => !m.seen && m.leaseId === null);
+          if (next) {
+            this.leaseSeq += 1;
+            const leaseId = `lease-${this.leaseSeq}`;
+            next.leaseId = leaseId;
+            next.leasedBySession = sessionId;
+            const unackedLeased = this.messages.filter((m) => !m.seen && m.leaseId !== null).length;
+            if (unackedLeased > this.maxConcurrentUnackedLeases) {
+              this.maxConcurrentUnackedLeases = unackedLeased;
+            }
+            this.claimed.push({ messageId: next.id, leaseId, sessionId });
+            return {
+              id: next.id,
+              text: next.text,
+              leaseId,
+              replyTarget: next.replyTarget,
+            };
+          }
           await new Promise<void>((resolve) => {
             const onAbort = () => {
-              if (this.claimWaiter === onWake) this.claimWaiter = null;
+              this.claimWaiters.delete(onWake);
               resolve();
             };
             const onWake = () => {
               signal?.removeEventListener("abort", onAbort);
               resolve();
             };
-            this.claimWaiter = onWake;
+            this.claimWaiters.add(onWake);
             signal?.addEventListener("abort", onAbort, { once: true });
           });
-          if (disconnected) return never();
-          if (signal?.aborted) return [];
         }
-        const take =
-          options.maxPerClaim !== undefined
-            ? Math.min(limit, options.maxPerClaim)
-            : limit;
-        const batch = this.pending.splice(0, take);
-        this.claimLimits.push(limit);
-        for (const msg of batch) {
-          this.claimedIds.push(msg.id);
-        }
-        this.flushClaimedWaiters();
-        return batch;
       },
-      markSeen: async (messageId: string) => {
+      markSeen: async (messageId: string, leaseId: string): Promise<void> => {
         if (disconnected) return never();
-        this.seen.push(messageId);
+        recordCall("markSeen");
+        const mode = nextFailure(markSeenFailures);
+        if (mode) throwForMode(mode, "markSeen");
+
+        const msg = this.messages.find((m) => m.id === messageId);
+        if (!msg) {
+          this.protocolErrors.push(`markSeen unknown message ${messageId}`);
+          throw new Error("Unknown message");
+        }
+        if (msg.seen) {
+          this.protocolErrors.push(`markSeen already seen ${messageId}`);
+          throw new Error("Message already acknowledged");
+        }
+        if (msg.leaseId !== leaseId || msg.leasedBySession !== sessionId) {
+          this.protocolErrors.push(
+            `markSeen stale lease ${leaseId} (expected ${msg.leaseId}) on session ${sessionId}`,
+          );
+          throw new Error("Stale lease or wrong session");
+        }
+        msg.seen = true;
+        msg.seenLeaseId = leaseId;
+        msg.leaseId = null;
+        msg.leasedBySession = null;
+        this.seen.push({ messageId, leaseId, sessionId });
+        this.flushSeenWaiters(messageId);
       },
-      postReply: async (
-        messageId: string,
-        commandId: string,
-        text: string,
-        status: ReplyStatus,
-      ) => {
+      postReply: async (command: ReplyCommand): Promise<void> => {
         if (disconnected) return never();
-        this.replyAttempts.push({ messageId, commandId, text, status });
-        if (options.hangPostReplyFor === messageId) {
-          options.onPostReplyHang?.();
-          return never();
+        recordCall("postReply");
+
+        if (command.replyTarget.kind === "thread" && ("status" in command || command.status !== undefined)) {
+          this.protocolErrors.push(`Thread reply carried status for ${command.commandId}`);
+          throw new Error("Status is not allowed on thread replies");
         }
-        if (remainingPostFailures > 0) {
-          remainingPostFailures -= 1;
-          throw new Error("Simulated transient cloud post failure");
+        if (
+          command.replyTarget.kind === "private" &&
+          command.status !== "answered" &&
+          command.status !== "failed"
+        ) {
+          this.protocolErrors.push(`Private reply missing valid status for ${command.commandId}`);
+          throw new Error("Private reply requires valid status");
         }
-        if (options.throwOnPostReply) {
-          throw new Error("Simulated cloud post failure");
+
+        const copy = cloneCommand(command);
+        this.replyAttempts.push(copy);
+
+        const mode = nextFailure(postReplyFailures, options.alwaysFailPostReply);
+        if (mode) throwForMode(mode, "postReply");
+
+        const existing = this.commandsById.get(copy.commandId);
+        if (existing) {
+          if (!isDeepStrictEqual(existing, copy)) {
+            this.idempotencyViolations.push(`Command ${copy.commandId} retried with different content`);
+            throw new Error("Idempotency conflict");
+          }
+          return;
         }
-        this.replies.push({ messageId, text, status });
+        this.commandsById.set(copy.commandId, copy);
+        this.replies.push(copy);
         this.flushReplyWaiters();
       },
     };
+    return conn;
+  }
+
+  private wakeClaimWaiters(): void {
+    for (const wake of [...this.claimWaiters]) {
+      this.claimWaiters.delete(wake);
+      wake();
+    }
   }
 
   private flushReplyWaiters(): void {
     const remaining: Array<{ count: number; resolve: () => void }> = [];
     for (const waiter of this.replyWaiters) {
-      if (this.replies.length >= waiter.count) {
-        waiter.resolve();
-      } else {
-        remaining.push(waiter);
-      }
+      if (this.replies.length >= waiter.count) waiter.resolve();
+      else remaining.push(waiter);
     }
     this.replyWaiters = remaining;
   }
 
-  private flushClaimedWaiters(): void {
-    const remaining: Array<{ count: number; resolve: () => void }> = [];
-    for (const waiter of this.claimedWaiters) {
-      if (this.claimedIds.length >= waiter.count) {
-        waiter.resolve();
-      } else {
-        remaining.push(waiter);
-      }
+  private flushSeenWaiters(messageId: string): void {
+    const remaining: Array<{ messageId: string; resolve: () => void }> = [];
+    for (const waiter of this.seenWaiters) {
+      if (waiter.messageId === messageId) waiter.resolve();
+      else remaining.push(waiter);
     }
-    this.claimedWaiters = remaining;
+    this.seenWaiters = remaining;
   }
 }
 
@@ -241,6 +393,7 @@ class FakeHarness implements HarnessPort {
   readonly started: string[] = [];
   readonly turns: PendingTurn[] = [];
   interrupted = 0;
+  closed = 0;
 
   private readonly autoReply: boolean;
   private turnWaiters: Array<{ index: number; resolve: (turn: PendingTurn) => void }> = [];
@@ -273,19 +426,15 @@ class FakeHarness implements HarnessPort {
     this.interrupted += 1;
   }
 
+  close(): void {
+    this.closed += 1;
+  }
+
   waitForTurn(index: number): Promise<PendingTurn> {
-    if (this.turns.length > index) {
-      return Promise.resolve(this.turns[index]);
-    }
+    if (this.turns.length > index) return Promise.resolve(this.turns[index]);
     return new Promise<PendingTurn>((resolve) => {
       this.turnWaiters.push({ index, resolve });
     });
-  }
-}
-
-async function flushEventLoop(turns = 5): Promise<void> {
-  for (let i = 0; i < turns; i += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 
@@ -295,7 +444,7 @@ async function makeTempDir(t: { after: (fn: () => Promise<void> | void) => void 
   return dir;
 }
 
-test("1. 100 messages through the runner: every one replied to exactly once, in arrival order", async (t) => {
+test("1. 100 messages: each run once, replied once, in order; at most one unacked lease at any time", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "state", "journal.ndjson");
   const cloud = new FakeCloud();
@@ -311,49 +460,66 @@ test("1. 100 messages through the runner: every one replied to exactly once, in 
   });
   await runner.start();
   await cloud.waitForReplies(100);
-  await runner.stop();
+  assert.deepEqual(await runner.stop(), { reason: "stopped" });
 
+  assert.equal(cloud.maxConcurrentUnackedLeases, 1);
+  assert.equal(cloud.idempotencyViolations.length, 0);
+  assert.equal(cloud.protocolErrors.length, 0);
   assert.equal(harness.started.length, 100);
   assert.equal(cloud.seen.length, 100);
   assert.equal(cloud.replies.length, 100);
   for (let i = 1; i <= 100; i += 1) {
-    assert.equal(cloud.seen[i - 1], `m-${i}`);
-    assert.deepEqual(cloud.replies[i - 1], {
-      messageId: `m-${i}`,
-      text: `reply:msg-${i}`,
-      status: "replied",
-    });
+    assert.equal(harness.started[i - 1], `msg-${i}`);
+    assert.equal(cloud.seen[i - 1].messageId, `m-${i}`);
+    assert.deepEqual(cloud.replies[i - 1].replyTarget, privateTarget(`m-${i}`));
+    assert.equal(cloud.replies[i - 1].status, "answered");
+    assert.equal(cloud.replies[i - 1].body, `reply:msg-${i}`);
   }
 });
 
-test("2. restart while messages are queued: abandon runner mid-queue, restart loses none and runs none twice", async (t) => {
+test("2. crash after accepted before turn starts: forgotten locally, newSession redelivers and runs once", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
-  cloud.enqueueNumbered(6);
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
 
-  let hitHang!: () => void;
-  const hungMidQueue = new Promise<void>((resolve) => {
-    hitHang = resolve;
-  });
-
-  const cloud1 = cloud.connect({
-    hangPostReplyFor: "m-2",
-    onPostReplyHang: hitHang,
-  });
+  let clockCalls = 0;
+  const cloud1 = cloud.connect();
+  const crashingClock: Clock = {
+    now() {
+      clockCalls += 1;
+      // Call 1: recover(), Call 2: acceptMessage(), Call 3: decideNext() -> simulate crash before turn_started.
+      if (clockCalls === 3) {
+        cloud1.disconnect();
+        throw new Error("Simulated crash before turn_started");
+      }
+      return 1_000 + clockCalls;
+    },
+  };
   const harness1 = new FakeHarness({ autoReply: true });
   const runner1 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
     harness: harness1,
     cloud: cloud1,
-    clock: makeClock(1_000),
+    clock: crashingClock,
   });
   await runner1.start();
-  await hungMidQueue;
-  cloud1.disconnect();
-  // Abandon runner1 without calling runner1.stop().
+  await runner1.done;
 
+  // Verify m-1 was accepted but never started, and its first lease is still unacknowledged.
+  assert.deepEqual(harness1.started, []);
+  const midJournal = await Journal.open(journalPath);
+  assert.deepEqual(
+    midJournal.records.map((r) => r.type),
+    ["message_accepted"],
+  );
+  await midJournal.close();
+  assert.equal(cloud.getMessage("m-1")?.seen, false);
+  const firstLease = cloud.getMessage("m-1")?.leaseId;
+  assert.ok(firstLease);
+
+  cloud.newSession();
   const harness2 = new FakeHarness({ autoReply: true });
   const runner2 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
@@ -363,26 +529,30 @@ test("2. restart while messages are queued: abandon runner mid-queue, restart lo
     clock: makeClock(2_000),
   });
   await runner2.start();
-  await cloud.waitForReplies(6);
-  await runner2.stop();
+  await cloud.waitForReplies(1);
+  assert.deepEqual(await runner2.stop(), { reason: "stopped" });
 
-  assert.deepEqual(harness1.started, ["msg-1", "msg-2"]);
-  assert.deepEqual(harness2.started, ["msg-3", "msg-4", "msg-5", "msg-6"]);
-  assert.deepEqual(
-    cloud.replies,
-    [1, 2, 3, 4, 5, 6].map((i) => ({
-      messageId: `m-${i}`,
-      text: `reply:msg-${i}`,
-      status: "replied",
-    })),
+  const afterJournal = await Journal.open(journalPath);
+  assert.ok(
+    afterJournal.records.some((r) => r.type === "message_released" && r.messageId === "m-1"),
+    "expected message_released record on recovery",
   );
+  await afterJournal.close();
+
+  assert.deepEqual(harness2.started, ["msg-1"]);
+  assert.equal(cloud.replies.length, 1);
+  assert.equal(cloud.replies[0].body, "reply:msg-1");
+  assert.equal(cloud.replies[0].status, "answered");
+  assert.equal(cloud.getMessage("m-1")?.seen, true);
+  assert.notEqual(cloud.getMessage("m-1")?.seenLeaseId, firstLease);
+  assert.equal(cloud.protocolErrors.length, 0);
 });
 
-test("3. restart while a turn is running: interrupted once across further restarts, next message runs normally", async (t) => {
+test("3. crash mid-turn after seen landed: not replayed, one restart reply across two restarts, next runs", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
-  cloud.enqueue({ id: "m-1", text: "msg-1" });
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
 
   const cloud1 = cloud.connect();
   const harness1 = new FakeHarness({ autoReply: false });
@@ -395,9 +565,11 @@ test("3. restart while a turn is running: interrupted once across further restar
   });
   await runner1.start();
   await harness1.waitForTurn(0);
+  assert.equal(cloud.getMessage("m-1")?.seen, true);
   cloud1.disconnect();
-  // Abandon runner1 with m-1 still hanging.
+  // Abandon runner1 without calling stop().
 
+  cloud.newSession();
   const harness2 = new FakeHarness({ autoReply: true });
   const runner2 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
@@ -409,6 +581,7 @@ test("3. restart while a turn is running: interrupted once across further restar
   await runner2.start();
   await runner2.stop();
 
+  cloud.newSession();
   const harness3 = new FakeHarness({ autoReply: true });
   const runner3 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
@@ -420,6 +593,7 @@ test("3. restart while a turn is running: interrupted once across further restar
   await runner3.start();
   await runner3.stop();
 
+  cloud.newSession();
   const harness4 = new FakeHarness({ autoReply: true });
   const runner4 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
@@ -429,7 +603,7 @@ test("3. restart while a turn is running: interrupted once across further restar
     clock: makeClock(4_000),
   });
   await runner4.start();
-  cloud.enqueue({ id: "m-2", text: "msg-2" });
+  cloud.enqueue({ id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") });
   await cloud.waitForReplies(2);
   await runner4.stop();
 
@@ -437,40 +611,41 @@ test("3. restart while a turn is running: interrupted once across further restar
   assert.deepEqual(harness2.started, []);
   assert.deepEqual(harness3.started, []);
   assert.deepEqual(harness4.started, ["msg-2"]);
-  assert.deepEqual(cloud.replies, [
-    {
-      messageId: "m-1",
-      text: RESTART_INTERRUPTED_REPLY,
-      status: "failed",
-    },
-    {
-      messageId: "m-2",
-      text: "reply:msg-2",
-      status: "replied",
-    },
-  ]);
+  assert.equal(cloud.replies.length, 2);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("m-1"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, RESTART_INTERRUPTED_REPLY);
+  assert.deepEqual(cloud.replies[1].replyTarget, privateTarget("m-2"));
+  assert.equal(cloud.replies[1].status, "answered");
+  assert.equal(cloud.replies[1].body, "reply:msg-2");
+  assert.equal(cloud.protocolErrors.length, 0);
 });
 
-test("4. finished turn whose reply post threw: posted after restart, not posted again on further restart", async (t) => {
+test("4. crash mid-turn when seen did NOT land: redelivered under new lease, acked without running, one restart reply", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
-  cloud.enqueue({ id: "m-1", text: "msg-1" });
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
 
-  const harness1 = new FakeHarness({ autoReply: true });
+  const cloud1 = cloud.connect({ failMarkSeen: ["network"] });
+  const harness1 = new FakeHarness({ autoReply: false });
   const runner1 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
     harness: harness1,
-    cloud: cloud.connect({ throwOnPostReply: true }),
+    cloud: cloud1,
     clock: makeClock(1_000),
   });
   await runner1.start();
-  await runner1.done;
+  await harness1.waitForTurn(0);
+  // Turn ran even though markSeen failed transiently; seen stays unconfirmed.
+  assert.equal(cloud.getMessage("m-1")?.seen, false);
+  const firstLease = cloud.getMessage("m-1")?.leaseId;
+  assert.ok(firstLease);
+  cloud1.disconnect();
+  // Abandon runner1 without calling stop().
 
-  assert.deepEqual(harness1.started, ["msg-1"]);
-  assert.deepEqual(cloud.replies, []);
-
+  cloud.newSession();
   const harness2 = new FakeHarness({ autoReply: true });
   const runner2 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
@@ -480,187 +655,37 @@ test("4. finished turn whose reply post threw: posted after restart, not posted 
     clock: makeClock(2_000),
   });
   await runner2.start();
-  await runner2.stop();
-
-  const harness3 = new FakeHarness({ autoReply: true });
-  const runner3 = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath,
-    harness: harness3,
-    cloud: cloud.connect(),
-    clock: makeClock(3_000),
-  });
-  await runner3.start();
-  await runner3.stop();
-
-  assert.deepEqual(harness2.started, []);
-  assert.deepEqual(harness3.started, []);
-  assert.deepEqual(cloud.replies, [
-    {
-      messageId: "m-1",
-      text: "reply:msg-1",
-      status: "replied",
-    },
-  ]);
-});
-
-test("5. a message delivered twice is run once", async (t) => {
-  const dir = await makeTempDir(t);
-  const journalPath = join(dir, "journal.ndjson");
-  const cloud = new FakeCloud();
-  const harness = new FakeHarness({ autoReply: true });
-  cloud.enqueue(
-    { id: "dup-1", text: "hello" },
-    { id: "dup-1", text: "hello" },
-    { id: "m-2", text: "after" },
-  );
-
-  const runner = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath,
-    harness,
-    cloud: cloud.connect(),
-    clock: makeClock(),
-  });
-  await runner.start();
+  await cloud.waitForSeen("m-1");
+  cloud.enqueue({ id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") });
   await cloud.waitForReplies(2);
+  assert.deepEqual(await runner2.stop(), { reason: "stopped" });
 
-  cloud.enqueue(
-    { id: "dup-1", text: "hello" },
-    { id: "m-3", text: "final" },
-  );
-  await cloud.waitForReplies(3);
-  await runner.stop();
-
-  assert.deepEqual(harness.started, ["hello", "after", "final"]);
-  assert.deepEqual(
-    cloud.replies.map((r) => r.messageId),
-    ["dup-1", "m-2", "m-3"],
-  );
+  assert.deepEqual(harness1.started, ["msg-1"]);
+  assert.deepEqual(harness2.started, ["msg-2"]);
+  assert.equal(cloud.getMessage("m-1")?.seen, true);
+  assert.notEqual(cloud.getMessage("m-1")?.seenLeaseId, firstLease);
+  assert.equal(cloud.replies.length, 2);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("m-1"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, RESTART_INTERRUPTED_REPLY);
+  assert.deepEqual(cloud.replies[1].replyTarget, privateTarget("m-2"));
+  assert.equal(cloud.replies[1].status, "answered");
+  assert.equal(cloud.replies[1].body, "reply:msg-2");
+  assert.equal(cloud.protocolErrors.length, 0);
 });
 
-test("6. at the queue cap the runner claims nothing more until a turn finishes", async (t) => {
-  const dir = await makeTempDir(t);
-  const journalPath = join(dir, "journal.ndjson");
-  const cloud = new FakeCloud();
-  const harness = new FakeHarness({ autoReply: false });
-  cloud.enqueueNumbered(5);
-
-  const runner = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath,
-    harness,
-    cloud: cloud.connect({ maxPerClaim: 1 }),
-    clock: makeClock(),
-    queueCap: 3,
-  });
-  await runner.start();
-
-  const turn1 = await harness.waitForTurn(0);
-  await cloud.waitForClaimedCount(3);
-  await flushEventLoop();
-
-  assert.deepEqual(cloud.claimedIds, ["m-1", "m-2", "m-3"]);
-  assert.equal(cloud.pending.length, 2);
-
-  turn1.resolve("reply:msg-1");
-  const turn2 = await harness.waitForTurn(1);
-  await cloud.waitForClaimedCount(4);
-  await flushEventLoop();
-
-  assert.deepEqual(cloud.claimedIds, ["m-1", "m-2", "m-3", "m-4"]);
-  assert.equal(cloud.pending.length, 1);
-
-  turn2.resolve("reply:msg-2");
-  const turn3 = await harness.waitForTurn(2);
-  turn3.resolve("reply:msg-3");
-  const turn4 = await harness.waitForTurn(3);
-  turn4.resolve("reply:msg-4");
-  const turn5 = await harness.waitForTurn(4);
-  turn5.resolve("reply:msg-5");
-
-  await cloud.waitForReplies(5);
-  await runner.stop();
-
-  assert.deepEqual(
-    cloud.replies.map((r) => r.messageId),
-    ["m-1", "m-2", "m-3", "m-4", "m-5"],
-  );
-});
-
-test("7. journal: torn last line ignored, symlink refused, file created 0600", async (t) => {
-  const dir = await makeTempDir(t);
-  const journalDir = join(dir, "private");
-  const journalPath = join(journalDir, "journal.ndjson");
-
-  const journal1 = await Journal.open(journalPath);
-  assert.equal((await stat(journalDir)).mode & 0o777, 0o700);
-  assert.equal((await stat(journalPath)).mode & 0o777, 0o600);
-
-  await journal1.append({
-    type: "message_accepted",
-    messageId: "m-1",
-    text: "hello",
-    at: 100,
-  });
-  await journal1.append({
-    type: "turn_started",
-    messageId: "m-1",
-    at: 101,
-  });
-  await journal1.close();
-
-  await appendFile(journalPath, '{"type":"turn_finished","messageId":"m-1"', "utf8");
-
-  const journal2 = await Journal.open(journalPath);
-  assert.deepEqual(journal2.records, [
-    { type: "message_accepted", messageId: "m-1", text: "hello", at: 100 },
-    { type: "turn_started", messageId: "m-1", at: 101 },
-  ]);
-
-  await journal2.append({
-    type: "turn_finished",
-    messageId: "m-1",
-    commandId: "cmd-1",
-    outcome: "replied",
-    replyText: "ok",
-    at: 102,
-  });
-  await journal2.close();
-
-  const journal3 = await Journal.open(journalPath);
-  assert.equal(journal3.records.length, 3);
-  await journal3.close();
-
-  const realTarget = join(dir, "real.ndjson");
-  const symlinkPath = join(dir, "link.ndjson");
-  await writeFile(realTarget, "", { mode: 0o600 });
-  await symlink(realTarget, symlinkPath);
-
-  await assert.rejects(
-    () => Journal.open(symlinkPath),
-    (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /symlink/i);
-      assert.equal(err.message.includes(symlinkPath), false);
-      assert.equal(err.message.includes(dir), false);
-      return true;
-    },
-  );
-});
-
-test("8. reply post retries (in-process and after restart) send identical commandId, text and status", async (t) => {
+test("5. reply post retries send identical command object in-process and after restart; private carries status, thread does not", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
 
-  // In-process retry: first postReply fails transiently, second succeeds.
-  cloud.enqueue({ id: "m-1", text: "first" });
+  // In-process retry for private reply (status: "answered").
+  cloud.enqueue({ id: "m-priv-1", text: "priv-1", replyTarget: privateTarget("m-priv-1") });
   const runner1 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
-    cloud: cloud.connect({ failPostReplyTimes: 1 }),
+    cloud: cloud.connect({ failPostReply: ["network"] }),
     clock: makeClock(1_000),
     generateId: makeIdGen("r1"),
   });
@@ -668,30 +693,31 @@ test("8. reply post retries (in-process and after restart) send identical comman
   await cloud.waitForReplies(1);
   await runner1.stop();
 
-  const m1Attempts = cloud.replyAttempts.filter((a) => a.messageId === "m-1");
-  assert.equal(m1Attempts.length, 2);
-  assert.deepEqual(m1Attempts[0], {
-    messageId: "m-1",
+  const priv1Attempts = cloud.replyAttempts.filter((a) => a.commandId === "r1-1");
+  assert.equal(priv1Attempts.length, 2);
+  assert.deepEqual(priv1Attempts[0], {
     commandId: "r1-1",
-    text: "reply:first",
-    status: "replied",
+    replyTarget: { kind: "private", inReplyTo: "m-priv-1" },
+    status: "answered",
+    body: "reply:priv-1",
   });
-  assert.deepEqual(m1Attempts[1], m1Attempts[0]);
+  assert.deepEqual(priv1Attempts[1], priv1Attempts[0]);
 
-  // Restart retry: postReply always fails in runner2, then succeeds in runner3.
-  cloud.enqueue({ id: "m-2", text: "second" });
+  // Restart retry for thread reply (no status property at all).
+  cloud.newSession();
+  cloud.enqueue({ id: "m-thread-1", text: "thread-1", replyTarget: threadTarget("root-42") });
   const runner2 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
-    cloud: cloud.connect({ throwOnPostReply: true }),
+    cloud: cloud.connect({ alwaysFailPostReply: "network" }),
     clock: makeClock(2_000),
     generateId: makeIdGen("r2"),
   });
   await runner2.start();
-  const r2Result = await runner2.done;
-  assert.deepEqual(r2Result, { reason: "cloud_failed" });
+  assert.deepEqual(await runner2.done, { reason: "cloud_failed" });
 
+  cloud.newSession();
   const runner3 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
@@ -704,19 +730,20 @@ test("8. reply post retries (in-process and after restart) send identical comman
   await cloud.waitForReplies(2);
   await runner3.stop();
 
-  const m2Attempts = cloud.replyAttempts.filter((a) => a.messageId === "m-2");
-  assert.ok(m2Attempts.length >= 2);
-  for (const attempt of m2Attempts) {
+  const threadAttempts = cloud.replyAttempts.filter((a) => a.commandId === "r2-1");
+  assert.equal(threadAttempts.length, 3);
+  for (const attempt of threadAttempts) {
+    assert.equal("status" in attempt, false);
     assert.deepEqual(attempt, {
-      messageId: "m-2",
       commandId: "r2-1",
-      text: "reply:second",
-      status: "replied",
+      replyTarget: { kind: "thread", threadRootId: "root-42" },
+      body: "reply:thread-1",
     });
   }
 
-  // Interruption notice gets its commandId once when recorded, not regenerated on restart.
-  cloud.enqueue({ id: "m-3", text: "third" });
+  // Interrupted thread turn also omits status and keeps identical commandId across restarts.
+  cloud.newSession();
+  cloud.enqueue({ id: "m-thread-2", text: "thread-2", replyTarget: threadTarget("root-99") });
   const cloud4 = cloud.connect();
   const harness4 = new FakeHarness({ autoReply: false });
   const runner4 = new EngineRunner({
@@ -731,17 +758,19 @@ test("8. reply post retries (in-process and after restart) send identical comman
   await harness4.waitForTurn(0);
   cloud4.disconnect();
 
+  cloud.newSession();
   const runner5 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
-    cloud: cloud.connect({ throwOnPostReply: true }),
+    cloud: cloud.connect({ alwaysFailPostReply: "network" }),
     clock: makeClock(5_000),
     generateId: makeIdGen("r5"),
   });
   await runner5.start();
   assert.deepEqual(await runner5.done, { reason: "cloud_failed" });
 
+  cloud.newSession();
   const runner6 = new EngineRunner({
     ...TEST_RUNNER_LIMITS,
     journalPath,
@@ -754,29 +783,32 @@ test("8. reply post retries (in-process and after restart) send identical comman
   await cloud.waitForReplies(3);
   await runner6.stop();
 
-  const m3Attempts = cloud.replyAttempts.filter((a) => a.messageId === "m-3");
-  assert.ok(m3Attempts.length >= 2);
-  for (const attempt of m3Attempts) {
+  const interruptedAttempts = cloud.replyAttempts.filter((a) => a.commandId === "r5-1");
+  assert.equal(interruptedAttempts.length, 3);
+  for (const attempt of interruptedAttempts) {
+    assert.equal("status" in attempt, false);
     assert.deepEqual(attempt, {
-      messageId: "m-3",
       commandId: "r5-1",
-      text: RESTART_INTERRUPTED_REPLY,
-      status: "failed",
+      replyTarget: { kind: "thread", threadRootId: "root-99" },
+      body: RESTART_INTERRUPTED_REPLY,
     });
   }
+
+  assert.equal(cloud.idempotencyViolations.length, 0);
+  assert.equal(cloud.protocolErrors.length, 0);
 });
 
-test("9. owed reply older than horizon is not sent; operator told once across further restarts", async (t) => {
+test("6. owed reply past the horizon is not sent; operator is told once", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
   const operator = new FakeOperator();
-  cloud.enqueue({ id: "m-1", text: "msg-1" });
+  cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
 
   const runner1 = new EngineRunner({
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
-    cloud: cloud.connect({ throwOnPostReply: true }),
+    cloud: cloud.connect({ alwaysFailPostReply: "network" }),
     clock: makeClock(1_000),
     replyRetryHorizonMs: 500,
     compactAfterRecords: 1_000,
@@ -789,6 +821,7 @@ test("9. owed reply older than horizon is not sent; operator told once across fu
 
   const attemptsBeforeRestart = cloud.replyAttempts.length;
 
+  cloud.newSession();
   const runner2 = new EngineRunner({
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
@@ -804,13 +837,12 @@ test("9. owed reply older than horizon is not sent; operator told once across fu
 
   assert.equal(cloud.replyAttempts.length, attemptsBeforeRestart);
   assert.equal(cloud.replies.length, 0);
-  const unknownReportsAfter2 = operator.events.filter(
-    (e) => e.kind === "unknown_reply_outcome",
-  );
-  assert.equal(unknownReportsAfter2.length, 1);
-  assert.equal(unknownReportsAfter2[0].detail.messageId, "m-1");
-  assert.equal(unknownReportsAfter2[0].detail.commandId, "cmd-1");
+  const reportsAfter2 = operator.events.filter((e) => e.kind === "unknown_reply_outcome");
+  assert.equal(reportsAfter2.length, 1);
+  assert.equal(reportsAfter2[0].detail.messageId, "m-1");
+  assert.equal(reportsAfter2[0].detail.commandId, "cmd-1");
 
+  cloud.newSession();
   const runner3 = new EngineRunner({
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
@@ -825,19 +857,19 @@ test("9. owed reply older than horizon is not sent; operator told once across fu
   await runner3.stop();
 
   assert.equal(cloud.replyAttempts.length, attemptsBeforeRestart);
-  const unknownReportsAfter3 = operator.events.filter(
-    (e) => e.kind === "unknown_reply_outcome",
+  assert.equal(
+    operator.events.filter((e) => e.kind === "unknown_reply_outcome").length,
+    1,
   );
-  assert.equal(unknownReportsAfter3.length, 1);
 });
 
-test("10. harness error with path and token never reaches reply or journal; operator gets truncated copy", async (t) => {
+test("7. harness error with path and token reaches no reply and no journal; operator gets truncated copy", async (t) => {
   const dir = await makeTempDir(t);
   const journalPath = join(dir, "journal.ndjson");
   const cloud = new FakeCloud();
   const operator = new FakeOperator();
   const harness = new FakeHarness({ autoReply: false });
-  cloud.enqueue({ id: "m-1", text: "trigger-error" });
+  cloud.enqueue({ id: "m-1", text: "trigger-error", replyTarget: privateTarget("m-1") });
 
   const secretPath = "/Users/example/private/credentials.json";
   const secretToken = "sk-live-secret-token-9876543210";
@@ -858,41 +890,335 @@ test("10. harness error with path and token never reaches reply or journal; oper
   await cloud.waitForReplies(1);
   await runner.stop();
 
-  assert.deepEqual(cloud.replies, [
-    {
-      messageId: "m-1",
-      text: TURN_FAILED_REPLY,
-      status: "failed",
-    },
-  ]);
+  assert.equal(cloud.replies.length, 1);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("m-1"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, TURN_FAILED_REPLY);
 
   const rawJournal = await readFile(journalPath, "utf8");
   assert.equal(rawJournal.includes(secretPath), false);
   assert.equal(rawJournal.includes(secretToken), false);
-  assert.equal(cloud.replies[0].text.includes(secretPath), false);
-  assert.equal(cloud.replies[0].text.includes(secretToken), false);
+  assert.equal(cloud.replies[0].body.includes(secretPath), false);
+  assert.equal(cloud.replies[0].body.includes(secretToken), false);
 
   const failReports = operator.events.filter((e) => e.kind === "turn_failed");
   assert.equal(failReports.length, 1);
   assert.equal(failReports[0].detail.messageId, "m-1");
-  assert.equal(typeof failReports[0].detail.error, "string");
-  const reportedError = failReports[0].detail.error as string;
-  assert.equal(reportedError.length, 500);
-  assert.equal(reportedError, longError.slice(0, 500));
+  assert.equal(failReports[0].detail.error, longError.slice(0, 500));
 });
 
-test("11. compaction drops settled text, keeps duplicate detection, preserves active turn interruption, stays 0600 with no temp file", async (t) => {
+test("8. over-long message gets one failed reply, is acknowledged seen, and does not block the next", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  const harness = new FakeHarness({ autoReply: true });
+  const oversizedText = "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1);
+
+  cloud.enqueue(
+    { id: "big-priv", text: oversizedText, replyTarget: privateTarget("big-priv") },
+    { id: "big-thread", text: oversizedText, replyTarget: threadTarget("root-big") },
+    { id: "m-2", text: "normal-msg", replyTarget: privateTarget("m-2") },
+  );
+
+  const runner = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness,
+    cloud: cloud.connect(),
+    clock: makeClock(1_000),
+  });
+  await runner.start();
+  await cloud.waitForReplies(3);
+  await runner.stop();
+
+  assert.deepEqual(harness.started, ["normal-msg"]);
+  assert.equal(cloud.getMessage("big-priv")?.seen, true);
+  assert.equal(cloud.getMessage("big-thread")?.seen, true);
+  assert.equal(cloud.getMessage("m-2")?.seen, true);
+
+  assert.equal(cloud.replies.length, 3);
+  assert.deepEqual(cloud.replies[0].replyTarget, privateTarget("big-priv"));
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[0].body, MESSAGE_TOO_LONG_REPLY);
+
+  assert.deepEqual(cloud.replies[1].replyTarget, threadTarget("root-big"));
+  assert.equal("status" in cloud.replies[1], false);
+  assert.equal(cloud.replies[1].body, MESSAGE_TOO_LONG_REPLY);
+
+  assert.deepEqual(cloud.replies[2].replyTarget, privateTarget("m-2"));
+  assert.equal(cloud.replies[2].status, "answered");
+  assert.equal(cloud.replies[2].body, "reply:normal-msg");
+
+  // Single record line over MAX_RECORD_BYTES is refused at journal append.
+  const oversizedJournal = await Journal.open(join(dir, "oversized.ndjson"));
+  await assert.rejects(
+    () =>
+      oversizedJournal.append({
+        type: "turn_finished",
+        messageId: "m-big",
+        outcome: "replied",
+        command: {
+          commandId: "cmd-big",
+          replyTarget: privateTarget("m-big"),
+          status: "answered",
+          body: "y".repeat(MAX_RECORD_BYTES),
+        },
+        at: 2_000,
+      }),
+    /maximum size/i,
+  );
+  await oversizedJournal.close();
+  assert.equal(cloud.protocolErrors.length, 0);
+});
+
+test("9. lost authority on claim, markSeen, and postReply stops at once with zero further cloud calls; restart recovers cleanly", async (t) => {
+  // 9a. AuthorityLostError on claim
+  {
+    const dir = await makeTempDir(t);
+    const journalPath = join(dir, "journal.ndjson");
+    const cloud = new FakeCloud();
+    cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
+
+    const conn1 = cloud.connect({ failClaim: ["authority"] });
+    const harness1 = new FakeHarness({ autoReply: true });
+    const runner1 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness1,
+      cloud: conn1,
+      clock: makeClock(1_000),
+    });
+    await runner1.start();
+    assert.deepEqual(await runner1.done, { reason: "authority_lost" });
+    assert.equal(harness1.interrupted, 1);
+    assert.equal(harness1.closed, 1);
+    assert.equal(conn1.callsAfterRefusal, 0);
+    assert.deepEqual(harness1.started, []);
+
+    cloud.newSession();
+    const harness2 = new FakeHarness({ autoReply: true });
+    const runner2 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness2,
+      cloud: cloud.connect(),
+      clock: makeClock(2_000),
+    });
+    await runner2.start();
+    await cloud.waitForReplies(1);
+    await runner2.stop();
+
+    assert.deepEqual(harness2.started, ["msg-1"]);
+    assert.equal(cloud.replies.length, 1);
+    assert.equal(cloud.replies[0].body, "reply:msg-1");
+    assert.equal(cloud.protocolErrors.length, 0);
+  }
+
+  // 9b. AuthorityLostError on markSeen (turn_started was journaled before markSeen)
+  {
+    const dir = await makeTempDir(t);
+    const journalPath = join(dir, "journal.ndjson");
+    const cloud = new FakeCloud();
+    cloud.enqueue(
+      { id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") },
+      { id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") },
+    );
+
+    const conn1 = cloud.connect({ failMarkSeen: ["authority"] });
+    const harness1 = new FakeHarness({ autoReply: true });
+    const runner1 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness1,
+      cloud: conn1,
+      clock: makeClock(1_000),
+    });
+    await runner1.start();
+    assert.deepEqual(await runner1.done, { reason: "authority_lost" });
+    assert.equal(harness1.interrupted, 1);
+    assert.equal(harness1.closed, 1);
+    assert.equal(conn1.callsAfterRefusal, 0);
+    assert.deepEqual(harness1.started, []);
+    assert.equal(cloud.getMessage("m-1")?.seen, false);
+
+    cloud.newSession();
+    const harness2 = new FakeHarness({ autoReply: true });
+    const runner2 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness2,
+      cloud: cloud.connect(),
+      clock: makeClock(2_000),
+    });
+    await runner2.start();
+    await cloud.waitForSeen("m-1");
+    await cloud.waitForReplies(2);
+    await runner2.stop();
+
+    assert.deepEqual(harness2.started, ["msg-2"]);
+    assert.equal(cloud.getMessage("m-1")?.seen, true);
+    assert.equal(cloud.replies.length, 2);
+    assert.equal(cloud.replies[0].body, RESTART_INTERRUPTED_REPLY);
+    assert.equal(cloud.replies[0].status, "failed");
+    assert.equal(cloud.replies[1].body, "reply:msg-2");
+    assert.equal(cloud.replies[1].status, "answered");
+    assert.equal(cloud.protocolErrors.length, 0);
+  }
+
+  // 9c. AuthorityLostError on postReply (no retry, zero calls after refusal; restart posts same reply once)
+  {
+    const dir = await makeTempDir(t);
+    const journalPath = join(dir, "journal.ndjson");
+    const cloud = new FakeCloud();
+    cloud.enqueue({ id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") });
+
+    const conn1 = cloud.connect({ failPostReply: ["authority"] });
+    const harness1 = new FakeHarness({ autoReply: true });
+    const runner1 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness1,
+      cloud: conn1,
+      clock: makeClock(1_000),
+      generateId: makeIdGen("auth"),
+    });
+    await runner1.start();
+    assert.deepEqual(await runner1.done, { reason: "authority_lost" });
+    assert.equal(harness1.interrupted, 1);
+    assert.equal(harness1.closed, 1);
+    assert.equal(conn1.callsAfterRefusal, 0);
+    assert.deepEqual(harness1.started, ["msg-1"]);
+    assert.equal(cloud.replies.length, 0);
+
+    cloud.newSession();
+    const harness2 = new FakeHarness({ autoReply: true });
+    const runner2 = new EngineRunner({
+      ...TEST_RUNNER_LIMITS,
+      journalPath,
+      harness: harness2,
+      cloud: cloud.connect(),
+      clock: makeClock(2_000),
+      generateId: makeIdGen("after"),
+    });
+    await runner2.start();
+    await cloud.waitForReplies(1);
+    await runner2.stop();
+
+    assert.deepEqual(harness2.started, []);
+    assert.equal(cloud.replies.length, 1);
+    assert.equal(cloud.replies[0].commandId, "auth-1");
+    assert.equal(cloud.replies[0].body, "reply:msg-1");
+    assert.equal(cloud.replies[0].status, "answered");
+    assert.equal(cloud.idempotencyViolations.length, 0);
+    assert.equal(cloud.protocolErrors.length, 0);
+  }
+});
+
+test("10. loseAuthority() during a running turn interrupts, closes, makes zero further cloud calls, and recovers interrupted once", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  cloud.enqueue(
+    { id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") },
+    { id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") },
+  );
+
+  const conn1 = cloud.connect();
+  const harness1 = new FakeHarness({ autoReply: false });
+  const runner1 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness1,
+    cloud: conn1,
+    clock: makeClock(1_000),
+  });
+  await runner1.start();
+  await harness1.waitForTurn(0);
+
+  conn1.markCutOff();
+  runner1.loseAuthority();
+  assert.deepEqual(await runner1.done, { reason: "authority_lost" });
+  assert.equal(harness1.interrupted, 1);
+  assert.equal(harness1.closed, 1);
+  assert.equal(conn1.callsAfterRefusal, 0);
+  assert.equal(cloud.replies.length, 0);
+
+  cloud.newSession();
+  const harness2 = new FakeHarness({ autoReply: true });
+  const runner2 = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness: harness2,
+    cloud: cloud.connect(),
+    clock: makeClock(2_000),
+  });
+  await runner2.start();
+  await cloud.waitForReplies(2);
+  await runner2.stop();
+
+  assert.deepEqual(harness1.started, ["msg-1"]);
+  assert.deepEqual(harness2.started, ["msg-2"]);
+  assert.equal(cloud.replies.length, 2);
+  assert.equal(cloud.replies[0].body, RESTART_INTERRUPTED_REPLY);
+  assert.equal(cloud.replies[0].status, "failed");
+  assert.equal(cloud.replies[1].body, "reply:msg-2");
+  assert.equal(cloud.replies[1].status, "answered");
+  assert.equal(cloud.protocolErrors.length, 0);
+});
+
+test("11. graceful stop() during a turn lets it finish and post its reply; reason is stopped", async (t) => {
+  const dir = await makeTempDir(t);
+  const journalPath = join(dir, "journal.ndjson");
+  const cloud = new FakeCloud();
+  const operator = new FakeOperator();
+  cloud.enqueue(
+    { id: "m-1", text: "msg-1", replyTarget: privateTarget("m-1") },
+    { id: "m-2", text: "msg-2", replyTarget: privateTarget("m-2") },
+  );
+
+  const harness = new FakeHarness({ autoReply: false });
+  const runner = new EngineRunner({
+    ...TEST_RUNNER_LIMITS,
+    journalPath,
+    harness,
+    cloud: cloud.connect(),
+    clock: makeClock(1_000),
+    operator,
+  });
+  await runner.start();
+  const turn = await harness.waitForTurn(0);
+
+  const stopPromise = runner.stop();
+  assert.equal(harness.interrupted, 0);
+
+  turn.resolve("finished-cleanly");
+  const result = await stopPromise;
+  assert.deepEqual(result, { reason: "stopped" });
+  assert.deepEqual(await runner.done, { reason: "stopped" });
+  assert.equal(harness.interrupted, 0);
+  assert.equal(harness.closed, 1);
+  assert.deepEqual(harness.started, ["msg-1"]);
+  assert.equal(cloud.replies.length, 1);
+  assert.equal(cloud.replies[0].body, "finished-cleanly");
+  assert.equal(cloud.replies[0].status, "answered");
+  assert.equal(cloud.getMessage("m-2")?.seen, false);
+  assert.deepEqual(
+    operator.events.filter((e) => e.kind === "runner_stopped"),
+    [{ kind: "runner_stopped", detail: { reason: "stopped" } }],
+  );
+});
+
+test("12. compaction drops settled text, still acks redelivered settled messages without running, and preserves active interruption", async (t) => {
   const dir = await makeTempDir(t);
   const journalDir = join(dir, "state");
   const journalPath = join(journalDir, "journal.ndjson");
   const cloud = new FakeCloud();
   cloud.enqueue(
-    { id: "m-1", text: "secret-payload-one" },
-    { id: "m-2", text: "secret-payload-two" },
-    { id: "m-3", text: "secret-payload-three" },
+    { id: "m-1", text: "secret-payload-one", replyTarget: privateTarget("m-1") },
+    { id: "m-2", text: "secret-payload-two", replyTarget: privateTarget("m-2") },
+    { id: "m-3", text: "secret-payload-three", replyTarget: privateTarget("m-3") },
   );
 
-  // Trigger automatic compaction after 10 records with settledIdCap: 3 (oldest id dropped first).
   const runner1 = new EngineRunner({
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
@@ -906,8 +1232,8 @@ test("11. compaction drops settled text, keeps duplicate detection, preserves ac
   await cloud.waitForReplies(3);
   await runner1.stop();
 
-  // Enqueue m-4 so m-3 and m-4 are also compacted and m-1 is evicted by settledIdCap: 3.
-  cloud.enqueue({ id: "m-4", text: "secret-payload-four" });
+  cloud.newSession();
+  cloud.enqueue({ id: "m-4", text: "secret-payload-four", replyTarget: privateTarget("m-4") });
   const runner1b = new EngineRunner({
     journalPath,
     harness: new FakeHarness({ autoReply: true }),
@@ -935,28 +1261,34 @@ test("11. compaction drops settled text, keeps duplicate detection, preserves ac
   assert.equal(compactedText.includes('"m-1"'), false);
   assert.equal(compactedText.includes('"m-4"'), true);
 
-  // Restart on compacted journal: duplicate of settled m-4 is ignored; m-5 starts and hangs.
-  const cloud2 = cloud.connect();
+  // Redeliver settled m-4 (simulate server having lost its seen flag) alongside new m-5.
+  const m4 = cloud.getMessage("m-4");
+  assert.ok(m4);
+  m4.seen = false;
+  m4.leaseId = null;
+  m4.leasedBySession = null;
+  cloud.newSession();
+  cloud.enqueue({ id: "m-5", text: "in-flight-turn", replyTarget: threadTarget("root-5") });
+
+  const conn2 = cloud.connect();
   const harness2 = new FakeHarness({ autoReply: false });
   const runner2 = new EngineRunner({
     journalPath,
     harness: harness2,
-    cloud: cloud2,
+    cloud: conn2,
     clock: makeClock(2_000),
     replyRetryHorizonMs: 60_000,
     compactAfterRecords: 1_000,
     settledIdCap: 3,
   });
   await runner2.start();
-  cloud.enqueue(
-    { id: "m-4", text: "duplicate-of-settled" },
-    { id: "m-5", text: "in-flight-turn" },
-  );
   await harness2.waitForTurn(0);
-  cloud2.disconnect();
+  conn2.disconnect();
+
+  assert.equal(m4.seen, true);
   assert.deepEqual(harness2.started, ["in-flight-turn"]);
 
-  // Compact the journal while m-5 is active (started, never finished).
+  // Compact while m-5 is active (started, never finished).
   const journal = await Journal.open(journalPath);
   const activeState = reduceAll(journal.records, { settledIdCap: 3 });
   await journal.compact(compacted(activeState));
@@ -964,8 +1296,10 @@ test("11. compaction drops settled text, keeps duplicate detection, preserves ac
 
   assert.equal((await stat(journalPath)).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(journalDir), ["journal.ndjson"]);
+  const compactedActiveText = await readFile(journalPath, "utf8");
+  assert.equal(compactedActiveText.includes("in-flight-turn"), false);
 
-  // Recovering from that compacted journal reports m-5 interrupted and never replays it.
+  cloud.newSession();
   const harness3 = new FakeHarness({ autoReply: true });
   const runner3 = new EngineRunner({
     journalPath,
@@ -981,82 +1315,102 @@ test("11. compaction drops settled text, keeps duplicate detection, preserves ac
   await runner3.stop();
 
   assert.deepEqual(harness3.started, []);
-  assert.deepEqual(cloud.replies[4], {
-    messageId: "m-5",
-    text: RESTART_INTERRUPTED_REPLY,
-    status: "failed",
-  });
+  assert.deepEqual(cloud.replies[4].replyTarget, threadTarget("root-5"));
+  assert.equal("status" in cloud.replies[4], false);
+  assert.equal(cloud.replies[4].body, RESTART_INTERRUPTED_REPLY);
+  assert.equal(cloud.protocolErrors.length, 0);
 });
 
-test("12. over-long message is refused with one failed reply and does not block the next message", async (t) => {
+test("13. journal safety: torn last line ignored, corrupt middle refused, symlink refused, 0600 file and 0700 folder permissions", async (t) => {
   const dir = await makeTempDir(t);
-  const journalPath = join(dir, "journal.ndjson");
-  const cloud = new FakeCloud();
-  const harness = new FakeHarness({ autoReply: true });
-  const oversizedText = "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1);
+  const journalDir = join(dir, "private");
+  const journalPath = join(journalDir, "journal.ndjson");
 
-  cloud.enqueue(
-    { id: "big-1", text: oversizedText },
-    { id: "m-2", text: "normal-msg" },
-  );
+  const journal1 = await Journal.open(journalPath);
+  assert.equal((await stat(journalDir)).mode & 0o777, 0o700);
+  assert.equal((await stat(journalPath)).mode & 0o777, 0o600);
 
-  const runner = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath,
-    harness,
-    cloud: cloud.connect(),
-    clock: makeClock(1_000),
+  await journal1.append({
+    type: "message_accepted",
+    messageId: "m-1",
+    text: "hello",
+    leaseId: "lease-1",
+    replyTarget: privateTarget("m-1"),
+    at: 100,
   });
-  await runner.start();
-  await cloud.waitForReplies(2);
+  await journal1.append({
+    type: "turn_started",
+    messageId: "m-1",
+    replyTarget: privateTarget("m-1"),
+    at: 101,
+  });
+  await journal1.close();
 
-  // Redelivering the same oversized message does not send a second refused reply.
-  cloud.enqueue(
-    { id: "big-1", text: oversizedText },
-    { id: "m-3", text: "after-dup" },
-  );
-  await cloud.waitForReplies(3);
-  await runner.stop();
+  await appendFile(journalPath, '{"type":"turn_finished","messageId":"m-1"', "utf8");
 
-  assert.deepEqual(harness.started, ["normal-msg", "after-dup"]);
-  assert.deepEqual(cloud.replies, [
+  const journal2 = await Journal.open(journalPath);
+  assert.deepEqual(journal2.records, [
     {
-      messageId: "big-1",
-      text: MESSAGE_TOO_LONG_REPLY,
-      status: "failed",
+      type: "message_accepted",
+      messageId: "m-1",
+      text: "hello",
+      leaseId: "lease-1",
+      replyTarget: privateTarget("m-1"),
+      at: 100,
     },
     {
-      messageId: "m-2",
-      text: "reply:normal-msg",
-      status: "replied",
-    },
-    {
-      messageId: "m-3",
-      text: "reply:after-dup",
-      status: "replied",
+      type: "turn_started",
+      messageId: "m-1",
+      replyTarget: privateTarget("m-1"),
+      at: 101,
     },
   ]);
 
-  // Also verify single record line over 256 KiB is refused at journal append.
-  const oversizedJournal = await Journal.open(join(dir, "oversized.ndjson"));
-  await assert.rejects(
-    () =>
-      oversizedJournal.append({
-        type: "turn_finished",
-        messageId: "m-big",
-        commandId: "cmd-big",
-        outcome: "replied",
-        replyText: "y".repeat(MAX_RECORD_BYTES),
-        at: 2_000,
-      }),
-    /maximum size/i,
+  await journal2.append({
+    type: "turn_finished",
+    messageId: "m-1",
+    outcome: "replied",
+    command: {
+      commandId: "cmd-1",
+      replyTarget: privateTarget("m-1"),
+      status: "answered",
+      body: "ok",
+    },
+    at: 102,
+  });
+  await journal2.close();
+
+  const journal3 = await Journal.open(journalPath);
+  assert.equal(journal3.records.length, 3);
+  await journal3.close();
+
+  // Corrupt middle record is refused, never skipped.
+  const corruptPath = join(journalDir, "corrupt.ndjson");
+  await writeFile(
+    corruptPath,
+    `${JSON.stringify({ type: "message_settled", messageId: "m-1", at: 1 })}\n{"bad":true}\n${JSON.stringify({ type: "message_settled", messageId: "m-2", at: 2 })}\n`,
+    { mode: 0o600 },
   );
-  await oversizedJournal.close();
-});
+  await assert.rejects(() => Journal.open(corruptPath), /corrupt record/i);
 
-test("13. existing journal folder with group or other permissions is refused", async (t) => {
-  const dir = await makeTempDir(t);
+  // Symlink refused without leaking local paths.
+  const realTarget = join(dir, "real.ndjson");
+  const symlinkPath = join(dir, "link.ndjson");
+  await writeFile(realTarget, "", { mode: 0o600 });
+  await symlink(realTarget, symlinkPath);
 
+  await assert.rejects(
+    () => Journal.open(symlinkPath),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /symlink/i);
+      assert.equal(err.message.includes(symlinkPath), false);
+      assert.equal(err.message.includes(dir), false);
+      return true;
+    },
+  );
+
+  // Existing folder with group or other permissions refused without leaking local paths.
   const groupReadableDir = join(dir, "group-open");
   await mkdir(groupReadableDir, { mode: 0o750 });
   await chmod(groupReadableDir, 0o750);
@@ -1083,48 +1437,5 @@ test("13. existing journal folder with group or other permissions is refused", a
       assert.equal(err.message.includes(dir), false);
       return true;
     },
-  );
-});
-
-test("14. runner done result reports the right reason for a cloud failure and for a clean stop", async (t) => {
-  const dir = await makeTempDir(t);
-
-  // Clean stop
-  const cleanCloud = new FakeCloud();
-  const cleanOperator = new FakeOperator();
-  cleanCloud.enqueue({ id: "m-1", text: "ok" });
-  const cleanRunner = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath: join(dir, "clean.ndjson"),
-    harness: new FakeHarness({ autoReply: true }),
-    cloud: cleanCloud.connect(),
-    clock: makeClock(1_000),
-    operator: cleanOperator,
-  });
-  await cleanRunner.start();
-  await cleanCloud.waitForReplies(1);
-  await cleanRunner.stop();
-  assert.deepEqual(await cleanRunner.done, { reason: "stopped" });
-  assert.deepEqual(
-    cleanOperator.events.filter((e) => e.kind === "runner_stopped"),
-    [{ kind: "runner_stopped", detail: { reason: "stopped" } }],
-  );
-
-  // Cloud failure
-  const failingCloud = new FakeCloud();
-  const failingOperator = new FakeOperator();
-  const failingRunner = new EngineRunner({
-    ...TEST_RUNNER_LIMITS,
-    journalPath: join(dir, "failing.ndjson"),
-    harness: new FakeHarness({ autoReply: true }),
-    cloud: failingCloud.connect({ throwOnClaim: true }),
-    clock: makeClock(2_000),
-    operator: failingOperator,
-  });
-  await failingRunner.start();
-  assert.deepEqual(await failingRunner.done, { reason: "cloud_failed" });
-  assert.deepEqual(
-    failingOperator.events.filter((e) => e.kind === "runner_stopped"),
-    [{ kind: "runner_stopped", detail: { reason: "cloud_failed" } }],
   );
 });
