@@ -111,7 +111,17 @@ export type WaitingTodoReason = "assigned" | "request" | "after" | "hold" | "age
 export type WaitingTodoPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace";
 export type WaitingPanelTab = "active" | "archived";
 export type WaitingArchivedPlacement = "channel" | "general" | "dm" | "group_dm" | "workspace" | "redacted";
-export type WaitingArchivedOutcomeKind = "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined";
+export type WaitingArchivedOutcomeKind = "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined" | "dismissed";
+
+export interface WaitingDismissedPlaceholder {
+  key: string;
+  itemKind: "ask" | "todo" | "review";
+  itemId: string;
+  cardId: string;
+  workspaceId: string;
+  position: number;
+  pendingUndo?: true;
+}
 
 export interface WaitingArchivedItem {
   itemKey: string;
@@ -134,6 +144,8 @@ export interface WaitingArchivedItem {
   conversationId?: string | null;
   channelLabel?: string;
   href?: string | null;
+  restoring?: true;
+  error?: string;
 }
 
 export interface WaitingArchivedVM {
@@ -184,6 +196,7 @@ export interface WaitingPanelVM {
   items: WaitingAskItem[];
   plainAsks?: WaitingPlainAskItem[];
   todos?: WaitingTodoItem[];
+  dismissedPlaceholders?: WaitingDismissedPlaceholder[];
   archived?: WaitingArchivedVM | null;
   counts: WaitingPanelCounts;
   loading: boolean;
@@ -204,15 +217,20 @@ export interface WaitingPanelHandlers {
   onRetryArchived?: () => void;
   onLoadMoreArchived?: () => void;
   onOpenArchivedTodo?: (item: WaitingArchivedItem) => void;
+  onRestoreArchived?: (item: WaitingArchivedItem) => void;
   onSubmitChoice: (item: WaitingAskItem, submission: ChoiceSubmission) => void;
   onRetryChoice: (item: WaitingAskItem) => void;
   onDraftChoice: (item: WaitingAskItem, draft: ChoiceDraft) => void;
+  onDismissAsk?: (item: WaitingAskItem) => void;
   onSubmitPlainAsk?: (item: WaitingPlainAskItem, bodyText: string, mode: "answer" | "stale") => void;
   onRetryPlainAsk?: (item: WaitingPlainAskItem) => void;
   onDraftPlainAsk?: (item: WaitingPlainAskItem, text: string) => void;
+  onDismissPlainAsk?: (item: WaitingPlainAskItem) => void;
   onMarkTodoDone?: (item: WaitingTodoItem) => void;
   onRetryTodo?: (item: WaitingTodoItem) => void;
   onOpenTodo?: (item: WaitingTodoItem) => void;
+  onDismissTodo?: (item: WaitingTodoItem) => void;
+  onUndoDismiss?: (placeholder: WaitingDismissedPlaceholder) => void;
   onOpenCatchUp?: (href: string) => void;
   onStartSurvey?: () => void;
   surveyHandlers?: WaitingSurveyHandlers;
@@ -426,7 +444,7 @@ function todoCardLocationText(item: WaitingTodoItem, scope: WaitingScope): strin
   return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
 }
 
-function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
+function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope, canDismiss: boolean): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
@@ -445,6 +463,7 @@ function todoCardSignature(item: WaitingTodoItem, scope: WaitingScope): string {
     item.pending ?? false,
     item.error ?? "",
     item.retryable ?? false,
+    canDismiss,
   ]);
 }
 
@@ -454,11 +473,13 @@ function buildTodoCard(
   scope: WaitingScope,
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
+  const canDismiss = Boolean(handlers.onDismissTodo);
   const card = node(doc, "article", "cs-waiting-card cs-waiting-card--todo");
   card.dataset.waitingTodo = item.id;
   card.dataset.waitingWorkspace = item.workspaceId;
-  card.dataset.waitingCardSig = todoCardSignature(item, scope);
+  card.dataset.waitingCardSig = todoCardSignature(item, scope, canDismiss);
 
+  const todoHead = node(doc, "div", "cs-waiting-card__todo-head");
   const meta = node(doc, "div", "cs-waiting-card__todo-meta");
   const kind = node(doc, "span", "cs-waiting-card__todo-kind", todoReasonLabel(item.reason));
   meta.append(kind);
@@ -466,9 +487,22 @@ function buildTodoCard(
   if (due) meta.append(node(doc, "span", "cs-waiting-card__todo-due", due));
   const location = todoCardLocationText(item, scope);
   if (location) meta.append(node(doc, "span", "cs-waiting-card__place", location));
+  todoHead.append(meta);
+  if (canDismiss) {
+    const dismiss = node(doc, "button", "cs-waiting-card__dismiss", "Dismiss");
+    dismiss.type = "button";
+    dismiss.dataset.waitingDismiss = item.reason === "request" ? "review" : "todo";
+    dismiss.dataset.waitingDismissId = item.id;
+    if (item.pending) dismiss.setAttribute("aria-disabled", "true");
+    dismiss.addEventListener("click", () => {
+      if (item.pending) return;
+      handlers.onDismissTodo?.(item);
+    });
+    todoHead.append(dismiss);
+  }
 
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
-  card.append(meta, title);
+  card.append(todoHead, title);
 
   if (item.error) {
     const err = node(doc, "p", "cs-waiting-card__error", item.error);
@@ -549,7 +583,7 @@ function cardLocationText(item: Pick<WaitingAskItem, "workspaceName" | "channelL
   return item.channelLabel ? `${item.workspaceName} · ${item.channelLabel}` : item.workspaceName;
 }
 
-function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
+function cardSignature(item: WaitingAskItem, scope: WaitingScope, canDismiss: boolean): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
@@ -563,10 +597,11 @@ function cardSignature(item: WaitingAskItem, scope: WaitingScope): string {
     item.choices.error ?? "",
     item.choices.retryable ?? false,
     item.choices.options.map(option => [option.id, option.label, option.description ?? "", option.recommended ?? false]),
+    canDismiss,
   ]);
 }
 
-function plainAskCardSignature(item: WaitingPlainAskItem, scope: WaitingScope): string {
+function plainAskCardSignature(item: WaitingPlainAskItem, scope: WaitingScope, canDismiss: boolean): string {
   return JSON.stringify([
     item.id,
     item.workspaceId,
@@ -579,7 +614,42 @@ function plainAskCardSignature(item: WaitingPlainAskItem, scope: WaitingScope): 
     item.pendingMode ?? "",
     item.error ?? "",
     item.retryable ?? false,
+    canDismiss,
   ]);
+}
+
+function dismissedPlaceholderSignature(placeholder: WaitingDismissedPlaceholder): string {
+  return JSON.stringify([
+    placeholder.key,
+    placeholder.itemKind,
+    placeholder.itemId,
+    placeholder.pendingUndo ?? false,
+  ]);
+}
+
+function buildDismissedPlaceholder(
+  doc: Document,
+  placeholder: WaitingDismissedPlaceholder,
+  handlers: WaitingPanelHandlers,
+): HTMLElement {
+  const row = node(doc, "div", "cs-waiting-card cs-waiting-card--dismissed");
+  row.setAttribute("role", "status");
+  row.setAttribute("aria-live", "polite");
+  row.dataset.waitingDismissed = placeholder.key;
+  row.dataset.waitingWorkspace = placeholder.workspaceId;
+  row.dataset.waitingCardSig = dismissedPlaceholderSignature(placeholder);
+
+  const label = node(doc, "span", "cs-waiting-dismissed__label", "Dismissed");
+  const undo = node(doc, "button", "cs-waiting-dismissed__undo", placeholder.pendingUndo ? "Undoing…" : "Undo");
+  undo.type = "button";
+  undo.dataset.waitingUndo = placeholder.key;
+  if (placeholder.pendingUndo) undo.setAttribute("aria-disabled", "true");
+  undo.addEventListener("click", () => {
+    if (placeholder.pendingUndo) return;
+    handlers.onUndoDismiss?.(placeholder);
+  });
+  row.append(label, undo);
+  return row;
 }
 
 function buildPlainAskCard(
@@ -588,10 +658,11 @@ function buildPlainAskCard(
   scope: WaitingScope,
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
+  const canDismiss = Boolean(handlers.onDismissPlainAsk);
   const card = node(doc, "article", "cs-waiting-card cs-waiting-card--plain");
   card.dataset.waitingPlainAsk = item.id;
   card.dataset.waitingWorkspace = item.workspaceId;
-  card.dataset.waitingCardSig = plainAskCardSignature(item, scope);
+  card.dataset.waitingCardSig = plainAskCardSignature(item, scope, canDismiss);
 
   const head = node(doc, "div", "cs-waiting-card__head");
   const avatar = isAgent(item.from) ? agentOrb(doc, item.from, true) : personAvatar(doc, item.from);
@@ -606,10 +677,22 @@ function buildPlainAskCard(
   const location = cardLocationText(item, scope);
   if (location) meta.append(node(doc, "span", "cs-waiting-card__place", location));
   head.append(avatar, meta);
+  const pending = item.pending === true;
+  if (canDismiss) {
+    const dismiss = node(doc, "button", "cs-waiting-card__dismiss", "Dismiss");
+    dismiss.type = "button";
+    dismiss.dataset.waitingDismiss = "ask";
+    dismiss.dataset.waitingDismissId = item.id;
+    if (pending) dismiss.setAttribute("aria-disabled", "true");
+    dismiss.addEventListener("click", () => {
+      if (pending) return;
+      handlers.onDismissPlainAsk?.(item);
+    });
+    head.append(dismiss);
+  }
 
   const question = node(doc, "p", "cs-waiting-card__question", item.what);
 
-  const pending = item.pending === true;
   const pendingStale = pending && item.pendingMode === "stale";
   const safeId = item.id.replace(/[^a-zA-Z0-9_-]/gu, "-");
   const form = node(doc, "form", "cs-waiting-plain__form");
@@ -688,10 +771,11 @@ function buildAskCard(
   scope: WaitingScope,
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
+  const canDismiss = Boolean(handlers.onDismissAsk);
   const card = node(doc, "article", "cs-waiting-card");
   card.dataset.waitingCard = item.id;
   card.dataset.waitingWorkspace = item.workspaceId;
-  card.dataset.waitingCardSig = cardSignature(item, scope);
+  card.dataset.waitingCardSig = cardSignature(item, scope, canDismiss);
 
   const head = node(doc, "div", "cs-waiting-card__head");
   const avatar = isAgent(item.from) ? agentOrb(doc, item.from, true) : personAvatar(doc, item.from);
@@ -706,6 +790,18 @@ function buildAskCard(
   const location = cardLocationText(item, scope);
   if (location) meta.append(node(doc, "span", "cs-waiting-card__place", location));
   head.append(avatar, meta);
+  if (canDismiss) {
+    const dismiss = node(doc, "button", "cs-waiting-card__dismiss", "Dismiss");
+    dismiss.type = "button";
+    dismiss.dataset.waitingDismiss = "ask";
+    dismiss.dataset.waitingDismissId = item.id;
+    if (item.choices.pending) dismiss.setAttribute("aria-disabled", "true");
+    dismiss.addEventListener("click", () => {
+      if (item.choices.pending) return;
+      handlers.onDismissAsk?.(item);
+    });
+    head.append(dismiss);
+  }
 
   const question = node(doc, "p", "cs-waiting-card__question", item.what);
 
@@ -748,7 +844,7 @@ function buildAskCard(
   return card;
 }
 
-function archivedCardSignature(item: WaitingArchivedItem, scope: WaitingScope): string {
+function archivedCardSignature(item: WaitingArchivedItem, scope: WaitingScope, canRestore: boolean): string {
   return JSON.stringify([
     scope,
     item.itemKey,
@@ -764,6 +860,9 @@ function archivedCardSignature(item: WaitingArchivedItem, scope: WaitingScope): 
     item.answeredByName ?? "",
     item.answeredByViewer ?? null,
     item.href ?? "",
+    item.restoring ?? false,
+    item.error ?? "",
+    canRestore,
   ]);
 }
 
@@ -782,11 +881,12 @@ function buildArchivedCard(
   scope: WaitingScope,
   handlers: WaitingPanelHandlers,
 ): HTMLElement {
+  const canRestore = item.outcomeKind === "dismissed" && Boolean(handlers.onRestoreArchived);
   const card = node(doc, "article", "cs-waiting-card cs-waiting-card--archived");
   card.dataset.waitingArchivedItem = item.itemKey;
   card.dataset.waitingArchivedKind = item.kind;
   card.dataset.waitingWorkspace = item.workspaceId;
-  card.dataset.waitingCardSig = archivedCardSignature(item, scope);
+  card.dataset.waitingCardSig = archivedCardSignature(item, scope, canRestore);
 
   const head = node(doc, "div", "cs-waiting-card__head");
   if (item.from) {
@@ -820,7 +920,7 @@ function buildArchivedCard(
   const title = node(doc, "p", "cs-waiting-card__question", item.title);
 
   const tone =
-    item.outcomeKind === "cleared_stale" || item.outcomeKind === "dropped" || item.outcomeKind === "declined"
+    item.outcomeKind === "cleared_stale" || item.outcomeKind === "dropped" || item.outcomeKind === "declined" || item.outcomeKind === "dismissed"
       ? "muted"
       : "positive";
   const outcome = node(doc, "div", "cs-waiting-archived__outcome");
@@ -834,18 +934,37 @@ function buildArchivedCard(
 
   card.append(head, title, outcome);
 
-  if (item.href) {
-    const actions = node(doc, "div", "cs-waiting-todo__actions");
-    const open = node(doc, "a", "cs-waiting-todo__open", "Open");
-    open.href = item.href;
-    open.dataset.waitingArchivedOpen = item.itemKey;
-    open.addEventListener("click", (event) => {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      if (!handlers.onOpenArchivedTodo) return;
-      event.preventDefault();
-      handlers.onOpenArchivedTodo(item);
-    });
-    actions.append(open);
+  if (item.error) {
+    const err = node(doc, "p", "cs-waiting-card__error", item.error);
+    err.setAttribute("role", "alert");
+    card.append(err);
+  }
+
+  if (canRestore || item.href) {
+    const actions = node(doc, "div", "cs-waiting-card__actions");
+    if (canRestore) {
+      const restore = node(doc, "button", "cs-waiting-panel__action", item.restoring ? "Restoring…" : "Restore");
+      restore.type = "button";
+      restore.dataset.waitingArchivedRestore = item.itemKey;
+      if (item.restoring) restore.setAttribute("aria-disabled", "true");
+      restore.addEventListener("click", () => {
+        if (item.restoring) return;
+        handlers.onRestoreArchived?.(item);
+      });
+      actions.append(restore);
+    }
+    if (item.href) {
+      const open = node(doc, "a", "cs-waiting-panel__action", "Open");
+      open.href = item.href;
+      open.dataset.waitingArchivedOpen = item.itemKey;
+      open.addEventListener("click", (event) => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (!handlers.onOpenArchivedTodo) return;
+        event.preventDefault();
+        handlers.onOpenArchivedTodo(item);
+      });
+      actions.append(open);
+    }
     card.append(actions);
   }
   return card;
@@ -1002,7 +1121,8 @@ function renderWaitingArchivedBody(
 
   let cursor: ChildNode | null = list.firstChild;
   for (const item of items) {
-    const sig = archivedCardSignature(item, vm.scope);
+    const canRestore = item.outcomeKind === "dismissed" && Boolean(handlers.onRestoreArchived);
+    const sig = archivedCardSignature(item, vm.scope, canRestore);
     let card = existing.get(item.itemKey);
     if (!card || card.dataset.waitingCardSig !== sig) {
       const built = buildArchivedCard(doc, item, vm.scope, handlers);
@@ -1243,7 +1363,8 @@ export function renderWaitingPanel(
 
   const plainAsks = vm.plainAsks ?? [];
   const todos = vm.todos ?? [];
-  if (vm.items.length === 0 && plainAsks.length === 0 && todos.length === 0) {
+  const dismissedPlaceholders = vm.dismissedPlaceholders ?? [];
+  if (vm.items.length === 0 && plainAsks.length === 0 && todos.length === 0 && dismissedPlaceholders.length === 0) {
     const emptyState = vm.failed ? "failed" : vm.truncated ? "truncated" : vm.loading || !vm.complete ? "loading" : "empty";
     const wsNum = formatScopeCount(vm.counts.workspace);
     const allNum = formatScopeCount(vm.counts.all);
@@ -1355,92 +1476,118 @@ export function renderWaitingPanel(
     if (el.dataset.waitingCard) existing.set(`ask:${el.dataset.waitingCard}`, el);
     else if (el.dataset.waitingPlainAsk) existing.set(`plain:${el.dataset.waitingPlainAsk}`, el);
     else if (el.dataset.waitingTodo) existing.set(`todo:${el.dataset.waitingTodo}`, el);
+    else if (el.dataset.waitingDismissed) existing.set(`dismissed:${el.dataset.waitingDismissed}`, el);
   }
 
-  const keepKeys = new Set<string>([
-    ...vm.items.map(item => `ask:${item.id}`),
-    ...plainAsks.map(item => `plain:${item.id}`),
-    ...todos.map(todo => `todo:${todo.id}`),
-  ]);
+  type ActiveRenderSlot =
+    | { slotKind: "ask"; key: string; item: WaitingAskItem }
+    | { slotKind: "todo"; key: string; item: WaitingTodoItem }
+    | { slotKind: "plain"; key: string; item: WaitingPlainAskItem }
+    | { slotKind: "dismissed"; key: string; item: WaitingDismissedPlaceholder };
+
+  const orderedSlots: ActiveRenderSlot[] = [
+    ...vm.items.map(item => ({ slotKind: "ask" as const, key: `ask:${item.id}`, item })),
+    ...todos.map(item => ({ slotKind: "todo" as const, key: `todo:${item.id}`, item })),
+    ...plainAsks.map(item => ({ slotKind: "plain" as const, key: `plain:${item.id}`, item })),
+  ];
+  const sortedPlaceholders = [...dismissedPlaceholders].sort((a, b) => a.position - b.position);
+  for (const placeholder of sortedPlaceholders) {
+    const insertAt = Math.max(0, Math.min(placeholder.position, orderedSlots.length));
+    orderedSlots.splice(insertAt, 0, {
+      slotKind: "dismissed",
+      key: `dismissed:${placeholder.key}`,
+      item: placeholder,
+    });
+  }
+
+  const keepKeys = new Set<string>(orderedSlots.map(slot => slot.key));
   const rawActive = doc.activeElement;
   const activeEl = rawActive && typeof (rawActive as HTMLElement).closest === "function" ? (rawActive as HTMLElement) : null;
-  const activeCardEl = activeEl?.closest<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo]") ?? null;
+  const activeCardEl = activeEl?.closest<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo], [data-waiting-dismissed]") ?? null;
   const activeKey = activeCardEl?.dataset.waitingCard
     ? `ask:${activeCardEl.dataset.waitingCard}`
     : activeCardEl?.dataset.waitingPlainAsk
       ? `plain:${activeCardEl.dataset.waitingPlainAsk}`
       : activeCardEl?.dataset.waitingTodo
         ? `todo:${activeCardEl.dataset.waitingTodo}`
-        : null;
+        : activeCardEl?.dataset.waitingDismissed
+          ? `dismissed:${activeCardEl.dataset.waitingDismissed}`
+          : null;
   const activeControlId = activeKey && activeEl?.id ? activeEl.id : null;
 
   for (const [key, el] of existing) {
     if (!keepKeys.has(key)) el.remove();
   }
 
+  const canDismissAsk = Boolean(handlers.onDismissAsk);
+  const canDismissPlain = Boolean(handlers.onDismissPlainAsk);
+  const canDismissTodo = Boolean(handlers.onDismissTodo);
+
   let cursor: ChildNode | null = list.firstChild;
-  for (const item of vm.items) {
-    const key = `ask:${item.id}`;
-    const sig = cardSignature(item, vm.scope);
+  for (const slot of orderedSlots) {
+    const key = slot.key;
     let card = existing.get(key);
-    if (card && card.dataset.waitingCardSig === sig) {
-      const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
-      if (timeEl && timeEl.textContent !== item.when) timeEl.textContent = item.when;
+    if (slot.slotKind === "ask") {
+      const sig = cardSignature(slot.item, vm.scope, canDismissAsk);
+      if (card && card.dataset.waitingCardSig === sig) {
+        const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
+        if (timeEl && timeEl.textContent !== slot.item.when) timeEl.textContent = slot.item.when;
+      } else {
+        const built = buildAskCard(doc, slot.item, vm.scope, handlers);
+        if (card) {
+          if (cursor === card) cursor = built;
+          card.replaceWith(built);
+        } else {
+          list.insertBefore(built, cursor);
+        }
+        card = built;
+        if (activeKey === key && activeControlId) {
+          const restored = doc.getElementById(activeControlId);
+          if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
+        }
+      }
+    } else if (slot.slotKind === "todo") {
+      const sig = todoCardSignature(slot.item, vm.scope, canDismissTodo);
+      if (!card || card.dataset.waitingCardSig !== sig) {
+        const built = buildTodoCard(doc, slot.item, vm.scope, handlers);
+        if (card) {
+          if (cursor === card) cursor = built;
+          card.replaceWith(built);
+        } else {
+          list.insertBefore(built, cursor);
+        }
+        card = built;
+      }
+    } else if (slot.slotKind === "plain") {
+      const sig = plainAskCardSignature(slot.item, vm.scope, canDismissPlain);
+      if (card && card.dataset.waitingCardSig === sig) {
+        const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
+        if (timeEl && timeEl.textContent !== slot.item.when) timeEl.textContent = slot.item.when;
+      } else {
+        const built = buildPlainAskCard(doc, slot.item, vm.scope, handlers);
+        if (card) {
+          if (cursor === card) cursor = built;
+          card.replaceWith(built);
+        } else {
+          list.insertBefore(built, cursor);
+        }
+        card = built;
+        if (activeKey === key && activeControlId) {
+          const restored = doc.getElementById(activeControlId);
+          if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
+        }
+      }
     } else {
-      const built = buildAskCard(doc, item, vm.scope, handlers);
-      if (card) {
-        if (cursor === card) cursor = built;
-        card.replaceWith(built);
-      } else {
-        list.insertBefore(built, cursor);
-      }
-      card = built;
-      if (activeKey === key && activeControlId) {
-        const restored = doc.getElementById(activeControlId);
-        if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
-      }
-    }
-    if (card !== cursor) list.insertBefore(card, cursor);
-    else cursor = cursor.nextSibling;
-  }
-
-  for (const todo of todos) {
-    const key = `todo:${todo.id}`;
-    const sig = todoCardSignature(todo, vm.scope);
-    let card = existing.get(key);
-    if (!card || card.dataset.waitingCardSig !== sig) {
-      const built = buildTodoCard(doc, todo, vm.scope, handlers);
-      if (card) {
-        if (cursor === card) cursor = built;
-        card.replaceWith(built);
-      } else {
-        list.insertBefore(built, cursor);
-      }
-      card = built;
-    }
-    if (card !== cursor) list.insertBefore(card, cursor);
-    else cursor = cursor.nextSibling;
-  }
-
-  for (const plain of plainAsks) {
-    const key = `plain:${plain.id}`;
-    const sig = plainAskCardSignature(plain, vm.scope);
-    let card = existing.get(key);
-    if (card && card.dataset.waitingCardSig === sig) {
-      const timeEl = card.querySelector<HTMLTimeElement>(".cs-waiting-card__when");
-      if (timeEl && timeEl.textContent !== plain.when) timeEl.textContent = plain.when;
-    } else {
-      const built = buildPlainAskCard(doc, plain, vm.scope, handlers);
-      if (card) {
-        if (cursor === card) cursor = built;
-        card.replaceWith(built);
-      } else {
-        list.insertBefore(built, cursor);
-      }
-      card = built;
-      if (activeKey === key && activeControlId) {
-        const restored = doc.getElementById(activeControlId);
-        if (restored && card.contains(restored)) restored.focus({ preventScroll: true });
+      const sig = dismissedPlaceholderSignature(slot.item);
+      if (!card || card.dataset.waitingCardSig !== sig) {
+        const built = buildDismissedPlaceholder(doc, slot.item, handlers);
+        if (card) {
+          if (cursor === card) cursor = built;
+          card.replaceWith(built);
+        } else {
+          list.insertBefore(built, cursor);
+        }
+        card = built;
       }
     }
     if (card !== cursor) list.insertBefore(card, cursor);
@@ -1669,9 +1816,10 @@ export function createWaitingSurface(
 }
 
 export interface WaitingFocusHint {
-  kind: "retry-todo" | "completed-todo" | "retry-plain" | "completed-plain" | "completed-ask";
+  kind: "retry-todo" | "completed-todo" | "retry-plain" | "completed-plain" | "completed-ask" | "dismissed" | "restored-dismissed";
   todoId?: string;
   signalId?: string;
+  dismissedKey?: string;
   prevIndex?: number;
 }
 
@@ -1686,6 +1834,25 @@ export function focusWaitingPanelAfterAction(
     el.focus({ preventScroll: true });
     return el;
   };
+  if (hint.kind === "dismissed" && hint.dismissedKey) {
+    const undo = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-undo]"))
+      .find(el => el.dataset.waitingUndo === hint.dismissedKey);
+    if (undo) return focusEl(undo);
+  }
+  if (hint.kind === "restored-dismissed") {
+    const targetCard = hint.todoId
+      ? Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-todo]")).find(el => el.dataset.waitingTodo === hint.todoId)
+      : hint.signalId
+        ? Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask]"))
+            .find(el => el.dataset.waitingCard === hint.signalId || el.dataset.waitingPlainAsk === hint.signalId)
+        : undefined;
+    if (targetCard) {
+      const control =
+        targetCard.querySelector<HTMLElement>("[data-waiting-dismiss]")
+        ?? Array.from(targetCard.querySelectorAll<HTMLElement>("button")).find(btn => !(btn as HTMLButtonElement).disabled);
+      if (control) return focusEl(control);
+    }
+  }
   if (hint.kind === "retry-todo" && hint.todoId) {
     const cards = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-todo]"));
     const card = cards.find(el => el.dataset.waitingTodo === hint.todoId);

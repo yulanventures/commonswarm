@@ -245,6 +245,14 @@ import {
   storedReviewCheckChannelId,
   storedReviewCheckId,
 } from "./review-checks.ts";
+import {
+  applyWaitingDismissalCommand,
+  isWaitingDismissalCommandKind,
+  parseWaitingDismissalCommand,
+  WAITING_DISMISSAL_COMMAND_KINDS,
+  type WaitingDismissalCommand,
+  waitingDismissalReplayFields,
+} from "./waiting-dismissals.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
@@ -640,6 +648,7 @@ type ValidatedCommand =
   | MarkChannelReadCommand
   | ConversationCommand
   | ReviewCheckCommand
+  | WaitingDismissalCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -927,6 +936,12 @@ interface StoredResponse {
   signal_ids?: string[];
   observed_signal_ids?: string[];
   refused?: Array<{ signal_id: string; error: string }>;
+  /** Waiting on you dismissals: item kind, id, state, and timestamp. */
+  item_kind?: string;
+  item_id?: string;
+  dismissed?: boolean;
+  dismissed_at?: string;
+  restored_at?: string;
 }
 
 interface EventEnvelope {
@@ -1439,6 +1454,7 @@ const COMMAND_KINDS = [
   "mark_channel_read",
   ...CONVERSATION_COMMAND_KINDS,
   ...REVIEW_CHECK_COMMAND_KINDS,
+  ...WAITING_DISMISSAL_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2369,6 +2385,10 @@ function validateCommand(
 
   if (isReviewCheckCommandKind(cmd.kind)) {
     return parseReviewCheckCommand(cmd);
+  }
+
+  if (isWaitingDismissalCommandKind(cmd.kind)) {
+    return parseWaitingDismissalCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -4384,6 +4404,8 @@ function storedResponse(value: unknown): StoredResponse {
     ...conversationReplayFields(response),
     // Revision-bound review checks (C3): preserve review_check replay fields.
     ...reviewCheckReplayFields(response),
+    // Waiting on you per-person dismissals: preserve dismissal/restore replay fields.
+    ...waitingDismissalReplayFields(response),
   };
 }
 
@@ -17956,6 +17978,59 @@ async function handleTransaction(
         const refusal: HttpResult = {
           status: outcome.status,
           body: { error: outcome.error, message: outcome.message, ...(outcome.extra ?? {}) },
+        };
+        return outcome.status === 404 ? refusal : decided(refusal);
+      }
+      const response: StoredResponse = { ok: true, event_ids: [], ...outcome.response };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash,
+        channelIds: outcome.audit_channel_ids,
+      });
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
+
+    if (isWaitingDismissalCommandKind(command.kind)) {
+      const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+      if (viewer === null) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "authz", reason: "credential_kind_forbidden", detail: ignoredIdentity, hash,
+        });
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      const outcome = await applyWaitingDismissalCommand(
+        tx, route.workspaceId, viewer, command as WaitingDismissalCommand,
+      );
+      if (!outcome.ok) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
+          reason: outcome.reason, detail: ignoredIdentity, hash,
+          channelIds: outcome.audit_channel_ids,
+        });
+        const refusal: HttpResult = {
+          status: outcome.status,
+          body: { error: outcome.error, message: outcome.message },
         };
         return outcome.status === 404 ? refusal : decided(refusal);
       }

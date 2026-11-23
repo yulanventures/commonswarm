@@ -15,7 +15,7 @@ import {
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
-import { answerChoice, answerPlainAsk, plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { answerChoice, answerPlainAsk, dismissWaitingItem, dismissWaitingItemCommand, plainAskReplyCommand, restoreWaitingItem, restoreWaitingItemCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
 import { parseDecisionQueue, parseWaitingArchivedPage, parseWaitingTodosQueue } from "./home/client.ts";
 
 class FakeNode {
@@ -1654,4 +1654,264 @@ test("Waiting on you Archived view: decoder validation, scope/redaction isolatio
   assert.ok(host.querySelector('[data-waiting-archived-state="empty"]'), "empty state appears after archive is exhausted");
   assert.equal(host.querySelector(".cs-waiting-panel__state-text").textContent, "No archived items in #garden.");
   assert.equal(host.querySelector("[data-waiting-archived-more]"), null);
+});
+
+test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismissed with Restore", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const ask1 = {
+    id: "ask-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: null, ownerFirstName: null, ownerInitial: "", yours: false, tint: "sage", hosted: false, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent",
+    fromId: "a-1",
+    what: "Approve deploy?",
+    when: "1m ago",
+    createdAt: "2026-11-23T10:00:00Z",
+    until: "9999-12-31T23:59:59Z",
+    choices: { options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }], multi: false },
+  };
+  const plain1 = {
+    id: "plain-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: ask1.from,
+    fromKind: "agent",
+    fromId: "a-1",
+    what: "Legacy plain ask?",
+    when: "2m ago",
+    createdAt: "2026-11-23T09:59:00Z",
+    until: "9999-12-31T23:59:59Z",
+  };
+  const todo1 = {
+    id: "todo-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Call electrician",
+    state: "open",
+    dueOn: null,
+    reason: "assigned",
+    href: "/app?w=ws-1&todo=todo-1",
+    canMarkDone: true,
+    placement: "general",
+    channelId: null,
+  };
+  const review1 = {
+    id: "todo-review-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Scout roof inspection",
+    state: "open",
+    dueOn: null,
+    reason: "request",
+    href: "/app?w=ws-1&todo=todo-review-1",
+    canMarkDone: false,
+    placement: "general",
+    channelId: null,
+  };
+
+  let items = [ask1];
+  let plainAsks = [plain1];
+  let todos = [todo1, review1];
+  let placeholders = [];
+  const dismissedCalls = [];
+  const undoCalls = [];
+  const restoreCalls = [];
+
+  const renderActive = () => {
+    const count = items.length + plainAsks.length + todos.length;
+    renderWaitingPanel(host, {
+      tab: "active",
+      scope: "channel",
+      place,
+      items,
+      plainAsks,
+      todos,
+      dismissedPlaceholders: placeholders,
+      counts: {
+        channel: { min: count, complete: true },
+        workspace: { min: count, complete: true },
+        all: { min: count, complete: true },
+      },
+      loading: false,
+      complete: true,
+      failed: false,
+      statusMessage: "",
+      statusSeq: 0,
+    }, {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onDismissAsk: (item) => {
+        dismissedCalls.push(["ask", item.id]);
+        items = items.filter(i => i.id !== item.id);
+        placeholders = [{ key: `ask:${item.id}`, itemKind: "ask", itemId: item.id, cardId: item.id, workspaceId: item.workspaceId, position: 0 }];
+        renderActive();
+      },
+      onDismissPlainAsk: (item) => {
+        dismissedCalls.push(["plain", item.id]);
+        plainAsks = plainAsks.filter(i => i.id !== item.id);
+        renderActive();
+      },
+      onDismissTodo: (item) => {
+        dismissedCalls.push([item.reason === "request" ? "review" : "todo", item.id]);
+        todos = todos.filter(t => t.id !== item.id);
+        renderActive();
+      },
+      onUndoDismiss: (ph) => {
+        undoCalls.push(ph.key);
+        placeholders = placeholders.filter(p => p.key !== ph.key);
+        items = [ask1];
+        renderActive();
+      },
+      onRestoreArchived: (item) => {
+        restoreCalls.push(item.itemKey);
+      },
+    });
+  };
+
+  renderActive();
+
+  // Every card kind renders a real <button> labeled "Dismiss", and plain asks KEEP "Clear as stale".
+  const dismissButtons = host.querySelectorAll("[data-waiting-dismiss]");
+  assert.equal(dismissButtons.length, 4);
+  for (const btn of dismissButtons) {
+    assert.equal(btn.tagName, "BUTTON");
+    assert.equal(btn.textContent, "Dismiss");
+  }
+  assert.deepEqual(dismissButtons.map(b => b.dataset.waitingDismiss), ["ask", "todo", "review", "ask"]);
+  assert.ok(host.querySelector('[data-waiting-plain-stale="plain-1"]'), "plain ask keeps Clear as stale alongside Dismiss");
+
+  // Clicking Dismiss removes the card optimistically, updates count, and shows "Dismissed" + "Undo" in place.
+  dismissButtons[0].click();
+  assert.deepEqual(dismissedCalls, [["ask", "ask-1"]]);
+  assert.equal(host.querySelector('[data-waiting-card="ask-1"]'), null);
+  const dismissedRow = host.querySelector('[data-waiting-dismissed="ask:ask-1"]');
+  assert.ok(dismissedRow);
+  assert.equal(dismissedRow.querySelector(".cs-waiting-dismissed__label").textContent, "Dismissed");
+  const undoBtn = dismissedRow.querySelector('[data-waiting-undo="ask:ask-1"]');
+  assert.ok(undoBtn);
+  assert.equal(undoBtn.tagName, "BUTTON");
+  assert.equal(undoBtn.textContent, "Undo");
+  assert.equal(host.querySelector("[data-waiting-scope]").options[0].textContent, "This channel (3)");
+
+  // Focus helper targets the in-place Undo button.
+  focusWaitingPanelAfterAction(host, { kind: "dismissed", dismissedKey: "ask:ask-1" });
+  assert.strictEqual(doc.activeElement, undoBtn);
+
+  // Clicking Undo puts the card back and restores the count.
+  undoBtn.click();
+  assert.deepEqual(undoCalls, ["ask:ask-1"]);
+  assert.ok(host.querySelector('[data-waiting-card="ask-1"]'));
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-1"]'), null);
+  assert.equal(host.querySelector("[data-waiting-scope]").options[0].textContent, "This channel (4)");
+
+  // Failed dismiss puts the card back with role="alert" error treatment.
+  items = [{ ...ask1, choices: { ...ask1.choices, error: "Could not dismiss. Try again." } }];
+  placeholders = [];
+  renderActive();
+  const restoredCard = host.querySelector('[data-waiting-card="ask-1"]');
+  assert.ok(restoredCard);
+  assert.ok(restoredCard.textContent.includes("Could not dismiss. Try again."));
+
+  // Dismissing the LAST remaining card still renders the in-place "Dismissed · Undo" row (not empty state).
+  items = [];
+  plainAsks = [];
+  todos = [];
+  placeholders = [{ key: "ask:ask-1", itemKind: "ask", itemId: "ask-1", cardId: "ask-1", workspaceId: "ws-1", position: 0 }];
+  renderActive();
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-1"]'));
+  assert.equal(host.querySelector('[data-waiting-state="empty"]'), null);
+
+  // Archived tab parses and renders outcome_kind="dismissed" with muted tone and "Restore" button.
+  const parsedArchived = parseWaitingArchivedPage({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-23T12:00:00Z",
+    total: 1,
+    truncated: false,
+    items: [{
+      item_key: "ask:11111111-2222-4333-8444-555555555555",
+      kind: "ask",
+      id: "11111111-2222-4333-8444-555555555555",
+      todo_id: null,
+      ask_kind: "choice",
+      title: "Approve deploy?",
+      from: { kind: "agent", id: "a-1", name: "Scout" },
+      outcome_kind: "dismissed",
+      outcome_text: "Dismissed",
+      archived_at: "2026-11-23T11:55:00Z",
+      answered_by: { kind: "user", id: "u-1", name: "Alice", by_viewer: true },
+      placement: "general",
+      channel_id: null,
+      conversation_id: null,
+      conversation_kind: "general",
+    }],
+  }, "ws-1");
+  assert.equal(parsedArchived.items[0].outcome_kind, "dismissed");
+  const mappedArchived = mapWaitingArchivedEntry(parsedArchived.items[0], {
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    channelLabel: "#general",
+    href: "/app?w=ws-1&m=11111111-2222-4333-8444-555555555555",
+    viewerId: "u-1",
+    now: Date.parse("2026-11-23T12:00:00Z"),
+  });
+
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "workspace",
+    place,
+    items: [],
+    archived: {
+      items: [mappedArchived],
+      counts: { channel: { min: 1, complete: true }, workspace: { min: 1, complete: true }, all: { min: 1, complete: true } },
+      loading: false, loadingMore: false, complete: true, failed: false, hasMore: false,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, {
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onRestoreArchived: (item) => restoreCalls.push(item.itemKey),
+  });
+
+  const outcome = host.querySelector('[data-waiting-archived-outcome="dismissed"]');
+  assert.ok(outcome);
+  assert.equal(outcome.dataset.outcomeTone, "muted");
+  assert.equal(outcome.querySelector(".cs-waiting-archived__answer").textContent, "Dismissed");
+  const restoreBtn = host.querySelector(`[data-waiting-archived-restore="${mappedArchived.itemKey}"]`);
+  assert.ok(restoreBtn);
+  assert.equal(restoreBtn.tagName, "BUTTON");
+  assert.equal(restoreBtn.textContent, "Restore");
+  restoreBtn.click();
+  assert.deepEqual(restoreCalls, [mappedArchived.itemKey]);
+
+  // Wire command builders match server contract.
+  assert.deepEqual(dismissWaitingItemCommand("review", "offer-1"), {
+    kind: "dismiss_waiting_item",
+    item_kind: "review",
+    item_id: "offer-1",
+  });
+  assert.deepEqual(restoreWaitingItemCommand("todo", "todo-1"), {
+    kind: "restore_waiting_item",
+    item_kind: "todo",
+    item_id: "todo-1",
+  });
+  assert.equal(typeof dismissWaitingItem, "function");
+  assert.equal(typeof restoreWaitingItem, "function");
 });

@@ -5781,3 +5781,96 @@ export type { ReviewCheckRecord, ReviewChecksReadOutcome, ReviewCheckVerdict, St
 export function uuid(): string {
   return crypto.randomUUID();
 }
+
+export type WaitingDismissalItemKind = "ask" | "todo" | "review";
+
+export type WaitingDismissalResult =
+  | { ok: true; itemKind: WaitingDismissalItemKind; itemId: string; dismissed?: boolean; restored?: boolean; dismissedAt?: string | null; restoredAt?: string | null }
+  | { ok: false; status: number; error: string | null; message: string };
+
+const WAITING_DISMISS_FAILED = "Could not dismiss. Try again.";
+const WAITING_RESTORE_FAILED = "Could not restore. Try again.";
+
+export function dismissWaitingItemCommand(itemKind: WaitingDismissalItemKind, itemId: string): Record<string, unknown> {
+  return { kind: "dismiss_waiting_item", item_kind: itemKind, item_id: itemId };
+}
+
+export function restoreWaitingItemCommand(itemKind: WaitingDismissalItemKind, itemId: string): Record<string, unknown> {
+  return { kind: "restore_waiting_item", item_kind: itemKind, item_id: itemId };
+}
+
+/** Per-person dismissal of one Waiting on you item (ask, todo, or review offer). */
+export async function dismissWaitingItem(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+  options?: {
+    pinned?: PinnedAccountContext | null;
+    accountWideWorkspace?: boolean;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<WaitingDismissalResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    dismissWaitingItemCommand(itemKind, itemId),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    return {
+      ok: true,
+      itemKind,
+      itemId,
+      dismissed: true,
+      dismissedAt: typeof body.dismissed_at === "string" ? body.dismissed_at : null,
+    };
+  }
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : WAITING_DISMISS_FAILED;
+  return { ok: false, status, error, message };
+}
+
+/** Per-person restore of a dismissed Waiting on you item (ask, todo, or review offer). */
+export async function restoreWaitingItem(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+  options?: {
+    pinned?: PinnedAccountContext | null;
+    accountWideWorkspace?: boolean;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<WaitingDismissalResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    restoreWaitingItemCommand(itemKind, itemId),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    return {
+      ok: true,
+      itemKind,
+      itemId,
+      restored: body.restored === true,
+      restoredAt: typeof body.restored_at === "string" ? body.restored_at : null,
+    };
+  }
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : WAITING_RESTORE_FAILED;
+  return { ok: false, status, error, message };
+}

@@ -151,3 +151,4 @@ tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts
 tests/seat-status.test.ts
 tests/hosted-mcp-conversations.test.ts
+tests/waiting-dismissals.test.ts

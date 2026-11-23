@@ -513,3 +513,65 @@ test("Check E draft retention on Skip: keeps session draft, restores it on Back,
   assert.equal(body.querySelector("[data-waiting-survey-send]").textContent, "Send 2 answers");
   assert.match(body.querySelector('[data-waiting-survey-item="q1"]').textContent, /Other: Keep this for later/);
 });
+
+test("survey step renders Dismiss alongside Skip and shows in-place Dismissed with Undo", () => {
+  const doc = makeDoc();
+  const body = doc.createElement("div");
+  const q1 = makeAsk("q1", { what: "First question?" });
+  const q2 = makeAsk("q2", { what: "Second question?" });
+  let items = [q1, q2];
+  let dismissedNotice = null;
+  const dismissed = [];
+  const undone = [];
+
+  const render = () => {
+    renderWaitingSurvey(
+      body,
+      { items, scope: "channel", mode: "step", index: 0, drafts: new Map(), skipped: new Set(), errors: new Map(), sending: false, dismissedNotice },
+      {
+        onExit: () => {},
+        onStep: () => {},
+        onDraftChange: () => {},
+        onSkip: () => {},
+        onDismiss: (item) => {
+          dismissed.push(item.id);
+          items = items.filter(i => i.id !== item.id);
+          dismissedNotice = { key: `ask:${item.id}` };
+          render();
+        },
+        onUndoDismiss: (key) => {
+          undone.push(key);
+          items = [q1, q2];
+          dismissedNotice = null;
+          render();
+        },
+        onReview: () => {},
+        onEdit: () => {},
+        onSendAll: () => {},
+      },
+    );
+  };
+
+  render();
+  const dismissBtn = body.querySelector('[data-waiting-survey-dismiss="q1"]');
+  const skipBtn = body.querySelector("[data-waiting-survey-skip]");
+  assert.ok(dismissBtn);
+  assert.equal(dismissBtn.tagName, "BUTTON");
+  assert.equal(dismissBtn.textContent, "Dismiss");
+  assert.ok(skipBtn);
+  assert.equal(skipBtn.textContent, "Skip");
+
+  dismissBtn.click();
+  assert.deepEqual(dismissed, ["q1"]);
+  const notice = body.querySelector('[data-waiting-dismissed="ask:q1"]');
+  assert.ok(notice);
+  assert.equal(notice.querySelector(".cs-waiting-dismissed__label").textContent, "Dismissed");
+  const undoBtn = notice.querySelector('[data-waiting-undo="ask:q1"]');
+  assert.ok(undoBtn);
+  assert.equal(undoBtn.textContent, "Undo");
+
+  undoBtn.click();
+  assert.deepEqual(undone, ["ask:q1"]);
+  assert.equal(body.querySelector('[data-waiting-dismissed="ask:q1"]'), null);
+  assert.ok(body.querySelector('[data-waiting-survey-dismiss="q1"]'));
+});
