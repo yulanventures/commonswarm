@@ -820,18 +820,26 @@ test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted
     );
 
     // 7. Bounded timeout fails closed with github_timeout.
-    await assert.rejects(
-      () => readGithubCiForCommit({
-        repo: "yulanventures/commonswarm",
-        headSha: SHA_NEW,
-        source: "actions",
-        timeoutMs: 40,
-        fetcher: async (_url, init) => new Promise<Response>((_res, rej) => {
-          init?.signal?.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
+    // AbortSignal.timeout uses an unref'd timer; because the mock fetcher has no real I/O handle,
+    // keep a ref'd timer alive for the duration of this wait so Node 22 does not drain the event
+    // loop before the 40 ms abort fires.
+    const keepAlive = setTimeout(() => {}, 10_000);
+    try {
+      await assert.rejects(
+        () => readGithubCiForCommit({
+          repo: "yulanventures/commonswarm",
+          headSha: SHA_NEW,
+          source: "actions",
+          timeoutMs: 40,
+          fetcher: async (_url, init) => new Promise<Response>((_res, rej) => {
+            init?.signal?.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
+          }),
         }),
-      }),
-      { code: "github_timeout" },
-    );
+        { code: "github_timeout" },
+      );
+    } finally {
+      clearTimeout(keepAlive);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
