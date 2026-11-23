@@ -62,6 +62,7 @@ function installWaitingDismissalFenceFixture() {
 
   let releaseTokenHold: (() => void) | null = null;
   let releaseQueueHold: (() => void) | null = null;
+  let releaseHistory404Hold: (() => void) | null = null;
 
   const login1SessionId = "sess-owner-login-1";
   const login2SessionId = "sess-owner-login-2";
@@ -101,6 +102,8 @@ function installWaitingDismissalFenceFixture() {
     dropGroupSM: false,
     dropSecretChannel: false,
     history404GroupSM: false,
+    holdNextHistory404: false,
+    history404Held: false,
     history404Reads: 0,
     conversationsRefreshes: 0,
     channelsRefreshes: 0,
@@ -121,6 +124,7 @@ function installWaitingDismissalFenceFixture() {
     refreshedBearer: (n: number, sessionId = login1SessionId) => `Bearer ${makeJwt(owner, sessionId, `refreshed-${n}`)}`,
     releaseTokenHold: () => { releaseTokenHold?.(); releaseTokenHold = null; },
     releaseQueueHold: () => { releaseQueueHold?.(); releaseQueueHold = null; },
+    releaseHistory404Hold: () => { releaseHistory404Hold?.(); releaseHistory404Hold = null; },
     expireStoredToken: (sessionId = login1SessionId) => {
       localStorage.setItem("sb-api-auth-token", JSON.stringify({
         access_token: makeJwt(owner, sessionId, "expired"),
@@ -489,6 +493,16 @@ function installWaitingDismissalFenceFixture() {
         return Response.json({ conversations: convList });
       }
       if (body?.resource === "conversation_history" && body?.workspace_id === wsId && body?.conversation_id === convGroupSM) {
+        if (f.holdNextHistory404 && Boolean(body?.before_id)) {
+          f.holdNextHistory404 = false;
+          f.history404Held = true;
+          f.log.push("conv-history-404-held");
+          await new Promise<void>((resolve) => { releaseHistory404Hold = resolve; });
+          f.history404Held = false;
+          f.history404Reads += 1;
+          f.log.push("conv-history-404-released");
+          return Response.json({ error: "conversation_not_found", message: "This conversation isn't available in this workspace." }, { status: 404 });
+        }
         if (f.history404GroupSM) {
           f.history404Reads += 1;
           f.log.push("conv-history-404");
@@ -602,14 +616,42 @@ async function observeWaitingDismissalFence() {
   const groupSMLink = () => document.querySelector<HTMLElement>(`[data-rail-conversation="${f.convGroupSM}"]`);
   const loadOlderFeed = () => document.querySelector<HTMLButtonElement>("[data-load-older]");
   const starBtn = () => document.querySelector<HTMLButtonElement>("[data-home-workspace-header] [data-channel-star]");
+  let pendingWaitLabel: string | null = null;
   const state = () => "scenario=" + f.scenario +
+    ", pendingWait=" + String(pendingWaitLabel) +
+    ", holds=" + JSON.stringify({
+      tokenHeld: f.tokenHeld,
+      holdNextToken: f.holdNextToken,
+      history404Held: f.history404Held,
+      holdNextHistory404: f.holdNextHistory404,
+      queueHeld: f.queueHeld,
+      holdNextQueue: f.holdNextQueue,
+    }) +
+    ", counters=" + JSON.stringify({
+      tokenRefreshCount: f.tokenRefreshCount,
+      history404Reads: f.history404Reads,
+      conversationsRefreshes: f.conversationsRefreshes,
+      queueReads: f.queueReads,
+      logoutCalls: f.logoutCalls,
+    }) +
+    ", dom=" + JSON.stringify({
+      panelOpen: shown(panel()),
+      railHasGroupDm: Boolean(groupSMLink()),
+      loadOlderShown: shown(loadOlderFeed()),
+      loadOlderDisabled: loadOlderFeed()?.disabled ?? null,
+    }) +
     ", dismissCmds=" + JSON.stringify(f.dismissCommands) +
     ", restoreCmds=" + JSON.stringify(f.restoreCommands) +
     ", log=" + f.log.join(" ") +
     ", steps=" + steps.join(" | ");
   const wait = async (predicate: () => unknown, label: string) => {
+    pendingWaitLabel = label;
     for (let i = 0; i < 600; i++) {
-      if (predicate()) { steps.push(label); return; }
+      if (predicate()) {
+        pendingWaitLabel = null;
+        steps.push(label);
+        return;
+      }
       await tick();
     }
     throw new Error("timed out at " + label + "; " + state());
@@ -634,10 +676,17 @@ async function observeWaitingDismissalFence() {
     await wait(() => groupSMLink()?.getAttribute("aria-current") === "page" && shown(loadOlderFeed()) && !loadOlderFeed()!.disabled,
       "opened group DM with Load older ready");
   };
-  const triggerGroupDmLossViaHistory404 = async () => {
+  // Pre-authorize the conversation_history read BEFORE the action's token refresh holds
+  // Supabase's navigatorLock, so the authoritative 404 arrives cleanly while the token hold is active.
+  const armGroupDmHistory404 = async () => {
+    f.holdNextHistory404 = true;
+    loadOlderFeed()!.click();
+    await wait(() => f.history404Held, "pre-authorized conversation_history 404 held in flight");
+  };
+  const deliverGroupDmLossViaHeldHistory404 = async () => {
     f.history404GroupSM = true;
     f.dropGroupSM = true;
-    loadOlderFeed()!.click();
+    f.releaseHistory404Hold();
     await wait(() => f.history404Reads >= 1 && !document.querySelector(`[data-rail-conversation="${f.convGroupSM}"]`),
       "same account lost group DM via authoritative 404 eviction");
   };
@@ -651,14 +700,15 @@ async function observeWaitingDismissalFence() {
       await openGroupDmFeed();
       await openPanelWorkspaceScope(false);
       await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)), "DM and #general asks rendered");
+      await armGroupDmHistory404();
       f.holdNextToken = true;
       f.expireStoredToken();
       card(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld && shown(dismissedRow(f.dmAskId)), "Dismiss entered held token acquisition with in-place Dismissed row");
       check(f.dismissCommands.length === 0, "no dismiss command dispatched while token acquisition is held");
-      f.restoreFreshStoredToken();
-      await triggerGroupDmLossViaHistory404();
+      await deliverGroupDmLossViaHeldHistory404();
       await wait(() => !dismissedRow(f.dmAskId) && !card(f.dmAskId), "Dismissed row retired synchronously on DM loss");
+      check(f.tokenHeld, "token acquisition must still be held when DM loss retires Dismiss");
       f.releaseTokenHold();
       await settleTicks();
       check(f.dismissCommands.length === 0, "retired Dismiss must dispatch ZERO commands after token acquisition releases");
@@ -674,12 +724,14 @@ async function observeWaitingDismissalFence() {
       await openGroupDmFeed();
       await openPanelWorkspaceScope(false);
       await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)), "DM and #general asks rendered");
+      await armGroupDmHistory404();
       f.failDismiss401Once = true;
       f.holdNextToken = true;
       card(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld && f.dismissCommands.length === 1, "Dismiss hit 401 and entered held recovery refresh");
-      await triggerGroupDmLossViaHistory404();
+      await deliverGroupDmLossViaHeldHistory404();
       await wait(() => !dismissedRow(f.dmAskId) && !card(f.dmAskId), "Dismissed row retired synchronously on DM loss");
+      check(f.tokenHeld, "401 recovery refresh must still be held when DM loss retires Dismiss");
       f.releaseTokenHold();
       await settleTicks();
       check(f.dismissCommands.length === 1, "retired Dismiss must NOT send a 401 retry after DM loss");
@@ -698,14 +750,15 @@ async function observeWaitingDismissalFence() {
       const readsBeforeDismiss = f.queueReads;
       card(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.dmAskId}"]`)!.click();
       await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeDismiss && shown(dismissedRow(f.dmAskId)), "DM ask dismissed and Undo visible");
+      await armGroupDmHistory404();
       f.holdNextToken = true;
       f.expireStoredToken();
       dismissedRow(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld, "Undo entered held token acquisition");
       check(f.restoreCommands.length === 0, "no restore command dispatched while token acquisition is held");
-      f.restoreFreshStoredToken();
-      await triggerGroupDmLossViaHistory404();
+      await deliverGroupDmLossViaHeldHistory404();
       await wait(() => !dismissedRow(f.dmAskId) && !card(f.dmAskId), "Undo row retired synchronously on DM loss");
+      check(f.tokenHeld, "token acquisition must still be held when DM loss retires Undo");
       f.releaseTokenHold();
       await settleTicks();
       check(f.restoreCommands.length === 0, "retired Undo must dispatch ZERO restore commands after token acquisition releases");
@@ -724,12 +777,14 @@ async function observeWaitingDismissalFence() {
       const readsBeforeDismiss = f.queueReads;
       card(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.dmAskId}"]`)!.click();
       await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeDismiss && shown(dismissedRow(f.dmAskId)), "DM ask dismissed and Undo visible");
+      await armGroupDmHistory404();
       f.failRestore401Once = true;
       f.holdNextToken = true;
       dismissedRow(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld && f.restoreCommands.length === 1, "Undo hit 401 and entered held recovery refresh");
-      await triggerGroupDmLossViaHistory404();
+      await deliverGroupDmLossViaHeldHistory404();
       await wait(() => !dismissedRow(f.dmAskId) && !card(f.dmAskId), "Undo row retired synchronously on DM loss");
+      check(f.tokenHeld, "401 recovery refresh must still be held when DM loss retires Undo");
       f.releaseTokenHold();
       await settleTicks();
       check(f.restoreCommands.length === 1, "retired Undo must NOT send a 401 retry after DM loss");
@@ -745,15 +800,18 @@ async function observeWaitingDismissalFence() {
       await openGroupDmFeed();
       await openPanelWorkspaceScope(true);
       await wait(() => shown(archivedCard(f.dmAskId)) && shown(archivedCard(f.genAskId)), "dismissed DM and #general items rendered in Archived");
+      await armGroupDmHistory404();
       f.holdNextToken = true;
       f.expireStoredToken();
       archivedCard(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld, "Archived Restore entered held token acquisition");
       check(f.restoreCommands.length === 0, "no restore command dispatched while token acquisition is held");
-      f.restoreFreshStoredToken();
-      await triggerGroupDmLossViaHistory404();
-      await wait(() => !archivedCard(f.dmAskId) && shown(archivedCard(f.genAskId)), "DM item cleared from Archived on DM loss");
+      await deliverGroupDmLossViaHeldHistory404();
+      // Cache invalidation clears the DM item synchronously; revalidation of #general completes once the auth lock releases.
+      await wait(() => !archivedCard(f.dmAskId), "DM item cleared synchronously from Archived on DM loss");
+      check(f.tokenHeld, "token acquisition must still be held when DM loss retires Archived Restore");
       f.releaseTokenHold();
+      await wait(() => shown(archivedCard(f.genAskId)), "unchanged #general archived item repainted after revalidation");
       await settleTicks();
       check(f.restoreCommands.length === 0, "retired Archived Restore must dispatch ZERO commands after token acquisition releases");
       check(!archivedCard(f.dmAskId), "lost DM item must not repaint in Archived");
@@ -768,13 +826,17 @@ async function observeWaitingDismissalFence() {
       await openGroupDmFeed();
       await openPanelWorkspaceScope(true);
       await wait(() => shown(archivedCard(f.dmAskId)) && shown(archivedCard(f.genAskId)), "dismissed DM and #general items rendered in Archived");
+      await armGroupDmHistory404();
       f.failRestore401Once = true;
       f.holdNextToken = true;
       archivedCard(f.dmAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.dmAskId}"]`)!.click();
       await wait(() => f.tokenHeld && f.restoreCommands.length === 1, "Archived Restore hit 401 and entered held recovery refresh");
-      await triggerGroupDmLossViaHistory404();
-      await wait(() => !archivedCard(f.dmAskId) && shown(archivedCard(f.genAskId)), "DM item cleared from Archived on DM loss");
+      await deliverGroupDmLossViaHeldHistory404();
+      // Cache invalidation clears the DM item synchronously; revalidation of #general completes once the auth lock releases.
+      await wait(() => !archivedCard(f.dmAskId), "DM item cleared synchronously from Archived on DM loss");
+      check(f.tokenHeld, "401 recovery refresh must still be held when DM loss retires Archived Restore");
       f.releaseTokenHold();
+      await wait(() => shown(archivedCard(f.genAskId)), "unchanged #general archived item repainted after revalidation");
       await settleTicks();
       check(f.restoreCommands.length === 1, "retired Archived Restore must NOT send a 401 retry after DM loss");
       check(!archivedCard(f.dmAskId), "lost DM item must not repaint in Archived");

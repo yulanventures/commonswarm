@@ -1360,10 +1360,11 @@ export async function postCommand(
     if (!pinnedSessionId) {
       return retiredResult();
     }
-    if (cached) {
+    const existingClient = cachedSession?.client ?? null;
+    if (existingClient) {
       let initial: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
       try {
-        initial = await boundedAuth(cached.auth.getSession());
+        initial = await boundedAuth(existingClient.auth.getSession());
       } catch {
         return retiredResult();
       }

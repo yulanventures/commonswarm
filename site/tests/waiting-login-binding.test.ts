@@ -2,9 +2,9 @@
  * Unit tests for single-account login binding (`session_id` claim pinning) on guarded
  * `postCommand` calls (PR #724 C3) and silent retirement in `waiting-dismissal`.
  *
- * Exercises the real bundled `commonswarm.ts` (including `client()`, `cached.auth.getSession()`,
- * `cached.auth.refreshSession()`, and `postCommand()`) with synthetic HTTP + localStorage,
- * plus pure claim-reader and controller tests — no browser required.
+ * Exercises the real bundled `commonswarm.ts` (including `client()`, `cachedSession.client.auth.getSession()`,
+ * `client().auth.refreshSession()`, and `postCommand()`) with synthetic HTTP + localStorage,
+ * plus direct (non-VM) guarded acquisition, claim-reader, and controller tests — no browser required.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -12,6 +12,12 @@ import { afterEach, test } from "node:test";
 import { createContext, runInContext } from "node:vm";
 import { build } from "esbuild";
 import ts from "typescript";
+import {
+  client as directClient,
+  configureMultiAccountForTesting,
+  postCommand as directPostCommand,
+  resetAccountManagerForTesting,
+} from "../src/lib/commonswarm.ts";
 import { decodeJwtClaims, sessionIdFromAccessToken } from "../src/lib/jwt-claims.ts";
 import { createWaitingDismissalController } from "../src/lib/waiting-dismissal.ts";
 
@@ -635,8 +641,8 @@ test("waiting-dismissal controller settles silently on operation_retired even wi
     itemKey: "ask:ask-2", kind: "ask", id: "ask-2", todoId: null, askKind: "choice",
     workspaceId: WORKSPACE, workspaceName: "Home", title: "Question?", from: null,
     outcomeKind: "dismissed", outcomeText: "Dismissed", archivedAt: "2026-11-23T12:00:00Z",
-    when: "now", answeredBy: null, placement: "general", channelId: null,
-    conversationId: null, conversationKind: "general", channelLabel: "#general", href: null,
+    when: "now", answeredByName: null, placement: "general", channelId: null,
+    conversationId: null, channelLabel: "#general", href: null,
   });
   assert.equal(renders, 1, "only initial restoring render; zero settlement repaint");
   assert.equal(reloads, 0);
@@ -712,9 +718,91 @@ test("LiveDashboard waitingActionGuard and queueAuthReload retire Waiting action
   // synchronously retires guard, bumps waitingAuthGeneration & waitingGeneration, and queues reload.
   runInContext(`queueAuthReload(${JSON.stringify(login2SameUser)}, false, false);`, ctx);
   assert.equal(runInContext("guard()", ctx), false, "same-user different-login SIGNED_IN retires guard immediately");
+  assert.equal(runInContext("renderedAuthLoginId", ctx), "sess-2");
   assert.equal(resets, 1, "resetWorkspaceSessionState ran synchronously");
   assert.equal(runInContext("waitingAuthGeneration", ctx), 1);
   assert.equal(runInContext("waitingGeneration", ctx), 1);
-  assert.equal(runInContext("renderedAuthLoginId", ctx), "sess-2");
   assert.equal(queuedBoots, 1);
+});
+
+test("direct (non-VM) guarded postCommand uses existing cachedSession.client without creating one prematurely", async () => {
+  const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 1 });
+  const login1Rotated = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 2 });
+  const login2Other = makeJwt({ sub: OWNER, session_id: "sess-direct-2", rev: 1 });
+  const initialSession = makeSession(login1Initial);
+  const rotatedSession = makeSession(login1Rotated, { refreshToken: "refresh-direct-2" });
+  const otherLoginSession = makeSession(login2Other, { refreshToken: "refresh-direct-other" });
+
+  const sentBearers: string[] = [];
+  const origFetch = globalThis.fetch;
+  configureMultiAccountForTesting({
+    deployment: { url: "https://api.test.invalid", anonKey: "synthetic-public-key" },
+  });
+  globalThis.fetch = (async (input, init) => {
+    const req = new Request(input, init);
+    sentBearers.push(req.headers.get("authorization") ?? "");
+    return Response.json({ status: "accepted", ok: true, event_ids: [] });
+  }) as typeof fetch;
+
+  let initializedClient: ReturnType<typeof directClient> = null;
+  let origGetSession: NonNullable<ReturnType<typeof directClient>>["auth"]["getSession"] | null = null;
+  try {
+    // 1. Before client() is ever created, guarded postCommand must not throw or create a client.
+    const beforeClient = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-no-client",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(beforeClient.status, 200);
+    assert.deepEqual(sentBearers, [`Bearer ${login1Initial}`]);
+
+    // 2. Once client() exists (real cachedSession.client), guarded postCommand calls its auth.getSession().
+    initializedClient = directClient();
+    assert.ok(initializedClient, "direct client() initialized");
+    origGetSession = initializedClient.auth.getSession.bind(initializedClient.auth);
+
+    let fakeSession = rotatedSession;
+    let getSessionCalls = 0;
+    initializedClient.auth.getSession = (async () => {
+      getSessionCalls += 1;
+      return { data: { session: fakeSession as never }, error: null };
+    }) as typeof initializedClient.auth.getSession;
+
+    const rotatedRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-rotated",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 1, "guarded acquisition must call cachedSession.client.auth.getSession()");
+    assert.equal(rotatedRes.status, 200);
+    assert.equal(sentBearers[1], `Bearer ${login1Rotated}`);
+
+    // 3. Different session_id from cachedSession.client.auth.getSession() retires silently with 0 dispatches.
+    fakeSession = otherLoginSession;
+    const swappedRes = await directPostCommand(
+      initialSession as never,
+      "cmd-direct-swapped",
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: "ask-1" },
+      { workspace_id: WORKSPACE, stream: { kind: "workspace" } },
+      undefined,
+      { isAlive: () => true },
+    );
+    assert.equal(getSessionCalls, 2);
+    assert.equal(swappedRes.status, 0);
+    assert.equal(swappedRes.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 2, "must not dispatch when direct client returns a different login");
+  } finally {
+    if (initializedClient && origGetSession) {
+      initializedClient.auth.getSession = origGetSession;
+      try { await initializedClient.auth.stopAutoRefresh(); } catch { /* ignore */ }
+    }
+    globalThis.fetch = origFetch;
+    resetAccountManagerForTesting();
+  }
 });
