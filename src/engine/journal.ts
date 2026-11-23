@@ -1,10 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, type FileHandle } from "node:fs/promises";
-import { dirname } from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { isJournalRecord, type JournalRecord } from "./core.js";
+
+export const MAX_RECORD_BYTES = 256 * 1024;
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
+const GROUP_OTHER_MASK = 0o077;
 const NEWLINE_BYTE = 0x0a;
 
 function errnoCode(err: unknown): string | undefined {
@@ -13,6 +25,14 @@ function errnoCode(err: unknown): string | undefined {
     return typeof code === "string" ? code : undefined;
   }
   return undefined;
+}
+
+function serializeRecord(record: JournalRecord): Buffer {
+  const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  if (line.length > MAX_RECORD_BYTES) {
+    throw new Error("Journal record exceeds maximum size");
+  }
+  return line;
 }
 
 function parseLine(raw: string): JournalRecord | null {
@@ -70,6 +90,44 @@ function parseJournalBuffer(buf: Buffer): ParsedJournal {
   return { records, validByteLength, needsNewline };
 }
 
+async function openVerifiedDirectory(dirPath: string): Promise<FileHandle> {
+  const flags =
+    constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0);
+  let handle: FileHandle;
+  try {
+    handle = await open(dirPath, flags);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === "ELOOP" || code === "EMLINK") {
+      throw new Error("Journal directory must not be a symlink");
+    }
+    if (code === "ENOTDIR") {
+      throw new Error("Journal parent path must be a directory");
+    }
+    throw new Error("Unable to inspect journal directory");
+  }
+
+  try {
+    const st = await handle.stat();
+    if (!st.isDirectory()) {
+      throw new Error("Journal parent path must be a directory");
+    }
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+      throw new Error("Journal directory must be owned by the current user");
+    }
+    if ((st.mode & GROUP_OTHER_MASK) !== 0) {
+      throw new Error("Journal directory must not allow group or other permissions");
+    }
+    return handle;
+  } catch (err) {
+    await handle.close().catch(() => {});
+    if (err instanceof Error && err.message.startsWith("Journal ")) {
+      throw err;
+    }
+    throw new Error("Unable to verify journal directory");
+  }
+}
+
 async function ensureJournalDirectory(dirPath: string): Promise<void> {
   let exists = true;
   try {
@@ -98,9 +156,21 @@ async function ensureJournalDirectory(dirPath: string): Promise<void> {
       throw new Error("Unable to create journal directory");
     }
   }
+
+  const dirHandle = await openVerifiedDirectory(dirPath);
+  await dirHandle.close();
 }
 
-async function openVerifiedHandle(filePath: string): Promise<FileHandle> {
+async function syncDirectory(dirPath: string): Promise<void> {
+  const dirHandle = await openVerifiedDirectory(dirPath);
+  try {
+    await dirHandle.sync();
+  } finally {
+    await dirHandle.close();
+  }
+}
+
+async function rejectSymlinkTarget(filePath: string): Promise<void> {
   try {
     const st = await lstat(filePath);
     if (st.isSymbolicLink()) {
@@ -117,6 +187,10 @@ async function openVerifiedHandle(filePath: string): Promise<FileHandle> {
       throw new Error("Unable to inspect journal file");
     }
   }
+}
+
+async function openVerifiedHandle(filePath: string): Promise<FileHandle> {
+  await rejectSymlinkTarget(filePath);
 
   const noFollow = constants.O_NOFOLLOW ?? 0;
   const flags = constants.O_RDWR | constants.O_CREAT | constants.O_APPEND | noFollow;
@@ -179,12 +253,18 @@ async function readAll(handle: FileHandle, size: number): Promise<Buffer> {
 export class Journal {
   readonly records: readonly JournalRecord[];
   private readonly filePath: string;
+  private count: number;
   private writeChain: Promise<void> = Promise.resolve();
   private closed = false;
 
   private constructor(filePath: string, records: readonly JournalRecord[]) {
     this.filePath = filePath;
     this.records = records;
+    this.count = records.length;
+  }
+
+  get recordCount(): number {
+    return this.count;
   }
 
   static async open(filePath: string): Promise<Journal> {
@@ -215,15 +295,16 @@ export class Journal {
   }
 
   async append(record: JournalRecord): Promise<void> {
+    const line = serializeRecord(record);
     await this.enqueueWrite(async () => {
       if (this.closed) {
         throw new Error("Journal is closed");
       }
       const handle = await openVerifiedHandle(this.filePath);
       try {
-        const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
         await writeAll(handle, line);
         await handle.sync();
+        this.count += 1;
       } finally {
         await handle.close();
       }
@@ -234,6 +315,56 @@ export class Journal {
     for (const record of records) {
       await this.append(record);
     }
+  }
+
+  async compact(records: readonly JournalRecord[]): Promise<void> {
+    const chunks = records.map(serializeRecord);
+    const payload = chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+
+    await this.enqueueWrite(async () => {
+      if (this.closed) {
+        throw new Error("Journal is closed");
+      }
+      const dirPath = dirname(this.filePath);
+      await ensureJournalDirectory(dirPath);
+      await rejectSymlinkTarget(this.filePath);
+
+      const tmpPath = join(dirPath, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
+      const flags =
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+
+      let tmpHandle: FileHandle | null = null;
+      let renamed = false;
+      try {
+        tmpHandle = await open(tmpPath, flags, FILE_MODE);
+        const st = await tmpHandle.stat();
+        if ((st.mode & 0o777) !== FILE_MODE) {
+          await tmpHandle.chmod(FILE_MODE);
+        }
+        if (payload.length > 0) {
+          await writeAll(tmpHandle, payload);
+        }
+        await tmpHandle.sync();
+        await tmpHandle.close();
+        tmpHandle = null;
+
+        await rename(tmpPath, this.filePath);
+        renamed = true;
+        await syncDirectory(dirPath);
+        this.count = records.length;
+      } catch (err) {
+        if (tmpHandle !== null) {
+          await tmpHandle.close().catch(() => {});
+        }
+        if (!renamed) {
+          await unlink(tmpPath).catch(() => {});
+        }
+        if (err instanceof Error && err.message.startsWith("Journal ")) {
+          throw err;
+        }
+        throw new Error("Unable to compact journal file");
+      }
+    });
   }
 
   async flush(): Promise<void> {
