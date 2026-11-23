@@ -6,12 +6,33 @@ import { MessageRow } from '../components/MessageRow';
 import { ReviewCard } from '../components/ReviewCard';
 import { WorkingCard } from '../components/WorkingCard';
 import { PEOPLE } from '../data/fixtures';
+import { CONVERSATION_UNAVAILABLE_TEXT } from '../data/queries';
 import { appActions, useAppStore } from '../store/appStore';
 
 export function ChannelScreen() {
   const { name } = useParams<{ name: string }>();
   const channels = useAppStore((state) => state.channels);
   const agents = useAppStore((state) => state.agents);
+  const unavailableConversationId = useAppStore(
+    (state) => state.unavailableConversationId,
+  );
+
+  if (
+    unavailableConversationId !== null &&
+    name !== undefined &&
+    name.toLowerCase() === unavailableConversationId
+  ) {
+    return (
+      <AppFrame>
+        <div
+          data-testid="conversation-unavailable"
+          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
+        >
+          {CONVERSATION_UNAVAILABLE_TEXT}
+        </div>
+      </AppFrame>
+    );
+  }
 
   const channel =
     channels.find((item) => item.name === name) ??
@@ -45,6 +66,12 @@ export function ChannelScreen() {
         <h1 className="text-lg font-bold tracking-tight text-ink">
           # {channel.name}
         </h1>
+        <span
+          data-testid="sample-data-marker"
+          className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+        >
+          Sample data
+        </span>
         <span className="hidden text-sm text-ink-muted desktop:inline">
           {channel.peopleCount} people · {channelAgents.length}{' '}
           {channelAgents.length === 1 ? 'agent' : 'agents'}

@@ -33,6 +33,12 @@ export function WaitingScreen() {
         <h1 className="text-lg font-bold tracking-tight text-ink">
           Waiting on you
         </h1>
+        <span
+          data-testid="sample-data-marker"
+          className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+        >
+          Sample data
+        </span>
 
         <div role="tablist" aria-label="Filter items" className="flex items-center gap-3">
           <button

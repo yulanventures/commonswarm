@@ -33,6 +33,10 @@ export interface AppState {
   addAgentDialogOpen: boolean;
   addAgentDraft: AddAgentDraft;
   announcement: string;
+  selectedWorkspaceId: string | null;
+  unavailableWorkspaceId: string | null;
+  unavailableConversationId: string | null;
+  knownPrivateConversationIds: string[];
 }
 
 type Listener = () => void;
@@ -56,6 +60,10 @@ function createInitialState(): AppState {
     addAgentDialogOpen: false,
     addAgentDraft: { ...DEFAULT_ADD_AGENT_DRAFT },
     announcement: '',
+    selectedWorkspaceId: null,
+    unavailableWorkspaceId: null,
+    unavailableConversationId: null,
+    knownPrivateConversationIds: [],
   };
 }
 
@@ -458,5 +466,70 @@ export const appActions = {
     }));
 
     return id;
+  },
+
+  selectWorkspace(workspaceId: string | null): void {
+    const normalized = workspaceId ? workspaceId.toLowerCase() : null;
+    setState((prev) => ({
+      ...prev,
+      selectedWorkspaceId: normalized,
+      unavailableWorkspaceId: null,
+      unavailableConversationId: null,
+      knownPrivateConversationIds:
+        prev.selectedWorkspaceId === normalized
+          ? prev.knownPrivateConversationIds
+          : [],
+    }));
+  },
+
+  markWorkspaceUnavailable(workspaceId: string): void {
+    const normalized = workspaceId.toLowerCase();
+    setState((prev) => ({
+      ...prev,
+      unavailableWorkspaceId: normalized,
+      unavailableConversationId: null,
+      knownPrivateConversationIds: [],
+    }));
+  },
+
+  markConversationUnavailable(conversationId: string): void {
+    const normalized = conversationId.toLowerCase();
+    setState((prev) => ({
+      ...prev,
+      unavailableConversationId: normalized,
+      knownPrivateConversationIds: prev.knownPrivateConversationIds.filter(
+        (id) => id !== normalized,
+      ),
+    }));
+  },
+
+  clearUnavailableConversation(): void {
+    setState((prev) =>
+      prev.unavailableConversationId === null
+        ? prev
+        : { ...prev, unavailableConversationId: null },
+    );
+  },
+
+  setKnownPrivateConversationIds(ids: readonly string[]): void {
+    const normalized = ids.map((id) => id.toLowerCase());
+    setState((prev) => ({
+      ...prev,
+      knownPrivateConversationIds: normalized,
+    }));
+  },
+
+  /**
+   * Synchronously reset every store slice that holds server-derived state.
+   * Called on login-generation changes and bfcache restore before any await.
+   */
+  resetServerState(): void {
+    setState((prev) => ({
+      ...prev,
+      selectedWorkspaceId: null,
+      unavailableWorkspaceId: null,
+      unavailableConversationId: null,
+      knownPrivateConversationIds: [],
+    }));
   },
 };

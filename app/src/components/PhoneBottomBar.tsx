@@ -1,9 +1,13 @@
 import { Link, useLocation } from 'react-router';
+import { useRealSidebarData, useSessionSnapshot } from '../data/queries';
 import { getOpenWaitingCount, useAppStore } from '../store/appStore';
 
-export function PhoneBottomBar() {
+function PhoneBottomBarView({
+  openWaitingCount,
+}: {
+  openWaitingCount: number | null;
+}) {
   const location = useLocation();
-  const openWaitingCount = useAppStore(getOpenWaitingCount);
 
   const isHome =
     location.pathname === '/home' || location.pathname.startsWith('/channels');
@@ -36,12 +40,12 @@ export function PhoneBottomBar() {
             : 'text-ink-muted hover:text-ink'
         }`}
       >
-        {openWaitingCount > 0 ? (
+        {openWaitingCount !== null && openWaitingCount > 0 ? (
           <span
             data-testid="phone-waiting-count"
             className="flex h-badge-sm min-w-badge items-center justify-center rounded-control bg-needs-you px-1 text-badge font-bold text-on-needs-you"
           >
-            {openWaitingCount}
+            {openWaitingCount > 99 ? '99+' : openWaitingCount}
           </span>
         ) : null}
         <span>Waiting</span>
@@ -68,4 +72,22 @@ export function PhoneBottomBar() {
       </Link>
     </nav>
   );
+}
+
+function RealPhoneBottomBar() {
+  const { waitingCount } = useRealSidebarData();
+  return <PhoneBottomBarView openWaitingCount={waitingCount} />;
+}
+
+function SamplePhoneBottomBar() {
+  const openWaitingCount = useAppStore(getOpenWaitingCount);
+  return <PhoneBottomBarView openWaitingCount={openWaitingCount} />;
+}
+
+export function PhoneBottomBar() {
+  const snapshot = useSessionSnapshot();
+  if (snapshot.state.status === 'authenticated') {
+    return <RealPhoneBottomBar />;
+  }
+  return <SamplePhoneBottomBar />;
 }

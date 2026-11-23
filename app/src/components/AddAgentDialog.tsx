@@ -1,14 +1,26 @@
 import { Dialog } from 'radix-ui';
-import type { FormEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { useEffect, useRef, type FormEvent } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { COMPUTERS, HARNESSES, PERMISSION_MODES } from '../data/fixtures';
 import { appActions, useAppStore } from '../store/appStore';
 
 export function AddAgentDialog() {
   const navigate = useNavigate();
+  const location = useLocation();
   const open = useAppStore((state) => state.addAgentDialogOpen);
   const draft = useAppStore((state) => state.addAgentDraft);
   const agents = useAppStore((state) => state.agents);
+  const routeKey = `${location.pathname}${location.search}${location.hash}`;
+  const prevRouteKeyRef = useRef(routeKey);
+
+  useEffect(() => {
+    if (prevRouteKeyRef.current !== routeKey) {
+      prevRouteKeyRef.current = routeKey;
+      if (open) {
+        appActions.closeAddAgentDialog();
+      }
+    }
+  }, [routeKey, open]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();

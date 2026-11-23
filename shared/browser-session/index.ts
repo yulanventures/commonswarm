@@ -58,6 +58,9 @@ export function deploymentOriginHash(url: string): string {
   return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0").slice(0, 4)}`;
 }
 
+/** Dormant multi-account feature gate; single source of truth for `/app` and `/next`. */
+export const MULTI_ACCOUNT_ENABLED = false;
+
 /** Canonical multi-account storage key builders shared with `/app` (`site/src/lib/multi-account.ts`). */
 export const slotStorageKey = (originHash: string, loginId: string): string =>
   `commonswarm:auth:v1:${originHash}:login:${loginId}`;
