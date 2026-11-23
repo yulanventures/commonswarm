@@ -1351,7 +1351,7 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     return new Response(JSON.stringify(nextBody), { status: nextStatus, headers: { "content-type": "application/json" } });
   };
   const fakeSession = {
-    access_token: "synthetic-a",
+    access_token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${Buffer.from(JSON.stringify({ sub: "u-a", session_id: "sess-a" })).toString("base64url")}.sig`,
     refresh_token: "synthetic-refresh-a",
     token_type: "bearer",
     expires_in: 3600,

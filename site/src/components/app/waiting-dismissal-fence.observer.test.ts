@@ -16,7 +16,11 @@
  *     when each old read completes, zero private rows paint and a fresh authorized read is issued.
  *  6. Unchanged-access controls for Dismiss, Undo, Archived Restore (both token acquisition hold
  *     and 401 recovery) and active Waiting queue read: action sent once (or retried once on 401
- *     with the same command_id and refreshed bearer) and list repaints from the fresh read.
+ *     with the same command_id and refreshed same-login bearer) and list repaints from the fresh read.
+ *  7. Same-person different-login replacement (`session_id` change with same `user.id`, no
+ *     `SIGNED_OUT` event) during held acquisition and during held 401 recovery, plus empty-session
+ *     during held acquisition, for Dismiss, Undo, and Archived Restore: zero commands / zero retries
+ *     and nothing repaints.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -59,6 +63,16 @@ function installWaitingDismissalFenceFixture() {
   let releaseTokenHold: (() => void) | null = null;
   let releaseQueueHold: (() => void) | null = null;
 
+  const login1SessionId = "sess-owner-login-1";
+  const login2SessionId = "sess-owner-login-2";
+  const makeJwt = (sub: string, sessionId: string, rev: string) =>
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+    btoa(JSON.stringify({ sub, session_id: sessionId, rev }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "") +
+    ".sig";
+
   const isQueueReadCase = scenario.startsWith("queue-read-");
   const isArchivedCase = scenario.startsWith("archived-restore-") || scenario === "control-archived-restore";
 
@@ -77,6 +91,8 @@ function installWaitingDismissalFenceFixture() {
     genAsk2Id,
     triggerAsk1Id,
     triggerAsk2Id,
+    login1SessionId,
+    login2SessionId,
     dmQuestion: "Private DM secret question?",
     privQuestion: "Private channel secret question?",
     genQuestion: "General authorized question?",
@@ -91,6 +107,8 @@ function installWaitingDismissalFenceFixture() {
     holdNextToken: false,
     tokenHeld: false,
     tokenRefreshCount: 0,
+    nextRefreshSessionId: login1SessionId,
+    logoutCalls: 0,
     failDismiss401Once: false,
     failRestore401Once: false,
     dismissCommands: [] as Array<{ command_id: string; item_id: string; bearer: string }>,
@@ -100,11 +118,12 @@ function installWaitingDismissalFenceFixture() {
     queueReads: 0,
     queueReadsAfterPrivLoss: 0,
     queueReadsAfterDmLoss: 0,
+    refreshedBearer: (n: number, sessionId = login1SessionId) => `Bearer ${makeJwt(owner, sessionId, `refreshed-${n}`)}`,
     releaseTokenHold: () => { releaseTokenHold?.(); releaseTokenHold = null; },
     releaseQueueHold: () => { releaseQueueHold?.(); releaseQueueHold = null; },
-    expireStoredToken: () => {
+    expireStoredToken: (sessionId = login1SessionId) => {
       localStorage.setItem("sb-api-auth-token", JSON.stringify({
-        access_token: "synthetic-human-expired",
+        access_token: makeJwt(owner, sessionId, "expired"),
         refresh_token: "synthetic-refresh-1",
         token_type: "bearer",
         expires_in: 3600,
@@ -112,14 +131,22 @@ function installWaitingDismissalFenceFixture() {
         user,
       }));
     },
-    restoreFreshStoredToken: () => {
+    restoreFreshStoredToken: (sessionId = login1SessionId) => {
       localStorage.setItem("sb-api-auth-token", JSON.stringify({
-        access_token: "synthetic-human",
+        access_token: makeJwt(owner, sessionId, "fresh"),
         refresh_token: "synthetic-refresh-1",
         token_type: "bearer",
         expires_in: 3600,
         expires_at: Math.floor(Date.now() / 1000) + 3600,
         user,
+      }));
+    },
+    clearStoredSession: () => {
+      localStorage.removeItem("sb-api-auth-token");
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "sb-api-auth-token",
+        newValue: null,
+        storageArea: localStorage,
       }));
     },
     log: [] as string[],
@@ -279,6 +306,7 @@ function installWaitingDismissalFenceFixture() {
       return Response.json(user);
     }
     if (url.pathname === "/auth/v1/logout") {
+      f.logoutCalls += 1;
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
@@ -293,8 +321,9 @@ function installWaitingDismissalFenceFixture() {
         f.tokenHeld = false;
         f.log.push(`auth-refresh-released-${n}`);
       }
+      const refreshSessionId = f.nextRefreshSessionId;
       return Response.json({
-        access_token: `synthetic-human-refreshed-${n}`,
+        access_token: makeJwt(owner, refreshSessionId, `refreshed-${n}`),
         refresh_token: `synthetic-refresh-${n + 1}`,
         token_type: "bearer",
         expires_in: 3600,
@@ -809,8 +838,8 @@ async function observeWaitingDismissalFence() {
       f.releaseTokenHold();
       await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBefore1 && !card(f.genAskId),
         "unchanged-access Dismiss sent once after token acquisition and repainted from fresh read");
-      check(f.dismissCommands[0]!.bearer === "Bearer synthetic-human-refreshed-1",
-        "expected refreshed bearer after token acquisition: " + JSON.stringify(f.dismissCommands));
+      check(f.dismissCommands[0]!.bearer === f.refreshedBearer(1),
+        "expected refreshed same-login bearer after token acquisition: " + JSON.stringify(f.dismissCommands));
 
       const readsBefore2 = f.queueReads;
       f.failDismiss401Once = true;
@@ -821,8 +850,8 @@ async function observeWaitingDismissalFence() {
       await wait(() => f.dismissCommands.length === 3 && f.queueReads > readsBefore2 && !card(f.genAsk2Id),
         "unchanged-access Dismiss retried once after 401 recovery and repainted from fresh read");
       check(f.dismissCommands[1]!.command_id === f.dismissCommands[2]!.command_id &&
-        f.dismissCommands[2]!.bearer === "Bearer synthetic-human-refreshed-2",
-        "401 retry must reuse command_id with refreshed bearer: " + JSON.stringify(f.dismissCommands));
+        f.dismissCommands[2]!.bearer === f.refreshedBearer(2),
+        "401 retry must reuse command_id with refreshed same-login bearer: " + JSON.stringify(f.dismissCommands));
       document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -842,6 +871,8 @@ async function observeWaitingDismissalFence() {
       f.releaseTokenHold();
       await wait(() => f.restoreCommands.length === 1 && f.queueReads > readsBefore1 && shown(card(f.genAskId)) && !dismissedRow(f.genAskId),
         "unchanged-access Undo sent once after token acquisition and repainted restored card from fresh read");
+      check(f.restoreCommands[0]!.bearer === f.refreshedBearer(1),
+        "expected refreshed same-login bearer after Undo token acquisition: " + JSON.stringify(f.restoreCommands));
 
       const readsBeforeD2 = f.queueReads;
       card(f.genAsk2Id)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAsk2Id}"]`)!.click();
@@ -855,8 +886,8 @@ async function observeWaitingDismissalFence() {
       await wait(() => f.restoreCommands.length === 3 && f.queueReads > readsBefore2 && shown(card(f.genAsk2Id)) && !dismissedRow(f.genAsk2Id),
         "unchanged-access Undo retried once after 401 recovery and repainted restored card from fresh read");
       check(f.restoreCommands[1]!.command_id === f.restoreCommands[2]!.command_id &&
-        f.restoreCommands[2]!.bearer === "Bearer synthetic-human-refreshed-2",
-        "Undo 401 retry must reuse command_id with refreshed bearer: " + JSON.stringify(f.restoreCommands));
+        f.restoreCommands[2]!.bearer === f.refreshedBearer(2),
+        "Undo 401 retry must reuse command_id with refreshed same-login bearer: " + JSON.stringify(f.restoreCommands));
       document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -873,6 +904,8 @@ async function observeWaitingDismissalFence() {
       f.releaseTokenHold();
       await wait(() => f.restoreCommands.length === 1 && f.queueReads > readsBefore1 && !archivedCard(f.genAskId),
         "unchanged-access Archived Restore sent once after token acquisition and repainted from fresh read");
+      check(f.restoreCommands[0]!.bearer === f.refreshedBearer(1),
+        "expected refreshed same-login bearer after Archived Restore token acquisition: " + JSON.stringify(f.restoreCommands));
 
       const readsBefore2 = f.queueReads;
       f.failRestore401Once = true;
@@ -883,8 +916,8 @@ async function observeWaitingDismissalFence() {
       await wait(() => f.restoreCommands.length === 3 && f.queueReads > readsBefore2 && !archivedCard(f.genAsk2Id),
         "unchanged-access Archived Restore retried once after 401 recovery and repainted from fresh read");
       check(f.restoreCommands[1]!.command_id === f.restoreCommands[2]!.command_id &&
-        f.restoreCommands[2]!.bearer === "Bearer synthetic-human-refreshed-2",
-        "Archived Restore 401 retry must reuse command_id with refreshed bearer: " + JSON.stringify(f.restoreCommands));
+        f.restoreCommands[2]!.bearer === f.refreshedBearer(2),
+        "Archived Restore 401 retry must reuse command_id with refreshed same-login bearer: " + JSON.stringify(f.restoreCommands));
       document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -900,6 +933,178 @@ async function observeWaitingDismissalFence() {
       f.releaseQueueHold();
       await wait(() => !f.queueHeld && shown(card(f.privAskId)) && shown(card(f.dmAskId)) && shown(card(f.genAskId)) && !card(f.triggerAsk1Id),
         "unchanged-access Waiting queue read completed and repainted authorized rows cleanly");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7a. Same-person replacement login (different session_id, NO SIGNED_OUT) during held acquisition:
+    //     Dismiss sends 0 commands and repaints nothing for the retired action.
+    if (f.scenario === "dismiss-login-swap-token-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)), "asks rendered under login 1");
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      f.expireStoredToken();
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld && shown(dismissedRow(f.genAskId)), "Dismiss entered held acquisition");
+      check(f.dismissCommands.length === 0, "no dismiss command dispatched while held");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.dismissCommands.length === 0, "same-person replacement login must dispatch ZERO dismiss commands");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!dismissedRow(f.genAskId) && !panel()?.querySelector('[role="alert"]'), "retired Dismiss must not repaint row or error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7b. Same-person replacement login during held 401 recovery (NO SIGNED_OUT): Dismiss sends NO retry.
+    if (f.scenario === "dismiss-login-swap-401-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)), "asks rendered under login 1");
+      f.failDismiss401Once = true;
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld && f.dismissCommands.length === 1, "Dismiss hit 401 and entered held recovery");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.dismissCommands.length === 1, "same-person replacement login must NOT send a 401 retry for Dismiss");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!dismissedRow(f.genAskId) && !panel()?.querySelector('[role="alert"]'), "retired Dismiss 401 must not repaint row or error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7c. Empty session during held acquisition (NO SIGNED_OUT): Dismiss sends 0 commands (never falls back).
+    if (f.scenario === "dismiss-empty-session-token-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.dmAskId)) && shown(card(f.genAskId)), "asks rendered under login 1");
+      f.holdNextToken = true;
+      f.expireStoredToken();
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld && shown(dismissedRow(f.genAskId)), "Dismiss entered held acquisition");
+      f.clearStoredSession();
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.dismissCommands.length === 0, "empty session during held acquisition must dispatch ZERO dismiss commands");
+      check(!panel()?.querySelector('[role="alert"]'), "retired Dismiss must settle silently without error alert");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7d. Same-person replacement login during held acquisition (NO SIGNED_OUT): Undo sends 0 commands.
+    if (f.scenario === "undo-login-swap-token-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "ask rendered under login 1");
+      const readsBeforeDismiss = f.queueReads;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeDismiss && shown(dismissedRow(f.genAskId)), "ask dismissed and Undo visible");
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      f.expireStoredToken();
+      dismissedRow(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld, "Undo entered held acquisition");
+      check(f.restoreCommands.length === 0, "no restore command dispatched while held");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 0, "same-person replacement login must dispatch ZERO Undo restore commands");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!dismissedRow(f.genAskId) && !panel()?.querySelector('[role="alert"]'), "retired Undo must not repaint row or error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7e. Same-person replacement login during held 401 recovery (NO SIGNED_OUT): Undo sends NO retry.
+    if (f.scenario === "undo-login-swap-401-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "ask rendered under login 1");
+      const readsBeforeDismiss = f.queueReads;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeDismiss && shown(dismissedRow(f.genAskId)), "ask dismissed and Undo visible");
+      f.failRestore401Once = true;
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      dismissedRow(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld && f.restoreCommands.length === 1, "Undo hit 401 and entered held recovery");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 1, "same-person replacement login must NOT send a 401 retry for Undo");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!dismissedRow(f.genAskId) && !panel()?.querySelector('[role="alert"]'), "retired Undo 401 must not repaint row or error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7f. Empty session during held acquisition (NO SIGNED_OUT): Undo sends 0 commands.
+    if (f.scenario === "undo-empty-session-token-hold") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => shown(card(f.genAskId)), "ask rendered under login 1");
+      const readsBeforeDismiss = f.queueReads;
+      card(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-dismiss="ask"][data-waiting-dismiss-id="${f.genAskId}"]`)!.click();
+      await wait(() => f.dismissCommands.length === 1 && f.queueReads > readsBeforeDismiss && shown(dismissedRow(f.genAskId)), "ask dismissed and Undo visible");
+      f.holdNextToken = true;
+      f.expireStoredToken();
+      dismissedRow(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-undo="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld, "Undo entered held acquisition");
+      f.clearStoredSession();
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 0, "empty session during held acquisition must dispatch ZERO Undo restore commands");
+      check(!panel()?.querySelector('[role="alert"]'), "retired Undo must settle silently without error alert");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7g. Same-person replacement login during held acquisition (NO SIGNED_OUT): Archived Restore sends 0 commands.
+    if (f.scenario === "archived-restore-login-swap-token-hold") {
+      await openPanelWorkspaceScope(true);
+      await wait(() => shown(archivedCard(f.genAskId)), "archived item rendered under login 1");
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      f.expireStoredToken();
+      archivedCard(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld, "Archived Restore entered held acquisition");
+      check(f.restoreCommands.length === 0, "no restore command dispatched while held");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 0, "same-person replacement login must dispatch ZERO Archived Restore commands");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!panel()?.querySelector('[role="alert"]'), "retired Archived Restore must not repaint error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7h. Same-person replacement login during held 401 recovery (NO SIGNED_OUT): Archived Restore sends NO retry.
+    if (f.scenario === "archived-restore-login-swap-401-hold") {
+      await openPanelWorkspaceScope(true);
+      await wait(() => shown(archivedCard(f.genAskId)), "archived item rendered under login 1");
+      f.failRestore401Once = true;
+      f.holdNextToken = true;
+      f.nextRefreshSessionId = f.login2SessionId;
+      archivedCard(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld && f.restoreCommands.length === 1, "Archived Restore hit 401 and entered held recovery");
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 1, "same-person replacement login must NOT send a 401 retry for Archived Restore");
+      check(f.logoutCalls === 0, "must not rely on a prior SIGNED_OUT / logout");
+      check(!panel()?.querySelector('[role="alert"]'), "retired Archived Restore 401 must not repaint error");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
+    // 7i. Empty session during held acquisition (NO SIGNED_OUT): Archived Restore sends 0 commands.
+    if (f.scenario === "archived-restore-empty-session-token-hold") {
+      await openPanelWorkspaceScope(true);
+      await wait(() => shown(archivedCard(f.genAskId)), "archived item rendered under login 1");
+      f.holdNextToken = true;
+      f.expireStoredToken();
+      archivedCard(f.genAskId)!.querySelector<HTMLButtonElement>(`[data-waiting-archived-restore="ask:${f.genAskId}"]`)!.click();
+      await wait(() => f.tokenHeld, "Archived Restore entered held acquisition");
+      f.clearStoredSession();
+      f.releaseTokenHold();
+      await settleTicks();
+      check(f.restoreCommands.length === 0, "empty session during held acquisition must dispatch ZERO Archived Restore commands");
+      check(!panel()?.querySelector('[role="alert"]'), "retired Archived Restore must settle silently without error alert");
       document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
@@ -997,6 +1202,21 @@ test("Waiting dismissal C3 (mounted Dashboard): held active Waiting queue read n
     "control-undo",
     "control-archived-restore",
     "queue-read-control",
+  ]);
+  assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
+});
+
+test("Waiting dismissal C3 (mounted Dashboard): same-person replacement login (without SIGNED_OUT) and empty session retire Dismiss, Undo, and Archived Restore across held acquisition and 401 recovery", { timeout: 180_000 }, async () => {
+  const outcomes = await runFenceScenarios([
+    "dismiss-login-swap-token-hold",
+    "dismiss-login-swap-401-hold",
+    "dismiss-empty-session-token-hold",
+    "undo-login-swap-token-hold",
+    "undo-login-swap-401-hold",
+    "undo-empty-session-token-hold",
+    "archived-restore-login-swap-token-hold",
+    "archived-restore-login-swap-401-hold",
+    "archived-restore-empty-session-token-hold",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

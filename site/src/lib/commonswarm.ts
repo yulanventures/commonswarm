@@ -43,6 +43,8 @@ import {
   AuthRetryableFetchError, type SupabaseClient, type Session,
 } from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
+import { decodeJwtClaims, sessionIdFromAccessToken } from "./jwt-claims.js";
+export { decodeJwtClaims, sessionIdFromAccessToken };
 import {
   AccountManager,
   AccountSessionRuntime,
@@ -1675,22 +1677,31 @@ export async function postCommand(
     command,
     ...extra,
   });
+  const guarded = Boolean(isAlive);
+  const pinnedSessionId = guarded ? sessionIdFromAccessToken(session.access_token) : null;
+  const matchesPinnedLogin = (candidate: Session | null | undefined): candidate is Session =>
+    Boolean(
+      candidate &&
+      candidate.user.id === session.user.id &&
+      pinnedSessionId &&
+      sessionIdFromAccessToken(candidate.access_token) === pinnedSessionId,
+    );
   let credential = session;
-  if (cached && isAlive) {
-    try {
-      const initial = await boundedAuth(cached.auth.getSession());
-      if (isCancelled()) {
+  if (guarded) {
+    if (!pinnedSessionId) {
+      return retiredResult();
+    }
+    if (cached) {
+      let initial: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
+      try {
+        initial = await boundedAuth(cached.auth.getSession());
+      } catch {
         return retiredResult();
       }
-      if (!initial.error && initial.data.session) {
-        if (initial.data.session.user.id !== session.user.id) {
-          throw new AuthRecoveryRequired();
-        }
-        credential = initial.data.session;
+      if (isCancelled() || initial.error || !matchesPinnedLogin(initial.data.session)) {
+        return retiredResult();
       }
-    } catch (error) {
-      if (isCancelled()) return retiredResult();
-      if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
+      credential = initial.data.session;
     }
   }
   if (isCancelled()) {
@@ -1732,6 +1743,39 @@ export async function postCommand(
         }
         const c = client();
         if (!c || attempt !== 0) throw new AuthRecoveryRequired();
+        if (guarded) {
+          let recovered: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
+          try {
+            recovered = await boundedAuth(c.auth.getSession());
+          } catch {
+            return retiredResult();
+          }
+          if (isCancelled() || recovered.error || !matchesPinnedLogin(recovered.data.session)) {
+            return retiredResult();
+          }
+          const active = recovered.data.session;
+          if (!sameCredentials(active, credential)) {
+            credential = active;
+          } else {
+            if (isCancelled()) {
+              return retiredResult();
+            }
+            let refreshed: Awaited<ReturnType<SupabaseClient["auth"]["refreshSession"]>>;
+            try {
+              refreshed = await boundedAuth(c.auth.refreshSession());
+            } catch {
+              return retiredResult();
+            }
+            if (isCancelled() || refreshed.error || !matchesPinnedLogin(refreshed.data.session)) {
+              return retiredResult();
+            }
+            credential = refreshed.data.session;
+          }
+          if (isCancelled()) {
+            return retiredResult();
+          }
+          continue;
+        }
         const recovered = await boundedAuth(c.auth.getSession());
         if (isCancelled()) {
           return retiredResult();

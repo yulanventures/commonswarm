@@ -127,6 +127,10 @@ function isNotFoundResult(result: WaitingDismissalResult): boolean {
   return !result.ok && (result.status === 404 || result.error === "not_found");
 }
 
+function isRetiredResult(result: WaitingDismissalResult): boolean {
+  return !result.ok && result.status === 0 && result.error === "operation_retired";
+}
+
 export function createWaitingDismissalController(ports: WaitingDismissalPorts): WaitingDismissalController {
   let accessGen = 0;
   let globalGen = 0;
@@ -337,7 +341,11 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         } catch {
           result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
         }
-        if (!alive()) return false;
+        if (!alive() || isRetiredResult(result)) {
+          row.retired = true;
+          deleteRow(key);
+          return false;
+        }
 
         if (result.ok) {
           row.dismissResolved = true;
@@ -386,7 +394,11 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
-      if (!alive()) return;
+      if (!alive() || isRetiredResult(result)) {
+        row.retired = true;
+        deleteRow(key);
+        return;
+      }
 
       deleteRow(key);
       if (!result.ok && !isNotFoundResult(result)) {
@@ -429,7 +441,11 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       } catch {
         result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
       }
-      if (!alive()) return;
+      if (!alive() || isRetiredResult(result)) {
+        entry.retired = true;
+        archivedRestoring.delete(item.itemKey);
+        return;
+      }
 
       archivedRestoring.delete(item.itemKey);
       if (!result.ok && !isNotFoundResult(result)) {

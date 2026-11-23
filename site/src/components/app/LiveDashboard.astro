@@ -1615,6 +1615,7 @@ import "../../styles/kylon-image-viewer.css";
     answerPlainAsk,
     dismissWaitingItem,
     restoreWaitingItem,
+    sessionIdFromAccessToken,
     type WaitingDismissalItemKind,
     type ChannelUnread,
     createChannel,
@@ -2373,6 +2374,13 @@ import "../../styles/kylon-image-viewer.css";
     let renderedAuthUserId = "";
     let renderedAuthLoginId = "";
     let renderedAuthViewGen = -1;
+    const authLoginIdFor = (targetSession: Session | null): string => {
+      if (!targetSession) return "";
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled()) {
+        return typeof currentActiveLogin === "function" ? (currentActiveLogin()?.loginId ?? "") : "";
+      }
+      return sessionIdFromAccessToken(targetSession.access_token) ?? "";
+    };
     let pendingFallbackNotice: string | null = null;
     let activeImageViewerDialog: HTMLDialogElement | null = null;
     let authReloadQueued = false;
@@ -6594,11 +6602,18 @@ import "../../styles/kylon-image-viewer.css";
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
     let waitingScope: WaitingScope = "channel";
     let waitingPanelViewer = "";
-    const waitingActionGuard = (viewer: string, authGen: number): (() => boolean) =>
+    const waitingActionGuard = (
+      viewer: string,
+      authGen: number,
+      loginId = typeof renderedAuthLoginId !== "undefined" ? renderedAuthLoginId : "",
+    ): (() => boolean) =>
       () => waitingAuthGeneration === authGen &&
         (sampleMode
           ? viewer === "sample-owner"
-          : renderedAuthUserId === viewer && session?.user.id === viewer);
+          : renderedAuthUserId === viewer &&
+            session?.user.id === viewer &&
+            (typeof renderedAuthLoginId === "undefined" || renderedAuthLoginId === loginId) &&
+            (typeof authLoginIdFor !== "function" || authLoginIdFor(session) === loginId));
     let waitingPanelOverviewFailed = false;
     let waitingStatusMessage = "";
     let waitingStatusSeq = 0;
@@ -7417,16 +7432,20 @@ import "../../styles/kylon-image-viewer.css";
       let sentCount = 0;
       let failedCount = 0;
       const succeededIds = new Set<string>();
+      let retired = false;
       for (const { item, submission } of entries) {
         const current = session;
-        if (!current || !isAlive()) break;
+        if (!current || !isAlive()) { retired = true; break; }
         let result: Awaited<ReturnType<typeof answerChoice>>;
         try {
           result = await answerChoice(current, uuid(), item.workspaceId, item.id, item.choices.multi, submission, { isAlive });
         } catch {
           result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
         }
-        if (!isAlive()) break;
+        if (!isAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+          retired = true;
+          break;
+        }
         if (result.ok) {
           sentCount += 1;
           succeededIds.add(item.id);
@@ -7462,7 +7481,10 @@ import "../../styles/kylon-image-viewer.css";
           waitingSurveyErrors.set(item.id, result.message);
         }
       }
-      if (!isAlive()) return;
+      if (retired || !isAlive()) {
+        waitingSurvey.sending = false;
+        return;
+      }
       waitingSurvey.sending = false;
       waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => !succeededIds.has(id));
       if (sentCount > 0) {
@@ -7573,7 +7595,10 @@ import "../../styles/kylon-image-viewer.css";
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
-      if (!isAlive()) return;
+      if (!isAlive() || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+        if (waitingPanelTickets.get(item.id) === ticket) waitingPanelTickets.delete(item.id);
+        return;
+      }
       waitingPanelTickets.delete(item.id);
       if (result.ok) {
         choiceDrafts.delete(choiceDraftKey(item.workspaceId, item.id));
@@ -7645,7 +7670,10 @@ import "../../styles/kylon-image-viewer.css";
       } catch (error) {
         result = { ok: false, status: 0, error: null, message: readableError(error) };
       }
-      if (!isAlive() || waitingPlainTickets.get(item.id) !== ticket) return;
+      if (!isAlive() || waitingPlainTickets.get(item.id) !== ticket || (!result.ok && result.status === 0 && result.error === "operation_retired")) {
+        if (waitingPlainTickets.get(item.id) === ticket) waitingPlainTickets.delete(item.id);
+        return;
+      }
       waitingPlainTickets.delete(item.id);
       const canRestoreFocus = (): HTMLElement | null => {
         if (!hadPanelFocus || !waitingPanelMod || !waitingSurface?.isOpen()) return null;
@@ -20378,11 +20406,15 @@ import "../../styles/kylon-image-viewer.css";
         const verified = await currentSession();
         if (version !== requestVersion || bootVersion !== bootGeneration) return;
         const previousAuthUserId = renderedAuthUserId;
+        const previousAuthLoginId = renderedAuthLoginId;
         session = verified;
         renderedAuthUserId = session?.user.id ?? "";
-        renderedAuthLoginId = session && isMultiAccountEnabled() ? (currentActiveLogin()?.loginId ?? "") : "";
+        renderedAuthLoginId = authLoginIdFor(session);
         renderedAuthViewGen = session && isMultiAccountEnabled() ? (accountManager()?.currentViewGeneration() ?? -1) : -1;
-        if (previousAuthUserId && renderedAuthUserId !== previousAuthUserId) {
+        if (
+          (previousAuthUserId && renderedAuthUserId !== previousAuthUserId) ||
+          (previousAuthLoginId && renderedAuthLoginId !== previousAuthLoginId)
+        ) {
           resetWorkspaceSessionState();
         }
         if (isMultiAccountEnabled()) renderAccountSwitcher();
@@ -20500,6 +20532,7 @@ import "../../styles/kylon-image-viewer.css";
           householdDashboard?.clear();
           session = null;
           renderedAuthUserId = "";
+          renderedAuthLoginId = "";
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
@@ -24223,16 +24256,27 @@ import "../../styles/kylon-image-viewer.css";
     const queueAuthReload = (nextSession: Session | null, recovered = false, signedOut = false): void => {
       const nextUserId = nextSession?.user.id ?? "";
       const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
-      const nextLoginId = multi && nextSession && typeof currentActiveLogin === "function"
-        ? (currentActiveLogin()?.loginId ?? "")
-        : "";
+      const currentRenderedLoginId = typeof renderedAuthLoginId !== "undefined" ? renderedAuthLoginId : "";
+      const nextLoginId = typeof authLoginIdFor === "function"
+        ? authLoginIdFor(nextSession)
+        : multi && nextSession && typeof currentActiveLogin === "function"
+          ? (currentActiveLogin()?.loginId ?? "")
+          : "";
       const nextViewGen = multi && nextSession && typeof accountManager === "function"
         ? (accountManager()?.currentViewGeneration() ?? -1)
         : -1;
+      const singleLoginChanged =
+        !multi &&
+        Boolean(renderedAuthUserId) &&
+        Boolean(nextSession) &&
+        nextUserId === renderedAuthUserId &&
+        Boolean(currentRenderedLoginId || nextLoginId) &&
+        nextLoginId !== currentRenderedLoginId;
       const identityChanged =
         signedOut ||
         nextUserId !== renderedAuthUserId ||
-        (multi && (nextLoginId !== renderedAuthLoginId || nextViewGen !== renderedAuthViewGen));
+        singleLoginChanged ||
+        (multi && (nextLoginId !== currentRenderedLoginId || nextViewGen !== renderedAuthViewGen));
       if (!identityChanged && !recovered) return;
       if (identityChanged) {
         if (multi) {
@@ -24240,10 +24284,10 @@ import "../../styles/kylon-image-viewer.css";
           householdDashboard?.clear();
           homeOverviewCounts.clear();
           session = null;
-          renderedAuthLoginId = nextLoginId;
           renderedAuthViewGen = nextViewGen;
         }
         renderedAuthUserId = nextUserId;
+        if (typeof renderedAuthLoginId !== "undefined") renderedAuthLoginId = nextLoginId;
         resetWorkspaceSessionState();
         requestVersion += 1;
         authRecoveryActive = false;
@@ -24263,16 +24307,27 @@ import "../../styles/kylon-image-viewer.css";
     onAuthChange((event, nextSession) => {
       // A sign-out or a different account in any tab ends an open Password dialog.
       if (passwordGuard.observeAuth(event, nextSession?.user.id)) closePasswordDialog();
+      const multi = typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled();
+      const nextLoginId = authLoginIdFor(nextSession);
+      const singleLoginChanged =
+        !multi &&
+        Boolean(renderedAuthUserId) &&
+        Boolean(nextSession) &&
+        nextSession!.user.id === renderedAuthUserId &&
+        Boolean(renderedAuthLoginId || nextLoginId) &&
+        nextLoginId !== renderedAuthLoginId;
       // SDK events can carry saved, unverified identity during initialization.
       // Only update an identity this dashboard has already verified.
-      if (session && nextSession?.user.id === session.user.id) session = nextSession;
+      if (session && nextSession?.user.id === session.user.id && !singleLoginChanged) session = nextSession;
       const recovered = event === "TOKEN_REFRESHED" && !!nextSession &&
         authRecoveryActive && app.dataset.state === "workspace-error" &&
         (!renderedAuthUserId || nextSession.user.id === renderedAuthUserId);
       if (
         event === "INITIAL_SESSION" ||
         event === "SIGNED_IN" ||
-        event === "SIGNED_OUT" || recovered
+        event === "SIGNED_OUT" ||
+        recovered ||
+        singleLoginChanged
       ) {
         queueAuthReload(nextSession, recovered, event === "SIGNED_OUT");
       }
