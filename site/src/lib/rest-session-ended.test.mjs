@@ -26,7 +26,7 @@ test("the response body stays readable for the caller", async () => {
 
 test("a PostgREST refusal only schedules the identity-safe check, never a direct sign-out", async () => {
   const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("./commonswarm.ts", import.meta.url), "utf8");
+  const source = await readFile(new URL("../../../shared/browser-session/index.ts", import.meta.url), "utf8");
   assert.match(source, /if \(url\.pathname\.includes\("\/rest\/v1\/"\) && await isRestSessionEnded\(response\)\) checkSessionAfterRestRefusal\(\);/);
   assert.match(source, /function checkSessionAfterRestRefusal\(verify: \(\) => Promise<unknown> = \(\) => verifiedSession\(\)\)/);
   const body = source.slice(source.indexOf("function checkSessionAfterRestRefusal"), source.indexOf("const authFetch"));

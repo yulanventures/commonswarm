@@ -6,7 +6,7 @@ import { posix, resolve } from "node:path";
 import process from "node:process";
 import ts from "typescript";
 
-const DEFAULT_INPUTS = ["src", "site/src"];
+const DEFAULT_INPUTS = ["src", "site/src", "shared", "app/src"];
 const NAME_PATTERN = /(TIMEOUT|DEADLINE|BUDGET)/i;
 
 function git(repo, args) {
@@ -24,7 +24,7 @@ function parseArgs(argv) {
     else if (arg === "--repo") result.repo = resolve(argv[++index]);
     else if (arg === "--input") result.inputs = argv[++index].split(",").filter(Boolean);
     else if (arg === "--help") {
-      process.stdout.write("Usage: node scripts/timeout-table/enumerate.mjs [--repo PATH] [--ref REF] [--input src,site/src]\n");
+      process.stdout.write("Usage: node scripts/timeout-table/enumerate.mjs [--repo PATH] [--ref REF] [--input src,site/src,shared,app/src]\n");
       process.exit(0);
     } else throw new Error(`Unknown argument: ${arg}`);
   }

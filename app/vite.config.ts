@@ -80,7 +80,20 @@ function commonSwarmHtmlPlugin(command: 'build' | 'serve', mode: string): Plugin
   };
 }
 
+const APP_ROOT = decodeURIComponent(
+  new URL('.', import.meta.url).pathname,
+).replace(/\/$/, '');
+const SHARED_BROWSER_SESSION_ROOT = decodeURIComponent(
+  new URL('../shared/browser-session', import.meta.url).pathname,
+).replace(/\/$/, '');
+
 export default defineConfig(({ command, mode }) => ({
   base: '/next/',
   plugins: [react(), tailwindcss(), commonSwarmHtmlPlugin(command, mode)],
+  // Dev server serves only app/ and the shared browser session module.
+  server: {
+    fs: {
+      allow: [APP_ROOT, SHARED_BROWSER_SESSION_ROOT],
+    },
+  },
 }));

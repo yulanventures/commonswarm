@@ -1,16 +1,18 @@
 # Checks app/ on pull requests, pushes to main, and manual workflow_dispatch.
-# Runs typecheck, build, and tests in app/ when app/ or this workflow changes.
+# Runs typecheck, build, and tests in app/ when app/, shared/, or this workflow changes.
 name: app
 
 on:
   pull_request:
     paths:
       - 'app/**'
+      - 'shared/**'
       - '.github/workflows/app.yml'
   push:
     branches: [main]
     paths:
       - 'app/**'
+      - 'shared/**'
       - '.github/workflows/app.yml'
   workflow_dispatch:
 
