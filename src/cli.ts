@@ -11938,6 +11938,13 @@ async function runCheckStatus(args: Arguments): Promise<void> {
 
 async function runCheckCi(args: Arguments): Promise<void> {
   args.assertShape(RUN_CHECK_CI_ACCEPTED_FLAGS, args.positionals.length >= 3 ? 3 : 2);
+  if (args.has("agent-token-stdin") && args.has("github-token-stdin")) {
+    throw new GithubCiError(
+      "invalid_request",
+      "Cannot combine --agent-token-stdin with --github-token-stdin; stdin can supply at most one secret.",
+      400,
+    );
+  }
   const auth = await resolveReviewCheckCliAuth(args);
   process.stdout.write(await executeCheckCiCli(args, auth));
 }

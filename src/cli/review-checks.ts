@@ -243,6 +243,13 @@ export async function executeCheckCiCli(
 
   const tokenFile = args.optional("github-token-file");
   const tokenStdin = args.has("github-token-stdin");
+  if (tokenStdin && args.has("agent-token-stdin")) {
+    throw new GithubCiError(
+      "invalid_request",
+      "Cannot combine --agent-token-stdin with --github-token-stdin; stdin can supply at most one secret.",
+      400,
+    );
+  }
   if (tokenFile && tokenStdin) {
     throw new GithubCiError("invalid_request", "Pass at most one of --github-token-file or --github-token-stdin.", 400);
   }

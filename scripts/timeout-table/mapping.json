@@ -4486,7 +4486,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/github-ci-stamps.ts:739",
+          "citation": "src/cloud/github-ci-stamps.ts:760",
           "detail": "AbortSignal.timeout(timeoutMs) bound on read-only GitHub CI GET requests.",
           "operation": {
             "name": "github-ci-readonly-get-signal",

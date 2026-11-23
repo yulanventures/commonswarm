@@ -210,19 +210,20 @@ export function normalizeGithubApiBaseUrl(raw?: string | null): string {
       400,
     );
   }
-  const isLoopback =
-    parsed.hostname === "127.0.0.1" ||
-    parsed.hostname === "::1" ||
-    parsed.hostname === "[::1]" ||
-    parsed.hostname === "localhost";
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback)) {
+  const isTrustedOrigin = parsed.origin === TRUSTED_GITHUB_API_ORIGIN && parsed.pathname === "/";
+  const isLoopbackFixture =
+    parsed.protocol === "http:" &&
+    (parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "::1") &&
+    parsed.port.length > 0 &&
+    parsed.pathname === "/";
+  if (!isTrustedOrigin && !isLoopbackFixture) {
     throw new GithubCiError(
       "github_api_url_invalid",
-      "GitHub API base URL must use https:// (or http:// on loopback for local diagnostic fixtures).",
+      `GitHub API base URL must be ${TRUSTED_GITHUB_API_ORIGIN} (or http://127.0.0.1:<port> / http://[::1]:<port> for local diagnostic fixtures).`,
       400,
     );
   }
-  return parsed.toString().replace(/\/+$/, "");
+  return parsed.origin;
 }
 
 export function isTrustedGithubApiOrigin(apiBaseUrl: string): boolean {
@@ -265,7 +266,10 @@ async function readBoundedLocalFileNoFollow(options: {
     if (code === "ELOOP" || code === "EMLINK") {
       throw new GithubCiError(options.unsafeCode, `${options.label} must not be a symbolic link.`, 400);
     }
-    throw error;
+    if (code === "EISDIR" || code === "ENXIO" || code === "EOPNOTSUPP" || code === "ENODEV") {
+      throw new GithubCiError(options.unsafeCode, `${options.label} must be a regular file.`, 400);
+    }
+    throw new GithubCiError(options.unsafeCode, `Unable to open ${options.label.toLowerCase()} (${code ?? "io_error"}).`, 400);
   }
   try {
     const info = await handle.stat();
@@ -336,10 +340,15 @@ export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
     }
     const r = item as Record<string, unknown>;
     if (r.kind === "workflow_run") {
+      const wfPath = typeof r.workflow_path === "string" ? r.workflow_path.trim() : "";
       if (
         typeof r.suite !== "string" || r.suite.trim().length === 0 || CONTROL_CHAR_RE.test(r.suite) ||
-        typeof r.workflow_path !== "string" || !r.workflow_path.trim().startsWith(".github/workflows/") ||
-        r.workflow_path.split("/").some((seg) => seg === "." || seg === "..") ||
+        typeof r.workflow_path !== "string" ||
+        !wfPath.startsWith(".github/workflows/") ||
+        wfPath.length <= ".github/workflows/".length ||
+        wfPath.endsWith("/") ||
+        wfPath.includes("\\") ||
+        wfPath.split("/").some((seg) => seg === "." || seg === ".." || seg.length === 0) ||
         CONTROL_CHAR_RE.test(r.workflow_path)
       ) {
         throw new GithubCiError(
@@ -359,7 +368,7 @@ export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
       rules.push({
         kind: "workflow_run",
         suite: r.suite.trim(),
-        workflow_path: r.workflow_path.trim(),
+        workflow_path: wfPath,
         ...(r.workflow_id !== undefined ? { workflow_id: r.workflow_id as number } : {}),
       });
       continue;
@@ -370,6 +379,12 @@ export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
       }
       const hasSlug = typeof r.app_slug === "string" && r.app_slug.trim().length > 0 && !CONTROL_CHAR_RE.test(r.app_slug);
       const hasId = typeof r.app_id === "number" && Number.isSafeInteger(r.app_id) && r.app_id >= 1;
+      if (r.app_slug !== undefined && !hasSlug) {
+        throw new GithubCiError("github_policy_invalid", 'check_run policy rule "app_slug" must be a non-empty string.', 400);
+      }
+      if (r.app_id !== undefined && !hasId) {
+        throw new GithubCiError("github_policy_invalid", 'check_run policy rule "app_id" must be a positive integer.', 400);
+      }
       if (!hasSlug && !hasId) {
         throw new GithubCiError("github_policy_invalid", 'check_run policy rule must pin "app_slug" and/or "app_id".', 400);
       }
@@ -392,6 +407,12 @@ export function parseGithubCiPolicy(raw: unknown): GithubCiPolicy {
       }
       const hasLogin = typeof r.creator_login === "string" && r.creator_login.trim().length > 0 && !CONTROL_CHAR_RE.test(r.creator_login);
       const hasId = typeof r.creator_id === "number" && Number.isSafeInteger(r.creator_id) && r.creator_id >= 1;
+      if (r.creator_login !== undefined && !hasLogin) {
+        throw new GithubCiError("github_policy_invalid", 'commit_status policy rule "creator_login" must be a non-empty string.', 400);
+      }
+      if (r.creator_id !== undefined && !hasId) {
+        throw new GithubCiError("github_policy_invalid", 'commit_status policy rule "creator_id" must be a positive integer.', 400);
+      }
       if (!hasLogin && !hasId) {
         throw new GithubCiError("github_policy_invalid", 'commit_status policy rule must pin "creator_login" and/or "creator_id".', 400);
       }
@@ -744,6 +765,13 @@ async function githubReadOnlyGetJson(options: {
     "user-agent": "commonswarm-c3b-ci-adapter",
   };
   if (options.token) {
+    if (new URL(options.url).origin !== TRUSTED_GITHUB_API_ORIGIN) {
+      throw new GithubCiError(
+        "github_untrusted_origin_token_refused",
+        `GitHub credentials may only be sent to ${TRUSTED_GITHUB_API_ORIGIN}; alternate --github-api-url overrides must remain credential-free.`,
+        400,
+      );
+    }
     headers.authorization = `Bearer ${options.token}`;
   }
 
@@ -807,7 +835,7 @@ async function githubReadOnlyGetJson(options: {
   }
 
   const linkHeader = response.headers.get("link") ?? "";
-  const hasNextPage = /;\s*rel=(?:"[^"]*\bnext\b[^"]*"|'[^']*\bnext\b[^']*'|next(?=[;\s,]|$))/i.test(linkHeader);
+  const hasNextPage = /;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|'[^']*\bnext\b[^']*'|next(?=[;\s,]|$))/i.test(linkHeader);
   try {
     return { payload: JSON.parse(rawText), hasNextPage };
   } catch {
@@ -1323,7 +1351,7 @@ export function evaluateGithubCiRuns(options: {
     head_sha: expectedHeadSha,
     policy_enforced: policy !== null,
     decision,
-    verdict: decision === "pending" ? null : decision,
+    verdict: policy !== null && decision !== "pending" ? decision : null,
     suites: selectedSuites,
     missing_suites: missingSuites,
     ignored_stale_head: ignoredStaleHead,
@@ -1333,15 +1361,22 @@ export function evaluateGithubCiRuns(options: {
   };
 }
 
+function sanitizeStampNoteSegment(value: string): string {
+  return value.replaceAll(/[\x00-\x1f\x7f]+/g, " ").trim();
+}
+
 export function formatGithubCiStampNote(evaluation: GithubCiEvaluation): string {
   const shortSha = evaluation.head_sha.slice(0, 9);
   const prefix = `GitHub CI ${evaluation.decision} @ ${shortSha}`;
   const parts: string[] = evaluation.suites.map((suite) => {
-    const outcome = suite.status === "completed" ? (suite.conclusion ?? "unknown") : suite.status;
-    return `${suite.suite} (attempt ${suite.run_attempt}, ${outcome}, run ${suite.run_id})`;
+    const suiteName = sanitizeStampNoteSegment(suite.suite) || "unnamed";
+    const rawOutcome = suite.status === "completed" ? (suite.conclusion ?? "unknown") : suite.status;
+    const outcome = sanitizeStampNoteSegment(rawOutcome) || "unknown";
+    return `${suiteName} (attempt ${suite.run_attempt}, ${outcome}, run ${suite.run_id})`;
   });
   for (const missing of evaluation.missing_suites) {
-    parts.push(`${missing} (missing)`);
+    const missingName = sanitizeStampNoteSegment(missing) || "unnamed";
+    parts.push(`${missingName} (missing)`);
   }
   if (parts.length === 0) {
     return `${prefix}: no runs on head`;

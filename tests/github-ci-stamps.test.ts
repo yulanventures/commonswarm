@@ -50,6 +50,13 @@ import {
 } from "../src/cloud/github-ci-stamps.js";
 import { executeCheckCiCli, type ReviewCheckCliArgs } from "../src/cli/review-checks.js";
 import { ReviewCheckError, type ReviewCheckRecord } from "../src/cloud/review-checks.js";
+import {
+  AGENT_SESSION_GENERATION_HEADER,
+  AGENT_SESSION_ID_HEADER,
+  AGENT_SESSION_KEY_HEADER,
+  type AgentSessionProof,
+} from "../src/cloud/session-contract.js";
+import { bindSessionProof } from "../src/cloud/session-proof.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -384,6 +391,46 @@ test("evaluateGithubCiRuns: policy enforcement, stale-head, superseded attempts,
   assert.equal(lateOlderCheckVsNewerFailure.verdict, "hold");
   assert.equal(lateOlderCheckVsNewerFailure.suites[0]!.run_id, 6002);
 
+  // 5b. HezSec C3 witness: late-finishing older check_run NEVER beats newer pending (queued) check_run!
+  const lateOlderCheckVsNewerPending = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    policy: {
+      version: 1,
+      repo: "yulanventures/commonswarm",
+      required: [{ kind: "check_run", suite: "unit", app_slug: "github-actions" }],
+    },
+    workflowRuns: [],
+    checkRuns: [
+      {
+        id: 6101,
+        name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
+        head_sha: SHA_NEW,
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-11-20T20:00:00Z",
+        completed_at: "2026-11-20T20:20:00Z",
+        html_url: null,
+      },
+      {
+        id: 6102,
+        name: "unit",
+        app_slug: "github-actions",
+        app_id: 15368,
+        head_sha: SHA_NEW,
+        status: "queued",
+        conclusion: null,
+        started_at: null,
+        completed_at: null,
+        html_url: null,
+      },
+    ],
+  });
+  assert.equal(lateOlderCheckVsNewerPending.decision, "pending");
+  assert.equal(lateOlderCheckVsNewerPending.verdict, null);
+  assert.equal(lateOlderCheckVsNewerPending.suites[0]!.run_id, 6102);
+
   // 6. HezSec C3 witness: late-updated older commit_status NEVER beats newer failed commit_status!
   const lateOlderStatusVsNewerFailure = evaluateGithubCiRuns({
     expectedHeadSha: SHA_NEW,
@@ -478,6 +525,48 @@ test("evaluateGithubCiRuns: policy enforcement, stale-head, superseded attempts,
   assert.match(note, /^GitHub CI pass @ 222222222:/);
   assert.match(note, /p1-cli \(attempt 2, success, run 4002\)/);
   assert.match(note, /unit \(attempt 1, success, run 5001\)/);
+
+  // 8. Diagnostic mode without policy never produces a stamp verdict.
+  const diagnosticOnly = evaluateGithubCiRuns({
+    expectedHeadSha: SHA_NEW,
+    requiredSuites: ["p1-cli"],
+    workflowRuns: [
+      {
+        id: 4009,
+        name: "p1-cli",
+        path: ".github/workflows/server-suite.yml",
+        workflow_id: 10,
+        head_sha: SHA_NEW,
+        run_attempt: 1,
+        status: "completed",
+        conclusion: "success",
+        created_at: "2026-11-20T20:03:00Z",
+        updated_at: "2026-11-20T20:04:00Z",
+        html_url: null,
+      },
+    ],
+    checkRuns: [],
+  });
+  assert.equal(diagnosticOnly.policy_enforced, false);
+  assert.equal(diagnosticOnly.decision, "pass");
+  assert.equal(diagnosticOnly.verdict, null);
+
+  // 9. Lead item: formatGithubCiStampNote replaces control characters and newlines with single spaces.
+  const sanitizedNote = formatGithubCiStampNote({
+    ...completeTrusted,
+    suites: [
+      {
+        ...completeTrusted.suites[0]!,
+        suite: "p1-cli\r\n\t\x1b[31m\x00red\x7f",
+        status: "completed",
+        conclusion: "success\n\x07spoofed",
+      },
+    ],
+    missing_suites: ["unit\r\nmissing\x1fcheck"],
+  });
+  assert.equal(/[\x00-\x1f\x7f]/.test(sanitizedNote), false, "stamp note must contain zero control characters or newlines");
+  assert.match(sanitizedNote, /p1-cli \[31m red \(attempt 2, success spoofed, run 4002\)/);
+  assert.match(sanitizedNote, /unit missing check \(missing\)/);
 });
 
 test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted-origin token refusal, short-page Link next, invalid total_count, missing created_at", async () => {
@@ -485,7 +574,14 @@ test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted
   assert.throws(() => normalizeGithubRepo("owner/repo?foo=1"), { code: "github_repo_invalid" });
   assert.throws(() => normalizeGithubApiBaseUrl("http://api.github.com"), { code: "github_api_url_invalid" });
   assert.throws(() => normalizeGithubApiBaseUrl("https://user:pass@api.github.com"), { code: "github_api_url_invalid" });
+  assert.throws(() => normalizeGithubApiBaseUrl("https://evil.example"), { code: "github_api_url_invalid" });
+  assert.throws(() => normalizeGithubApiBaseUrl("http://localhost:8080"), { code: "github_api_url_invalid" });
+  assert.throws(() => normalizeGithubApiBaseUrl("https://localhost:8080"), { code: "github_api_url_invalid" });
+  assert.throws(() => normalizeGithubApiBaseUrl("https://api.github.com/extra"), { code: "github_api_url_invalid" });
+  assert.throws(() => normalizeGithubApiBaseUrl("http://127.0.0.1"), { code: "github_api_url_invalid" });
+  assert.equal(normalizeGithubApiBaseUrl("https://api.github.com/"), "https://api.github.com");
   assert.equal(normalizeGithubApiBaseUrl("http://127.0.0.1:8080/"), "http://127.0.0.1:8080");
+  assert.equal(normalizeGithubApiBaseUrl("http://[::1]:8080/"), "http://[::1]:8080");
 
   // Policy validator rejects traversal workflow_path and duplicate rules.
   assert.throws(
@@ -524,6 +620,19 @@ test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted
     assert.equal(await readGithubTokenFromFile(tokenPath), GH_SECRET);
     await assert.rejects(() => readGithubTokenFromFile(openPath), { code: "github_token_file_unsafe" });
     await assert.rejects(() => readGithubTokenFromFile(dirPath), { code: "github_token_file_unsafe" });
+
+    // Swap safe token file to wrong mode (0644) before open -> refused via fstat on opened handle!
+    await chmod(tokenPath, 0o644);
+    await assert.rejects(
+      () => readGithubTokenFromFile(tokenPath),
+      (err: unknown) => {
+        assert.ok(err instanceof GithubCiError);
+        assert.equal(err.code, "github_token_file_unsafe");
+        assert.equal(err.message.includes(root), false, "error message must never include local filesystem path");
+        return true;
+      },
+    );
+    await chmod(tokenPath, 0o600);
 
     // Swap safe token file to a symlink before open -> refused via O_NOFOLLOW!
     const targetSecret = join(root, "real.txt");
@@ -650,6 +759,20 @@ test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted
         }),
         { code: "github_malformed_response" },
       );
+      await assert.rejects(
+        () => readGithubCiForCommit({
+          repo: "yulanventures/commonswarm",
+          headSha: SHA_NEW,
+          source: "checks",
+          fetcher: async () => new Response(JSON.stringify({
+            ...(badTotal !== undefined ? { total_count: badTotal } : {}),
+            check_runs: [{
+              id: 1, name: "unit", head_sha: SHA_NEW, status: "completed", conclusion: "success",
+            }],
+          }), { status: 200 }),
+        }),
+        { code: "github_malformed_response" },
+      );
     }
     await assert.rejects(
       () => readGithubCiForCommit({
@@ -712,8 +835,28 @@ test("HezSec C1 & C3 protocol witnesses: atomic O_NOFOLLOW token file, untrusted
 });
 
 test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on GitHub, no GH bearer at alternate origin, policy-bound stamping, and real CLI", async () => {
-  const githubRequests: Array<{ method: string; url: string; auth: string | null; csProof: string | null }> = [];
-  const csRequests: Array<{ url: string; auth: string | null; csProof: string | null }> = [];
+  const realSessionProof: AgentSessionProof = {
+    session_id: "12345678-1234-4123-8123-123456789abc",
+    generation: 3,
+    key: "K".repeat(43),
+  };
+  const githubRequests: Array<{
+    method: string;
+    url: string;
+    auth: string | null;
+    csProof: string | null;
+    sessionId: string | null;
+    sessionGen: string | null;
+    sessionKey: string | null;
+  }> = [];
+  const csRequests: Array<{
+    url: string;
+    auth: string | null;
+    csProof: string | null;
+    sessionId: string | null;
+    sessionGen: string | null;
+    sessionKey: string | null;
+  }> = [];
   const stampedCommands: Array<Record<string, unknown>> = [];
   let ghMode: "pass" | "hold" | "pending" | "untrusted_only" = "pass";
   let currentCheck = makeCheckRecord();
@@ -724,6 +867,9 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
       url: req.url ?? "",
       auth: typeof req.headers.authorization === "string" ? req.headers.authorization : null,
       csProof: typeof req.headers["x-swarm-session-proof"] === "string" ? req.headers["x-swarm-session-proof"] : null,
+      sessionId: typeof req.headers[AGENT_SESSION_ID_HEADER] === "string" ? req.headers[AGENT_SESSION_ID_HEADER] : null,
+      sessionGen: typeof req.headers[AGENT_SESSION_GENERATION_HEADER] === "string" ? req.headers[AGENT_SESSION_GENERATION_HEADER] : null,
+      sessionKey: typeof req.headers[AGENT_SESSION_KEY_HEADER] === "string" ? req.headers[AGENT_SESSION_KEY_HEADER] : null,
     });
     assert.equal(req.method, "GET", "GitHub CI adapter must be strictly read-only GET");
     if (req.url?.includes("/actions/runs")) {
@@ -770,6 +916,9 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
       url: req.url ?? "",
       auth: typeof req.headers.authorization === "string" ? req.headers.authorization : null,
       csProof: typeof req.headers["x-swarm-session-proof"] === "string" ? req.headers["x-swarm-session-proof"] : null,
+      sessionId: typeof req.headers[AGENT_SESSION_ID_HEADER] === "string" ? req.headers[AGENT_SESSION_ID_HEADER] : null,
+      sessionGen: typeof req.headers[AGENT_SESSION_GENERATION_HEADER] === "string" ? req.headers[AGENT_SESSION_GENERATION_HEADER] : null,
+      sessionKey: typeof req.headers[AGENT_SESSION_KEY_HEADER] === "string" ? req.headers[AGENT_SESSION_KEY_HEADER] : null,
     });
     let raw = "";
     req.setEncoding("utf8");
@@ -814,11 +963,13 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
   const csTarget = { url: `http://127.0.0.1:${(csServer.address() as { port: number }).port}`, anonKey: "fixture-anon", profileId: "fixture" };
   const trustedGhFetcher = makeTrustedGithubProxyFetcher(ghUrl);
 
-  // Simulate CommonSwarm's session-proof-injecting fetcher (like bindSessionProof in src/cli.ts).
+  // Real CommonSwarm session-proof-injecting fetcher from src/cloud/session-proof.ts
+  // (plus the synthetic header check kept for backwards compatibility).
+  const realBoundFetcher = bindSessionProof(fetch, realSessionProof);
   const csSessionProofFetcher: typeof fetch = (input, init) => {
     const headers = new Headers(init?.headers);
     headers.set("x-swarm-session-proof", CS_PROOF_SECRET);
-    return fetch(input, { ...init, headers });
+    return realBoundFetcher(input, { ...init, headers });
   };
 
   const root = await mkdtemp(join(tmpdir(), "cs-gh-cli-"));
@@ -887,7 +1038,43 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
       ),
       { code: "github_policy_required" },
     );
+    // 4b. HezSec C2: arbitrary --source or --suite overrides are REFUSED when stamping, and stay diagnostic on --dry-run!
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], { "policy-file": policyFile, source: "actions" }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+        { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+      ),
+      { code: "github_policy_source_mismatch" },
+    );
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], { "policy-file": policyFile, suite: ["p1-cli"] }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+        { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+      ),
+      { code: "github_policy_suite_override_refused" },
+    );
+    const diagPartialOut = await executeCheckCiCli(
+      makeCliArgs(["check", "ci", CHECK_ID], { source: "actions", suite: ["p1-cli"], "dry-run": true, json: true }),
+      { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      { env: { GITHUB_TOKEN: GH_SECRET }, githubFetcher: trustedGhFetcher },
+    );
+    const diagPartialJson = JSON.parse(diagPartialOut);
+    assert.equal(diagPartialJson.stamped, false);
+    assert.equal(diagPartialJson.action, "dry_run");
+    assert.equal(diagPartialJson.evaluation.policy_enforced, false);
+    assert.equal(diagPartialJson.evaluation.verdict, null);
     assert.equal(stampedCommands.length, 0);
+
+    // 4c. HezSec C1: --agent-token-stdin together with --github-token-stdin is refused cleanly (400 invalid_request)!
+    await assert.rejects(
+      () => executeCheckCiCli(
+        makeCliArgs(["check", "ci", CHECK_ID], { "agent-token-stdin": true, "github-token-stdin": true }),
+        { target: csTarget, bearer: AGENT_TOKEN, workspaceId: WS, fetcher: csSessionProofFetcher },
+      ),
+      (err: unknown) => err instanceof GithubCiError && err.code === "invalid_request" && err.status === 400,
+    );
 
     // 5. Stale --head-sha fails closed with stale_head (409) BEFORE touching GitHub!
     const beforeStale = githubRequests.length;
@@ -991,9 +1178,19 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
     assert.ok(trustedReqs.every((r) => r.auth === `Bearer ${GH_SECRET}`), "trusted origin receives GitHub token");
     assert.ok(githubRequests.every((r) => r.method === "GET"));
     assert.ok(githubRequests.every((r) => r.csProof === null), "NO GitHub request may ever carry CommonSwarm session-proof header");
+    assert.ok(githubRequests.every((r) => r.sessionId === null && r.sessionGen === null && r.sessionKey === null), "NO GitHub request may ever carry real CommonSwarm session-proof headers");
     assert.ok(githubRequests.every((r) => r.auth !== `Bearer ${AGENT_TOKEN}`), "NO GitHub request may ever carry CommonSwarm bearer");
     assert.ok(csRequests.length >= 2);
     assert.ok(csRequests.every((r) => r.csProof === CS_PROOF_SECRET), "CommonSwarm requests still carry session-proof");
+    assert.ok(
+      csRequests.every(
+        (r) =>
+          r.sessionId === realSessionProof.session_id &&
+          r.sessionGen === String(realSessionProof.generation) &&
+          r.sessionKey === realSessionProof.key,
+      ),
+      "CommonSwarm requests carry real bindSessionProof headers",
+    );
     assert.ok(csRequests.every((r) => r.auth !== `Bearer ${GH_SECRET}`), "NO CommonSwarm request may ever carry GitHub token");
 
     // 10. Real CLI binary `cswarm check ci --dry-run` against loopback fixture with ambient GITHUB_TOKEN:
@@ -1043,6 +1240,31 @@ test("HezSec C1 + C2 end-to-end: separate credentials/fetchers, no CS proof on G
         const stderr = (err as { stderr?: string }).stderr ?? "";
         assert.match(stderr, /https:\/\/api\.github\.com/);
         assert.equal(stderr.includes(GH_SECRET), false);
+        return true;
+      },
+    );
+
+    // Real CLI binary refuses --agent-token-stdin together with --github-token-stdin cleanly (invalid_request, not EOF).
+    await assert.rejects(
+      () => execFileAsync(
+        process.execPath,
+        [
+          CLI, "check", "ci", "yulanventures/commonswarm#713",
+          "--url", csTarget.url,
+          "--anon-key", csTarget.anonKey,
+          "--workspace-id", WS,
+          "--agent-token-stdin",
+          "--github-token-stdin",
+          "--json",
+        ],
+        { encoding: "utf8" },
+      ),
+      (err: unknown) => {
+        const stdout = (err as { stdout?: string }).stdout ?? "";
+        const parsed = JSON.parse(stdout) as { ok?: boolean; error?: { code?: string; message?: string } };
+        assert.equal(parsed.ok, false);
+        assert.equal(parsed.error?.code, "invalid_request");
+        assert.match(parsed.error?.message ?? "", /--agent-token-stdin.*--github-token-stdin/);
         return true;
       },
     );
