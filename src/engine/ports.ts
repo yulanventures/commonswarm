@@ -8,6 +8,7 @@ export interface IncomingMessage {
 export interface HarnessPort {
   runTurn(text: string): Promise<string>;
   interrupt(): Promise<void> | void;
+  close?(): Promise<void> | void;
 }
 
 export interface CloudPort {

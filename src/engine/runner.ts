@@ -171,6 +171,11 @@ export class EngineRunner {
         }
       }
     }
+    try {
+      await this.options.harness.close?.();
+    } catch {
+      // Best-effort harness teardown during runner shutdown.
+    }
     const result: RunResult = { reason: this.stopReason };
     await this.reportOperator("runner_stopped", { reason: result.reason });
     return result;
