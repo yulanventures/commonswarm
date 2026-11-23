@@ -1,13 +1,15 @@
 import { ADMIN_RESOURCE, ADMIN_AVAILABILITY, ADMIN_REGISTRY_VERSION, adminEffectiveCapabilities, adminRecord } from './protocol.js';
 // @ts-ignore Deno uses explicit source extensions; Node harness executes this through tsx.
 import { AdminProofError, type AdminAdmission, type AdminRequestVerifier, type AdminInput, type AdminAuditKind, type AdminSecurityReason } from './admin-oauth-auth.ts';
+// @ts-ignore Deno uses explicit source extensions; Node harness executes this through tsx.
+import { COMMAND_REQUEST_BUDGET_MS, remainingFailureBudgetMs, runWithinFailureBudget } from './failure-budget.ts';
 import type { AdminManifest } from './admin-policy.d.ts';
 
 type Result = { status: number; body: Record<string, unknown> };
 export interface AdminHttpDependencies {
   verifier: Pick<AdminRequestVerifier, 'verify'>;
-  transact(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal): Promise<Result>;
-  securityFailure(reason: AdminSecurityReason): Promise<void>;
+  transact(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal, requestDeadlineAt?: number): Promise<Result>;
+  securityFailure(reason: AdminSecurityReason, requestDeadlineAt?: number): Promise<void>;
 }
 const response = (status: number, body: unknown, headers: Record<string, string> = {}) => {
   const encoded = JSON.stringify(body);
@@ -41,6 +43,7 @@ async function boundedBody(request: Request, signal: AbortSignal): Promise<Recor
 export function createAdminHttpHandler(deps: AdminHttpDependencies, surface: 'admin_command' | 'admin_mcp') {
   let running = 0;
   return async (request: Request): Promise<Response> => {
+    const requestDeadlineAt = Date.now() + COMMAND_REQUEST_BUDGET_MS;
     const url = new URL(request.url);
     if (surface === 'admin_mcp' && request.method === 'GET' && url.pathname === '/admin/.well-known/oauth-protected-resource' && !url.search) {
       return response(200, { resource: ADMIN_RESOURCE, authorization_servers: ['https://mcp.commonswarm.com'],
@@ -48,7 +51,11 @@ export function createAdminHttpHandler(deps: AdminHttpDependencies, surface: 'ad
         bearer_methods_supported: [], dpop_signing_alg_values_supported: ['ES256'] });
     }
     if (running >= 4) {
-      try { await deps.securityFailure('rate_limited'); } catch { return response(503, { error: 'admin_failure_audit_unavailable' }); }
+      const audited = await runWithinFailureBudget(
+        remainingFailureBudgetMs(requestDeadlineAt),
+        () => deps.securityFailure('rate_limited', requestDeadlineAt),
+      );
+      if (!audited.ok) return response(503, { error: 'admin_failure_audit_unavailable' });
       return response(429, { error: 'rate_limited' });
     }
     running++;
@@ -73,7 +80,7 @@ export function createAdminHttpHandler(deps: AdminHttpDependencies, surface: 'ad
         input = body;
         kind = adminRecord(input.command)?.kind === 'admin_read_metadata' ? 'read' : 'action';
         attempted = true;
-        const result = await deps.transact(input, admission, kind, timeout.signal);
+        const result = await deps.transact(input, admission, kind, timeout.signal, requestDeadlineAt);
         if (Date.now() >= admission.token.expires_at || timeout.signal.aborted) return response(401, { error: 'credential_expired' });
         return response(result.status, result.body);
       }
@@ -93,7 +100,7 @@ export function createAdminHttpHandler(deps: AdminHttpDependencies, surface: 'ad
           command: supported ? { kind: 'admin_read_metadata', grant_id: admission.token.admin_grant_id, resource_kind: 'grant', workspace_id: null } : null };
       }
       attempted = true;
-        const result = await deps.transact(input, admission, kind, timeout.signal);
+        const result = await deps.transact(input, admission, kind, timeout.signal, requestDeadlineAt);
       if (Date.now() >= admission.token.expires_at || timeout.signal.aborted) return response(401, { error: 'credential_expired' });
       if (result.status !== 200) return response(result.status, { jsonrpc: '2.0', id: rpcId, error: { code: -32000, message: String(result.body.error ?? 'forbidden') } });
       let output: unknown = result.body;
@@ -114,12 +121,20 @@ export function createAdminHttpHandler(deps: AdminHttpDependencies, surface: 'ad
       if (admission && !attempted) {
         // Even a cancelled/malformed authenticated request reaches the adapter's
         // separate rollback audit. No unchecked body can supply a victim binding.
-        try { await deps.transact(input ?? {}, admission, kind, timeout.signal); }
-        catch { return response(503, { error: 'admin_failure_audit_unavailable' }); }
+        const audited = await runWithinFailureBudget(
+          remainingFailureBudgetMs(requestDeadlineAt),
+          () => deps.transact(input ?? {}, admission!, kind, timeout.signal, requestDeadlineAt),
+        );
+        if (!audited.ok) return response(503, { error: 'admin_failure_audit_unavailable' });
       }
       const reason: AdminSecurityReason = error instanceof AdminProofError ? error.code : admission ? 'transaction_failed' : 'invalid_token';
-      try { if (!admission) await deps.securityFailure(reason); }
-      catch { return response(503, { error: 'admin_failure_audit_unavailable' }); }
+      if (!admission) {
+        const audited = await runWithinFailureBudget(
+          remainingFailureBudgetMs(requestDeadlineAt),
+          () => deps.securityFailure(reason, requestDeadlineAt),
+        );
+        if (!audited.ok) return response(503, { error: 'admin_failure_audit_unavailable' });
+      }
       if (error instanceof AdminProofError && error.code === 'nonce_required') return response(401, { error: 'use_dpop_nonce' }, {
         'www-authenticate': 'DPoP error="use_dpop_nonce"', 'dpop-nonce': error.nonce!, 'access-control-expose-headers': 'DPoP-Nonce',
       });

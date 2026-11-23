@@ -22,6 +22,8 @@ import {
   dbCode,
   durableCommandFailure,
   finishCommandFailure,
+  remainingFailureBudgetMs,
+  runWithinFailureBudget,
   type DurableCommandFailure,
 } from "../../supabase/functions/command/failures.js";
 import {
@@ -36,19 +38,31 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MATCHING_HOST = "localhost";
 const WRONG_DNS_HOST = "wrong.commonswarm.internal";
 
+interface EdgeDatabaseHolderSnapshot {
+  generation: number;
+  max: number;
+  maxRetainedSockets: number;
+  currentPoolSockets: number;
+  retiredSockets: number;
+  retainedSockets: number;
+  retiredPoolCount: number;
+}
+
 interface LoadedDatabaseModule {
   createEdgeDatabase: (
     databaseUrl: string,
     config: Record<string, unknown>,
     encodedCa?: string,
   ) => postgres.Sql;
+  inspectEdgeDatabaseHolder: (sql: unknown) => EdgeDatabaseHolderSnapshot | null;
   EdgeDatabaseStalledError: new () => Error & { code: string };
   EDGE_DATABASE_STALLED_CODE: string;
   INVALID_DATABASE_CONFIGURATION_MESSAGE: string;
   EDGE_DATABASE_STALL_TIMEOUT_MS: number;
   EDGE_DATABASE_CALL_CEILING_MS: number;
   EDGE_DATABASE_REPLACE_COOLDOWN_MS: number;
-  EDGE_DATABASE_MAX_RETIRED_POOLS: number;
+  EDGE_DATABASE_MAX_RETAINED_SOCKETS: number;
+  EDGE_DATABASE_RETIRED_SOCKET_TTL_MS: number;
 }
 
 let cachedDbModule: Promise<{ mod: LoadedDatabaseModule; dir: string }> | null = null;
@@ -269,6 +283,7 @@ interface FakePgServer {
   getDecryptedBytes: () => number;
   getSniNames: () => string[];
   destroyOldestSockets: (count?: number) => void;
+  destroyConn: (cid: number) => void;
   closeAll: () => void;
 }
 
@@ -337,10 +352,13 @@ async function startFakePgServer(options: {
   queryDelayMs?: (text: string, cid: number) => number | "silent";
   onQuery?: (event: FakePgQueryEvent) => boolean | void;
   ignoreTerminate?: boolean;
+  ignoreTerminateFor?: (cid: number) => boolean;
 } = {}): Promise<FakePgServer> {
   const freezeConns = options.freezeConns ?? new Set<number>();
   const freezeAfterFirst = options.freezeAfterFirstQuery ?? new Set<number>();
   const ignoreTerminate = options.ignoreTerminate ?? true;
+  const shouldIgnoreTerminate = (cid: number) =>
+    options.ignoreTerminateFor ? options.ignoreTerminateFor(cid) : ignoreTerminate;
   let connCount = 0;
   let decryptedBytes = 0;
   let closedRaw = 0;
@@ -348,7 +366,7 @@ async function startFakePgServer(options: {
   const sniNames: string[] = [];
   const openRaw = new Set<net.Socket>();
   const openTls = new Set<tls.TLSSocket>();
-  const connSockets: Array<{ raw: net.Socket; tls?: tls.TLSSocket }> = [];
+  const connSockets: Array<{ cid: number; raw: net.Socket; tls?: tls.TLSSocket }> = [];
 
   const isFrozenConn = (cid: number) =>
     freezeConns === "all" || freezeConns.has(cid);
@@ -359,6 +377,10 @@ async function startFakePgServer(options: {
     let inTx = false;
     sock.on("data", (buf: Buffer) => {
       if (isTls) decryptedBytes += buf.length;
+      if (buf[0] === 0x58) {
+        if (!shouldIgnoreTerminate(cid)) sock.end();
+        return;
+      }
       if (frozen) return;
       if (!started) {
         started = true;
@@ -367,10 +389,6 @@ async function startFakePgServer(options: {
           Buffer.from([0x5a, 0, 0, 0, 5, 0x49]), // ReadyForQuery (Idle)
         ]));
         if (isFrozenConn(cid)) frozen = true;
-        return;
-      }
-      if (buf[0] === 0x58) {
-        if (!ignoreTerminate) sock.end();
         return;
       }
       const text = buf.toString("utf8");
@@ -412,7 +430,7 @@ async function startFakePgServer(options: {
     connCount += 1;
     const cid = connCount;
     openRaw.add(raw);
-    const entry: { raw: net.Socket; tls?: tls.TLSSocket } = { raw };
+    const entry: { cid: number; raw: net.Socket; tls?: tls.TLSSocket } = { cid, raw };
     connSockets.push(entry);
     raw.on("error", () => {});
     raw.on("close", () => {
@@ -477,6 +495,12 @@ async function startFakePgServer(options: {
           destroyed += 1;
         }
       }
+    },
+    destroyConn: (cid: number) => {
+      const entry = connSockets.find((e) => e.cid === cid);
+      if (!entry) return;
+      if (entry.tls && !entry.tls.destroyed) entry.tls.destroy();
+      if (!entry.raw.destroyed) entry.raw.destroy();
     },
     closeAll: () => {
       for (const s of [...openTls]) s.destroy();
@@ -916,8 +940,8 @@ test("holder: two stalls inside cooldown perform only one replacement and discar
   }
 });
 
-test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast with bounded sockets, and recover once sockets close", async () => {
-  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+test("holder: size-1 repeated half-open TLS rotations hit socket cap, fail fast with bounded sockets, and recover once sockets close", async () => {
+  const { createEdgeDatabase, inspectEdgeDatabaseHolder, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
   const pki = await createTestPki();
   // Conns 1 and 2 freeze silently and never answer close_notify/FIN; conn 3 is healthy!
   const server = await startFakePgServer({
@@ -935,22 +959,23 @@ test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast w
         stall_timeout_ms: 200,
         call_ceiling_ms: 2_000,
         replace_cooldown_ms: 50,
-        max_retired_pools: 2,
+        max_retained_sockets: 2,
       },
       btoa(pki.trustedCa),
     );
     try {
-      // Rotation 1: pool 1 stalls -> retired (1/2), pool 2 swapped in.
+      // Rotation 1: pool 1 stalls -> retired (1/2 sockets), pool 2 swapped in (1 + 1 <= 2).
       await assert.rejects(
         () => db`SELECT 'ROT_1'`,
         (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
       );
       assert.equal(server.getConnCount(), 1);
       assert.equal(server.getOpenTlsCount(), 1, "half-open TLS socket from pool 1 remains open on silent peer");
+      assert.ok(inspectEdgeDatabaseHolder(db)!.retainedSockets >= server.getOpenTlsCount());
 
       await new Promise((r) => setTimeout(r, 80));
 
-      // Rotation 2: pool 2 stalls -> retired (2/2, CAP REACHED!), no pool 3 created!
+      // Rotation 2: pool 2 stalls -> retired (2/2 sockets, CAP REACHED: 2 + 1 > 2), no pool 3 created!
       await assert.rejects(
         () => db`SELECT 'ROT_2'`,
         (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
@@ -958,8 +983,9 @@ test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast w
       assert.equal(server.getConnCount(), 2);
       assert.equal(server.getOpenTlsCount(), 2, "both retired half-open TLS sockets remain open");
       assert.equal(server.getClosedTlsCount(), 0);
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retiredSockets, 2);
 
-      // At cap: 5 consecutive calls MUST fail fast (< 50ms total) with ZERO new sockets opened!
+      // At cap: 5 consecutive calls MUST fail fast (< 100ms total) with ZERO new sockets opened!
       const tCap = Date.now();
       for (let i = 0; i < 5; i += 1) {
         await assert.rejects(
@@ -969,18 +995,20 @@ test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast w
       }
       const capElapsed = Date.now() - tCap;
       assert.ok(capElapsed < 100, `at-cap calls must fail fast without waiting, took ${capElapsed}ms`);
-      assert.equal(server.getConnCount(), 2, "retired-pool cap must strictly bound total opened sockets");
+      assert.equal(server.getConnCount(), 2, "socket cap must strictly bound total opened sockets");
 
       // Recovery: peer/keepalive closes one retired pool's socket -> postgres.js onclose fires -> holder recovers!
       server.destroyOldestSockets(1);
       await new Promise((r) => setTimeout(r, 150));
       assert.equal(server.getClosedTlsCount(), 1, "server observed 1 retired TLS socket physically closed");
       assert.equal(server.getOpenTlsCount(), 1);
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retiredSockets, 1);
 
       const tRec = Date.now();
       await db`SELECT 'RECOVERED_AFTER_SOCKET_CLOSE'`;
       assert.ok(Date.now() - tRec < 1_000, "holder must recover immediately once a retired pool frees its socket");
       assert.equal(server.getConnCount(), 3);
+      assert.ok(inspectEdgeDatabaseHolder(db)!.retainedSockets >= server.getOpenTlsCount());
     } finally {
       await db.end({ timeout: 0 });
     }
@@ -988,6 +1016,355 @@ test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast w
     server.closeAll();
     await pki.cleanup();
   }
+});
+
+test("holder C1: size-2 pool with mixed half-closed and normal closure never undercounts, bounds live allocations, and recovers on final close", async () => {
+  const { createEdgeDatabase, inspectEdgeDatabaseHolder, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  // Conn 1 (pool 1 slot A): answers first query then goes silent & ignores Terminate (half-closed).
+  // Conn 2 (pool 1 slot B): healthy, will be closed normally while pool 1 is still live.
+  // Conn 3 (pool 1 slot B replacement): healthy, answers Terminate cleanly at pool 1 retirement.
+  // Conns 4 & 5 (pool 2 slots A & B): freeze silently and ignore Terminate (half-closed).
+  // Conn 6 (pool 3): healthy!
+  let releaseGate: (() => void) | null = null;
+  const server = await startFakePgServer({
+    freezeAfterFirstQuery: new Set([1]),
+    freezeConns: new Set([4, 5]),
+    tlsPair: pki.matchingPair,
+    ignoreTerminateFor: (cid) => cid === 1 || cid === 4 || cid === 5,
+    onQuery: ({ cid, text, respond }) => {
+      if (text.includes("HOLD_BOTH_OPEN") && cid === 1) {
+        releaseGate = () => respond("SELECT 1");
+        return true;
+      }
+      return false;
+    },
+  });
+  try {
+    const maxRetainedSockets = 4;
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 2,
+        idle_timeout: 10,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 200,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 50,
+        max_retained_sockets: maxRetainedSockets,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      const assertConservativeInvariant = (label: string) => {
+        const snap = inspectEdgeDatabaseHolder(db)!;
+        const serverOpen = server.getOpenTlsCount();
+        assert.ok(
+          snap.retainedSockets >= serverOpen,
+          `${label}: holder count (${snap.retainedSockets}) fell below server open sockets (${serverOpen})`,
+        );
+        assert.ok(
+          serverOpen <= maxRetainedSockets,
+          `${label}: server open sockets (${serverOpen}) exceeded cap (${maxRetainedSockets})`,
+        );
+        assert.ok(
+          snap.retainedSockets <= maxRetainedSockets,
+          `${label}: holder reserved sockets (${snap.retainedSockets}) exceeded cap (${maxRetainedSockets})`,
+        );
+      };
+
+      // Step 1: Open both sockets on pool 1 simultaneously (conn 1 held while conn 2 runs).
+      const q1 = Promise.resolve(db`SELECT 'HOLD_BOTH_OPEN'`);
+      const waitGate = Date.now() + 2_000;
+      while (releaseGate === null && Date.now() < waitGate) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(releaseGate !== null, "conn 1 must hold HOLD_BOTH_OPEN");
+      const q2 = Promise.resolve(db`SELECT 'OPEN_SECOND_SLOT'`);
+      await q2;
+      assert.equal(server.getConnCount(), 2, "pool 1 opened both sockets");
+      assert.equal(server.getOpenTlsCount(), 2);
+      assertConservativeInvariant("both sockets open on pool 1");
+      (releaseGate as () => void)();
+      await q1;
+      // Conn 1 is now frozen (silent peer) after its first query.
+
+      // Step 2: Conn 2 closes normally while pool 1 is still live; conn 1 stays open.
+      server.destroyConn(2);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(server.getOpenTlsCount(), 1, "conn 1 still open while conn 2 closed");
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retainedSockets, 2, "live pool stays conservatively reserved at max=2");
+      assertConservativeInvariant("after conn 2 normal close while live");
+
+      // Step 3: A lone call on pool 1 opens replacement conn 3 (or hits silent conn 1).
+      // Run two concurrent calls so one hits silent conn 1 and the other exercises slot B (conn 3),
+      // ensuring conn 3 opens while conn 1 is still half-closed and then pool 1 stalls & retires!
+      const results = await Promise.allSettled([
+        db`SELECT 'TRIGGER_STALL_A'`,
+        db`SELECT 'TRIGGER_STALL_B'`,
+      ]);
+      // At least one hit silent conn 1 and stalled pool 1!
+      const stalledCount = results.filter(
+        (r) => r.status === "rejected" && (r.reason as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      ).length;
+      assert.ok(stalledCount >= 1, "pool 1 must stall on silent conn 1");
+
+      // Wait briefly so pool 1's end({ timeout: 0 }) finishes and healthy conn 3 closes normally (ignoreTerminateFor(3)=false).
+      await new Promise((r) => setTimeout(r, 120));
+      // Conn 1 is STILL open (half-closed); conn 3 closed normally after retirement -> pool 1 MUST remain in cap with 1 reserved socket!
+      assert.equal(server.getOpenTlsCount(), 1, "pool 1's half-closed conn 1 remains open after conn 3 closed normally");
+      const afterPool1Retire = inspectEdgeDatabaseHolder(db)!;
+      assert.equal(afterPool1Retire.retiredPoolCount, 1, "pool 1 must NOT leave cap while conn 1 is still open");
+      assert.ok(afterPool1Retire.retiredSockets >= 1, `pool 1 must retain >= 1 socket, got ${afterPool1Retire.retiredSockets}`);
+      assertConservativeInvariant("after pool 1 retirement and conn 3 normal close");
+
+      // Step 4: Pool 2 opens its two sockets (both silent half-closed conns 4 & 5) and stalls -> retires!
+      await Promise.allSettled([
+        db`SELECT 'POOL2_SILENT_A'`,
+        db`SELECT 'POOL2_SILENT_B'`,
+      ]);
+      await new Promise((r) => setTimeout(r, 100));
+      // Now pool 1 has >= 1 reserved socket (conn 1) + pool 2 has 2 reserved sockets (conns 4 & 5) => >= 3 retired sockets.
+      // Opening pool 3 (max=2) would need >= 3 + 2 = 5 > 4 -> CAP REACHED!
+      const atCap = inspectEdgeDatabaseHolder(db)!;
+      assert.ok(atCap.retiredSockets >= 3, `expected >= 3 retired sockets at cap, got ${atCap.retiredSockets}`);
+      assertConservativeInvariant("at cap after pool 2 retirement");
+      const connsAtCap = server.getConnCount();
+
+      // At cap: consecutive calls fail fast (< 100ms) with ZERO new sockets allocated!
+      const tCap = Date.now();
+      for (let i = 0; i < 4; i += 1) {
+        await assert.rejects(
+          () => db`SELECT 'SIZE2_AT_CAP_${i}'`,
+          (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+        );
+      }
+      assert.ok(Date.now() - tCap < 100, "size-2 cap must fail fast");
+      assert.equal(server.getConnCount(), connsAtCap, "size-2 cap must open zero new sockets");
+      assertConservativeInvariant("during fail-fast cap");
+
+      // Step 5: Confirmed closure of pool 1's last half-closed socket (conn 1) frees pool 1 -> retired drops to 2 -> 2 + 2 <= 4 -> recovers!
+      server.destroyConn(1);
+      await new Promise((r) => setTimeout(r, 150));
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retiredSockets, 2, "confirmed closure of conn 1 retires pool 1 from cap");
+      assertConservativeInvariant("after confirmed closure of pool 1's last socket");
+
+      await db`SELECT 'SIZE2_RECOVERED'`;
+      assertConservativeInvariant("after pool 3 recovery");
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder C1: retired size-2 pool that only ever opened 1 socket releases its unproven reservation after retired_socket_ttl_ms", async () => {
+  const { createEdgeDatabase, inspectEdgeDatabaseHolder, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  const server = await startFakePgServer({
+    freezeConns: new Set([1]),
+    tlsPair: pki.matchingPair,
+    ignoreTerminate: false,
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 2,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 150,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 50,
+        max_retained_sockets: 2,
+        retired_socket_ttl_ms: 300,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      // Only 1 query runs on pool 1 (max=2), so only 1 socket ever opened; pool 1 stalls & retires at cap (2 + 2 > 2).
+      await assert.rejects(
+        () => db`SELECT 'ONLY_ONE_SOCKET'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      // Even after conn 1 closes normally, 1 unproven socket remains conservatively reserved (1 + 2 = 3 > 2 -> at cap).
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retiredSockets, 1);
+      await assert.rejects(
+        () => db`SELECT 'STILL_CONSERVATIVELY_RESERVED'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      // After retired_socket_ttl_ms elapses, the unproven reservation expires and capacity is restored!
+      await new Promise((r) => setTimeout(r, 260));
+      assert.equal(inspectEdgeDatabaseHolder(db)!.retiredSockets, 0);
+      await db`SELECT 'RECOVERED_AFTER_TTL'`;
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder small hardening: unsupported postgres.js features throw naming the property while then, symbols and inspection return undefined", async () => {
+  const { createEdgeDatabase } = await loadDatabaseModule();
+  const db = createEdgeDatabase("postgres://u:p@127.0.0.1:5432/db", { max: 1, fetch_types: false }, undefined);
+  try {
+    const unsupported = [
+      "json",
+      "unsafe",
+      "array",
+      "listen",
+      "reserve",
+      "file",
+      "types",
+      "typed",
+      "notify",
+      "subscribe",
+      "largeObject",
+      "close",
+      "options",
+      "parameters",
+    ];
+    for (const prop of unsupported) {
+      assert.throws(
+        () => (db as unknown as Record<string, unknown>)[prop],
+        (err: unknown) => err instanceof Error && err.message.includes(prop),
+        `accessing unsupported feature "${prop}" must throw naming it`,
+      );
+    }
+    const raw = db as unknown as Record<PropertyKey, unknown>;
+    assert.equal(raw.then, undefined, "holder must not look like a thenable");
+    assert.equal(raw.catch, undefined);
+    assert.equal(raw.finally, undefined);
+    assert.equal(raw.toJSON, undefined);
+    assert.equal(raw.inspect, undefined);
+    assert.equal(raw[Symbol.toStringTag], undefined);
+    assert.equal(raw[Symbol.for("nodejs.util.inspect.custom")], undefined);
+    assert.equal(raw[Symbol.for("Deno.customInspect")], undefined);
+    // Must resolve directly to the holder itself when awaited or wrapped in Promise.resolve.
+    assert.equal(await Promise.resolve(db), db);
+  } finally {
+    await db.end({ timeout: 0 });
+  }
+});
+
+test("C2: stall followed by a held diagnostic insert returns retryable 503 inside request budget; unheld diagnostic still writes", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  const server = await startFakePgServer({
+    freezeConns: new Set([1]),
+    tlsPair: pki.matchingPair,
+    ignoreTerminate: true,
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 1,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 200,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 50,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      // 1. Real holder stall followed by a held diagnostic insert (simulates second stall/hang on diagnostic pool).
+      const requestDeadlineAt = Date.now() + 380; // 200ms stall + ~180ms remaining request budget
+      let stalledError: unknown = null;
+      try {
+        await db`SELECT 'STALL_THEN_HELD_DIAGNOSTIC'`;
+      } catch (err) {
+        stalledError = err;
+      }
+      assert.equal(dbCode(stalledError), EDGE_DATABASE_STALLED_CODE);
+
+      let releaseHeldInsert: ((err: Error) => void) | null = null;
+      let insertFailureSeen = false;
+      const failure = durableCommandFailure({
+        commandKind: "post_signal",
+        reason: classifyCommandFailure(false, dbCode(stalledError)),
+        code: dbCode(stalledError),
+        error: stalledError,
+        requestId: "44444444-5555-4666-8777-888888888888",
+      });
+      const tCatch = Date.now();
+      const response = await finishCommandFailure(
+        failure,
+        () => new Promise<void>((_resolve, reject) => { releaseHeldInsert = reject; }),
+        () => { insertFailureSeen = true; },
+        remainingFailureBudgetMs(requestDeadlineAt, 500),
+      );
+      const catchElapsed = Date.now() - tCatch;
+      assert.deepEqual(response, { status: 503, body: { error: "temporarily_unavailable" } });
+      assert.equal(insertFailureSeen, true, "abandoned diagnostic must report insertion failure");
+      assert.ok(catchElapsed < 400, `held diagnostic must be abandoned within remaining budget (took ${catchElapsed}ms)`);
+      // Rejecting the abandoned diagnostic promise later must NOT produce an unhandled rejection.
+      (releaseHeldInsert as ((err: Error) => void) | null)?.(new Error("late diagnostic failure"));
+      await new Promise((r) => setTimeout(r, 20));
+
+      // 2. Exhausted budget (<= 0ms) skips persistence immediately and returns the safe fallback.
+      let calledWhenExhausted = false;
+      let exhaustedCallback = false;
+      const tZero = Date.now();
+      const zeroRes = await finishCommandFailure(
+        failure,
+        async () => { calledWhenExhausted = true; },
+        () => { exhaustedCallback = true; },
+        remainingFailureBudgetMs(Date.now() - 10),
+      );
+      assert.deepEqual(zeroRes, { status: 503, body: { error: "temporarily_unavailable" } });
+      assert.equal(calledWhenExhausted, false);
+      assert.equal(exhaustedCallback, true);
+      assert.ok(Date.now() - tZero < 50);
+
+      // 3. Unheld diagnostic insert still completes and persists the row.
+      const persisted: DurableCommandFailure[] = [];
+      const okRes = await finishCommandFailure(
+        failure,
+        async (row) => { persisted.push(row); },
+        () => { assert.fail("unheld diagnostic should succeed"); },
+        500,
+      );
+      assert.deepEqual(okRes, { status: 503, body: { error: "temporarily_unavailable" } });
+      assert.equal(persisted.length, 1);
+
+      // 4. runWithinFailureBudget bounds held admin/cleanup writes and honors AbortSignal.
+      const heldBudget = await runWithinFailureBudget(80, () => new Promise<void>(() => {}));
+      assert.equal(heldBudget.ok, false);
+      const ac = new AbortController();
+      ac.abort();
+      const abortedBudget = await runWithinFailureBudget(500, async () => "ok", ac.signal);
+      assert.equal(abortedBudget.ok, false);
+      const fastBudget = await runWithinFailureBudget(500, async () => "saved");
+      assert.deepEqual(fastBudget, { ok: true, value: "saved" });
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("storage calls in command/index.ts enforce AbortSignal.timeout(3_000) and map timeouts to storage errors", async () => {
+  const source = await readFile(join(repoRoot, "supabase/functions/command/index.ts"), "utf8");
+  const start = source.indexOf("function fileStorage(): FileStorage {");
+  const end = source.indexOf("const authClient = createClient(", start);
+  assert.ok(start > 0 && end > start, "fileStorage adapter must exist");
+  const block = source.slice(start, end);
+  assert.match(source, /const FILE_STORAGE_TIMEOUT_MS = 3_000;/);
+  const timeoutSignals = block.match(/signal:\s*AbortSignal\.timeout\(FILE_STORAGE_TIMEOUT_MS\)/g) ?? [];
+  assert.equal(timeoutSignals.length, 4, "all four fileStorage methods (signUpload, objectSize, removeObjects, signDownload) must carry AbortSignal.timeout(FILE_STORAGE_TIMEOUT_MS)");
+  assert.match(block, /storage upload sign failed: timeout/);
+  assert.match(block, /storage object info failed: timeout/);
+  assert.match(block, /storage download sign failed: timeout/);
 });
 
 test("holder: idle pool and unawaited lazy tagged template leave zero timers running (process exits cleanly)", async () => {
@@ -1292,7 +1669,7 @@ test("Deno createEdgeDatabase proves TLS verification, pool-holder stall recover
         }
       }
 
-      // 3. Retired-pool cap under Deno: 2 stalls hit cap, 3rd call fails fast, then recovers after peer closes socket.
+      // 3. Socket cap under Deno: 2 stalls hit cap, 3rd call fails fast, then recovers after peer closes socket.
       {
         const db = createEdgeDatabase(Deno.env.get("TEST_TLS_CAP_URL")!, {
           max: 1,
@@ -1301,9 +1678,22 @@ test("Deno createEdgeDatabase proves TLS verification, pool-holder stall recover
           stall_timeout_ms: 200,
           call_ceiling_ms: 2000,
           replace_cooldown_ms: 50,
-          max_retired_pools: 2,
+          max_retained_sockets: 2,
         }, caB64);
         try {
+          // Proxy hardening under Deno: unsupported features throw naming the property, then/symbols return undefined.
+          for (const prop of ["json", "unsafe", "array", "listen", "reserve", "file", "types"]) {
+            let threw = false;
+            try {
+              void (db as unknown as Record<string, unknown>)[prop];
+            } catch (err) {
+              threw = err instanceof Error && err.message.includes(prop);
+            }
+            if (!threw) throw new Error("Deno holder failed to throw for unsupported feature " + prop);
+          }
+          if ((db as unknown as Record<string, unknown>).then !== undefined) {
+            throw new Error("Deno holder must not expose .then");
+          }
           for (let i = 0; i < 2; i += 1) {
             let code = "";
             try {

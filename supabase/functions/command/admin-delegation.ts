@@ -16,6 +16,7 @@ import {
 } from '../_shared/protocol.js';
 import type { AdminActor, AdminCommand, AdminAccountState, AdminAccountEvent, AdminConsent, AdminClientApproval, AdminDecisionContext } from '../_shared/admin-authority.d.ts';
 import type { AdminManifest, AdminScope } from '../_shared/admin-policy.d.ts';
+import type { AdminFailureOutcome } from './failures.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 type Result = { status: number; body: Record<string, unknown> };
@@ -597,9 +598,20 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
 }
 
 /** A failed transaction retains only its failure card, in a new transaction.
- * No exception message, SQL parameter, secret or success event is copied here. A retryable (40P01) card caches no result.
+ * No exception message, SQL parameter, secret or success event is copied here.
+ * A retryable (40P01) or unknown-outcome (stall/lost connection) card caches no result,
+ * leaving the definitive receipt to the action's own transaction.
  */
-export async function recordAdminFailure(tx: Sql, input: AdminInput, authentication: AdminAuthentication, operation?: AdminAuditKind, retryable = false): Promise<void> {
+export async function recordAdminFailure(
+  tx: Sql,
+  input: AdminInput,
+  authentication: AdminAuthentication,
+  operation?: AdminAuditKind,
+  retryable = false,
+  outcome: AdminFailureOutcome = 'rolled_back',
+): Promise<void> {
+  const unknownOutcome = outcome === 'unknown';
+  const reasonCode = unknownOutcome ? 'admin_transaction_outcome_unknown' : 'admin_transaction_failed';
   const oauth = authentication.kind === 'oauth' && isVerifiedAdminAdmission(authentication.admission) ? authentication.admission : null;
   if (authentication.kind !== 'human' && !oauth) { await adminSecurityFailure(tx, 'unknown_admin_credential'); return; }
   if (oauth) {
@@ -618,7 +630,7 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
   ` : [];
   const account = rows[0];
   if (!owner || !account) {
-    await tx`INSERT INTO swarm.admin_security_audit(audit_id, occurred_at, reason_code) VALUES (${crypto.randomUUID()}::uuid, statement_timestamp(), 'admin_transaction_failed')`;
+    await tx`INSERT INTO swarm.admin_security_audit(audit_id, occurred_at, reason_code) VALUES (${crypto.randomUUID()}::uuid, statement_timestamp(), ${reasonCode})`;
     return;
   }
   const grant = account.projection.grants[grantId ?? (id(raw?.grant_id) ? raw.grant_id : '')];
@@ -638,14 +650,17 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
       action: auditAction(raw),
       target_kind: 'admin_grant', target_id: grant?.grant_id ?? null, workspace_id: null,
       manifest_digest: grant?.manifest_digest ?? null, request_digest: await adminDigest(input),
-      outcome: 'failed', reason_code: 'admin_transaction_failed', policy_check: { result: 'rolled_back', buckets: allowance.buckets }, related_event_ids: [],
-      next_action: 'Ask the granting person to review the failed connection.', recovery_kind: 'human' },
+      outcome: 'failed', reason_code: reasonCode, policy_check: { result: unknownOutcome ? 'unknown' : 'rolled_back', buckets: allowance.buckets }, related_event_ids: [],
+      next_action: unknownOutcome
+        ? 'The database connection stalled before the outcome was confirmed. Retry with the same command_id or inspect recent admin history.'
+        : 'Ask the granting person to review the failed connection.',
+      recovery_kind: 'human' },
   };
   await tx`INSERT INTO swarm.admin_events(owner_user_id, seq, event_id, command_id, event)
     VALUES (${owner}::uuid, ${event.seq}, ${event.event_id}::uuid, ${event.command_id}, ${tx.json(event as unknown as postgres.JSONValue)})`;
   const projection = reduceAdminAuthority(account.projection, event);
   await tx`UPDATE swarm.admin_accounts SET seq = ${event.seq}, projection = ${tx.json(projection as unknown as postgres.JSONValue)} WHERE owner_user_id = ${owner}::uuid`;
-  if (!retryable && typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id)) {
+  if (!retryable && !unknownOutcome && typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id)) {
     const actorKey = actor.kind === 'human' ? `human:${actor.user_id}` : `delegated_admin:${actor.admin_identity_id}`;
     await tx`INSERT INTO swarm.admin_command_results(owner_user_id, actor_key, command_id, request_digest, response)
       VALUES (${owner}::uuid, ${actorKey}, ${input.command_id}, ${await adminDigest(input)}, ${tx.json(errorResult(503, 'admin_command_failed') as unknown as postgres.JSONValue)})

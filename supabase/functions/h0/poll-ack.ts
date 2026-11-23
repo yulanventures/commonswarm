@@ -19,6 +19,7 @@
 import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { createEdgeDatabase } from "../_shared/database.ts";
+import { COMMAND_REQUEST_BUDGET_MS, remainingFailureBudgetMs, runWithinFailureBudget } from "../_shared/failure-budget.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -922,6 +923,7 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
   }
   const parsed = parseH0PollBody(await readBody(request));
   if (!parsed.ok) return json(400, { error: parsed.error, message: parsed.message });
+  const requestDeadlineAt = Date.now() + parsed.body.wait * 1_000 + COMMAND_REQUEST_BUDGET_MS;
   const tokenHash = await sha256(token);
   let held: { seat: Seat; holder: string } | null = null;
   try {
@@ -1075,9 +1077,13 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
     return json(200, responseBody);
   } finally {
     if (held !== null) {
-      try {
-        await releaseLock(held.seat, held.holder);
-      } catch {
+      const seat = held.seat;
+      const holder = held.holder;
+      const released = await runWithinFailureBudget(
+        remainingFailureBudgetMs(requestDeadlineAt),
+        () => releaseLock(seat, holder),
+      );
+      if (!released.ok) {
         console.error("h0 poll lock release failed");
       }
     }

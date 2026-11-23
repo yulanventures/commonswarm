@@ -9,12 +9,30 @@ export const EDGE_DATABASE_STALLED_MESSAGE = "Edge database connection stalled";
 
 /** No-progress stall threshold (ms): above lock (5s) and statement (10s) bounds, below 30s client timeout. */
 export const EDGE_DATABASE_STALL_TIMEOUT_MS = 15_000;
-/** Per-call ceiling (ms): bounds a silent call masked by a healthy sibling on size-2 pools. */
+/**
+ * Per-call ceiling (ms): releases a caller masked by a healthy sibling on multi-connection pools.
+ * The caller is settled with EdgeDatabaseStalledError; work it already started outside the
+ * database (such as an external HTTP fetch) may continue after settlement.
+ */
 export const EDGE_DATABASE_CALL_CEILING_MS = 25_000;
 /** Minimum interval (ms) between pool replacements. */
 export const EDGE_DATABASE_REPLACE_COOLDOWN_MS = 5_000;
-/** Maximum retired pools allowed to still hold unclosed sockets before failing fast. */
-export const EDGE_DATABASE_MAX_RETIRED_POOLS = 4;
+/**
+ * Maximum sockets the holder may reserve simultaneously across active and retired pools.
+ * Expressed in sockets (not pools) so size-1, size-2, and size-4 pools share a hard allocation
+ * bound even when half-closed sockets remain open on a vanished peer.
+ */
+export const EDGE_DATABASE_MAX_RETAINED_SOCKETS = 8;
+/**
+ * Conservative upper bound (ms) before a retired pool's unproven socket reservation expires.
+ *
+ * Justified from OS TCP teardown on Linux with keep_alive = 5 s (edgeDatabaseOptions):
+ * - Idle / FIN_WAIT_2 keepalive teardown: TCP_KEEPIDLE (5 s) + tcp_keepcnt (9) * tcp_keepintvl (75 s) = 680 s.
+ * - Active send / terminate('X' + FIN) to a vanished peer: tcp_retries2 (15) with 200 ms same-host RTO ≈ 925 s.
+ * 960 s (16 min) exceeds both bounds; if keep_alive is configured higher, the holder scales up to
+ * (keep_alive + 9 * 75) * 1000 ms.
+ */
+export const EDGE_DATABASE_RETIRED_SOCKET_TTL_MS = 960_000;
 
 /** Fixed, secret-free, cause-free error returned when the holder retires or refuses a stalled pool. */
 export class EdgeDatabaseStalledError extends Error {
@@ -29,12 +47,33 @@ export class EdgeDatabaseStalledError extends Error {
 export interface EdgeDatabaseHolderConfig extends EdgeDatabaseConfig {
   /** No-progress stall threshold in ms (default 15,000). */
   stall_timeout_ms?: number;
-  /** Per-call ceiling in ms (default 25,000). */
+  /** Per-call ceiling in ms (default 25,000); releases the caller while external work may continue. */
   call_ceiling_ms?: number;
   /** Minimum ms between pool replacements (default 5,000). */
   replace_cooldown_ms?: number;
-  /** Cap on retired pools still holding unclosed sockets (default 4). */
-  max_retired_pools?: number;
+  /** Maximum sockets reserved across active and retired pools before failing fast (default 8). */
+  max_retained_sockets?: number;
+  /** Upper bound in ms before a retired pool's unproven socket reservation expires (default >= 960,000). */
+  retired_socket_ttl_ms?: number;
+}
+
+export interface EdgeDatabaseHolderSnapshot {
+  generation: number;
+  max: number;
+  maxRetainedSockets: number;
+  currentPoolSockets: number;
+  retiredSockets: number;
+  retainedSockets: number;
+  retiredPoolCount: number;
+}
+
+const holderInspectors = new WeakMap<object, () => EdgeDatabaseHolderSnapshot>();
+
+/** Read-only diagnostic snapshot of a holder's conservative socket reservations (for tests/monitoring). */
+export function inspectEdgeDatabaseHolder(sql: unknown): EdgeDatabaseHolderSnapshot | null {
+  if ((typeof sql !== "object" && typeof sql !== "function") || sql === null) return null;
+  const inspector = holderInspectors.get(sql as object);
+  return inspector ? inspector() : null;
 }
 
 interface PendingWaiter {
@@ -49,15 +88,47 @@ interface PoolSlot {
   generation: number;
   sql: postgres.Sql;
   max: number;
+  /** True once any operation has been dispatched on this pool (postgres.js connects lazily). */
+  used: boolean;
   retired: boolean;
+  retiredAt: number | null;
+  /** True if more than `max` operations were pending at retirement (queries queue may hold waiters until end() destroys them). */
+  hadQueuedAtRetire: boolean;
+  /** True once slot.sql.end({ timeout: 0 }) has drained postgres.js's internal queries queue. */
+  endCompleted: boolean;
   pending: Map<number, PendingWaiter>;
   lastSettlementAt: number;
   watchdogTimer: ReturnType<typeof setTimeout> | null;
-  /** Upper bound on currently open sockets in this pool, decremented by postgres.js onclose. */
-  openSockets: number;
-  /** Connection ids already observed closed after retirement. */
+  /** Distinct connection ids proven closed by postgres.js onclose after retirement. */
   retiredClosedIds: Set<number>;
 }
+
+const LINUX_DEFAULT_TCP_KEEPINTVL_SECONDS = 75;
+const LINUX_DEFAULT_TCP_KEEPCNT = 9;
+
+/**
+ * Non-feature properties (Promise/thenable detection, serialization, runtime inspection) that
+ * return undefined on the holder proxy so it is never treated as a thenable or broken under inspect.
+ */
+const HOLDER_INSPECTION_PROPERTIES = new Set<string>([
+  "then",
+  "catch",
+  "finally",
+  "toJSON",
+  "inspect",
+  "$$typeof",
+  "asymmetricMatch",
+  "nodeType",
+  "__esModule",
+  "default",
+  "constructor",
+  "valueOf",
+  "toString",
+  "name",
+  "length",
+  "prototype",
+  "__proto__",
+]);
 
 function positiveBound(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
@@ -80,14 +151,22 @@ function clearWatchdog(slot: PoolSlot): void {
  * Open a bounded, pool-level self-recovering Postgres client for an edge worker isolate.
  *
  * TLS and socket lifecycle stay inside stock postgres.js (`withDatabaseTls` unchanged).
- * Recovery operates one level up by monitoring pool progress and per-call ceilings, swapping
- * in a fresh pool on stall, rejecting pending callers directly from the holder, and bounding
- * retired pools whose half-open sockets have not yet closed.
+ * Recovery operates one level up by monitoring pool progress (15 s) and per-call ceilings (25 s,
+ * which releases the waiting caller while any work it started outside the database may continue),
+ * swapping in a fresh pool on stall, rejecting pending callers directly from the holder, and
+ * conservatively accounting for retained sockets across active and retired pools.
+ *
+ * Because postgres.js 3.4.9 exposes only `onclose(connectionId)` and no connect/open lifecycle
+ * callback, every pool reserves its full `max` socket count from the moment it dispatches any work
+ * until closure of every connection id it could have opened is proven after retirement + `end()`
+ * or the OS keepalive/retransmit teardown bound elapses.
  *
  * Forwarded client surface (exact set used by the eight edge pools and management bindings):
  * - tagged template / builder call (`apply`)
  * - `begin` (runs the entire transaction on the pool generation current at start; never replayed)
  * - `end`
+ * Accessing any other client feature (e.g. `json`, `unsafe`, `array`, `listen`, `reserve`, `file`,
+ * `types`) throws a clear error naming the unsupported property.
  */
 export function createEdgeDatabase(
   databaseUrl: string,
@@ -102,7 +181,14 @@ export function createEdgeDatabase(
   const stallTimeoutMs = positiveBound(config.stall_timeout_ms, EDGE_DATABASE_STALL_TIMEOUT_MS);
   const callCeilingMs = positiveBound(config.call_ceiling_ms, EDGE_DATABASE_CALL_CEILING_MS);
   const replaceCooldownMs = positiveBound(config.replace_cooldown_ms, EDGE_DATABASE_REPLACE_COOLDOWN_MS);
-  const maxRetiredPools = Math.max(1, Math.floor(positiveBound(config.max_retired_pools, EDGE_DATABASE_MAX_RETIRED_POOLS)));
+  const maxRetainedSockets = Math.max(
+    baseOptions.max,
+    Math.floor(positiveBound(config.max_retained_sockets, EDGE_DATABASE_MAX_RETAINED_SOCKETS)),
+  );
+  const keepAliveBoundMs =
+    (baseOptions.keep_alive + LINUX_DEFAULT_TCP_KEEPCNT * LINUX_DEFAULT_TCP_KEEPINTVL_SECONDS) * 1_000;
+  const defaultRetiredSocketTtlMs = Math.max(EDGE_DATABASE_RETIRED_SOCKET_TTL_MS, keepAliveBoundMs);
+  const retiredSocketTtlMs = positiveBound(config.retired_socket_ttl_ms, defaultRetiredSocketTtlMs);
 
   let nextGeneration = 1;
   let nextWaiterId = 1;
@@ -110,29 +196,56 @@ export function createEdgeDatabase(
   let lastReplacedAt = Number.NEGATIVE_INFINITY;
   const retiredPools = new Set<PoolSlot>();
 
+  function slotReservedSockets(slot: PoolSlot, now: number): number {
+    if (!slot.used) return 0;
+    if (!slot.retired) return slot.max;
+    if (slot.retiredAt !== null && now - slot.retiredAt >= retiredSocketTtlMs) {
+      retiredPools.delete(slot);
+      return 0;
+    }
+    const remaining = Math.max(0, slot.max - slot.retiredClosedIds.size);
+    if (remaining === 0) {
+      retiredPools.delete(slot);
+      return 0;
+    }
+    return remaining;
+  }
+
+  function countRetiredSockets(now: number): number {
+    let total = 0;
+    for (const retired of [...retiredPools]) {
+      total += slotReservedSockets(retired, now);
+    }
+    return total;
+  }
+
   function openPool(): PoolSlot {
     const generation = nextGeneration++;
     const slot: PoolSlot = {
       generation,
       sql: null as unknown as postgres.Sql,
       max: baseOptions.max,
+      used: false,
       retired: false,
+      retiredAt: null,
+      hadQueuedAtRetire: false,
+      endCompleted: false,
       pending: new Map(),
       lastSettlementAt: 0,
       watchdogTimer: null,
-      openSockets: 0,
       retiredClosedIds: new Set(),
     };
 
     const onclose = (connectionId: number) => {
-      if (!slot.retired) {
-        slot.openSockets = Math.max(0, slot.openSockets - 1);
+      // While live (or while queued waiters could still trigger a reconnect before end({ timeout: 0 })
+      // drains postgres.js's queries queue), a close callback does not prove permanent release because
+      // postgres.js may immediately reconnect that connection slot without an observable open hook.
+      if (!slot.retired || (slot.hadQueuedAtRetire && !slot.endCompleted)) {
         return;
       }
       if (slot.retiredClosedIds.has(connectionId)) return;
       slot.retiredClosedIds.add(connectionId);
-      slot.openSockets = Math.max(0, slot.openSockets - 1);
-      if (slot.openSockets === 0) {
+      if (slot.retiredClosedIds.size >= slot.max) {
         retiredPools.delete(slot);
       }
     };
@@ -160,7 +273,8 @@ export function createEdgeDatabase(
   function acquireSlot(): PoolSlot | null {
     if (holderClosed) return null;
     if (currentPool === null) {
-      if (retiredPools.size >= maxRetiredPools) {
+      const now = Date.now();
+      if (countRetiredSockets(now) + baseOptions.max > maxRetainedSockets) {
         return null;
       }
       currentPool = openPool();
@@ -189,14 +303,16 @@ export function createEdgeDatabase(
 
     lastReplacedAt = now;
     slot.retired = true;
+    slot.retiredAt = now;
+    slot.hadQueuedAtRetire = slot.pending.size > slot.max;
     clearWatchdog(slot);
-    if (slot.openSockets > 0) {
+    if (slot.used) {
       retiredPools.add(slot);
     }
 
     // Swap in a fresh pool (or enter fail-fast cap state) BEFORE rejecting callers so
-    // immediate caller retries observe the new generation or cap immediately.
-    if (retiredPools.size < maxRetiredPools) {
+    // immediate caller retries observe the new generation or socket cap immediately.
+    if (countRetiredSockets(now) + baseOptions.max <= maxRetainedSockets) {
       try {
         currentPool = openPool();
       } catch {
@@ -209,9 +325,14 @@ export function createEdgeDatabase(
     rejectAllPending(slot);
 
     try {
-      Promise.resolve(slot.sql.end({ timeout: 0 })).catch(() => {});
+      Promise.resolve(slot.sql.end({ timeout: 0 }))
+        .catch(() => {})
+        .finally(() => {
+          slot.endCompleted = true;
+        });
     } catch {
       // Swallow synchronous close errors from a retired pool.
+      slot.endCompleted = true;
     }
   }
 
@@ -275,8 +396,8 @@ export function createEdgeDatabase(
         reject,
       };
       const generation = slot.generation;
+      slot.used = true;
       slot.pending.set(waiter.id, waiter);
-      slot.openSockets = Math.min(slot.max, Math.max(slot.openSockets, slot.pending.size));
       if (slot.pending.size === 1) {
         scheduleWatchdog(slot);
       }
@@ -366,12 +487,26 @@ export function createEdgeDatabase(
     if (active !== null) {
       clearWatchdog(active);
       active.retired = true;
-      endings.push(Promise.resolve(active.sql.end(options)).catch(() => {}));
+      active.retiredAt = Date.now();
+      endings.push(
+        Promise.resolve(active.sql.end(options))
+          .catch(() => {})
+          .finally(() => {
+            active.endCompleted = true;
+          }),
+      );
     }
-    for (const retired of retiredPools) {
+    for (const retired of [...retiredPools]) {
       clearWatchdog(retired);
-      endings.push(Promise.resolve(retired.sql.end({ timeout: 0 })).catch(() => {}));
+      endings.push(
+        Promise.resolve(retired.sql.end({ timeout: 0 }))
+          .catch(() => {})
+          .finally(() => {
+            retired.endCompleted = true;
+          }),
+      );
     }
+    retiredPools.clear();
     await Promise.all(endings);
   }
 
@@ -393,8 +528,26 @@ export function createEdgeDatabase(
       if (name === "end") {
         return (options?: { timeout?: number }) => endHolder(options);
       }
-      return undefined;
+      if (typeof name === "symbol" || HOLDER_INSPECTION_PROPERTIES.has(name)) {
+        return undefined;
+      }
+      throw new Error(`Edge database holder does not support postgres.js feature "${name}"`);
     },
+  });
+
+  holderInspectors.set(holder, () => {
+    const now = Date.now();
+    const retiredSockets = countRetiredSockets(now);
+    const currentPoolSockets = currentPool && currentPool.used ? currentPool.max : 0;
+    return {
+      generation: currentPool ? currentPool.generation : nextGeneration - 1,
+      max: baseOptions.max,
+      maxRetainedSockets,
+      currentPoolSockets,
+      retiredSockets,
+      retainedSockets: retiredSockets + currentPoolSockets,
+      retiredPoolCount: retiredPools.size,
+    };
   });
 
   return holder as unknown as postgres.Sql;

@@ -9,6 +9,7 @@ import { householdReadProvenance, messageReadProvenance, withReadProvenance } fr
 import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { createEdgeDatabase } from "../_shared/database.ts";
+import { FAILURE_PERSISTENCE_MAX_MS, runWithinFailureBudget } from "../_shared/failure-budget.ts";
 import {
   authenticateHostedSeatCapability,
   HOSTED_SEAT_READ_TOOLS,
@@ -303,8 +304,9 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     if (error instanceof HostedToolFailure) {
       const emitted = await reportHostedSeatRefused(error.code, call.token, providerStatus);
       if (emitted) {
-        try {
-          await authDb.begin("isolation level read committed", async (tx) => {
+        await runWithinFailureBudget(
+          FAILURE_PERSISTENCE_MAX_MS,
+          () => authDb.begin("isolation level read committed", async (tx) => {
             await setRole(tx, "swarm_command");
             await tx`SELECT set_config('lock_timeout', '250ms', true)`;
             await tx`
@@ -313,10 +315,9 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
                 ${call.token.subject}::uuid
               )
             `;
-          });
-        } catch {
-          // Alert recording must never change the tool refusal returned to the caller.
-        }
+          }),
+          call.signal,
+        );
       }
     }
     throw error;

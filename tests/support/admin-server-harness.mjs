@@ -4,11 +4,135 @@ import { oauthFixture } from './admin-edge-oauth-fixture.mjs';
 // Real Deno edge adapters. Local credentials stay in memory or the protected
 // task file; no credentials, SQL errors, or response bodies go to stdout.
 const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
+const scenario = Deno.args[1];
 for (const target of [config.local.API_URL, config.local.DB_URL]) {
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(target).hostname)) throw new Error('local stack required');
 }
+// For stall_recovery, interpose a local TCP wire proxy in front of config.local.DB_URL so
+// command/index.ts's real createEdgeDatabase pool holder experiences genuine half-open silent-peer
+// stalls around COMMIT without any production test hook.
+let stallProxy = null;
+if (scenario === 'stall_recovery') {
+  const parsedDb = new URL(config.local.DB_URL);
+  const targetHost = parsedDb.hostname;
+  const targetPort = Number(parsedDb.port || 5432);
+  const decoder = new TextDecoder('latin1');
+  let mode = 'pass'; // 'pass' | 'rollback' | 'lost_reply'
+  const heldClientConns = [];
+  const activeUpstreams = new Set();
+  const listener = Deno.listen({ hostname: '127.0.0.1', port: 0 });
+  const proxyPort = listener.addr.port;
+  const writeAll = async (conn, data) => {
+    let offset = 0;
+    while (offset < data.length) {
+      offset += await conn.write(data.subarray(offset));
+    }
+  };
+  const acceptLoop = (async () => {
+    for await (const client of listener) {
+      (async () => {
+        let upstream;
+        try {
+          upstream = await Deno.connect({ hostname: targetHost, port: targetPort });
+          activeUpstreams.add(upstream);
+        } catch {
+          try { client.close(); } catch { /* ignore */ }
+          return;
+        }
+        let sawAdminReceiptInsert = false;
+        let holdClient = false;
+        let dropCommitReply = false;
+        const c2s = (async () => {
+          const buf = new Uint8Array(16384);
+          try {
+            while (true) {
+              const n = await client.read(buf);
+              if (n === null) break;
+              const chunk = buf.slice(0, n);
+              if (mode !== 'pass') {
+                const text = decoder.decode(chunk);
+                if (text.includes('INSERT INTO swarm.admin_command_results')) {
+                  sawAdminReceiptInsert = true;
+                }
+                if (sawAdminReceiptInsert && text.includes('\0commit\0')) {
+                  const chosen = mode;
+                  mode = 'pass';
+                  if (chosen === 'rollback') {
+                    // Drop COMMIT before Postgres sees it and close upstream so Postgres rolls back
+                    // and releases locks immediately; keep client socket open & silent so the holder stalls.
+                    holdClient = true;
+                    heldClientConns.push(client);
+                    try { upstream.close(); } catch { /* ignore */ }
+                    return;
+                  }
+                  if (chosen === 'lost_reply') {
+                    // Forward COMMIT so Postgres commits durably, then drop Postgres's COMMIT reply.
+                    dropCommitReply = true;
+                    await writeAll(upstream, chunk);
+                    return;
+                  }
+                }
+              }
+              await writeAll(upstream, chunk);
+            }
+          } catch { /* socket closed */ }
+          if (!holdClient && !dropCommitReply) {
+            try { upstream.close(); } catch { /* ignore */ }
+          }
+        })();
+        const s2c = (async () => {
+          const buf = new Uint8Array(16384);
+          try {
+            while (true) {
+              const n = await upstream.read(buf);
+              if (n === null) break;
+              const chunk = buf.slice(0, n);
+              if (dropCommitReply) {
+                const text = decoder.decode(chunk);
+                if (text.includes('COMMIT\0')) {
+                  // Postgres has durably committed; hold client open & silent and release upstream.
+                  holdClient = true;
+                  heldClientConns.push(client);
+                  try { upstream.close(); } catch { /* ignore */ }
+                  return;
+                }
+                continue;
+              }
+              if (holdClient) return;
+              await writeAll(client, chunk);
+            }
+          } catch { /* socket closed */ }
+          if (!holdClient) {
+            try { client.close(); } catch { /* ignore */ }
+          }
+        })();
+        await Promise.allSettled([c2s, s2c]);
+        activeUpstreams.delete(upstream);
+      })();
+    }
+  })();
+  const proxiedUrl = new URL(config.local.DB_URL);
+  proxiedUrl.port = String(proxyPort);
+  stallProxy = {
+    url: proxiedUrl.toString(),
+    arm(nextMode) { mode = nextMode; },
+    releaseHeld() {
+      while (heldClientConns.length > 0) {
+        const c = heldClientConns.pop();
+        try { c.close(); } catch { /* ignore */ }
+      }
+    },
+    close() {
+      mode = 'pass';
+      try { listener.close(); } catch { /* ignore */ }
+      this.releaseHeld();
+      for (const u of activeUpstreams) { try { u.close(); } catch { /* ignore */ } }
+      void acceptLoop.catch(() => {});
+    },
+  };
+}
 Deno.env.set('SWARM_ENV', 'test');
-Deno.env.set('SWARM_DATABASE_URL', config.local.DB_URL);
+Deno.env.set('SWARM_DATABASE_URL', stallProxy ? stallProxy.url : config.local.DB_URL);
 Deno.env.set('SUPABASE_URL', config.local.API_URL);
 Deno.env.set('SUPABASE_ANON_KEY', config.local.ANON_KEY);
 Deno.env.set('SWARM_COMMAND_ALLOWED_ORIGINS', 'https://commonswarm.com');
@@ -96,7 +220,6 @@ async function count(owner = config.owner) {
   return row.n;
 }
 try {
-  const scenario = Deno.args[1];
   const grant = await activate();
   if (scenario === 'runtime') {
     const issueInput = wire({ kind:'issue_admin_credential',grant_id:grant.grantId,credential_lineage_id:id() });
@@ -373,6 +496,80 @@ try {
       const [failure]=await db`SELECT event FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid ORDER BY seq DESC LIMIT 1`;
       check(failure.event.type==='AdminActionRecorded' && failure.event.payload.outcome==='failed' && failure.event.actor_user===null && failure.event.grant_id===grant.grantId,'failure is an audited delegated actor');
       check((await http(input,token)).status===503 && await count()===before+1,'failure receipt retains stable retry outcome');
+    } else if (scenario === 'stall_recovery') {
+      const fullGrant = await activate(true);
+      const fullOauth = await issue(fullGrant);
+      // (a) OAuth admin action that actually rolled back under a holder stall:
+      // catch audits 'unknown' and writes NO receipt; retry with same command_id + fresh proof executes once.
+      const ws1 = id(), cmd1 = id();
+      const req1 = wire({ kind: 'admin_create_workspace', grant_id: fullGrant.grantId, workspace_id: ws1, name: 'Stall rollback witness' }, cmd1);
+      stallProxy.arm('rollback');
+      const first1 = await http(req1, fullOauth.access);
+      check(first1.status === 503 && first1.body.error === 'admin_command_failed' && first1.body.retryable === true, 'oauth stall rollback returns retryable 503');
+      const [ws1Before] = await db`SELECT count(*)::integer AS n FROM swarm.workspaces WHERE workspace_id = ${ws1}::uuid`;
+      check(ws1Before.n === 0, 'oauth stall rollback left zero workspace effect');
+      const [rcpt1Before] = await db`SELECT count(*)::integer AS n FROM swarm.admin_command_results WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd1}`;
+      check(rcpt1Before.n === 0, 'oauth stall rollback wrote no synthetic failure receipt');
+      const [audit1] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd1} ORDER BY seq DESC LIMIT 1`;
+      check(audit1?.event?.type === 'AdminActionRecorded' && audit1.event.payload.outcome === 'failed'
+        && audit1.event.payload.reason_code === 'admin_transaction_outcome_unknown'
+        && audit1.event.payload.policy_check?.result === 'unknown', 'oauth stall rollback audited as unknown');
+      stallProxy.releaseHeld();
+      const retry1 = await http(req1, fullOauth.access);
+      check(retry1.status === 200, 'oauth same-id retry after rollback succeeds with fresh proof');
+      const [ws1After] = await db`SELECT count(*)::integer AS n FROM swarm.workspaces WHERE workspace_id = ${ws1}::uuid`;
+      const [rcpt1After] = await db`SELECT response FROM swarm.admin_command_results WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd1}`;
+      check(ws1After.n === 1 && rcpt1After?.response?.status === 200, 'oauth rollback retry executed once and stored 200 receipt');
+
+      // (b) OAuth admin action with a lost COMMIT reply after a real commit:
+      // catch audits 'unknown' and preserves committed 200 receipt; retry returns stored receipt with one effect.
+      const ws2 = id(), cmd2 = id();
+      const req2 = wire({ kind: 'admin_create_workspace', grant_id: fullGrant.grantId, workspace_id: ws2, name: 'Stall lost reply witness' }, cmd2);
+      stallProxy.arm('lost_reply');
+      const first2 = await http(req2, fullOauth.access);
+      check(first2.status === 503 && first2.body.error === 'admin_command_failed' && first2.body.retryable === true, 'oauth lost reply returns retryable 503');
+      const [ws2Before] = await db`SELECT count(*)::integer AS n FROM swarm.workspaces WHERE workspace_id = ${ws2}::uuid`;
+      const [rcpt2Before] = await db`SELECT response FROM swarm.admin_command_results WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd2}`;
+      const [audit2] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd2} ORDER BY seq DESC LIMIT 1`;
+      check(ws2Before.n === 1 && rcpt2Before?.response?.status === 200
+        && audit2?.event?.payload?.reason_code === 'admin_transaction_outcome_unknown'
+        && audit2?.event?.payload?.policy_check?.result === 'unknown', 'oauth lost reply preserved real commit and audited unknown');
+      stallProxy.releaseHeld();
+      const retry2 = await http(req2, fullOauth.access);
+      check(retry2.status === 200, 'oauth same-id retry after lost reply returns stored 200 receipt');
+      const [ws2After] = await db`SELECT count(*)::integer AS n FROM swarm.workspaces WHERE workspace_id = ${ws2}::uuid`;
+      const [events2] = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd2} AND event->>'type' = 'AdminWorkspaceCreated'`;
+      check(ws2After.n === 1 && events2.n === 1, 'oauth lost reply retry left exactly one effect');
+
+      // (c) Human account admin action: rollback under stall + lost reply after real commit.
+      const humanBeforeConsents = (await db`SELECT count(*)::integer AS n FROM swarm.admin_consents WHERE owner_user_id = ${config.owner}::uuid`)[0].n;
+      const cmd3 = id();
+      const req3 = wire({ kind: 'prepare_admin_consent', manifest: manifest(), full_account_selected: false }, cmd3);
+      stallProxy.arm('rollback');
+      const first3 = await http(req3);
+      check(first3.status === 500 && first3.body.error === 'admin_command_failed', 'human stall rollback keeps 500 body');
+      const [rcpt3Before] = await db`SELECT count(*)::integer AS n FROM swarm.admin_command_results WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd3}`;
+      const [audit3] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd3} ORDER BY seq DESC LIMIT 1`;
+      check(rcpt3Before.n === 0 && audit3?.event?.payload?.policy_check?.result === 'unknown'
+        && audit3?.event?.payload?.reason_code === 'admin_transaction_outcome_unknown', 'human stall rollback wrote unknown audit and no receipt');
+      stallProxy.releaseHeld();
+      const retry3 = await http(req3);
+      check(retry3.status === 200 && typeof retry3.body.consent_receipt_id === 'string', 'human same-id retry after rollback succeeds');
+      const humanAfterRollback = (await db`SELECT count(*)::integer AS n FROM swarm.admin_consents WHERE owner_user_id = ${config.owner}::uuid`)[0].n;
+      check(humanAfterRollback === humanBeforeConsents + 1, 'human rollback retry created one consent');
+
+      const cmd4 = id();
+      const req4 = wire({ kind: 'prepare_admin_consent', manifest: manifest(), full_account_selected: false }, cmd4);
+      stallProxy.arm('lost_reply');
+      const first4 = await http(req4);
+      check(first4.status === 500 && first4.body.error === 'admin_command_failed', 'human lost reply keeps 500 body');
+      const [rcpt4Before] = await db`SELECT response FROM swarm.admin_command_results WHERE owner_user_id = ${config.owner}::uuid AND command_id = ${cmd4}`;
+      check(rcpt4Before?.response?.status === 200, 'human lost reply preserved committed 200 receipt');
+      stallProxy.releaseHeld();
+      const retry4 = await http(req4);
+      const humanAfterLostReply = (await db`SELECT count(*)::integer AS n FROM swarm.admin_consents WHERE owner_user_id = ${config.owner}::uuid`)[0].n;
+      check(retry4.status === 200 && retry4.body.consent_receipt_id === rcpt4Before.response.body.consent_receipt_id
+        && humanAfterLostReply === humanAfterRollback + 1, 'human lost reply retry returned stored receipt with one consent');
     } else if (scenario === 'replay') {
       const postgres = (await import('npm:postgres@3.4.9')).default;
       const firstDb=postgres(config.local.DB_URL,{prepare:false,max:1});
@@ -483,4 +680,4 @@ try {
 } catch {
   console.log('ADMIN_SERVER_FAILED:' + stage);
   Deno.exitCode = 1;
-} finally { await db.end({ timeout: 2 }); }
+} finally { stallProxy?.close(); await db.end({ timeout: 2 }); }

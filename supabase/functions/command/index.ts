@@ -122,10 +122,12 @@ import {
 } from "./cors.ts";
 import { newestInteractiveAmrSeconds } from "./fresh-auth.ts";
 import {
-  adminFailureRetryable, adminOAuthFailureResult, classifyCommandFailure,
+  COMMAND_REQUEST_BUDGET_MS,
+  adminFailureOutcome, adminFailureRetryable, adminOAuthFailureResult, classifyCommandFailure,
   dbCode,
   durableCommandFailure,
   finishCommandFailure,
+  remainingFailureBudgetMs, runWithinFailureBudget,
   safeError, safeAdminError,
   type DurableCommandFailure,
 } from "./failures.ts";
@@ -1555,9 +1557,26 @@ export const db = createEdgeDatabase(databaseUrl, {
 }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 
 /**
+ * Storage REST deadline (ms) for file-artifact metadata/signing calls inside command transactions
+ * and the post-commit purge drain. Consistent with removeObjects' 3 s bound and same-network JWKS
+ * fetches (3 s), and strictly below lock_timeout (5 s), statement_timeout (10 s), and the edge DB
+ * holder stall threshold (15 s) so a hung storage fetch fails as a storage error instead of
+ * looking like a database stall.
+ */
+const FILE_STORAGE_TIMEOUT_MS = 3_000;
+
+function isStorageTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
+
+/**
  * Storage adapter for file artifacts (§7). Raw REST with the service role key:
  * the bucket is service-role-only (★R12), so every signed URL is minted here
  * and nowhere else. The runtime injects SUPABASE_SERVICE_ROLE_KEY.
+ *
+ * Note: signUpload (fileVersionCreate), objectSize (fileVersionCommit), and
+ * signDownload (fileDownloadUrl) all run inside the command's db.begin/savepoint
+ * transaction; removeObjects runs in the post-commit drain transaction.
  */
 function fileStorage(): FileStorage {
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -1574,22 +1593,32 @@ function fileStorage(): FileStorage {
     async signUpload(path) {
       // No upsert field: storage defaults to upsert OFF, which is load-bearing
       // (★R3) — a second PUT to a committed version's path must be refused.
-      const response = await fetch(
-        `${base}/object/upload/sign/${FILE_BUCKET}/${path}`,
-        {
-          method: "POST",
-          // x-upsert explicitly false (★R3): the default is upsert-off, and
-          // this pins it against a storage default ever moving. Whether hosted
-          // storage honors both the header and the signature binding is S6's
-          // to re-verify.
-          headers: { ...headers, "x-upsert": "false" },
-          body: "{}",
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`storage upload sign failed: ${response.status}`);
+      let response: Response;
+      let data: { url?: string };
+      try {
+        response = await fetch(
+          `${base}/object/upload/sign/${FILE_BUCKET}/${path}`,
+          {
+            method: "POST",
+            // x-upsert explicitly false (★R3): the default is upsert-off, and
+            // this pins it against a storage default ever moving. Whether hosted
+            // storage honors both the header and the signature binding is S6's
+            // to re-verify.
+            headers: { ...headers, "x-upsert": "false" },
+            body: "{}",
+            signal: AbortSignal.timeout(FILE_STORAGE_TIMEOUT_MS),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`storage upload sign failed: ${response.status}`);
+        }
+        data = await response.json() as { url?: string };
+      } catch (error) {
+        if (isStorageTimeoutError(error)) {
+          throw new Error("storage upload sign failed: timeout");
+        }
+        throw error;
       }
-      const data = await response.json() as { url?: string };
       if (typeof data.url !== "string") {
         throw new Error("storage upload sign returned no url");
       }
@@ -1609,12 +1638,24 @@ function fileStorage(): FileStorage {
        * container never compresses, which is why S4's e2e could not catch it (its
        * evidence named hosted HEAD semantics as not established; this is that gap).
        * The info endpoint's JSON `size` comes from object metadata, not transport. */
-      const response = await fetch(
-        `${base}/object/info/authenticated/${FILE_BUCKET}/${path}`,
-        { headers },
-      );
-      if (!response.ok) return null;
-      const info = await response.json().catch(() => null);
+      let response: Response;
+      let info: { size?: unknown } | null;
+      try {
+        response = await fetch(
+          `${base}/object/info/authenticated/${FILE_BUCKET}/${path}`,
+          {
+            headers,
+            signal: AbortSignal.timeout(FILE_STORAGE_TIMEOUT_MS),
+          },
+        );
+        if (!response.ok) return null;
+        info = await response.json().catch(() => null);
+      } catch (error) {
+        if (isStorageTimeoutError(error)) {
+          throw new Error("storage object info failed: timeout");
+        }
+        throw error;
+      }
       const size = info && typeof info.size === "number" ? info.size : Number.NaN;
       return Number.isFinite(size) && size >= 0 ? size : null;
     },
@@ -1630,25 +1671,35 @@ function fileStorage(): FileStorage {
         // S4 review item 1: a hung storage call must not hold the drain (and,
         // without waitUntil, the response) hostage. 3s is generous for a
         // same-network batch delete; a timeout is a recorded failed attempt.
-        signal: AbortSignal.timeout(3_000),
+        signal: AbortSignal.timeout(FILE_STORAGE_TIMEOUT_MS),
       });
       if (!response.ok && response.status !== 404) {
         throw new Error(`storage object delete failed: ${response.status}`);
       }
     },
     async signDownload(path, filename, expiresInSeconds) {
-      const response = await fetch(
-        `${base}/object/sign/${FILE_BUCKET}/${path}`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ expiresIn: expiresInSeconds }),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`storage download sign failed: ${response.status}`);
+      let response: Response;
+      let data: { signedURL?: string };
+      try {
+        response = await fetch(
+          `${base}/object/sign/${FILE_BUCKET}/${path}`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ expiresIn: expiresInSeconds }),
+            signal: AbortSignal.timeout(FILE_STORAGE_TIMEOUT_MS),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`storage download sign failed: ${response.status}`);
+        }
+        data = await response.json() as { signedURL?: string };
+      } catch (error) {
+        if (isStorageTimeoutError(error)) {
+          throw new Error("storage download sign failed: timeout");
+        }
+        throw error;
       }
-      const data = await response.json() as { signedURL?: string };
       if (typeof data.signedURL !== "string") {
         throw new Error("storage download sign returned no url");
       }
@@ -20325,8 +20376,15 @@ import type { AdminAdmission } from '../_shared/admin-oauth-auth.ts';
 const adminHttpDependencies = {
   verifier: { verify: admitAdminRequest },
   transact: runAdminOAuthCommand,
-  securityFailure: async (reason: Parameters<typeof adminSecurityFailure>[1]) => {
-    await db.begin(async tx => { await setTransaction(tx); await adminSecurityFailure(tx, reason); });
+  securityFailure: async (
+    reason: Parameters<typeof adminSecurityFailure>[1],
+    requestDeadlineAt: number = Date.now() + COMMAND_REQUEST_BUDGET_MS,
+  ) => {
+    const audited = await runWithinFailureBudget(
+      remainingFailureBudgetMs(requestDeadlineAt),
+      () => db.begin(async tx => { await setTransaction(tx); await adminSecurityFailure(tx, reason); }),
+    );
+    if (!audited.ok) throw audited.error;
   },
 };
 const handleAdminCommandRequest = createAdminHttpHandler(adminHttpDependencies, 'admin_command');
@@ -20336,7 +20394,13 @@ export async function handleAdminMcpRequest(request: Request): Promise<Response>
   return withCommandCors(request, await handleAdminMcpPost(request), allowedCommandOrigins, commandEnvironment);
 }
 
-async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal): Promise<HttpResult> {
+async function runAdminOAuthCommand(
+  input: AdminInput,
+  admission: AdminAdmission,
+  kind: AdminAuditKind,
+  signal: AbortSignal,
+  requestDeadlineAt: number = Date.now() + COMMAND_REQUEST_BUDGET_MS,
+): Promise<HttpResult> {
   const authentication: AdminAuthentication = { kind: 'oauth', admission };
   try {
     const outcome = await retryLocalAuthTransaction(() => db.begin('isolation level read committed', async tx => {
@@ -20351,9 +20415,12 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
     return outcome.result;
   } catch (error) {
     console.error('admin_command_failed', 'transaction_failed');
-    // Replay admission has already committed; rollback cannot make it reusable. A 40P01 caches no result: retryable.
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind, adminFailureRetryable(error)); }); }
-    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    // Replay admission has already committed; rollback cannot make it reusable. A 40P01 or unknown outcome caches no result: retryable.
+    const audited = await runWithinFailureBudget(
+      remainingFailureBudgetMs(requestDeadlineAt),
+      () => db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind, adminFailureRetryable(error), adminFailureOutcome(error)); }),
+    );
+    if (!audited.ok) return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable');
     return adminOAuthFailureResult(error, 'admin_command_failed');
   }
 }
@@ -20362,6 +20429,7 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
 const commandRequestIds = new WeakMap<object, string>();
 
 async function handlePostRequest(request: Request): Promise<Response> {
+  const requestDeadlineAt = Date.now() + COMMAND_REQUEST_BUDGET_MS;
   const credential = bearer(request);
   if (presentsAdminCredential(request)) {
     return await handleAdminCommandRequest(request);
@@ -20524,7 +20592,7 @@ let verifiedHuman: VerifiedHuman | null = null;
       user_id: identity.userId, session_binding: adminSessionBinding,
       interactive_at_seconds: identity.interactiveAuthAtSeconds,
       csrf_verified: allowedCommandOrigins.has(request.headers.get("origin") ?? ""),
-    } }, identity);
+    } }, identity, requestDeadlineAt);
     return json(result.status, result.body);
   }
 
@@ -20608,6 +20676,7 @@ let verifiedHuman: VerifiedHuman | null = null;
       (insertError) => {
         console.error("command failure persistence failed", safeError(insertError));
       },
+      remainingFailureBudgetMs(requestDeadlineAt),
     );
     return json(result.status, result.body);
   }
@@ -20646,6 +20715,7 @@ async function runAdminAccountCommand(
   input: AdminInput,
   authentication: AdminAuthentication,
   human: VerifiedHuman | null = null,
+  requestDeadlineAt: number = Date.now() + COMMAND_REQUEST_BUDGET_MS,
 ): Promise<HttpResult> {
   try {
     const outcome = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
@@ -20660,9 +20730,12 @@ async function runAdminAccountCommand(
   } catch (error) {
     if (error instanceof HumanSessionEnded) return { status: 401, body: { error: "unauthenticated" } };
     console.error("admin_command_failed", safeAdminError(error));
-    // Account failure auditing follows in a fresh transaction after rollback.
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
-    catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
+    // Account failure auditing follows in a fresh transaction after rollback or stall (unknown outcome caches no receipt).
+    const audited = await runWithinFailureBudget(
+      remainingFailureBudgetMs(requestDeadlineAt),
+      () => db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, false, adminFailureOutcome(error)); }),
+    );
+    if (!audited.ok) return { status: 500, body: { error: "admin_failure_audit_unavailable" } };
     return { status: 500, body: { error: "admin_command_failed" } };
   }
 }
@@ -21926,10 +21999,11 @@ export async function handleAdminWorkerCommand(
   input: AdminInput, request: Request,
   deliver: (credential: import('./admin-routine.ts').AdminWorkerDelivery, signal: AbortSignal) => Promise<void>,
 ): Promise<HttpResult> {
+  const requestDeadlineAt = Date.now() + COMMAND_REQUEST_BUDGET_MS;
   let admission: AdminAdmission;
   try { admission = await adminHttpDependencies.verifier.verify(request, 'admin_command'); }
   catch {
-    try { await adminHttpDependencies.securityFailure('invalid_dpop'); }
+    try { await adminHttpDependencies.securityFailure('invalid_dpop', requestDeadlineAt); }
     catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
     return { status: 401, body: { error: 'unauthenticated' } };
   }
@@ -22000,8 +22074,11 @@ export async function handleAdminWorkerCommand(
     }));
     return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
   } catch (error) {
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error)); }); }
-    catch { return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable'); }
+    const audited = await runWithinFailureBudget(
+      remainingFailureBudgetMs(requestDeadlineAt),
+      () => db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, undefined, adminFailureRetryable(error), adminFailureOutcome(error)); }),
+    );
+    if (!audited.ok) return adminOAuthFailureResult(error, 'admin_failure_audit_unavailable');
     return adminOAuthFailureResult(error, 'admin_command_failed');
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort);
