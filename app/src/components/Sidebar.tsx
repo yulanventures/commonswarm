@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router';
+import { readRuntimeConfig } from '../data/config';
 import { COMPUTERS, HARNESSES, PEOPLE, WORKSPACES } from '../data/fixtures';
-import type { AgentState } from '../data/types';
+import type { Agent, AgentState } from '../data/types';
 import {
   appActions,
   getOpenWaitingCount,
@@ -23,9 +24,64 @@ export function Sidebar({ fullWidth = false }: SidebarProps) {
   const channels = useAppStore((state) => state.channels);
   const openWaitingCount = useAppStore(getOpenWaitingCount);
   const activeWorkspace = WORKSPACES.find((w) => w.active) ?? WORKSPACES[0];
+  const workspaceName = activeWorkspace?.name ?? 'Northwind';
+  const runtimeConfig = readRuntimeConfig();
+
+  const knownComputerIds = new Set(COMPUTERS.map((computer) => computer.id));
+  const computerGroups = COMPUTERS.map((computer) => ({
+    computer,
+    agents: agents.filter((agent) => agent.computerId === computer.id),
+  })).filter((group) => group.agents.length > 0);
+  const workspaceAgents = agents.filter(
+    (agent) => !agent.computerId || !knownComputerIds.has(agent.computerId),
+  );
 
   const getHarnessTag = (harnessId: string): string =>
     HARNESSES.find((h) => h.id === harnessId)?.tag ?? harnessId;
+
+  const renderAgentRow = (agent: Agent, showHarnessTag: boolean) => (
+    <NavLink
+      key={agent.id}
+      to={`/agents/${agent.id}`}
+      className={({ isActive }) =>
+        `flex h-row-xl items-center gap-2.5 rounded-control px-2.5 text-ink no-underline transition-quiet ${
+          isActive ? 'bg-active' : 'hover:bg-elevated'
+        }`
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Avatar
+            label={agent.initial}
+            tone={agent.tone}
+            shape="agent"
+            size="sm"
+          />
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span
+              className={`truncate leading-tight ${
+                isActive
+                  ? 'font-semibold text-ink'
+                  : 'font-medium text-ink-strong'
+              }`}
+            >
+              {agent.name}
+            </span>
+            <span
+              className={`truncate text-xs leading-snug ${AGENT_STATE_COLOR[agent.state]}`}
+            >
+              {agent.sidebarStateLabel}
+            </span>
+          </span>
+          {showHarnessTag && agent.harnessId ? (
+            <span className="rounded-tag border border-border px-1.5 py-0.5 font-mono text-2xs text-ink-muted">
+              {getHarnessTag(agent.harnessId)}
+            </span>
+          ) : null}
+        </>
+      )}
+    </NavLink>
+  );
 
   return (
     <div
@@ -33,15 +89,25 @@ export function Sidebar({ fullWidth = false }: SidebarProps) {
         fullWidth ? 'w-full' : 'w-nav border-r border-hairline'
       }`}
     >
-      <div className="flex h-header shrink-0 items-center justify-between px-4">
-        <span className="text-lg font-bold tracking-tight">
-          {activeWorkspace?.name ?? 'Northwind'}
-        </span>
+      <div className="flex h-header shrink-0 items-center justify-between gap-2 px-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-lg font-bold tracking-tight">
+            {workspaceName}
+          </span>
+          {runtimeConfig.status === 'not_configured' ? (
+            <span
+              data-testid="sample-data-marker"
+              className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+            >
+              Sample data
+            </span>
+          ) : null}
+        </div>
         <button
           type="button"
           aria-label="Add an agent"
           onClick={() => appActions.openAddAgentDialog()}
-          className="flex size-touch items-center justify-center rounded-sm bg-subtle text-lg text-ink-secondary transition-quiet hover:bg-active hover:text-ink desktop:size-btn-xs"
+          className="flex size-touch shrink-0 items-center justify-center rounded-sm bg-subtle text-lg text-ink-secondary transition-quiet hover:bg-active hover:text-ink desktop:size-btn-xs"
         >
           +
         </button>
@@ -126,72 +192,45 @@ export function Sidebar({ fullWidth = false }: SidebarProps) {
           </button>
         </div>
 
-        {COMPUTERS.map((computer, index) => {
-          const computerAgents = agents.filter(
-            (agent) => agent.computerId === computer.id,
-          );
-          if (computerAgents.length === 0) return null;
-          return (
-            <div key={computer.id}>
-              <div
-                className={`flex items-center gap-1.5 px-4.5 pb-1 text-xs text-ink-muted ${
-                  index === 0 ? 'pt-0.5' : 'pt-2.5'
+        {computerGroups.map(({ computer, agents: computerAgents }, index) => (
+          <div key={computer.id} role="group" aria-label={computer.name}>
+            <div
+              className={`flex items-center gap-1.5 px-4.5 pb-1 text-xs text-ink-muted ${
+                index === 0 ? 'pt-0.5' : 'pt-2.5'
+              }`}
+            >
+              <span
+                aria-hidden="true"
+                className={`size-dot-sm rounded-full ${
+                  computer.online ? 'bg-working' : 'bg-offline'
                 }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`size-dot-sm rounded-full ${
-                    computer.online ? 'bg-working' : 'bg-offline'
-                  }`}
-                />
-                <span>{computer.name}</span>
-              </div>
-              <div className="flex flex-col gap-0.5 px-2">
-                {computerAgents.map((agent) => (
-                  <NavLink
-                    key={agent.id}
-                    to={`/agents/${agent.id}`}
-                    className={({ isActive }) =>
-                      `flex h-row-xl items-center gap-2.5 rounded-control px-2.5 text-ink no-underline transition-quiet ${
-                        isActive ? 'bg-active' : 'hover:bg-elevated'
-                      }`
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Avatar
-                          label={agent.initial}
-                          tone={agent.tone}
-                          shape="agent"
-                          size="sm"
-                        />
-                        <span className="flex min-w-0 flex-1 flex-col">
-                          <span
-                            className={`truncate leading-tight ${
-                              isActive
-                                ? 'font-semibold text-ink'
-                                : 'font-medium text-ink-strong'
-                            }`}
-                          >
-                            {agent.name}
-                          </span>
-                          <span
-                            className={`truncate text-xs leading-snug ${AGENT_STATE_COLOR[agent.state]}`}
-                          >
-                            {agent.sidebarStateLabel}
-                          </span>
-                        </span>
-                        <span className="rounded-tag border border-border px-1.5 py-0.5 font-mono text-2xs text-ink-muted">
-                          {getHarnessTag(agent.harnessId)}
-                        </span>
-                      </>
-                    )}
-                  </NavLink>
-                ))}
-              </div>
+              />
+              <span>{computer.name}</span>
             </div>
-          );
-        })}
+            <div className="flex flex-col gap-0.5 px-2">
+              {computerAgents.map((agent) => renderAgentRow(agent, true))}
+            </div>
+          </div>
+        ))}
+
+        {workspaceAgents.length > 0 ? (
+          <div
+            role="group"
+            aria-label={workspaceName}
+            data-testid="workspace-agent-group"
+          >
+            <div
+              className={`px-4.5 pb-1 text-xs text-ink-muted ${
+                computerGroups.length === 0 ? 'pt-0.5' : 'pt-2.5'
+              }`}
+            >
+              {workspaceName}
+            </div>
+            <div className="flex flex-col gap-0.5 px-2">
+              {workspaceAgents.map((agent) => renderAgentRow(agent, false))}
+            </div>
+          </div>
+        ) : null}
 
         <div
           id="people"

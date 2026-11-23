@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { HashRouter, Navigate, Route, Routes } from 'react-router';
 import { AgentSessionScreen } from './screens/AgentSessionScreen';
 import { ChannelScreen } from './screens/ChannelScreen';
 import { PhoneHomeScreen } from './screens/PhoneHomeScreen';
@@ -19,8 +19,8 @@ export function AppRoutes() {
 
 export function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <AppRoutes />
-    </BrowserRouter>
+    </HashRouter>
   );
 }

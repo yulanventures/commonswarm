@@ -45,11 +45,18 @@ const PHONE_STATE_TEXT: Record<AgentState, string> = {
 
 export function SessionHeader({ agent }: SessionHeaderProps) {
   const isPhone = useIsPhone();
-  const computer = COMPUTERS.find((c) => c.id === agent.computerId);
-  const harness = HARNESSES.find((h) => h.id === agent.harnessId);
+  const computer = agent.computerId
+    ? COMPUTERS.find((c) => c.id === agent.computerId)
+    : undefined;
+  const harness = agent.harnessId
+    ? HARNESSES.find((h) => h.id === agent.harnessId)
+    : undefined;
   const pill = PILL_STYLES[agent.state];
   const computerName = computer?.shortName ?? agent.computerId;
   const harnessName = harness?.name ?? agent.harnessId;
+  const metaParts = [harnessName, computerName, agent.folder].filter(
+    (part): part is string => Boolean(part),
+  );
 
   if (isPhone) {
     return (
@@ -75,7 +82,9 @@ export function SessionHeader({ agent }: SessionHeaderProps) {
             data-testid="session-state-pill"
             className={`truncate text-sm ${PHONE_SUBTITLE_COLOR[agent.state]}`}
           >
-            {PHONE_STATE_TEXT[agent.state]} · {computerName}
+            {computerName
+              ? `${PHONE_STATE_TEXT[agent.state]} · ${computerName}`
+              : PHONE_STATE_TEXT[agent.state]}
           </span>
         </div>
       </header>
@@ -90,9 +99,14 @@ export function SessionHeader({ agent }: SessionHeaderProps) {
         <span className="truncate text-lg font-bold tracking-tight">
           {agent.name}
         </span>
-        <span className="truncate text-xs text-ink-muted">
-          {harnessName} · {computerName} · {agent.folder}
-        </span>
+        {metaParts.length > 0 ? (
+          <span
+            data-testid="session-header-meta"
+            className="truncate text-xs text-ink-muted"
+          >
+            {metaParts.join(' · ')}
+          </span>
+        ) : null}
       </div>
 
       <span

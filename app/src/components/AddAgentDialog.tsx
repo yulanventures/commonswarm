@@ -28,7 +28,10 @@ export function AddAgentDialog() {
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="animate-overlay-in fixed inset-0 z-40 bg-backdrop/85" />
+        <div
+          aria-hidden="true"
+          className="animate-overlay-in pointer-events-auto fixed inset-0 z-40 bg-backdrop/85"
+        />
         <Dialog.Content className="animate-dialog-in fixed top-1/2 left-1/2 z-50 max-h-full w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-modal border border-border bg-elevated px-pad-dialog-x py-pad-dialog-y text-ink shadow-modal focus:outline-none">
           <form onSubmit={handleSubmit} className="flex flex-col gap-6">
             <Dialog.Title className="text-dialog-title font-bold tracking-tighter text-ink">
