@@ -10369,7 +10369,7 @@ async function runFileRm(args: Arguments): Promise<void> {
   process.stdout.write(
     `Tombstoned ${result.name}. It is hidden from listings and downloads now, and stays restorable with cswarm file restore until ${
       result.restorable_until ?? "the 30-day window ends"
-    }.\nAfter that the purge permanently deletes the bytes; existing download URLs expire on their own 5-minute clock.\n`,
+    }.\nAfter that it cannot be restored, and its stored copy is erased by a background process; existing download URLs expire on their own 5-minute clock.\n`,
   );
 }
 
