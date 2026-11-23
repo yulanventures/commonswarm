@@ -58,7 +58,29 @@ export function deploymentOriginHash(url: string): string {
   return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0").slice(0, 4)}`;
 }
 
-/** Storage key prefixes owned by `/app`'s multi-account mode (mirrored from `site/src/lib/multi-account.ts`). */
+/** Canonical multi-account storage key builders shared with `/app` (`site/src/lib/multi-account.ts`). */
+export const slotStorageKey = (originHash: string, loginId: string): string =>
+  `commonswarm:auth:v1:${originHash}:login:${loginId}`;
+
+export const slotStoragePrefix = (originHash: string): string =>
+  `commonswarm:auth:v1:${originHash}:login:`;
+
+export const accountsStorageKey = (originHash: string): string =>
+  `commonswarm:accounts:v1:${originHash}`;
+
+export const activeAccountStorageKey = (originHash: string): string =>
+  `commonswarm:active-account:v1:${originHash}`;
+
+export const tabAccountStorageKey = (originHash: string): string =>
+  `commonswarm:tab-account:v1:${originHash}`;
+
+export const attemptStorageKey = (originHash: string, attemptId: string): string =>
+  `commonswarm:auth:v1:${originHash}:attempt:${attemptId}`;
+
+export const attemptStoragePrefix = (originHash: string): string =>
+  `commonswarm:auth:v1:${originHash}:attempt:`;
+
+/** Storage key namespace prefixes owned by `/app`'s multi-account mode. */
 export const MULTI_ACCOUNT_STORAGE_KEY_PREFIXES = [
   "commonswarm:auth:v1:",
   "commonswarm:accounts:v1:",
@@ -69,11 +91,11 @@ export const MULTI_ACCOUNT_STORAGE_KEY_PREFIXES = [
 export function multiAccountStorageKeyPrefixesForDeployment(url: string): readonly string[] {
   const originHash = deploymentOriginHash(url);
   return [
-    `commonswarm:auth:v1:${originHash}:login:`,
-    `commonswarm:auth:v1:${originHash}:attempt:`,
-    `commonswarm:accounts:v1:${originHash}`,
-    `commonswarm:active-account:v1:${originHash}`,
-    `commonswarm:tab-account:v1:${originHash}`,
+    slotStoragePrefix(originHash),
+    attemptStoragePrefix(originHash),
+    accountsStorageKey(originHash),
+    activeAccountStorageKey(originHash),
+    tabAccountStorageKey(originHash),
   ];
 }
 
@@ -82,46 +104,54 @@ export interface StorageKeysLike {
   key(index: number): string | null;
 }
 
+export type MultiAccountProbeResult = "in_use" | "absent" | "unknown";
+
 /**
  * Pure check for whether multi-account storage keys exist in `storage`.
+ * Distinguishes `"absent"` (complete readable scan found no keys) from `"unknown"`
+ * (storage unavailable or threw at any point during enumeration), so callers can fail closed.
  * When `deploymentUrl` is supplied, checks keys scoped to that deployment's origin hash;
  * otherwise checks any key matching `MULTI_ACCOUNT_STORAGE_KEY_PREFIXES`.
  */
 export function multiAccountInUse(
   storage: StorageKeysLike | null | undefined,
   deploymentUrl?: string,
-): boolean {
-  if (!storage) return false;
+): MultiAccountProbeResult {
+  if (!storage) return "unknown";
   try {
     const length = storage.length;
+    if (typeof length !== "number" || !Number.isInteger(length) || length < 0) return "unknown";
+    if (typeof storage.key !== "function") return "unknown";
     if (deploymentUrl !== undefined) {
       const originHash = deploymentOriginHash(deploymentUrl);
       const exactKeys = new Set([
-        `commonswarm:accounts:v1:${originHash}`,
-        `commonswarm:active-account:v1:${originHash}`,
-        `commonswarm:tab-account:v1:${originHash}`,
+        accountsStorageKey(originHash),
+        activeAccountStorageKey(originHash),
+        tabAccountStorageKey(originHash),
       ]);
-      const loginPrefix = `commonswarm:auth:v1:${originHash}:login:`;
-      const attemptPrefix = `commonswarm:auth:v1:${originHash}:attempt:`;
+      const loginPrefix = slotStoragePrefix(originHash);
+      const attemptPrefix = attemptStoragePrefix(originHash);
       for (let i = 0; i < length; i += 1) {
         const key = storage.key(i);
         if (key === null) continue;
+        if (typeof key !== "string") return "unknown";
         if (exactKeys.has(key) || key.startsWith(loginPrefix) || key.startsWith(attemptPrefix)) {
-          return true;
+          return "in_use";
         }
       }
-      return false;
+      return "absent";
     }
     for (let i = 0; i < length; i += 1) {
       const key = storage.key(i);
       if (key === null) continue;
+      if (typeof key !== "string") return "unknown";
       if (MULTI_ACCOUNT_STORAGE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
-        return true;
+        return "in_use";
       }
     }
-    return false;
+    return "absent";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -192,7 +222,6 @@ export interface BrowserSession {
   verifiedSession(): Promise<Session | null>;
   boundedAuth<T>(operation: Promise<T>): Promise<T>;
   signOut(): Promise<void>;
-  dispose(): void;
 }
 
 export interface BrowserSessionLocksUnavailable {
@@ -502,7 +531,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   if ((client as unknown as { rest?: { retry?: boolean } }).rest) {
     (client as unknown as { rest: { retry: boolean } }).rest.retry = false;
   }
-  const { data: authSubscription } = client.auth.onAuthStateChange((event) => {
+  client.auth.onAuthStateChange((event) => {
     if (event === "SIGNED_OUT") { deadSession = false; removalSnapshot = null; refreshRetryAfter = 0; }
     else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") deadSession = false;
   });
@@ -557,17 +586,6 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     deadSession = false;
   }
 
-  function dispose(): void {
-    if (storageRetryTimer !== undefined) {
-      clearTimeout(storageRetryTimer);
-      storageRetryTimer = undefined;
-    }
-    if (typeof globalThis.removeEventListener === "function") {
-      globalThis.removeEventListener("storage", onStorage);
-    }
-    authSubscription.subscription.unsubscribe();
-  }
-
   return {
     ok: true,
     client,
@@ -576,6 +594,5 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     verifiedSession,
     boundedAuth,
     signOut,
-    dispose,
   };
 }

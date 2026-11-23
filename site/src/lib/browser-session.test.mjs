@@ -18,6 +18,14 @@ import {
   resolveDeployment,
   sessionStorageKeyForDeployment,
 } from "../../../shared/browser-session/index.js";
+import {
+  accountsStorageKey,
+  activeAccountStorageKey,
+  attemptStorageKey,
+  deploymentOriginHash as siteDeploymentOriginHash,
+  slotStorageKey,
+  tabAccountStorageKey,
+} from "./multi-account.ts";
 
 function memoryStorage(initial = {}) {
   const entries = new Map(Object.entries(initial));
@@ -160,8 +168,8 @@ test("allowProcessLockFallback: false creates client with navigatorLock and dete
     assert.equal(capturedOptions?.auth?.lockAcquireTimeout, -1);
     assert.equal(capturedOptions?.auth?.lock, navigatorLock);
     assert.equal(result.client.rest?.retry, false);
+    assert.equal("dispose" in result, false, "dispose is deferred until a product caller exists");
     await result.client.auth.getSession();
-    result.dispose();
     await result.client.auth.dispose();
   });
 });
@@ -189,18 +197,19 @@ test("allowProcessLockFallback: true falls back to processLock when navigator.lo
     if (!result.ok) return;
     assert.equal(capturedOptions?.auth?.detectSessionInUrl, true);
     assert.equal(capturedOptions?.auth?.lock, processLock);
+    assert.equal("dispose" in result, false);
     await result.client.auth.getSession();
-    result.dispose();
     await result.client.auth.dispose();
   });
 });
 
-test("multiAccountInUse detects all multi-account key shapes and ignores single-account or other deployments", () => {
+test("multiAccountInUse distinguishes in_use, absent, and unknown across real key producers and failing storage", () => {
   const url = "https://api.commonswarm.com";
   const otherUrl = "https://staging.commonswarm.com";
   const hash = deploymentOriginHash(url);
   const otherHash = deploymentOriginHash(otherUrl);
 
+  assert.equal(siteDeploymentOriginHash, deploymentOriginHash, "site re-exports the shared origin hash");
   assert.deepEqual(MULTI_ACCOUNT_STORAGE_KEY_PREFIXES, [
     "commonswarm:auth:v1:",
     "commonswarm:accounts:v1:",
@@ -215,30 +224,62 @@ test("multiAccountInUse detects all multi-account key shapes and ignores single-
     `commonswarm:tab-account:v1:${hash}`,
   ]);
 
-  assert.equal(multiAccountInUse(null), false);
-  assert.equal(multiAccountInUse(undefined), false);
-  assert.equal(multiAccountInUse(memoryStorage({})), false);
-  assert.equal(multiAccountInUse(memoryStorage({ "sb-api-auth-token": "{}", theme: "dark" })), false);
-  assert.equal(multiAccountInUse(memoryStorage({ "sb-api-auth-token": "{}" }), url), false);
+  assert.equal(multiAccountInUse(null), "unknown");
+  assert.equal(multiAccountInUse(undefined), "unknown");
+  assert.equal(multiAccountInUse(null, url), "unknown");
+  assert.equal(multiAccountInUse(undefined, url), "unknown");
+  assert.equal(multiAccountInUse(memoryStorage({})), "absent");
+  assert.equal(multiAccountInUse(memoryStorage({ "sb-api-auth-token": "{}", theme: "dark" })), "absent");
+  assert.equal(multiAccountInUse(memoryStorage({ "sb-api-auth-token": "{}" }), url), "absent");
+
+  const throwingLength = {
+    get length() {
+      throw new Error("SecurityError: storage denied");
+    },
+    key() {
+      return null;
+    },
+  };
+  assert.equal(multiAccountInUse(throwingLength), "unknown");
+  assert.equal(multiAccountInUse(throwingLength, url), "unknown");
+
+  const throwingFirstKey = {
+    length: 1,
+    key() {
+      throw new Error("SecurityError: key denied");
+    },
+  };
+  assert.equal(multiAccountInUse(throwingFirstKey), "unknown");
+  assert.equal(multiAccountInUse(throwingFirstKey, url), "unknown");
+
+  const throwingLaterKey = {
+    length: 3,
+    key(index) {
+      if (index === 0) return "sb-api-auth-token";
+      throw new Error("storage broke mid-enumeration");
+    },
+  };
+  assert.equal(multiAccountInUse(throwingLaterKey), "unknown");
+  assert.equal(multiAccountInUse(throwingLaterKey, url), "unknown");
 
   const matchingKeys = [
-    `commonswarm:accounts:v1:${hash}`,
-    `commonswarm:active-account:v1:${hash}`,
-    `commonswarm:tab-account:v1:${hash}`,
-    `commonswarm:auth:v1:${hash}:login:login-1`,
-    `commonswarm:auth:v1:${hash}:attempt:attempt-1`,
+    accountsStorageKey(hash),
+    activeAccountStorageKey(hash),
+    tabAccountStorageKey(hash),
+    slotStorageKey(hash, "login-1"),
+    attemptStorageKey(hash, "attempt-1"),
   ];
   for (const key of matchingKeys) {
     const store = memoryStorage({ "sb-api-auth-token": "{}", [key]: "1" });
-    assert.equal(multiAccountInUse(store), true, `unscoped check must match ${key}`);
-    assert.equal(multiAccountInUse(store, url), true, `deployment-scoped check must match ${key}`);
-    assert.equal(multiAccountInUse(store, otherUrl), false, `other deployment must not match ${key}`);
+    assert.equal(multiAccountInUse(store), "in_use", `unscoped check must match ${key}`);
+    assert.equal(multiAccountInUse(store, url), "in_use", `deployment-scoped check must match ${key}`);
+    assert.equal(multiAccountInUse(store, otherUrl), "absent", `other deployment must not match ${key}`);
   }
 
-  const otherStore = memoryStorage({ [`commonswarm:accounts:v1:${otherHash}`]: "{}" });
-  assert.equal(multiAccountInUse(otherStore), true);
-  assert.equal(multiAccountInUse(otherStore, url), false);
-  assert.equal(multiAccountInUse(otherStore, otherUrl), true);
+  const otherStore = memoryStorage({ [accountsStorageKey(otherHash)]: "{}" });
+  assert.equal(multiAccountInUse(otherStore), "in_use");
+  assert.equal(multiAccountInUse(otherStore, url), "absent");
+  assert.equal(multiAccountInUse(otherStore, otherUrl), "in_use");
 });
 
 test("shared browser-session PostgREST refusal schedules locked verification, never direct sign-out", async () => {

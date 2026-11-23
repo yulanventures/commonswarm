@@ -1,8 +1,13 @@
 // @ts-check
 import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "astro/config";
 
 const SITE_ORIGIN = "https://commonswarm.com";
+const SITE_ROOT = fileURLToPath(new URL(".", import.meta.url));
+const SHARED_BROWSER_SESSION_ROOT = fileURLToPath(
+  new URL("../shared/browser-session", import.meta.url),
+);
 
 /** @type {import("astro").Astro.Integration} */
 // The sitemap lists pages meant to be found. Left out: the not-found page (it answers every wrong
@@ -67,7 +72,7 @@ export default defineConfig({
   vite: {
     server: {
       fs: {
-        allow: [".."],
+        allow: [SITE_ROOT, SHARED_BROWSER_SESSION_ROOT],
       },
     },
   },
