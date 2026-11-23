@@ -3,7 +3,7 @@ import { CommandTimer, slowCommandLine } from "./slow-command-log.ts";
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
@@ -16,7 +16,7 @@ import {
   REGISTRATION_SEAT_REVOKED,
   REGISTRATION_TOKEN_ALREADY_USED,
 } from "./registration-conflicts.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
 import { H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE } from "../../../src/h0/verbs.ts";
 import {
   agentCredentialRevoked,
@@ -1544,16 +1544,16 @@ if (
   throw new Error("command test hooks refuse to run unless SWARM_ENV=test");
 }
 
-export const db = postgres(databaseUrl, withDatabaseTls({
+export const db = createEdgeDatabase(databaseUrl, {
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
    * the durable fix is SWARM_DATABASE_URL on the transaction pooler (6543). */
   max: 2,
-  prepare: false,
   idle_timeout: 3,
-  connect_timeout: 10,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+  connect_timeout: 5,
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
+
 /**
  * Storage adapter for file artifacts (§7). Raw REST with the service role key:
  * the bucket is service-role-only (★R12), so every signed URL is minted here

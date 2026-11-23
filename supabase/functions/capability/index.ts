@@ -22,9 +22,9 @@
  * member-read-view identifiers, or for any streaming/subscription API, must
  * return zero. It answers one request with one JSON object and closes.
  */
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -220,12 +220,11 @@ const ALLOWED_ORIGINS = new Set(
   configuredOrigins.length > 0 ? configuredOrigins : [DEFAULT_ALLOWED_ORIGIN],
 );
 
-const db = postgres(databaseUrl, withDatabaseTls({
+const db = createEdgeDatabase(databaseUrl, {
   max: 4,
-  prepare: false,
-  idle_timeout: 20,
-  connect_timeout: 10,
-}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+  idle_timeout: 10,
+  connect_timeout: 5,
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
 
 interface ProjectionRow {
   capability_id: string;

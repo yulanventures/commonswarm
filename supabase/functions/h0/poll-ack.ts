@@ -16,9 +16,9 @@
  * not apply. ack calls ackAgentDelivery and advances delivery state only there.
  * ackBatch closes the batch row and writes no delivery column.
  */
-import postgres from "npm:postgres@3.4.9";
+import type postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+import { createEdgeDatabase } from "../_shared/database.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -109,12 +109,11 @@ function h0Database(): postgres.Sql {
       "h0 function requires SWARM_DATABASE_URL/SUPABASE_DB_URL",
     );
   }
-  database = postgres(databaseUrl, withDatabaseTls({
+  database = createEdgeDatabase(databaseUrl, {
     max: 1,
-    prepare: false,
     idle_timeout: 3,
-    connect_timeout: 10,
-  }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
+    connect_timeout: 5,
+  }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
   return database;
 }
 
