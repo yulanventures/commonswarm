@@ -3,8 +3,8 @@ export const APP_ORIGIN = "https://commonswarm.com";
 export const HELP_URL = "https://commonswarm.com/support";
 export const OVERRIDE_ENV_VAR = "COMMONSWARM_DESKTOP_URL";
 
-export type NavigationDisposition = "in_app" | "external" | "blocked";
-export type NavigationSource = "navigate" | "new_window";
+export type NavigationDisposition = "in_app" | "external" | "blocked" | "ignore";
+export type NavigationSource = "navigate" | "redirect" | "new_window";
 
 export interface SignInPathEntry {
   /**
@@ -108,7 +108,51 @@ export interface AppOriginOptions {
 
 export interface NavigationPolicyOptions extends AppOriginOptions {
   readonly source: NavigationSource;
-  readonly currentUrl?: string | null;
+  /**
+   * Whether the frame being navigated (or requesting a new window) is the main frame.
+   */
+  readonly isMainFrame: boolean;
+  /**
+   * Whether the frame that initiated this navigation is the window's own main frame.
+   */
+  readonly initiatorIsMainFrame?: boolean;
+  /**
+   * Serialized origin of the initiating frame (WebFrameMain.origin).
+   */
+  readonly initiatorOrigin?: string | null;
+  /**
+   * Optional full URL of the initiating frame (WebFrameMain.url).
+   * Used to verify interactive sign-in steps and cross-check origin consistency.
+   */
+  readonly initiatorUrl?: string | null;
+  /**
+   * True only when the main frame is currently showing the bundled offline error page.
+   */
+  readonly initiatorIsOfflinePage?: boolean;
+  /**
+   * For source === "redirect": whether this redirect continues a trusted in-flight
+   * main-frame navigation rather than an arbitrary or untracked request.
+   */
+  readonly continuingTrustedNavigation?: boolean;
+  /**
+   * For source === "redirect": the URL of the previous hop in the in-flight navigation chain.
+   */
+  readonly previousNavigationUrl?: string | null;
+  /**
+   * Whether a real browser-level user gesture authorized an explicit external open.
+   */
+  readonly hasUserGesture?: boolean;
+  /**
+   * For source === "new_window": whether the window's main frame currently has any subframes.
+   * Must be explicitly false for any window-open request to be honoured (fails closed when true or omitted).
+   */
+  readonly mainFrameHasSubframes?: boolean;
+}
+
+export interface PermissionPolicyOptions extends AppOriginOptions {
+  readonly permission: string;
+  readonly requestingUrl?: string | null;
+  readonly isMainFrame: boolean;
 }
 
 function parseUrl(raw: string): URL | null {
@@ -177,7 +221,7 @@ function matchesSignInPath(pathname: string, prefix: string): boolean {
   return pathname === prefix;
 }
 
-function isAllowedSignInUrl(url: URL): boolean {
+function isAllowedSignInParsedUrl(url: URL): boolean {
   if (url.protocol !== "https:" || url.port !== "" || hasCredentials(url)) {
     return false;
   }
@@ -186,55 +230,111 @@ function isAllowedSignInUrl(url: URL): boolean {
   return entry.paths.some((pathEntry) => matchesSignInPath(url.pathname, pathEntry.prefix));
 }
 
-function isSignInOriginatingUrl(
-  rawCurrentUrl: string | null | undefined,
-  options?: AppOriginOptions,
+export function isAllowedSignInUrl(rawUrl: string): boolean {
+  const parsed = parseUrl(rawUrl);
+  return parsed !== null && isAllowedSignInParsedUrl(parsed);
+}
+
+function isAppInitiator(options: NavigationPolicyOptions): boolean {
+  if (!options.initiatorIsMainFrame) return false;
+  if (!options.initiatorOrigin || !isAppOriginUrl(options.initiatorOrigin, options)) {
+    return false;
+  }
+  if (options.initiatorUrl && !isAppOriginUrl(options.initiatorUrl, options)) {
+    return false;
+  }
+  return true;
+}
+
+function isSignInInitiator(options: NavigationPolicyOptions): boolean {
+  if (!options.initiatorIsMainFrame) return false;
+  if (!options.initiatorUrl) return false;
+  const parsed = parseUrl(options.initiatorUrl);
+  if (!parsed || !isAllowedSignInParsedUrl(parsed)) return false;
+  if (options.initiatorOrigin && parsed.origin !== options.initiatorOrigin) {
+    return false;
+  }
+  return true;
+}
+
+function isTrustedRedirectHop(
+  previousUrl: string | null | undefined,
+  options: AppOriginOptions,
 ): boolean {
-  if (!rawCurrentUrl) return false;
-  if (isAppOriginUrl(rawCurrentUrl, options)) return true;
-  const parsed = parseUrl(rawCurrentUrl);
-  if (!parsed) return false;
-  return isAllowedSignInUrl(parsed);
+  if (!previousUrl) return false;
+  if (isAppOriginUrl(previousUrl, options)) return true;
+  return isAllowedSignInUrl(previousUrl);
 }
 
 /**
- * Classify a navigation target:
+ * Classify a navigation, redirect, or window-open target:
+ * - "ignore": subframe navigation or redirect (top-level policy does not apply; no OS hand-off)
  * - "in_app":
- *   - https://commonswarm.com (any path) or an allowed local dev origin, for any source
- *   - for source === "navigate" only: explicit sign-in paths on SIGN_IN_HOSTS when the window
- *     currently shows the app origin or is already on an allowed sign-in URL
- * - "external": any other https: URL (including sign-in hosts opened via new_window)
- * - "blocked": http: to non-local hosts, file:, javascript:, data:, custom schemes, credentials, malformed input
+ *   - "navigate": app main frame to app origin or SIGN_IN_HOSTS; main frame on an allowed sign-in
+ *     URL continuing to SIGN_IN_HOSTS or returning to app origin; bundled offline page retrying app origin
+ *   - "redirect": continuation of a trusted main-frame navigation to app origin or SIGN_IN_HOSTS
+ *   - "new_window": app main frame with no subframes opening an app-origin URL (loaded in the main window)
+ * - "external": well-formed https: URL without credentials on an explicit user-gesture open
+ *   ("navigate" or "new_window") initiated by the app's own main frame at the app origin
+ *   (and for "new_window", only when mainFrameHasSubframes is explicitly false).
+ *   Redirects never return "external".
+ * - "blocked": everything else (cancelled locally, never handed to shell.openExternal)
  */
 export function classifyNavigation(
   rawUrl: string,
   options: NavigationPolicyOptions,
 ): NavigationDisposition {
+  if (!options.isMainFrame) {
+    return options.source === "new_window" ? "blocked" : "ignore";
+  }
+
   const parsed = parseUrl(rawUrl);
   if (!parsed || hasCredentials(parsed)) return "blocked";
 
-  if (options.allowedDevOrigin) {
-    const devOrigin = parseUrl(options.allowedDevOrigin);
-    if (devOrigin && isAllowedLocalDevUrl(devOrigin) && parsed.origin === devOrigin.origin) {
-      return "in_app";
-    }
-  }
+  const targetIsAppOrigin = isAppOriginUrl(parsed.href, options);
 
-  if (parsed.protocol !== "https:") return "blocked";
-  if (!parsed.hostname) return "blocked";
-
-  if (parsed.port === "") {
-    if (parsed.hostname === "commonswarm.com") return "in_app";
+  if (options.source === "redirect") {
+    if (options.continuingTrustedNavigation !== true) return "blocked";
+    if (options.initiatorIsMainFrame === false) return "blocked";
+    if (targetIsAppOrigin) return "in_app";
     if (
-      options.source === "navigate" &&
-      isAllowedSignInUrl(parsed) &&
-      isSignInOriginatingUrl(options.currentUrl, options)
+      isAllowedSignInParsedUrl(parsed) &&
+      isTrustedRedirectHop(options.previousNavigationUrl, options)
     ) {
       return "in_app";
     }
+    return "blocked";
   }
 
-  return "external";
+  if (options.source === "new_window") {
+    if (!isAppInitiator(options)) return "blocked";
+    if (options.mainFrameHasSubframes !== false) return "blocked";
+    if (targetIsAppOrigin) return "in_app";
+    if (options.hasUserGesture === true && isAllowedExternalUrl(parsed.href)) {
+      return "external";
+    }
+    return "blocked";
+  }
+
+  // source === "navigate"
+  if (isAppInitiator(options)) {
+    if (targetIsAppOrigin || isAllowedSignInParsedUrl(parsed)) return "in_app";
+    if (options.hasUserGesture === true && isAllowedExternalUrl(parsed.href)) {
+      return "external";
+    }
+    return "blocked";
+  }
+
+  if (isSignInInitiator(options)) {
+    if (targetIsAppOrigin || isAllowedSignInParsedUrl(parsed)) return "in_app";
+    return "blocked";
+  }
+
+  if (options.initiatorIsMainFrame === true && options.initiatorIsOfflinePage === true) {
+    return targetIsAppOrigin ? "in_app" : "blocked";
+  }
+
+  return "blocked";
 }
 
 /**
@@ -258,10 +358,22 @@ export function isAppOriginUrl(
 }
 
 /**
- * Guard for shell.openExternal: allow https: URLs only.
+ * Guard for shell.openExternal: allow well-formed https: URLs without credentials only.
  */
 export function isAllowedExternalUrl(rawUrl: string): boolean {
   const parsed = parseUrl(rawUrl);
   if (!parsed || hasCredentials(parsed)) return false;
   return parsed.protocol === "https:" && parsed.hostname.length > 0;
+}
+
+/**
+ * Permission decision for Electron permission request and check handlers.
+ * Allows notifications only for the app origin from the main frame; fails closed
+ * on missing, empty, foreign, or subframe requests.
+ */
+export function isPermissionAllowed(options: PermissionPolicyOptions): boolean {
+  if (options.permission !== "notifications") return false;
+  if (!options.isMainFrame) return false;
+  if (!options.requestingUrl) return false;
+  return isAppOriginUrl(options.requestingUrl, options);
 }
