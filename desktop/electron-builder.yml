@@ -1,0 +1,25 @@
+appId: com.commonswarm.desktop
+productName: CommonSwarm
+directories:
+  buildResources: build
+  output: release
+files:
+  - dist/**/*
+  - "!dist/**/*.test.*"
+  - static/**/*
+  - package.json
+afterPack: scripts/after-pack.cjs
+mac:
+  icon: build/icon.icns
+  category: public.app-category.productivity
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  notarize: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+dmg:
+  sign: false
