@@ -103,7 +103,7 @@ export async function finishCommandFailure(
       // Reporting a diagnostic failure must not mask the command failure either.
     }
   }
-  return failure.reason === "lock_timeout"
+  return failure.reason === "lock_timeout" || failure.db_code === "EDGE_DATABASE_STALLED"
     ? { status: 503, body: { error: "temporarily_unavailable" } }
     : { status: 500, body: { error: "internal_error" } };
 }

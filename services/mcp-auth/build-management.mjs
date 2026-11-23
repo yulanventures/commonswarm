@@ -25,15 +25,19 @@ await build({
       });
       builder.onLoad({ filter: /\/supabase\/functions\/command\/index\.ts$/ }, async (args) => {
         const source = await readFile(args.path, "utf8");
-        const pool = /export const db = postgres\(databaseUrl, withDatabaseTls\(\{[\s\S]*?\}, Deno\.env\.get\("SWARM_DATABASE_TLS_CA_B64"\)\)\);/gu;
+        const pool = /export const db = createEdgeDatabase\(databaseUrl, \{[\s\S]*?\}, Deno\.env\.get\("SWARM_DATABASE_TLS_CA_B64"\)\);/gu;
         const matches = [...source.matchAll(pool)];
         if (matches.length !== 1 || !/\bmax: 2,/u.test(matches[0][0])) {
           throw new Error("management pool adapter requires exactly one max-2 pool");
         }
         return { loader: "ts", contents: source.replace(pool, (value) =>
-          value.replace("db = postgres(", "db = lazyManagementDatabase(() => postgres(")
-            .replace("withDatabaseTls(", "managementDatabaseOptions(")
-            .replace(/\);$/u, "));")) };
+          value.replace(
+            "db = createEdgeDatabase(databaseUrl, {",
+            "db = lazyManagementDatabase(() => createEdgeDatabase(databaseUrl, managementDatabaseOptions({",
+          ).replace(
+            /\}, Deno\.env\.get\("SWARM_DATABASE_TLS_CA_B64"\)\);$/u,
+            '}), Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));',
+          )) };
       });
     },
   }],

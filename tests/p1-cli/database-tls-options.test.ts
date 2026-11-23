@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import tls from "node:tls";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { build as esbuild } from "esbuild";
 import postgres from "postgres";
 import {
   EDGE_DATABASE_CONNECT_TIMEOUT_SECONDS,
@@ -16,8 +17,82 @@ import {
   edgeDatabaseOptions,
   withDatabaseTls,
 } from "../../supabase/functions/_shared/database-options.js";
+import {
+  classifyCommandFailure,
+  dbCode,
+  durableCommandFailure,
+  finishCommandFailure,
+  type DurableCommandFailure,
+} from "../../supabase/functions/command/failures.js";
+import {
+  extractSafeDiagnostics,
+  firstForbiddenDiagnosticKey,
+  formatReadFailureLog,
+  isRetryableErrorCode,
+  publicReadErrorBody,
+} from "../../supabase/functions/read/diagnostics.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const MATCHING_HOST = "localhost";
+const WRONG_DNS_HOST = "wrong.commonswarm.internal";
+
+interface LoadedDatabaseModule {
+  createEdgeDatabase: (
+    databaseUrl: string,
+    config: Record<string, unknown>,
+    encodedCa?: string,
+  ) => postgres.Sql;
+  EdgeDatabaseStalledError: new () => Error & { code: string };
+  EDGE_DATABASE_STALLED_CODE: string;
+  INVALID_DATABASE_CONFIGURATION_MESSAGE: string;
+  EDGE_DATABASE_STALL_TIMEOUT_MS: number;
+  EDGE_DATABASE_CALL_CEILING_MS: number;
+  EDGE_DATABASE_REPLACE_COOLDOWN_MS: number;
+  EDGE_DATABASE_MAX_RETIRED_POOLS: number;
+}
+
+let cachedDbModule: Promise<{ mod: LoadedDatabaseModule; dir: string }> | null = null;
+
+/** Bundle supabase/functions/_shared/database.ts for Node 22 using the same esbuild mapping as mcp-auth. */
+async function loadDatabaseModule(): Promise<LoadedDatabaseModule> {
+  if (!cachedDbModule) {
+    cachedDbModule = (async () => {
+      const dir = await mkdtemp(join(tmpdir(), "edge-db-node-bundle-"));
+      const outfile = join(dir, "database.mjs");
+      const postgresHref = pathToFileURL(join(repoRoot, "node_modules/postgres/src/index.js")).href;
+      await esbuild({
+        absWorkingDir: repoRoot,
+        entryPoints: ["supabase/functions/_shared/database.ts"],
+        outfile,
+        bundle: true,
+        platform: "node",
+        target: "node22",
+        format: "esm",
+        banner: { js: "const __denoEnvGet = () => undefined;" },
+        define: { "Deno.env.get": "__denoEnvGet" },
+        plugins: [{
+          name: "deno-npm-postgres",
+          setup(builder) {
+            builder.onResolve({ filter: /^npm:postgres@/ }, () => ({
+              path: postgresHref,
+              external: true,
+            }));
+          },
+        }],
+      });
+      const mod = await import(pathToFileURL(outfile).href) as LoadedDatabaseModule;
+      return { mod, dir };
+    })();
+  }
+  return (await cachedDbModule).mod;
+}
+
+test.after(async () => {
+  if (cachedDbModule) {
+    const { dir } = await cachedDbModule;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("database options decode and verify a configured private CA", () => {
   const pem = "-----BEGIN CERTIFICATE-----\ntest-only\n-----END CERTIFICATE-----\n";
@@ -29,7 +104,7 @@ test("database options decode and verify a configured private CA", () => {
   assert.throws(() => withDatabaseTls({}, btoa("not a certificate")), /PEM certificate/);
 });
 
-test("edgeDatabaseOptions sets bounded recovery defaults and preserves pool size", () => {
+test("edgeDatabaseOptions sets plain postgres.js defaults, preserves pool size and TLS, and sets no custom socket", () => {
   const pem = "-----BEGIN CERTIFICATE-----\ntest-only\n-----END CERTIFICATE-----\n";
   const opts = edgeDatabaseOptions({ max: 2 }, btoa(pem));
   assert.equal(opts.max, 2);
@@ -40,14 +115,26 @@ test("edgeDatabaseOptions sets bounded recovery defaults and preserves pool size
   assert.equal(opts.keep_alive, EDGE_DATABASE_KEEP_ALIVE_SECONDS);
   assert.equal(opts.backoff(0), 0);
   assert.equal(opts.backoff(10), 0);
-  assert.equal(typeof opts.socket, "function");
+  assert.equal("socket" in opts, false, "edgeDatabaseOptions must never attach a custom socket factory");
   assert.deepEqual(opts.ssl, { ca: pem, rejectUnauthorized: true });
+
+  const explicit = edgeDatabaseOptions({
+    max: 2,
+    ssl: { ca: pem, servername: "db.commonswarm.internal", rejectUnauthorized: true },
+  }, btoa(pem));
+  assert.equal("socket" in explicit, false);
+  assert.deepEqual(explicit.ssl, {
+    ca: pem,
+    servername: "db.commonswarm.internal",
+    rejectUnauthorized: true,
+  });
 
   const noTls = edgeDatabaseOptions({ max: 1, idle_timeout: 10, connect_timeout: 4 }, undefined);
   assert.equal(noTls.max, 1);
   assert.equal(noTls.idle_timeout, 10);
   assert.equal(noTls.connect_timeout, 4);
   assert.equal("ssl" in noTls, false);
+  assert.equal("socket" in noTls, false);
 });
 
 test("every edge function constructs its Postgres client via the shared createEdgeDatabase helper", async () => {
@@ -67,26 +154,211 @@ test("every edge function constructs its Postgres client via the shared createEd
   }
 });
 
+interface TlsTestPki {
+  dir: string;
+  trustedCa: string;
+  matchingPair: { key: string; cert: string };
+  wrongNamePair: { key: string; cert: string };
+  untrustedCaPair: { key: string; cert: string };
+  cleanup: () => Promise<void>;
+}
+
+function runOpenssl(args: string[]): void {
+  const res = spawnSync("openssl", args, { encoding: "utf8", timeout: 30_000 });
+  assert.equal(res.status, 0, `openssl ${args[0]} failed: ${res.stderr}`);
+}
+
+async function createTestPki(): Promise<TlsTestPki> {
+  const dir = await mkdtemp(join(tmpdir(), "edge-db-pki-"));
+  try {
+    const trustedCaKey = join(dir, "ca.key");
+    const trustedCaCert = join(dir, "ca.crt");
+    const untrustedCaKey = join(dir, "untrusted-ca.key");
+    const untrustedCaCert = join(dir, "untrusted-ca.crt");
+
+    runOpenssl([
+      "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", trustedCaKey, "-out", trustedCaCert,
+      "-days", "1", "-subj", "/CN=CommonSwarm Test Internal CA",
+    ]);
+    runOpenssl([
+      "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", untrustedCaKey, "-out", untrustedCaCert,
+      "-days", "1", "-subj", "/CN=CommonSwarm Untrusted CA",
+    ]);
+
+    const issueLeaf = async (
+      name: string,
+      dnsName: string,
+      san: string,
+      caCertPath: string,
+      caKeyPath: string,
+    ): Promise<{ key: string; cert: string }> => {
+      const keyPath = join(dir, `${name}.key`);
+      const csrPath = join(dir, `${name}.csr`);
+      const extPath = join(dir, `${name}.ext`);
+      const certPath = join(dir, `${name}.crt`);
+      await writeFile(extPath, `subjectAltName=${san}\nbasicConstraints=CA:FALSE\n`, "utf8");
+      runOpenssl([
+        "req", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", keyPath, "-out", csrPath,
+        "-subj", `/CN=${dnsName}`,
+      ]);
+      runOpenssl([
+        "x509", "-req", "-in", csrPath,
+        "-CA", caCertPath, "-CAkey", caKeyPath, "-CAcreateserial",
+        "-out", certPath, "-days", "1", "-extfile", extPath,
+      ]);
+      return {
+        key: await readFile(keyPath, "utf8"),
+        cert: await readFile(certPath, "utf8"),
+      };
+    };
+
+    const matchingPair = await issueLeaf(
+      "matching-leaf",
+      MATCHING_HOST,
+      `DNS:${MATCHING_HOST},IP:127.0.0.1`,
+      trustedCaCert,
+      trustedCaKey,
+    );
+    const wrongNamePair = await issueLeaf(
+      "wrong-name-leaf",
+      WRONG_DNS_HOST,
+      `DNS:${WRONG_DNS_HOST}`,
+      trustedCaCert,
+      trustedCaKey,
+    );
+    const untrustedCaPair = await issueLeaf(
+      "untrusted-leaf",
+      MATCHING_HOST,
+      `DNS:${MATCHING_HOST},IP:127.0.0.1`,
+      untrustedCaCert,
+      untrustedCaKey,
+    );
+
+    return {
+      dir,
+      trustedCa: await readFile(trustedCaCert, "utf8"),
+      matchingPair,
+      wrongNamePair,
+      untrustedCaPair,
+      cleanup: () => rm(dir, { recursive: true, force: true }),
+    };
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+interface FakePgQueryEvent {
+  cid: number;
+  text: string;
+  isSimple: boolean;
+  respond: (tag?: string, rows?: Array<Record<string, string>>) => void;
+}
+
 interface FakePgServer {
   server: net.Server;
   port: number;
   getConnCount: () => number;
+  getOpenRawCount: () => number;
+  getOpenTlsCount: () => number;
+  getClosedRawCount: () => number;
+  getClosedTlsCount: () => number;
+  getDecryptedBytes: () => number;
+  getSniNames: () => string[];
+  destroyOldestSockets: (count?: number) => void;
   closeAll: () => void;
 }
 
+function pgWireResponse(
+  tagText: string,
+  inTx: boolean,
+  isSimple: boolean,
+  rows?: Array<Record<string, string>>,
+): Buffer {
+  const parts: Buffer[] = [];
+  if (!isSimple) {
+    parts.push(Buffer.from([0x31, 0, 0, 0, 4])); // ParseComplete
+  }
+  if (rows && rows.length > 0) {
+    const columns = Object.keys(rows[0]!);
+    // RowDescription ('T')
+    const colBufs: Buffer[] = [];
+    for (const col of columns) {
+      const nameBuf = Buffer.from(`${col}\0`, "utf8");
+      const meta = Buffer.alloc(18);
+      meta.writeUInt32BE(25, 6); // text oid
+      meta.writeInt16BE(-1, 10);
+      meta.writeInt32BE(-1, 12);
+      colBufs.push(nameBuf, meta);
+    }
+    const rdBody = Buffer.concat([Buffer.from([(columns.length >> 8) & 0xff, columns.length & 0xff]), ...colBufs]);
+    const rd = Buffer.alloc(5 + rdBody.length);
+    rd[0] = 0x54;
+    rd.writeUInt32BE(4 + rdBody.length, 1);
+    rdBody.copy(rd, 5);
+    parts.push(rd);
+    if (!isSimple) parts.push(Buffer.from([0x32, 0, 0, 0, 4])); // BindComplete
+    for (const row of rows) {
+      const fieldBufs: Buffer[] = [];
+      for (const col of columns) {
+        const val = Buffer.from(String(row[col] ?? ""), "utf8");
+        const len = Buffer.alloc(4);
+        len.writeInt32BE(val.length, 0);
+        fieldBufs.push(len, val);
+      }
+      const drBody = Buffer.concat([Buffer.from([(columns.length >> 8) & 0xff, columns.length & 0xff]), ...fieldBufs]);
+      const dr = Buffer.alloc(5 + drBody.length);
+      dr[0] = 0x44;
+      dr.writeUInt32BE(4 + drBody.length, 1);
+      drBody.copy(dr, 5);
+      parts.push(dr);
+    }
+  } else if (!isSimple) {
+    parts.push(Buffer.from([0x6e, 0, 0, 0, 4])); // NoData
+    parts.push(Buffer.from([0x32, 0, 0, 0, 4])); // BindComplete
+  }
+  const tag = Buffer.from(`${tagText}\0`, "utf8");
+  const cc = Buffer.alloc(5 + tag.length);
+  cc[0] = 0x43;
+  cc.writeUInt32BE(4 + tag.length, 1);
+  tag.copy(cc, 5);
+  parts.push(cc);
+  parts.push(Buffer.from([0x5a, 0, 0, 0, 5, inTx ? 0x54 : 0x49])); // ReadyForQuery
+  return Buffer.concat(parts);
+}
+
 async function startFakePgServer(options: {
-  freezeConns?: ReadonlySet<number>;
+  freezeConns?: ReadonlySet<number> | "all";
+  freezeAfterFirstQuery?: ReadonlySet<number>;
   tlsPair?: { key: string; cert: string };
+  queryDelayMs?: (text: string, cid: number) => number | "silent";
+  onQuery?: (event: FakePgQueryEvent) => boolean | void;
+  ignoreTerminate?: boolean;
 } = {}): Promise<FakePgServer> {
   const freezeConns = options.freezeConns ?? new Set<number>();
+  const freezeAfterFirst = options.freezeAfterFirstQuery ?? new Set<number>();
+  const ignoreTerminate = options.ignoreTerminate ?? true;
   let connCount = 0;
-  const sockets: Array<net.Socket | tls.TLSSocket> = [];
+  let decryptedBytes = 0;
+  let closedRaw = 0;
+  let closedTls = 0;
+  const sniNames: string[] = [];
+  const openRaw = new Set<net.Socket>();
+  const openTls = new Set<tls.TLSSocket>();
+  const connSockets: Array<{ raw: net.Socket; tls?: tls.TLSSocket }> = [];
 
-  const attachWire = (sock: net.Socket | tls.TLSSocket, cid: number) => {
+  const isFrozenConn = (cid: number) =>
+    freezeConns === "all" || freezeConns.has(cid);
+
+  const attachWire = (sock: net.Socket | tls.TLSSocket, cid: number, isTls: boolean) => {
     let started = false;
     let frozen = false;
     let inTx = false;
     sock.on("data", (buf: Buffer) => {
+      if (isTls) decryptedBytes += buf.length;
       if (frozen) return;
       if (!started) {
         started = true;
@@ -94,59 +366,87 @@ async function startFakePgServer(options: {
           Buffer.from([0x52, 0, 0, 0, 8, 0, 0, 0, 0]), // AuthenticationOk
           Buffer.from([0x5a, 0, 0, 0, 5, 0x49]), // ReadyForQuery (Idle)
         ]));
+        if (isFrozenConn(cid)) frozen = true;
         return;
       }
-      if (buf[0] === 0x58) return; // Terminate
+      if (buf[0] === 0x58) {
+        if (!ignoreTerminate) sock.end();
+        return;
+      }
       const text = buf.toString("utf8");
       const isBegin = /\bbegin\b/i.test(text);
       const isCommit = /\bcommit\b/i.test(text);
+      const isRollback = /\brollback\b/i.test(text);
       const isSimple = buf[0] === 0x51;
       if (isBegin) inTx = true;
-      if (isCommit) inTx = false;
-      const cmd = isBegin ? "BEGIN" : isCommit ? "COMMIT" : "SELECT 1";
-      const tag = Buffer.from(`${cmd}\0`);
-      const cc = Buffer.alloc(5 + tag.length);
-      cc[0] = 0x43;
-      cc.writeUInt32BE(4 + tag.length, 1);
-      tag.copy(cc, 5);
-      const rfq = Buffer.from([0x5a, 0, 0, 0, 5, inTx ? 0x54 : 0x49]);
-      if (isSimple) {
-        sock.write(Buffer.concat([cc, rfq]));
-      } else {
-        const prefix = Buffer.from([
-          0x31, 0, 0, 0, 4, // ParseComplete
-          0x6e, 0, 0, 0, 4, // NoData
-          0x32, 0, 0, 0, 4, // BindComplete
-        ]);
-        sock.write(Buffer.concat([prefix, cc, rfq]));
+      if (isCommit || isRollback) inTx = false;
+
+      const defaultTag = isBegin ? "BEGIN" : isCommit ? "COMMIT" : isRollback ? "ROLLBACK" : "SELECT 1";
+      const respond = (tag = defaultTag, rows?: Array<Record<string, string>>) => {
+        if (!sock.destroyed && sock.writable) {
+          sock.write(pgWireResponse(tag, inTx, isSimple, rows));
+        }
+        if ((isCommit || !inTx) && freezeAfterFirst.has(cid)) {
+          frozen = true;
+        }
+      };
+
+      if (options.onQuery) {
+        const handled = options.onQuery({ cid, text, isSimple, respond });
+        if (handled === true) return;
       }
-      if ((isCommit || !inTx) && freezeConns.has(cid)) {
-        frozen = true;
+
+      const delay = options.queryDelayMs ? options.queryDelayMs(text, cid) : 0;
+      if (delay === "silent") return;
+      if (delay > 0) {
+        const t = setTimeout(() => respond(), delay);
+        t.unref?.();
+        return;
       }
+      respond();
     });
   };
 
-  // allowHalfOpen: true models a silently vanished peer that never answers TCP FIN.
+  // allowHalfOpen: true models a silently vanished peer that never answers TCP FIN / TLS close_notify.
   const server = net.createServer({ allowHalfOpen: true }, (raw) => {
     connCount += 1;
     const cid = connCount;
-    sockets.push(raw);
+    openRaw.add(raw);
+    const entry: { raw: net.Socket; tls?: tls.TLSSocket } = { raw };
+    connSockets.push(entry);
     raw.on("error", () => {});
+    raw.on("close", () => {
+      openRaw.delete(raw);
+      closedRaw += 1;
+    });
     if (options.tlsPair) {
       const { key, cert } = options.tlsPair;
       raw.once("data", (first: Buffer) => {
         if (first.length === 8 && first.readInt32BE(4) === 80877103) {
           raw.write("S");
-          const tlsSock = new tls.TLSSocket(raw, { isServer: true, key, cert });
-          sockets.push(tlsSock);
+          const tlsSock = new tls.TLSSocket(raw, {
+            isServer: true,
+            key,
+            cert,
+            SNICallback(servername, cb) {
+              sniNames.push(servername);
+              cb(null);
+            },
+          });
+          entry.tls = tlsSock;
+          openTls.add(tlsSock);
           tlsSock.on("error", () => {});
-          attachWire(tlsSock, cid);
+          tlsSock.on("close", () => {
+            openTls.delete(tlsSock);
+            closedTls += 1;
+          });
+          attachWire(tlsSock, cid, true);
         } else {
-          attachWire(raw, cid);
+          attachWire(raw, cid, false);
         }
       });
     } else {
-      attachWire(raw, cid);
+      attachWire(raw, cid, false);
     }
   });
 
@@ -158,199 +458,904 @@ async function startFakePgServer(options: {
     server,
     port: address.port,
     getConnCount: () => connCount,
+    getOpenRawCount: () => openRaw.size,
+    getOpenTlsCount: () => openTls.size,
+    getClosedRawCount: () => closedRaw,
+    getClosedTlsCount: () => closedTls,
+    getDecryptedBytes: () => decryptedBytes,
+    getSniNames: () => [...sniNames],
+    destroyOldestSockets: (count = 1) => {
+      let destroyed = 0;
+      for (const entry of connSockets) {
+        if (destroyed >= count) break;
+        if (entry.tls && !entry.tls.destroyed) {
+          entry.tls.destroy();
+          entry.raw.destroy();
+          destroyed += 1;
+        } else if (!entry.raw.destroyed) {
+          entry.raw.destroy();
+          destroyed += 1;
+        }
+      }
+    },
     closeAll: () => {
-      for (const s of sockets) s.destroy();
+      for (const s of [...openTls]) s.destroy();
+      for (const s of [...openRaw]) s.destroy();
       server.close();
     },
   };
 }
 
-test("edgeDatabaseOptions recovers from half-open peers after idle_timeout and during active transactions (plain and TLS)", async () => {
-  const work = await mkdtemp(join(tmpdir(), "edge-db-opts-tls-"));
-  const certPath = join(work, "server.crt");
-  const keyPath = join(work, "server.key");
-  let tlsPair: { key: string; cert: string } | undefined;
-  const openssl = spawnSync("openssl", [
-    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-    "-keyout", keyPath, "-out", certPath,
-    "-days", "1", "-subj", "/CN=localhost",
-    "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
-  ], { encoding: "utf8", timeout: 30_000 });
-  if (openssl.status === 0) {
-    tlsPair = {
-      cert: await readFile(certPath, "utf8"),
-      key: await readFile(keyPath, "utf8"),
-    };
-  }
-
+test("stock postgres.js with edgeDatabaseOptions verifies TLS SNI and private CA before any Postgres byte", async () => {
+  const pki = await createTestPki();
+  const encodedCa = btoa(pki.trustedCa);
   try {
-    for (const mode of tlsPair ? (["plain", "tls"] as const) : (["plain"] as const)) {
-      const fake = await startFakePgServer({
-        freezeConns: new Set([1, 2]),
-        tlsPair: mode === "tls" ? tlsPair : undefined,
-      });
+    // 1. Matching-name control: connects with DNS SNI and completes a query.
+    const goodServer = await startFakePgServer({ tlsPair: pki.matchingPair, ignoreTerminate: false });
+    try {
+      const sql = postgres(
+        `postgres://u:p@${MATCHING_HOST}:${goodServer.port}/db`,
+        edgeDatabaseOptions({ max: 1, connect_timeout: 2, fetch_types: false }, encodedCa) as postgres.Options<Record<string, never>>,
+      );
       try {
-        const host = mode === "tls" ? "localhost" : "127.0.0.1";
-        const encodedCa = mode === "tls" ? btoa(tlsPair!.cert) : undefined;
-        const resolved = {
-          ...edgeDatabaseOptions({
-            max: 1,
-            idle_timeout: 1,
-            connect_timeout: 2,
-            close_grace_ms: 250,
-            socket_timeout_ms: 600,
-          }, encodedCa),
-          fetch_types: false,
-        };
-        const sql = postgres(
-          `postgres://u:p@${host}:${fake.port}/db`,
-          resolved as postgres.Options<Record<string, never>>,
-        );
-        try {
-          // 1. Initial transaction succeeds; conn 1 then freezes (silently dead peer).
-          await sql.begin(async (tx) => {
-            await tx`SELECT 1`;
-          });
-          assert.equal(fake.getConnCount(), 1);
-
-          // 2. Wait past idle_timeout (1s) + close_grace_ms (0.25s). Without our
-          //    socket.end grace timer, postgres.js wedges slot 1 in queues.ended forever.
-          await new Promise((r) => setTimeout(r, 1_500));
-          const tIdle = Date.now();
-          await sql.begin(async (tx) => {
-            await tx`SELECT 2`;
-          });
-          assert.ok(Date.now() - tIdle < 2_000, `${mode}: post-idle recovery took too long`);
-          assert.equal(fake.getConnCount(), 2);
-
-          // 3. Immediately send a transaction on frozen conn 2 (before idle_timeout).
-          //    It must fail cleanly within socket_timeout_ms (never hang or retry-duplicate).
-          const tActive = Date.now();
-          await assert.rejects(
-            () => sql.begin(async (tx) => { await tx`SELECT 3`; }),
-            (err: unknown) => (err as { code?: string })?.code === "CONNECTION_CLOSED",
-          );
-          const activeElapsed = Date.now() - tActive;
-          assert.ok(activeElapsed < 2_000, `${mode}: active frozen tx took ${activeElapsed}ms`);
-
-          // 4. Immediately after the dead socket is evicted, the very next transaction
-          //    opens conn 3 and succeeds with zero backoff delay.
-          const tNext = Date.now();
-          await sql.begin(async (tx) => {
-            await tx`SELECT 4`;
-          });
-          assert.ok(Date.now() - tNext < 2_000, `${mode}: post-eviction tx took too long`);
-          assert.equal(fake.getConnCount(), 3);
-        } finally {
-          await sql.end({ timeout: 0 });
-        }
+        await sql.begin(async (tx) => { await tx`SELECT 1`; });
+        assert.deepEqual(goodServer.getSniNames(), [MATCHING_HOST]);
+        assert.ok(goodServer.getDecryptedBytes() > 0, "matching-name control must send Postgres startup bytes");
       } finally {
-        fake.closeAll();
+        await sql.end({ timeout: 0 });
       }
+    } finally {
+      goodServer.closeAll();
+    }
+
+    // 2. Trusted CA, wrong DNS name: refused before any Postgres byte is sent.
+    const wrongServer = await startFakePgServer({ tlsPair: pki.wrongNamePair });
+    try {
+      const sql = postgres(
+        `postgres://u:p@${MATCHING_HOST}:${wrongServer.port}/db`,
+        edgeDatabaseOptions({ max: 1, connect_timeout: 2, fetch_types: false }, encodedCa) as postgres.Options<Record<string, never>>,
+      );
+      try {
+        await assert.rejects(() => sql`SELECT 1`);
+        assert.deepEqual(wrongServer.getSniNames(), [MATCHING_HOST]);
+        assert.equal(wrongServer.getDecryptedBytes(), 0, "wrong-name cert must be refused before any Postgres byte");
+      } finally {
+        await sql.end({ timeout: 0 });
+      }
+    } finally {
+      wrongServer.closeAll();
+    }
+
+    // 3. Untrusted CA, matching DNS name: refused before any Postgres byte is sent.
+    const untrustedServer = await startFakePgServer({ tlsPair: pki.untrustedCaPair });
+    try {
+      const sql = postgres(
+        `postgres://u:p@${MATCHING_HOST}:${untrustedServer.port}/db`,
+        edgeDatabaseOptions({ max: 1, connect_timeout: 2, fetch_types: false }, encodedCa) as postgres.Options<Record<string, never>>,
+      );
+      try {
+        await assert.rejects(() => sql`SELECT 1`);
+        assert.deepEqual(untrustedServer.getSniNames(), [MATCHING_HOST]);
+        assert.equal(untrustedServer.getDecryptedBytes(), 0, "untrusted CA cert must be refused before any Postgres byte");
+      } finally {
+        await sql.end({ timeout: 0 });
+      }
+    } finally {
+      untrustedServer.closeAll();
     }
   } finally {
-    await rm(work, { recursive: true, force: true });
+    await pki.cleanup();
   }
 });
 
-test("edgeDatabaseOptions bounds connect_timeout on silent peer and never poisons later requests via backoff", async () => {
-  // 1. Silent TCP acceptor: accepts TCP then never replies -> CONNECT_TIMEOUT within connect_timeout.
+test("edgeDatabaseOptions bounds connect_timeout on silent peer and disables reconnect backoff poisoning", async () => {
+  const pki = await createTestPki();
   const silent = net.createServer((sock) => {
     sock.on("error", () => {});
   });
   await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
-  const silentAddress = silent.address();
-  assert.ok(silentAddress && typeof silentAddress === "object");
-  try {
-    const sql = postgres(
-      `postgres://u:p@127.0.0.1:${silentAddress.port}/db`,
-      {
-        ...edgeDatabaseOptions({ max: 1, connect_timeout: 1, socket_timeout_ms: 5_000 }, undefined),
-        fetch_types: false,
-      } as postgres.Options<Record<string, never>>,
-    );
-    try {
-      const t0 = Date.now();
-      await assert.rejects(
-        () => sql`SELECT 1`,
-        (err: unknown) => (err as { code?: string })?.code === "CONNECT_TIMEOUT",
-      );
-      const elapsed = Date.now() - t0;
-      assert.ok(elapsed >= 800 && elapsed < 3_000, `expected ~1s CONNECT_TIMEOUT, got ${elapsed}ms`);
-    } finally {
-      await sql.end({ timeout: 0 });
-    }
-  } finally {
-    silent.close();
-  }
+  const silentPort = (silent.address() as net.AddressInfo).port;
 
-  // 2. Repeated ECONNREFUSED failures must NOT escalate backoff (default postgres.js hits 10-20s).
   const probe = net.createServer();
   await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
   const deadPort = (probe.address() as net.AddressInfo).port;
   await new Promise<void>((r) => probe.close(() => r()));
 
-  const sql = postgres(
-    `postgres://u:p@127.0.0.1:${deadPort}/db`,
-    {
-      ...edgeDatabaseOptions({ max: 1, connect_timeout: 2 }, undefined),
-      fetch_types: false,
-    } as postgres.Options<Record<string, never>>,
-  );
   try {
-    const start = Date.now();
-    for (let i = 0; i < 10; i += 1) {
-      await assert.rejects(() => sql`SELECT 1`);
+    for (const mode of ["plain", "tls"] as const) {
+      const encodedCa = mode === "tls" ? btoa(pki.trustedCa) : undefined;
+      const host = mode === "tls" ? MATCHING_HOST : "127.0.0.1";
+      const sqlSilent = postgres(
+        `postgres://u:p@${host}:${silentPort}/db`,
+        edgeDatabaseOptions({ max: 1, connect_timeout: 1, fetch_types: false }, encodedCa) as postgres.Options<Record<string, never>>,
+      );
+      try {
+        const t0 = Date.now();
+        await assert.rejects(
+          () => sqlSilent`SELECT 1`,
+          (err: unknown) => (err as { code?: string })?.code === "CONNECT_TIMEOUT",
+        );
+        const elapsed = Date.now() - t0;
+        assert.ok(elapsed >= 800 && elapsed < 3_000, `${mode}: expected ~1s CONNECT_TIMEOUT, got ${elapsed}ms`);
+      } finally {
+        await sqlSilent.end({ timeout: 0 });
+      }
+
+      const sqlDead = postgres(
+        `postgres://u:p@${host}:${deadPort}/db`,
+        edgeDatabaseOptions({ max: 1, connect_timeout: 2, fetch_types: false }, encodedCa) as postgres.Options<Record<string, never>>,
+      );
+      try {
+        const start = Date.now();
+        for (let i = 0; i < 10; i += 1) {
+          await assert.rejects(() => sqlDead`SELECT 1`);
+        }
+        const elapsed = Date.now() - start;
+        assert.ok(elapsed < 3_000, `${mode}: 10 failed connects took ${elapsed}ms (backoff poisoned requests)`);
+      } finally {
+        await sqlDead.end({ timeout: 0 });
+      }
     }
-    const elapsed = Date.now() - start;
-    assert.ok(elapsed < 3_000, `10 failed connects took ${elapsed}ms (backoff poisoned requests)`);
   } finally {
-    await sql.end({ timeout: 0 });
+    silent.close();
+    await pki.cleanup();
   }
 });
 
-test("Deno createEdgeDatabase helper recovers from half-open peer without Docker", async (context) => {
+test("holder: size-1 pool rejects silent TLS peer within stall bound, rotates, never replays, and recovers immediately", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  // Conn 1 goes silent after startup; conn 2 (replacement pool) is healthy!
+  const server = await startFakePgServer({
+    freezeConns: new Set([1]),
+    tlsPair: pki.matchingPair,
+    ignoreTerminate: false,
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 1,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 350,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 100,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      let beginRuns = 0;
+      const t0 = Date.now();
+      await assert.rejects(
+        () => db.begin(async (tx) => {
+          beginRuns += 1;
+          await tx`SELECT 1`;
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal((err as { code?: unknown }).code, EDGE_DATABASE_STALLED_CODE);
+          assert.equal("cause" in err && err.cause !== undefined, false, "stall error must have no cause");
+          assert.doesNotMatch(err.message, /postgres:|localhost|127\.0\.0\.1/);
+          return true;
+        },
+      );
+      const elapsed = Date.now() - t0;
+      assert.ok(elapsed >= 280 && elapsed < 1_500, `expected stall ~350ms, got ${elapsed}ms`);
+      assert.equal(beginRuns, 0, "holder must never replay a stalled begin callback");
+
+      // Next call immediately uses the fresh replacement pool (conn 2) and succeeds.
+      const tNext = Date.now();
+      await db.begin(async (tx) => {
+        await tx`SELECT 2`;
+      });
+      assert.ok(Date.now() - tNext < 1_000, "recovery on fresh pool must be immediate");
+      assert.equal(server.getConnCount(), 2);
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: size-2 pool under healthy burst (total > N) and legitimate slow call (< N) triggers NO replacement", async () => {
+  const { createEdgeDatabase } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  const server = await startFakePgServer({
+    tlsPair: pki.matchingPair,
+    ignoreTerminate: false,
+    queryDelayMs: (text) => {
+      if (text.includes("SLOW_LEGIT")) return 220;
+      if (text.includes("BURST")) return 45;
+      return 0;
+    },
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 2,
+        idle_timeout: 10,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 350,
+        call_ceiling_ms: 3_000,
+        replace_cooldown_ms: 100,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      // Burst: 26 queued transactions x 45ms on size-2 pool => ~585ms total (> 350ms stall_timeout_ms).
+      const tBurst = Date.now();
+      await Promise.all(
+        Array.from({ length: 26 }, (_, i) =>
+          db.begin(async (tx) => {
+            await tx`SELECT 'BURST_${i}'`;
+          }),
+        ),
+      );
+      const burstMs = Date.now() - tBurst;
+      assert.ok(burstMs >= 400, `burst should exceed stall_timeout_ms (350ms), took ${burstMs}ms`);
+      assert.ok(server.getConnCount() <= 2, `healthy burst must not replace pool; opened ${server.getConnCount()} conns`);
+
+      // One legitimate slower call (220ms < 350ms) alongside fast sibling calls: no replacement.
+      await Promise.all([
+        db.begin(async (tx) => { await tx`SELECT 'SLOW_LEGIT'`; }),
+        db.begin(async (tx) => { await tx`SELECT 'BURST_A'`; }),
+        db.begin(async (tx) => { await tx`SELECT 'BURST_B'`; }),
+      ]);
+      assert.ok(server.getConnCount() <= 2, `legitimate slow call must not replace pool; opened ${server.getConnCount()} conns`);
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: size-2 stall rejects a healthy sibling transaction (accepted cost) without replaying it", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  const server = await startFakePgServer({
+    tlsPair: pki.matchingPair,
+    queryDelayMs: (text) => {
+      if (text.includes("SILENT_TX")) return "silent";
+      if (text.includes("SIBLING_WAIT")) return 700;
+      return 0;
+    },
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 2,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 300,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 100,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      let siblingStarts = 0;
+      const [silentRes, siblingRes] = await Promise.all([
+        db.begin(async (tx) => { await tx`SELECT 'SILENT_TX'`; }).then(
+          () => ({ ok: true as const }),
+          (err) => ({ ok: false as const, code: (err as { code?: string })?.code }),
+        ),
+        db.begin(async (tx) => {
+          siblingStarts += 1;
+          await tx`SELECT 'SIBLING_WAIT'`;
+        }).then(
+          () => ({ ok: true as const }),
+          (err) => ({ ok: false as const, code: (err as { code?: string })?.code }),
+        ),
+      ]);
+      assert.deepEqual(silentRes, { ok: false, code: EDGE_DATABASE_STALLED_CODE });
+      assert.deepEqual(siblingRes, { ok: false, code: EDGE_DATABASE_STALLED_CODE });
+      assert.equal(siblingStarts, 1, "sibling transaction must never be replayed");
+
+      // Next call succeeds on fresh pool.
+      await db`SELECT 1`;
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: per-call ceiling catches a silent call masked by a progressing healthy sibling on a size-2 pool", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  const server = await startFakePgServer({
+    tlsPair: pki.matchingPair,
+    queryDelayMs: (text) => (text.includes("SILENT_FOREVER") ? "silent" : 0),
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 2,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 300,
+        call_ceiling_ms: 850,
+        replace_cooldown_ms: 100,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      const t0 = Date.now();
+      const silentCall = db`SELECT 'SILENT_FOREVER'`.then(
+        () => ({ ok: true as const }),
+        (err) => ({ ok: false as const, code: (err as { code?: string })?.code, at: Date.now() - t0 }),
+      );
+
+      // Keep the sibling completing every 120ms so the 300ms no-progress rule NEVER fires!
+      let siblingSuccesses = 0;
+      let running = true;
+      const siblingLoop = (async () => {
+        while (running) {
+          try {
+            await db`SELECT 'HEALTHY_TICK'`;
+            siblingSuccesses += 1;
+          } catch {
+            // One tick may coincide with the ceiling replacement.
+          }
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      })();
+
+      const silentOutcome = await silentCall;
+      running = false;
+      await siblingLoop;
+
+      assert.equal(silentOutcome.ok, false);
+      if (!silentOutcome.ok) {
+        assert.equal(silentOutcome.code, EDGE_DATABASE_STALLED_CODE);
+        assert.ok(
+          silentOutcome.at >= 750 && silentOutcome.at < 2_000,
+          `silent masked call must settle at ceiling (~850ms), settled at ${silentOutcome.at}ms`,
+        );
+      }
+      assert.ok(siblingSuccesses >= 4, `healthy sibling should complete repeatedly before ceiling (got ${siblingSuccesses})`);
+
+      // Post-ceiling recovery works immediately.
+      await db`SELECT 'POST_CEILING_OK'`;
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: two stalls inside cooldown perform only one replacement and discard late results from replaced pools", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  let delayedResponder: (() => void) | null = null;
+  let lateResultDeliveredToServer = false;
+  const server = await startFakePgServer({
+    tlsPair: pki.matchingPair,
+    onQuery: ({ cid, text, respond }) => {
+      if (cid === 1 && text.includes("LATE_RESULT")) {
+        delayedResponder = () => {
+          lateResultDeliveredToServer = true;
+          respond("SELECT 1");
+        };
+        return true;
+      }
+      if (cid === 2) {
+        // Conn 2 stays silent so a second stall happens inside cooldown!
+        return true;
+      }
+      return false;
+    },
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 1,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 250,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 1_200,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      // Stall 1 (outside cooldown) -> replaces pool 1 with pool 2.
+      await assert.rejects(
+        () => db`SELECT 'LATE_RESULT'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      assert.equal(server.getConnCount(), 1);
+
+      // Fire a late server reply for pool 1's already-rejected query: must be silently discarded (no unhandled rejection).
+      assert.ok(delayedResponder !== null);
+      (delayedResponder as () => void)();
+      assert.equal(lateResultDeliveredToServer, true);
+
+      // Stall 2 (inside 1200ms cooldown) -> opens conn 2 on pool 2, stalls, rejects waiters, REUSES pool 2 (no conn 3!).
+      await assert.rejects(
+        () => db`SELECT 'STALL_IN_COOLDOWN'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      assert.equal(server.getConnCount(), 2, "second stall inside cooldown must reuse pool 2 (not open pool 3)");
+
+      // Third call still inside cooldown also runs on reused pool 2 (still no conn 3!).
+      await assert.rejects(
+        () => db`SELECT 'STALL_STILL_IN_COOLDOWN'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      assert.equal(server.getConnCount(), 2);
+
+      // Wait past cooldown, stall once more -> now pool 2 IS replaced by pool 3 (conn 3 healthy!).
+      await new Promise((r) => setTimeout(r, 850));
+      await assert.rejects(
+        () => db`SELECT 'STALL_AFTER_COOLDOWN'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      await db`SELECT 'HEALTHY_ON_POOL_3'`;
+      assert.equal(server.getConnCount(), 3);
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: repeated half-open TLS rotations hit retired-pool cap, fail fast with bounded sockets, and recover once sockets close", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+  // Conns 1 and 2 freeze silently and never answer close_notify/FIN; conn 3 is healthy!
+  const server = await startFakePgServer({
+    freezeConns: new Set([1, 2]),
+    tlsPair: pki.matchingPair,
+    ignoreTerminate: true,
+  });
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 1,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 200,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 50,
+        max_retired_pools: 2,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      // Rotation 1: pool 1 stalls -> retired (1/2), pool 2 swapped in.
+      await assert.rejects(
+        () => db`SELECT 'ROT_1'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      assert.equal(server.getConnCount(), 1);
+      assert.equal(server.getOpenTlsCount(), 1, "half-open TLS socket from pool 1 remains open on silent peer");
+
+      await new Promise((r) => setTimeout(r, 80));
+
+      // Rotation 2: pool 2 stalls -> retired (2/2, CAP REACHED!), no pool 3 created!
+      await assert.rejects(
+        () => db`SELECT 'ROT_2'`,
+        (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+      );
+      assert.equal(server.getConnCount(), 2);
+      assert.equal(server.getOpenTlsCount(), 2, "both retired half-open TLS sockets remain open");
+      assert.equal(server.getClosedTlsCount(), 0);
+
+      // At cap: 5 consecutive calls MUST fail fast (< 50ms total) with ZERO new sockets opened!
+      const tCap = Date.now();
+      for (let i = 0; i < 5; i += 1) {
+        await assert.rejects(
+          () => db`SELECT 'AT_CAP_${i}'`,
+          (err: unknown) => (err as { code?: string })?.code === EDGE_DATABASE_STALLED_CODE,
+        );
+      }
+      const capElapsed = Date.now() - tCap;
+      assert.ok(capElapsed < 100, `at-cap calls must fail fast without waiting, took ${capElapsed}ms`);
+      assert.equal(server.getConnCount(), 2, "retired-pool cap must strictly bound total opened sockets");
+
+      // Recovery: peer/keepalive closes one retired pool's socket -> postgres.js onclose fires -> holder recovers!
+      server.destroyOldestSockets(1);
+      await new Promise((r) => setTimeout(r, 150));
+      assert.equal(server.getClosedTlsCount(), 1, "server observed 1 retired TLS socket physically closed");
+      assert.equal(server.getOpenTlsCount(), 1);
+
+      const tRec = Date.now();
+      await db`SELECT 'RECOVERED_AFTER_SOCKET_CLOSE'`;
+      assert.ok(Date.now() - tRec < 1_000, "holder must recover immediately once a retired pool frees its socket");
+      assert.equal(server.getConnCount(), 3);
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("holder: idle pool and unawaited lazy tagged template leave zero timers running (process exits cleanly)", async () => {
+  await loadDatabaseModule();
+  const { dir } = await cachedDbModule!;
+  const pki = await createTestPki();
+  const server = await startFakePgServer({ tlsPair: pki.matchingPair, ignoreTerminate: false });
+  const scriptDir = await mkdtemp(join(tmpdir(), "edge-db-idle-exit-"));
+  const scriptPath = join(scriptDir, "idle-exit.mjs");
+  try {
+    await writeFile(scriptPath, `
+      import { createEdgeDatabase } from ${JSON.stringify(pathToFileURL(join(dir, "database.mjs")).href)};
+      const db = createEdgeDatabase(
+        ${JSON.stringify(`postgres://u:p@${MATCHING_HOST}:${server.port}/db`)},
+        { max: 1, idle_timeout: 1, connect_timeout: 2, fetch_types: false, stall_timeout_ms: 15000 },
+        ${JSON.stringify(btoa(pki.trustedCa))},
+      );
+      // Unawaited lazy tagged template must not execute or start any timer.
+      const _unused = db\`SELECT 'NEVER_AWAITED'\`;
+      // Run one real query, then end cleanly.
+      await db\`SELECT 1\`;
+      await db.end({ timeout: 1 });
+      console.log("IDLE_EXIT_READY");
+    `, "utf8");
+
+    const res = await new Promise<{ exitedOnOwn: boolean; status: number | null; out: string; err: string }>((resolveRun) => {
+      const child = spawn(process.execPath, [scriptPath], { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (d) => { out += String(d); });
+      child.stderr.on("data", (d) => { err += String(d); });
+      const killer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolveRun({ exitedOnOwn: false, status: null, out, err });
+      }, 4_000);
+      child.on("close", (status) => {
+        clearTimeout(killer);
+        resolveRun({ exitedOnOwn: true, status, out, err });
+      });
+    });
+
+    assert.equal(res.exitedOnOwn, true, `idle holder kept event loop alive: ${res.out}${res.err}`);
+    assert.equal(res.status, 0, res.err);
+    assert.match(res.out, /IDLE_EXIT_READY/);
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+    await rm(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("command and read HTTP mappings classify EDGE_DATABASE_STALLED as existing retryable 5xx with no new shape", async () => {
+  const { EdgeDatabaseStalledError, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const stalled = new EdgeDatabaseStalledError();
+  assert.equal(dbCode(stalled), EDGE_DATABASE_STALLED_CODE);
+
+  // Command mapping: existing 503 { error: "temporarily_unavailable" }, db_code preserved, best-effort insert never masks it.
+  const rows: DurableCommandFailure[] = [];
+  const reason = classifyCommandFailure(false, dbCode(stalled));
+  assert.equal(reason, "internal_error");
+  const failure = durableCommandFailure({
+    commandKind: "post_signal",
+    reason,
+    code: dbCode(stalled),
+    error: stalled,
+    requestId: "11111111-2222-4333-8444-555555555555",
+  });
+  assert.equal(failure.db_code, EDGE_DATABASE_STALLED_CODE);
+  const cmdRes = await finishCommandFailure(failure, async (row) => { rows.push(row); });
+  assert.deepEqual(cmdRes, { status: 503, body: { error: "temporarily_unavailable" } });
+  assert.equal(rows.length, 1);
+
+  // Best-effort diagnostic insert failure (e.g. second stall) must never mask the 503 response.
+  let insertFailureSeen = false;
+  const cmdResWhenAuditFails = await finishCommandFailure(
+    failure,
+    async () => { throw new EdgeDatabaseStalledError(); },
+    () => { insertFailureSeen = true; },
+  );
+  assert.equal(insertFailureSeen, true);
+  assert.deepEqual(cmdResWhenAuditFails, { status: 503, body: { error: "temporarily_unavailable" } });
+
+  // Read mapping: existing retryable 500 { error: "internal_error", request_id, retryable: true }.
+  assert.equal(isRetryableErrorCode(EDGE_DATABASE_STALLED_CODE), true);
+  const diag = extractSafeDiagnostics(stalled, "query", "22222222-3333-4444-8555-666666666666");
+  assert.equal(diag.code, EDGE_DATABASE_STALLED_CODE);
+  assert.equal(diag.retryable, true);
+  assert.equal(firstForbiddenDiagnosticKey(diag as unknown as Record<string, unknown>), null);
+  assert.doesNotMatch(formatReadFailureLog(diag), /postgres:|127\.0\.0\.1/);
+  assert.deepEqual(publicReadErrorBody(diag), {
+    error: "internal_error",
+    request_id: "22222222-3333-4444-8555-666666666666",
+    retryable: true,
+  });
+});
+
+test("lost reply after commit: stall error returns 503, retry with same command_id replays stored receipt with one row written", async () => {
+  const { createEdgeDatabase, EDGE_DATABASE_STALLED_CODE } = await loadDatabaseModule();
+  const pki = await createTestPki();
+
+  // In-memory transactional store simulating swarm.signals + swarm.idempotency_keys.
+  const committedSignals: Array<{ id: string; body: string }> = [];
+  const committedReceipts = new Map<string, string>();
+  let pendingSignal: { id: string; body: string } | null = null;
+  let pendingReceipt: { commandId: string; receipt: string } | null = null;
+
+  const server = await startFakePgServer({
+    tlsPair: pki.matchingPair,
+    onQuery: ({ cid, text, respond }) => {
+      if (/\bbegin\b/i.test(text)) {
+        pendingSignal = null;
+        pendingReceipt = null;
+        respond("BEGIN");
+        return true;
+      }
+      if (text.includes("SELECT receipt FROM idempotency_keys")) {
+        const match = /cmd_([a-z0-9-]+)/i.exec(text);
+        const key = match ? match[0] : "";
+        const existing = committedReceipts.get(key);
+        respond("SELECT", existing ? [{ receipt: existing }] : []);
+        return true;
+      }
+      if (text.includes("INSERT INTO signals")) {
+        const id = `sig-${committedSignals.length + 1}`;
+        pendingSignal = { id, body: "hello-once" };
+        respond("INSERT 0 1", [{ id }]);
+        return true;
+      }
+      if (text.includes("INSERT INTO idempotency_keys")) {
+        const match = /cmd_([a-z0-9-]+)/i.exec(text);
+        const key = match ? match[0] : "";
+        const receipt = JSON.stringify({ status: 200, signal_id: pendingSignal?.id ?? "unknown" });
+        pendingReceipt = { commandId: key, receipt };
+        respond("INSERT 0 1");
+        return true;
+      }
+      if (/\bcommit\b/i.test(text)) {
+        // Commit succeeds durably in Postgres!
+        if (pendingSignal) committedSignals.push(pendingSignal);
+        if (pendingReceipt) committedReceipts.set(pendingReceipt.commandId, pendingReceipt.receipt);
+        pendingSignal = null;
+        pendingReceipt = null;
+        if (cid === 1) {
+          // Reply to COMMIT is LOST on conn 1 (half-open silent peer after commit)!
+          return true;
+        }
+        respond("COMMIT");
+        return true;
+      }
+      return false;
+    },
+  });
+
+  try {
+    const db = createEdgeDatabase(
+      `postgres://u:p@${MATCHING_HOST}:${server.port}/db`,
+      {
+        max: 1,
+        connect_timeout: 2,
+        fetch_types: false,
+        stall_timeout_ms: 250,
+        call_ceiling_ms: 2_000,
+        replace_cooldown_ms: 50,
+      },
+      btoa(pki.trustedCa),
+    );
+    try {
+      const commandId = "cmd_723-lost-reply";
+      const runCommand = async (cmdId: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+        try {
+          return await db.begin("isolation level read committed", async (tx) => {
+            const existing = await tx<{ receipt: string }[]>`
+              SELECT receipt FROM idempotency_keys WHERE command_id = ${cmdId}
+            `;
+            if (existing.length > 0) {
+              return { status: 200, body: JSON.parse(existing[0]!.receipt) as Record<string, unknown> };
+            }
+            const inserted = await tx<{ id: string }[]>`
+              INSERT INTO signals (body) VALUES ('hello-once') RETURNING id
+            `;
+            const receipt = { status: 200, signal_id: inserted[0]!.id };
+            await tx`
+              INSERT INTO idempotency_keys (command_id, receipt) VALUES (${cmdId}, ${JSON.stringify(receipt)})
+            `;
+            return { status: 200, body: receipt };
+          });
+        } catch (error) {
+          const code = dbCode(error);
+          const failure = durableCommandFailure({
+            commandKind: "post_signal",
+            reason: classifyCommandFailure(false, code),
+            code,
+            error,
+            requestId: "33333333-4444-4555-8666-777777777777",
+          });
+          return await finishCommandFailure(failure, async () => {});
+        }
+      };
+
+      // Attempt 1: commit lands on Postgres, reply is lost to stall -> 503 temporarily_unavailable.
+      const first = await runCommand(commandId);
+      assert.deepEqual(first, { status: 503, body: { error: "temporarily_unavailable" } });
+      assert.equal(committedSignals.length, 1, "first attempt committed one row before reply was lost");
+
+      // Attempt 2: client retries with the SAME command_id on rotated fresh pool -> receives stored receipt, still ONE row!
+      const retry = await runCommand(commandId);
+      assert.deepEqual(retry, { status: 200, body: { status: 200, signal_id: "sig-1" } });
+      assert.equal(committedSignals.length, 1, "retry with same command_id must write zero duplicate rows");
+      assert.equal(server.getConnCount(), 2, "retry ran on fresh rotated pool");
+      assert.equal(EDGE_DATABASE_STALLED_CODE, "EDGE_DATABASE_STALLED");
+    } finally {
+      await db.end({ timeout: 0 });
+    }
+  } finally {
+    server.closeAll();
+    await pki.cleanup();
+  }
+});
+
+test("Deno createEdgeDatabase proves TLS verification, pool-holder stall recovery, retired-pool cap, and DSN sanitization", async (context) => {
   const denoCheck = spawnSync("deno", ["--version"], { encoding: "utf8", timeout: 10_000 });
   if (denoCheck.status !== 0) {
+    if (process.env.GITHUB_ACTIONS === "true") {
+      assert.fail("CI must run the Deno createEdgeDatabase proof (deno is missing)");
+    }
     context.skip("deno is not installed");
     return;
   }
-  const fake = await startFakePgServer({ freezeConns: new Set([1, 2]) });
+
+  const pki = await createTestPki();
+  const tlsStall = await startFakePgServer({ freezeConns: new Set([1]), tlsPair: pki.matchingPair });
+  const tlsCap = await startFakePgServer({ freezeConns: new Set([1, 2]), tlsPair: pki.matchingPair });
+  const tlsWrongName = await startFakePgServer({ tlsPair: pki.wrongNamePair });
+  const tlsUntrusted = await startFakePgServer({ tlsPair: pki.untrustedCaPair });
   const work = await mkdtemp(join(tmpdir(), "edge-db-deno-helper-"));
+
   try {
     const scriptPath = join(work, "probe.ts");
     const dbHelperUrl = new URL("../../supabase/functions/_shared/database.ts", import.meta.url).href;
+    const sentinel = "EDGE_DB_SECRET_SENTINEL_723";
     await writeFile(scriptPath, `
-      import { createEdgeDatabase } from ${JSON.stringify(dbHelperUrl)};
-      const db = createEdgeDatabase(Deno.env.get("TEST_DB_URL")!, {
-        max: 1,
-        idle_timeout: 1,
-        connect_timeout: 2,
-        close_grace_ms: 250,
-        socket_timeout_ms: 600,
-      }, undefined);
-      // Disable type fetch only for the minimal fake wire server by running simple begin/commit queries.
-      (db.options as Record<string, unknown>).fetch_types = false;
-      try {
-        await db.begin(async (tx) => { await tx\`SELECT 1\`; });
-        await new Promise((r) => setTimeout(r, 1500));
-        await db.begin(async (tx) => { await tx\`SELECT 2\`; });
-        let closedCode = "";
+      import {
+        createEdgeDatabase,
+        EDGE_DATABASE_STALLED_CODE,
+        INVALID_DATABASE_CONFIGURATION_MESSAGE,
+      } from ${JSON.stringify(dbHelperUrl)};
+
+      const caB64 = Deno.env.get("TEST_CA_B64")!;
+      const sentinel = ${JSON.stringify(sentinel)};
+
+      // 1. Condition 3: malformed URLs carrying a credential sentinel must never leak it.
+      const badUrls = [
+        "postgres://u:" + sentinel + "@bad host:notaport/db",
+        "not-a-url://" + sentinel + ":pass@[::bad",
+        "postgres://u:" + sentinel + "@127.0.0.1:5432/db?target_session_attrs=" + sentinel,
+        "",
+      ];
+      for (const bad of badUrls) {
+        let caught: unknown;
         try {
-          await db.begin(async (tx) => { await tx\`SELECT 3\`; });
-          throw new Error("expected frozen tx to fail");
+          createEdgeDatabase(bad, { max: 1 }, undefined);
         } catch (err) {
-          closedCode = String((err as { code?: unknown })?.code ?? "");
+          caught = err;
         }
-        if (closedCode !== "CONNECTION_CLOSED") {
-          throw new Error("unexpected error code: " + closedCode);
+        if (!(caught instanceof Error)) throw new Error("expected Error for malformed URL");
+        if (caught.message !== INVALID_DATABASE_CONFIGURATION_MESSAGE) {
+          throw new Error("unexpected sanitized message: " + caught.message);
         }
-        await db.begin(async (tx) => { await tx\`SELECT 4\`; });
-        console.log("DENO_CREATE_EDGE_DB_OK");
-      } finally {
-        await db.end({ timeout: 0 });
+        if ("cause" in caught && caught.cause !== undefined) {
+          throw new Error("sanitized error must not carry a cause");
+        }
+        const combined = [caught.message, caught.stack ?? "", String(caught), String(caught.cause ?? "")].join("\\n");
+        if (combined.includes(sentinel)) {
+          throw new Error("credential sentinel leaked in thrown error");
+        }
       }
+
+      // 2. TLS stall recovery under Deno: silent peer rejected with EDGE_DATABASE_STALLED, fresh pool succeeds.
+      {
+        const db = createEdgeDatabase(Deno.env.get("TEST_TLS_STALL_URL")!, {
+          max: 1,
+          connect_timeout: 2,
+          fetch_types: false,
+          stall_timeout_ms: 300,
+          call_ceiling_ms: 2000,
+          replace_cooldown_ms: 50,
+        }, caB64);
+        try {
+          let stallCode = "";
+          try {
+            await db.begin(async (tx) => { await tx\`SELECT 1\`; });
+            throw new Error("expected stalled TLS tx to fail");
+          } catch (err) {
+            stallCode = String((err as { code?: unknown })?.code ?? "");
+          }
+          if (stallCode !== EDGE_DATABASE_STALLED_CODE) {
+            throw new Error("unexpected stall error code: " + stallCode);
+          }
+          await db.begin(async (tx) => { await tx\`SELECT 2\`; });
+        } finally {
+          await db.end({ timeout: 0 });
+        }
+      }
+
+      // 3. Retired-pool cap under Deno: 2 stalls hit cap, 3rd call fails fast, then recovers after peer closes socket.
+      {
+        const db = createEdgeDatabase(Deno.env.get("TEST_TLS_CAP_URL")!, {
+          max: 1,
+          connect_timeout: 2,
+          fetch_types: false,
+          stall_timeout_ms: 200,
+          call_ceiling_ms: 2000,
+          replace_cooldown_ms: 50,
+          max_retired_pools: 2,
+        }, caB64);
+        try {
+          for (let i = 0; i < 2; i += 1) {
+            let code = "";
+            try {
+              await db\`SELECT 1\`;
+            } catch (err) {
+              code = String((err as { code?: unknown })?.code ?? "");
+            }
+            if (code !== EDGE_DATABASE_STALLED_CODE) throw new Error("expected stall on rot " + i);
+            await new Promise((r) => setTimeout(r, 80));
+          }
+          const tFast = Date.now();
+          let capCode = "";
+          try {
+            await db\`SELECT 1\`;
+          } catch (err) {
+            capCode = String((err as { code?: unknown })?.code ?? "");
+          }
+          if (capCode !== EDGE_DATABASE_STALLED_CODE || Date.now() - tFast > 100) {
+            throw new Error("cap did not fail fast: code=" + capCode);
+          }
+          console.log("DENO_CAP_REACHED");
+          // Wait for parent harness to destroy one retired half-open socket, then recover on conn 3.
+          await new Promise((r) => setTimeout(r, 350));
+          await db\`SELECT 3\`;
+        } finally {
+          await db.end({ timeout: 0 });
+        }
+      }
+
+      // 4. Stock TLS verification controls under Deno: wrong-name and untrusted-CA refused before Postgres startup.
+      for (const envName of ["TEST_TLS_WRONG_URL", "TEST_TLS_UNTRUSTED_URL"]) {
+        const db = createEdgeDatabase(Deno.env.get(envName)!, {
+          max: 1,
+          connect_timeout: 2,
+          fetch_types: false,
+        }, caB64);
+        try {
+          let failed = false;
+          try {
+            await db\`SELECT 1\`;
+          } catch {
+            failed = true;
+          }
+          if (!failed) throw new Error(envName + " must reject TLS connection");
+        } finally {
+          await db.end({ timeout: 0 });
+        }
+      }
+
+      console.log("DENO_CREATE_EDGE_DB_POOL_HOLDER_OK");
     `, "utf8");
+
     const run = await new Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }>((resolveRun) => {
       const child = spawn("deno", [
         "run", "--no-lock", "--no-prompt",
@@ -359,24 +1364,57 @@ test("Deno createEdgeDatabase helper recovers from half-open peer without Docker
         scriptPath,
       ], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, TEST_DB_URL: `postgres://u:p@127.0.0.1:${fake.port}/db` },
+        env: {
+          ...process.env,
+          TEST_CA_B64: btoa(pki.trustedCa),
+          TEST_TLS_STALL_URL: `postgres://u:p@${MATCHING_HOST}:${tlsStall.port}/db`,
+          TEST_TLS_CAP_URL: `postgres://u:p@${MATCHING_HOST}:${tlsCap.port}/db`,
+          TEST_TLS_WRONG_URL: `postgres://u:p@${MATCHING_HOST}:${tlsWrongName.port}/db`,
+          TEST_TLS_UNTRUSTED_URL: `postgres://u:p@${MATCHING_HOST}:${tlsUntrusted.port}/db`,
+        },
       });
       let stdout = "";
       let stderr = "";
+      let destroyedCapSocket = false;
+      let closedRemainingHalfOpen = false;
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+        if (!destroyedCapSocket && stdout.includes("DENO_CAP_REACHED")) {
+          destroyedCapSocket = true;
+          setTimeout(() => tlsCap.destroyOldestSockets(1), 50);
+        }
+        if (!closedRemainingHalfOpen && stdout.includes("DENO_CREATE_EDGE_DB_POOL_HOLDER_OK")) {
+          closedRemainingHalfOpen = true;
+          // Close remaining half-open peer sockets so Deno's event loop exits cleanly.
+          tlsStall.destroyOldestSockets(10);
+          tlsCap.destroyOldestSockets(10);
+        }
+      });
       child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-      const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+      const timer = setTimeout(() => child.kill("SIGKILL"), 45_000);
       child.on("error", (error) => { clearTimeout(timer); resolveRun({ status: null, stdout, stderr, error }); });
       child.on("close", (status) => { clearTimeout(timer); resolveRun({ status, stdout, stderr }); });
     });
+
     assert.ifError(run.error);
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /DENO_CREATE_EDGE_DB_OK/);
-    assert.equal(fake.getConnCount(), 3);
+    assert.match(run.stdout, /DENO_CREATE_EDGE_DB_POOL_HOLDER_OK/);
+    assert.equal(tlsStall.getConnCount(), 2);
+    assert.deepEqual(tlsStall.getSniNames(), [MATCHING_HOST, MATCHING_HOST]);
+    assert.equal(tlsCap.getConnCount(), 3);
+    assert.ok(tlsCap.getClosedTlsCount() >= 1, "Deno cap recovery must observe at least 1 closed socket before opening conn 3");
+    assert.deepEqual(tlsWrongName.getSniNames(), [MATCHING_HOST]);
+    assert.equal(tlsWrongName.getDecryptedBytes(), 0, "Deno wrong-name cert must be refused before any Postgres byte");
+    assert.deepEqual(tlsUntrusted.getSniNames(), [MATCHING_HOST]);
+    assert.equal(tlsUntrusted.getDecryptedBytes(), 0, "Deno untrusted CA cert must be refused before any Postgres byte");
   } finally {
-    fake.closeAll();
+    tlsStall.closeAll();
+    tlsCap.closeAll();
+    tlsWrongName.closeAll();
+    tlsUntrusted.closeAll();
+    await pki.cleanup();
     await rm(work, { recursive: true, force: true });
   }
 });

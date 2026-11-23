@@ -76,6 +76,7 @@ const CONNECTION_CODES = new Set([
   "CONNECT_TIMEOUT",
   "CONNECTION_CLOSED",
   "CONNECTION_ENDED",
+  "EDGE_DATABASE_STALLED",
 ]);
 
 /** Explicit retryable SQLSTATE / library codes (class or full code). */

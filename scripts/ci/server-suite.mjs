@@ -97,12 +97,17 @@ function dockerHubLibrary(name, digest) {
 function supabaseRegistries(name, digest) {
   return [`public.ecr.aws/supabase/${name}@${digest}`, `ghcr.io/supabase/${name}@${digest}`, `supabase/${name}@${digest}`];
 }
+function supabaseEdgeRegistries(name, digest) {
+  return [`public.ecr.aws/supabase/${name}@${digest}`, `ghcr.io/supabase/${name}@${digest}`];
+}
 const pinnedTestImages = [
   { alias: 'c1-psql', image: 'postgres:17.12', digest: 'sha256:6f7593c161689b6b02c78668b314af7da8811b592c5519108c57a49d0b6ad788', registries: dockerHubLibrary, users: [] },
   { alias: 'p1-cli-postgres', image: 'postgres:17.11', digest: 'sha256:996e9dc583ba9f0265a2c75547a9c95fb22c251e394749cab205a0a00e1856a1', registries: dockerHubLibrary,
     users: ['tests/p1-cli/n-db-target-marker.test.ts', 'tests/p1-cli/n-db-freeze-hosted-shape.test.ts', 'tests/p1-cli/supabase-stack.test.ts'] },
   { alias: 'p1-cli-box-postgres', image: 'public.ecr.aws/supabase/postgres:17.6.1.147', digest: 'sha256:0c0d3539aaf3c8c09a9a5b044ad3f709470e7241f3e4c69e1572bfac1b90a24b', registries: supabaseRegistries,
-    users: ['tests/p1-cli/n-db-cron-jobs.test.ts'] },
+    users: ['tests/p1-cli/n-db-cron-jobs.test.ts', 'tests/p1-cli/edge-database-recovery.test.ts'] },
+  { alias: 'p1-cli-edge-runtime', image: 'public.ecr.aws/supabase/edge-runtime:v1.73.13', digest: 'sha256:e8ddc7b0f4888818159d4b665e922de667948e2864c895ed62acdfd29e7c6c80', registries: supabaseEdgeRegistries,
+    users: ['tests/p1-cli/edge-database-recovery.test.ts'] },
 ];
 function testImages() {
   return pinnedTestImages.map(({ alias, image, digest, registries, users }) => {

@@ -411,17 +411,23 @@ test("the pinned test images are the tags their consumers run, each with a diges
   const { stdout, digests } = testImageMetadata();
   assert.match(stdout, /^key=[0-9a-f]{64}$/m);
   assert.match(stdout, /^c1_psql_image=postgres:17\.12$/m);
-  assert.deepEqual(Object.keys(digests), ["postgres:17.12", "postgres:17.11", "public.ecr.aws/supabase/postgres:17.6.1.147"]);
+  assert.deepEqual(Object.keys(digests), [
+    "postgres:17.12",
+    "postgres:17.11",
+    "public.ecr.aws/supabase/postgres:17.6.1.147",
+    "public.ecr.aws/supabase/edge-runtime:v1.73.13",
+  ]);
 });
 
 test("a cold test image cache pulls each image only by digest, tags it and asks to save it", { timeout: 120_000 }, context => {
   const { digests } = testImageMetadata();
   const { cache, cold } = coldTestCache(context);
-  assert.match(cold.stdout, /Pulled 3 pinned test images; cache archive/);
+  assert.match(cold.stdout, /Pulled 4 pinned test images; cache archive/);
   assert.deepEqual(pulls(cache.calls()).sort(), [
     `postgres@${digests["postgres:17.12"]}`,
     `postgres@${digests["postgres:17.11"]}`,
     `public.ecr.aws/supabase/postgres@${digests["public.ecr.aws/supabase/postgres:17.6.1.147"]}`,
+    `public.ecr.aws/supabase/edge-runtime@${digests["public.ecr.aws/supabase/edge-runtime:v1.73.13"]}`,
   ].sort());
   assert.deepEqual(cache.calls().filter(args => args[0] === "tag").map(args => args[2]).sort(), Object.keys(digests).sort());
   assert.equal(readFileSync(join(cache.work, "output"), "utf8"), "save=true\n");
@@ -432,7 +438,7 @@ test("a warm test image cache loads, verifies and pulls nothing", { timeout: 120
   cache.reset();
   const warm = testCache(cache, { PINNED_IMAGE_CACHE_HIT: "true" });
   assert.equal(warm.status, 0, `${warm.stdout}${warm.stderr}`);
-  assert.match(warm.stdout, /Restored and verified 3 pinned test images from the cache; no registry pulls\./);
+  assert.match(warm.stdout, /Restored and verified 4 pinned test images from the cache; no registry pulls\./);
   assert.deepEqual(pulls(cache.calls()), []);
 });
 
@@ -442,10 +448,11 @@ test("an ECR data limit sends the box image to GHCR, still by digest", { timeout
   const result = testCache(cache, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "data-limit" });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.ok(pulls(cache.calls()).includes(`ghcr.io/supabase/postgres@${digests["public.ecr.aws/supabase/postgres:17.6.1.147"]}`));
+  assert.ok(pulls(cache.calls()).includes(`ghcr.io/supabase/edge-runtime@${digests["public.ecr.aws/supabase/edge-runtime:v1.73.13"]}`));
 });
 
 for (const [name, script, env, ok, message] of [
-  ["nothing pulled", "", {}, true, /Checked 3 pinned test images: unchanged, none pulled from a registry\./],
+  ["nothing pulled", "", {}, true, /Checked 4 pinned test images: unchanged, none pulled from a registry\./],
   ["a pinned tag pulled again", "docker pull --quiet postgres:17.11\n", {}, false, /changed or went missing.*postgres:17\.11/s],
   ["a pinned repository pulled under another name", "", { DOCKER_EXTRA_IMAGE: "postgres:<none>" }, false, /pulled into the pinned test image repositories/],
   ["a mirror of a pinned repository pulled", "", { DOCKER_EXTRA_IMAGE: "mirror.gcr.io/library/postgres:17.11" }, false, /pulled into the pinned test image repositories/],

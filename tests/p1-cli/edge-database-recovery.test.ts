@@ -1,26 +1,34 @@
 /**
- * Edge database recovery witness against this stack's real Postgres image in Docker.
+ * Edge database TLS verification and pool-holder recovery witness against this stack's real
+ * Postgres image and pinned Supabase edge-runtime image in Docker.
  *
- * Reproduces the 2026-11-23 incident where restarting/recreating Postgres left warm
- * edge isolates unable to write until the edge container was restarted:
- * - Case A: `docker restart` of Postgres while the Deno edge client stays alive.
- * - Down window + backoff-poison check: writes while Postgres is stopped fail within
- *   `connect_timeout` (not 30s) and repeated failures do not poison the first write
- *   after Postgres returns.
- * - Case B: force-removing Postgres (half-open TCP socket with no FIN/RST) and
- *   starting a replacement container on the same user-defined Docker network with
- *   the same network alias (`db.commonswarm.internal`) and data volume, at a new IP:
- *   both an immediate write on the dead socket and an idle-timeout half-close recover
- *   and re-resolve the alias to the new IP without restarting the Deno process.
+ * Reproduces the 2026-11-23 incident with stock postgres.js TLS verification enabled (no custom socket):
+ * - TLS verification controls inside the pinned edge-runtime image:
+ *   1. Matching DNS/SNI certificate (`db.commonswarm.internal`) from the private CA connects
+ *      and confirms `pg_stat_ssl.ssl = true`.
+ *   2. Wrong-name certificate (`wrong.commonswarm.internal` served on `wrong-target.commonswarm.internal`)
+ *      from the trusted CA is refused before any Postgres startup or authentication byte reaches the server.
+ *   3. Untrusted-CA certificate for `untrusted.commonswarm.internal` is refused before any Postgres
+ *      startup or authentication byte reaches the server.
+ * - Case A: `docker restart` of TLS Postgres while the edge-runtime user worker stays warm; first write
+ *   after recovery completes within N (15s) + connect_timeout (5s).
+ * - Down window + backoff-poison check: writes while Postgres is stopped fail within `connect_timeout`
+ *   (not 30s), and repeated failures do not poison the first write after return.
+ * - Case B1: force-removing TLS Postgres while a connection is open (half-open TCP, no FIN/RST)
+ *   and starting a replacement container on the same Docker network with the same alias and
+ *   volume at a new IP: stalled write settles with `EDGE_DATABASE_STALLED` within N + margin and
+ *   rotates the pool; the first write after recovery resolves the alias to the new IP with TLS verified.
+ * - Case B2: force-removing TLS Postgres while idle, letting `idle_timeout` half-close against the
+ *   vanished peer, then starting a third container at a third IP: first write recovers within
+ *   N + connect_timeout with TLS verified.
  *
- * Reached by `npm run test:p1-cli` (glob). Skips with an explicit reason when Docker
- * is absent or when the host Deno binary cannot execute inside the Linux container.
+ * Reached by `npm run test:p1-cli` (glob). Fails (never skips) under GitHub Actions if Docker,
+ * Deno, OpenSSL, or the pinned images are unavailable.
  */
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -28,42 +36,46 @@ import { fileURLToPath } from "node:url";
 import { pullDockerImage } from "../support/docker-image-pull.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.147";
+const PG_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.147";
+const EDGE_IMAGE = "public.ecr.aws/supabase/edge-runtime:v1.73.13";
 const DB_ALIAS = "db.commonswarm.internal";
+const WRONG_TARGET_ALIAS = "wrong-target.commonswarm.internal";
+const WRONG_CERT_CN = "wrong.commonswarm.internal";
+const UNTRUSTED_ALIAS = "untrusted.commonswarm.internal";
 const CONNECT_TIMEOUT_SECONDS = 5;
-const SOCKET_TIMEOUT_MS = 15_000;
-const RECOVERY_BOUND_MS = 10_000;
+const STALL_TIMEOUT_MS = 15_000;
 const DOWN_CONNECT_BOUND_MS = (CONNECT_TIMEOUT_SECONDS + 3) * 1_000;
-const HALF_OPEN_WRITE_BOUND_MS = SOCKET_TIMEOUT_MS + 3_000;
+const RECOVERY_BOUND_MS = STALL_TIMEOUT_MS + CONNECT_TIMEOUT_SECONDS * 1_000 + 2_000;
+const IN_GITHUB_ACTIONS = process.env.GITHUB_ACTIONS === "true";
 
-function run(command: string, args: string[], input?: string): SpawnSyncReturns<string> {
+function run(
+  command: string,
+  args: string[],
+  options: { input?: string; env?: NodeJS.ProcessEnv } = {},
+): SpawnSyncReturns<string> {
   return spawnSync(command, args, {
     encoding: "utf8",
-    input: input ?? "",
+    input: options.input ?? "",
+    env: options.env ?? process.env,
     stdio: ["pipe", "pipe", "pipe"],
     timeout: 120_000,
   });
 }
 
-function findDenoBinary(): string | null {
-  const probe = run("which", ["deno"]);
-  if (probe.status !== 0) return null;
-  const raw = probe.stdout.trim().split("\n")[0]?.trim();
-  if (!raw) return null;
-  try {
-    return realpathSync(raw);
-  } catch {
-    return raw;
+function skipOrFail(context: { skip: (message?: string) => void }, reason: string): void {
+  if (IN_GITHUB_ACTIONS) {
+    assert.fail(`CI must run the edge database recovery witness without skipping: ${reason}`);
   }
+  context.skip(reason);
 }
 
 function inspectContainerIp(container: string): string {
   const inspected = run("docker", [
     "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container,
   ]);
-  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.equal(inspected.status, 0, "failed to inspect container IP");
   const ip = inspected.stdout.trim();
-  assert.match(ip, /^\d+\.\d+\.\d+\.\d+$/, `unexpected container IP for ${container}: ${ip}`);
+  assert.match(ip, /^\d+\.\d+\.\d+\.\d+$/, `unexpected container IP for ${container}`);
   return ip;
 }
 
@@ -75,129 +87,190 @@ function nextDifferentIp(ip: string, avoid: ReadonlySet<string>): string {
     const candidate = `${parts[0]}.${parts[1]}.${parts[2]}.${last}`;
     if (!avoid.has(candidate)) return candidate;
   }
-  throw new Error(`could not pick a distinct IP near ${ip}`);
+  throw new Error("could not pick a distinct container IP");
 }
 
 async function waitForPostgresReady(container: string, password: string): Promise<void> {
   const deadline = Date.now() + 90_000;
+  // Pass PGPASSWORD through environment inheritance (-e PGPASSWORD without =value), never argv.
+  const env = { ...process.env, PGPASSWORD: password };
   while (Date.now() < deadline) {
     const probe = run("docker", [
-      "exec", "-e", `PGPASSWORD=${password}`, container,
+      "exec", "-e", "PGPASSWORD", container,
       "psql", "-X", "-v", "ON_ERROR_STOP=1",
       "-h", "127.0.0.1", "-U", "supabase_admin", "-d", "postgres",
       "-q", "-t", "-A", "-c", "SELECT 1",
-    ]);
+    ], { env });
     if (probe.status === 0 && probe.stdout.trim() === "1") return;
     await new Promise((r) => setTimeout(r, 300));
   }
-  const logs = run("docker", ["logs", "--tail", "40", container]);
-  assert.fail(`Postgres container ${container} did not become ready:\n${logs.stdout}\n${logs.stderr}`);
+  assert.fail(`Postgres container ${container} did not become ready within 90s`);
 }
 
-interface ClientReply {
-  id: number;
+function runOpenssl(args: string[]): void {
+  const res = run("openssl", args);
+  assert.equal(res.status, 0, `openssl ${args[0]} failed`);
+}
+
+async function generateTlsFixtures(work: string): Promise<{
+  trustedCaPem: string;
+  goodDir: string;
+  wrongDir: string;
+  untrustedDir: string;
+}> {
+  const pkiDir = join(work, "pki");
+  const goodDir = join(pkiDir, "good");
+  const wrongDir = join(pkiDir, "wrong");
+  const untrustedDir = join(pkiDir, "untrusted");
+  await mkdir(goodDir, { recursive: true, mode: 0o755 });
+  await mkdir(wrongDir, { recursive: true, mode: 0o755 });
+  await mkdir(untrustedDir, { recursive: true, mode: 0o755 });
+
+  const caKey = join(pkiDir, "ca.key");
+  const caCert = join(pkiDir, "ca.crt");
+  const badCaKey = join(pkiDir, "bad-ca.key");
+  const badCaCert = join(pkiDir, "bad-ca.crt");
+
+  runOpenssl([
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", caKey, "-out", caCert,
+    "-days", "1", "-subj", "/CN=CommonSwarm Witness CA",
+  ]);
+  runOpenssl([
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", badCaKey, "-out", badCaCert,
+    "-days", "1", "-subj", "/CN=CommonSwarm Witness Untrusted CA",
+  ]);
+
+  const issue = async (outDir: string, dnsName: string, issuerCert: string, issuerKey: string) => {
+    const keyPath = join(outDir, "server.key");
+    const csrPath = join(outDir, "server.csr");
+    const extPath = join(outDir, "server.ext");
+    const certPath = join(outDir, "server.crt");
+    await writeFile(extPath, `subjectAltName=DNS:${dnsName}\nbasicConstraints=CA:FALSE\n`, "utf8");
+    runOpenssl([
+      "req", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", keyPath, "-out", csrPath,
+      "-subj", `/CN=${dnsName}`,
+    ]);
+    runOpenssl([
+      "x509", "-req", "-in", csrPath,
+      "-CA", issuerCert, "-CAkey", issuerKey, "-CAcreateserial",
+      "-out", certPath, "-days", "1", "-extfile", extPath,
+    ]);
+    await chmod(certPath, 0o644);
+    await chmod(keyPath, 0o644);
+  };
+
+  await issue(goodDir, DB_ALIAS, caCert, caKey);
+  await issue(wrongDir, WRONG_CERT_CN, caCert, caKey);
+  await issue(untrustedDir, UNTRUSTED_ALIAS, badCaCert, badCaKey);
+
+  return {
+    trustedCaPem: await readFile(caCert, "utf8"),
+    goodDir,
+    wrongDir,
+    untrustedDir,
+  };
+}
+
+interface EdgeOpReply {
   ok: boolean;
   elapsedMs: number;
   value?: unknown;
   code?: string;
-  message?: string;
+  diagnostic?: string;
 }
 
-class ContainerDenoClient {
-  #proc: ChildProcessWithoutNullStreams;
-  #nextId = 1;
-  #pending = new Map<number, {
-    resolve: (reply: ClientReply) => void;
-    reject: (err: Error) => void;
-    timer: NodeJS.Timeout;
-  }>();
-  #stderr = "";
-
-  constructor(proc: ChildProcessWithoutNullStreams) {
-    this.#proc = proc;
-    proc.stdout.setEncoding("utf8");
-    proc.stderr.setEncoding("utf8");
-    let buffer = "";
-    proc.stdout.on("data", (chunk: string) => {
-      buffer += chunk;
-      let nl = buffer.indexOf("\n");
-      while (nl >= 0) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        if (line.startsWith("REPLY:")) {
-          const reply = JSON.parse(line.slice("REPLY:".length)) as ClientReply;
-          const slot = this.#pending.get(reply.id);
-          if (slot) {
-            this.#pending.delete(reply.id);
-            clearTimeout(slot.timer);
-            slot.resolve(reply);
-          }
-        }
-        nl = buffer.indexOf("\n");
-      }
-    });
-    proc.stderr.on("data", (chunk: string) => {
-      this.#stderr += chunk;
-    });
-    proc.on("close", (code, signal) => {
-      for (const [id, slot] of this.#pending) {
-        this.#pending.delete(id);
-        clearTimeout(slot.timer);
-        slot.reject(new Error(`deno client exited (${code}/${signal}) while awaiting request ${id}\n${this.#stderr}`));
-      }
-    });
-  }
-
-  request(op: Record<string, unknown>, timeoutMs = 25_000): Promise<ClientReply> {
-    const id = this.#nextId++;
-    return new Promise((resolveReq, rejectReq) => {
-      const timer = setTimeout(() => {
-        this.#pending.delete(id);
-        rejectReq(new Error(`deno client request ${id} (${String(op.op)}) timed out after ${timeoutMs}ms\n${this.#stderr}`));
-      }, timeoutMs);
-      this.#pending.set(id, { resolve: resolveReq, reject: rejectReq, timer });
-      this.#proc.stdin.write(`${JSON.stringify({ id, ...op })}\n`);
-    });
-  }
-
-  async close(): Promise<void> {
+async function waitForEdgeReady(edgePort: number): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
     try {
-      await this.request({ op: "close" }, 5_000);
+      const res = await fetch(`http://127.0.0.1:${edgePort}/health`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (res.status === 200) return;
     } catch {
-      // Fall through to process cleanup.
+      // Retry until ready.
     }
-    this.#proc.stdin.end();
-    if (this.#proc.exitCode === null && this.#proc.signalCode === null) {
-      this.#proc.kill("SIGKILL");
-    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  assert.fail("pinned edge-runtime container did not become healthy within 90s");
+}
+
+async function edgeOp(
+  edgePort: number,
+  body: Record<string, unknown>,
+  timeoutMs = 30_000,
+): Promise<EdgeOpReply> {
+  const response = await fetch(`http://127.0.0.1:${edgePort}/op`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await response.text();
+  if (response.status !== 200) {
+    assert.fail(`edge witness returned unexpected HTTP status ${response.status} for op=${String(body.op)}`);
+  }
+  try {
+    return JSON.parse(text) as EdgeOpReply;
+  } catch {
+    assert.fail(`edge witness returned non-JSON body for op=${String(body.op)}`);
   }
 }
 
-test("edge database client recovers from Postgres restart and recreate with a new IP without process restart", { timeout: 300_000 }, async (context) => {
+/** Write with a single caller-side retry if the first attempt trips a stall or stale socket close. */
+async function writeWithCallerRetry(
+  edgePort: number,
+  label: string,
+): Promise<{ reply: EdgeOpReply; totalMs: number; retriedCode: string | null }> {
+  const t0 = Date.now();
+  const first = await edgeOp(edgePort, { op: "write", label }, RECOVERY_BOUND_MS + 5_000);
+  if (first.ok) {
+    return { reply: first, totalMs: Date.now() - t0, retriedCode: null };
+  }
+  const second = await edgeOp(edgePort, { op: "write", label }, DOWN_CONNECT_BOUND_MS + 5_000);
+  return { reply: second, totalMs: Date.now() - t0, retriedCode: first.code ?? "UNKNOWN" };
+}
+
+function assertPostgresSawNoStartupOrAuth(container: string, label: string): void {
+  const logs = run("docker", ["logs", container]);
+  const combined = `${logs.stdout}\n${logs.stderr}`;
+  assert.doesNotMatch(
+    combined,
+    /connection authenticated:|connection authorized:|password authentication failed/i,
+    `${label}: Postgres must never receive startup or authentication bytes on a refused TLS handshake`,
+  );
+}
+
+test("pinned edge-runtime verifies stock TLS and recovers via pool holder from Postgres restart and recreate with a new IP", { timeout: 300_000 }, async (context) => {
+  // Confirm the pinned edge image tag matches deploy/edge-runtime/compose.yaml.
+  const composeEdge = (await readFile(join(repoRoot, "deploy/edge-runtime/compose.yaml"), "utf8"))
+    .match(/^\s+image:\s+(\S+)$/m)?.[1];
+  assert.equal(composeEdge, EDGE_IMAGE, "EDGE_IMAGE must match deploy/edge-runtime/compose.yaml");
+
   if (run("docker", ["version", "--format", "{{.Server.Version}}"]).status !== 0) {
-    context.skip("Docker is absent; this witness requires a throwaway Postgres container");
+    skipOrFail(context, "Docker is absent; this witness requires throwaway Postgres and edge-runtime containers");
     return;
   }
-  const denoBin = findDenoBinary();
-  if (denoBin === null) {
-    context.skip("deno is absent; this witness runs the real Deno edge helper");
+  if (run("deno", ["--version"]).status !== 0) {
+    skipOrFail(context, "deno is absent");
     return;
   }
-  const image = await pullDockerImage(IMAGE);
-  if (!image.ready) {
-    context.skip(image.reason);
+  if (run("openssl", ["version"]).status !== 0) {
+    skipOrFail(context, "openssl is absent; TLS witness requires ephemeral CA and server certificates");
     return;
   }
-  // Confirm the host Deno binary can execute inside this stack's Linux Postgres container
-  // (succeeds on Linux CI where Deno's glibc binary runs directly on Debian 12; skips on macOS).
-  const denoInContainer = run("docker", [
-    "run", "--rm",
-    "--entrypoint", "/usr/local/bin/deno",
-    "-v", `${denoBin}:/usr/local/bin/deno:ro`,
-    IMAGE, "--version",
-  ]);
-  if (denoInContainer.status !== 0) {
-    context.skip(`host deno binary cannot run inside Linux container (${denoInContainer.stderr.trim().split("\n")[0] ?? "exec error"})`);
+
+  const pgImage = await pullDockerImage(PG_IMAGE);
+  if (!pgImage.ready) {
+    skipOrFail(context, pgImage.reason);
+    return;
+  }
+  const edgeImage = await pullDockerImage(EDGE_IMAGE);
+  if (!edgeImage.ready) {
+    skipOrFail(context, edgeImage.reason);
     return;
   }
 
@@ -209,225 +282,368 @@ test("edge database client recovers from Postgres restart and recreate with a ne
   const pg1 = `edge-db-pg1-${id}`;
   const pg2 = `edge-db-pg2-${id}`;
   const pg3 = `edge-db-pg3-${id}`;
-  const clientContainer = `edge-db-cli-${id}`;
+  const pgWrong = `edge-db-wrong-${id}`;
+  const pgUntrusted = `edge-db-untrusted-${id}`;
+  const edgeContainer = `edge-db-rt-${id}`;
   const work = await mkdtemp(join(tmpdir(), "edge-db-recovery-"));
-  const denoDir = join(work, "deno-dir");
-  await mkdir(denoDir, { mode: 0o700 });
+  await chmod(work, 0o755);
 
-  let client: ContainerDenoClient | null = null;
   try {
-    // Pre-cache npm:postgres@3.4.9 on the host into denoDir so the container starts offline-safe.
-    const cached = spawnSync(denoBin, [
-      "cache", "--no-lock",
-      "--config", join(repoRoot, "supabase/functions/command/deno.json"),
-      join(repoRoot, "supabase/functions/_shared/database.ts"),
-    ], {
-      encoding: "utf8",
-      timeout: 60_000,
-      env: { ...process.env, DENO_DIR: denoDir },
-    });
-    assert.equal(cached.status, 0, cached.stdout + cached.stderr);
+    const pki = await generateTlsFixtures(work);
+    const pgEnvFile = join(work, "pg.env");
+    await writeFile(pgEnvFile, [
+      `POSTGRES_PASSWORD=${password}`,
+      `JWT_SECRET=${jwtSecret}`,
+      "JWT_EXP=3600",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    await chmod(pgEnvFile, 0o600);
 
-    await writeFile(join(work, "client.ts"), `
+    const edgeEnvFile = join(work, "edge.env");
+    const dbUrlForHost = (host: string) =>
+      `postgres://supabase_admin:${encodeURIComponent(password)}@${host}:5432/postgres`;
+    const caB64 = Buffer.from(pki.trustedCaPem, "utf8").toString("base64");
+    await writeFile(edgeEnvFile, [
+      `SWARM_DATABASE_URL=${dbUrlForHost(DB_ALIAS)}`,
+      `WITNESS_WRONG_NAME_URL=${dbUrlForHost(WRONG_TARGET_ALIAS)}`,
+      `WITNESS_UNTRUSTED_CA_URL=${dbUrlForHost(UNTRUSTED_ALIAS)}`,
+      `SWARM_DATABASE_TLS_CA_B64=${caB64}`,
+      "",
+    ].join("\n"), { mode: 0o600 });
+    await chmod(edgeEnvFile, 0o600);
+
+    const mainDir = join(work, "main");
+    const workerDir = join(work, "worker");
+    await mkdir(mainDir, { recursive: true, mode: 0o755 });
+    await mkdir(workerDir, { recursive: true, mode: 0o755 });
+
+    await writeFile(join(workerDir, "deno.json"), JSON.stringify({
+      imports: { postgres: "npm:postgres@3.4.9" },
+    }, null, 2), { mode: 0o644 });
+
+    // Main service keeps a single warm user-worker isolate alive across all requests.
+    await writeFile(join(mainDir, "index.ts"), `
+declare const EdgeRuntime: {
+  userWorkers: {
+    create(options: {
+      servicePath: string;
+      memoryLimitMb: number;
+      workerTimeoutMs: number;
+      noModuleCache: boolean;
+      envVars: Array<[string, string]>;
+    }): Promise<{ fetch(request: Request): Promise<Response> }>;
+  };
+};
+
+let workerPromise: Promise<{ fetch(request: Request): Promise<Response> }> | null = null;
+function getWorker() {
+  if (!workerPromise) {
+    workerPromise = EdgeRuntime.userWorkers.create({
+      servicePath: "/run/witness/worker",
+      memoryLimitMb: 128,
+      workerTimeoutMs: 300_000,
+      noModuleCache: false,
+      envVars: [
+        ["SWARM_DATABASE_URL", Deno.env.get("SWARM_DATABASE_URL") ?? ""],
+        ["WITNESS_WRONG_NAME_URL", Deno.env.get("WITNESS_WRONG_NAME_URL") ?? ""],
+        ["WITNESS_UNTRUSTED_CA_URL", Deno.env.get("WITNESS_UNTRUSTED_CA_URL") ?? ""],
+        ["SWARM_DATABASE_TLS_CA_B64", Deno.env.get("SWARM_DATABASE_TLS_CA_B64") ?? ""],
+      ],
+    });
+  }
+  return workerPromise;
+}
+
+Deno.serve(async (request) => {
+  const url = new URL(request.url);
+  if (url.pathname === "/health") {
+    return Response.json({ status: "ok" });
+  }
+  try {
+    const worker = await getWorker();
+    return await worker.fetch(request);
+  } catch {
+    return Response.json({ ok: false, elapsedMs: 0, code: "WORKER_ERROR", diagnostic: "edge_worker_invocation_failed" }, { status: 200 });
+  }
+});
+`, { mode: 0o644 });
+
+    // User worker runs the actual shared createEdgeDatabase pool holder and returns fixed diagnostics only.
+    await writeFile(join(workerDir, "index.ts"), `
 import { createEdgeDatabase } from "/work/supabase/functions/_shared/database.ts";
 
-const db = createEdgeDatabase(Deno.env.get("SWARM_DATABASE_URL")!, {
+const dbUrl = Deno.env.get("SWARM_DATABASE_URL")!;
+const wrongNameUrl = Deno.env.get("WITNESS_WRONG_NAME_URL")!;
+const untrustedCaUrl = Deno.env.get("WITNESS_UNTRUSTED_CA_URL")!;
+const caB64 = Deno.env.get("SWARM_DATABASE_TLS_CA_B64")!;
+
+const db = createEdgeDatabase(dbUrl, {
   max: 1,
   idle_timeout: 3,
   connect_timeout: ${CONNECT_TIMEOUT_SECONDS},
-}, undefined);
+}, caB64);
 
-const decoder = new TextDecoder();
-let buffer = "";
-for await (const chunk of Deno.stdin.readable) {
-  buffer += decoder.decode(chunk, { stream: true });
-  let nl = buffer.indexOf("\\n");
-  while (nl >= 0) {
-    const line = buffer.slice(0, nl).trim();
-    buffer = buffer.slice(nl + 1);
-    if (line.length > 0) {
-      const req = JSON.parse(line) as { id: number; op: string; label?: string };
-      const t0 = Date.now();
+function safeCode(err: unknown): string {
+  const raw = err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string"
+    ? (err as { code: string }).code
+    : "";
+  return /^[A-Z0-9_]{1,48}$/.test(raw) ? raw : "DATABASE_ERROR";
+}
+
+function fixedDiagnostic(code: string): string {
+  if (code === "EDGE_DATABASE_STALLED") return "database_stalled";
+  if (code === "CONNECT_TIMEOUT") return "connect_timeout";
+  if (code === "CONNECTION_CLOSED") return "connection_closed";
+  if (code.includes("TLS") || code.includes("CERT") || code.includes("SIGNATURE") || code.includes("VERIFY")) {
+    return "tls_verification_failed";
+  }
+  return "database_operation_failed";
+}
+
+Deno.serve(async (request) => {
+  const req = await request.json() as { op: string; label?: string; target?: "good" | "wrong" | "untrusted" };
+  const t0 = Date.now();
+  try {
+    if (req.op === "init") {
+      await db.begin(async (tx) => {
+        await tx\`CREATE TABLE IF NOT EXISTS public.edge_recovery_witness (
+          id serial PRIMARY KEY,
+          label text NOT NULL
+        )\`;
+      });
+      return Response.json({ ok: true, elapsedMs: Date.now() - t0 });
+    }
+    if (req.op === "write") {
+      const rows = await db.begin(async (tx) => {
+        return await tx<{ id: number; addr: string; ssl: boolean }[]>\`
+          INSERT INTO public.edge_recovery_witness (label)
+          VALUES (\${req.label ?? ""})
+          RETURNING id, inet_server_addr()::text AS addr,
+            (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl
+        \`;
+      });
+      return Response.json({ ok: true, elapsedMs: Date.now() - t0, value: rows[0] ?? null });
+    }
+    if (req.op === "list") {
+      const rows = await db<{ label: string }[]>\`
+        SELECT label FROM public.edge_recovery_witness ORDER BY id ASC
+      \`;
+      return Response.json({ ok: true, elapsedMs: Date.now() - t0, value: rows.map((r) => r.label) });
+    }
+    if (req.op === "probe_tls") {
+      const targetUrl = req.target === "wrong"
+        ? wrongNameUrl
+        : req.target === "untrusted"
+        ? untrustedCaUrl
+        : dbUrl;
+      const probe = createEdgeDatabase(targetUrl, {
+        max: 1,
+        connect_timeout: ${CONNECT_TIMEOUT_SECONDS},
+      }, caB64);
       try {
-        if (req.op === "init") {
-          await db.begin(async (tx) => {
-            await tx\`CREATE TABLE IF NOT EXISTS public.edge_recovery_witness (
-              id serial PRIMARY KEY,
-              label text NOT NULL
-            )\`;
-          });
-          console.log("REPLY:" + JSON.stringify({ id: req.id, ok: true, elapsedMs: Date.now() - t0 }));
-        } else if (req.op === "write") {
-          const rows = await db.begin(async (tx) => {
-            return await tx<{ id: number; addr: string }[]>\`
-              INSERT INTO public.edge_recovery_witness (label)
-              VALUES (\${req.label ?? ""})
-              RETURNING id, inet_server_addr()::text AS addr
-            \`;
-          });
-          console.log("REPLY:" + JSON.stringify({
-            id: req.id, ok: true, elapsedMs: Date.now() - t0, value: rows[0] ?? null,
-          }));
-        } else if (req.op === "list") {
-          const rows = await db<{ label: string }[]>\`
-            SELECT label FROM public.edge_recovery_witness ORDER BY id ASC
-          \`;
-          console.log("REPLY:" + JSON.stringify({
-            id: req.id, ok: true, elapsedMs: Date.now() - t0, value: rows.map((r) => r.label),
-          }));
-        } else if (req.op === "close") {
-          await db.end({ timeout: 1 });
-          console.log("REPLY:" + JSON.stringify({ id: req.id, ok: true, elapsedMs: Date.now() - t0 }));
-          Deno.exit(0);
-        }
-      } catch (err) {
-        const record = err && typeof err === "object" ? err as { code?: unknown; message?: unknown } : {};
-        console.log("REPLY:" + JSON.stringify({
-          id: req.id,
-          ok: false,
-          elapsedMs: Date.now() - t0,
-          code: typeof record.code === "string" ? record.code : "",
-          message: typeof record.message === "string" ? record.message : String(err),
-        }));
+        const rows = await probe<{ ssl: boolean }[]>\`
+          SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()
+        \`;
+        return Response.json({ ok: true, elapsedMs: Date.now() - t0, value: rows[0] ?? null });
+      } finally {
+        await probe.end({ timeout: 0 });
       }
     }
-    nl = buffer.indexOf("\\n");
+    if (req.op === "close") {
+      await db.end({ timeout: 1 });
+      return Response.json({ ok: true, elapsedMs: Date.now() - t0 });
+    }
+    return Response.json({ ok: false, elapsedMs: Date.now() - t0, code: "UNKNOWN_OP", diagnostic: "unknown_operation" });
+  } catch (err) {
+    const code = safeCode(err);
+    return Response.json({
+      ok: false,
+      elapsedMs: Date.now() - t0,
+      code,
+      diagnostic: fixedDiagnostic(code),
+    });
   }
-}
-`, "utf8");
+});
+`, { mode: 0o644 });
 
-    assert.equal(run("docker", ["network", "create", network]).status, 0);
-    assert.equal(run("docker", ["volume", "create", volume]).status, 0);
+    assert.equal(run("docker", ["network", "create", network]).status, 0, "failed to create Docker network");
+    assert.equal(run("docker", ["volume", "create", volume]).status, 0, "failed to create Docker volume");
 
-    const startPg = (name: string, ip?: string) => {
+    // Start a throwaway Postgres container with TLS enabled and credentials passed only via 0600 env-file.
+    const startPg = (opts: {
+      name: string;
+      tlsDir: string;
+      alias?: string;
+      ip?: string;
+      useSharedVolume?: boolean;
+    }) => {
       const args = [
-        "run", "-d", "--name", name,
+        "run", "-d", "--name", opts.name,
         "--network", network,
-        ...(ip ? ["--ip", ip] : []),
-        "--network-alias", DB_ALIAS,
-        "-v", `${volume}:/var/lib/postgresql/data`,
-        "-e", `POSTGRES_PASSWORD=${password}`,
-        "-e", `JWT_SECRET=${jwtSecret}`,
-        "-e", "JWT_EXP=3600",
-        IMAGE,
+        ...(opts.ip ? ["--ip", opts.ip] : []),
+        ...(opts.alias ? ["--network-alias", opts.alias] : []),
+        ...(opts.useSharedVolume ? ["-v", `${volume}:/var/lib/postgresql/data`] : []),
+        "-v", `${opts.tlsDir}:/run/tls-src:ro`,
+        "--env-file", pgEnvFile,
+        "--entrypoint", "/bin/bash",
+        PG_IMAGE,
+        "-c",
+        "mkdir -p /tmp/pg-tls && cp /run/tls-src/server.crt /run/tls-src/server.key /tmp/pg-tls/ && chown postgres:postgres /tmp/pg-tls/server.crt /tmp/pg-tls/server.key && chmod 600 /tmp/pg-tls/server.key && exec /usr/local/bin/docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/pg-tls/server.crt -c ssl_key_file=/tmp/pg-tls/server.key -c log_connections=on",
       ];
       const started = run("docker", args);
-      assert.equal(started.status, 0, started.stderr);
+      assert.equal(started.status, 0, `failed to start Postgres container ${opts.name}`);
     };
 
-    startPg(pg1);
-    await waitForPostgresReady(pg1, password);
-    const ip1 = inspectContainerIp(pg1);
+    startPg({ name: pg1, tlsDir: pki.goodDir, alias: DB_ALIAS, useSharedVolume: true });
+    startPg({ name: pgWrong, tlsDir: pki.wrongDir, alias: WRONG_TARGET_ALIAS });
+    startPg({ name: pgUntrusted, tlsDir: pki.untrustedDir, alias: UNTRUSTED_ALIAS });
+    await Promise.all([
+      waitForPostgresReady(pg1, password),
+      waitForPostgresReady(pgWrong, password),
+      waitForPostgresReady(pgUntrusted, password),
+    ]);
 
+    const ip1 = inspectContainerIp(pg1);
+    const wrongIp = inspectContainerIp(pgWrong);
+    const untrustedIp = inspectContainerIp(pgUntrusted);
     const netGateway = run("docker", [
       "network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", network,
     ]).stdout.trim();
-    const usedIps = new Set([netGateway, ip1]);
+    const usedIps = new Set([netGateway, ip1, wrongIp, untrustedIp]);
 
-    // Start the single long-lived Deno edge client container on the same Docker network.
-    const dbUrl = `postgres://supabase_admin:${encodeURIComponent(password)}@${DB_ALIAS}:5432/postgres?sslmode=disable`;
-    const child = spawn("docker", [
-      "run", "--rm", "-i",
-      "--name", clientContainer,
+    // Start the pinned edge-runtime container with credentials passed only via 0600 env-file.
+    const edgeStart = run("docker", [
+      "run", "-d", "--name", edgeContainer,
       "--network", network,
-      "--user", `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
-      "-e", `SWARM_DATABASE_URL=${dbUrl}`,
-      "-e", "DENO_DIR=/run/witness/deno-dir",
-      "-v", `${denoBin}:/usr/local/bin/deno:ro`,
+      "-p", "127.0.0.1::9000",
+      "--env-file", edgeEnvFile,
       "-v", `${repoRoot}:/work:ro`,
-      "-v", `${work}:/run/witness`,
-      "--entrypoint", "/usr/local/bin/deno",
-      IMAGE,
-      "run", "--no-lock", "--no-prompt", "--cached-only",
-      "--config", "/work/supabase/functions/command/deno.json",
-      "--allow-net", "--allow-env", "--allow-read",
-      "/run/witness/client.ts",
-    ], { stdio: ["pipe", "pipe", "pipe"] });
-    client = new ContainerDenoClient(child);
-    usedIps.add(inspectContainerIp(clientContainer));
+      "-v", `${work}:/run/witness:ro`,
+      EDGE_IMAGE,
+      "start",
+      "--main-service", "/run/witness/main",
+      "--port", "9000",
+      "--policy", "per_worker",
+      "--max-parallelism", "2",
+    ]);
+    assert.equal(edgeStart.status, 0, "failed to start pinned edge-runtime container");
+    usedIps.add(inspectContainerIp(edgeContainer));
 
-    // Baseline: schema + first write succeed through the shared helper.
-    const initReply = await client.request({ op: "init" });
-    assert.equal(initReply.ok, true, initReply.message);
-    const w1 = await client.request({ op: "write", label: "before-restart" });
-    assert.equal(w1.ok, true, w1.message);
+    const portInfo = run("docker", ["port", edgeContainer, "9000/tcp"]);
+    assert.equal(portInfo.status, 0, "failed to inspect edge-runtime published port");
+    const edgePort = Number(portInfo.stdout.trim().split(":").pop());
+    assert.ok(Number.isInteger(edgePort) && edgePort > 0, "invalid published edge-runtime port");
+    await waitForEdgeReady(edgePort);
 
-    // Case A: docker restart of Postgres; same Deno process recovers within RECOVERY_BOUND_MS.
-    assert.equal(run("docker", ["restart", pg1]).status, 0);
+    const timings: Record<string, unknown> = {};
+
+    // TLS verification controls inside the pinned edge-runtime image (stock postgres.js TLS):
+    // 1. Matching-name control (DNS db.commonswarm.internal, trusted CA) succeeds with ssl=true.
+    const goodProbe = await edgeOp(edgePort, { op: "probe_tls", target: "good" });
+    assert.equal(goodProbe.ok, true, `matching TLS control failed (${goodProbe.code}/${goodProbe.diagnostic})`);
+    assert.equal((goodProbe.value as { ssl?: boolean } | null)?.ssl, true, "matching TLS control must report ssl=true");
+
+    // 2. Wrong-name cert (trusted CA, cert for wrong.commonswarm.internal) refused before startup/auth.
+    const wrongProbe = await edgeOp(edgePort, { op: "probe_tls", target: "wrong" });
+    assert.equal(wrongProbe.ok, false, "wrong-name certificate must be refused by edge-runtime");
+    assertPostgresSawNoStartupOrAuth(pgWrong, "wrong-name cert");
+
+    // 3. Untrusted-CA cert refused before startup/auth.
+    const untrustedProbe = await edgeOp(edgePort, { op: "probe_tls", target: "untrusted" });
+    assert.equal(untrustedProbe.ok, false, "untrusted CA certificate must be refused by edge-runtime");
+    assertPostgresSawNoStartupOrAuth(pgUntrusted, "untrusted CA cert");
+
+    // Baseline: schema + first write succeed through the warm TLS pool.
+    const initReply = await edgeOp(edgePort, { op: "init" });
+    assert.equal(initReply.ok, true, `init failed (${initReply.code}/${initReply.diagnostic})`);
+    const w1 = await edgeOp(edgePort, { op: "write", label: "before-restart" });
+    assert.equal(w1.ok, true, `baseline write failed (${w1.code}/${w1.diagnostic})`);
+    assert.equal((w1.value as { ssl?: boolean } | null)?.ssl, true, "baseline write must use TLS");
+    timings.baselineMs = w1.elapsedMs;
+
+    // Case A: docker restart of TLS Postgres; same warm edge-runtime worker recovers within N + connect_timeout.
+    assert.equal(run("docker", ["restart", pg1]).status, 0, "failed to restart pg1");
     await waitForPostgresReady(pg1, password);
-    const w2 = await client.request({ op: "write", label: "after-restart" });
-    assert.equal(w2.ok, true, `case A write failed: ${w2.code} ${w2.message}`);
-    assert.ok(w2.elapsedMs < RECOVERY_BOUND_MS, `case A took ${w2.elapsedMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
+    const caseA = await writeWithCallerRetry(edgePort, "after-restart");
+    assert.equal(caseA.reply.ok, true, `case A write failed (${caseA.reply.code}/${caseA.reply.diagnostic})`);
+    assert.equal((caseA.reply.value as { ssl?: boolean } | null)?.ssl, true, "case A write must use TLS");
+    assert.ok(caseA.totalMs < RECOVERY_BOUND_MS, `case A took ${caseA.totalMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
+    timings.afterRestartMs = caseA.totalMs;
+    timings.afterRestartRetriedCode = caseA.retriedCode;
 
-    // Down-window + backoff-poison check: while Postgres is stopped, writes fail within
+    // Down-window + backoff-poison check: while TLS Postgres is stopped, writes fail within
     // connect_timeout (not 30s), and repeated failures do not poison the first write after return.
-    assert.equal(run("docker", ["stop", pg1]).status, 0);
+    assert.equal(run("docker", ["stop", pg1]).status, 0, "failed to stop pg1");
+    const downWriteTimes: number[] = [];
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const downWrite = await client.request({ op: "write", label: `while-down-${attempt}` }, DOWN_CONNECT_BOUND_MS + 5_000);
+      const downWrite = await edgeOp(edgePort, { op: "write", label: `while-down-${attempt}` }, DOWN_CONNECT_BOUND_MS + 5_000);
       assert.equal(downWrite.ok, false, "write must fail while Postgres is stopped");
       assert.ok(
         downWrite.elapsedMs < DOWN_CONNECT_BOUND_MS,
         `down write #${attempt} took ${downWrite.elapsedMs}ms (bound ${DOWN_CONNECT_BOUND_MS}ms)`,
       );
+      downWriteTimes.push(downWrite.elapsedMs);
     }
-    assert.equal(run("docker", ["start", pg1]).status, 0);
+    timings.downWindowWriteMs = downWriteTimes;
+
+    assert.equal(run("docker", ["start", pg1]).status, 0, "failed to start pg1");
     await waitForPostgresReady(pg1, password);
-    const w3 = await client.request({ op: "write", label: "after-down-window" });
-    assert.equal(w3.ok, true, `first write after restart failed: ${w3.code} ${w3.message}`);
+    const afterDown = await writeWithCallerRetry(edgePort, "after-down-window");
+    assert.equal(afterDown.reply.ok, true, `first write after restart failed (${afterDown.reply.code}/${afterDown.reply.diagnostic})`);
+    assert.equal((afterDown.reply.value as { ssl?: boolean } | null)?.ssl, true, "post-down-window write must use TLS");
     assert.ok(
-      w3.elapsedMs < RECOVERY_BOUND_MS,
-      `first write after down window took ${w3.elapsedMs}ms (backoff poisoned recovery; bound ${RECOVERY_BOUND_MS}ms)`,
+      afterDown.totalMs < RECOVERY_BOUND_MS,
+      `first write after down window took ${afterDown.totalMs}ms (bound ${RECOVERY_BOUND_MS}ms)`,
     );
+    timings.afterDownWindowMs = afterDown.totalMs;
 
-    // Case B1: force-remove pg1 while the pool holds an open connection to ip1 (half-open TCP,
-    // no FIN/RST). An immediate write while down must fail within the bounded socket timeout
-    // (well under 30s), and the first write after pg2 comes up at a NEW IP must succeed.
-    const w4 = await client.request({ op: "write", label: "before-recreate" });
-    assert.equal(w4.ok, true, w4.message);
-    assert.equal(run("docker", ["rm", "-f", pg1]).status, 0);
-
-    const halfOpenFail = await client.request({ op: "write", label: "while-recreate-down" }, HALF_OPEN_WRITE_BOUND_MS + 5_000);
-    assert.equal(halfOpenFail.ok, false, "write on half-open dead socket must fail");
-    assert.ok(
-      halfOpenFail.elapsedMs < HALF_OPEN_WRITE_BOUND_MS,
-      `half-open dead-socket write took ${halfOpenFail.elapsedMs}ms (bound ${HALF_OPEN_WRITE_BOUND_MS}ms)`,
-    );
+    // Case B1: force-remove pg1 while the pool holds an open TLS connection to ip1 (half-open TCP,
+    // no FIN/RST) and recreate pg2 at a NEW IP on the same alias.
+    const w4 = await edgeOp(edgePort, { op: "write", label: "before-recreate" });
+    assert.equal(w4.ok, true, `pre-recreate write failed (${w4.code}/${w4.diagnostic})`);
+    assert.equal(run("docker", ["rm", "-f", pg1]).status, 0, "failed to remove pg1");
 
     const ip2 = nextDifferentIp(ip1, usedIps);
     usedIps.add(ip2);
-    startPg(pg2, ip2);
+    startPg({ name: pg2, tlsDir: pki.goodDir, alias: DB_ALIAS, ip: ip2, useSharedVolume: true });
     await waitForPostgresReady(pg2, password);
     const actualIp2 = inspectContainerIp(pg2);
     assert.equal(actualIp2, ip2);
     assert.notEqual(actualIp2, ip1, "recreated Postgres must have a new IP address");
 
-    const w5 = await client.request({ op: "write", label: "after-recreate-new-ip" });
-    assert.equal(w5.ok, true, `case B1 write after recreate failed: ${w5.code} ${w5.message}`);
-    assert.ok(w5.elapsedMs < RECOVERY_BOUND_MS, `case B1 took ${w5.elapsedMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
-    assert.equal((w5.value as { addr?: string } | null)?.addr, ip2, "client must connect to the new container IP");
+    const caseB1 = await writeWithCallerRetry(edgePort, "after-recreate-new-ip");
+    assert.equal(caseB1.reply.ok, true, `case B1 write after recreate failed (${caseB1.reply.code}/${caseB1.reply.diagnostic})`);
+    assert.ok(caseB1.totalMs < RECOVERY_BOUND_MS, `case B1 took ${caseB1.totalMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
+    assert.equal((caseB1.reply.value as { addr?: string; ssl?: boolean } | null)?.addr, ip2, "client must connect to the new container IP");
+    assert.equal((caseB1.reply.value as { addr?: string; ssl?: boolean } | null)?.ssl, true, "case B1 write must use TLS");
+    timings.afterActiveRecreateMs = caseB1.totalMs;
+    timings.afterActiveRecreateRetriedCode = caseB1.retriedCode;
 
-    // Case B2: force-remove pg2 while the connection to ip2 is idle, wait past idle_timeout (3s)
-    // + close_grace_ms (1s) so postgres.js calls terminate() -> socket.end() on the half-open
-    // socket, then start pg3 at a third IP. Today's code wedges the slot in queues.ended forever.
-    assert.equal(run("docker", ["rm", "-f", pg2]).status, 0);
+    // Case B2: force-remove pg2 while the TLS connection to ip2 is idle, wait past idle_timeout (3s)
+    // so postgres.js half-closes against the vanished peer, then recreate pg3 at a third IP.
+    assert.equal(run("docker", ["rm", "-f", pg2]).status, 0, "failed to remove pg2");
+    await new Promise((r) => setTimeout(r, 4_000));
     const ip3 = nextDifferentIp(ip2, usedIps);
     usedIps.add(ip3);
-    startPg(pg3, ip3);
+    startPg({ name: pg3, tlsDir: pki.goodDir, alias: DB_ALIAS, ip: ip3, useSharedVolume: true });
     await waitForPostgresReady(pg3, password);
     const actualIp3 = inspectContainerIp(pg3);
     assert.equal(actualIp3, ip3);
     assert.notEqual(actualIp3, ip2);
-    // Ensure idle_timeout (3s) + close_grace_ms (1s) has elapsed on the dead ip2 socket.
-    await new Promise((r) => setTimeout(r, 4_500));
 
-    const w6 = await client.request({ op: "write", label: "after-idle-recreate" });
-    assert.equal(w6.ok, true, `case B2 write after idle recreate failed: ${w6.code} ${w6.message}`);
-    assert.ok(w6.elapsedMs < RECOVERY_BOUND_MS, `case B2 took ${w6.elapsedMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
-    assert.equal((w6.value as { addr?: string } | null)?.addr, ip3, "client must resolve alias to third IP");
+    const caseB2 = await writeWithCallerRetry(edgePort, "after-idle-recreate");
+    assert.equal(caseB2.reply.ok, true, `case B2 write after idle recreate failed (${caseB2.reply.code}/${caseB2.reply.diagnostic})`);
+    assert.ok(caseB2.totalMs < RECOVERY_BOUND_MS, `case B2 took ${caseB2.totalMs}ms (bound ${RECOVERY_BOUND_MS}ms)`);
+    assert.equal((caseB2.reply.value as { addr?: string; ssl?: boolean } | null)?.addr, ip3, "client must resolve alias to third IP");
+    assert.equal((caseB2.reply.value as { addr?: string; ssl?: boolean } | null)?.ssl, true, "case B2 write must use TLS");
+    timings.afterIdleRecreateMs = caseB2.totalMs;
+    timings.afterIdleRecreateRetriedCode = caseB2.retriedCode;
+
+    console.log(JSON.stringify({ event: "edge_db_recovery_witness_timings", ...timings }));
 
     // Verify data persisted across all restarts/recreates and no failed write duplicated.
-    const listed = await client.request({ op: "list" });
-    assert.equal(listed.ok, true, listed.message);
+    const listed = await edgeOp(edgePort, { op: "list" });
+    assert.equal(listed.ok, true, `list failed (${listed.code}/${listed.diagnostic})`);
     assert.deepEqual(listed.value, [
       "before-restart",
       "after-restart",
@@ -436,9 +652,10 @@ for await (const chunk of Deno.stdin.readable) {
       "after-recreate-new-ip",
       "after-idle-recreate",
     ]);
+
+    await edgeOp(edgePort, { op: "close" });
   } finally {
-    if (client) await client.close();
-    run("docker", ["rm", "-f", clientContainer, pg1, pg2, pg3]);
+    run("docker", ["rm", "-f", edgeContainer, pg1, pg2, pg3, pgWrong, pgUntrusted]);
     run("docker", ["volume", "rm", "-f", volume]);
     run("docker", ["network", "rm", network]);
     await rm(work, { recursive: true, force: true });
