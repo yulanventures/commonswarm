@@ -45,6 +45,7 @@ export interface AcpClientOptions {
   readonly killGraceMs: number;
   readonly clientName?: string;
   readonly clientVersion?: string;
+  readonly onSpawned?: (pid: number) => void | Promise<void>;
 }
 
 type JsonRpcId = string | number;
@@ -168,6 +169,12 @@ export class AcpClient {
 
     const client = new AcpClient(child, options);
     try {
+      if (options.onSpawned !== undefined) {
+        if (child.pid === undefined) {
+          throw new AcpError("spawn_failed", "ACP child failed to start");
+        }
+        await options.onSpawned(child.pid);
+      }
       await client.handshake(options);
       return client;
     } catch (err) {

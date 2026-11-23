@@ -15,6 +15,7 @@ export interface AcpHarnessOptions {
   readonly killGraceMs: number;
   readonly clientName?: string;
   readonly clientVersion?: string;
+  readonly onSpawned?: (pid: number) => void | Promise<void>;
 }
 
 function assertPositiveMs(value: number, label: string): void {
@@ -117,6 +118,7 @@ export class AcpHarness implements HarnessPort {
       killGraceMs: this.options.killGraceMs,
       clientName: this.options.clientName,
       clientVersion: this.options.clientVersion,
+      onSpawned: this.options.onSpawned,
     });
     this.opening = openPromise;
     try {

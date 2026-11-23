@@ -150,6 +150,7 @@ tests/engine-core.test.ts
 tests/engine-acp.test.ts
 tests/engine-seat-lock.test.ts
 tests/engine-cloud-link.test.ts
+tests/engine-containment.test.ts
 tests/local-auth-users-concurrency.test.ts
 tests/mobile-audit/freeze-control.test.ts
 tests/mobile-audit/shard.test.ts
