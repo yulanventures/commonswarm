@@ -249,6 +249,7 @@ import {
   applyWaitingDismissalCommand,
   isWaitingDismissalCommandKind,
   parseWaitingDismissalCommand,
+  reauthorizeWaitingDismissalReplay,
   WAITING_DISMISSAL_COMMAND_KINDS,
   type WaitingDismissalCommand,
   waitingDismissalReplayFields,
@@ -17607,6 +17608,25 @@ async function handleTransaction(
             if (reauthorizedCheck !== null) return reauthorizedCheck;
           }
         }
+        /* A stored waiting dismissal or restore replays only while the calling person still
+         * satisfies live Waiting item eligibility; otherwise return the uniform 404. Both
+         * regular retries and LedgerRace retries pass through this check, and swarm_read.audit_log
+         * excludes these command kinds so neither replay nor conflict leaks to other members. */
+        if (matches && isWaitingDismissalCommandKind(kind)) {
+          const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+          if (viewer === null) {
+            return { status: 403, body: { error: "forbidden" } };
+          }
+          const dismissalCmd = command as WaitingDismissalCommand;
+          const reauthorizedDismissal = await reauthorizeWaitingDismissalReplay(
+            tx,
+            route.workspaceId,
+            viewer,
+            dismissalCmd.item_kind,
+            dismissalCmd.item_id,
+          );
+          if (reauthorizedDismissal !== null) return reauthorizedDismissal;
+        }
         const replayedConversation = !matches
           ? undefined
           : isConversationCommandKind(kind)
@@ -18010,12 +18030,10 @@ async function handleTransaction(
     }
 
     if (isWaitingDismissalCommandKind(command.kind)) {
+      // Local agent tokens are refused earlier by the HUMAN_ONLY_COMMANDS gate before reaching
+      // this branch or its audit; this check defends in depth for any other non-human credential.
       const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
       if (viewer === null) {
-        await insertAudit(tx, {
-          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
-          outcome: "authz", reason: "credential_kind_forbidden", detail: ignoredIdentity, hash,
-        });
         return { status: 403, body: { error: "forbidden" } };
       }
       const outcome = await applyWaitingDismissalCommand(
@@ -18026,7 +18044,6 @@ async function handleTransaction(
           auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: outcome.status === 404 || outcome.status === 403 ? "authz" : "domain",
           reason: outcome.reason, detail: ignoredIdentity, hash,
-          channelIds: outcome.audit_channel_ids,
         });
         const refusal: HttpResult = {
           status: outcome.status,
@@ -18057,7 +18074,6 @@ async function handleTransaction(
       await insertAudit(tx, {
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash,
-        channelIds: outcome.audit_channel_ids,
       });
       return { status: 200, body: { status: "accepted", ...response } };
     }

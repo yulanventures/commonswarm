@@ -3,18 +3,28 @@
 --      (workspace_id, user_id, item_kind, item_id) where item_kind IN ('ask', 'todo', 'review').
 --      A dismissal never modifies the underlying signal, to-do, or offer for anyone else, posts
 --      nothing to chat, and wakes no agent.
---   2. swarm.dismiss_waiting_item and swarm.restore_waiting_item (command-role only) enforce live
---      human workspace membership and live item read access using the existing canonical visibility
---      helpers (swarm.is_member, swarm.conversation_visible, swarm.conversation_signal_visible_to,
---      swarm.actor_can_access_channel, swarm.household_human_can_read). Both are idempotent.
---   3. swarm_read.decision_queue, swarm_read.decision_queue_page, swarm_read.waiting_todos_page,
+--   2. Single-source eligibility helpers (swarm.waiting_ask_eligible, swarm.waiting_todo_reason,
+--      swarm.waiting_todo_eligible, swarm.waiting_review_eligible, swarm.waiting_item_eligible)
+--      define the exact Waiting on you membership, state, reason, and visibility rules BEFORE
+--      the caller's own dismissal is filtered out. Both the read models and the command write/replay
+--      functions call these helpers.
+--   3. swarm.dismiss_waiting_item, swarm.restore_waiting_item, and
+--      swarm.waiting_dismissal_replay_allowed (command-role only) enforce live human workspace
+--      membership and current Waiting item eligibility, re-checking after row writes under
+--      READ COMMITTED so authority loss during a row-lock wait rolls back the write and returns
+--      a uniform not_found (404).
+--   4. swarm_read.decision_queue, swarm_read.decision_queue_page, swarm_read.waiting_todos_page,
 --      and swarm_read.home_overview exclude active dismissals (restored_at IS NULL) for the calling
 --      person from both lists and counts while preserving exact signatures, return shapes, grants,
 --      and privacy gates.
---   4. swarm_read.waiting_archived_page includes still-open dismissed items with outcome_kind =
+--   5. swarm_read.waiting_archived_page includes still-open dismissed items with outcome_kind =
 --      'dismissed' and outcome_text = 'Dismissed', ordered with resolved items by dismissed_at,
 --      under identical live visibility and origin-redaction gates. Once an item is resolved for
 --      real (answered, done, dropped, accepted, declined), it appears only under its real outcome.
+--   6. swarm_read.audit_log excludes dismiss_waiting_item and restore_waiting_item from the
+--      workspace-wide audit projection so one person's private triage (and its correlatable
+--      request hash across fresh, replayed, conflicting, or refused outcomes) is never visible
+--      to other workspace members, owners, or admins while server-side rows remain in swarm.audit_log.
 SET search_path = swarm, pg_catalog, public;
 
 CREATE TABLE swarm.waiting_dismissals (
@@ -64,108 +74,231 @@ ALTER TABLE swarm.waiting_dismissals ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE swarm.waiting_dismissals FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
--- Canonical human read gate for a Waiting on you item (reuses existing visibility helpers).
-CREATE FUNCTION swarm.waiting_item_can_read(
+-- Single-source eligibility predicate for an open Waiting on you ask (pre-dismissal).
+-- Shared by decision_queue, decision_queue_page, waiting_archived_page (dismissed_asks),
+-- dismiss_waiting_item, restore_waiting_item, and waiting_dismissal_replay_allowed.
+CREATE FUNCTION swarm.waiting_ask_eligible(
+  p_workspace_id uuid,
+  p_user_id uuid,
+  p_signal_id uuid,
+  p_read_at timestamptz
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    p_workspace_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND p_signal_id IS NOT NULL
+    AND p_read_at IS NOT NULL
+    AND swarm.is_member(p_workspace_id, p_user_id)
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.signals AS s
+      LEFT JOIN swarm.conversation_signals AS cs
+        ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
+      LEFT JOIN swarm.conversations AS c
+        ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
+      WHERE s.workspace_id = p_workspace_id
+        AND s.id = p_signal_id
+        AND s.kind = 'ask'
+        AND s.until > p_read_at
+        AND (
+          s.to_user_id = p_user_id
+          OR EXISTS (
+            SELECT 1
+            FROM swarm.signal_recipients AS r
+            WHERE r.workspace_id = s.workspace_id
+              AND r.signal_id = s.id
+              AND r.recipient_user_id = p_user_id
+          )
+        )
+        AND NOT swarm.ask_answered(s.workspace_id, s.id)
+        AND (
+          s.channel_id IS NULL
+          OR swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', p_user_id)
+        )
+        AND (
+          c.conversation_id IS NULL
+          OR (
+            (
+              c.kind IN ('general', 'public_channel')
+              OR (
+                c.kind = 'private_channel'
+                AND swarm.actor_can_access_channel(p_workspace_id, c.channel_id, 'user', p_user_id)
+              )
+              OR (
+                c.kind IN ('dm', 'group_dm')
+                AND EXISTS (
+                  SELECT 1
+                  FROM swarm.conversation_members AS cm
+                  WHERE cm.workspace_id = c.workspace_id
+                    AND cm.conversation_id = c.conversation_id
+                    AND cm.member_user_id = p_user_id
+                    AND cm.left_at IS NULL
+                )
+              )
+            )
+            AND swarm.conversation_signal_visible_to(
+              cs.workspace_id, cs.signal_id, cs.audience,
+              s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
+              'user', p_user_id
+            )
+          )
+        )
+    );
+$$;
+
+-- Single-source Waiting on you reason for an open household to-do (pre-dismissal).
+-- Returns 'request', 'assigned', 'after', 'hold', 'agent_removed', or NULL.
+-- Shared by waiting_todos_page, waiting_todo_eligible, and waiting_review_eligible.
+CREATE FUNCTION swarm.waiting_todo_reason(
+  p_workspace_id uuid,
+  p_user_id uuid,
+  p_todo_id uuid
+)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT CASE
+    WHEN p_workspace_id IS NULL
+      OR p_user_id IS NULL
+      OR p_todo_id IS NULL
+      OR NOT swarm.household_human_can_read(p_workspace_id, p_user_id)
+    THEN NULL::text
+    ELSE (
+      SELECT
+        CASE
+          WHEN t.offer_id IS NOT NULL AND t.offer_decider = p_user_id THEN 'request'
+          WHEN t.assignee_user = p_user_id THEN 'assigned'
+          WHEN t.gate_kind = 'after' AND EXISTS (
+            SELECT 1 FROM swarm.household_todos AS prerequisite
+            WHERE prerequisite.workspace_id = t.workspace_id
+              AND prerequisite.todo_id = t.gate_todo_id
+              AND prerequisite.assignee_user = p_user_id
+              AND prerequisite.state IN ('open', 'doing')
+          ) THEN 'after'
+          WHEN t.gate_kind = 'hold' AND p.owner_user_id = p_user_id AND p.revoked_at IS NULL THEN 'hold'
+          WHEN p.owner_user_id = p_user_id AND p.revoked_at IS NOT NULL THEN 'agent_removed'
+          ELSE NULL::text
+        END
+      FROM swarm.household_todos AS t
+      LEFT JOIN LATERAL (
+        SELECT ap.owner_user_id, coalesce(ap.revoked_at, seat.revoked_at) AS revoked_at
+        FROM swarm.agent_principals AS ap
+        LEFT JOIN swarm.agent_workspace_memberships AS seat
+          ON seat.principal_id = ap.principal_id
+          AND seat.owner_user_id = ap.owner_user_id
+          AND seat.workspace_id = t.workspace_id
+        WHERE ap.principal_id = t.assignee_principal
+          AND (ap.workspace_id = t.workspace_id OR seat.principal_id IS NOT NULL)
+      ) AS p ON true
+      WHERE t.workspace_id = p_workspace_id
+        AND t.todo_id = p_todo_id
+        AND t.state IN ('open', 'doing')
+    )
+  END;
+$$;
+
+-- Single-source eligibility predicate for a non-request Waiting on you to-do (pre-dismissal).
+CREATE FUNCTION swarm.waiting_todo_eligible(
+  p_workspace_id uuid,
+  p_user_id uuid,
+  p_todo_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT coalesce(
+    swarm.waiting_todo_reason(p_workspace_id, p_user_id, p_todo_id)
+      IN ('assigned', 'after', 'hold', 'agent_removed'),
+    false
+  );
+$$;
+
+-- Single-source eligibility predicate for a current Waiting on you work-request review (pre-dismissal).
+CREATE FUNCTION swarm.waiting_review_eligible(
+  p_workspace_id uuid,
+  p_user_id uuid,
+  p_offer_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT
+    p_workspace_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND p_offer_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.household_todos AS t
+      WHERE t.workspace_id = p_workspace_id
+        AND t.offer_id = p_offer_id
+        AND swarm.waiting_todo_reason(p_workspace_id, p_user_id, t.todo_id) = 'request'
+    );
+$$;
+
+-- Unified pre-dismissal eligibility dispatcher for all three Waiting item kinds.
+CREATE FUNCTION swarm.waiting_item_eligible(
+  p_workspace_id uuid,
+  p_user_id uuid,
+  p_item_kind text,
+  p_item_id uuid,
+  p_read_at timestamptz DEFAULT statement_timestamp()
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT CASE p_item_kind
+    WHEN 'ask' THEN swarm.waiting_ask_eligible(p_workspace_id, p_user_id, p_item_id, p_read_at)
+    WHEN 'todo' THEN swarm.waiting_todo_eligible(p_workspace_id, p_user_id, p_item_id)
+    WHEN 'review' THEN swarm.waiting_review_eligible(p_workspace_id, p_user_id, p_item_id)
+    ELSE false
+  END;
+$$;
+
+-- Replay reauthorization gate for stored dismiss/restore receipts (command-role only).
+CREATE FUNCTION swarm.waiting_dismissal_replay_allowed(
   p_workspace_id uuid,
   p_user_id uuid,
   p_item_kind text,
   p_item_id uuid
 )
 RETURNS boolean
-LANGUAGE plpgsql
+LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
-DECLARE
-  v_sig record;
-BEGIN
-  IF p_workspace_id IS NULL OR p_user_id IS NULL OR p_item_id IS NULL
-     OR p_item_kind IS NULL OR p_item_kind NOT IN ('ask', 'todo', 'review') THEN
-    RETURN false;
-  END IF;
-
-  IF NOT swarm.is_member(p_workspace_id, p_user_id) THEN
-    RETURN false;
-  END IF;
-
-  IF p_item_kind = 'ask' THEN
-    SELECT
-      s.id,
-      s.from_kind,
-      s.from_principal,
-      s.to_user_id,
-      s.to_agent_principal_id,
-      s.channel_id,
-      cs.conversation_id,
-      cs.audience
-    INTO v_sig
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
-    WHERE s.workspace_id = p_workspace_id
-      AND s.id = p_item_id
-      AND s.kind = 'ask'
-      AND (
-        s.to_user_id = p_user_id
-        OR EXISTS (
-          SELECT 1
-          FROM swarm.signal_recipients AS r
-          WHERE r.workspace_id = s.workspace_id
-            AND r.signal_id = s.id
-            AND r.recipient_user_id = p_user_id
-        )
-      );
-    IF NOT FOUND THEN
-      RETURN false;
-    END IF;
-
-    IF v_sig.conversation_id IS NOT NULL THEN
-      RETURN swarm.conversation_visible(p_workspace_id, 'user', p_user_id, v_sig.conversation_id)
-        AND swarm.conversation_signal_visible_to(
-          p_workspace_id, v_sig.id, v_sig.audience,
-          v_sig.from_kind::text, v_sig.from_principal,
-          v_sig.to_user_id, v_sig.to_agent_principal_id,
-          'user', p_user_id
-        );
-    END IF;
-
-    RETURN v_sig.channel_id IS NULL
-      OR swarm.actor_can_access_channel(p_workspace_id, v_sig.channel_id, 'user', p_user_id);
-  END IF;
-
-  IF NOT swarm.household_human_can_read(p_workspace_id, p_user_id) THEN
-    RETURN false;
-  END IF;
-
-  IF p_item_kind = 'todo' THEN
-    RETURN EXISTS (
-      SELECT 1
-      FROM swarm.household_todos AS t
-      WHERE t.workspace_id = p_workspace_id
-        AND t.todo_id = p_item_id
+  SELECT
+    p_workspace_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND p_item_id IS NOT NULL
+    AND p_item_kind IN ('ask', 'todo', 'review')
+    AND swarm.is_member(p_workspace_id, p_user_id)
+    AND swarm.waiting_item_eligible(
+      p_workspace_id, p_user_id, p_item_kind, p_item_id, statement_timestamp()
     );
-  END IF;
-
-  -- item_kind = 'review' (work-request offer_id)
-  RETURN EXISTS (
-    SELECT 1
-    FROM swarm.household_todos AS t
-    WHERE t.workspace_id = p_workspace_id
-      AND t.offer_id = p_item_id
-      AND t.offer_decider = p_user_id
-  ) OR EXISTS (
-    SELECT 1
-    FROM swarm.household_todo_events AS e
-    WHERE e.workspace_id = p_workspace_id
-      AND e.event->>'type' = 'TodoOffered'
-      AND e.event->'payload'->'todo'->'offer'->>'offer_id' = p_item_id::text
-      AND e.event->'payload'->'todo'->'offer'->>'decider_user_id' = p_user_id::text
-  );
-END;
 $$;
 
 -- Idempotent per-person dismissal of a Waiting on you item (command-role only).
+-- Re-checks live authority after acquiring/writing the dismissal row under READ COMMITTED;
+-- if authority was lost while waiting on the row lock, rolls back the write and returns not_found.
 CREATE FUNCTION swarm.dismiss_waiting_item(
   p_workspace_id uuid,
   p_user_id uuid,
@@ -181,7 +314,6 @@ AS $$
 DECLARE
   v_now timestamptz := statement_timestamp();
   v_dismissed_at timestamptz;
-  v_audit_channel_id uuid := NULL;
 BEGIN
   IF p_workspace_id IS NULL OR p_user_id IS NULL OR p_item_id IS NULL
      OR p_item_kind IS NULL OR p_item_kind NOT IN ('ask', 'todo', 'review') THEN
@@ -192,52 +324,55 @@ BEGIN
     RETURN jsonb_build_object('status', 'forbidden');
   END IF;
 
-  IF NOT swarm.waiting_item_can_read(p_workspace_id, p_user_id, p_item_kind, p_item_id) THEN
+  IF NOT swarm.waiting_item_eligible(p_workspace_id, p_user_id, p_item_kind, p_item_id, v_now) THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
-  IF p_item_kind = 'ask' THEN
-    SELECT CASE
-      WHEN c.conversation_id IS NOT NULL AND c.kind IN ('public_channel', 'private_channel') THEN c.channel_id
-      WHEN c.conversation_id IS NULL THEN s.channel_id
-      ELSE NULL
-    END
-    INTO v_audit_channel_id
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
-    LEFT JOIN swarm.conversations AS c
-      ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
-    WHERE s.workspace_id = p_workspace_id AND s.id = p_item_id;
-  END IF;
+  BEGIN
+    INSERT INTO swarm.waiting_dismissals (
+      workspace_id, user_id, item_kind, item_id, dismissed_at, restored_at, updated_at
+    ) VALUES (
+      p_workspace_id, p_user_id, p_item_kind, p_item_id, v_now, NULL, v_now
+    )
+    ON CONFLICT (workspace_id, user_id, item_kind, item_id) DO UPDATE
+    SET
+      dismissed_at = CASE
+        WHEN swarm.waiting_dismissals.restored_at IS NULL THEN swarm.waiting_dismissals.dismissed_at
+        ELSE v_now
+      END,
+      restored_at = NULL,
+      updated_at = v_now
+    RETURNING dismissed_at INTO v_dismissed_at;
 
-  INSERT INTO swarm.waiting_dismissals (
-    workspace_id, user_id, item_kind, item_id, dismissed_at, restored_at, updated_at
-  ) VALUES (
-    p_workspace_id, p_user_id, p_item_kind, p_item_id, v_now, NULL, v_now
-  )
-  ON CONFLICT (workspace_id, user_id, item_kind, item_id) DO UPDATE
-  SET
-    dismissed_at = CASE
-      WHEN swarm.waiting_dismissals.restored_at IS NULL THEN swarm.waiting_dismissals.dismissed_at
-      ELSE v_now
-    END,
-    restored_at = NULL,
-    updated_at = v_now
-  RETURNING dismissed_at INTO v_dismissed_at;
+    -- Re-verify authority in a fresh READ COMMITTED snapshot after the row write completes.
+    IF NOT swarm.is_member(p_workspace_id, p_user_id) THEN
+      RAISE EXCEPTION 'waiting_dismissal_forbidden' USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT swarm.waiting_item_eligible(p_workspace_id, p_user_id, p_item_kind, p_item_id, clock_timestamp()) THEN
+      RAISE EXCEPTION 'waiting_item_not_found' USING ERRCODE = 'P0001';
+    END IF;
+  EXCEPTION
+    WHEN SQLSTATE 'P0001' THEN
+      IF SQLERRM = 'waiting_dismissal_forbidden' THEN
+        RETURN jsonb_build_object('status', 'forbidden');
+      END IF;
+      RETURN jsonb_build_object('status', 'not_found');
+  END;
 
   RETURN jsonb_build_object(
     'status', 'ok',
     'item_kind', p_item_kind,
     'item_id', p_item_id,
     'dismissed', true,
-    'dismissed_at', v_dismissed_at,
-    'audit_channel_id', v_audit_channel_id
+    'dismissed_at', v_dismissed_at
   );
 END;
 $$;
 
--- Idempotent per-person restore of a dismissed Waiting on you item (command-role only).
+-- Per-person restore of an actively dismissed Waiting on you item (command-role only).
+-- Requires an active dismissal row (restored_at IS NULL) AND live Waiting item eligibility,
+-- re-checked after the row write under READ COMMITTED so authority loss during a row-lock wait
+-- rolls back the write and returns uniform not_found.
 CREATE FUNCTION swarm.restore_waiting_item(
   p_workspace_id uuid,
   p_user_id uuid,
@@ -253,7 +388,6 @@ AS $$
 DECLARE
   v_now timestamptz := statement_timestamp();
   v_changed integer := 0;
-  v_audit_channel_id uuid := NULL;
 BEGIN
   IF p_workspace_id IS NULL OR p_user_id IS NULL OR p_item_id IS NULL
      OR p_item_kind IS NULL OR p_item_kind NOT IN ('ask', 'todo', 'review') THEN
@@ -264,43 +398,47 @@ BEGIN
     RETURN jsonb_build_object('status', 'forbidden');
   END IF;
 
-  IF NOT swarm.waiting_item_can_read(p_workspace_id, p_user_id, p_item_kind, p_item_id) THEN
+  IF NOT swarm.waiting_item_eligible(p_workspace_id, p_user_id, p_item_kind, p_item_id, v_now) THEN
     RETURN jsonb_build_object('status', 'not_found');
   END IF;
 
-  IF p_item_kind = 'ask' THEN
-    SELECT CASE
-      WHEN c.conversation_id IS NOT NULL AND c.kind IN ('public_channel', 'private_channel') THEN c.channel_id
-      WHEN c.conversation_id IS NULL THEN s.channel_id
-      ELSE NULL
-    END
-    INTO v_audit_channel_id
-    FROM swarm.signals AS s
-    LEFT JOIN swarm.conversation_signals AS cs
-      ON cs.workspace_id = s.workspace_id AND cs.signal_id = s.id
-    LEFT JOIN swarm.conversations AS c
-      ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
-    WHERE s.workspace_id = p_workspace_id AND s.id = p_item_id;
-  END IF;
+  BEGIN
+    UPDATE swarm.waiting_dismissals
+    SET
+      restored_at = v_now,
+      updated_at = v_now
+    WHERE workspace_id = p_workspace_id
+      AND user_id = p_user_id
+      AND item_kind = p_item_kind
+      AND item_id = p_item_id
+      AND restored_at IS NULL;
+    GET DIAGNOSTICS v_changed = ROW_COUNT;
 
-  UPDATE swarm.waiting_dismissals
-  SET
-    restored_at = coalesce(restored_at, v_now),
-    updated_at = v_now
-  WHERE workspace_id = p_workspace_id
-    AND user_id = p_user_id
-    AND item_kind = p_item_kind
-    AND item_id = p_item_id
-    AND restored_at IS NULL;
-  GET DIAGNOSTICS v_changed = ROW_COUNT;
+    IF v_changed = 0 THEN
+      RAISE EXCEPTION 'waiting_item_not_found' USING ERRCODE = 'P0001';
+    END IF;
+
+    -- Re-verify authority in a fresh READ COMMITTED snapshot after the row write completes.
+    IF NOT swarm.is_member(p_workspace_id, p_user_id) THEN
+      RAISE EXCEPTION 'waiting_dismissal_forbidden' USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT swarm.waiting_item_eligible(p_workspace_id, p_user_id, p_item_kind, p_item_id, clock_timestamp()) THEN
+      RAISE EXCEPTION 'waiting_item_not_found' USING ERRCODE = 'P0001';
+    END IF;
+  EXCEPTION
+    WHEN SQLSTATE 'P0001' THEN
+      IF SQLERRM = 'waiting_dismissal_forbidden' THEN
+        RETURN jsonb_build_object('status', 'forbidden');
+      END IF;
+      RETURN jsonb_build_object('status', 'not_found');
+  END;
 
   RETURN jsonb_build_object(
     'status', 'ok',
     'item_kind', p_item_kind,
     'item_id', p_item_id,
-    'restored', (v_changed > 0),
-    'restored_at', v_now,
-    'audit_channel_id', v_audit_channel_id
+    'restored', true,
+    'restored_at', v_now
   );
 END;
 $$;
@@ -308,15 +446,26 @@ $$;
 ALTER TABLE swarm.waiting_dismissals OWNER TO swarm_admin;
 
 ALTER FUNCTION swarm.waiting_dismissal_validate_refs() OWNER TO swarm_admin;
-ALTER FUNCTION swarm.waiting_item_can_read(uuid, uuid, text, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_ask_eligible(uuid, uuid, uuid, timestamptz) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_todo_reason(uuid, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_todo_eligible(uuid, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_review_eligible(uuid, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_item_eligible(uuid, uuid, text, uuid, timestamptz) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.waiting_dismissal_replay_allowed(uuid, uuid, text, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.dismiss_waiting_item(uuid, uuid, text, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid) OWNER TO swarm_admin;
 
 REVOKE ALL ON FUNCTION swarm.waiting_dismissal_validate_refs() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-REVOKE ALL ON FUNCTION swarm.waiting_item_can_read(uuid, uuid, text, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_ask_eligible(uuid, uuid, uuid, timestamptz) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_todo_reason(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_todo_eligible(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_review_eligible(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_item_eligible(uuid, uuid, text, uuid, timestamptz) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+REVOKE ALL ON FUNCTION swarm.waiting_dismissal_replay_allowed(uuid, uuid, text, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 REVOKE ALL ON FUNCTION swarm.dismiss_waiting_item(uuid, uuid, text, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 REVOKE ALL ON FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid) FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
+GRANT EXECUTE ON FUNCTION swarm.waiting_dismissal_replay_allowed(uuid, uuid, text, uuid) TO swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.dismiss_waiting_item(uuid, uuid, text, uuid) TO swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid) TO swarm_command;
 
@@ -387,30 +536,8 @@ BEGIN
     ELSE NULL
    END AS agent_id
   FROM swarm.household_todos t
-  LEFT JOIN LATERAL (
-   SELECT ap.owner_user_id, coalesce(ap.revoked_at, seat.revoked_at) AS revoked_at
-   FROM swarm.agent_principals ap
-   LEFT JOIN swarm.agent_workspace_memberships seat
-    ON seat.principal_id = ap.principal_id
-    AND seat.owner_user_id = ap.owner_user_id
-    AND seat.workspace_id = t.workspace_id
-   WHERE ap.principal_id = t.assignee_principal
-    AND (ap.workspace_id = t.workspace_id OR seat.principal_id IS NOT NULL)
-  ) p ON true
   CROSS JOIN LATERAL (
-   SELECT CASE
-    WHEN t.offer_id IS NOT NULL AND t.offer_decider = viewer THEN 'request'
-    WHEN t.assignee_user = viewer THEN 'assigned'
-    WHEN t.gate_kind = 'after' AND EXISTS (
-     SELECT 1 FROM swarm.household_todos prerequisite
-     WHERE prerequisite.workspace_id = t.workspace_id
-      AND prerequisite.todo_id = t.gate_todo_id
-      AND prerequisite.assignee_user = viewer
-      AND prerequisite.state IN ('open', 'doing')
-    ) THEN 'after'
-    WHEN t.gate_kind = 'hold' AND p.owner_user_id = viewer AND p.revoked_at IS NULL THEN 'hold'
-    WHEN p.owner_user_id = viewer AND p.revoked_at IS NOT NULL THEN 'agent_removed'
-   END AS kind
+   SELECT swarm.waiting_todo_reason(t.workspace_id, viewer, t.todo_id) AS kind
   ) reason
   WHERE t.workspace_id = p_workspace_id
    AND t.state IN ('open', 'doing')
@@ -524,10 +651,7 @@ BEGIN
   LEFT JOIN swarm.conversations c
    ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
   WHERE s.workspace_id = p_workspace_id AND s.kind = 'ask' AND s.until > read_at
-   AND (s."to" = viewer OR EXISTS (
-    SELECT 1 FROM swarm.signal_recipients r
-    WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer))
-   AND NOT swarm.ask_answered(s.workspace_id, s.id)
+   AND swarm.waiting_ask_eligible(p_workspace_id, viewer, s.id, read_at)
    AND NOT EXISTS (
     SELECT 1 FROM swarm.waiting_dismissals wd
     WHERE wd.workspace_id = s.workspace_id
@@ -535,26 +659,6 @@ BEGIN
      AND wd.item_kind = 'ask'
      AND wd.item_id = s.id
      AND wd.restored_at IS NULL
-   )
-   AND (
-    c.conversation_id IS NULL
-    OR c.kind IN ('general', 'public_channel')
-    OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
-    OR (
-     c.kind IN ('dm', 'group_dm')
-     AND EXISTS (
-      SELECT 1 FROM swarm.conversation_members cm
-      WHERE cm.workspace_id = c.workspace_id
-       AND cm.conversation_id = c.conversation_id
-       AND cm.member_user_id = viewer
-       AND cm.left_at IS NULL
-     )
-     AND swarm.conversation_signal_visible_to(
-      cs.workspace_id, cs.signal_id, cs.audience,
-      s.from_kind, s."from", s."to", s.to_agent,
-      'user', viewer
-     )
-    )
    )
  ), page AS (
   SELECT * FROM open_asks ORDER BY created_at, id LIMIT 100
@@ -623,10 +727,7 @@ BEGIN
   LEFT JOIN swarm.conversations c
    ON c.workspace_id = s.workspace_id AND c.conversation_id = cs.conversation_id
   WHERE s.workspace_id = p_workspace_id AND s.kind = 'ask' AND s.until > read_at
-   AND (s."to" = viewer OR EXISTS (
-    SELECT 1 FROM swarm.signal_recipients r
-    WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer))
-   AND NOT swarm.ask_answered(s.workspace_id, s.id)
+   AND swarm.waiting_ask_eligible(p_workspace_id, viewer, s.id, read_at)
    AND NOT EXISTS (
     SELECT 1 FROM swarm.waiting_dismissals wd
     WHERE wd.workspace_id = s.workspace_id
@@ -634,26 +735,6 @@ BEGIN
      AND wd.item_kind = 'ask'
      AND wd.item_id = s.id
      AND wd.restored_at IS NULL
-   )
-   AND (
-    c.conversation_id IS NULL
-    OR c.kind IN ('general', 'public_channel')
-    OR (c.kind = 'private_channel' AND swarm.claims_can_access_channel(p_workspace_id, c.channel_id))
-    OR (
-     c.kind IN ('dm', 'group_dm')
-     AND EXISTS (
-      SELECT 1 FROM swarm.conversation_members cm
-      WHERE cm.workspace_id = c.workspace_id
-       AND cm.conversation_id = c.conversation_id
-       AND cm.member_user_id = viewer
-       AND cm.left_at IS NULL
-     )
-     AND swarm.conversation_signal_visible_to(
-      cs.workspace_id, cs.signal_id, cs.audience,
-      s.from_kind, s."from", s."to", s.to_agent,
-      'user', viewer
-     )
-    )
    )
  ), anchor AS (
   SELECT coalesce(
@@ -1499,11 +1580,6 @@ BEGIN
    ON cs.workspace_id = p_workspace_id AND cs.signal_id = s.id
   LEFT JOIN swarm.conversations raw_c
    ON raw_c.workspace_id = p_workspace_id AND raw_c.conversation_id = cs.conversation_id
-  LEFT JOIN swarm.conversation_members viewer_cm
-   ON raw_c.kind IN ('dm', 'group_dm')
-   AND viewer_cm.workspace_id = raw_c.workspace_id
-   AND viewer_cm.conversation_id = raw_c.conversation_id
-   AND viewer_cm.member_user_id = viewer
   CROSS JOIN LATERAL (
    SELECT
     CASE
@@ -1524,47 +1600,8 @@ BEGIN
    AND wd.user_id = viewer
    AND wd.item_kind = 'ask'
    AND wd.restored_at IS NULL
-   AND s.kind = 'ask'
-   AND s.until > read_at
-   AND (
-    s.to_user_id = viewer
-    OR EXISTS (
-     SELECT 1 FROM swarm.signal_recipients r
-     WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer
-    )
-   )
-   AND NOT swarm.ask_answered(s.workspace_id, s.id)
+   AND swarm.waiting_ask_eligible(p_workspace_id, viewer, s.id, read_at)
    AND NOT EXISTS (SELECT 1 FROM archived_asks aa WHERE aa.id = s.id)
-   -- Same whole-row canonical membership and audience gate as archived_asks.
-   AND (
-    (
-     raw_c.conversation_id IS NOT NULL
-     AND (
-      raw_c.kind IN ('general', 'public_channel')
-      OR (
-       raw_c.kind = 'private_channel'
-       AND swarm.actor_can_access_channel(p_workspace_id, raw_c.channel_id, 'user', viewer)
-      )
-      OR (
-       raw_c.kind IN ('dm', 'group_dm')
-       AND viewer_cm.member_user_id IS NOT NULL
-       AND viewer_cm.left_at IS NULL
-      )
-     )
-     AND swarm.conversation_signal_visible_to(
-      cs.workspace_id, cs.signal_id, cs.audience,
-      s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id,
-      'user', viewer
-     )
-    )
-    OR (
-     raw_c.conversation_id IS NULL
-     AND (
-      s.channel_id IS NULL
-      OR swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', viewer)
-     )
-    )
-   )
  ),
  dismissed_todos AS (
   SELECT
@@ -1588,16 +1625,6 @@ BEGIN
   FROM swarm.waiting_dismissals wd
   JOIN swarm.household_todos t
    ON t.workspace_id = wd.workspace_id AND t.todo_id = wd.item_id
-  LEFT JOIN LATERAL (
-   SELECT ap.owner_user_id, coalesce(ap.revoked_at, seat.revoked_at) AS revoked_at
-   FROM swarm.agent_principals ap
-   LEFT JOIN swarm.agent_workspace_memberships seat
-    ON seat.principal_id = ap.principal_id
-    AND seat.owner_user_id = ap.owner_user_id
-    AND seat.workspace_id = t.workspace_id
-   WHERE ap.principal_id = t.assignee_principal
-    AND (ap.workspace_id = t.workspace_id OR seat.principal_id IS NOT NULL)
-  ) p ON true
   CROSS JOIN LATERAL (
    SELECT
     (t.origin_placement = 'channel'
@@ -1628,20 +1655,7 @@ BEGIN
    AND wd.user_id = viewer
    AND wd.item_kind = 'todo'
    AND wd.restored_at IS NULL
-   AND t.state IN ('open', 'doing')
-   AND NOT (t.offer_id IS NOT NULL AND t.offer_decider = viewer)
-   AND (
-    t.assignee_user = viewer
-    OR (t.gate_kind = 'after' AND EXISTS (
-     SELECT 1 FROM swarm.household_todos prerequisite
-     WHERE prerequisite.workspace_id = t.workspace_id
-      AND prerequisite.todo_id = t.gate_todo_id
-      AND prerequisite.assignee_user = viewer
-      AND prerequisite.state IN ('open', 'doing')
-    ))
-    OR (t.gate_kind = 'hold' AND p.owner_user_id = viewer AND p.revoked_at IS NULL)
-    OR (p.owner_user_id = viewer AND p.revoked_at IS NOT NULL)
-   )
+   AND swarm.waiting_todo_eligible(p_workspace_id, viewer, t.todo_id)
  ),
  dismissed_reviews AS (
   SELECT
@@ -1699,9 +1713,7 @@ BEGIN
    AND wd.user_id = viewer
    AND wd.item_kind = 'review'
    AND wd.restored_at IS NULL
-   AND t.state IN ('open', 'doing')
-   AND t.offer_id IS NOT NULL
-   AND t.offer_decider = viewer
+   AND swarm.waiting_review_eligible(p_workspace_id, viewer, t.offer_id)
    AND NOT EXISTS (SELECT 1 FROM archived_reviews ar WHERE ar.id = t.offer_id)
  ),
  candidate_items AS MATERIALIZED (
@@ -1790,5 +1802,68 @@ ALTER FUNCTION swarm_read.waiting_archived_page(uuid, integer, timestamptz, text
 REVOKE ALL ON FUNCTION swarm_read.waiting_archived_page(uuid, integer, timestamptz, text)
  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.waiting_archived_page(uuid, integer, timestamptz, text) TO authenticated;
+
+-- Latest prior definition: 20261113000003_private_channels.sql.
+-- Exclude dismiss_waiting_item and restore_waiting_item from the workspace-wide audit
+-- projection so one person's private triage (including fresh, replayed, conflicting, and
+-- refused outcomes and their correlatable request hashes) is never visible to other people.
+-- Full server-side rows remain in swarm.audit_log.
+CREATE OR REPLACE VIEW swarm_read.audit_log
+WITH (security_barrier = true)
+AS
+  SELECT
+    a.audit_id,
+    a.occurred_at,
+    a.actor_user,
+    a.actor_agent_principal,
+    a.actor_run,
+    a.credential_kind,
+    a.credential_id,
+    a.device_id,
+    a.command_kind,
+    a.workspace_id,
+    a.stream_id,
+    a.outcome,
+    a.reason,
+    a.detail,
+    a.request_hash,
+    a.ip
+  FROM swarm.audit_log AS a
+  WHERE swarm.is_member(a.workspace_id, auth.uid())
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.memberships AS m
+      WHERE m.workspace_id = a.workspace_id
+        AND m.user_id = auth.uid()
+        AND m.revoked_at IS NULL
+        AND m.role IN ('owner', 'admin')
+    )
+    AND (
+      COALESCE(cardinality(a.channel_ids), 0) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest(a.channel_ids) AS cid
+        WHERE cid IS NULL
+           OR NOT swarm.claims_can_access_channel(a.workspace_id, cid)
+      )
+    )
+    AND (
+      a.command_kind NOT IN (
+        'private_channel_manager_promoted',
+        'private_channel_auto_archived'
+      )
+      OR (
+        a.stream_id IS NOT NULL
+        AND swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+      )
+    )
+    AND a.command_kind NOT IN (
+      'dismiss_waiting_item',
+      'restore_waiting_item'
+    );
+
+ALTER VIEW swarm_read.audit_log OWNER TO swarm_admin;
+GRANT SELECT ON swarm_read.audit_log TO authenticated, swarm_read;
+REVOKE ALL ON swarm_read.audit_log FROM PUBLIC, anon;
 
 RESET search_path;

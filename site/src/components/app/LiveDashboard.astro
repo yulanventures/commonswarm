@@ -1652,6 +1652,12 @@ import "../../styles/kylon-image-viewer.css";
     upsertReviewCheckInMap,
   } from "../../lib/review-checks";
   import { buildReviewCheckCard } from "../../lib/review-check-card";
+  import {
+    createWaitingDismissalController,
+    type WaitingAccessLossEvent,
+    type WaitingDismissPlacementKind,
+    type WaitingDismissTarget,
+  } from "../../lib/waiting-dismissal";
   import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
   import {
     agentPresenceLine,
@@ -6656,29 +6662,6 @@ import "../../styles/kylon-image-viewer.css";
     type WaitingTodoTicket = { viewer: string; workspaceId: string; todoId: string };
     const waitingTodoTickets = new Map<string, WaitingTodoTicket>();
     const waitingTodoErrors = new Map<string, string>();
-    type WaitingDismissRecord = {
-      key: string;
-      slotKind: "ask" | "plain" | "todo";
-      itemKind: WaitingDismissalItemKind;
-      itemId: string;
-      cardId: string;
-      workspaceId: string;
-      position: number;
-      placeKey: string;
-      scope: WaitingScope;
-      savedAsk?: WaitingAskItem;
-      savedPlain?: WaitingPlainAskItem;
-      savedTodo?: WaitingTodoItem;
-      savedIndex: number;
-      savedSurveyIndex?: number;
-      inFlightDismiss?: Promise<boolean>;
-      undone: boolean;
-      pendingUndo: boolean;
-      dismissResolved: boolean;
-    };
-    const waitingDismissedRecords = new Map<string, WaitingDismissRecord>();
-    let waitingSurveyDismissedKey: string | null = null;
-    const waitingArchivedRestoring = new Set<string>();
     const waitingArchivedRestoreErrors = new Map<string, string>();
     // Multi-question survey session state (PR 3): drafts survive Back, Next, Skip, and closing the panel/sheet.
     const waitingSurveyDrafts = new Map<string, SurveyDraft>();
@@ -6950,7 +6933,7 @@ import "../../styles/kylon-image-viewer.css";
             viewerId,
             now,
           });
-          const restoring = waitingArchivedRestoring.has(mapped.itemKey);
+          const restoring = waitingDismissalCtrl.isArchivedRestoring(mapped.itemKey);
           const error = waitingArchivedRestoreErrors.get(mapped.itemKey);
           items.push({
             ...mapped,
@@ -6979,13 +6962,21 @@ import "../../styles/kylon-image-viewer.css";
     };
 
     const pruneRetiredWaitingArchivedScopes = (keepIds?: ReadonlySet<string>): void => {
-      const liveIds = keepIds ?? new Set(workspaces.map(ws => ws.id));
+      const memberIds = new Set(workspaces.map(ws => ws.id));
+      const liveIds = keepIds ?? memberIds;
       for (const [wsId, st] of waitingArchivedByWorkspace) {
         if (!liveIds.has(wsId)) {
           st.requestSeq += 1;
           waitingArchivedByWorkspace.delete(wsId);
           waitingArchivedChannels.delete(wsId);
         }
+      }
+      const retiredWorkspaces = new Set<string>();
+      for (const wsId of waitingPanelAsks.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      for (const wsId of waitingPanelPlainAsks.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      for (const wsId of waitingPanelTodos.keys()) if (!memberIds.has(wsId)) retiredWorkspaces.add(wsId);
+      for (const wsId of retiredWorkspaces) {
+        waitingDismissalCtrl.retireForWorkspace(wsId);
       }
     };
 
@@ -7719,27 +7710,211 @@ import "../../styles/kylon-image-viewer.css";
       }
     };
 
-    const restoreSavedDismissCard = (rec: WaitingDismissRecord): void => {
-      if (rec.slotKind === "ask" && rec.savedAsk) {
-        const list = [...(waitingPanelAsks.get(rec.workspaceId) ?? [])];
-        if (!list.some(entry => entry.id === rec.savedAsk!.id)) {
-          list.splice(Math.max(0, Math.min(rec.savedIndex, list.length)), 0, rec.savedAsk);
-          waitingPanelAsks.set(rec.workspaceId, list);
+    const waitingActionContext = () => {
+      const activeSession = session;
+      const viewer = typeof renderedAuthUserId !== "undefined" ? renderedAuthUserId : activeSession?.user.id ?? "";
+      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
+      const authAlive = viewer && typeof waitingActionGuard === "function"
+        ? waitingActionGuard(viewer, authGen)
+        : () => homeViewerId() === viewer;
+      if (!activeSession || sampleMode || !viewer || !authAlive() || activeSession.user.id !== homeViewerId()) return null;
+      const pinned =
+        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
+          ? pinAccountContext({ userId: activeSession.user.id })
+          : null;
+      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return null;
+      const isAlive = (): boolean => authAlive() && homeViewerId() === viewer && (!pinned || pinned.isCurrent());
+      return { activeSession, pinned, isAlive };
+    };
+
+    const pruneWaitingCacheForAccessLoss = (event: WaitingAccessLossEvent): void => {
+      if (event.kind === "all") return;
+      const eq = (a: string | null | undefined, b: string | null | undefined): boolean =>
+        Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
+      const matchesAsk = (conv: WaitingConversation): boolean => {
+        if (event.kind === "workspace") return true;
+        if (conv.kind === "unknown") return true;
+        if (event.kind === "channel") return conv.kind === "channel" && eq(conv.channelId, event.channelId);
+        return (
+          ((conv.kind === "dm" || conv.kind === "group_dm") && eq(conv.conversationId, event.conversationId)) ||
+          (event.channelId !== null && conv.kind === "channel" && eq(conv.channelId, event.channelId))
+        );
+      };
+      const matchesTodo = (todo: WaitingTodoItem): boolean => {
+        if (event.kind === "workspace") return true;
+        if (event.kind === "channel") return todo.placement === "channel" && eq(todo.channelId, event.channelId);
+        return (
+          ((todo.placement === "dm" || todo.placement === "group_dm") && eq(todo.conversationId, event.conversationId)) ||
+          (event.channelId !== null && todo.placement === "channel" && eq(todo.channelId, event.channelId))
+        );
+      };
+      const wsId = event.workspaceId;
+      const removedAskIds = new Set<string>();
+      const prevAsks = waitingPanelAsks.get(wsId);
+      if (prevAsks) {
+        const nextAsks = prevAsks.filter(item => {
+          if (matchesAsk(item.conversation)) { removedAskIds.add(item.id); return false; }
+          return true;
+        });
+        if (event.kind === "workspace") waitingPanelAsks.delete(wsId);
+        else waitingPanelAsks.set(wsId, nextAsks);
+      }
+      const prevPlain = waitingPanelPlainAsks.get(wsId);
+      if (prevPlain) {
+        const nextPlain = prevPlain.filter(item => {
+          if (matchesAsk(item.conversation)) { waitingPlainErrors.delete(item.id); return false; }
+          return true;
+        });
+        if (event.kind === "workspace") waitingPanelPlainAsks.delete(wsId);
+        else waitingPanelPlainAsks.set(wsId, nextPlain);
+      }
+      const prevTodos = waitingPanelTodos.get(wsId);
+      if (prevTodos) {
+        const nextTodos = prevTodos.filter(item => {
+          if (matchesTodo(item)) { waitingTodoErrors.delete(item.id); return false; }
+          return true;
+        });
+        if (event.kind === "workspace") waitingPanelTodos.delete(wsId);
+        else waitingPanelTodos.set(wsId, nextTodos);
+      }
+      if (removedAskIds.size > 0 || event.kind === "workspace") {
+        for (const id of removedAskIds) {
+          waitingPanelErrors.delete(id);
+          waitingSurveyErrors.delete(id);
+          waitingSurveySkipped.delete(id);
+          waitingSurveyDrafts.delete(`${wsId}:${id}`);
         }
-      } else if (rec.slotKind === "plain" && rec.savedPlain) {
-        const list = [...(waitingPanelPlainAsks.get(rec.workspaceId) ?? [])];
-        if (!list.some(entry => entry.id === rec.savedPlain!.id)) {
-          list.splice(Math.max(0, Math.min(rec.savedIndex, list.length)), 0, rec.savedPlain);
-          waitingPanelPlainAsks.set(rec.workspaceId, list);
-        }
-      } else if (rec.slotKind === "todo" && rec.savedTodo) {
-        const list = [...(waitingPanelTodos.get(rec.workspaceId) ?? [])];
-        if (!list.some(entry => entry.id === rec.savedTodo!.id)) {
-          list.splice(Math.max(0, Math.min(rec.savedIndex, list.length)), 0, rec.savedTodo);
-          waitingPanelTodos.set(rec.workspaceId, list);
+        if (waitingSurvey.active) {
+          waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => !removedAskIds.has(id));
+          if (waitingSurvey.itemIds.length === 0) {
+            waitingSurvey.active = false;
+          } else {
+            waitingSurvey.index = Math.max(0, Math.min(waitingSurvey.index, waitingSurvey.itemIds.length - 1));
+          }
         }
       }
+      waitingArchivedRestoreErrors.clear();
+      if (event.kind === "workspace") {
+        waitingPanelLoadedWorkspaces.delete(wsId);
+        waitingPanelTruncatedWorkspaces.delete(wsId);
+      }
     };
+
+    const waitingDismissalCtrl = createWaitingDismissalController({
+      sendDismiss: async (workspaceId, itemKind, itemId) => {
+        const ctx = waitingActionContext();
+        if (!ctx) return { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
+        return dismissWaitingItem(ctx.activeSession, uuid(), workspaceId, itemKind, itemId, {
+          pinned: ctx.pinned,
+          accountWideWorkspace: true,
+          isAlive: ctx.isAlive,
+        });
+      },
+      sendRestore: async (workspaceId, itemKind, itemId) => {
+        const ctx = waitingActionContext();
+        if (!ctx) return { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
+        return restoreWaitingItem(ctx.activeSession, uuid(), workspaceId, itemKind, itemId, {
+          pinned: ctx.pinned,
+          accountWideWorkspace: true,
+          isAlive: ctx.isAlive,
+        });
+      },
+      resolveReviewOfferId: async (workspaceId, todoId) => {
+        if (workspaceId === activeWorkspaceId) {
+          const cached = homeTodoRead?.todo.todo_id === todoId
+            ? homeTodoRead.todo
+            : homeTodoRows.find(row => row.todo_id === todoId);
+          if (cached?.offer?.offer_id) return cached.offer.offer_id;
+        }
+        const ctx = waitingActionContext();
+        if (!ctx) return null;
+        const server = homeServer(ctx.pinned, { accountRouted: true });
+        if (!server) return null;
+        const read = await server.readTodo(workspaceId, todoId);
+        if (!ctx.isAlive()) return null;
+        return read.todo.offer?.offer_id ?? null;
+      },
+      isAlive: () => waitingActionContext() !== null,
+      removeCardFromClient: (target) => {
+        if (target.slotKind === "ask") {
+          const list = waitingPanelAsks.get(target.workspaceId) ?? [];
+          waitingPanelAsks.set(target.workspaceId, list.filter(entry => entry.id !== target.cardId));
+          waitingPanelErrors.delete(target.cardId);
+          waitingSurveyErrors.delete(target.cardId);
+          if (target.fromSurvey && waitingSurvey.active) {
+            waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => id !== target.cardId);
+            if (waitingSurvey.itemIds.length === 0) {
+              waitingSurvey.active = false;
+            } else {
+              waitingSurvey.index = Math.max(0, Math.min(waitingSurvey.index, waitingSurvey.itemIds.length - 1));
+            }
+          }
+        } else if (target.slotKind === "plain") {
+          const list = waitingPanelPlainAsks.get(target.workspaceId) ?? [];
+          waitingPanelPlainAsks.set(target.workspaceId, list.filter(entry => entry.id !== target.cardId));
+          waitingPlainErrors.delete(target.cardId);
+        } else {
+          const list = waitingPanelTodos.get(target.workspaceId) ?? [];
+          waitingPanelTodos.set(target.workspaceId, list.filter(entry => entry.id !== target.cardId));
+          waitingTodoErrors.delete(target.cardId);
+        }
+        const prevCount = homeOverviewCounts.get(target.workspaceId);
+        if (typeof prevCount === "number" && prevCount > 0) {
+          homeOverviewCounts.set(target.workspaceId, prevCount - 1);
+        }
+        adjustCatchUpCountOptimistic(target.workspaceId, target.cardId, -1);
+      },
+      onRetireAccessLoss: (event) => {
+        pruneWaitingCacheForAccessLoss(event);
+      },
+      reloadWaiting: async () => {
+        await refreshWaitingCounts();
+      },
+      invalidateArchived: (workspaceId) => {
+        invalidateWaitingArchived(workspaceId);
+      },
+      setCardError: (slotKind, cardId, message) => {
+        if (slotKind === "ask") {
+          waitingPanelErrors.set(cardId, message);
+          if (waitingSurvey.active) waitingSurveyErrors.set(cardId, message);
+        } else if (slotKind === "plain") {
+          waitingPlainErrors.set(cardId, message);
+        } else {
+          waitingTodoErrors.set(cardId, message);
+        }
+      },
+      setStatusError: (message) => {
+        showWaitingStatus(message);
+      },
+      setArchivedError: (itemKey, message) => {
+        waitingArchivedRestoreErrors.set(itemKey, message);
+      },
+      clearArchivedError: (itemKey) => {
+        waitingArchivedRestoreErrors.delete(itemKey);
+      },
+      render: () => {
+        syncWaitingButtons();
+        renderHomeRail();
+        renderWaitingPanelView();
+      },
+      onDismissedRendered: (key) => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "dismissed", dismissedKey: key });
+        }
+      },
+      onRestoredReloaded: (slotKind, cardId) => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, {
+            kind: "restored-dismissed",
+            ...(slotKind === "todo" ? { todoId: cardId } : { signalId: cardId }),
+          });
+        }
+      },
+    });
 
     const dismissWaitingPanelItem = async (
       target:
@@ -7747,26 +7922,10 @@ import "../../styles/kylon-image-viewer.css";
         | { slotKind: "plain"; item: WaitingPlainAskItem }
         | { slotKind: "todo"; item: WaitingTodoItem },
     ): Promise<void> => {
-      const activeSession = session;
-      const viewer = typeof renderedAuthUserId !== "undefined" ? renderedAuthUserId : activeSession?.user.id ?? "";
-      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
-      const authAlive = viewer && typeof waitingActionGuard === "function"
-        ? waitingActionGuard(viewer, authGen)
-        : () => homeViewerId() === viewer;
-      if (!activeSession || sampleMode || !viewer || !authAlive() || activeSession.user.id !== homeViewerId()) return;
+      if (!waitingActionContext()) return;
       if (typeof workspaces !== "undefined" && !workspaces.some(ws => ws.id === target.item.workspaceId)) return;
-      const pinned =
-        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
-          ? pinAccountContext({ userId: activeSession.user.id })
-          : null;
-      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
-      const isAlive = (): boolean => authAlive() && homeViewerId() === viewer && (!pinned || pinned.isCurrent());
-
-      const key = `${target.slotKind}:${target.item.id}`;
-      if (waitingDismissedRecords.has(key)) return;
 
       const panelBefore = one<HTMLElement>("[data-waiting-panel]");
-      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
       const allDomSlots = panelBefore
         ? Array.from(panelBefore.querySelectorAll<HTMLElement>("[data-waiting-card], [data-waiting-plain-ask], [data-waiting-todo], [data-waiting-dismissed]"))
         : [];
@@ -7777,301 +7936,48 @@ import "../../styles/kylon-image-viewer.css";
       );
       const place = currentWaitingPlace();
       const placeKey = waitingPlaceKeyFor(place);
-
       const itemKind: WaitingDismissalItemKind =
         target.slotKind === "todo"
           ? (target.item.reason === "request" ? "review" : "todo")
           : "ask";
 
-      let savedIndex = 0;
-      let savedSurveyIndex: number | undefined;
-      const rec: WaitingDismissRecord = {
-        key,
+      let channelId: string | null = null;
+      let conversationId: string | null = null;
+      let placementKind: WaitingDismissPlacementKind = "workspace";
+      if (target.slotKind === "todo") {
+        placementKind = target.item.placement ?? "workspace";
+        channelId = target.item.channelId ?? null;
+        conversationId = target.item.conversationId ?? null;
+      } else {
+        const conv = target.item.conversation;
+        placementKind = conv.kind;
+        if (conv.kind === "channel") channelId = conv.channelId;
+        else if (conv.kind === "dm" || conv.kind === "group_dm") conversationId = conv.conversationId ?? null;
+      }
+
+      const dismissTarget: WaitingDismissTarget = {
         slotKind: target.slotKind,
         itemKind,
         itemId: itemKind === "review" ? "" : target.item.id,
         cardId: target.item.id,
         workspaceId: target.item.workspaceId,
+        channelId,
+        conversationId,
+        placementKind,
         position: domPos >= 0 ? domPos : 0,
         placeKey,
         scope: waitingScope,
-        savedIndex: 0,
-        undone: false,
-        pendingUndo: false,
-        dismissResolved: false,
+        ...(target.slotKind === "ask" && target.fromSurvey ? { fromSurvey: true } : {}),
       };
-
-      if (target.slotKind === "ask") {
-        const list = waitingPanelAsks.get(target.item.workspaceId) ?? [];
-        savedIndex = Math.max(0, list.findIndex(entry => entry.id === target.item.id));
-        rec.savedAsk = list[savedIndex] ?? target.item;
-        rec.savedIndex = savedIndex;
-        waitingPanelAsks.set(target.item.workspaceId, list.filter(entry => entry.id !== target.item.id));
-        waitingPanelErrors.delete(target.item.id);
-        waitingSurveyErrors.delete(target.item.id);
-        if (target.fromSurvey && waitingSurvey.active) {
-          savedSurveyIndex = waitingSurvey.itemIds.indexOf(target.item.id);
-          rec.savedSurveyIndex = savedSurveyIndex >= 0 ? savedSurveyIndex : 0;
-          waitingSurvey.itemIds = waitingSurvey.itemIds.filter(id => id !== target.item.id);
-          if (waitingSurvey.itemIds.length === 0) {
-            waitingSurvey.active = false;
-            waitingSurveyDismissedKey = null;
-          } else {
-            waitingSurvey.index = Math.max(0, Math.min(waitingSurvey.index, waitingSurvey.itemIds.length - 1));
-            waitingSurveyDismissedKey = key;
-          }
-        }
-      } else if (target.slotKind === "plain") {
-        const list = waitingPanelPlainAsks.get(target.item.workspaceId) ?? [];
-        savedIndex = Math.max(0, list.findIndex(entry => entry.id === target.item.id));
-        rec.savedPlain = list[savedIndex] ?? target.item;
-        rec.savedIndex = savedIndex;
-        waitingPanelPlainAsks.set(target.item.workspaceId, list.filter(entry => entry.id !== target.item.id));
-        waitingPlainErrors.delete(target.item.id);
-      } else {
-        const list = waitingPanelTodos.get(target.item.workspaceId) ?? [];
-        savedIndex = Math.max(0, list.findIndex(entry => entry.id === target.item.id));
-        rec.savedTodo = list[savedIndex] ?? target.item;
-        rec.savedIndex = savedIndex;
-        waitingPanelTodos.set(target.item.workspaceId, list.filter(entry => entry.id !== target.item.id));
-        waitingTodoErrors.delete(target.item.id);
-      }
-
-      waitingDismissedRecords.set(key, rec);
-      const prevCount = homeOverviewCounts.get(target.item.workspaceId);
-      if (typeof prevCount === "number" && prevCount > 0) {
-        homeOverviewCounts.set(target.item.workspaceId, prevCount - 1);
-      }
-      adjustCatchUpCountOptimistic(target.item.workspaceId, target.item.id, -1);
-      syncWaitingButtons();
-      renderHomeRail();
-      renderWaitingPanelView();
-
-      if (hadPanelFocus && waitingPanelMod && waitingSurface?.isOpen()) {
-        const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
-          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "dismissed", dismissedKey: key });
-        }
-      }
-
-      const runDismiss = async (): Promise<boolean> => {
-        let resolvedItemId = rec.itemId;
-        if (itemKind === "review" && !resolvedItemId) {
-          if (target.item.workspaceId === activeWorkspaceId) {
-            const cached = homeTodoRead?.todo.todo_id === target.item.id
-              ? homeTodoRead.todo
-              : homeTodoRows.find(row => row.todo_id === target.item.id);
-            if (cached?.offer?.offer_id) resolvedItemId = cached.offer.offer_id;
-          }
-          if (!resolvedItemId) {
-            const server = homeServer(pinned, { accountRouted: true });
-            if (!server) return false;
-            try {
-              const read = await server.readTodo(target.item.workspaceId, target.item.id);
-              if (!isAlive()) return false;
-              if (!read.todo.offer?.offer_id) {
-                // Offer is already gone on the server; refresh silently.
-                waitingDismissedRecords.delete(key);
-                if (waitingSurveyDismissedKey === key) waitingSurveyDismissedKey = null;
-                invalidateWaitingArchived(target.item.workspaceId);
-                scheduleWaitingRefresh(200);
-                renderWaitingPanelView();
-                return false;
-              }
-              resolvedItemId = read.todo.offer.offer_id;
-            } catch {
-              if (!isAlive()) return false;
-              return false;
-            }
-          }
-          rec.itemId = resolvedItemId;
-        }
-        let result: Awaited<ReturnType<typeof dismissWaitingItem>>;
-        try {
-          result = await dismissWaitingItem(
-            activeSession,
-            uuid(),
-            target.item.workspaceId,
-            itemKind,
-            resolvedItemId,
-            { pinned, accountWideWorkspace: true, isAlive },
-          );
-        } catch {
-          result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
-        }
-        if (!isAlive()) return false;
-        if (result.ok) {
-          rec.dismissResolved = true;
-          if (!rec.undone) {
-            invalidateWaitingArchived(target.item.workspaceId);
-            scheduleWaitingRefresh(400);
-          }
-          return true;
-        }
-        if (!rec.undone) {
-          waitingDismissedRecords.delete(key);
-          if (waitingSurveyDismissedKey === key) waitingSurveyDismissedKey = null;
-          restoreSavedDismissCard(rec);
-          if (target.slotKind === "ask") {
-            waitingPanelErrors.set(target.item.id, result.message);
-            if (waitingSurvey.active && rec.savedSurveyIndex !== undefined && !waitingSurvey.itemIds.includes(target.item.id)) {
-              waitingSurvey.itemIds.splice(Math.max(0, Math.min(rec.savedSurveyIndex, waitingSurvey.itemIds.length)), 0, target.item.id);
-              waitingSurveyErrors.set(target.item.id, result.message);
-            }
-          } else if (target.slotKind === "plain") {
-            waitingPlainErrors.set(target.item.id, result.message);
-          } else {
-            waitingTodoErrors.set(target.item.id, result.message);
-          }
-          const countNow = homeOverviewCounts.get(target.item.workspaceId);
-          if (typeof countNow === "number") homeOverviewCounts.set(target.item.workspaceId, countNow + 1);
-          adjustCatchUpCountOptimistic(target.item.workspaceId, target.item.id, 1);
-          syncWaitingButtons();
-          renderHomeRail();
-          renderWaitingPanelView();
-          const panelNow = one<HTMLElement>("[data-waiting-panel]");
-          if (hadPanelFocus && panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
-            waitingPanelMod.focusWaitingPanelAfterAction(panelNow, {
-              kind: "restored-dismissed",
-              ...(target.slotKind === "todo" ? { todoId: target.item.id } : { signalId: target.item.id }),
-            });
-          }
-        }
-        return false;
-      };
-
-      rec.inFlightDismiss = runDismiss();
-      await rec.inFlightDismiss;
+      await waitingDismissalCtrl.dismiss(dismissTarget);
     };
 
     const undoWaitingDismissal = async (key: string): Promise<void> => {
-      const rec = waitingDismissedRecords.get(key);
-      if (!rec || rec.undone) return;
-      const activeSession = session;
-      const viewer = typeof renderedAuthUserId !== "undefined" ? renderedAuthUserId : activeSession?.user.id ?? "";
-      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
-      const authAlive = viewer && typeof waitingActionGuard === "function"
-        ? waitingActionGuard(viewer, authGen)
-        : () => homeViewerId() === viewer;
-      if (!activeSession || sampleMode || !viewer || !authAlive() || activeSession.user.id !== homeViewerId()) return;
-      const pinned =
-        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
-          ? pinAccountContext({ userId: activeSession.user.id })
-          : null;
-      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
-      const isAlive = (): boolean => authAlive() && homeViewerId() === viewer && (!pinned || pinned.isCurrent());
-
-      const panelBefore = one<HTMLElement>("[data-waiting-panel]");
-      const hadPanelFocus = Boolean(panelBefore && document.activeElement && panelBefore.contains(document.activeElement));
-
-      rec.undone = true;
-      rec.pendingUndo = true;
-      waitingDismissedRecords.delete(key);
-      if (waitingSurveyDismissedKey === key) waitingSurveyDismissedKey = null;
-
-      restoreSavedDismissCard(rec);
-      if (rec.slotKind === "ask" && waitingSurvey.active && rec.savedSurveyIndex !== undefined && !waitingSurvey.itemIds.includes(rec.cardId)) {
-        const idx = Math.max(0, Math.min(rec.savedSurveyIndex, waitingSurvey.itemIds.length));
-        waitingSurvey.itemIds.splice(idx, 0, rec.cardId);
-        waitingSurvey.index = idx;
-      }
-
-      const countNow = homeOverviewCounts.get(rec.workspaceId);
-      if (typeof countNow === "number") homeOverviewCounts.set(rec.workspaceId, countNow + 1);
-      adjustCatchUpCountOptimistic(rec.workspaceId, rec.cardId, 1);
-      syncWaitingButtons();
-      renderHomeRail();
-      renderWaitingPanelView();
-
-      if (hadPanelFocus && waitingPanelMod && waitingSurface?.isOpen()) {
-        const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow) {
-          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, {
-            kind: "restored-dismissed",
-            ...(rec.slotKind === "todo" ? { todoId: rec.cardId } : { signalId: rec.cardId }),
-          });
-        }
-      }
-
-      const dismissSucceeded = rec.inFlightDismiss ? await rec.inFlightDismiss : rec.dismissResolved;
-      if (!isAlive() || !dismissSucceeded || !rec.itemId) return;
-
-      let result: Awaited<ReturnType<typeof restoreWaitingItem>>;
-      try {
-        result = await restoreWaitingItem(
-          activeSession,
-          uuid(),
-          rec.workspaceId,
-          rec.itemKind,
-          rec.itemId,
-          { pinned, accountWideWorkspace: true, isAlive },
-        );
-      } catch {
-        result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
-      }
-      if (!isAlive()) return;
-      if (result.ok) {
-        invalidateWaitingArchived(rec.workspaceId);
-        scheduleWaitingRefresh(400);
-        return;
-      }
-      if (rec.slotKind === "ask") waitingPanelErrors.set(rec.cardId, result.message);
-      else if (rec.slotKind === "plain") waitingPlainErrors.set(rec.cardId, result.message);
-      else waitingTodoErrors.set(rec.cardId, result.message);
-      renderWaitingPanelView();
+      await waitingDismissalCtrl.undo(key);
     };
 
     const restoreArchivedWaitingItem = async (item: WaitingArchivedItem): Promise<void> => {
-      if (item.outcomeKind !== "dismissed" || waitingArchivedRestoring.has(item.itemKey)) return;
-      const activeSession = session;
-      const viewer = typeof renderedAuthUserId !== "undefined" ? renderedAuthUserId : activeSession?.user.id ?? "";
-      const authGen = typeof waitingAuthGeneration !== "undefined" ? waitingAuthGeneration : 0;
-      const authAlive = viewer && typeof waitingActionGuard === "function"
-        ? waitingActionGuard(viewer, authGen)
-        : () => homeViewerId() === viewer;
-      if (!activeSession || sampleMode || !viewer || !authAlive() || activeSession.user.id !== homeViewerId()) return;
-      const pinned =
-        typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && typeof pinAccountContext === "function"
-          ? pinAccountContext({ userId: activeSession.user.id })
-          : null;
-      if (typeof isMultiAccountEnabled === "function" && isMultiAccountEnabled() && !pinned) return;
-      const isAlive = (): boolean => authAlive() && homeViewerId() === viewer && (!pinned || pinned.isCurrent());
-
-      waitingArchivedRestoring.add(item.itemKey);
-      waitingArchivedRestoreErrors.delete(item.itemKey);
-      renderWaitingPanelView();
-
-      let result: Awaited<ReturnType<typeof restoreWaitingItem>>;
-      try {
-        result = await restoreWaitingItem(
-          activeSession,
-          uuid(),
-          item.workspaceId,
-          item.kind,
-          item.id,
-          { pinned, accountWideWorkspace: true, isAlive },
-        );
-      } catch {
-        result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
-      }
-      if (!isAlive()) return;
-      waitingArchivedRestoring.delete(item.itemKey);
-      if (result.ok) {
-        const archState = waitingArchivedByWorkspace.get(item.workspaceId);
-        if (archState) {
-          archState.entries = archState.entries.filter(entry => entry.item_key.toLowerCase() !== item.itemKey.toLowerCase());
-          if (archState.total > 0) archState.total -= 1;
-        }
-        const countNow = homeOverviewCounts.get(item.workspaceId);
-        if (typeof countNow === "number") homeOverviewCounts.set(item.workspaceId, countNow + 1);
-        syncWaitingButtons();
-        renderHomeRail();
-        renderWaitingPanelView();
-        void refreshWaitingCounts();
-        return;
-      }
-      waitingArchivedRestoreErrors.set(item.itemKey, result.message);
-      renderWaitingPanelView();
+      await waitingDismissalCtrl.restoreArchived(item);
     };
 
     const renderWaitingPanelView = (): void => {
@@ -8117,7 +8023,6 @@ import "../../styles/kylon-image-viewer.css";
       if (waitingSurvey.active && surveyItems.length === 0 && !waitingSurvey.sending) {
         waitingSurvey.active = false;
       }
-      const surveyDismissedRec = waitingSurveyDismissedKey ? waitingDismissedRecords.get(waitingSurveyDismissedKey) ?? null : null;
       const surveyVM = waitingSurvey.active ? {
         items: surveyItems,
         scope: waitingScope,
@@ -8127,9 +8032,7 @@ import "../../styles/kylon-image-viewer.css";
         skipped: waitingSurveySkipped,
         errors: waitingSurveyErrors,
         sending: waitingSurvey.sending,
-        dismissedNotice: surveyDismissedRec && !surveyDismissedRec.undone
-          ? { key: surveyDismissedRec.key, ...(surveyDismissedRec.pendingUndo ? { pendingUndo: true as const } : {}) }
-          : null,
+        dismissedNotice: waitingDismissalCtrl.surveyNotice(),
       } : null;
       let archivedVM = null;
       if (waitingTab === "archived") {
@@ -8220,20 +8123,7 @@ import "../../styles/kylon-image-viewer.css";
           hasMore: anyArchHasMore,
         };
       }
-      const activeDismissedPlaceholders: WaitingDismissedPlaceholder[] = [];
-      for (const rec of waitingDismissedRecords.values()) {
-        if (!rec.undone && rec.placeKey === placeKey && rec.scope === waitingScope) {
-          activeDismissedPlaceholders.push({
-            key: rec.key,
-            itemKind: rec.itemKind,
-            itemId: rec.itemId || rec.cardId,
-            cardId: rec.cardId,
-            workspaceId: rec.workspaceId,
-            position: rec.position,
-            ...(rec.pendingUndo ? { pendingUndo: true as const } : {}),
-          });
-        }
-      }
+      const activeDismissedPlaceholders = waitingDismissalCtrl.placeholdersFor(placeKey, waitingScope);
       waitingPanelMod.renderWaitingPanel(
         container,
         {
@@ -8262,8 +8152,7 @@ import "../../styles/kylon-image-viewer.css";
         {
           onTabChange: (next) => {
             clearWaitingStatus();
-            waitingDismissedRecords.clear();
-            waitingSurveyDismissedKey = null;
+            waitingDismissalCtrl.retireAll();
             waitingSurvey.active = false;
             clearWaitingArchivedCache();
             waitingTab = next;
@@ -8272,8 +8161,7 @@ import "../../styles/kylon-image-viewer.css";
           },
           onScopeChange: (next) => {
             clearWaitingStatus();
-            waitingDismissedRecords.clear();
-            waitingSurveyDismissedKey = null;
+            waitingDismissalCtrl.retireAll();
             waitingSurvey.active = false;
             waitingScope = next;
             if (waitingTab === "archived") {
@@ -8287,8 +8175,7 @@ import "../../styles/kylon-image-viewer.css";
           },
           onClose: () => {
             clearWaitingStatus();
-            waitingDismissedRecords.clear();
-            waitingSurveyDismissedKey = null;
+            waitingDismissalCtrl.retireAll();
             clearWaitingArchivedCache();
             waitingSurface?.close(true);
           },
@@ -8503,9 +8390,7 @@ import "../../styles/kylon-image-viewer.css";
       waitingPlainLastSubmissions.clear();
       waitingTodoTickets.clear();
       waitingTodoErrors.clear();
-      waitingDismissedRecords.clear();
-      waitingSurveyDismissedKey = null;
-      waitingArchivedRestoring.clear();
+      waitingDismissalCtrl.retireAll();
       waitingArchivedRestoreErrors.clear();
       waitingSurveyDrafts.clear();
       waitingSurveySkipped.clear();
@@ -8606,6 +8491,7 @@ import "../../styles/kylon-image-viewer.css";
             counted.set(workspace.id, null);
             waitingPanelFailedWorkspaces.add(workspace.id);
             waitingPanelTruncatedWorkspaces.delete(workspace.id);
+            waitingDismissalCtrl.retireForWorkspace(workspace.id);
             clearWaitingArchivedCache(workspace.id);
           } else if (row.needs_you.asks.length > 0 || row.needs_you.assigned.length > 0 || row.needs_you.waiting.length > 0) {
             counted.set(workspace.id, null);
@@ -8858,12 +8744,7 @@ import "../../styles/kylon-image-viewer.css";
               todosTruncated = row.needs_you.assigned.length >= 20 || row.needs_you.waiting.length >= 20;
             }
             if (!live()) return;
-            const pendingDismissIds = new Set<string>();
-            for (const rec of waitingDismissedRecords.values()) {
-              if (!rec.undone && !rec.dismissResolved && rec.workspaceId === workspace.id) {
-                pendingDismissIds.add(rec.cardId);
-              }
-            }
+            const pendingDismissIds = waitingDismissalCtrl.pendingDismissCardIds(workspace.id);
             const filteredPanelItems = pendingDismissIds.size > 0
               ? panelItems.filter(item => !pendingDismissIds.has(item.id))
               : panelItems;
@@ -17875,8 +17756,12 @@ import "../../styles/kylon-image-viewer.css";
       for (const [id, entry] of postedSinceReset.entries()) {
         if (entry.row.conversationId === conversationId) postedSinceReset.delete(id);
       }
+      const evictedConv = workspaceConversations?.find((c) => c.conversationId === conversationId) ?? null;
       if (workspaceConversations) {
         workspaceConversations = workspaceConversations.filter((c) => c.conversationId !== conversationId);
+      }
+      if (typeof waitingDismissalCtrl !== "undefined") {
+        waitingDismissalCtrl.retireForConversation(workspaceId, conversationId, evictedConv?.channelId ?? null);
       }
       if (invalidateArchive && typeof invalidateWaitingArchived === "function") {
         invalidateWaitingArchived(workspaceId);
@@ -17967,6 +17852,14 @@ import "../../styles/kylon-image-viewer.css";
       if (pinnedUserId && workspaceId) modernConversationsConfirmed.add(`${pinnedUserId}:${workspaceId}`);
       const invalidatedArchive =
         typeof hasLostConversationAccess === "function" && hasLostConversationAccess(workspaceId, prevList, rows);
+      if (prevList && typeof waitingDismissalCtrl !== "undefined") {
+        for (const prev of prevList) {
+          const next = rows.find((r) => r.conversationId === prev.conversationId);
+          if (!next || ((prev.kind === "private_channel" || isDirectKind(prev.kind)) && prev.joined && !next.joined)) {
+            waitingDismissalCtrl.retireForConversation(workspaceId, prev.conversationId, prev.channelId ?? null);
+          }
+        }
+      }
       if (invalidatedArchive) {
         if (typeof invalidateWaitingArchived === "function") invalidateWaitingArchived(workspaceId);
         if (typeof resetReviewChecks === "function") resetReviewChecks(false);
@@ -19901,8 +19794,17 @@ import "../../styles/kylon-image-viewer.css";
       channels = next;
       channelListFailed = false;
       channelsLoaded = true;
-      if (lostChannelAccess && typeof invalidateWaitingArchived === "function") {
-        invalidateWaitingArchived(workspaceId);
+      if (lostChannelAccess) {
+        if (typeof waitingDismissalCtrl !== "undefined") {
+          for (const prev of prevChannels) {
+            if (!next.some(cur => cur.channelId === prev.channelId)) {
+              waitingDismissalCtrl.retireForChannel(workspaceId, prev.channelId);
+            }
+          }
+        }
+        if (typeof invalidateWaitingArchived === "function") {
+          invalidateWaitingArchived(workspaceId);
+        }
       }
       /* A `?c=` that could not be resolved earlier gets one more chance against this list:
          the read it was resolved against can have been dropped for a newer one, or the

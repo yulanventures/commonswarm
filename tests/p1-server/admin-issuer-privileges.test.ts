@@ -130,9 +130,10 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.review_check_replay_visible(uuid,text,uuid,uuid)', 'EXECUTE', false],
   // Live seat status (C2, 20261120000006): canonical workspace-visible signal predicate for command-role coarse presence gating.
   ['swarm_command', 'FUNCTION', 'swarm.signals_have_workspace_visible(uuid,uuid[])', 'EXECUTE', false],
-  // Waiting on you dismissals (20261124000001): per-person idempotent dismiss/restore definers.
+  // Waiting on you dismissals (20261124000001): per-person dismiss/restore and replay-reauth definers.
   ['swarm_command', 'FUNCTION', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

@@ -16,6 +16,7 @@ import {
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
 import { answerChoice, answerPlainAsk, dismissWaitingItem, dismissWaitingItemCommand, plainAskReplyCommand, restoreWaitingItem, restoreWaitingItemCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { createWaitingDismissalController } from "./waiting-dismissal.ts";
 import { parseDecisionQueue, parseWaitingArchivedPage, parseWaitingTodosQueue } from "./home/client.ts";
 
 class FakeNode {
@@ -1771,8 +1772,7 @@ test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismi
       },
       onUndoDismiss: (ph) => {
         undoCalls.push(ph.key);
-        placeholders = placeholders.filter(p => p.key !== ph.key);
-        items = [ask1];
+        placeholders = placeholders.map(p => (p.key === ph.key ? { ...p, pendingUndo: true } : p));
         renderActive();
       },
       onRestoreArchived: (item) => {
@@ -1793,13 +1793,14 @@ test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismi
   assert.deepEqual(dismissButtons.map(b => b.dataset.waitingDismiss), ["ask", "todo", "review", "ask"]);
   assert.ok(host.querySelector('[data-waiting-plain-stale="plain-1"]'), "plain ask keeps Clear as stale alongside Dismiss");
 
-  // Clicking Dismiss removes the card optimistically, updates count, and shows "Dismissed" + "Undo" in place.
+  // Clicking Dismiss removes the card, updates count, and shows "Dismissed" + "Undo" in place (with zero item content).
   dismissButtons[0].click();
   assert.deepEqual(dismissedCalls, [["ask", "ask-1"]]);
   assert.equal(host.querySelector('[data-waiting-card="ask-1"]'), null);
   const dismissedRow = host.querySelector('[data-waiting-dismissed="ask:ask-1"]');
   assert.ok(dismissedRow);
   assert.equal(dismissedRow.querySelector(".cs-waiting-dismissed__label").textContent, "Dismissed");
+  assert.equal(dismissedRow.textContent.includes(ask1.what), false, "Dismissed row renders no content from the item");
   const undoBtn = dismissedRow.querySelector('[data-waiting-undo="ask:ask-1"]');
   assert.ok(undoBtn);
   assert.equal(undoBtn.tagName, "BUTTON");
@@ -1810,14 +1811,24 @@ test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismi
   focusWaitingPanelAfterAction(host, { kind: "dismissed", dismissedKey: "ask:ask-1" });
   assert.strictEqual(doc.activeElement, undoBtn);
 
-  // Clicking Undo puts the card back and restores the count.
+  // Clicking Undo switches the row to "Undoing…" and does NOT re-insert the card itself before reload.
   undoBtn.click();
   assert.deepEqual(undoCalls, ["ask:ask-1"]);
+  assert.equal(host.querySelector('[data-waiting-card="ask-1"]'), null);
+  const undoingBtn = host.querySelector('[data-waiting-undo="ask:ask-1"]');
+  assert.ok(undoingBtn);
+  assert.equal(undoingBtn.textContent, "Undoing…");
+  assert.equal(undoingBtn.getAttribute("aria-disabled"), "true");
+
+  // Card reappears only after the server reload supplies it and removes the placeholder.
+  placeholders = [];
+  items = [ask1];
+  renderActive();
   assert.ok(host.querySelector('[data-waiting-card="ask-1"]'));
   assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-1"]'), null);
   assert.equal(host.querySelector("[data-waiting-scope]").options[0].textContent, "This channel (4)");
 
-  // Failed dismiss puts the card back with role="alert" error treatment.
+  // Failed non-404 dismiss reloads card with role="alert" error treatment.
   items = [{ ...ask1, choices: { ...ask1.choices, error: "Could not dismiss. Try again." } }];
   placeholders = [];
   renderActive();
@@ -1914,4 +1925,233 @@ test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismi
   });
   assert.equal(typeof dismissWaitingItem, "function");
   assert.equal(typeof restoreWaitingItem, "function");
+});
+
+test("C3 dismissal controller: Undo reloads without inserting a saved card; access loss retires rows and fences late refusals; unchanged-access control restores after reload", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "all", channelId: null, label: "All channels" };
+  const placeKey = "ws-1:all::::";
+
+  const makeChoiceAsk = (id, what, conversation) => ({
+    id,
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation,
+    channelLabel: conversation.kind === "channel" ? "#secret" : conversation.kind === "dm" ? "DM" : "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent",
+    fromId: "a-1",
+    what,
+    when: "1m",
+    createdAt: "2026-11-23T12:00:00Z",
+    until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+  });
+
+  const dmAsk = makeChoiceAsk("ask-dm", "Secret DM question?", { kind: "dm", partnerKind: "person", partnerId: "u-2", conversationId: "conv-dm" });
+  const privAsk = makeChoiceAsk("ask-priv", "Private channel question?", { kind: "channel", channelId: "ch-priv" });
+  const genAsk = makeChoiceAsk("ask-gen", "General question?", { kind: "general" });
+
+  // Server-backed fixture lists (mutated only to simulate authoritative server state).
+  let serverAsks = [dmAsk, privAsk, genAsk];
+  let clientAsks = [...serverAsks];
+  let cardErrors = new Map();
+  let statusMessage = "";
+  let statusSeq = 0;
+  let reloadCount = 0;
+
+  let nextDismiss = () => Promise.resolve({ ok: true, itemKind: "ask", itemId: "", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+  let nextRestore = () => Promise.resolve({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" });
+
+  let ctrl;
+  const render = () => {
+    const items = clientAsks.map(item => (cardErrors.has(item.id)
+      ? { ...item, choices: { ...item.choices, error: cardErrors.get(item.id) } }
+      : item));
+    renderWaitingPanel(host, {
+      tab: "active",
+      scope: "workspace",
+      place,
+      items,
+      plainAsks: [],
+      todos: [],
+      dismissedPlaceholders: ctrl.placeholdersFor(placeKey, "workspace"),
+      counts: {
+        channel: { min: items.length, complete: true },
+        workspace: { min: items.length, complete: true },
+        all: { min: items.length, complete: true },
+      },
+      loading: false,
+      complete: true,
+      failed: false,
+      statusMessage,
+      statusSeq,
+    }, {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onDismissAsk: (item) => void ctrl.dismiss({
+        slotKind: "ask",
+        itemKind: "ask",
+        itemId: item.id,
+        cardId: item.id,
+        workspaceId: item.workspaceId,
+        channelId: item.conversation.kind === "channel" ? item.conversation.channelId : null,
+        conversationId: item.conversation.kind === "dm" || item.conversation.kind === "group_dm" ? item.conversation.conversationId ?? null : null,
+        placementKind: item.conversation.kind,
+        position: 0,
+        placeKey,
+        scope: "workspace",
+      }),
+      onUndoDismiss: (ph) => void ctrl.undo(ph.key),
+    });
+  };
+
+  ctrl = createWaitingDismissalController({
+    sendDismiss: (ws, kind, id) => nextDismiss(ws, kind, id),
+    sendRestore: (ws, kind, id) => nextRestore(ws, kind, id),
+    isAlive: () => true,
+    removeCardFromClient: (target) => {
+      clientAsks = clientAsks.filter(i => i.id !== target.cardId);
+      cardErrors.delete(target.cardId);
+    },
+    onRetireAccessLoss: (ev) => {
+      if (ev.kind === "conversation") {
+        clientAsks = clientAsks.filter(i => !(i.conversation.kind === "dm" && i.conversation.conversationId === ev.conversationId));
+      } else if (ev.kind === "channel") {
+        clientAsks = clientAsks.filter(i => !(i.conversation.kind === "channel" && i.conversation.channelId === ev.channelId));
+      }
+    },
+    reloadWaiting: async () => {
+      reloadCount += 1;
+      const pending = ctrl.pendingDismissCardIds("ws-1");
+      clientAsks = serverAsks.filter(i => !pending.has(i.id));
+      render();
+    },
+    invalidateArchived: () => {},
+    setCardError: (_slot, id, msg) => { cardErrors.set(id, msg); },
+    setStatusError: (msg) => { statusMessage = msg; statusSeq += 1; },
+    setArchivedError: () => {},
+    clearArchivedError: () => {},
+    render,
+  });
+
+  render();
+
+  // 1. Held Dismiss refusal arriving AFTER authoritative DM conversation loss paints NOTHING (no card, no row, no error).
+  let settleDmDismiss;
+  nextDismiss = () => new Promise(resolve => { settleDmDismiss = resolve; });
+  const dmDismissPromise = ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: dmAsk.id, cardId: dmAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: "conv-dm", placementKind: "dm",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), "in-place Dismissed row shown while in flight");
+  assert.equal(host.textContent.includes(dmAsk.what), false, "DM question text is gone from DOM");
+
+  // Authoritative conversation loss happens BEFORE Dismiss settles!
+  serverAsks = serverAsks.filter(i => i.id !== dmAsk.id);
+  const retired = ctrl.retireForConversation("ws-1", "conv-dm", null);
+  assert.equal(retired, true);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), null, "Dismissed row retired synchronously");
+  assert.equal(host.querySelector('[data-waiting-card="ask-dm"]'), null);
+
+  // Late refusal (even a 500 or 404) settles -> fenced out, paints nothing, sets no error!
+  const reloadsBeforeLateRefusal = reloadCount;
+  settleDmDismiss({ ok: false, status: 500, error: "server_error", message: "Should never appear" });
+  await dmDismissPromise;
+  assert.equal(reloadCount, reloadsBeforeLateRefusal, "retired dismiss settlement is ignored");
+  assert.equal(host.querySelector('[data-waiting-card="ask-dm"]'), null);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), null);
+  assert.equal(cardErrors.has(dmAsk.id), false);
+  assert.equal(host.textContent.includes(dmAsk.what), false);
+
+  // 2. Undo refused (404) after private-channel loss paints NOTHING.
+  nextDismiss = async () => {
+    serverAsks = serverAsks.filter(i => i.id !== privAsk.id);
+    return { ok: true, itemKind: "ask", itemId: privAsk.id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+  };
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: privAsk.id, cardId: privAsk.id,
+    workspaceId: "ws-1", channelId: "ch-priv", conversationId: null, placementKind: "channel",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-priv"]'));
+
+  let settlePrivUndo;
+  nextRestore = () => new Promise(resolve => { settlePrivUndo = resolve; });
+  const privUndoPromise = ctrl.undo("ask:ask-priv");
+  // While Undo waits, row shows "Undoing…" and does NOT insert privAsk!
+  assert.equal(host.querySelector('[data-waiting-undo="ask:ask-priv"]').textContent, "Undoing…");
+  assert.equal(host.querySelector('[data-waiting-card="ask-priv"]'), null);
+  await Promise.resolve();
+
+  // Server refuses restore with 404 (caller removed from private channel); reload returns no privAsk.
+  settlePrivUndo({ ok: false, status: 404, error: "not_found", message: "Waiting item not found." });
+  await privUndoPromise;
+  assert.equal(host.querySelector('[data-waiting-card="ask-priv"]'), null);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-priv"]'), null);
+  assert.equal(statusMessage, "", "404 refusal reloads silently with no error");
+  assert.equal(host.textContent.includes(privAsk.what), false);
+
+  // 3. Unchanged-access control (#general ask): Dismiss, then Undo -> shows "Undoing…", inserts nothing itself,
+  //    then restores the card ONLY after server reload returns it.
+  nextDismiss = async () => {
+    serverAsks = serverAsks.filter(i => i.id !== genAsk.id);
+    return { ok: true, itemKind: "ask", itemId: genAsk.id, dismissed: true, dismissedAt: "2026-11-23T12:03:00Z" };
+  };
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null);
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-gen"]'));
+
+  let settleGenUndo;
+  nextRestore = () => new Promise(resolve => { settleGenUndo = resolve; });
+  const reloadsBeforeUndo = reloadCount;
+  const genUndoPromise = ctrl.undo("ask:ask-gen");
+  assert.equal(host.querySelector('[data-waiting-undo="ask:ask-gen"]').textContent, "Undoing…");
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null, "Undo inserts nothing before server reload");
+  await Promise.resolve();
+
+  // Server accepts restore and includes genAsk on the subsequent reload.
+  serverAsks = [genAsk];
+  settleGenUndo({ ok: true, itemKind: "ask", itemId: genAsk.id, restored: true, restoredAt: "2026-11-23T12:04:00Z" });
+  await genUndoPromise;
+  assert.ok(reloadCount > reloadsBeforeUndo, "Undo triggers authoritative server reload");
+  assert.ok(host.querySelector('[data-waiting-card="ask-gen"]'), "unchanged-access control card reappears after reload");
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-gen"]'), null);
+
+  // 4. Failed Dismiss (non-404) reloads from server with error treatment (never re-inserting a saved card);
+  //    404 Dismiss reloads silently with no error.
+  nextDismiss = async () => ({ ok: false, status: 500, error: "server_error", message: "Server busy." });
+  const reloadsBefore500 = reloadCount;
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(reloadCount > reloadsBefore500);
+  assert.equal(cardErrors.get(genAsk.id), "Server busy.");
+  assert.ok(host.querySelector('[data-waiting-card="ask-gen"]').textContent.includes("Server busy."));
+
+  cardErrors.clear();
+  serverAsks = [];
+  nextDismiss = async () => ({ ok: false, status: 404, error: "not_found", message: "Waiting item not found." });
+  const reloadsBefore404 = reloadCount;
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(reloadCount > reloadsBefore404);
+  assert.equal(cardErrors.has(genAsk.id), false, "404 dismiss reloads with no error");
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null);
 });

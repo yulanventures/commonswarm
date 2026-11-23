@@ -1,7 +1,9 @@
 /**
  * Unit tests for Waiting on you per-person dismissals (Slice 1):
  * - Wire parsing & validation in supabase/functions/command/waiting-dismissals.ts
- * - HUMAN_ONLY_COMMANDS includes dismiss_waiting_item and restore_waiting_item (agents get 403)
+ * - HUMAN_ONLY_COMMANDS includes dismiss_waiting_item and restore_waiting_item
+ *   (local agent tokens are refused by the early human-only gate before the dismissal branch or its audit)
+ * - Uniform 404 body shared by fresh refusals and replay reauthorization
  * - Replay field preservation
  */
 import assert from "node:assert/strict";
@@ -11,12 +13,16 @@ import { HUMAN_ONLY_COMMANDS } from "../src/protocol/workspace-commands.js";
 import {
   isWaitingDismissalCommandKind,
   parseWaitingDismissalCommand,
+  reauthorizeWaitingDismissalReplay,
+  WAITING_ITEM_NOT_FOUND_BODY,
   waitingDismissalReplayFields,
 } from "../supabase/functions/command/waiting-dismissals.js";
 
 const VALID_ID = "11111111-2222-4333-8444-555555555555";
+const WS_ID = "22222222-3333-4444-8555-666666666666";
+const USER_ID = "33333333-4444-4555-8666-777777777777";
 
-test("HUMAN_ONLY_COMMANDS blocks agent credentials from dismiss_waiting_item and restore_waiting_item", () => {
+test("HUMAN_ONLY_COMMANDS blocks local agent tokens at the early human-only gate before dismissal branch/audit", () => {
   assert.equal(HUMAN_ONLY_COMMANDS.has("dismiss_waiting_item"), true);
   assert.equal(HUMAN_ONLY_COMMANDS.has("restore_waiting_item"), true);
 });
@@ -54,6 +60,17 @@ test("parseWaitingDismissalCommand validates kind, item_kind, UUID, and rejects 
   }
 });
 
+test("reauthorizeWaitingDismissalReplay returns null when allowed and uniform 404 when denied", async () => {
+  const allowTx = (async () => [{ allowed: true }]) as unknown as Parameters<typeof reauthorizeWaitingDismissalReplay>[0];
+  const denyTx = (async () => [{ allowed: false }]) as unknown as Parameters<typeof reauthorizeWaitingDismissalReplay>[0];
+
+  assert.equal(await reauthorizeWaitingDismissalReplay(allowTx, WS_ID, USER_ID, "ask", VALID_ID), null);
+  assert.deepEqual(
+    await reauthorizeWaitingDismissalReplay(denyTx, WS_ID, USER_ID, "ask", VALID_ID),
+    { status: 404, body: { ...WAITING_ITEM_NOT_FOUND_BODY } },
+  );
+});
+
 test("waitingDismissalReplayFields preserves only valid dismissal/restore fields", () => {
   assert.deepEqual(
     waitingDismissalReplayFields({
@@ -61,6 +78,7 @@ test("waitingDismissalReplayFields preserves only valid dismissal/restore fields
       item_id: VALID_ID,
       dismissed: true,
       dismissed_at: "2026-11-23T12:00:00Z",
+      audit_channel_id: "should-never-surface",
       ignored: "nope",
     }),
     {
@@ -74,13 +92,13 @@ test("waitingDismissalReplayFields preserves only valid dismissal/restore fields
     waitingDismissalReplayFields({
       item_kind: "review",
       item_id: VALID_ID,
-      restored: false,
+      restored: true,
       restored_at: "2026-11-23T12:05:00Z",
     }),
     {
       item_kind: "review",
       item_id: VALID_ID,
-      restored: false,
+      restored: true,
       restored_at: "2026-11-23T12:05:00Z",
     },
   );

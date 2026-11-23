@@ -1174,10 +1174,70 @@ REVOKE ALL ON FUNCTION swarm_read.waiting_archived_page(uuid, integer, timestamp
  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.waiting_archived_page(uuid, integer, timestamptz, text) TO authenticated;
 
+-- Restore swarm_read.audit_log to its exact 20261113000003_private_channels.sql definition.
+CREATE OR REPLACE VIEW swarm_read.audit_log
+WITH (security_barrier = true)
+AS
+  SELECT
+    a.audit_id,
+    a.occurred_at,
+    a.actor_user,
+    a.actor_agent_principal,
+    a.actor_run,
+    a.credential_kind,
+    a.credential_id,
+    a.device_id,
+    a.command_kind,
+    a.workspace_id,
+    a.stream_id,
+    a.outcome,
+    a.reason,
+    a.detail,
+    a.request_hash,
+    a.ip
+  FROM swarm.audit_log AS a
+  WHERE swarm.is_member(a.workspace_id, auth.uid())
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.memberships AS m
+      WHERE m.workspace_id = a.workspace_id
+        AND m.user_id = auth.uid()
+        AND m.revoked_at IS NULL
+        AND m.role IN ('owner', 'admin')
+    )
+    AND (
+      COALESCE(cardinality(a.channel_ids), 0) = 0
+      OR NOT EXISTS (
+        SELECT 1
+        FROM unnest(a.channel_ids) AS cid
+        WHERE cid IS NULL
+           OR NOT swarm.claims_can_access_channel(a.workspace_id, cid)
+      )
+    )
+    AND (
+      a.command_kind NOT IN (
+        'private_channel_manager_promoted',
+        'private_channel_auto_archived'
+      )
+      OR (
+        a.stream_id IS NOT NULL
+        AND swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+      )
+    );
+
+ALTER VIEW swarm_read.audit_log OWNER TO swarm_admin;
+GRANT SELECT ON swarm_read.audit_log TO authenticated, swarm_read;
+REVOKE ALL ON swarm_read.audit_log FROM PUBLIC, anon;
+
 -- Drop only the objects added by 20261124000001
 DROP FUNCTION IF EXISTS swarm.dismiss_waiting_item(uuid, uuid, text, uuid);
 DROP FUNCTION IF EXISTS swarm.restore_waiting_item(uuid, uuid, text, uuid);
-DROP FUNCTION IF EXISTS swarm.waiting_item_can_read(uuid, uuid, text, uuid);
+DROP FUNCTION IF EXISTS swarm.waiting_dismissal_replay_allowed(uuid, uuid, text, uuid);
+DROP FUNCTION IF EXISTS swarm.waiting_item_eligible(uuid, uuid, text, uuid, timestamptz);
+DROP FUNCTION IF EXISTS swarm.waiting_review_eligible(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.waiting_todo_eligible(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.waiting_todo_reason(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS swarm.waiting_ask_eligible(uuid, uuid, uuid, timestamptz);
 DROP TABLE IF EXISTS swarm.waiting_dismissals;
 DROP FUNCTION IF EXISTS swarm.waiting_dismissal_validate_refs();
 

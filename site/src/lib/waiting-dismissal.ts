@@ -1,0 +1,399 @@
+/**
+ * Waiting on you dismissal controller (C3):
+ * - Keeps NO copy of the dismissed question or to-do (only kind, id, routing keys, and slot position).
+ * - Undo keeps the row showing "Undoing…", sends the restore command, and RELOADS from the server.
+ * - Failed Dismiss RELOADS from the server (with error treatment on non-404, silent reload on 404);
+ *   never re-inserts a saved card.
+ * - Archived Restore sends restore, then RELOADS from the server.
+ * - Authoritative loss of conversation, channel, or workspace access synchronously retires matching
+ *   Dismissed rows, survey pointers, and pending actions, and fences late async settlements via
+ *   per-row retirement and a monotonic access generation counter.
+ */
+import type { WaitingDismissalItemKind, WaitingDismissalResult } from "./commonswarm";
+import type { WaitingArchivedItem, WaitingDismissedPlaceholder, WaitingScope } from "./waiting-panel";
+
+export type WaitingDismissSlotKind = "ask" | "plain" | "todo";
+export type WaitingDismissPlacementKind = "channel" | "general" | "dm" | "group_dm" | "workspace" | "unknown";
+
+export interface WaitingDismissTarget {
+  slotKind: WaitingDismissSlotKind;
+  itemKind: WaitingDismissalItemKind;
+  /** Signal id, todo id, or offer id; "" only while resolving an offer id for review items. */
+  itemId: string;
+  /** Card id rendered in the Waiting list (signal id for asks, todo id for todos/reviews). */
+  cardId: string;
+  workspaceId: string;
+  channelId: string | null;
+  conversationId: string | null;
+  placementKind: WaitingDismissPlacementKind;
+  position: number;
+  placeKey: string;
+  scope: WaitingScope;
+  fromSurvey?: boolean;
+}
+
+/** Minimal metadata kept for an in-place "Dismissed · Undo" row. Holds NO content from the item. */
+export interface WaitingDismissRow {
+  readonly key: string;
+  readonly slotKind: WaitingDismissSlotKind;
+  readonly itemKind: WaitingDismissalItemKind;
+  itemId: string;
+  readonly cardId: string;
+  readonly workspaceId: string;
+  readonly channelId: string | null;
+  readonly conversationId: string | null;
+  readonly placementKind: WaitingDismissPlacementKind;
+  readonly position: number;
+  readonly placeKey: string;
+  readonly scope: WaitingScope;
+  readonly accessGen: number;
+  pendingUndo: boolean;
+  dismissResolved: boolean;
+  retired: boolean;
+  inFlightDismiss?: Promise<boolean>;
+}
+
+interface ArchivedRestoreEntry {
+  readonly itemKey: string;
+  readonly workspaceId: string;
+  readonly channelId: string | null;
+  readonly conversationId: string | null;
+  readonly placement: WaitingArchivedItem["placement"];
+  retired: boolean;
+}
+
+export type WaitingAccessLossEvent =
+  | { kind: "conversation"; workspaceId: string; conversationId: string; channelId: string | null }
+  | { kind: "channel"; workspaceId: string; channelId: string }
+  | { kind: "workspace"; workspaceId: string }
+  | { kind: "all" };
+
+export interface WaitingDismissalPorts {
+  sendDismiss: (workspaceId: string, itemKind: WaitingDismissalItemKind, itemId: string) => Promise<WaitingDismissalResult>;
+  sendRestore: (workspaceId: string, itemKind: WaitingDismissalItemKind, itemId: string) => Promise<WaitingDismissalResult>;
+  resolveReviewOfferId?: (workspaceId: string, todoId: string) => Promise<string | null>;
+  isAlive: () => boolean;
+  removeCardFromClient: (target: WaitingDismissTarget) => void;
+  onRetireAccessLoss?: (event: WaitingAccessLossEvent) => void;
+  reloadWaiting: (workspaceId: string) => Promise<void> | void;
+  invalidateArchived: (workspaceId: string) => void;
+  setCardError: (slotKind: WaitingDismissSlotKind, cardId: string, message: string) => void;
+  setStatusError: (message: string) => void;
+  setArchivedError: (itemKey: string, message: string) => void;
+  clearArchivedError: (itemKey: string) => void;
+  render: () => void;
+  onDismissedRendered?: (key: string) => void;
+  onRestoredReloaded?: (slotKind: WaitingDismissSlotKind, cardId: string) => void;
+}
+
+export interface WaitingDismissalController {
+  accessGeneration(): number;
+  has(key: string): boolean;
+  pendingDismissCardIds(workspaceId: string): Set<string>;
+  placeholdersFor(placeKey: string, scope: WaitingScope): WaitingDismissedPlaceholder[];
+  surveyNotice(): { key: string; pendingUndo?: true } | null;
+  isArchivedRestoring(itemKey: string): boolean;
+  dismiss(target: WaitingDismissTarget): Promise<void>;
+  undo(key: string): Promise<void>;
+  restoreArchived(item: WaitingArchivedItem): Promise<void>;
+  retireForConversation(workspaceId: string, conversationId: string, channelId?: string | null): boolean;
+  retireForChannel(workspaceId: string, channelId: string): boolean;
+  retireForWorkspace(workspaceId: string): boolean;
+  retireAll(notify?: boolean): void;
+}
+
+function sameId(a: string | null | undefined, b: string | null | undefined): boolean {
+  return Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
+}
+
+function isNotFoundResult(result: WaitingDismissalResult): boolean {
+  return !result.ok && (result.status === 404 || result.error === "not_found");
+}
+
+export function createWaitingDismissalController(ports: WaitingDismissalPorts): WaitingDismissalController {
+  let accessGen = 0;
+  const rows = new Map<string, WaitingDismissRow>();
+  const archivedRestoring = new Map<string, ArchivedRestoreEntry>();
+  let surveyDismissedKey: string | null = null;
+
+  const deleteRow = (key: string): void => {
+    rows.delete(key);
+    if (surveyDismissedKey === key) surveyDismissedKey = null;
+  };
+
+  const retireMatching = (
+    predicate: (row: WaitingDismissRow) => boolean,
+    archivedPredicate: (entry: ArchivedRestoreEntry) => boolean,
+    event: WaitingAccessLossEvent,
+  ): boolean => {
+    accessGen += 1;
+    let changed = false;
+    for (const [key, row] of rows.entries()) {
+      if (predicate(row)) {
+        row.retired = true;
+        deleteRow(key);
+        changed = true;
+      }
+    }
+    for (const [itemKey, entry] of archivedRestoring.entries()) {
+      if (archivedPredicate(entry)) {
+        entry.retired = true;
+        archivedRestoring.delete(itemKey);
+        changed = true;
+      }
+    }
+    ports.onRetireAccessLoss?.(event);
+    if (changed) ports.render();
+    return changed;
+  };
+
+  return {
+    accessGeneration: () => accessGen,
+    has: (key) => rows.has(key),
+
+    pendingDismissCardIds(workspaceId: string): Set<string> {
+      const ids = new Set<string>();
+      for (const row of rows.values()) {
+        if (!row.retired && !row.pendingUndo && !row.dismissResolved && sameId(row.workspaceId, workspaceId)) {
+          ids.add(row.cardId);
+        }
+      }
+      return ids;
+    },
+
+    placeholdersFor(placeKey: string, scope: WaitingScope): WaitingDismissedPlaceholder[] {
+      const out: WaitingDismissedPlaceholder[] = [];
+      for (const row of rows.values()) {
+        if (!row.retired && row.placeKey === placeKey && row.scope === scope) {
+          out.push({
+            key: row.key,
+            itemKind: row.itemKind,
+            itemId: row.itemId || row.cardId,
+            cardId: row.cardId,
+            workspaceId: row.workspaceId,
+            position: row.position,
+            ...(row.pendingUndo ? { pendingUndo: true as const } : {}),
+          });
+        }
+      }
+      return out;
+    },
+
+    surveyNotice(): { key: string; pendingUndo?: true } | null {
+      if (!surveyDismissedKey) return null;
+      const row = rows.get(surveyDismissedKey);
+      if (!row || row.retired) return null;
+      return {
+        key: row.key,
+        ...(row.pendingUndo ? { pendingUndo: true as const } : {}),
+      };
+    },
+
+    isArchivedRestoring: (itemKey) => archivedRestoring.has(itemKey),
+
+    async dismiss(target: WaitingDismissTarget): Promise<void> {
+      if (!ports.isAlive()) return;
+      const key = `${target.slotKind}:${target.cardId}`;
+      if (rows.has(key)) return;
+
+      const row: WaitingDismissRow = {
+        key,
+        slotKind: target.slotKind,
+        itemKind: target.itemKind,
+        itemId: target.itemId,
+        cardId: target.cardId,
+        workspaceId: target.workspaceId,
+        channelId: target.channelId,
+        conversationId: target.conversationId,
+        placementKind: target.placementKind,
+        position: target.position,
+        placeKey: target.placeKey,
+        scope: target.scope,
+        accessGen,
+        pendingUndo: false,
+        dismissResolved: false,
+        retired: false,
+      };
+      rows.set(key, row);
+      if (target.fromSurvey) surveyDismissedKey = key;
+
+      ports.removeCardFromClient(target);
+      ports.render();
+      ports.onDismissedRendered?.(key);
+
+      const alive = (): boolean => ports.isAlive() && !row.retired;
+
+      const runDismiss = async (): Promise<boolean> => {
+        let resolvedItemId = row.itemId;
+        if (target.itemKind === "review" && !resolvedItemId) {
+          if (!ports.resolveReviewOfferId) {
+            if (!alive()) return false;
+            deleteRow(key);
+            ports.render();
+            await ports.reloadWaiting(target.workspaceId);
+            return false;
+          }
+          try {
+            const offerId = await ports.resolveReviewOfferId(target.workspaceId, target.cardId);
+            if (!alive()) return false;
+            if (!offerId) {
+              deleteRow(key);
+              ports.invalidateArchived(target.workspaceId);
+              ports.render();
+              await ports.reloadWaiting(target.workspaceId);
+              return false;
+            }
+            resolvedItemId = offerId;
+          } catch {
+            if (!alive()) return false;
+            deleteRow(key);
+            ports.setCardError(target.slotKind, target.cardId, "Could not dismiss. Try again.");
+            ports.render();
+            await ports.reloadWaiting(target.workspaceId);
+            return false;
+          }
+          row.itemId = resolvedItemId;
+        }
+
+        let result: WaitingDismissalResult;
+        try {
+          result = await ports.sendDismiss(target.workspaceId, target.itemKind, resolvedItemId);
+        } catch {
+          result = { ok: false, status: 0, error: null, message: "Could not dismiss. Try again." };
+        }
+        if (!alive()) return false;
+
+        if (result.ok) {
+          row.dismissResolved = true;
+          if (!row.pendingUndo) {
+            ports.invalidateArchived(target.workspaceId);
+            void ports.reloadWaiting(target.workspaceId);
+          }
+          return true;
+        }
+
+        deleteRow(key);
+        if (!isNotFoundResult(result)) {
+          ports.setCardError(target.slotKind, target.cardId, result.message);
+        }
+        ports.invalidateArchived(target.workspaceId);
+        ports.render();
+        await ports.reloadWaiting(target.workspaceId);
+        return false;
+      };
+
+      row.inFlightDismiss = runDismiss();
+      await row.inFlightDismiss;
+    },
+
+    async undo(key: string): Promise<void> {
+      const row = rows.get(key);
+      if (!row || row.retired || row.pendingUndo || !ports.isAlive()) return;
+
+      row.pendingUndo = true;
+      ports.render();
+
+      const alive = (): boolean => ports.isAlive() && !row.retired;
+
+      const dismissSucceeded = row.inFlightDismiss ? await row.inFlightDismiss : row.dismissResolved;
+      if (!alive() || !dismissSucceeded || !row.itemId) return;
+
+      let result: WaitingDismissalResult;
+      try {
+        result = await ports.sendRestore(row.workspaceId, row.itemKind, row.itemId);
+      } catch {
+        result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
+      }
+      if (!alive()) return;
+
+      deleteRow(key);
+      if (!result.ok && !isNotFoundResult(result)) {
+        ports.setStatusError(result.message);
+      }
+      ports.invalidateArchived(row.workspaceId);
+      ports.render();
+      await ports.reloadWaiting(row.workspaceId);
+      if (result.ok && alive()) {
+        ports.onRestoredReloaded?.(row.slotKind, row.cardId);
+      }
+    },
+
+    async restoreArchived(item: WaitingArchivedItem): Promise<void> {
+      if (item.outcomeKind !== "dismissed" || archivedRestoring.has(item.itemKey) || !ports.isAlive()) return;
+
+      const entry: ArchivedRestoreEntry = {
+        itemKey: item.itemKey,
+        workspaceId: item.workspaceId,
+        channelId: item.channelId ?? null,
+        conversationId: item.conversationId ?? null,
+        placement: item.placement,
+        retired: false,
+      };
+      archivedRestoring.set(item.itemKey, entry);
+      ports.clearArchivedError(item.itemKey);
+      ports.render();
+
+      let result: WaitingDismissalResult;
+      try {
+        result = await ports.sendRestore(item.workspaceId, item.kind, item.id);
+      } catch {
+        result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
+      }
+      if (!ports.isAlive() || entry.retired) return;
+
+      archivedRestoring.delete(item.itemKey);
+      if (!result.ok && !isNotFoundResult(result)) {
+        ports.setArchivedError(item.itemKey, result.message);
+      }
+      ports.invalidateArchived(item.workspaceId);
+      ports.render();
+      await ports.reloadWaiting(item.workspaceId);
+    },
+
+    retireForConversation(workspaceId: string, conversationId: string, channelId: string | null = null): boolean {
+      return retireMatching(
+        (row) =>
+          sameId(row.workspaceId, workspaceId) &&
+          (sameId(row.conversationId, conversationId) ||
+            (channelId !== null && sameId(row.channelId, channelId)) ||
+            row.placementKind === "unknown"),
+        (entry) =>
+          sameId(entry.workspaceId, workspaceId) &&
+          (sameId(entry.conversationId, conversationId) ||
+            (channelId !== null && sameId(entry.channelId, channelId)) ||
+            entry.placement === "redacted"),
+        { kind: "conversation", workspaceId, conversationId, channelId },
+      );
+    },
+
+    retireForChannel(workspaceId: string, channelId: string): boolean {
+      return retireMatching(
+        (row) =>
+          sameId(row.workspaceId, workspaceId) &&
+          (sameId(row.channelId, channelId) || row.placementKind === "unknown"),
+        (entry) =>
+          sameId(entry.workspaceId, workspaceId) &&
+          (sameId(entry.channelId, channelId) || entry.placement === "redacted"),
+        { kind: "channel", workspaceId, channelId },
+      );
+    },
+
+    retireForWorkspace(workspaceId: string): boolean {
+      return retireMatching(
+        (row) => sameId(row.workspaceId, workspaceId),
+        (entry) => sameId(entry.workspaceId, workspaceId),
+        { kind: "workspace", workspaceId },
+      );
+    },
+
+    retireAll(notify = false): void {
+      accessGen += 1;
+      for (const row of rows.values()) row.retired = true;
+      rows.clear();
+      surveyDismissedKey = null;
+      for (const entry of archivedRestoring.values()) entry.retired = true;
+      archivedRestoring.clear();
+      if (notify) ports.onRetireAccessLoss?.({ kind: "all" });
+    },
+  };
+}

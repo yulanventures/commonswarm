@@ -1,9 +1,9 @@
 /**
  * Waiting on you per-person dismissals (Slice 1): dedicated command module
  * (kept separate from command/index.ts, modeled on review-checks.ts).
- * Every visibility, membership, and idempotency rule lives in
- * 20261124000001_waiting_dismissals.sql; this module validates the wire shape
- * and maps SQL outcomes to typed HTTP responses.
+ * Every visibility, membership, eligibility, locking, and audit-view rule lives in
+ * 20261124000001_waiting_dismissals.sql; this module validates the wire shape,
+ * maps SQL outcomes to typed HTTP responses, and reauthorizes idempotency replays.
  */
 import type postgres from "postgres";
 
@@ -35,15 +35,19 @@ export type WaitingDismissalParse =
   | { ok: false; status: 400; reason: string };
 
 export type WaitingDismissalOutcome =
-  | { ok: true; response: Record<string, unknown>; audit_channel_ids?: string[] }
+  | { ok: true; response: Record<string, unknown> }
   | {
     ok: false;
     status: 400 | 403 | 404;
     error: string;
     message: string;
     reason: string;
-    audit_channel_ids?: string[];
   };
+
+export const WAITING_ITEM_NOT_FOUND_BODY = {
+  error: "not_found",
+  message: "Waiting item not found.",
+} as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -59,12 +63,6 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
-}
-
-function auditTags(result: Record<string, unknown>): { audit_channel_ids?: string[] } {
-  return typeof result.audit_channel_id === "string" && UUID_RE.test(result.audit_channel_id)
-    ? { audit_channel_ids: [result.audit_channel_id.toLowerCase()] }
-    : {};
 }
 
 export function parseWaitingDismissalCommand(cmd: Record<string, unknown>): WaitingDismissalParse {
@@ -127,7 +125,6 @@ export async function applyWaitingDismissalCommand(
 
   const result = row?.result ?? {};
   const status = typeof result.status === "string" ? result.status : "invalid_request";
-  const tags = auditTags(result);
 
   if (status === "ok") {
     if (command.kind === "dismiss_waiting_item") {
@@ -139,7 +136,6 @@ export async function applyWaitingDismissalCommand(
           dismissed: Boolean(result.dismissed),
           ...(typeof result.dismissed_at === "string" ? { dismissed_at: result.dismissed_at } : {}),
         },
-        ...tags,
       };
     }
     return {
@@ -150,7 +146,6 @@ export async function applyWaitingDismissalCommand(
         restored: Boolean(result.restored),
         ...(typeof result.restored_at === "string" ? { restored_at: result.restored_at } : {}),
       },
-      ...tags,
     };
   }
 
@@ -158,8 +153,8 @@ export async function applyWaitingDismissalCommand(
     return {
       ok: false,
       status: 404,
-      error: "not_found",
-      message: "Waiting item not found.",
+      error: WAITING_ITEM_NOT_FOUND_BODY.error,
+      message: WAITING_ITEM_NOT_FOUND_BODY.message,
       reason: "waiting_item_not_found",
     };
   }
@@ -180,6 +175,30 @@ export async function applyWaitingDismissalCommand(
     error: "invalid_request",
     message: "Invalid waiting dismissal parameters.",
     reason: "waiting_dismissal_invalid_request",
+  };
+}
+
+/** Reauthorize a stored dismiss/restore receipt against the caller's live Waiting eligibility.
+ *  Returns null when authorized (caller receives the original receipt), or the uniform 404 otherwise. */
+export async function reauthorizeWaitingDismissalReplay(
+  tx: Sql,
+  workspaceId: string,
+  userId: string,
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+): Promise<{ status: 404; body: Record<string, unknown> } | null> {
+  const [row] = await tx<{ allowed: boolean }[]>`
+    SELECT swarm.waiting_dismissal_replay_allowed(
+      ${workspaceId}::uuid,
+      ${userId}::uuid,
+      ${itemKind},
+      ${itemId}::uuid
+    ) AS allowed
+  `;
+  if (row?.allowed === true) return null;
+  return {
+    status: 404,
+    body: { ...WAITING_ITEM_NOT_FOUND_BODY },
   };
 }
 

@@ -16,6 +16,37 @@ SELECT
   AND NOT has_table_privilege('swarm_command', 'swarm.waiting_dismissals', 'SELECT')
   AND NOT has_table_privilege('authenticated', 'swarm.waiting_dismissals', 'INSERT')
   AND NOT has_table_privilege('swarm_command', 'swarm.waiting_dismissals', 'INSERT')
+  AND to_regprocedure('swarm.waiting_item_can_read(uuid,uuid,text,uuid)') IS NULL
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_todo_reason(uuid,uuid,uuid)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_todo_eligible(uuid,uuid,uuid)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_review_eligible(uuid,uuid,uuid)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_item_eligible(uuid,uuid,text,uuid,timestamp with time zone)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+  )
   AND EXISTS (
     SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm.dismiss_waiting_item(uuid,uuid,text,uuid)')
@@ -26,19 +57,40 @@ SELECT
     WHERE p.oid = to_regprocedure('swarm.restore_waiting_item(uuid,uuid,text,uuid)')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
   )
+  AND has_function_privilege('swarm_command', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE')
   AND has_function_privilege('swarm_command', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
   AND has_function_privilege('swarm_command', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('authenticated', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_read', 'swarm.waiting_dismissal_replay_allowed(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm.dismiss_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_read', 'swarm.restore_waiting_item(uuid,uuid,text,uuid)', 'EXECUTE')
-  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_item_can_read(uuid,uuid,text,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_ask_eligible(uuid,uuid,uuid,timestamp with time zone)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_todo_reason(uuid,uuid,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_todo_eligible(uuid,uuid,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_review_eligible(uuid,uuid,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm.waiting_item_eligible(uuid,uuid,text,uuid,timestamp with time zone)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'swarm_read.decision_queue(uuid)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'swarm_read.decision_queue_page(uuid,timestamp with time zone,uuid)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'swarm_read.home_overview()', 'EXECUTE')
+  AND EXISTS (
+    SELECT 1 FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'swarm_read'
+      AND c.relname = 'audit_log'
+      AND c.relowner = 'swarm_admin'::regrole
+      AND 'security_barrier=true' = ANY(coalesce(c.reloptions, ARRAY[]::text[]))
+  )
+  AND has_table_privilege('authenticated', 'swarm_read.audit_log', 'SELECT')
+  AND has_table_privilege('swarm_read', 'swarm_read.audit_log', 'SELECT')
+  AND NOT has_table_privilege('anon', 'swarm_read.audit_log', 'SELECT')
+  AND position('dismiss_waiting_item' IN pg_get_viewdef('swarm_read.audit_log'::regclass, true)) > 0
+  AND position('restore_waiting_item' IN pg_get_viewdef('swarm_read.audit_log'::regclass, true)) > 0
   AS catalog_ok
 \gset

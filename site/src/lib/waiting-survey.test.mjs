@@ -541,8 +541,7 @@ test("survey step renders Dismiss alongside Skip and shows in-place Dismissed wi
         },
         onUndoDismiss: (key) => {
           undone.push(key);
-          items = [q1, q2];
-          dismissedNotice = null;
+          dismissedNotice = { key, pendingUndo: true };
           render();
         },
         onReview: () => {},
@@ -572,6 +571,16 @@ test("survey step renders Dismiss alongside Skip and shows in-place Dismissed wi
 
   undoBtn.click();
   assert.deepEqual(undone, ["ask:q1"]);
+  const undoing = body.querySelector('[data-waiting-undo="ask:q1"]');
+  assert.ok(undoing);
+  assert.equal(undoing.textContent, "Undoing…");
+  assert.equal(undoing.getAttribute("aria-disabled"), "true");
+  assert.equal(body.querySelector('[data-waiting-survey-dismiss="q1"]'), null, "Undo does not paint q1 before reload");
+
+  // Reload brings q1 back and clears the dismissed notice.
+  items = [q1, q2];
+  dismissedNotice = null;
+  render();
   assert.equal(body.querySelector('[data-waiting-dismissed="ask:q1"]'), null);
   assert.ok(body.querySelector('[data-waiting-survey-dismiss="q1"]'));
 });

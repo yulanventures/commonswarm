@@ -1,28 +1,38 @@
 /**
- * Server witness for 20261124000001_waiting_dismissals.sql (CI / local Postgres only):
- *   1. Catalog check, rollback, rollback-catalog check, re-apply, and functional proof.
- *   2. Per-person dismissal of an ask, a to-do, and a work-request review:
- *      - Leaves the dismissing person's decision_queue, decision_queue_page, waiting_todos_page,
- *        and home_overview (both lists and counts).
- *      - Stays untouched in another person's lists and counts.
- *      - Appears in waiting_archived_page with outcome_kind='dismissed' and outcome_text='Dismissed'.
- *   3. Restore returns still-open items to Waiting on you and removes them from Archived.
- *   4. Idempotency: dismissing twice keeps original dismissed_at and produces one row; restoring
- *      twice succeeds cleanly.
- *   5. Authz:
- *      - Agents cannot call dismiss_waiting_item/restore_waiting_item (HUMAN_ONLY_COMMANDS + role gates).
- *      - A person who cannot read the item (unauthorized private channel ask, no household consent
- *        for to-do/review, non-member) is refused with not_found / forbidden.
- *      - Direct table access on swarm.waiting_dismissals is refused for authenticated/anon/swarm_read/swarm_command.
- *   6. Real resolution supersedes dismissal: a dismissed-then-answered ask appears in Archived
- *      only under its real outcome ('answered'), never as 'dismissed'.
+ * Server witness for 20261124000001_waiting_dismissals.sql and the served command edge (CI / local Postgres):
+ *   1. Catalog check, rollback, rollback-catalog check, re-apply, and functional proof, plus
+ *      exact read-function parity (all 5 read functions return identical results before and after
+ *      for a fixture with no dismissals).
+ *   2. Per-person dismissal & restore isolation for ask, todo, and review, real-outcome precedence,
+ *      and direct table denial.
+ *   3. C1 authorization:
+ *      - Household reader targeting another person's to-do gets 404 and creates no row.
+ *      - Former offer decider gets 404 and creates no row (no TodoOffered history fallback).
+ *      - Shared-household to-do with private origin can be dismissed/restored and stays redacted.
+ *      - Unknown UUID and out-of-scope UUID return indistinguishable 404 status and body.
+ *      - Access removed while the dismissal row is locked by another transaction (FOR UPDATE)
+ *        rolls back the write, returns 404, and leaves no active dismissal row.
+ *   4. C2 receipts, replay, audit privacy, and early agent gate (served command edge):
+ *      - Directed ask after private-channel removal and after leaving a DM gets 404 on dismiss,
+ *        restore, and exact replay.
+ *      - Live same-person exact retry returns its original receipt (both dismiss and restore).
+ *      - Authenticated owner and admin outside a private channel see nothing of another person's
+ *        dismissal (fresh, replayed, conflicting, or refused) in swarm_read.audit_log.
+ *      - Local agent token is refused 403 by the early HUMAN_ONLY_COMMANDS gate before the
+ *        dismissal branch or its audit.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { dbAssert, repoSql, runSql } from "../support/admin-schema-db.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 import * as todos from "../../src/protocol/household-todos.js";
 import * as todoPolicy from "../../src/protocol/household-todo-policy.js";
@@ -31,6 +41,10 @@ import * as objects from "../../src/protocol/household-objects.js";
 import * as transfers from "../../supabase/functions/command/household-transfers.js";
 import { createHouseholdObjectStore, type HouseholdIdentity } from "../../supabase/functions/command/household-objects.js";
 import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from "../../supabase/functions/command/household-todos.js";
+
+type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
+type Person = { id: string; jwt: string };
+type Row = Record<string, unknown>;
 
 const proofRoot = "deploy/release-proofs/waiting-dismissals/20261124000001";
 const catalogAssert = (rollback = false) =>
@@ -44,31 +58,22 @@ const catalogAssert = (rollback = false) =>
     rollback ? "waiting dismissals rollback catalog" : "waiting dismissals catalog",
   );
 
-test("20261124000001 waiting_dismissals rolls back cleanly and re-applies with functional proof", () => {
-  runSql(
-    catalogAssert(false) +
-      repoSql(`${proofRoot}-functional.sql`) +
-      repoSql(`${proofRoot}-rollback.sql`) +
-      catalogAssert(true) +
-      repoSql("supabase/migrations/20261124000001_waiting_dismissals.sql") +
-      catalogAssert(false) +
-      repoSql(`${proofRoot}-functional.sql`),
-  );
-});
-
+let local: Local;
 let sql: postgres.Sql;
+let admin: SupabaseClient;
+let functionProcess: ReturnType<typeof spawn> | undefined;
+let functionLogs = "";
+let envDir: string | undefined;
 
-function resolveDbUrl(): string {
-  const fromEnv = process.env.WAITING_DISMISSALS_TEST_DB_URL ?? process.env.WAITING_TODOS_TEST_DB_URL;
-  const dbUrl = fromEnv ?? (JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
+function localEnvironment(): Local {
+  const parsed = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
-  })) as { DB_URL?: string }).DB_URL;
-  assert.ok(
-    dbUrl && ["127.0.0.1", "localhost", "[::1]"].includes(new URL(dbUrl).hostname),
-    "expected local Supabase DB_URL",
-  );
-  return dbUrl;
+    timeout: 10_000,
+  })) as Partial<Local>;
+  assert.ok(parsed.API_URL?.startsWith("http://127.0.0.1:"));
+  assert.ok(parsed.ANON_KEY && parsed.DB_URL && parsed.SERVICE_ROLE_KEY);
+  return parsed as Local;
 }
 
 const todoCore = { ...todos, ...todoPolicy, ...objectPolicy };
@@ -119,17 +124,268 @@ function committedTodo(result: { outcome: todos.TodoOutcome }): todos.Todo {
   return result.outcome.value;
 }
 
-before(() => {
-  sql = postgres(resolveDbUrl(), { prepare: false, max: 2 });
+async function createUser(label: string): Promise<Person> {
+  const email = `${label}-${randomUUID()}@example.test`;
+  const password = `T-${randomBytes(24).toString("base64url")}!`;
+  const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+  assert.ifError(created.error);
+  const client = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const signed = await client.auth.signInWithPassword({ email, password });
+  assert.ifError(signed.error);
+  return { id: created.data.user!.id, jwt: signed.data.session!.access_token };
+}
+
+async function sendCommand(
+  bearer: string,
+  workspaceId: string,
+  command: Row,
+  commandId: string = randomUUID(),
+): Promise<{ status: number; body: Row }> {
+  const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+    method: "POST",
+    signal: AbortSignal.timeout(15_000),
+    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      command_id: commandId,
+      client_version: "0.1.0",
+      workspace_id: workspaceId,
+      stream: { kind: "workspace" },
+      command,
+    }),
+  });
+  return { status: response.status, body: await response.json() as Row };
+}
+
+function stripGeneratedAt(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripGeneratedAt);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "generated_at") continue;
+      out[k] = stripGeneratedAt(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+async function readAllFiveAs(conn: postgres.Sql | postgres.TransactionSql, wsId: string, userId: string) {
+  const exec = async (q: postgres.TransactionSql) => {
+    await q`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: userId })}, true)`;
+    await q`SET LOCAL ROLE authenticated`;
+    const [dq] = await q<{ r: Row }[]>`SELECT swarm_read.decision_queue(${wsId}::uuid) AS r`;
+    const [dqp] = await q<{ r: Row }[]>`SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r`;
+    const [wt] = await q<{ r: Row }[]>`SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r`;
+    const [wa] = await q<{ r: Row }[]>`SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 50, NULL, NULL) AS r`;
+    const [ho] = await q<{ r: { workspaces: Array<{ workspace_id: string } & Row> } }[]>`SELECT swarm_read.home_overview() AS r`;
+    const wsOverview = ho!.r.workspaces.find((w) => w.workspace_id === wsId) ?? null;
+    return {
+      dq: dq!.r,
+      dqp: dqp!.r,
+      wt: wt!.r,
+      wa: wa!.r,
+      wsOverview,
+    };
+  };
+  if ("begin" in conn && typeof conn.begin === "function") {
+    return conn.begin(async (tx) => exec(tx));
+  }
+  const tx = conn as postgres.TransactionSql;
+  await tx`SAVEPOINT sp_read_five`;
+  const res = await exec(tx);
+  await tx`ROLLBACK TO SAVEPOINT sp_read_five`;
+  return res;
+}
+
+before(async () => {
+  local = localEnvironment();
+  envDir = mkdtempSync(join(tmpdir(), "cs-waiting-dismissals-"));
+  const envFile = join(envDir, "test.env");
+  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_CHAT_MENTIONS=1\n", { mode: 0o600 });
+  sql = postgres(local.DB_URL, { prepare: false, max: 8 });
+  admin = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  functionProcess = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile], {
+    cwd: process.cwd(),
+    env: { ...process.env, SWARM_ENV: "test" },
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const cliState = observeFunctionCli(functionProcess);
+  let startupSeen = false;
+  const observe = (chunk: Buffer) => {
+    functionLogs = (functionLogs + chunk.toString("utf8")).slice(-30_000);
+    startupSeen ||= functionLogs.includes("Serving functions on");
+  };
+  functionProcess.stdout?.on("data", observe);
+  functionProcess.stderr?.on("data", observe);
+  const bootDeadline = Date.now() + 60_000;
+  while (!startupSeen) {
+    const cliNow = cliState();
+    if (cliNow === "exited" || cliNow === "error") {
+      throw new Error(`supabase functions serve ${cliNow} early: ${functionLogs.slice(-2000)}`);
+    }
+    if (Date.now() > bootDeadline) {
+      throw new Error(`supabase functions serve timed out: ${functionLogs.slice(-2000)}`);
+    }
+    await delay(200);
+  }
+  await awaitFunctionRunning({
+    url: `${local.API_URL}/functions/v1/command`,
+    fetcher: fetch,
+    timeoutMs: 30_000,
+    sleep: (ms) => delay(ms),
+    now: () => Date.now(),
+    diagnostics: () => `local command function was not ready: ${functionLogs.slice(-2000)}`,
+    cliState,
+  });
 });
 
 after(async () => {
-  await sql.end();
+  if (functionProcess?.pid) {
+    try { process.kill(-functionProcess.pid, "SIGTERM"); } catch { /* exited */ }
+  }
+  if (envDir) rmSync(envDir, { recursive: true, force: true });
+  if (sql) await sql.end();
+});
+
+test("20261124000001 rolls back cleanly, re-applies with proofs, and read functions return identical results before and after with no dismissals", async () => {
+  // Seed a fixture with asks (general, private channel, DM, answered), todos (assigned, review, private origin, done), and ZERO dismissals.
+  const aliceId = randomUUID();
+  const bobId = randomUUID();
+  const wsId = randomUUID();
+  const scoutId = randomUUID();
+  const privChId = randomUUID();
+  const privConvId = randomUUID();
+  const dmConvId = randomUUID();
+  const generalAskId = randomUUID();
+  const privAskId = randomUUID();
+  const dmAskId = randomUUID();
+  const answeredAskId = randomUUID();
+  const store = makeTodoStore();
+  const aliceIdentity: HouseholdIdentity = { user_id: aliceId, principal_id: null, run_id: null, connection: null };
+  const bobIdentity: HouseholdIdentity = { user_id: bobId, principal_id: null, run_id: null, connection: null };
+
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO auth.users (id, email)
+      VALUES
+        (${aliceId}::uuid, ${`wd-par-a-${aliceId}@example.test`}),
+        (${bobId}::uuid, ${`wd-par-b-${bobId}@example.test`})
+    `;
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES (${aliceId}::uuid, 'ParityAlice'), (${bobId}::uuid, 'ParityBob')
+    `;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${wsId}::uuid, 'ParityWS', ${aliceId}::uuid)`;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${wsId}::uuid, ${aliceId}::uuid, 'owner'), (${wsId}::uuid, ${bobId}::uuid, 'member')
+    `;
+    await tx`
+      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${scoutId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'ParityScout')
+    `;
+    await tx`
+      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
+      VALUES (${wsId}::uuid, ${scoutId}::uuid, ${aliceId}::uuid)
+    `;
+    await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose) VALUES (${wsId}::uuid, 'shared')`;
+    await tx`
+      INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+      VALUES
+        (${wsId}::uuid, ${aliceId}::uuid, 'editor', ${randomUUID()}::uuid, now()),
+        (${wsId}::uuid, ${bobId}::uuid, 'editor', ${randomUUID()}::uuid, now())
+    `;
+    await tx`
+      INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
+      VALUES (${privChId}::uuid, ${wsId}::uuid, 'parity-secret', 'private', ${aliceId}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
+      VALUES (${privChId}::uuid, ${wsId}::uuid, 'user', ${aliceId}::uuid, ${aliceId}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
+      VALUES
+        (${privConvId}::uuid, ${wsId}::uuid, 'private_channel', ${privChId}::uuid, 'user', ${aliceId}::uuid),
+        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${aliceId}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
+      VALUES
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${aliceId}::uuid),
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${bobId}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
+      VALUES
+        (${generalAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Parity general ask?', NULL, '9999-12-31T23:59:59Z'),
+        (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Parity private ask?', ${privChId}::uuid, '9999-12-31T23:59:59Z'),
+        (${dmAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'Parity DM ask?', NULL, '9999-12-31T23:59:59Z'),
+        (${answeredAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Parity answered ask?', NULL, '9999-12-31T23:59:59Z')
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
+      VALUES
+        (${wsId}::uuid, ${privConvId}::uuid, ${privAskId}::uuid, 'conversation'),
+        (${wsId}::uuid, ${dmConvId}::uuid, ${dmAskId}::uuid, 'conversation')
+    `;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
+      VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'user', ${answeredAskId}::uuid, 'note', 'Answered!', '9999-12-31T23:59:59Z')
+    `;
+    await tx`SET LOCAL ROLE swarm_command`;
+    committedTodo(await store.write(tx, wsId, aliceIdentity, `req-${randomUUID()}`, {
+      kind: "todo_create",
+      title: "Parity assigned todo",
+      assign: { to: { kind: "user", id: aliceId } },
+    }));
+    committedTodo(await store.write(tx, wsId, bobIdentity, `req-${randomUUID()}`, {
+      kind: "todo_create",
+      title: "Parity review todo",
+      assign: { to: { kind: "agent", id: scoutId } },
+    }));
+    await tx`RESET ROLE`;
+  });
+
+  try {
+    // 1. With migration applied: run proofs and snapshot all 5 read functions.
+    runSql(catalogAssert(false) + repoSql(`${proofRoot}-functional.sql`));
+    const afterAlice1 = stripGeneratedAt(await readAllFiveAs(sql, wsId, aliceId));
+    const afterBob1 = stripGeneratedAt(await readAllFiveAs(sql, wsId, bobId));
+
+    // 2. Roll back to pre-migration definitions: verify rollback catalog and snapshot all 5 read functions.
+    runSql(repoSql(`${proofRoot}-rollback.sql`) + catalogAssert(true));
+    const beforeAlice = stripGeneratedAt(await readAllFiveAs(sql, wsId, aliceId));
+    const beforeBob = stripGeneratedAt(await readAllFiveAs(sql, wsId, bobId));
+
+    assert.deepEqual(afterAlice1, beforeAlice, "all 5 read functions must match pre-migration results for Alice with no dismissals");
+    assert.deepEqual(afterBob1, beforeBob, "all 5 read functions must match pre-migration results for Bob with no dismissals");
+
+    // 3. Re-apply migration: verify proofs and parity again.
+    runSql(
+      repoSql("supabase/migrations/20261124000001_waiting_dismissals.sql") +
+        catalogAssert(false) +
+        repoSql(`${proofRoot}-functional.sql`),
+    );
+    const afterAlice2 = stripGeneratedAt(await readAllFiveAs(sql, wsId, aliceId));
+    const afterBob2 = stripGeneratedAt(await readAllFiveAs(sql, wsId, bobId));
+    assert.deepEqual(afterAlice2, beforeAlice);
+    assert.deepEqual(afterBob2, beforeBob);
+  } finally {
+    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
+    await sql`DELETE FROM swarm.users WHERE user_id IN (${aliceId}::uuid, ${bobId}::uuid)`;
+    await sql`DELETE FROM auth.users WHERE id IN (${aliceId}::uuid, ${bobId}::uuid)`;
+  }
 });
 
 const ROLLBACK_WITNESS = Symbol("rollback-waiting-dismissals-witness");
 
-test("dismiss and restore work per person for ask, todo, and review with isolation, authz, idempotency, and real-outcome precedence", async () => {
+test("per-person isolation, direct table denial, C1 eligibility, private-origin redaction, and real-outcome precedence", async () => {
   const aliceId = randomUUID();
   const bobId = randomUUID();
   const noConsentId = randomUUID();
@@ -216,14 +472,21 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
         VALUES (${privAskId}::uuid, ${wsId}::uuid, ${scoutId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Private question', ${privChannelId}::uuid, '9999-12-31T23:59:59Z')
       `;
 
-      // Create an assigned to-do for Alice and a work-request review for Alice (Bob offers to Scout, owned by Alice)
-      await tx`SAVEPOINT sp_setup_todos`;
       await tx`SET LOCAL ROLE swarm_command`;
       const aliceTodo = committedTodo(await store.write(tx, wsId, aliceIdentity, `req-${randomUUID()}`, {
         kind: "todo_create",
         title: "Book plumber",
         assign: { to: { kind: "user", id: aliceId } },
       }));
+      // Shared-household to-do assigned to Bob with origin in Alice's private channel (Bob cannot access #secret-room).
+      const bobPrivateOriginTodo = committedTodo(await store.write(tx, wsId, aliceIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Buy paint",
+        assign: { to: { kind: "user", id: bobId } },
+        origin_placement: "channel",
+        origin_channel_id: privChannelId,
+      }));
+      // Work-request review for Alice (Bob offers to Scout, owned by Alice).
       const reviewTodo = committedTodo(await store.write(tx, wsId, bobIdentity, `req-${randomUUID()}`, {
         kind: "todo_create",
         title: "Scout roof inspection",
@@ -231,44 +494,21 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
       }));
       assert.ok(reviewTodo.offer?.offer_id, "review todo should carry an offer_id");
       const reviewOfferId = reviewTodo.offer.offer_id;
+      // Second offer that Alice declines -> Alice becomes a FORMER offer decider (TodoOffered remains in history).
+      const declinedOfferTodo = committedTodo(await store.write(tx, wsId, bobIdentity, `req-${randomUUID()}`, {
+        kind: "todo_create",
+        title: "Old declined offer",
+        assign: { to: { kind: "agent", id: scoutId } },
+      }));
+      assert.ok(declinedOfferTodo.offer?.offer_id);
+      const formerOfferId = declinedOfferTodo.offer.offer_id;
+      committedTodo(await store.write(tx, wsId, aliceIdentity, `req-${randomUUID()}`, {
+        kind: "household_todo_answer",
+        todo_id: declinedOfferTodo.todo_id,
+        offer_id: formerOfferId,
+        answer: "decline",
+      }));
       await tx`RESET ROLE`;
-
-      const readAs = async (userId: string) => {
-        await tx`SAVEPOINT sp_read`;
-        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: userId })}, true)`;
-        await tx`SET LOCAL ROLE authenticated`;
-        const [dq] = await tx<{ r: { total: number; asks: Array<{ signal_id: string }> } }[]>`
-          SELECT swarm_read.decision_queue(${wsId}::uuid) AS r
-        `;
-        const [dqp] = await tx<{ r: { total: number; asks: Array<{ signal_id: string }> } }[]>`
-          SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r
-        `;
-        const [wt] = await tx<{ r: { total: number; todos: Array<{ todo_id: string; reason: string }> } }[]>`
-          SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r
-        `;
-        const [wa] = await tx<{ r: { total: number; items: Array<{ item_key: string; outcome_kind: string; outcome_text: string }> } }[]>`
-          SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 50, NULL, NULL) AS r
-        `;
-        const [ho] = await tx<{ r: { workspaces: Array<{ workspace_id: string; needs_you: { asks: Array<{ signal_id: string }>; assigned: Array<{ todo_id: string }>; waiting: Array<{ todo_id: string; reason: string }> } }> } }[]>`
-          SELECT swarm_read.home_overview() AS r
-        `;
-        await tx`ROLLBACK TO SAVEPOINT sp_read`;
-        const wsOverview = ho!.r.workspaces.find((w) => w.workspace_id === wsId)!;
-        return { dq: dq!.r, dqp: dqp!.r, wt: wt!.r, wa: wa!.r, wsOverview };
-      };
-
-      // Baseline: Alice sees 2 asks, 2 todos (1 assigned + 1 request); Bob sees 1 ask (sharedAskId)
-      const aliceBefore = await readAs(aliceId);
-      assert.equal(aliceBefore.dq.total, 2);
-      assert.equal(aliceBefore.dqp.total, 2);
-      assert.equal(aliceBefore.wt.total, 2);
-      assert.equal(aliceBefore.wsOverview.needs_you.asks.length, 2);
-      assert.equal(aliceBefore.wsOverview.needs_you.assigned.length, 1);
-      assert.equal(aliceBefore.wsOverview.needs_you.waiting.length, 1);
-
-      const bobBefore = await readAs(bobId);
-      assert.equal(bobBefore.dq.total, 1);
-      assert.equal(bobBefore.dq.asks[0]!.signal_id, sharedAskId);
 
       // Direct table reads/writes refused for client roles
       for (const role of ["anon", "authenticated", "swarm_read", "swarm_command"]) {
@@ -278,32 +518,94 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
         await tx`ROLLBACK TO SAVEPOINT sp_table_deny`;
       }
 
-      // Write calls as swarm_command
-      await tx`SAVEPOINT sp_cmd`;
       await tx`SET LOCAL ROLE swarm_command`;
 
-      // Unauthorized reads are refused:
-      // 1. Bob cannot dismiss Alice's private-channel ask -> not_found
-      const [bobPriv] = await tx<{ r: { status: string } }[]>`
+      // C1: Bob (consented household reader/editor) targeting Alice's to-do -> not_found and NO row created.
+      const [bobOtherTodo] = await tx<{ r: Row }[]>`
+        SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${bobId}::uuid, 'todo', ${aliceTodo.todo_id}::uuid) AS r
+      `;
+      assert.deepEqual(bobOtherTodo!.r, { status: "not_found" });
+
+      // C1: Former offer decider (Alice on declined offer) -> not_found and NO row created.
+      const [formerDecider] = await tx<{ r: Row }[]>`
+        SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'review', ${formerOfferId}::uuid) AS r
+      `;
+      assert.deepEqual(formerDecider!.r, { status: "not_found" });
+
+      // C1: Unknown UUID returns the exact same not_found as out-of-scope targets.
+      const [unknownTarget] = await tx<{ r: Row }[]>`
+        SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${bobId}::uuid, 'todo', ${randomUUID()}::uuid) AS r
+      `;
+      assert.deepEqual(unknownTarget!.r, bobOtherTodo!.r);
+
+      // C1: Bob cannot dismiss Alice's private-channel ask -> not_found.
+      const [bobPriv] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${bobId}::uuid, 'ask', ${privAskId}::uuid) AS r
       `;
-      assert.equal(bobPriv!.r.status, "not_found");
+      assert.deepEqual(bobPriv!.r, { status: "not_found" });
 
-      // 2. NoConsent member cannot dismiss a to-do or review -> not_found
-      const [ncTodo] = await tx<{ r: { status: string } }[]>`
+      // C1: NoConsent member cannot dismiss a to-do or review -> not_found.
+      const [ncTodo] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${noConsentId}::uuid, 'todo', ${aliceTodo.todo_id}::uuid) AS r
       `;
-      assert.equal(ncTodo!.r.status, "not_found");
-      const [ncReview] = await tx<{ r: { status: string } }[]>`
+      assert.deepEqual(ncTodo!.r, { status: "not_found" });
+      const [ncReview] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${noConsentId}::uuid, 'review', ${reviewOfferId}::uuid) AS r
       `;
-      assert.equal(ncReview!.r.status, "not_found");
+      assert.deepEqual(ncReview!.r, { status: "not_found" });
 
-      // 3. Outsider (non-member) -> forbidden
-      const [outRes] = await tx<{ r: { status: string } }[]>`
+      // C1: Outsider (non-member) -> forbidden.
+      const [outRes] = await tx<{ r: Row }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${outsiderId}::uuid, 'ask', ${sharedAskId}::uuid) AS r
       `;
-      assert.equal(outRes!.r.status, "forbidden");
+      assert.deepEqual(outRes!.r, { status: "forbidden" });
+
+      // C1: Restore without an active dismissal row -> not_found.
+      const [restoreWithoutRow] = await tx<{ r: Row }[]>`
+        SELECT swarm.restore_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'todo', ${aliceTodo.todo_id}::uuid) AS r
+      `;
+      assert.deepEqual(restoreWithoutRow!.r, { status: "not_found" });
+
+      await tx`RESET ROLE`;
+      const [refusedRows] = await tx<{ cnt: string }[]>`
+        SELECT count(*)::text AS cnt FROM swarm.waiting_dismissals WHERE workspace_id = ${wsId}::uuid
+      `;
+      assert.equal(Number(refusedRows!.cnt), 0, "refused dismissals must create zero rows");
+
+      // C1: Shared-household to-do assigned to Bob with a private origin can be dismissed and stays redacted.
+      const bobBeforePrivOrigin = await readAllFiveAs(tx, wsId, bobId);
+      const bobTodosBefore = (bobBeforePrivOrigin.wt as { todos: Array<Row> }).todos;
+      const privOriginRowBefore = bobTodosBefore.find((t) => t.todo_id === bobPrivateOriginTodo.todo_id);
+      assert.ok(privOriginRowBefore, "Bob should see his assigned shared-household todo");
+      assert.equal(privOriginRowBefore.placement, "workspace");
+      assert.equal(privOriginRowBefore.channel_id, null);
+      assert.equal(privOriginRowBefore.conversation_id, null);
+
+      await tx`SET LOCAL ROLE swarm_command`;
+      const [bobDismissPrivOrigin] = await tx<{ r: Row }[]>`
+        SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${bobId}::uuid, 'todo', ${bobPrivateOriginTodo.todo_id}::uuid) AS r
+      `;
+      assert.equal(bobDismissPrivOrigin!.r.status, "ok");
+      assert.equal(Object.hasOwn(bobDismissPrivOrigin!.r, "audit_channel_id"), false, "audit_channel_id must not be returned");
+      await tx`RESET ROLE`;
+
+      const bobAfterPrivOrigin = await readAllFiveAs(tx, wsId, bobId);
+      assert.equal((bobAfterPrivOrigin.wt as { total: number }).total, 0);
+      const bobArchItems = (bobAfterPrivOrigin.wa as { items: Array<Row> }).items;
+      const archPrivOrigin = bobArchItems.find((i) => i.item_key === `todo:${bobPrivateOriginTodo.todo_id}`);
+      assert.ok(archPrivOrigin, "dismissed private-origin todo appears in Bob's Archived");
+      assert.equal(archPrivOrigin.outcome_kind, "dismissed");
+      assert.equal(archPrivOrigin.placement, "workspace");
+      assert.equal(archPrivOrigin.channel_id, null);
+      assert.equal(archPrivOrigin.conversation_id, null);
+
+      await tx`SET LOCAL ROLE swarm_command`;
+      const [bobRestorePrivOrigin] = await tx<{ r: Row }[]>`
+        SELECT swarm.restore_waiting_item(${wsId}::uuid, ${bobId}::uuid, 'todo', ${bobPrivateOriginTodo.todo_id}::uuid) AS r
+      `;
+      assert.equal(bobRestorePrivOrigin!.r.status, "ok");
+      assert.equal(bobRestorePrivOrigin!.r.restored, true);
+      assert.equal(Object.hasOwn(bobRestorePrivOrigin!.r, "audit_channel_id"), false);
 
       // Alice dismisses sharedAskId, aliceTodo, and reviewOfferId
       const [dAsk1] = await tx<{ r: { status: string; dismissed: boolean; dismissed_at: string } }[]>`
@@ -312,7 +614,7 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
       assert.equal(dAsk1!.r.status, "ok");
       assert.equal(dAsk1!.r.dismissed, true);
 
-      // Idempotency: dismissing the same ask twice keeps original dismissed_at
+      // Idempotent dismiss keeps original dismissed_at
       const [dAsk2] = await tx<{ r: { status: string; dismissed: boolean; dismissed_at: string } }[]>`
         SELECT swarm.dismiss_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'ask', ${sharedAskId}::uuid) AS r
       `;
@@ -330,33 +632,17 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
       assert.equal(dReview!.r.status, "ok");
       await tx`RESET ROLE`;
 
-      // Verify Alice's queues & home_overview drop all 3 dismissed items, while Bob STILL sees sharedAskId
-      const aliceAfterDismiss = await readAs(aliceId);
-      assert.equal(aliceAfterDismiss.dq.total, 1);
-      assert.equal(aliceAfterDismiss.dq.asks[0]!.signal_id, privAskId);
-      assert.equal(aliceAfterDismiss.dqp.total, 1);
-      assert.equal(aliceAfterDismiss.wt.total, 0);
-      assert.equal(aliceAfterDismiss.wsOverview.needs_you.asks.length, 1);
-      assert.equal(aliceAfterDismiss.wsOverview.needs_you.assigned.length, 0);
-      assert.equal(aliceAfterDismiss.wsOverview.needs_you.waiting.length, 0);
+      const aliceAfterDismiss = await readAllFiveAs(tx, wsId, aliceId);
+      assert.equal((aliceAfterDismiss.dq as { total: number }).total, 1);
+      assert.equal((aliceAfterDismiss.dqp as { total: number }).total, 1);
+      assert.equal((aliceAfterDismiss.wt as { total: number }).total, 0);
+      assert.equal((aliceAfterDismiss.wa as { total: number }).total, 4); // 3 dismissed + 1 declined review
 
-      // Verify all 3 dismissed items appear in Alice's Archived tab with outcome_kind='dismissed'
-      assert.equal(aliceAfterDismiss.wa.total, 3);
-      const archByKey = new Map(aliceAfterDismiss.wa.items.map((item) => [item.item_key, item]));
-      for (const expectedKey of [`ask:${sharedAskId}`, `todo:${aliceTodo.todo_id}`, `review:${reviewOfferId}`]) {
-        const entry = archByKey.get(expectedKey);
-        assert.ok(entry, `expected ${expectedKey} in Archived`);
-        assert.equal(entry.outcome_kind, "dismissed");
-        assert.equal(entry.outcome_text, "Dismissed");
-      }
+      // Bob still sees sharedAskId untouched!
+      const bobAfterAliceDismiss = await readAllFiveAs(tx, wsId, bobId);
+      assert.equal((bobAfterAliceDismiss.dq as { total: number }).total, 1);
 
-      // Bob is unaffected by Alice's dismissals!
-      const bobAfterAliceDismiss = await readAs(bobId);
-      assert.equal(bobAfterAliceDismiss.dq.total, 1);
-      assert.equal(bobAfterAliceDismiss.dq.asks[0]!.signal_id, sharedAskId);
-      assert.equal(bobAfterAliceDismiss.wa.total, 0);
-
-      // Restore aliceTodo and reviewOfferId -> both return to Waiting on you and leave Archived
+      // Restore aliceTodo and reviewOfferId; a second fresh SQL restore without an active dismissal row returns not_found.
       await tx`SET LOCAL ROLE swarm_command`;
       const [rTodo1] = await tx<{ r: { status: string; restored: boolean } }[]>`
         SELECT swarm.restore_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'todo', ${aliceTodo.todo_id}::uuid) AS r
@@ -364,12 +650,10 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
       assert.equal(rTodo1!.r.status, "ok");
       assert.equal(rTodo1!.r.restored, true);
 
-      // Restoring twice is idempotent
-      const [rTodo2] = await tx<{ r: { status: string; restored: boolean } }[]>`
+      const [rTodo2] = await tx<{ r: { status: string } }[]>`
         SELECT swarm.restore_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'todo', ${aliceTodo.todo_id}::uuid) AS r
       `;
-      assert.equal(rTodo2!.r.status, "ok");
-      assert.equal(rTodo2!.r.restored, false);
+      assert.equal(rTodo2!.r.status, "not_found");
 
       const [rReview] = await tx<{ r: { status: string; restored: boolean } }[]>`
         SELECT swarm.restore_waiting_item(${wsId}::uuid, ${aliceId}::uuid, 'review', ${reviewOfferId}::uuid) AS r
@@ -378,21 +662,16 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
       assert.equal(rReview!.r.restored, true);
       await tx`RESET ROLE`;
 
-      const aliceAfterRestore = await readAs(aliceId);
-      assert.equal(aliceAfterRestore.wt.total, 2);
-      assert.equal(aliceAfterRestore.wsOverview.needs_you.assigned.length, 1);
-      assert.equal(aliceAfterRestore.wsOverview.needs_you.waiting.length, 1);
-      assert.equal(aliceAfterRestore.wa.total, 1);
-      assert.equal(aliceAfterRestore.wa.items[0]!.item_key, `ask:${sharedAskId}`);
-
       // Dismissed-then-answered ask shows ONLY its real outcome in Archived (not 'dismissed')
       await tx`
         INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until)
         VALUES (${randomUUID()}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${sharedAskId}::uuid, 'note', 'Yes, ship it!', '9999-12-31T23:59:59Z')
       `;
-      const aliceAfterRealAnswer = await readAs(aliceId);
-      const sharedMatches = aliceAfterRealAnswer.wa.items.filter((i) => i.item_key === `ask:${sharedAskId}`);
-      assert.equal(sharedMatches.length, 1, "dismissed-then-answered ask must appear exactly once");
+      const aliceAfterRealAnswer = await readAllFiveAs(tx, wsId, aliceId);
+      const sharedMatches = (aliceAfterRealAnswer.wa as { items: Array<Row> }).items.filter(
+        (i) => i.item_key === `ask:${sharedAskId}`,
+      );
+      assert.equal(sharedMatches.length, 1);
       assert.equal(sharedMatches[0]!.outcome_kind, "answered");
       assert.equal(sharedMatches[0]!.outcome_text, "Yes, ship it!");
 
@@ -400,5 +679,363 @@ test("dismiss and restore work per person for ask, todo, and review with isolati
     });
   } catch (err) {
     if (err !== ROLLBACK_WITNESS) throw err;
+  }
+});
+
+test("served command edge: C1/C2 replay reauthorization, uniform 404, audit privacy for outside owner/admin, lock-wait revocation, and early agent gate", async () => {
+  const outsideOwner = await createUser("wd-owner");
+  const outsideAdmin = await createUser("wd-admin");
+  const member = await createUser("wd-member");
+  const peer = await createUser("wd-peer");
+  const wsId = randomUUID();
+  const privChId = randomUUID();
+  const privConvId = randomUUID();
+  const dmConvId = randomUUID();
+  const privAskId = randomUUID();
+  const dmAskId = randomUUID();
+  const lockRaceAskId = randomUUID();
+  const agentPrincipalId = randomUUID();
+  const agentToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
+
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES
+        (${outsideOwner.id}::uuid, 'OutsideOwner'),
+        (${outsideAdmin.id}::uuid, 'OutsideAdmin'),
+        (${member.id}::uuid, 'Member'),
+        (${peer.id}::uuid, 'Peer')
+    `;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${wsId}::uuid, 'ServedDismissWS', ${outsideOwner.id}::uuid)`;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES
+        (${wsId}::uuid, ${outsideOwner.id}::uuid, 'owner'),
+        (${wsId}::uuid, ${outsideAdmin.id}::uuid, 'admin'),
+        (${wsId}::uuid, ${member.id}::uuid, 'member'),
+        (${wsId}::uuid, ${peer.id}::uuid, 'member')
+    `;
+    const deviceId = randomUUID();
+    const runId = randomUUID();
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${deviceId}::uuid, ${member.id}::uuid, 'wd-agent-test')`;
+    await tx`
+      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${agentPrincipalId}::uuid, ${wsId}::uuid, ${member.id}::uuid, 'MemberBot')
+    `;
+    await tx`
+      INSERT INTO swarm.agent_workspace_memberships (workspace_id, principal_id, owner_user_id)
+      VALUES (${wsId}::uuid, ${agentPrincipalId}::uuid, ${member.id}::uuid)
+    `;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${runId}::uuid, ${agentPrincipalId}::uuid, ${deviceId}::uuid)`;
+    await tx`
+      INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
+      VALUES (
+        ${randomUUID()}::uuid, ${agentPrincipalId}::uuid, ${runId}::uuid,
+        ${tx.json(["post_signal"])}::jsonb, ${createHash("sha256").update(agentToken).digest()},
+        statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid
+      )
+    `;
+    // Private channel containing ONLY member and peer (outsideOwner and outsideAdmin are NOT members).
+    await tx`
+      INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
+      VALUES (${privChId}::uuid, ${wsId}::uuid, 'member-private', 'private', ${member.id}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.channel_members (channel_id, workspace_id, member_kind, user_id, added_by_principal, added_by_kind)
+      VALUES
+        (${privChId}::uuid, ${wsId}::uuid, 'user', ${member.id}::uuid, ${member.id}::uuid, 'user'),
+        (${privChId}::uuid, ${wsId}::uuid, 'user', ${peer.id}::uuid, ${member.id}::uuid, 'user')
+    `;
+    await tx`
+      INSERT INTO swarm.conversations (conversation_id, workspace_id, kind, channel_id, created_by_kind, created_by_principal)
+      VALUES
+        (${privConvId}::uuid, ${wsId}::uuid, 'private_channel', ${privChId}::uuid, 'user', ${member.id}::uuid),
+        (${dmConvId}::uuid, ${wsId}::uuid, 'dm', NULL, 'user', ${peer.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_members (workspace_id, conversation_id, member_kind, member_user_id)
+      VALUES
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${member.id}::uuid),
+        (${wsId}::uuid, ${dmConvId}::uuid, 'user', ${peer.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, until)
+      VALUES
+        (${privAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Secret channel question?', ${privChId}::uuid, '9999-12-31T23:59:59Z'),
+        (${lockRaceAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'Lock race question?', ${privChId}::uuid, '9999-12-31T23:59:59Z'),
+        (${dmAskId}::uuid, ${wsId}::uuid, ${peer.id}::uuid, 'user', ${member.id}::uuid, 'ask', 'DM question?', NULL, '9999-12-31T23:59:59Z')
+    `;
+    await tx`
+      INSERT INTO swarm.conversation_signals (workspace_id, conversation_id, signal_id, audience)
+      VALUES
+        (${wsId}::uuid, ${privConvId}::uuid, ${privAskId}::uuid, 'conversation'),
+        (${wsId}::uuid, ${privConvId}::uuid, ${lockRaceAskId}::uuid, 'conversation'),
+        (${wsId}::uuid, ${dmConvId}::uuid, ${dmAskId}::uuid, 'conversation')
+    `;
+  });
+
+  try {
+    // 1. Local agent token is refused 403 by the early HUMAN_ONLY_COMMANDS gate before the dismissal branch or its audit.
+    const agentBeforeAudit = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+    `;
+    const agentDismiss = await sendCommand(agentToken, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: privAskId,
+    });
+    assert.equal(agentDismiss.status, 403);
+    assert.deepEqual(agentDismiss.body, { error: "forbidden" });
+    const agentAfterAudit = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+    `;
+    assert.equal(agentAfterAudit[0]!.cnt, agentBeforeAudit[0]!.cnt, "early HUMAN_ONLY_COMMANDS gate refuses before dismissal branch audit");
+
+    // 2. Uniform 404: unknown UUID and out-of-scope private ask return identical status and body.
+    const unknownResp = await sendCommand(outsideOwner.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: randomUUID(),
+    });
+    const outOfScopeResp = await sendCommand(outsideOwner.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: privAskId,
+    });
+    assert.equal(unknownResp.status, 404);
+    assert.deepEqual(outOfScopeResp, unknownResp, "unknown and out-of-scope targets must be indistinguishable");
+
+    // 3. Private-channel ask: fresh dismiss + live exact replay return original receipt; conflict returns 409.
+    const privDismissCmdId = randomUUID();
+    const freshPriv = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: privAskId },
+      privDismissCmdId,
+    );
+    assert.equal(freshPriv.status, 200);
+    assert.equal(freshPriv.body.status, "accepted");
+    assert.equal(freshPriv.body.dismissed, true);
+    assert.equal(Object.hasOwn(freshPriv.body, "audit_channel_id"), false);
+
+    const liveRetryPriv = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: privAskId },
+      privDismissCmdId,
+    );
+    assert.equal(liveRetryPriv.status, 200);
+    assert.deepEqual(liveRetryPriv.body, freshPriv.body, "live same-person retry must return original receipt");
+
+    // Conflicting command_id reuse on dismiss_waiting_item -> 409 (and still invisible in audit view!).
+    const conflictResp = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: dmAskId },
+      privDismissCmdId,
+    );
+    assert.equal(conflictResp.status, 409);
+
+    // 4. DM ask: dismiss, restore, live exact retry of restore, then re-dismiss before leaving DM.
+    const dmDismiss1 = await sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: dmAskId,
+    });
+    assert.equal(dmDismiss1.status, 200);
+
+    const dmRestoreCmdId = randomUUID();
+    const dmRestore1 = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: dmAskId },
+      dmRestoreCmdId,
+    );
+    assert.equal(dmRestore1.status, 200);
+    assert.equal(dmRestore1.body.restored, true);
+
+    const dmRestoreLiveRetry = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: dmAskId },
+      dmRestoreCmdId,
+    );
+    assert.equal(dmRestoreLiveRetry.status, 200);
+    assert.deepEqual(dmRestoreLiveRetry.body, dmRestore1.body, "live same-person restore retry returns original receipt");
+
+    const dmDismiss2CmdId = randomUUID();
+    const dmDismiss2 = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: dmAskId },
+      dmDismiss2CmdId,
+    );
+    assert.equal(dmDismiss2.status, 200);
+
+    // 5. Lock-wait race: seed a restored dismissal row for lockRaceAskId, lock it FOR UPDATE in tx1,
+    //    fire dismiss_waiting_item while locked, remove member from privChId, release lock -> 404 and NO active row!
+    const seedLockDismiss = await sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: lockRaceAskId,
+    });
+    assert.equal(seedLockDismiss.status, 200);
+    const seedLockRestore = await sendCommand(member.jwt, wsId, {
+      kind: "restore_waiting_item",
+      item_kind: "ask",
+      item_id: lockRaceAskId,
+    });
+    assert.equal(seedLockRestore.status, 200);
+
+    let lockAcquired!: () => void;
+    let releaseLock!: () => void;
+    const lockReady = new Promise<void>((resolve) => { lockAcquired = resolve; });
+    const waitToRelease = new Promise<void>((resolve) => { releaseLock = resolve; });
+
+    const lockHolder = sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT 1 FROM swarm.waiting_dismissals
+        WHERE workspace_id = ${wsId}::uuid
+          AND user_id = ${member.id}::uuid
+          AND item_kind = 'ask'
+          AND item_id = ${lockRaceAskId}::uuid
+        FOR UPDATE
+      `;
+      assert.equal(rows.length, 1);
+      lockAcquired();
+      await waitToRelease;
+    });
+
+    await lockReady;
+    const waitingDismissPromise = sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: lockRaceAskId,
+    });
+
+    // Wait until the dismiss transaction is actually waiting on the dismissal row lock.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const waiters = await sql<{ cnt: string }[]>`
+        SELECT count(*)::text AS cnt
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND state = 'active'
+      `;
+      if (Number(waiters[0]!.cnt) > 0) break;
+      await delay(50);
+    }
+
+    // Revoke member's access to the private channel while dismiss is blocked on the row lock!
+    await sql`
+      DELETE FROM swarm.channel_members
+      WHERE workspace_id = ${wsId}::uuid AND channel_id = ${privChId}::uuid AND user_id = ${member.id}::uuid
+    `;
+    releaseLock();
+    await lockHolder;
+
+    const lockRaceResp = await waitingDismissPromise;
+    assert.deepEqual(lockRaceResp, unknownResp, "access lost during row-lock wait must return uniform 404");
+
+    const [activeLockRow] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.waiting_dismissals
+      WHERE workspace_id = ${wsId}::uuid
+        AND user_id = ${member.id}::uuid
+        AND item_kind = 'ask'
+        AND item_id = ${lockRaceAskId}::uuid
+        AND restored_at IS NULL
+    `;
+    assert.equal(Number(activeLockRow!.cnt), 0, "rolled-back dismiss must leave no active dismissal row");
+
+    // 6. After private-channel removal: dismiss, restore, and exact replay all return uniform 404.
+    const postRemoveReplay = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: privAskId },
+      privDismissCmdId,
+    );
+    const postRemoveDismiss = await sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: privAskId,
+    });
+    const postRemoveRestore = await sendCommand(member.jwt, wsId, {
+      kind: "restore_waiting_item",
+      item_kind: "ask",
+      item_id: privAskId,
+    });
+    assert.deepEqual(postRemoveReplay, unknownResp);
+    assert.deepEqual(postRemoveDismiss, unknownResp);
+    assert.deepEqual(postRemoveRestore, unknownResp);
+
+    // 7. After leaving DM: dismiss, restore, and exact replay all return uniform 404.
+    await sql`
+      UPDATE swarm.conversation_members
+      SET left_at = now()
+      WHERE workspace_id = ${wsId}::uuid AND conversation_id = ${dmConvId}::uuid AND member_user_id = ${member.id}::uuid
+    `;
+    const postLeaveDmReplay = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "dismiss_waiting_item", item_kind: "ask", item_id: dmAskId },
+      dmDismiss2CmdId,
+    );
+    const postLeaveDmRestoreReplay = await sendCommand(
+      member.jwt,
+      wsId,
+      { kind: "restore_waiting_item", item_kind: "ask", item_id: dmAskId },
+      dmRestoreCmdId,
+    );
+    const postLeaveDmDismiss = await sendCommand(member.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "ask",
+      item_id: dmAskId,
+    });
+    const postLeaveDmRestore = await sendCommand(member.jwt, wsId, {
+      kind: "restore_waiting_item",
+      item_kind: "ask",
+      item_id: dmAskId,
+    });
+    assert.deepEqual(postLeaveDmReplay, unknownResp);
+    assert.deepEqual(postLeaveDmRestoreReplay, unknownResp);
+    assert.deepEqual(postLeaveDmDismiss, unknownResp);
+    assert.deepEqual(postLeaveDmRestore, unknownResp);
+
+    // 8. C2 Audit privacy: server-side swarm.audit_log retained rows, but authenticated outside owner
+    //    AND outside admin see ZERO dismissal/restore rows (fresh, replayed, conflicting, or refused)
+    //    in swarm_read.audit_log.
+    const [rawAuditCount] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt
+      FROM swarm.audit_log
+      WHERE workspace_id = ${wsId}::uuid
+        AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+    `;
+    assert.ok(Number(rawAuditCount!.cnt) >= 4, "server-side audit_log still records internal dismissal audit rows");
+
+    for (const auditor of [outsideOwner, outsideAdmin]) {
+      const visible = await sql.begin(async (tx) => {
+        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: auditor.id })}, true)`;
+        await tx`SET LOCAL ROLE authenticated`;
+        return tx<{ command_kind: string; actor_user: string; outcome: string; request_hash: string }[]>`
+          SELECT command_kind, actor_user, outcome, request_hash
+          FROM swarm_read.audit_log
+          WHERE workspace_id = ${wsId}::uuid
+            AND command_kind IN ('dismiss_waiting_item', 'restore_waiting_item')
+        `;
+      });
+      assert.equal(visible.length, 0, `auditor ${auditor.id} must see zero waiting dismissal/restore rows in swarm_read.audit_log`);
+    }
+  } finally {
+    await sql`DELETE FROM swarm.workspaces WHERE workspace_id = ${wsId}::uuid`;
+    await sql`
+      DELETE FROM swarm.users
+      WHERE user_id IN (${outsideOwner.id}::uuid, ${outsideAdmin.id}::uuid, ${member.id}::uuid, ${peer.id}::uuid)
+    `;
+    for (const u of [outsideOwner, outsideAdmin, member, peer]) {
+      await admin.auth.admin.deleteUser(u.id);
+    }
   }
 });
