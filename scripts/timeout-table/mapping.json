@@ -4681,6 +4681,20 @@
             "removes": [],
             "reason": "Local host CLT probe, not a Cloud API request."
           }
+        },
+        "src/engine/seat-lock.ts:timeout": {
+          "class": "local",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/engine/seat-lock.ts:164",
+          "detail": "SQLite busy timeout set to 0 ms on the seat lock database so a lock held by another runner is refused at once.",
+          "operation": {
+            "name": "engine-seat-lock-busy-timeout",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local SQLite busy timeout (0 ms) for immediate lock contention refusal, not a network wait."
+          }
         }
       }
     }
