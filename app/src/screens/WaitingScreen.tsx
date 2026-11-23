@@ -71,7 +71,11 @@ export function WaitingScreen() {
               <WaitingItemCard
                 key={item.id}
                 item={item}
-                agent={agents.find((agent) => agent.id === item.agentId)}
+                agent={
+                  item.status === 'dismissed'
+                    ? undefined
+                    : agents.find((agent) => agent.id === item.agentId)
+                }
               />
             ))}
             <ClearedList items={clearedItems} />

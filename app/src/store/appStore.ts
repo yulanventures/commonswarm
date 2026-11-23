@@ -7,10 +7,12 @@ import {
   createInitialChannels,
   createInitialClearedItems,
   createInitialWaitingItems,
+  getFixtureWaitingItem,
 } from '../data/fixtures';
 import type {
   AddAgentDraft,
   Agent,
+  ApprovalOptionKind,
   AvatarTone,
   Channel,
   ClearedItem,
@@ -99,7 +101,20 @@ export function resetAppStore(): void {
   emit();
 }
 
-function formatSettledApprovalLabel(optionId: string): string {
+function formatSettledApprovalLabel(
+  optionId: string,
+  kind?: ApprovalOptionKind,
+): string {
+  switch (kind) {
+    case 'allow_once':
+      return 'Allowed once';
+    case 'allow_always':
+      return 'Always allowed in this folder';
+    case 'reject_once':
+      return 'Denied';
+    case 'reject_always':
+      return 'Always denied';
+  }
   switch (optionId) {
     case 'allow-once':
       return 'Allowed once';
@@ -120,9 +135,11 @@ export const appActions = {
       return {
         ...prev,
         waitingItems: prev.waitingItems.map((item): WaitingItem =>
-          item.id === id ? { ...item, status: 'dismissed' as const } : item,
+          item.id === id
+            ? { id: target.id, kind: target.kind, status: 'dismissed' }
+            : item,
         ),
-        announcement: `Dismissed ${target.title}`,
+        announcement: 'Dismissed',
       };
     });
   },
@@ -131,20 +148,39 @@ export const appActions = {
     setState((prev) => {
       const target = prev.waitingItems.find((item) => item.id === id);
       if (!target || target.status !== 'dismissed') return prev;
+      const restored = getFixtureWaitingItem(target.kind, target.id);
+      if (!restored) return prev;
       return {
         ...prev,
         waitingItems: prev.waitingItems.map((item): WaitingItem =>
-          item.id === id ? { ...item, status: 'open' as const } : item,
+          item.id === id ? restored : item,
         ),
-        announcement: `Restored ${target.title}`,
+        announcement: 'Restored',
       };
     });
   },
 
   answerApproval(approvalId: string, optionId: string): void {
-    const settledLabel = formatSettledApprovalLabel(optionId);
     setState((prev) => {
       let matchedAgentName = '';
+      let matchedKind: ApprovalOptionKind | undefined;
+
+      for (const agent of prev.agents) {
+        for (const event of agent.events) {
+          if (
+            event.type === 'approval_request' &&
+            event.approvalId === approvalId
+          ) {
+            matchedKind = event.options.find(
+              (option) => option.id === optionId,
+            )?.kind;
+            break;
+          }
+        }
+      }
+
+      const settledLabel = formatSettledApprovalLabel(optionId, matchedKind);
+
       const agents = prev.agents.map((agent) => {
         const hasApproval = agent.events.some(
           (event) =>
@@ -174,8 +210,8 @@ export const appActions = {
       const waitingTarget = prev.waitingItems.find(
         (item) => item.id === approvalId,
       );
-      const waitingItems = prev.waitingItems.map((item) =>
-        item.id === approvalId
+      const waitingItems = prev.waitingItems.map((item): WaitingItem =>
+        item.id === approvalId && item.status !== 'dismissed'
           ? { ...item, status: 'resolved' as const, resolvedLabel: settledLabel }
           : item,
       );
@@ -207,15 +243,15 @@ export const appActions = {
   answerChoice(waitingId: string, optionId: string): void {
     setState((prev) => {
       const target = prev.waitingItems.find((item) => item.id === waitingId);
-      if (!target || target.kind !== 'choice' || target.status !== 'open') {
+      if (!target || target.status !== 'open' || target.kind !== 'choice') {
         return prev;
       }
       const option = target.options.find((opt) => opt.id === optionId);
       const label = option ? option.label : optionId;
       return {
         ...prev,
-        waitingItems: prev.waitingItems.map((item) =>
-          item.id === waitingId
+        waitingItems: prev.waitingItems.map((item): WaitingItem =>
+          item.id === waitingId && item.status !== 'dismissed'
             ? { ...item, status: 'resolved' as const, resolvedLabel: label }
             : item,
         ),

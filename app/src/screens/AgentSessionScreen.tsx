@@ -16,6 +16,8 @@ import type {
   PersonMessageEvent,
   QueuedMessageEvent,
   SessionEvent,
+  SessionStatusEvent,
+  SessionStatusKind,
 } from '../data/types';
 import { useIsPhone } from '../hooks/useIsPhone';
 import { appActions, useAppStore } from '../store/appStore';
@@ -27,7 +29,31 @@ type AgentBlockEvent =
 
 type GroupedEntry =
   | { kind: 'person'; event: PersonMessageEvent }
-  | { kind: 'agent_turn'; id: string; durationLabel?: string; items: AgentBlockEvent[] };
+  | { kind: 'status'; event: SessionStatusEvent }
+  | {
+      kind: 'agent_turn';
+      id: string;
+      durationLabel?: string;
+      items: AgentBlockEvent[];
+    };
+
+const SESSION_STATUS_LABELS: Record<SessionStatusKind, string> = {
+  turn_started: 'Turn started',
+  turn_failed: 'Turn failed',
+  turn_interrupted: 'Turn interrupted',
+  message_refused: 'Message refused',
+  runner_stopped: 'Runner stopped',
+  authority_lost: 'Authority lost',
+};
+
+const SESSION_STATUS_DOT: Record<SessionStatusKind, string> = {
+  turn_started: 'bg-working',
+  turn_failed: 'bg-needs-you',
+  turn_interrupted: 'bg-offline',
+  message_refused: 'bg-needs-you',
+  runner_stopped: 'bg-offline',
+  authority_lost: 'bg-needs-you',
+};
 
 function groupSessionEvents(events: SessionEvent[]): {
   entries: GroupedEntry[];
@@ -43,6 +69,10 @@ function groupSessionEvents(events: SessionEvent[]): {
     }
     if (event.type === 'person_message') {
       entries.push({ kind: 'person', event });
+      continue;
+    }
+    if (event.type === 'session_status') {
+      entries.push({ kind: 'status', event });
       continue;
     }
 
@@ -64,6 +94,13 @@ function groupSessionEvents(events: SessionEvent[]): {
   }
 
   return { entries, queued };
+}
+
+function renderDeliveryNote(event: AgentTextEvent): string | null {
+  if (event.delivery === 'failed') return 'Failed to send';
+  if (event.delivery === 'abandoned') return 'Not delivered';
+  if (event.delivery === 'posting') return 'Sending…';
+  return null;
 }
 
 export function AgentSessionScreen() {
@@ -97,10 +134,33 @@ export function AgentSessionScreen() {
         className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4.5 pt-4.5 pb-4 desktop:gap-5.5 desktop:px-pad-page desktop:pt-pad-section"
       >
         {entries.map((entry) => {
+          if (entry.kind === 'status') {
+            const label = SESSION_STATUS_LABELS[entry.event.kind];
+            return (
+              <div
+                key={entry.event.id}
+                data-testid={`session-status-${entry.event.id}`}
+                className="flex items-center gap-2 text-xs text-ink-muted"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`size-dot-xs shrink-0 rounded-full ${SESSION_STATUS_DOT[entry.event.kind]}`}
+                />
+                <span className="truncate">
+                  {entry.event.detail
+                    ? `${label} · ${entry.event.detail}`
+                    : label}
+                </span>
+                <span className="shrink-0">{entry.event.timestamp}</span>
+              </div>
+            );
+          }
+
           if (entry.kind === 'person') {
             const person = PEOPLE.find((p) => p.id === entry.event.authorId);
             const authorName = person?.name ?? entry.event.authorId;
-            const initials = person?.initials ?? authorName.slice(0, 2).toUpperCase();
+            const initials =
+              person?.initials ?? authorName.slice(0, 2).toUpperCase();
             const tone = person?.tone ?? 'maya';
 
             if (isPhone) {
@@ -109,7 +169,7 @@ export function AgentSessionScreen() {
                   key={entry.event.id}
                   className="max-w-phone-bubble-max self-end rounded-modal bg-active px-3.5 py-2.5 text-ink"
                 >
-                  {entry.event.phoneText ?? entry.event.text}
+                  {entry.event.text}
                 </div>
               );
             }
@@ -127,6 +187,7 @@ export function AgentSessionScreen() {
                     <span className="font-semibold text-ink">{authorName}</span>
                     <span className="text-xs text-ink-muted">
                       {entry.event.timestamp}
+                      {entry.event.seen ? ' · Seen' : ''}
                     </span>
                   </div>
                   <div className="text-ink-body">{entry.event.text}</div>
@@ -150,9 +211,21 @@ export function AgentSessionScreen() {
                     );
                   }
                   if (item.type === 'agent_text') {
+                    const deliveryNote = renderDeliveryNote(item);
                     return (
                       <div key={item.id} className="text-ink-body">
-                        {item.phoneText ?? item.text}
+                        <span>{item.text}</span>
+                        {item.streaming ? (
+                          <span
+                            aria-hidden="true"
+                            className="ml-0.5 inline-block h-caret-h w-caret-w align-middle bg-ink-muted"
+                          />
+                        ) : null}
+                        {deliveryNote ? (
+                          <span className="ml-2 text-xs text-needs-you-ink">
+                            {deliveryNote}
+                          </span>
+                        ) : null}
                       </div>
                     );
                   }
@@ -197,12 +270,24 @@ export function AgentSessionScreen() {
                     return <StepList key={item.id} steps={item.steps} />;
                   }
                   if (item.type === 'agent_text') {
+                    const deliveryNote = renderDeliveryNote(item);
                     return (
                       <div
                         key={item.id}
                         className="max-w-message-max text-ink-body"
                       >
-                        {item.text}
+                        <span>{item.text}</span>
+                        {item.streaming ? (
+                          <span
+                            aria-hidden="true"
+                            className="ml-0.5 inline-block h-caret-h w-caret-w align-middle bg-ink-muted"
+                          />
+                        ) : null}
+                        {deliveryNote ? (
+                          <span className="ml-2 text-xs text-needs-you-ink">
+                            {deliveryNote}
+                          </span>
+                        ) : null}
                       </div>
                     );
                   }

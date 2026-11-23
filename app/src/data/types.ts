@@ -61,22 +61,53 @@ export interface StepOutput {
   detail: string;
 }
 
+export type AgentStepKind =
+  | 'Read'
+  | 'Search'
+  | 'Ran'
+  | 'Edited'
+  | 'Tool'
+  | 'Think';
+
+export type AgentStepState = 'running' | 'ok' | 'error';
+
 export interface AgentStep {
   id: string;
-  kind: 'Read' | 'Search' | 'Ran' | 'Edited';
+  kind: AgentStepKind;
   target: string;
-  phoneTarget?: string;
   result?: StepResult;
-  state: 'ok' | 'error';
+  state: AgentStepState;
   output?: StepOutput;
-  showOnPhone?: boolean;
 }
+
+export type ApprovalOptionKind =
+  | 'allow_once'
+  | 'allow_always'
+  | 'reject_once'
+  | 'reject_always';
 
 export interface ApprovalOption {
   id: string;
+  kind?: ApprovalOptionKind;
   label: string;
-  phoneLabel?: string;
   primary?: boolean;
+}
+
+export type SessionStatusKind =
+  | 'turn_started'
+  | 'turn_failed'
+  | 'turn_interrupted'
+  | 'message_refused'
+  | 'runner_stopped'
+  | 'authority_lost';
+
+export interface SessionStatusEvent {
+  id: string;
+  type: 'session_status';
+  kind: SessionStatusKind;
+  detail?: string;
+  stopReason?: string;
+  timestamp: string;
 }
 
 export interface PersonMessageEvent {
@@ -85,7 +116,7 @@ export interface PersonMessageEvent {
   authorId: string;
   timestamp: string;
   text: string;
-  phoneText?: string;
+  seen?: boolean;
 }
 
 export interface AgentStepsEvent {
@@ -96,12 +127,16 @@ export interface AgentStepsEvent {
   steps: AgentStep[];
 }
 
+export type AgentTextDelivery = 'posting' | 'posted' | 'failed' | 'abandoned';
+
 export interface AgentTextEvent {
   id: string;
   type: 'agent_text';
   agentId: string;
+  messageId?: string;
   text: string;
-  phoneText?: string;
+  streaming?: boolean;
+  delivery?: AgentTextDelivery;
 }
 
 export interface ApprovalRequestEvent {
@@ -110,7 +145,7 @@ export interface ApprovalRequestEvent {
   agentId: string;
   approvalId: string;
   title: string;
-  command: string;
+  command?: string;
   options: ApprovalOption[];
   settledOptionId?: string;
   settledLabel?: string;
@@ -128,7 +163,8 @@ export type SessionEvent =
   | AgentStepsEvent
   | AgentTextEvent
   | ApprovalRequestEvent
-  | QueuedMessageEvent;
+  | QueuedMessageEvent
+  | SessionStatusEvent;
 
 export interface SessionFileChange {
   path: string;
@@ -150,16 +186,16 @@ export interface Agent {
   name: string;
   initial: string;
   tone: AvatarTone;
-  computerId: string;
-  harnessId: HarnessId;
-  folder: string;
+  computerId?: string;
+  harnessId?: HarnessId;
+  folder?: string;
   state: AgentState;
   stateElapsed: string;
   sidebarStateLabel: string;
   channelActivity: string;
   model: string;
-  mode: PermissionMode;
-  sessionMeta: SessionMeta;
+  mode?: PermissionMode;
+  sessionMeta?: SessionMeta;
   events: SessionEvent[];
 }
 
@@ -203,7 +239,9 @@ export interface Channel {
   messages: ChannelMessage[];
 }
 
-export type WaitingItemStatus = 'open' | 'dismissed' | 'resolved';
+export type WaitingItemKind = 'approval' | 'choice' | 'review';
+
+export type ActiveWaitingItemStatus = 'open' | 'resolved';
 
 export interface WaitingApprovalItem {
   id: string;
@@ -211,9 +249,9 @@ export interface WaitingApprovalItem {
   agentId: string;
   title: string;
   meta: string;
-  command: string;
+  command?: string;
   options: ApprovalOption[];
-  status: WaitingItemStatus;
+  status: ActiveWaitingItemStatus;
   resolvedLabel?: string;
 }
 
@@ -230,7 +268,7 @@ export interface WaitingChoiceItem {
   title: string;
   meta: string;
   options: WaitingChoiceOption[];
-  status: WaitingItemStatus;
+  status: ActiveWaitingItemStatus;
   resolvedLabel?: string;
 }
 
@@ -241,14 +279,22 @@ export interface WaitingReviewItem {
   title: string;
   meta: string;
   targetRoute: string;
-  status: WaitingItemStatus;
+  status: ActiveWaitingItemStatus;
   resolvedLabel?: string;
 }
 
-export type WaitingItem =
+export type ActiveWaitingItem =
   | WaitingApprovalItem
   | WaitingChoiceItem
   | WaitingReviewItem;
+
+export interface DismissedWaitingItem {
+  id: string;
+  kind: WaitingItemKind;
+  status: 'dismissed';
+}
+
+export type WaitingItem = ActiveWaitingItem | DismissedWaitingItem;
 
 export interface ClearedItem {
   id: string;

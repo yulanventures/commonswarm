@@ -1,4 +1,5 @@
 import type {
+  ActiveWaitingItem,
   AddAgentDraft,
   Agent,
   Channel,
@@ -9,6 +10,7 @@ import type {
   Person,
   SlashCommand,
   WaitingItem,
+  WaitingItemKind,
   Workspace,
 } from './types';
 
@@ -152,8 +154,7 @@ export function createInitialAgents(): Agent[] {
           authorId: 'maya',
           timestamp: '10:42',
           text: "Checkout fails for carts with a discount code since yesterday's release. Find it, fix it, and open a pull request.",
-          phoneText:
-            'Checkout fails for carts with a discount code. Find it, fix it, open a pull request.',
+          seen: true,
         },
         {
           id: 'evt-atlas-2',
@@ -166,7 +167,6 @@ export function createInitialAgents(): Agent[] {
               kind: 'Read',
               target: 'api/checkout/totals.ts',
               state: 'ok',
-              showOnPhone: false,
             },
             {
               id: 'step-atlas-2',
@@ -174,7 +174,6 @@ export function createInitialAgents(): Agent[] {
               target: 'applyDiscount',
               result: { kind: 'info', text: '6 matches' },
               state: 'ok',
-              showOnPhone: false,
             },
             {
               id: 'step-atlas-3',
@@ -182,7 +181,6 @@ export function createInitialAgents(): Agent[] {
               target: 'npm test -- checkout',
               result: { kind: 'error', text: '2 failed' },
               state: 'error',
-              showOnPhone: true,
               output: {
                 headlineParts: [
                   { text: 'expected total ' },
@@ -197,10 +195,8 @@ export function createInitialAgents(): Agent[] {
               id: 'step-atlas-4',
               kind: 'Edited',
               target: 'api/checkout/totals.ts',
-              phoneTarget: 'checkout/totals.ts',
               result: { kind: 'diff', added: 9, removed: 3 },
               state: 'ok',
-              showOnPhone: true,
             },
             {
               id: 'step-atlas-5',
@@ -208,7 +204,6 @@ export function createInitialAgents(): Agent[] {
               target: 'npm test -- checkout',
               result: { kind: 'success', text: '41 passed' },
               state: 'ok',
-              showOnPhone: true,
             },
           ],
         },
@@ -217,8 +212,7 @@ export function createInitialAgents(): Agent[] {
           type: 'agent_text',
           agentId: 'atlas',
           text: 'The discount was applied after tax, so totals for discounted carts stopped matching the payment. I moved it before tax and added a test for a 20% code. The branch is ready.',
-          phoneText:
-            'The discount was applied after tax. I moved it before tax and added a test. The branch is ready.',
+          delivery: 'posted',
         },
         {
           id: 'evt-atlas-4',
@@ -228,13 +222,18 @@ export function createInitialAgents(): Agent[] {
           title: 'Atlas wants to push to GitHub',
           command: 'git push origin fix/discount-before-tax',
           options: [
-            { id: 'allow-once', label: 'Allow once', primary: true },
+            {
+              id: 'allow-once',
+              kind: 'allow_once',
+              label: 'Allow once',
+              primary: true,
+            },
             {
               id: 'always-folder',
+              kind: 'allow_always',
               label: 'Always allow in this folder',
-              phoneLabel: 'Always here',
             },
-            { id: 'deny', label: 'Deny' },
+            { id: 'deny', kind: 'reject_once', label: 'Deny' },
           ],
         },
         {
@@ -286,7 +285,6 @@ export function createInitialAgents(): Agent[] {
               kind: 'Read',
               target: 'CHANGELOG.md',
               state: 'ok',
-              showOnPhone: true,
             },
             {
               id: 'step-juno-2',
@@ -294,7 +292,6 @@ export function createInitialAgents(): Agent[] {
               target: 'discount',
               result: { kind: 'info', text: '3 commits' },
               state: 'ok',
-              showOnPhone: true,
             },
           ],
         },
@@ -340,7 +337,6 @@ export function createInitialAgents(): Agent[] {
               kind: 'Read',
               target: 'api/checkout/totals.ts',
               state: 'ok',
-              showOnPhone: true,
             },
           ],
         },
@@ -387,7 +383,6 @@ export function createInitialAgents(): Agent[] {
               target: 'tax calculation',
               result: { kind: 'info', text: '4 pages' },
               state: 'ok',
-              showOnPhone: true,
             },
           ],
         },
@@ -396,6 +391,34 @@ export function createInitialAgents(): Agent[] {
           type: 'agent_text',
           agentId: 'scout',
           text: 'Updating checkout pricing examples to show discounts applied before tax.',
+        },
+      ],
+    },
+    {
+      id: 'triage',
+      name: 'Triage',
+      initial: 'T',
+      tone: 'green',
+      state: 'idle',
+      stateElapsed: '5m',
+      sidebarStateLabel: 'Listening · verified 5m ago',
+      channelActivity: 'Listening',
+      model: 'Sonnet 5.5 · Medium',
+      events: [
+        {
+          id: 'evt-triage-1',
+          type: 'person_message',
+          authorId: 'jonas',
+          timestamp: '10:36',
+          text: 'Watch #support for any more Stripe receipt mismatches.',
+          seen: true,
+        },
+        {
+          id: 'evt-triage-2',
+          type: 'session_status',
+          kind: 'turn_interrupted',
+          detail: 'Runner reconnected before reply completed',
+          timestamp: '10:37',
         },
       ],
     },
@@ -529,7 +552,7 @@ export function createInitialChannels(): Channel[] {
       name: 'support',
       unread: false,
       peopleCount: 2,
-      agentIds: ['atlas'],
+      agentIds: ['atlas', 'triage'],
       messages: [
         {
           id: 'msg-support-1',
@@ -549,7 +572,7 @@ export function createInitialChannels(): Channel[] {
   ];
 }
 
-export function createInitialWaitingItems(): WaitingItem[] {
+function createWaitingFixtureCatalog(): ActiveWaitingItem[] {
   return [
     {
       id: 'wait-atlas-push',
@@ -559,13 +582,18 @@ export function createInitialWaitingItems(): WaitingItem[] {
       meta: '# launch · 12s',
       command: 'git push origin fix/discount-before-tax',
       options: [
-        { id: 'allow-once', label: 'Allow once', primary: true },
+        {
+          id: 'allow-once',
+          kind: 'allow_once',
+          label: 'Allow once',
+          primary: true,
+        },
         {
           id: 'always-folder',
+          kind: 'allow_always',
           label: 'Always allow in this folder',
-          phoneLabel: 'Always here',
         },
-        { id: 'deny', label: 'Deny' },
+        { id: 'deny', kind: 'reject_once', label: 'Deny' },
       ],
       status: 'open',
     },
@@ -601,9 +629,26 @@ export function createInitialWaitingItems(): WaitingItem[] {
         { id: 'wordmark', label: 'Wordmark', recommended: true },
         { id: 'monogram', label: 'Monogram' },
       ],
-      status: 'dismissed',
+      status: 'open',
     },
   ];
+}
+
+export function getFixtureWaitingItem(
+  kind: WaitingItemKind,
+  id: string,
+): ActiveWaitingItem | undefined {
+  return createWaitingFixtureCatalog().find(
+    (item) => item.kind === kind && item.id === id,
+  );
+}
+
+export function createInitialWaitingItems(): WaitingItem[] {
+  return createWaitingFixtureCatalog().map((item): WaitingItem =>
+    item.id === 'wait-docs-logo'
+      ? { id: item.id, kind: item.kind, status: 'dismissed' }
+      : item,
+  );
 }
 
 export function createInitialClearedItems(): ClearedItem[] {

@@ -20,7 +20,7 @@ interface ComposerProps {
   agentControls?: {
     agentId: string;
     model: string;
-    mode: PermissionMode;
+    mode?: PermissionMode;
   };
   channelChipLabel?: string;
 }
@@ -190,81 +190,85 @@ export function Composer({
         <div className="flex items-center gap-2">
           {agentControls ? (
             <>
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    type="button"
-                    aria-label="Select model"
-                    className="flex h-chip items-center rounded-sm bg-active px-2.5 text-sm text-ink-strong transition-quiet hover:bg-menu-active hover:text-ink"
-                  >
-                    {agentControls.model}
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    sideOffset={6}
-                    align="start"
-                    className="animate-menu-in z-50 min-w-44 rounded-card border border-border bg-popover p-1.5 text-sm text-ink shadow-popover"
-                  >
-                    {MODEL_OPTIONS.map((modelOption) => (
-                      <DropdownMenu.Item
-                        key={modelOption}
-                        onSelect={() =>
-                          appActions.setAgentModel(
-                            agentControls.agentId,
-                            modelOption,
-                          )
-                        }
-                        className={`flex h-row-md cursor-pointer items-center justify-between rounded-sm px-2.5 outline-none transition-quiet data-[highlighted]:bg-menu-active ${
-                          agentControls.model === modelOption
-                            ? 'font-semibold text-accent'
-                            : 'text-ink-strong'
-                        }`}
-                      >
-                        <span>{modelOption}</span>
-                      </DropdownMenu.Item>
-                    ))}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
+              {agentControls.model ? (
+                <DropdownMenu.Root modal={false}>
+                  <DropdownMenu.Trigger asChild>
+                    <button
+                      type="button"
+                      aria-label="Select model"
+                      className="flex h-chip items-center rounded-sm bg-active px-2.5 text-sm text-ink-strong transition-quiet hover:bg-menu-active hover:text-ink"
+                    >
+                      {agentControls.model}
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.Content
+                      sideOffset={6}
+                      align="start"
+                      className="animate-menu-in z-50 min-w-44 rounded-card border border-border bg-popover p-1.5 text-sm text-ink shadow-popover"
+                    >
+                      {MODEL_OPTIONS.map((modelOption) => (
+                        <DropdownMenu.Item
+                          key={modelOption}
+                          onSelect={() =>
+                            appActions.setAgentModel(
+                              agentControls.agentId,
+                              modelOption,
+                            )
+                          }
+                          className={`flex h-row-md cursor-pointer items-center justify-between rounded-sm px-2.5 outline-none transition-quiet data-[highlighted]:bg-menu-active ${
+                            agentControls.model === modelOption
+                              ? 'font-semibold text-accent'
+                              : 'text-ink-strong'
+                          }`}
+                        >
+                          <span>{modelOption}</span>
+                        </DropdownMenu.Item>
+                      ))}
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+              ) : null}
 
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    type="button"
-                    aria-label="Select permission mode"
-                    className="flex h-chip items-center rounded-sm bg-active px-2.5 text-sm text-ink-strong transition-quiet hover:bg-menu-active hover:text-ink"
-                  >
-                    {agentControls.mode}
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    sideOffset={6}
-                    align="start"
-                    className="animate-menu-in z-50 min-w-52 rounded-card border border-border bg-popover p-1.5 text-sm text-ink shadow-popover"
-                  >
-                    {PERMISSION_MODES.map((modeOption) => (
-                      <DropdownMenu.Item
-                        key={modeOption}
-                        onSelect={() =>
-                          appActions.setAgentMode(
-                            agentControls.agentId,
-                            modeOption,
-                          )
-                        }
-                        className={`flex h-row-md cursor-pointer items-center rounded-sm px-2.5 outline-none transition-quiet data-[highlighted]:bg-menu-active ${
-                          agentControls.mode === modeOption
-                            ? 'font-semibold text-accent'
-                            : 'text-ink-strong'
-                        }`}
-                      >
-                        {modeOption}
-                      </DropdownMenu.Item>
-                    ))}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
+              {agentControls.mode ? (
+                <DropdownMenu.Root modal={false}>
+                  <DropdownMenu.Trigger asChild>
+                    <button
+                      type="button"
+                      aria-label="Select permission mode"
+                      className="flex h-chip items-center rounded-sm bg-active px-2.5 text-sm text-ink-strong transition-quiet hover:bg-menu-active hover:text-ink"
+                    >
+                      {agentControls.mode}
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.Content
+                      sideOffset={6}
+                      align="start"
+                      className="animate-menu-in z-50 min-w-52 rounded-card border border-border bg-popover p-1.5 text-sm text-ink shadow-popover"
+                    >
+                      {PERMISSION_MODES.map((modeOption) => (
+                        <DropdownMenu.Item
+                          key={modeOption}
+                          onSelect={() =>
+                            appActions.setAgentMode(
+                              agentControls.agentId,
+                              modeOption,
+                            )
+                          }
+                          className={`flex h-row-md cursor-pointer items-center rounded-sm px-2.5 outline-none transition-quiet data-[highlighted]:bg-menu-active ${
+                            agentControls.mode === modeOption
+                              ? 'font-semibold text-accent'
+                              : 'text-ink-strong'
+                          }`}
+                        >
+                          {modeOption}
+                        </DropdownMenu.Item>
+                      ))}
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+              ) : null}
             </>
           ) : null}
 

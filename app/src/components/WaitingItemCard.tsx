@@ -9,16 +9,14 @@ interface WaitingItemCardProps {
 }
 
 export function WaitingItemCard({ item, agent }: WaitingItemCardProps) {
-  const initial = agent?.initial ?? item.agentId.charAt(0).toUpperCase();
-  const tone = agent?.tone ?? 'purple';
-
   if (item.status === 'dismissed') {
     return (
       <div
         data-testid={`dismissed-row-${item.id}`}
+        data-dismissed-kind={item.kind}
         className="flex min-h-row-xl items-center gap-2.5 rounded-card border border-dashed border-border px-pad-card-x text-md text-ink-muted transition-quiet"
       >
-        <span className="truncate">Dismissed “{item.title}”</span>
+        <span>Dismissed</span>
         <div className="flex-1" />
         <button
           type="button"
@@ -34,6 +32,9 @@ export function WaitingItemCard({ item, agent }: WaitingItemCardProps) {
   if (item.status === 'resolved') {
     return null;
   }
+
+  const initial = agent?.initial ?? item.agentId.charAt(0).toUpperCase();
+  const tone = agent?.tone ?? 'purple';
 
   if (item.kind === 'approval') {
     return (
@@ -55,9 +56,11 @@ export function WaitingItemCard({ item, agent }: WaitingItemCardProps) {
           </button>
         </div>
 
-        <div className="overflow-x-auto rounded-sm bg-sidebar px-3 py-2.5 font-mono text-sm text-ink-body">
-          {item.command}
-        </div>
+        {item.command ? (
+          <div className="overflow-x-auto rounded-sm bg-sidebar px-3 py-2.5 font-mono text-sm text-ink-body">
+            {item.command}
+          </div>
+        ) : null}
 
         <div className="flex flex-wrap gap-2">
           {item.options.map((option) => (
