@@ -175,3 +175,127 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
     await rm(work, { recursive: true, force: true });
   }
 });
+
+function postgresCommandFromCompose(composeText: string): string[] {
+  const lines = composeText.split(/\r?\n/);
+  const serviceStart = lines.findIndex((line) => line === "  postgres:");
+  assert.ok(serviceStart >= 0, "postgres service missing from deploy/supabase-stack/compose.yaml");
+  let commandStart = -1;
+  for (let i = serviceStart + 1; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (/^(?:[a-z0-9_-]+:|  [a-z0-9_-]+:)/.test(line)) break;
+    if (line === "    command:") {
+      commandStart = i + 1;
+      break;
+    }
+  }
+  assert.ok(commandStart >= 0, "postgres command list missing from deploy/supabase-stack/compose.yaml");
+  const rawArgs: string[] = [];
+  for (let i = commandStart; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (!line.startsWith("      - ")) break;
+    rawArgs.push(line.slice("      - ".length).trim());
+  }
+  assert.ok(rawArgs.length > 0, "postgres command list is empty");
+  // Drop only TLS flags because this throwaway container mounts no TLS keypair; keep hba_file and all other flags verbatim.
+  const filtered: string[] = [];
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    if (rawArgs[i] === "-c" && /^ssl(?:_|=)/.test(rawArgs[i + 1] ?? "")) {
+      i += 1;
+      continue;
+    }
+    filtered.push(rawArgs[i]!);
+  }
+  return filtered;
+}
+
+test("pg_cron executes a scheduled job via background workers under the production pg_hba.conf", { timeout: 300_000 }, async (context) => {
+  if (run("docker", ["version", "--format", "{{.Server.Version}}"]).status !== 0) {
+    context.skip("Docker is absent; this gate needs a throwaway box database");
+    return;
+  }
+  const image = await pullDockerImage(IMAGE);
+  if (!image.ready) {
+    context.skip(image.reason);
+    return;
+  }
+  const composeText = await readFile(join(stackDir, "compose.yaml"), "utf8");
+  const postgresCommand = postgresCommandFromCompose(composeText);
+  const id = randomUUID().slice(0, 8);
+  const db = `ndb-cron-bgw-${id}`;
+  let scheduledJobId: string | null = null;
+  const adminSql = (sql: string) => run("docker", [
+    "exec", "-i", "-e", `PGPASSWORD=${PASSWORD}`, db,
+    "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "supabase_admin", "-d", "postgres", "-q", "-t", "-A",
+  ], sql);
+  try {
+    const started = run("docker", [
+      "run", "-d", "--name", db, "--shm-size=256m",
+      "-e", `POSTGRES_PASSWORD=${PASSWORD}`,
+      "-e", `JWT_SECRET=${randomUUID()}${randomUUID()}`,
+      "-e", "JWT_EXP=3600",
+      "-v", `${join(stackDir, "postgres", "pg_hba.conf")}:/etc/postgresql-custom/pg_hba.conf:ro`,
+      IMAGE,
+      ...postgresCommand,
+    ]);
+    assert.equal(started.status, 0, started.stderr);
+
+    // Wait for the post-initdb server (with production pg_hba.conf loaded) via bounded polling without sleeps.
+    const readyDeadline = Date.now() + 90_000;
+    let ready = false;
+    for (let attempt = 0; attempt < 2000 && Date.now() < readyDeadline; attempt += 1) {
+      const probe = adminSql(
+        "SELECT current_setting('listen_addresses') <> '' AND current_setting('hba_file') = '/etc/postgresql-custom/pg_hba.conf' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres');",
+      );
+      if (probe.status === 0 && probe.stdout.trim() === "t") {
+        ready = true;
+        break;
+      }
+      const running = run("docker", ["inspect", "--format", "{{.State.Running}}", db]).stdout.trim();
+      if (running === "false") {
+        const logs = run("docker", ["logs", "--tail", "80", db]);
+        assert.fail(`postgres container exited before becoming ready:\n${logs.stdout}\n${logs.stderr}`);
+      }
+    }
+    assert.ok(ready, "box postgres did not become ready with production pg_hba.conf");
+
+    const setup = adminSql(`
+      CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+      SELECT cron.schedule('commonswarm-cron-bgworker-witness', '5 seconds', 'SELECT 1');
+    `);
+    assert.equal(setup.status, 0, setup.stderr);
+    scheduledJobId = setup.stdout.trim().split("\n").at(-1) ?? "";
+    assert.match(scheduledJobId, /^\d+$/, `unexpected cron job id: ${setup.stdout}`);
+    assert.equal(adminSql("SELECT pg_reload_conf();").status, 0);
+
+    // Poll cron.job_run_details with a bounded number of short queries (no sleeps) until one run finishes.
+    const pollDeadline = Date.now() + 70_000;
+    let outcome = "";
+    for (let attempt = 0; attempt < 1500 && Date.now() < pollDeadline; attempt += 1) {
+      const check = adminSql(
+        `SELECT status || '|' || COALESCE(return_message, '') FROM cron.job_run_details WHERE jobid = ${scheduledJobId} AND status IN ('succeeded', 'failed') ORDER BY runid DESC LIMIT 1;`,
+      );
+      assert.equal(check.status, 0, check.stderr);
+      const line = check.stdout.trim();
+      if (line.length > 0) {
+        outcome = line;
+        break;
+      }
+    }
+    assert.ok(outcome.length > 0, "throwaway pg_cron job did not record a completed run within the poll bound");
+    const [status, ...messageParts] = outcome.split("|");
+    assert.equal(status, "succeeded", `pg_cron job failed under production pg_hba.conf: ${messageParts.join("|")}`);
+
+    const bgwSetting = adminSql("SHOW cron.use_background_workers;");
+    assert.equal(bgwSetting.status, 0, bgwSetting.stderr);
+    assert.equal(bgwSetting.stdout.trim(), "on", "cron.use_background_workers must be on");
+    const workersSetting = adminSql("SHOW max_worker_processes;");
+    assert.equal(workersSetting.status, 0, workersSetting.stderr);
+    assert.ok(Number(workersSetting.stdout.trim()) >= 16, `max_worker_processes=${workersSetting.stdout.trim()} is too low`);
+  } finally {
+    if (scheduledJobId && /^\d+$/.test(scheduledJobId)) {
+      adminSql(`SELECT cron.unschedule(${scheduledJobId});`);
+    }
+    run("docker", ["rm", "-f", db]);
+  }
+});
