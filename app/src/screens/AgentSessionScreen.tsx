@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useParams } from 'react-router';
 import { AppFrame } from '../components/AppFrame';
 import { ApprovalCard } from '../components/ApprovalCard';
@@ -70,6 +71,15 @@ export function AgentSessionScreen() {
   const isPhone = useIsPhone();
   const agents = useAppStore((state) => state.agents);
   const agent = agents.find((item) => item.id === id) ?? agents[0];
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const eventCount = agent?.events.length ?? 0;
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (timeline) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }, [agent?.id, eventCount, isPhone]);
 
   if (!agent) return null;
 
@@ -82,7 +92,10 @@ export function AgentSessionScreen() {
     >
       <SessionHeader agent={agent} />
 
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4.5 pt-4.5 pb-4 desktop:gap-5.5 desktop:px-pad-page desktop:pt-pad-section">
+      <div
+        ref={timelineRef}
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4.5 pt-4.5 pb-4 desktop:gap-5.5 desktop:px-pad-page desktop:pt-pad-section"
+      >
         {entries.map((entry) => {
           if (entry.kind === 'person') {
             const person = PEOPLE.find((p) => p.id === entry.event.authorId);
