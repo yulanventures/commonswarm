@@ -261,7 +261,7 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
 
 export const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
 
-export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"] as const;
+export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "wake-transport", "grok-bot-agent-id"] as const;
 
 export async function runReceiveConfigure(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-configure");
@@ -269,6 +269,7 @@ export async function runReceiveConfigure(args: OnboardingArguments): Promise<vo
   await output(await configureAgentReceive({
     profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
     hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
+    wakeTransport: args.optional("wake-transport"),
     grokBotAgentId: args.optional("grok-bot-agent-id"),
     execution: { command: await stableNodePath(), args: [...process.execArgv, resolve(process.argv[1]!)] },
   }));
@@ -320,6 +321,16 @@ export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
   await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
 
+export async function runReceiveRegisterSocket(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-register-socket");
+  args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  const { registerClaudeWakeSocket } = await import("./cloud/native-wake-claude.js");
+  await output(await registerClaudeWakeSocket({
+    profilePath: args.required("profile"),
+    hostSessionId: checkedHostSessionId(args.required("host-session-id")),
+  }));
+}
+
 export const RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 
 export async function runReceiveServe(args: OnboardingArguments): Promise<void> {
@@ -330,6 +341,9 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
   if (binding?.provider === "codex") {
     const { serveCodexWakeBridge } = await import("./cloud/native-wake-codex.js");
     await serveCodexWakeBridge(options);
+  } else if (binding?.provider === "claude" && binding.wake_transport === "socket") {
+    const { serveClaudeWakeBridge } = await import("./cloud/native-wake-claude.js");
+    await serveClaudeWakeBridge(options);
   } else if (binding?.provider === "grok-bot") {
     const { serveGrokBotChannel } = await import("./cloud/agent-channel-grok-bot.js");
     await serveGrokBotChannel(options);

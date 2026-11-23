@@ -31,6 +31,7 @@ import {
   updateReceiveBinding,
   type ReceiveBinding,
 } from "./agent-receive.js";
+import { checkClaudePeerAuthHelper, type ClaudePeerAuthAvailability } from "./claude-peer-auth.js";
 
 type ReceiveProvider = ReceiveBinding["provider"];
 import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
@@ -44,6 +45,7 @@ export const NATIVE_WAKE_ROUTES = [
   "claude-socket",
   "channel",
   "agy-agentapi",
+  "unavailable",
   "none",
 ] as const;
 export type NativeWakeRoute = (typeof NATIVE_WAKE_ROUTES)[number];
@@ -68,12 +70,35 @@ export function assertFixedNativeWakePrompt(prompt: string): number {
 }
 
 /** Map a local receive binding to its public wake route label (`whoami` and `receive status`). */
-export function wakeRouteForBinding(binding: ReceiveBinding | null): NativeWakeRoute {
+export function wakeRouteForBinding(
+  binding: ReceiveBinding | null,
+  claudePeerAuth?: ClaudePeerAuthAvailability,
+): NativeWakeRoute {
   if (!binding || binding.requested_mode !== "wake") return "none";
   if (binding.provider === "codex") return "codex-queue";
-  if (binding.provider === "claude") return "channel";
+  if (binding.provider === "claude") {
+    if (binding.wake_transport === "socket") {
+      const helper = claudePeerAuth ?? checkClaudePeerAuthHelper();
+      return helper.available ? "claude-socket" : "unavailable";
+    }
+    return "channel";
+  }
   if (binding.provider === "grok-bot") return "channel";
   return "none";
+}
+
+export function formatWakeRouteLine(
+  wakeRoute: NativeWakeRoute,
+  wakeVerified: boolean,
+  wakeRouteReason?: string | null,
+): string {
+  if (wakeRoute === "unavailable" && wakeRouteReason) {
+    return `Wake route: unavailable (${wakeRouteReason}).`;
+  }
+  if (wakeRoute !== "none" && wakeRoute !== "unavailable") {
+    return `Wake route: ${wakeRoute} (${wakeVerified ? "verified" : "unverified"}).`;
+  }
+  return `Wake route: ${wakeRoute}.`;
 }
 
 export interface NativeWakeState {
@@ -93,6 +118,15 @@ export interface NativeWakeState {
 
 export interface NativeWakeAdapter {
   readonly route: Exclude<NativeWakeRoute, "none">;
+  /**
+   * Optional pre-reservation readiness gate (e.g., Claude `~/.claude/sessions/<pid>.json`
+   * `status === "idle"`). Returning `{ ready: false, reason }` defers dispatch without
+   * consuming the pending wake slot or 2-minute rate floor.
+   */
+  isReadyToWake?: (input: {
+    hostSessionId: string;
+    cwd: string;
+  }) => Promise<{ ready: true } | { ready: false; reason: string }>;
   sendWake(input: {
     hostSessionId: string;
     prompt: string;
@@ -242,6 +276,7 @@ export async function resolveAuthorizedWakeBinding(options: {
   profilePath: string;
   hostSessionId?: string;
   expectedProvider: ReceiveProvider;
+  expectedWakeTransport?: "socket" | "channel";
   expectedSeat?: WakeSeatExpectation;
 }): Promise<AuthorizedWakeBindingResult> {
   let profile: string;
@@ -335,6 +370,16 @@ export async function resolveAuthorizedWakeBinding(options: {
       detail: "This seat is no longer opted into wake mode.",
     };
   }
+  if (
+    options.expectedWakeTransport !== undefined &&
+    (binding.wake_transport ?? "channel") !== options.expectedWakeTransport
+  ) {
+    return {
+      ok: false,
+      code: "wake_transport_mismatch",
+      detail: `Receive binding uses wake transport ${binding.wake_transport ?? "channel"}, not ${options.expectedWakeTransport}.`,
+    };
+  }
   return { ok: true, profile: opened, binding };
 }
 
@@ -382,7 +427,7 @@ export async function acknowledgeNativeWakeOnCheck(options: {
 
   if (
     binding &&
-    binding.provider === "codex" &&
+    (binding.provider === "codex" || (binding.provider === "claude" && binding.wake_transport === "socket")) &&
     binding.requested_mode === "wake" &&
     binding.canary !== null &&
     binding.canary.emitted_while_idle &&
@@ -413,6 +458,7 @@ export type NativeWakeDecision =
   | { action: "sent"; batch: number; retry: boolean }
   | { action: "debouncing"; dueAtMs: number }
   | { action: "rate_limited"; dueAtMs: number }
+  | { action: "session_busy"; reason: string }
   | { action: "pending"; batch: number }
   | { action: "wake_failed"; batch: number }
   | { action: "binding_inactive"; code: string; detail: string }
@@ -425,6 +471,7 @@ export interface NativeWakeBridgeOptions {
   cwd: string;
   adapter: NativeWakeAdapter;
   expectedProvider?: ReceiveProvider;
+  expectedWakeTransport?: "socket" | "channel";
   expectedSeat?: WakeSeatExpectation;
   debounceMs?: number;
   minIntervalMs?: number;
@@ -437,6 +484,11 @@ export interface NativeWakeBridgeOptions {
 function defaultProviderForRoute(route: Exclude<NativeWakeRoute, "none">): ReceiveProvider {
   if (route === "codex-queue") return "codex";
   return "claude";
+}
+
+function defaultWakeTransportForRoute(route: Exclude<NativeWakeRoute, "none">): "socket" | "channel" | undefined {
+  if (route === "claude-socket") return "socket";
+  return undefined;
 }
 
 type ReservationOutcome =
@@ -454,6 +506,7 @@ export class NativeWakeBridge {
   private readonly cwd: string;
   private readonly adapter: NativeWakeAdapter;
   private readonly expectedProvider: ReceiveProvider;
+  private readonly expectedWakeTransport: "socket" | "channel" | undefined;
   private readonly expectedSeat: WakeSeatExpectation | undefined;
   private readonly debounceMs: number;
   private readonly minIntervalMs: number;
@@ -470,6 +523,7 @@ export class NativeWakeBridge {
     this.cwd = options.cwd;
     this.adapter = options.adapter;
     this.expectedProvider = options.expectedProvider ?? defaultProviderForRoute(options.adapter.route);
+    this.expectedWakeTransport = options.expectedWakeTransport ?? defaultWakeTransportForRoute(options.adapter.route);
     this.expectedSeat = options.expectedSeat;
     this.debounceMs = options.debounceMs ?? NATIVE_WAKE_DEBOUNCE_MS;
     this.minIntervalMs = options.minIntervalMs ?? NATIVE_WAKE_MIN_INTERVAL_MS;
@@ -509,6 +563,7 @@ export class NativeWakeBridge {
             profilePath: this.profilePath,
             hostSessionId: this.hostSessionId,
             expectedProvider: this.expectedProvider,
+            ...(this.expectedWakeTransport !== undefined ? { expectedWakeTransport: this.expectedWakeTransport } : {}),
             ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
           });
           if (!auth.ok) {
@@ -536,6 +591,15 @@ export class NativeWakeBridge {
             if (state.retry_sent_at === null) {
               if (nowMs - sentAtMs < this.retryAfterMs) {
                 return { kind: "decision", decision: { action: "pending", batch: state.pending_batch } };
+              }
+              if (this.adapter.isReadyToWake !== undefined) {
+                const ready = await this.adapter.isReadyToWake({
+                  hostSessionId: this.hostSessionId,
+                  cwd: auth.binding.cwd || this.cwd,
+                });
+                if (!ready.ready) {
+                  return { kind: "decision", decision: { action: "session_busy", reason: ready.reason } };
+                }
               }
               // Reserve the single retry slot BEFORE releasing the lock / running the subprocess.
               const nextBatch = state.batch + 1;
@@ -582,6 +646,17 @@ export class NativeWakeBridge {
             const rateDue = lastWakeMs + this.minIntervalMs;
             if (Number.isFinite(lastWakeMs) && nowMs < rateDue) {
               return { kind: "decision", decision: { action: "rate_limited", dueAtMs: rateDue } };
+            }
+          }
+
+          // 5. Optional host idle gate (e.g., Claude session status === "idle") before reserving budget.
+          if (this.adapter.isReadyToWake !== undefined) {
+            const ready = await this.adapter.isReadyToWake({
+              hostSessionId: this.hostSessionId,
+              cwd: auth.binding.cwd || this.cwd,
+            });
+            if (!ready.ready) {
+              return { kind: "decision", decision: { action: "session_busy", reason: ready.reason } };
             }
           }
 
@@ -638,6 +713,7 @@ export class NativeWakeBridge {
               profilePath: this.profilePath,
               hostSessionId: this.hostSessionId,
               expectedProvider: this.expectedProvider,
+              ...(this.expectedWakeTransport !== undefined ? { expectedWakeTransport: this.expectedWakeTransport } : {}),
               ...(this.expectedSeat ? { expectedSeat: this.expectedSeat } : {}),
             });
             if (!liveAuth.ok) {
