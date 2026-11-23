@@ -4398,7 +4398,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/native-wake-codex.ts:380",
+          "citation": "src/cloud/native-wake-codex.ts:394",
           "detail": "5-second local standalone Codex wake-bridge heartbeat interval.",
           "operation": {
             "name": "codex-wake-heartbeat",
@@ -4414,7 +4414,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/native-wake-codex.ts:262",
+          "citation": "src/cloud/native-wake-codex.ts:264",
           "detail": "ThinCommandClient signal request timeout for self-addressed Codex idle canary emission.",
           "operation": {
             "name": "codex-wake-canary-timeout",

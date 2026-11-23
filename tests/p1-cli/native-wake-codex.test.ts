@@ -754,6 +754,113 @@ test("serveCodexWakeBridge survives a slow codex queue call past the heartbeat l
   }
 });
 
+test("serveCodexWakeBridge waits for an in-flight heartbeat write before resolving on opt-out", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-codex-heartbeat-stop-"));
+  const previousHome = process.env.HOME;
+  const previousState = process.env.SWARM_AGENT_STATE_DIR;
+  process.env.HOME = root;
+  process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
+
+  let heartbeatCalls = 0;
+  let heartbeatAfterExit = false;
+  let heartbeatStarted!: () => void;
+  const waitForHeartbeat = new Promise<void>((done) => { heartbeatStarted = done; });
+  let releaseHeartbeat!: () => void;
+  const heartbeatGate = new Promise<void>((done) => { releaseHeartbeat = done; });
+
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      if (req.method !== "POST" || !raw.trim()) {
+        res.writeHead(404).end();
+        return;
+      }
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      if (body.resource === "members") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          members: [{ user_id: OWNER, display_name: "Owner" }],
+          agents: [{ principal_id: AGENT, name: "CodexSeat", owner_user_id: OWNER }],
+          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER, workspace_name: "TestWS" },
+        }));
+        return;
+      }
+      if (body.resource === "signals") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          signals: [],
+          pending_delivery_count: 0,
+          capabilities: { cursor_after: 1, delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ grants: [] }));
+    });
+  });
+
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const abort = new AbortController();
+  let serving: Promise<void> | undefined;
+  let serveExited = false;
+  try {
+    const port = (server.address() as { port: number }).port;
+    const { cwd, profile } = await setupBoundCodexSeat(root, `http://127.0.0.1:${port}`);
+    serving = serveCodexWakeBridge({
+      profilePath: profile,
+      hostSessionId: THREAD,
+      adapter: new CodexQueueAdapter({
+        codexExecutable: "codex",
+        runner: async () => ({ stdout: "ok\n", stderr: "" }),
+      }),
+      debounceMs: 50,
+      minIntervalMs: 100,
+      pollMs: 50,
+      heartbeatMs: 30,
+      signal: abort.signal,
+      beforeHeartbeat: async () => {
+        heartbeatCalls += 1;
+        if (serveExited) heartbeatAfterExit = true;
+        if (heartbeatCalls === 1) {
+          heartbeatStarted();
+          await heartbeatGate;
+        }
+      },
+    }).finally(() => {
+      serveExited = true;
+    });
+
+    await waitForHeartbeat;
+    await configureAgentReceive({
+      profilePath: profile,
+      mode: "turn",
+      provider: "codex",
+      hostSessionId: THREAD,
+      cwd,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] },
+    });
+    await delay(150);
+    assert.equal(serveExited, false, "serveCodexWakeBridge must wait for an in-flight heartbeat write before resolving");
+
+    releaseHeartbeat();
+    await serving;
+    assert.equal(serveExited, true);
+    assert.equal(heartbeatAfterExit, false);
+    const finalBinding = await readReceiveBinding(profile, THREAD);
+    assert.equal(finalBinding?.channel_pid, null);
+    assert.equal(finalBinding?.channel_heartbeat_at, null);
+    assert.equal(receiveStatus(finalBinding).channel_running, false);
+  } finally {
+    releaseHeartbeat();
+    abort.abort();
+    await serving?.catch(() => undefined);
+    if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+    else process.env.SWARM_AGENT_STATE_DIR = previousState;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await new Promise<void>((done) => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("serveCodexWakeBridge refuses wake when wake mode is withdrawn during a held poll", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-codex-withdraw-"));
   const previousHome = process.env.HOME;

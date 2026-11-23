@@ -181,6 +181,8 @@ export interface ServeCodexWakeBridgeOptions {
   wake?: WakeHandle;
   now?: () => number;
   signal?: AbortSignal;
+  /** Test seam invoked inside a heartbeat touch before updating the receive binding. */
+  beforeHeartbeat?: () => Promise<void> | void;
 }
 
 /**
@@ -337,7 +339,10 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
     }));
   });
 
-  let touching = false;
+  let inFlightTouch: Promise<void> | null = null;
+  const awaitInFlightTouch = async (): Promise<void> => {
+    await inFlightTouch?.catch(() => undefined);
+  };
   const bindingStillOwned = async (): Promise<boolean> => {
     const current = await readReceiveBinding(profilePath, host).catch(() => null);
     return (
@@ -346,34 +351,43 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
       current.channel_instance_id === runtimeId
     );
   };
-  const touch = async (): Promise<void> => {
-    if (stopped || abort.signal.aborted || touching) return;
-    touching = true;
-    try {
-      if (bridge.isDispatching()) {
-        if (!(await bindingStillOwned())) {
-          stop();
+  const touch = (): Promise<void> => {
+    if (stopped || abort.signal.aborted) return inFlightTouch ?? Promise.resolve();
+    if (inFlightTouch !== null) return inFlightTouch;
+    const run = (async () => {
+      try {
+        if (bridge.isDispatching()) {
+          if (!(await bindingStillOwned())) {
+            stop();
+          }
+          return;
         }
-        return;
+        if (options.beforeHeartbeat !== undefined) {
+          await options.beforeHeartbeat();
+        }
+        await updateReceiveBinding(profilePath, host, (b) => {
+          if (stopped || abort.signal.aborted || b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") {
+            stop();
+            return b;
+          }
+          return { ...b, channel_heartbeat_at: new Date(now()).toISOString() };
+        });
+      } catch (error) {
+        if (error instanceof FileLockTimeoutError) {
+          if (!(await bindingStillOwned())) {
+            stop();
+          }
+          return;
+        }
+        stop();
       }
-      await updateReceiveBinding(profilePath, host, (b) => {
-        if (b.channel_instance_id !== runtimeId || b.requested_mode !== "wake") {
-          stop();
-          return b;
-        }
-        return { ...b, channel_heartbeat_at: new Date(now()).toISOString() };
-      });
-    } catch (error) {
-      if (error instanceof FileLockTimeoutError) {
-        if (!(await bindingStillOwned())) {
-          stop();
-        }
-        return;
-      }
-      stop();
-    } finally {
-      touching = false;
-    }
+    })();
+    let tracked: Promise<void> | null = null;
+    tracked = run.finally(() => {
+      if (inFlightTouch === tracked) inFlightTouch = null;
+    });
+    inFlightTouch = tracked;
+    return tracked;
   };
 
   try {
@@ -485,6 +499,7 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
           break;
         }
         if (decision.action === "sent" || decision.action === "error") {
+          await awaitInFlightTouch();
           await touch();
         }
         if (decision.action === "error" && decision.code !== lastErrorCode) {
@@ -525,6 +540,7 @@ export async function serveCodexWakeBridge(options: ServeCodexWakeBridgeOptions)
     if (heartbeat) clearInterval(heartbeat);
     manager?.stopTimers();
     await wake.close();
+    await awaitInFlightTouch();
     await updateReceiveBinding(profilePath, host, (b) =>
       b.channel_instance_id === runtimeId
         ? { ...b, channel_pid: null, channel_heartbeat_at: null, wake_verified_at: null }
