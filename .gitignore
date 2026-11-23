@@ -35,3 +35,5 @@ uxtest/rounds/*/*
 
 # Deterministic ChatGPT submission draft built from distribution/chatgpt-apps.
 dist-chatgpt/
+app/node_modules
+app/dist
