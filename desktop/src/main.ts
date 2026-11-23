@@ -17,7 +17,7 @@ import {
   isAllowedExternalUrl,
   isAppOriginUrl,
   resolveAppUrl,
-  type NavigationPolicyOptions,
+  type AppOriginOptions,
 } from "./policy.js";
 
 const APP_TITLE = "CommonSwarm";
@@ -185,7 +185,7 @@ function buildAppMenu(): Menu {
   return Menu.buildFromTemplate(template);
 }
 
-function configurePermissions(policyOptions: NavigationPolicyOptions): void {
+function configurePermissions(policyOptions: AppOriginOptions): void {
   const defaultSession = session.defaultSession;
 
   defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
@@ -198,7 +198,7 @@ function configurePermissions(policyOptions: NavigationPolicyOptions): void {
   });
 }
 
-function createMainWindow(appUrl: string, policyOptions: NavigationPolicyOptions): BrowserWindow {
+function createMainWindow(appUrl: string, policyOptions: AppOriginOptions): BrowserWindow {
   const saved = loadWindowState();
 
   const win = new BrowserWindow({
@@ -268,7 +268,11 @@ function createMainWindow(appUrl: string, policyOptions: NavigationPolicyOptions
   };
 
   const handleNavigation = (event: { preventDefault: () => void }, url: string): void => {
-    const disposition = classifyNavigation(url, policyOptions);
+    const disposition = classifyNavigation(url, {
+      ...policyOptions,
+      source: "navigate",
+      currentUrl: win.webContents.getURL(),
+    });
     if (disposition === "in_app") return;
     event.preventDefault();
     if (disposition === "external") {
@@ -280,7 +284,10 @@ function createMainWindow(appUrl: string, policyOptions: NavigationPolicyOptions
   win.webContents.on("will-redirect", handleNavigation);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    const disposition = classifyNavigation(url, policyOptions);
+    const disposition = classifyNavigation(url, {
+      ...policyOptions,
+      source: "new_window",
+    });
     if (disposition === "in_app") {
       void win.loadURL(url);
     } else if (disposition === "external") {
@@ -312,7 +319,7 @@ if (!gotSingleInstanceLock) {
   app.setName(APP_TITLE);
 
   const appUrl = resolveAppUrl({ isPackaged: app.isPackaged, env: process.env });
-  const policyOptions: NavigationPolicyOptions = {
+  const policyOptions: AppOriginOptions = {
     allowedDevOrigin: getAllowedDevOrigin(appUrl, app.isPackaged),
   };
 

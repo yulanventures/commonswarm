@@ -23,3 +23,7 @@ Packages are written to `desktop/release/`.
 1. Open the `.dmg` and drag **CommonSwarm** to **Applications**.
 2. Open **CommonSwarm**; macOS shows a warning that Apple could not verify it.
 3. Open **System Settings > Privacy & Security** and click **Open Anyway**.
+
+## Sign-in
+
+Email and password and GitHub work inside the window; Google sign-in is expected to be refused by Google inside an app window and will be handled through the system browser in a later version.

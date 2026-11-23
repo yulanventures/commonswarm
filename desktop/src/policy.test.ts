@@ -11,68 +11,207 @@ import {
   SIGN_IN_HOSTS,
 } from "./policy.js";
 
+const FROM_APP = { source: "navigate", currentUrl: APP_URL } as const;
+const NEW_WINDOW = { source: "new_window", currentUrl: APP_URL } as const;
+
 test("classifyNavigation allows the CommonSwarm app origin on any path", () => {
-  assert.equal(classifyNavigation("https://commonswarm.com"), "in_app");
-  assert.equal(classifyNavigation("https://commonswarm.com/app"), "in_app");
-  assert.equal(classifyNavigation("https://commonswarm.com/invite?token=abc#section"), "in_app");
-  assert.equal(classifyNavigation("https://commonswarm.com/support"), "in_app");
+  for (const opts of [FROM_APP, NEW_WINDOW]) {
+    assert.equal(classifyNavigation("https://commonswarm.com", opts), "in_app");
+    assert.equal(classifyNavigation("https://commonswarm.com/app", opts), "in_app");
+    assert.equal(classifyNavigation("https://commonswarm.com/invite?token=abc#section", opts), "in_app");
+    assert.equal(classifyNavigation("https://commonswarm.com/support", opts), "in_app");
+  }
 });
 
-test("classifyNavigation allows every allow-listed sign-in host", () => {
+test("classifyNavigation allows every allow-listed sign-in host path on navigate from app origin", () => {
   assert.ok(SIGN_IN_HOSTS.length >= 3);
   for (const entry of SIGN_IN_HOSTS) {
     assert.ok(entry.reason.length > 0, `missing reason for ${entry.host}`);
-    assert.equal(classifyNavigation(`https://${entry.host}/auth`), "in_app");
+    assert.ok(entry.paths.length > 0, `missing paths for ${entry.host}`);
+    for (const pathEntry of entry.paths) {
+      assert.ok(pathEntry.reason.length > 0, `missing reason for ${entry.host}${pathEntry.prefix}`);
+      const samplePath = pathEntry.prefix.endsWith("/")
+        ? `${pathEntry.prefix}step`
+        : pathEntry.prefix;
+      assert.equal(
+        classifyNavigation(`https://${entry.host}${samplePath}`, FROM_APP),
+        "in_app",
+        `expected ${entry.host}${samplePath} to be in_app`,
+      );
+      assert.equal(
+        classifyNavigation(`https://${entry.host}${samplePath}`, NEW_WINDOW),
+        "external",
+        `expected ${entry.host}${samplePath} to be external for new_window`,
+      );
+    }
+    assert.equal(
+      classifyNavigation(`https://${entry.host}/not-an-auth-path`, FROM_APP),
+      "external",
+      `expected unlisted path on ${entry.host} to be external`,
+    );
   }
   assert.equal(
-    classifyNavigation("https://api.commonswarm.com/auth/v1/authorize?provider=github"),
+    classifyNavigation("https://api.commonswarm.com/auth/v1/authorize?provider=github", FROM_APP),
     "in_app",
   );
   assert.equal(
-    classifyNavigation("https://api.commonswarm.com/auth/v1/callback?code=123"),
+    classifyNavigation("https://api.commonswarm.com/auth/v1/callback?code=123", FROM_APP),
     "in_app",
   );
   assert.equal(
-    classifyNavigation("https://github.com/login/oauth/authorize?client_id=abc"),
+    classifyNavigation("https://github.com/login/oauth/authorize?client_id=abc", FROM_APP),
     "in_app",
   );
   assert.equal(
-    classifyNavigation("https://accounts.google.com/o/oauth2/v2/auth?client_id=abc"),
+    classifyNavigation("https://accounts.google.com/o/oauth2/v2/auth?client_id=abc", FROM_APP),
     "in_app",
   );
+});
+
+test("classifyNavigation keeps new_window to app origin only and sends external or sign-in links to system browser", () => {
+  assert.equal(
+    classifyNavigation("https://github.com/yulanventures/commonswarm/pull/1", NEW_WINDOW),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://docs.google.com/document/d/12345/edit", NEW_WINDOW),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/login/oauth/authorize?client_id=abc", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/login/oauth/authorize?client_id=abc", NEW_WINDOW),
+    "external",
+  );
+});
+
+test("classifyNavigation restricts sign-in hosts to explicit auth paths on navigate", () => {
+  assert.equal(
+    classifyNavigation("https://github.com/yulanventures/commonswarm/pull/1", FROM_APP),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/login?return_to=%2Flogin%2Foauth%2Fauthorize", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/session", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/sessions/two-factor/app", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/login/../yulanventures/commonswarm/pull/1", FROM_APP),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://api.commonswarm.com/auth/v1/authorize?provider=github", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://api.commonswarm.com/functions/v1/command", FROM_APP),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://accounts.google.com/v3/signin/rejected", FROM_APP),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("https://accounts.google.com/ManageAccount", FROM_APP),
+    "external",
+  );
+});
+
+test("classifyNavigation requires app or sign-in currentUrl to enter a sign-in host", () => {
+  assert.equal(
+    classifyNavigation("https://github.com/login/oauth/authorize?client_id=abc", {
+      source: "navigate",
+      currentUrl: "https://example.com/page",
+    }),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://api.commonswarm.com/auth/v1/authorize?provider=github", {
+      source: "navigate",
+      currentUrl: "https://example.com/page",
+    }),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://accounts.google.com/o/oauth2/v2/auth?client_id=abc", {
+      source: "navigate",
+      currentUrl: "",
+    }),
+    "external",
+  );
+  assert.equal(
+    classifyNavigation("https://github.com/login", {
+      source: "navigate",
+    }),
+    "external",
+  );
+});
+
+test("classifyNavigation allows the full OAuth redirect chain at every step", () => {
+  const steps = [
+    "https://commonswarm.com/app",
+    "https://api.commonswarm.com/auth/v1/authorize?provider=github",
+    "https://github.com/login/oauth/authorize?client_id=abc",
+    "https://github.com/login?return_to=%2Flogin%2Foauth%2Fauthorize",
+    "https://github.com/session",
+    "https://github.com/sessions/two-factor/app",
+    "https://api.commonswarm.com/auth/v1/callback?code=123",
+    "https://commonswarm.com/app?code=123",
+  ];
+  for (let i = 1; i < steps.length; i++) {
+    const currentUrl = steps[i - 1];
+    const nextUrl = steps[i];
+    assert.equal(
+      classifyNavigation(nextUrl, { source: "navigate", currentUrl }),
+      "in_app",
+      `expected transition ${currentUrl} -> ${nextUrl} to be in_app`,
+    );
+  }
 });
 
 test("classifyNavigation treats look-alike hosts as external, never in_app", () => {
-  assert.equal(classifyNavigation("https://commonswarm.com.evil.example/app"), "external");
-  assert.equal(classifyNavigation("https://evilcommonswarm.com/app"), "external");
-  assert.equal(classifyNavigation("https://sub.commonswarm.com/app"), "external");
-  assert.equal(classifyNavigation("https://github.com.evil.example/login"), "external");
-  assert.equal(classifyNavigation("https://evilgithub.com/login"), "external");
-  assert.equal(classifyNavigation("https://accounts.google.com.evil.example/"), "external");
-  assert.equal(classifyNavigation("https://commonswarm.com:8443/app"), "external");
+  assert.equal(classifyNavigation("https://commonswarm.com.evil.example/app", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://evilcommonswarm.com/app", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://sub.commonswarm.com/app", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://github.com.evil.example/login", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://evilgithub.com/login", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://accounts.google.com.evil.example/", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://accounts.google.com.evil.example/o/oauth2/v2/auth", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://commonswarm.com:8443/app", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://github.com:8443/login", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://github.com@evil.example/login", FROM_APP), "blocked");
 });
 
 test("classifyNavigation treats other https URLs as external", () => {
-  assert.equal(classifyNavigation("https://example.com/docs"), "external");
-  assert.equal(classifyNavigation("https://docs.github.com/en"), "external");
+  assert.equal(classifyNavigation("https://example.com/docs", FROM_APP), "external");
+  assert.equal(classifyNavigation("https://docs.github.com/en", FROM_APP), "external");
 });
 
 test("classifyNavigation blocks non-https, dangerous schemes, credentials, and malformed input", () => {
-  assert.equal(classifyNavigation("http://commonswarm.com"), "blocked");
-  assert.equal(classifyNavigation("http://commonswarm.com/app"), "blocked");
-  assert.equal(classifyNavigation("http://api.commonswarm.com/auth/v1/authorize"), "blocked");
-  assert.equal(classifyNavigation("http://example.com"), "blocked");
-  assert.equal(classifyNavigation("http://localhost:4321/app"), "blocked");
-  assert.equal(classifyNavigation("javascript:alert(1)"), "blocked");
-  assert.equal(classifyNavigation("data:text/html,<script>alert(1)</script>"), "blocked");
-  assert.equal(classifyNavigation("file:///etc/passwd"), "blocked");
-  assert.equal(classifyNavigation("commonswarm://open"), "blocked");
-  assert.equal(classifyNavigation("mailto:ops@commonswarm.com"), "blocked");
-  assert.equal(classifyNavigation("https://user:pass@commonswarm.com/app"), "blocked");
-  assert.equal(classifyNavigation(""), "blocked");
-  assert.equal(classifyNavigation("   "), "blocked");
-  assert.equal(classifyNavigation("not a url"), "blocked");
-  assert.equal(classifyNavigation("://missing-scheme"), "blocked");
+  assert.equal(classifyNavigation("http://commonswarm.com", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("http://commonswarm.com/app", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("http://api.commonswarm.com/auth/v1/authorize", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("http://example.com", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("http://localhost:4321/app", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("javascript:alert(1)", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("data:text/html,<script>alert(1)</script>", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("file:///etc/passwd", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("commonswarm://open", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("mailto:ops@commonswarm.com", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("https://user:pass@commonswarm.com/app", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("   ", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("not a url", FROM_APP), "blocked");
+  assert.equal(classifyNavigation("://missing-scheme", FROM_APP), "blocked");
 });
 
 test("resolveAppUrl accepts override only when unpackaged and only for allowed origins", () => {
@@ -163,16 +302,28 @@ test("allowedDevOrigin permits only the matching local dev origin in unpackaged 
   assert.equal(getAllowedDevOrigin("https://commonswarm.com/app", false), null);
 
   assert.equal(
-    classifyNavigation("http://localhost:4321/invite", { allowedDevOrigin: devOrigin }),
+    classifyNavigation("http://localhost:4321/invite", { source: "navigate", allowedDevOrigin: devOrigin }),
     "in_app",
   );
   assert.equal(
-    classifyNavigation("http://localhost:9999/other", { allowedDevOrigin: devOrigin }),
+    classifyNavigation("http://localhost:4321/invite", { source: "new_window", allowedDevOrigin: devOrigin }),
+    "in_app",
+  );
+  assert.equal(
+    classifyNavigation("http://localhost:9999/other", { source: "navigate", allowedDevOrigin: devOrigin }),
     "blocked",
   );
   assert.equal(
-    classifyNavigation("http://commonswarm.com/app", { allowedDevOrigin: devOrigin }),
+    classifyNavigation("http://commonswarm.com/app", { source: "navigate", allowedDevOrigin: devOrigin }),
     "blocked",
+  );
+  assert.equal(
+    classifyNavigation("https://api.commonswarm.com/auth/v1/authorize?provider=github", {
+      source: "navigate",
+      currentUrl: "http://localhost:4321/app",
+      allowedDevOrigin: devOrigin,
+    }),
+    "in_app",
   );
 });
 
