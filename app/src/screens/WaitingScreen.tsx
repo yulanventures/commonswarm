@@ -2,6 +2,7 @@ import { Link } from 'react-router';
 import { AppFrame } from '../components/AppFrame';
 import { ClearedList } from '../components/ClearedList';
 import { WaitingItemCard } from '../components/WaitingItemCard';
+import { WORKSPACE_UNAVAILABLE_TEXT, useSessionSnapshot } from '../data/queries';
 import {
   appActions,
   getOpenWaitingCount,
@@ -9,11 +10,31 @@ import {
 } from '../store/appStore';
 
 export function WaitingScreen() {
+  const snapshot = useSessionSnapshot();
+  const unavailableWorkspaceId = useAppStore(
+    (state) => state.unavailableWorkspaceId,
+  );
   const agents = useAppStore((state) => state.agents);
   const waitingItems = useAppStore((state) => state.waitingItems);
   const clearedItems = useAppStore((state) => state.clearedItems);
   const filter = useAppStore((state) => state.waitingFilter);
   const openCount = useAppStore(getOpenWaitingCount);
+
+  if (
+    snapshot.state.status === 'authenticated' &&
+    unavailableWorkspaceId !== null
+  ) {
+    return (
+      <AppFrame>
+        <div
+          data-testid="workspace-unavailable-pane"
+          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
+        >
+          {WORKSPACE_UNAVAILABLE_TEXT}
+        </div>
+      </AppFrame>
+    );
+  }
 
   const visibleItems = waitingItems.filter(
     (item) => item.status === 'open' || item.status === 'dismissed',
@@ -33,6 +54,12 @@ export function WaitingScreen() {
         <h1 className="text-lg font-bold tracking-tight text-ink">
           Waiting on you
         </h1>
+        <span
+          data-testid="sample-data-marker"
+          className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+        >
+          Sample data
+        </span>
 
         <div role="tablist" aria-label="Filter items" className="flex items-center gap-3">
           <button

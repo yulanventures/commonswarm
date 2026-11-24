@@ -27,7 +27,7 @@ export interface Person {
   name: string;
   initials: string;
   tone: AvatarTone;
-  presence: 'online' | 'away';
+  presence?: 'online' | 'away';
 }
 
 export interface Computer {
@@ -232,11 +232,27 @@ export interface ChannelMessage {
 }
 
 export interface Channel {
+  id?: string;
   name: string;
+  kind?: 'general' | 'public_channel' | 'private_channel';
+  isPrivate?: boolean;
   unread: boolean;
+  unreadCount?: number;
+  mentionCount?: number;
+  muted?: boolean;
   peopleCount: number;
   agentIds: string[];
   messages: ChannelMessage[];
+}
+
+export interface SidebarDirectMessage {
+  id: string;
+  kind: 'dm' | 'group_dm';
+  title: string;
+  unread: boolean;
+  unreadCount: number;
+  mentionCount: number;
+  muted: boolean;
 }
 
 export type WaitingItemKind = 'approval' | 'choice' | 'review';

@@ -40,6 +40,7 @@ import {
 } from "@supabase/supabase-js";
 import { authProvider } from "./auth-providers.js";
 import {
+  MULTI_ACCOUNT_ENABLED,
   accountsStorageKey,
   activeAccountStorageKey,
   attemptStorageKey,
@@ -51,8 +52,7 @@ import {
   tabAccountStorageKey,
 } from "../../../shared/browser-session/index.js";
 
-/** Dormant feature gate until PR 2 passes HezSec, Designer, and Lead reviews. */
-export const MULTI_ACCOUNT_ENABLED = false;
+export { MULTI_ACCOUNT_ENABLED };
 
 let multiAccountTestOverride: boolean | null = null;
 

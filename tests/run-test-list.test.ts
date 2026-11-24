@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -10,11 +11,14 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 const runner = resolve(process.cwd(), "scripts/run-test-list.mjs");
 
@@ -31,6 +35,9 @@ function run(dir: string, ...args: string[]) {
   // an inherited NODE_TEST_CONTEXT would make the inner node --test behave as a child reporter
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  const runTmp = join(dir, ".tmp");
+  mkdirSync(runTmp, { recursive: true });
+  env.TMPDIR = runTmp;
   return spawnSync(process.execPath, [runner, ...args], { cwd: dir, encoding: "utf8", env });
 }
 
@@ -409,8 +416,14 @@ function hangingFixture(): string {
   ].join("\n");
 }
 
+const SIGNAL_EXIT_CODES: Record<"SIGTERM" | "SIGINT" | "SIGHUP", number> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
-  test(`runner cleans up and stays interrupted on ${signal}`, { timeout: 60_000, ...POSIX_ONLY }, async () => {
+  test(`runner cleans up and exits with conventional code on ${signal}`, { timeout: 60_000, ...POSIX_ONLY }, async () => {
     await withSandbox(async (sandbox) => {
       writeFileSync(join(sandbox.work, "hang.test.mjs"), hangingFixture());
       writeFileSync(join(sandbox.work, "list.txt"), "hang.test.mjs\n");
@@ -418,9 +431,11 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
       const allocated = await waitForAck(join(sandbox.work, "ack.txt"));
       child.kill(signal);
       const result = await done;
-      assert.ok(
-        result.signal === signal || (result.status !== 0 && result.status !== null),
-        `interruption must not look like success: status=${result.status} signal=${result.signal}`,
+      assert.equal(result.signal, null, `expected clean exit with conventional code on ${signal}`);
+      assert.equal(
+        result.status,
+        SIGNAL_EXIT_CODES[signal],
+        `expected exit code ${SIGNAL_EXIT_CODES[signal]} on ${signal}, got status=${result.status} signal=${result.signal}`,
       );
       assertCleaned(sandbox, allocated);
     });
@@ -628,3 +643,193 @@ for (const mode of ["symlink", "directory"] as const) {
     });
   });
 }
+
+test("runner removes its run root after a passing list run and after a failing list run", { timeout: 60_000 }, async () => {
+  await withSandbox(async (sandbox) => {
+    writeFileSync(join(sandbox.work, "pass.test.mjs"), leakingFixture("ack-pass.txt", false));
+    writeFileSync(join(sandbox.work, "pass-list.txt"), "pass.test.mjs\n");
+    const passResult = await startRunner(sandbox, ["pass-list.txt"]).done;
+    assert.equal(passResult.status, 0, passResult.stderr);
+    assertCleaned(sandbox, await waitForAck(join(sandbox.work, "ack-pass.txt")));
+
+    writeFileSync(join(sandbox.work, "fail.test.mjs"), leakingFixture("ack-fail.txt", true));
+    writeFileSync(join(sandbox.work, "fail-list.txt"), "fail.test.mjs\n");
+    const failResult = await startRunner(sandbox, ["fail-list.txt"]).done;
+    assert.notEqual(failResult.status, 0, "failing run must exit nonzero");
+    assertCleaned(sandbox, await waitForAck(join(sandbox.work, "ack-fail.txt")));
+  });
+});
+
+test("runner cleans up its run root on an uncaught error while the child is running", { timeout: 60_000, ...POSIX_ONLY }, async () => {
+  await withSandbox(async (sandbox) => {
+    const ackPath = join(sandbox.work, "ack.txt");
+    writeFileSync(join(sandbox.work, "hang.test.mjs"), hangingFixture());
+    writeFileSync(join(sandbox.work, "list.txt"), "hang.test.mjs\n");
+    writeFileSync(
+      join(sandbox.work, "throw-after-ack.mjs"),
+      [
+        'import { existsSync } from "node:fs";',
+        `const ackPath = ${JSON.stringify(ackPath)};`,
+        "const timer = setInterval(() => {",
+        "  if (existsSync(ackPath)) {",
+        "    clearInterval(timer);",
+        '    throw new Error("deliberate uncaught error");',
+        "  }",
+        "}, 25);",
+        "timer.unref();",
+        "",
+      ].join("\n"),
+    );
+    const result = await startRunner(sandbox, ["list.txt"], {
+      nodeFlags: ["--import", join(sandbox.work, "throw-after-ack.mjs")],
+    }).done;
+    assert.equal(result.status, 1, `expected exit 1 on uncaught error, got status=${result.status} signal=${result.signal}`);
+    assert.match(result.stderr, /deliberate uncaught error/);
+    assertCleaned(sandbox, await waitForAck(ackPath));
+  });
+});
+
+test("startup sweep removes stale dead-owner and >24h orphan folders while preserving live, recent, and unreadable <24h folders", { timeout: 60_000, ...POSIX_ONLY }, async () => {
+  await withSandbox(async (sandbox) => {
+    // Obtain a guaranteed-dead PID by running and reaping a short-lived child.
+    const shortLived = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+    assert.equal(shortLived.status, 0);
+    const deadPid = shortLived.pid;
+    assert.ok(typeof deadPid === "number" && deadPid > 0, "expected short-lived child pid");
+    // Confirm the PID is actually dead before building fixtures around it.
+    let deadConfirmed = false;
+    try {
+      process.kill(deadPid, 0);
+    } catch (error) {
+      deadConfirmed = (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+    assert.equal(deadConfirmed, true, `expected reaped pid ${deadPid} to be ESRCH`);
+
+    const nowMs = Date.now();
+    const hoursAgo = (hours: number) => new Date(nowMs - hours * 60 * 60 * 1000);
+    const makeRunDir = (name: string, ageHours: number, marker?: string) => {
+      const dir = join(sandbox.parent, name);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "payload.txt"), "data");
+      if (marker !== undefined) writeFileSync(join(dir, ".owner-pid"), marker, { mode: 0o600 });
+      const ts = hoursAgo(ageHours);
+      utimesSync(dir, ts, ts);
+      return dir;
+    };
+
+    const oldDead = makeRunDir("cswarm-test-run-old-dead", 7, `${deadPid}\n`);
+    const oldLive = makeRunDir("cswarm-test-run-old-live", 30, `${process.pid}\n`);
+    const recentDead = makeRunDir("cswarm-test-run-recent-dead", 1, `${deadPid}\n`);
+    const oldNoMarker = makeRunDir("cswarm-test-run-old-nomarker", 10);
+    const oldBadMarker = makeRunDir("cswarm-test-run-old-badmarker", 10, "not-a-pid\n");
+    const oldUnreadable = makeRunDir("cswarm-test-run-old-unreadable", 10, `${deadPid}\n`);
+    const unreadableMarker = join(oldUnreadable, ".owner-pid");
+    chmodSync(unreadableMarker, 0o000);
+    utimesSync(oldUnreadable, hoursAgo(10), hoursAgo(10));
+    const ancientNoMarker = makeRunDir("cswarm-test-run-ancient-nomarker", 26);
+    const oldSymlink = join(sandbox.parent, "cswarm-test-run-symlink");
+    symlinkSync(sandbox.canary, oldSymlink, "dir");
+
+    try {
+      writeFileSync(
+        join(sandbox.work, "ok.test.mjs"),
+        'import { test } from "node:test";\ntest("ok", () => {});\n',
+      );
+      writeFileSync(join(sandbox.work, "list.txt"), "ok.test.mjs\n");
+      const result = await startRunner(sandbox, ["list.txt"]).done;
+      assert.equal(result.status, 0, result.stderr);
+
+      assert.equal(existsSync(oldDead), false, "old folder with dead owner must be swept");
+      assert.equal(existsSync(ancientNoMarker), false, ">24h folder without marker must be swept");
+      assert.equal(existsSync(oldLive), true, "folder with live owner must never be swept");
+      assert.equal(existsSync(recentDead), true, "recent (<6h) folder must not be swept");
+      assert.equal(existsSync(oldNoMarker), true, "6h-24h folder with missing marker must be left alone");
+      assert.equal(existsSync(oldBadMarker), true, "6h-24h folder with corrupt marker must be left alone");
+      assert.equal(existsSync(oldUnreadable), true, "6h-24h folder with unreadable marker must be left alone");
+      assert.equal(lstatSync(oldSymlink).isSymbolicLink(), true, "symlink matching prefix must never be swept");
+      assert.equal(readFileSync(join(sandbox.canary, "keep.txt"), "utf8"), "keep\n");
+
+      const remaining = readdirSync(sandbox.parent).sort();
+      assert.deepEqual(remaining, [
+        "canary",
+        "cswarm-test-run-old-badmarker",
+        "cswarm-test-run-old-live",
+        "cswarm-test-run-old-nomarker",
+        "cswarm-test-run-old-unreadable",
+        "cswarm-test-run-recent-dead",
+        "cswarm-test-run-symlink",
+      ]);
+    } finally {
+      try {
+        chmodSync(unreadableMarker, 0o600);
+      } catch {
+        // Already removed or restored.
+      }
+    }
+  });
+});
+
+test("CSWARM_KEEP_TEST_TMP=1 keeps the run folder, writes .owner-pid, and prints its path", { timeout: 60_000 }, async () => {
+  await withSandbox(async (sandbox) => {
+    writeFileSync(join(sandbox.work, "pass.test.mjs"), leakingFixture("ack-keep-pass.txt", false));
+    writeFileSync(join(sandbox.work, "pass-list.txt"), "pass.test.mjs\n");
+    const passResult = await startRunner(sandbox, ["pass-list.txt"], {
+      extraEnv: { CSWARM_KEEP_TEST_TMP: "1" },
+    }).done;
+    assert.equal(passResult.status, 0, passResult.stderr);
+    const passAllocated = await waitForAck(join(sandbox.work, "ack-keep-pass.txt"));
+    const passRoot = dirname(passAllocated);
+    assert.equal(existsSync(passRoot), true, "opt-out must keep the run folder on pass");
+    assert.equal(existsSync(passAllocated), true, "opt-out must preserve contents inside the run folder");
+    assert.ok(passResult.stderr.includes(passRoot), `expected kept path ${passRoot} in stderr: ${passResult.stderr}`);
+    const markerPid = readFileSync(join(passRoot, ".owner-pid"), "utf8").trim();
+    assert.match(markerPid, /^[1-9][0-9]*$/, "kept folder must contain a numeric .owner-pid marker");
+
+    writeFileSync(join(sandbox.work, "fail.test.mjs"), leakingFixture("ack-keep-fail.txt", true));
+    writeFileSync(join(sandbox.work, "fail-list.txt"), "fail.test.mjs\n");
+    const failResult = await startRunner(sandbox, ["fail-list.txt"], {
+      extraEnv: { CSWARM_KEEP_TEST_TMP: "1" },
+    }).done;
+    assert.notEqual(failResult.status, 0, "opt-out must preserve failing exit status");
+    const failAllocated = await waitForAck(join(sandbox.work, "ack-keep-fail.txt"));
+    const failRoot = dirname(failAllocated);
+    assert.equal(existsSync(failRoot), true, "opt-out must keep the run folder on failure");
+    assert.ok(failResult.stderr.includes(failRoot), `expected kept path ${failRoot} in stderr: ${failResult.stderr}`);
+  });
+});
+
+test("removeRunRoot refuses empty, relative, and outside-tmpdir paths", { timeout: 60_000 }, async () => {
+  await withSandbox(async (sandbox) => {
+    const outsideDir = join(sandbox.work, "cswarm-test-run-outside");
+    mkdirSync(outsideDir);
+    writeFileSync(join(outsideDir, "keep.txt"), "outside\n");
+    const outsideStat = lstatSync(outsideDir);
+    const runnerUrl = pathToFileURL(runner).href;
+    const probe = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        [
+          `import { removeRunRoot } from ${JSON.stringify(runnerUrl)};`,
+          `const parent = ${JSON.stringify(realpathSync(sandbox.parent))};`,
+          `const outside = ${JSON.stringify(realpathSync(outsideDir))};`,
+          `const id = { dev: ${outsideStat.dev}, ino: ${outsideStat.ino}, uid: ${outsideStat.uid} };`,
+          "const r1 = removeRunRoot({ parent, root: '', identity: id });",
+          "const r2 = removeRunRoot({ parent, root: 'cswarm-test-run-rel', identity: id });",
+          "const r3 = removeRunRoot({ parent, root: outside, identity: id });",
+          "const r4 = removeRunRoot({ parent: outside, root: outside, identity: id });",
+          "if (r1 || r2 || r3 || r4) process.exit(1);",
+        ].join("\n"),
+      ],
+      {
+        cwd: sandbox.work,
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: sandbox.parent },
+      },
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.equal(existsSync(outsideDir), true, "outside directory must not be deleted");
+    assert.equal(readFileSync(join(outsideDir, "keep.txt"), "utf8"), "outside\n");
+  });
+});

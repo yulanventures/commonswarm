@@ -9,6 +9,7 @@ import { SessionDetailsPanel } from '../components/SessionDetailsPanel';
 import { SessionHeader } from '../components/SessionHeader';
 import { StepList } from '../components/StepList';
 import { PEOPLE } from '../data/fixtures';
+import { WORKSPACE_UNAVAILABLE_TEXT, useSessionSnapshot } from '../data/queries';
 import type {
   AgentStepsEvent,
   AgentTextEvent,
@@ -105,6 +106,10 @@ function renderDeliveryNote(event: AgentTextEvent): string | null {
 
 export function AgentSessionScreen() {
   const { id } = useParams<{ id: string }>();
+  const snapshot = useSessionSnapshot();
+  const unavailableWorkspaceId = useAppStore(
+    (state) => state.unavailableWorkspaceId,
+  );
   const isPhone = useIsPhone();
   const agents = useAppStore((state) => state.agents);
   const agent = agents.find((item) => item.id === id) ?? agents[0];
@@ -117,6 +122,22 @@ export function AgentSessionScreen() {
       timeline.scrollTop = timeline.scrollHeight;
     }
   }, [agent?.id, eventCount, isPhone]);
+
+  if (
+    snapshot.state.status === 'authenticated' &&
+    unavailableWorkspaceId !== null
+  ) {
+    return (
+      <AppFrame>
+        <div
+          data-testid="workspace-unavailable-pane"
+          className="flex flex-1 items-center justify-center px-6 text-md text-ink-secondary"
+        >
+          {WORKSPACE_UNAVAILABLE_TEXT}
+        </div>
+      </AppFrame>
+    );
+  }
 
   if (!agent) return null;
 
