@@ -308,7 +308,16 @@ test("20261124000001 rolls back cleanly, re-applies with proofs, and read functi
       SET LOCAL ROLE authenticated;
       v_dq := swarm_read.decision_queue('${wsId}'::uuid) - 'generated_at';
       v_dqp := swarm_read.decision_queue_page('${wsId}'::uuid, NULL, NULL) - 'generated_at';
-      v_wt := swarm_read.waiting_todos_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at';
+      v_wt := pg_catalog.jsonb_set(
+        swarm_read.waiting_todos_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at',
+        '{todos}',
+        coalesce((
+          SELECT pg_catalog.jsonb_agg(elem - 'offer_id' ORDER BY ord)
+          FROM pg_catalog.jsonb_array_elements(
+            (swarm_read.waiting_todos_page('${wsId}'::uuid, 50, NULL, NULL))->'todos'
+          ) WITH ORDINALITY AS t(elem, ord)
+        ), '[]'::jsonb)
+      );
       v_wa := swarm_read.waiting_archived_page('${wsId}'::uuid, 50, NULL, NULL) - 'generated_at';
       SELECT elem INTO v_ho
       FROM pg_catalog.jsonb_array_elements((swarm_read.home_overview())->'workspaces') AS elem
