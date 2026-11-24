@@ -2049,7 +2049,9 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       async boundedAuth<T>(op: Promise<T>) {
         return op;
       },
-      async signOut() {},
+      async signOut() {
+        return { signedOutLocally: true, serverRevoked: true, replaced: false, retry: false };
+      },
       async quiesce() {
         await realClient.removeAllChannels();
       },
@@ -2581,7 +2583,9 @@ describe('Step 4: real read-only conversations, safe rendering, pagination, live
       async boundedAuth<T>(op: Promise<T>) {
         return op;
       },
-      async signOut() {},
+      async signOut() {
+        return { signedOutLocally: true, serverRevoked: true, replaced: false, retry: false };
+      },
       async quiesce() {
         await realClient.removeAllChannels();
       },

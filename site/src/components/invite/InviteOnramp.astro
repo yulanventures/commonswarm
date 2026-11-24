@@ -245,8 +245,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
 <script>
   import {
+    AuthRecoveryRequired,
     EmailAddressRejected,
     EmailRateLimited,
+    SessionExpired,
     bootstrapMultiAccountAuth,
     currentSession,
     isMultiAccountEnabled,
@@ -623,11 +625,30 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       show("connect");
     };
 
+    let recoveryPending = false;
     const accept = async (confirmed = false): Promise<void> => {
       if (!payload) return unusable();
       const sender = payload.inviter_display_name;
       const pinned = isMultiAccountEnabled() ? pinAccountContext() : null;
-      const session = await currentSession();
+      const generationAtCheck = authGeneration;
+      let session;
+      try {
+        session = await currentSession();
+      } catch (error) {
+        if (generationAtCheck !== authGeneration) return;
+        if (error instanceof AuthRecoveryRequired) {
+          recoveryPending = true;
+          if (host.dataset.state === "loading" || host.dataset.state === "joining") {
+            show("join-error");
+          }
+          return;
+        }
+        if (error instanceof SessionExpired) return show("auth");
+        show("join-error");
+        return;
+      }
+      if (generationAtCheck !== authGeneration) return;
+      recoveryPending = false;
       if (!session || (pinned && !pinned.isCurrent())) return show("auth");
       authUser = session.user.id;
       authEmail = session.user.email ?? null;
@@ -753,11 +774,29 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
       if (!payload) {
         const joinedId = url.searchParams.get("joined") ?? "";
-        const session = await currentSession();
-        authEmail = session?.user.email ?? null;
-        const joined = session
-          ? (await myWorkspaces()).find((workspace) => workspace.id === joinedId)
-          : null;
+        const generationAtCheck = authGeneration;
+        let session = null;
+        let joined = null;
+        try {
+          session = await currentSession();
+          if (generationAtCheck !== authGeneration) return;
+          authEmail = session?.user.email ?? null;
+          joined = session
+            ? (await myWorkspaces()).find((workspace) => workspace.id === joinedId) ?? null
+            : null;
+        } catch (error) {
+          if (generationAtCheck !== authGeneration) return;
+          if (error instanceof AuthRecoveryRequired) {
+            recoveryPending = true;
+            show("join-error");
+            return;
+          }
+          if (!(error instanceof SessionExpired)) {
+            show("join-error");
+            return;
+          }
+        }
+        if (generationAtCheck !== authGeneration) return;
         if (joined) {
           let hostId = "";
           try {
@@ -1090,6 +1129,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
       if (isMultiAccountEnabled() && payload && resumeId && session && authUser === null) {
         ++authGeneration;
+        recoveryPending = false;
         authUser = user;
         authEmail = session.user.email ?? null;
         resetReview();
@@ -1098,6 +1138,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
       authUser = user;
       authEmail = session?.user.email ?? null;
+      if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && session && payload && recoveryPending) {
+        recoveryPending = false;
+        void accept(false);
+      }
     });
     onAccountForcedTeardown(() => {
       ++authGeneration;
