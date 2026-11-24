@@ -1355,24 +1355,27 @@ export async function postCommand(
       pinnedSessionId &&
       sessionIdFromAccessToken(candidate.access_token) === pinnedSessionId,
     );
-  let credential = session;
+  let credential: Session;
   if (guarded) {
     if (!pinnedSessionId) {
       return retiredResult();
     }
     const existingClient = cachedSession?.client ?? null;
-    if (existingClient) {
-      let initial: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
-      try {
-        initial = await boundedAuth(existingClient.auth.getSession());
-      } catch {
-        return retiredResult();
-      }
-      if (isCancelled() || initial.error || !matchesPinnedLogin(initial.data.session)) {
-        return retiredResult();
-      }
-      credential = initial.data.session;
+    if (!existingClient) {
+      return retiredResult();
     }
+    let initial: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
+    try {
+      initial = await boundedAuth(existingClient.auth.getSession());
+    } catch {
+      return retiredResult();
+    }
+    if (isCancelled() || initial.error || !matchesPinnedLogin(initial.data.session)) {
+      return retiredResult();
+    }
+    credential = initial.data.session;
+  } else {
+    credential = session;
   }
   if (isCancelled()) {
     return retiredResult();
@@ -1411,8 +1414,8 @@ export async function postCommand(
         if (isCancelled()) {
           return retiredResult();
         }
-        const c = client();
         if (guarded) {
+          const c = cachedSession?.client ?? null;
           if (!c) return retiredResult();
           if (attempt !== 0) throw new AuthRecoveryRequired();
           let recovered: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
@@ -1447,6 +1450,7 @@ export async function postCommand(
           }
           continue;
         }
+        const c = client();
         if (!c || attempt !== 0) throw new AuthRecoveryRequired();
         const recovered = await boundedAuth(c.auth.getSession());
         if (isCancelled()) {
