@@ -12,10 +12,10 @@ import {
   AuthRecoveryRequired,
   MULTI_ACCOUNT_STORAGE_KEY_PREFIXES,
   PINNED_SUPABASE_JS_VERSION,
+  RECOVERY_RECHECK_MAX_MS,
   REFRESH_BACKOFF_BASE_MS,
   REFRESH_BACKOFF_CAP_MS,
   REFRESH_BACKOFF_FLOOR_MS,
-  REFRESH_RETRY_AFTER_CEILING_MS,
   SessionExpired,
   createBrowserSession,
   credentialGenerationKey,
@@ -1312,10 +1312,11 @@ test("no fabricated session can be stored: sentinel discard guard, independent s
           ),
       },
       {
-        name: "empty storage (storedAtStart === null) + explicit refreshSession 400 refresh_token_already_used",
+        name: "empty storage (storedAtStart === null) + explicit refreshSession discarded before network",
         initialStorage: {},
         refreshArg: { refresh_token: "rt-orphan" },
         expectTerminalPassThrough: false,
+        expectZeroWireCalls: true,
         response: () => alreadyUsedResponse(),
       },
     ];
@@ -1324,10 +1325,12 @@ test("no fabricated session can be stored: sentinel discard guard, independent s
       const storage = memoryStorage(scenario.initialStorage);
       const locks = createFifoLocks();
       const observedEvents = [];
+      let wireCalls = 0;
 
       const fetchImpl = async (input) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (url.includes("/auth/v1/token")) {
+          wireCalls += 1;
           return scenario.response();
         }
         throw new Error(`Unexpected fetch URL: ${url}`);
@@ -1342,12 +1345,13 @@ test("no fabricated session can be stored: sentinel discard guard, independent s
 
           const res = await session.client.auth.refreshSession(scenario.refreshArg);
           assert.equal(res.data.session, null, `${scenario.name}: must not return a fabricated session`);
+          if (scenario.expectZeroWireCalls) {
+            assert.equal(wireCalls, 0, `${scenario.name}: discarded before network`);
+          }
           if (scenario.expectTerminalPassThrough) {
             assert.equal(res.error?.code, "refresh_token_not_found", `${scenario.name}: terminal error preserved`);
-          } else if (Object.keys(scenario.initialStorage).length === 0) {
-            assert.equal(res.error?.name, "AuthRetryableFetchError", `${scenario.name}: empty slot blocked by write fence`);
           } else {
-            assert.equal(res.error?.name, "AuthRefreshDiscardedError", `${scenario.name}: non-terminal failure exited via discard`);
+            assert.equal(res.error?.name, "AuthRefreshDiscardedError", `${scenario.name}: exited via discard`);
           }
 
           const storedNow = storage.entries.get(TEST_STORAGE_KEY) ?? null;
@@ -1470,8 +1474,8 @@ test("cross-tab backoff generation key (Item 15): uses non-secret session_id + u
         await assert.rejects(() => session.currentSession(), (err) => {
           assert.ok(err instanceof AuthRecoveryRequired);
           assert.ok(typeof err.retryAfter === "number");
-          assert.ok(err.retryAfter <= beforeFailure + REFRESH_RETRY_AFTER_CEILING_MS + 1_000);
-          assert.ok(err.retryAfter >= beforeFailure + REFRESH_RETRY_AFTER_CEILING_MS - 1_000);
+          assert.ok(err.retryAfter <= beforeFailure + RECOVERY_RECHECK_MAX_MS + 1_000);
+          assert.ok(err.retryAfter >= beforeFailure + RECOVERY_RECHECK_MAX_MS - 1_000);
           return true;
         });
 
@@ -1484,6 +1488,10 @@ test("cross-tab backoff generation key (Item 15): uses non-secret session_id + u
         assert.deepEqual(Object.keys(parsedBackoff).sort(), ["attempts", "gen", "nextAttemptAt"]);
         assert.equal(parsedBackoff.gen, credentialGenerationKey(JSON.parse(stored1)));
         assert.equal(parsedBackoff.attempts, 1);
+        assert.ok(
+          parsedBackoff.nextAttemptAt >= beforeFailure + 86_400_000 - 1_000,
+          "stored wire deadline preserves full valid server Retry-After (86400s)",
+        );
 
         // 1) Rotation (same login, new expires_at) replaces storage without a storage event:
         //    old backoff is ignored and cleared, refreshing rtRot immediately.
@@ -1733,7 +1741,7 @@ test("Item 14: no raw refresh token, access token, or session payload appears in
         mode = "terminal";
         try { await session.verifiedSession(); } catch (err) { collectedErrors.push({ path: "terminal-refusal", err }); }
 
-        // 4) Empty-slot orphan fence -> AuthRetryableFetchError
+        // 4) Empty-slot orphan refresh -> AuthRefreshDiscardedError
         mode = "network";
         const orphanRes = await session.client.auth.refreshSession({ refresh_token: secretRt });
         if (orphanRes.error) collectedErrors.push({ path: "orphan-fence", err: orphanRes.error });
@@ -1767,7 +1775,7 @@ test("Item 14: no raw refresh token, access token, or session payload appears in
   }
 });
 
-test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SIGNED_IN preserves active peer backoff; readable-but-write-refused storage preserves in-process backoff; Retry-After: 300 gates wire for 300s; 15-minute ceiling clamps extreme headers", async (t) => {
+test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SIGNED_IN preserves active peer backoff; refused writes preserve stronger memory deadline across locked reconciliation; Retry-After: 7200 honours full 2-hour wire deadline with 15-minute UI recheck cadence", async (t) => {
   await t.test("delayed TOKEN_REFRESHED and SIGNED_IN for current session arriving after peer 429 backoff do not clear backoff or allow wire refresh before retry time", async () => {
     const modA = await import("../../../shared/browser-session/index.ts?tab=c1-delayed-a");
     const modB = await import("../../../shared/browser-session/index.ts?tab=c1-delayed-b");
@@ -1912,7 +1920,7 @@ test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SI
     });
   });
 
-  await t.test("Retry-After: 300 gates the wire for full 300s even on earlier screen-level retries, and 15-minute ceiling clamps extreme headers", async () => {
+  await t.test("Retry-After: 7200 honours full 2-hour wire deadline across two module instances while capping UI recheck interval at 15 minutes", async () => {
     const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
     let fakeNow = Date.now();
     const realDateNow = Date.now;
@@ -1929,7 +1937,7 @@ test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SI
         user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
       });
 
-      const storage = memoryStorage({ [TEST_STORAGE_KEY]: makeExpired("sid-ra300", "rt-ra300") });
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: makeExpired("sid-ra7200", "rt-ra7200") });
       const locks = createFifoLocks();
       let retryAfterHeader = "300";
       let refreshWireCalls = 0;
@@ -1967,7 +1975,7 @@ test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SI
           assert.equal(err1?.retryAfter, t0 + 300_000, "Retry-After: 300 is NOT clipped to 60s exponential cap");
           assert.equal(refreshWireCalls, 1);
 
-          // Screen-level retry at +65s (past old 60s cap) and +299s must STILL send zero wire calls.
+          // Screen-level retry at +65s (past 60s exponential cap) and +299s sends ZERO wire calls.
           fakeNow = t0 + 65_000;
           let err65;
           try { await tabB.verifiedSession(); } catch (e) { err65 = e; }
@@ -1979,27 +1987,173 @@ test("Condition 1 (two independent module instances): delayed TOKEN_REFRESHED/SI
           await assert.rejects(() => tabA.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
           assert.equal(refreshWireCalls, 1, "wire still gated at +299s");
 
-          // At +300s, the wire gate opens; test extreme Retry-After: 7200 against the 15-minute ceiling.
+          // At +300s, the wire gate opens; server answers Retry-After: 7200 (2 hours).
           retryAfterHeader = "7200";
           fakeNow = t0 + 300_000;
-          let errCeiling;
-          try { await tabA.verifiedSession(); } catch (e) { errCeiling = e; }
-          assert.equal(errCeiling?.name, "AuthRecoveryRequired");
-          assert.equal(REFRESH_RETRY_AFTER_CEILING_MS, 15 * 60 * 1_000, "sanity ceiling is 15 minutes");
-          assert.equal(errCeiling?.retryAfter, fakeNow + REFRESH_RETRY_AFTER_CEILING_MS, "extreme Retry-After clamped to 15-minute ceiling");
+          const t1 = fakeNow;
+          let errTwoHour;
+          try { await tabA.verifiedSession(); } catch (e) { errTwoHour = e; }
+          assert.equal(errTwoHour?.name, "AuthRecoveryRequired");
+          assert.equal(RECOVERY_RECHECK_MAX_MS, 15 * 60 * 1_000, "screen-level recheck interval caps at 15 minutes");
+          assert.equal(errTwoHour?.retryAfter, t1 + RECOVERY_RECHECK_MAX_MS, "UI retryAfter capped at 15 minutes");
           assert.equal(refreshWireCalls, 2);
 
-          // Still gated at +899s from second failure, then allowed at +900s.
-          const t1 = fakeNow;
-          fakeNow = t1 + REFRESH_RETRY_AFTER_CEILING_MS - 1_000;
+          // Stored disk record retains the FULL 2-hour server deadline (never clipped on write or read).
+          const storedRecord = JSON.parse(storage.entries.get(backoffKey));
+          assert.equal(storedRecord.nextAttemptAt, t1 + 7_200_000, "disk record preserves full 7200s deadline");
+
+          // At +15 minutes: screen-level retry is offered (next recheck in another 15m) and sends NOTHING.
+          fakeNow = t1 + RECOVERY_RECHECK_MAX_MS;
+          let errAt15m;
+          try { await tabB.verifiedSession(); } catch (e) { errAt15m = e; }
+          assert.equal(errAt15m?.name, "AuthRecoveryRequired");
+          assert.equal(errAt15m?.retryAfter, fakeNow + RECOVERY_RECHECK_MAX_MS, "offers another 15-minute UI recheck");
+          assert.equal(refreshWireCalls, 2, "at 15 minutes zero wire refresh is sent");
+
+          // At just under two hours (7199s): STILL sends nothing, UI retryAfter points to the remaining 1s.
+          fakeNow = t1 + 7_200_000 - 1_000;
+          let errUnder2h;
+          try { await tabA.verifiedSession(); } catch (e) { errUnder2h = e; }
+          assert.equal(errUnder2h?.name, "AuthRecoveryRequired");
+          assert.equal(errUnder2h?.retryAfter, t1 + 7_200_000, "remaining 1s reported when under 15m left");
+          assert.equal(refreshWireCalls, 2, "just under two hours zero wire refresh is sent");
+
+          // At exactly two hours (7200s): wire gate opens and sends exactly ONE refresh.
+          fakeNow = t1 + 7_200_000;
           await assert.rejects(() => tabB.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
-          assert.equal(refreshWireCalls, 2, "wire gated up to 15-minute ceiling");
-          fakeNow = t1 + REFRESH_RETRY_AFTER_CEILING_MS;
-          await assert.rejects(() => tabB.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
-          assert.equal(refreshWireCalls, 3, "wire opens once 15-minute ceiling elapses");
-          assert.ok(storage.entries.has(backoffKey));
+          assert.equal(refreshWireCalls, 3, "at two hours exactly one wire refresh is sent");
         } finally {
           await Promise.all([tabA.quiesce(), tabB.quiesce()]);
+        }
+      });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  await t.test("refused write with older readable same-generation disk record preserves stronger in-memory deadline across locked reconciliation, and unrelated disk removal preserves current-gen memory fallback", async () => {
+    const backoffKey = refreshBackoffStorageKeyForDeployment(TEST_API_URL);
+    let fakeNow = Date.now();
+    const realDateNow = Date.now;
+    Date.now = () => fakeNow;
+
+    try {
+      const nowSec = Math.floor(fakeNow / 1000);
+      const stored1 = JSON.stringify({
+        access_token: makeJwt({ sub: "user-1", sessionId: "sid-merge-1", sig: "sig-merge-1" }),
+        refresh_token: "rt-merge-1",
+        expires_in: 3600,
+        expires_at: nowSec - 120,
+        token_type: "bearer",
+        user: { id: "user-1", aud: "authenticated", email: "owner@example.test" },
+      });
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: stored1 });
+      let refuseBackoffWrites = false;
+      const toggleWriteStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) { return base.getItem(k); },
+        setItem(k, v) {
+          if (refuseBackoffWrites && k === backoffKey) {
+            throw new DOMException("QuotaExceededError", "QuotaExceededError");
+          }
+          base.setItem(k, v);
+        },
+        removeItem(k) { base.removeItem(k); },
+      };
+      const locks = createFifoLocks();
+      let retryAfterHeader = "5";
+      let refreshWireCalls = 0;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/token")) {
+          refreshWireCalls += 1;
+          return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "x-supabase-api-version": "2024-01-01",
+              "retry-after": retryAfterHeader,
+            },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withSharedBrowserEnv({ storage: toggleWriteStorage, locks, fetchImpl }, async () => {
+        const modA = await import("../../../shared/browser-session/index.ts?tab=c1-merge-a");
+        const sdk = { createClient, navigatorLock, processLock, isAuthSessionMissingError, AuthRetryableFetchError };
+        const tabA = modA.createBrowserSession({ url: TEST_API_URL, anonKey: "anon-key", detectSessionInUrl: false, allowProcessLockFallback: false, sdk });
+        assert.equal(tabA.ok, true);
+        if (!tabA.ok) return;
+
+        try {
+          // 1) First failure at t0 writes an older same-generation disk record (Retry-After: 5, attempts: 1).
+          const t0 = fakeNow;
+          await assert.rejects(() => tabA.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+          assert.equal(refreshWireCalls, 1);
+          const olderDiskRaw = base.entries.get(backoffKey);
+          assert.equal(JSON.parse(olderDiskRaw).nextAttemptAt, t0 + 5_000);
+          assert.equal(JSON.parse(olderDiskRaw).attempts, 1);
+
+          // 2) Advance past older deadline (t1 = t0 + 6s); now refuse backoff writes while older disk record stays readable.
+          fakeNow = t0 + 6_000;
+          const t1 = fakeNow;
+          refuseBackoffWrites = true;
+          retryAfterHeader = "60";
+          let err2;
+          try { await tabA.verifiedSession(); } catch (e) { err2 = e; }
+          assert.equal(err2?.name, "AuthRecoveryRequired");
+          assert.equal(err2?.retryAfter, t1 + 60_000, "in-memory record holds newer 60s deadline");
+          assert.equal(refreshWireCalls, 2);
+          assert.equal(base.entries.get(backoffKey), olderDiskRaw, "disk still holds older same-generation record");
+
+          // 3) Advance to t1 + 10s (past older t0+5s disk deadline, before newer t1+60s memory deadline).
+          //    Locked reconciliation inside getSession()/verifiedSession() MUST keep the stronger memory deadline
+          //    and NOT clear the refused-write state or send early!
+          fakeNow = t1 + 10_000;
+          let err3;
+          try { await tabA.verifiedSession(); } catch (e) { err3 = e; }
+          assert.equal(err3?.name, "AuthRecoveryRequired");
+          assert.equal(err3?.retryAfter, t1 + 60_000, "locked reconciliation preserved newer in-memory deadline");
+          assert.equal(refreshWireCalls, 2, "zero early wire refresh after locked reconciliation");
+
+          // Repeat again at t1 + 30s to prove refused-write flag was NOT cleared by the first reconciliation.
+          fakeNow = t1 + 30_000;
+          await tabA.client.auth.getSession();
+          let err4;
+          try { await tabA.verifiedSession(); } catch (e) { err4 = e; }
+          assert.equal(err4?.retryAfter, t1 + 60_000, "still honours newer deadline on subsequent locked attempts");
+          assert.equal(refreshWireCalls, 2, "still zero early wire refreshes");
+
+          // 4) Unrelated-generation disk record appears while writes remain refused: locked reconciliation
+          //    removes the unrelated disk record and preserves the current-generation in-memory deadline!
+          base.entries.set(backoffKey, JSON.stringify({ gen: "v1:sid:user-other:sid-other:1", nextAttemptAt: t1 + 1_000, attempts: 1 }));
+          fakeNow = t1 + 45_000;
+          let err5;
+          try { await tabA.verifiedSession(); } catch (e) { err5 = e; }
+          assert.equal(err5?.retryAfter, t1 + 60_000, "current-generation memory deadline preserved after removing unrelated disk record");
+          assert.equal(base.entries.has(backoffKey), false, "unrelated disk record was removed under lock");
+          assert.equal(refreshWireCalls, 2, "zero wire refreshes after unrelated disk record removal");
+
+          // 5) Once storage writes recover before t1 + 60s, locked reconciliation persists the merged record
+          //    and STILL gates until t1 + 60s, then opens at t1 + 60s.
+          base.entries.set(backoffKey, olderDiskRaw);
+          refuseBackoffWrites = false;
+          fakeNow = t1 + 55_000;
+          await assert.rejects(() => tabA.verifiedSession(), (e) => e?.retryAfter === t1 + 60_000);
+          assert.equal(refreshWireCalls, 2, "still gated at t1 + 55s");
+          const persistedMerged = JSON.parse(base.entries.get(backoffKey));
+          assert.equal(persistedMerged.nextAttemptAt, t1 + 60_000, "merged deadline persisted once write succeeded");
+          assert.equal(persistedMerged.attempts, 2, "merged attempt count persisted once write succeeded");
+
+          fakeNow = t1 + 60_000;
+          await assert.rejects(() => tabA.verifiedSession(), (e) => e?.name === "AuthRecoveryRequired");
+          assert.equal(refreshWireCalls, 3, "wire opens once newer merged deadline elapses");
+        } finally {
+          await tabA.quiesce();
         }
       });
     } finally {

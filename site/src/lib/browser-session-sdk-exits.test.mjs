@@ -600,11 +600,10 @@ test("Real module witness: reviewer edge cases (successor already visible, slot 
     });
   });
 
-  await t.test("Case B2: slot ALREADY empty before storedAtStart (storedAtStart === null) — independent setItem write fence blocks storage/events and replacement credential proceeds immediately despite orphan SDK cache", async () => {
+  await t.test("Case B2 (C3): empty slot + would-succeed transport discards orphan refresh BEFORE the network (zero wire calls, empty slot, zero events) and replacement credential proceeds normally", async () => {
     const storage = memoryStorage({});
     const locks = createFifoLocks();
     const events = [];
-    let fencedSetRejections = 0;
     const refreshTokensSeen = [];
 
     const fetchImpl = async (input, init) => {
@@ -612,13 +611,11 @@ test("Real module witness: reviewer edge cases (successor already visible, slot 
       if (url.includes("/auth/v1/token")) {
         const body = JSON.parse(String(init?.body ?? "{}"));
         refreshTokensSeen.push(body.refresh_token);
-        if (body.refresh_token === "rt-orphan") {
-          throw new TypeError("Failed to fetch");
-        }
+        // Transport WOULD succeed for any refresh token (including rt-orphan) if a wire call ever went out!
         return new Response(
           JSON.stringify({
-            access_token: "at-replacement-fresh",
-            refresh_token: "rt-replacement-fresh",
+            access_token: body.refresh_token === "rt-orphan" ? "at-orphan-hydrated" : "at-replacement-fresh",
+            refresh_token: body.refresh_token === "rt-orphan" ? "rt-orphan-hydrated" : "rt-replacement-fresh",
             expires_in: 3600,
             token_type: "bearer",
             user: { id: "user-2", aud: "authenticated", email: "two@example.test" },
@@ -636,33 +633,12 @@ test("Real module witness: reviewer edge cases (successor already visible, slot 
     };
 
     await withBrowserEnv({ storage, locks, fetchImpl }, async ({ dispatchStorageEvent }) => {
-      const session = makeRealSession({
-        createClient(url, key, opts) {
-          const origStorage = opts.auth.storage;
-          return createClient(url, key, {
-            ...opts,
-            auth: {
-              ...opts.auth,
-              storage: {
-                getItem: (k) => origStorage.getItem(k),
-                removeItem: (k) => origStorage.removeItem(k),
-                setItem: (k, v) => {
-                  try {
-                    return origStorage.setItem(k, v);
-                  } catch (err) {
-                    if (err instanceof AuthRetryableFetchError) fencedSetRejections += 1;
-                    throw err;
-                  }
-                },
-              },
-            },
-          });
-        },
-      });
+      const session = makeRealSession();
       session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
       try {
         await session.client.auth.initialize();
         await settleLockIdle(locks);
+        storage.ops.length = 0;
 
         const startedAt = Date.now();
         const res = await session.client.auth.refreshSession({ refresh_token: "rt-orphan" });
@@ -670,20 +646,18 @@ test("Real module witness: reviewer edge cases (successor already visible, slot 
 
         assert.ok(elapsedMs < 250, `settled within 250 ms (actual: ${elapsedMs} ms)`);
         assert.equal(locks.isHeld(TEST_LOCK_NAME), false, "lock released");
-        assert.equal(res.data.session, null);
-        assert.equal(res.error?.name, "AuthRetryableFetchError", "write fence aborted _saveSession via AuthRetryableFetchError");
-        assert.equal(fencedSetRejections, 1, "independent setItem write fence intercepted sentinel payload");
+        assert.deepEqual(refreshTokensSeen, [], "ZERO wire calls for orphan refresh on empty slot");
+        assert.equal(res.data.session, null, "no session returned");
+        assert.equal(isAuthRefreshDiscardedError(res.error), true, "exited via existing AuthRefreshDiscardedError discard exit");
         assert.equal(storage.entries.get(TEST_STORAGE_KEY), undefined, "empty slot stays empty");
         assert.equal(
           storage.ops.some((op) => op === `set:${TEST_STORAGE_KEY}` || op === `remove:${TEST_STORAGE_KEY}`),
           false,
           "zero localStorage mutations on session slot",
         );
-        assert.deepEqual(events, [], "zero events emitted (neither TOKEN_REFRESHED nor SIGNED_OUT)");
+        assert.deepEqual(events, [], "zero events emitted (neither TOKEN_REFRESHED nor SIGNED_IN nor SIGNED_OUT)");
 
-        // Confirm GoTrue cached lastRefreshFailure for the orphaned token, AND prove that
-        // a current or replacement credential (even expired!) proceeds normally at once.
-        assert.equal(session.client.auth.lastRefreshFailure?.refreshToken, "rt-orphan");
+        // Subsequent replacement credential stored in the managed slot still refreshes and verifies normally.
         const replacementExpired = makeStoredSession({
           accessToken: "at-replacement-exp",
           refreshToken: "rt-replacement",
@@ -695,7 +669,111 @@ test("Real module witness: reviewer edge cases (successor already visible, slot 
         const verified = await session.verifiedSession();
         assert.equal(verified?.refresh_token, "rt-replacement-fresh", "replacement credential proceeded immediately");
         assert.equal(verified?.user.id, "user-2");
-        assert.deepEqual(refreshTokensSeen, ["rt-orphan", "rt-replacement"]);
+        assert.deepEqual(refreshTokensSeen, ["rt-replacement"]);
+      } finally {
+        await session.quiesce();
+      }
+    });
+  });
+
+  await t.test("Case B3 (C3): independent sentinel write fence blocks sentinel payloads on its own (direct setItem and _saveSession), and unreadable storage without memory or unparseable body discards before network", async () => {
+    const storage = memoryStorage({});
+    const locks = createFifoLocks();
+    const events = [];
+    let wireCalls = 0;
+    let capturedStorage = null;
+    let capturedAuthFetch = null;
+
+    const fetchImpl = async () => {
+      wireCalls += 1;
+      return new Response(
+        JSON.stringify({
+          access_token: "at-should-not-happen",
+          refresh_token: "rt-should-not-happen",
+          expires_in: 3600,
+          token_type: "bearer",
+          user: { id: "user-1", aud: "authenticated" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+      const session = makeRealSession({
+        createClient(url, key, opts) {
+          capturedStorage = opts.auth.storage;
+          capturedAuthFetch = opts.global.fetch;
+          return createClient(url, key, opts);
+        },
+      });
+      session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+      try {
+        await session.client.auth.initialize();
+        await settleLockIdle(locks);
+        storage.ops.length = 0;
+        events.length = 0;
+
+        // 1) Obtain a genuine sentinel payload from this instance's authFetch (zero wire calls).
+        const sentinelResp = await capturedAuthFetch(`${TEST_API_URL}/auth/v1/token?grant_type=refresh_token`, {
+          method: "POST",
+          body: "not-valid-json",
+        });
+        assert.equal(wireCalls, 0, "unparseable refresh body discarded before network");
+        const sentinelSession = await sentinelResp.json();
+        assert.equal(sentinelSession.access_token.startsWith("__cs_discard_v1_"), true);
+
+        // 2) Direct authStorage.setItem refuses the sentinel payload via AuthRetryableFetchError.
+        assert.throws(
+          () => capturedStorage.setItem(TEST_STORAGE_KEY, JSON.stringify(sentinelSession)),
+          (err) => err instanceof AuthRetryableFetchError,
+          "independent setItem write fence rejects sentinel payload",
+        );
+
+        // 3) Pinned SDK _saveSession also fails at the independent write fence without writing or emitting events.
+        await assert.rejects(
+          () => session.client.auth._saveSession(sentinelSession),
+          (err) => err instanceof AuthRetryableFetchError,
+          "independent write fence stops _saveSession on an empty slot",
+        );
+        assert.equal(storage.entries.get(TEST_STORAGE_KEY), undefined, "empty slot stays empty");
+        assert.equal(
+          storage.ops.some((op) => op === `set:${TEST_STORAGE_KEY}`),
+          false,
+          "zero localStorage writes for sentinel payload",
+        );
+        assert.deepEqual(events, [], "zero events emitted");
+      } finally {
+        await session.quiesce();
+      }
+    });
+
+    // 4) Unreadable storage with no current managed credential in memory discards BEFORE the network.
+    const unreadableStorage = {
+      get length() { throw new DOMException("SecurityError", "SecurityError"); },
+      key() { throw new DOMException("SecurityError", "SecurityError"); },
+      getItem() { throw new DOMException("SecurityError", "SecurityError"); },
+      setItem() { throw new DOMException("SecurityError", "SecurityError"); },
+      removeItem() { throw new DOMException("SecurityError", "SecurityError"); },
+    };
+    const unreadableEvents = [];
+    let unreadableWireCalls = 0;
+    await withBrowserEnv({
+      storage: unreadableStorage,
+      locks: createFifoLocks(),
+      fetchImpl: async () => {
+        unreadableWireCalls += 1;
+        return new Response(JSON.stringify({}), { status: 200 });
+      },
+    }, async () => {
+      const session = makeRealSession();
+      session.client.auth.onAuthStateChange((e, s) => unreadableEvents.push({ e, s }));
+      try {
+        await session.client.auth.initialize();
+        const res = await session.client.auth.refreshSession({ refresh_token: "rt-unreadable-orphan" });
+        assert.equal(unreadableWireCalls, 0, "unreadable storage without memory discards before network");
+        assert.equal(res.data.session, null);
+        assert.equal(isAuthRefreshDiscardedError(res.error), true, "exited via AuthRefreshDiscardedError");
+        assert.deepEqual(unreadableEvents, [], "zero events emitted");
       } finally {
         await session.quiesce();
       }
@@ -1316,7 +1394,7 @@ test("Real module witness (Items 6, 7, 10, 11): synchronous _emitInitialSession 
         // 3) Sign out -> SIGNED_OUT (runs under lock, clears stale backoff)
         seedBackoff();
         const signOutRes = await session.signOut();
-        assert.deepEqual(signOutRes, { signedOutLocally: true, serverRevoked: true, replaced: false });
+        assert.deepEqual(signOutRes, { signedOutLocally: true, serverRevoked: true, replaced: false, retry: false });
         assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "locked signOut cleared backoff");
 
         const expected = [
@@ -1572,7 +1650,7 @@ test("commonswarm single-account failure handling: only unsupported_sdk rejects 
           currentSession: async () => fakeSessionObj,
           verifiedSession: async () => fakeSessionObj,
           boundedAuth: (p) => p,
-          signOut: async () => ({ signedOutLocally: true, serverRevoked: true, replaced: false }),
+          signOut: async () => ({ signedOutLocally: true, serverRevoked: true, replaced: false, retry: false }),
           quiesce: async () => undefined,
         };
       },
@@ -2125,7 +2203,7 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
 
         // Deliberate sign-out during active 429 backoff: must clear local credential and announce SIGNED_OUT once.
         const outcome = await session.signOut({ expected: { userId: "user-1", sessionId: "sid-backoff-1" } });
-        assert.deepEqual(outcome, { signedOutLocally: true, serverRevoked: false, replaced: false });
+        assert.deepEqual(outcome, { signedOutLocally: true, serverRevoked: false, replaced: false, retry: false });
         assert.equal(storage.entries.get(TEST_STORAGE_KEY) ?? null, null, "stored credential for that login is gone");
         assert.equal(storage.entries.has(TEST_BACKOFF_KEY), false, "backoff record cleared under lock");
         assert.deepEqual(events, [{ event: "SIGNED_OUT", sess: null }], "SIGNED_OUT announced exactly once");
@@ -2180,8 +2258,10 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
             signedOutLocally: true,
             serverRevoked: logoutStatus === 204,
             replaced: false,
+            retry: false,
           });
           assert.equal(logoutHeaders.length, 1, "server logout attempted once");
+          assert.equal(new URL(logoutHeaders[0].url).searchParams.get("scope"), "local", "ordinary sign-out uses local scope on the wire");
           assert.equal(logoutHeaders[0].auth, `Bearer ${validJwt}`);
           assert.equal(storage.entries.get(TEST_STORAGE_KEY) ?? null, null, "local credential cleared");
           assert.deepEqual(events, [{ event: "SIGNED_OUT", sess: null }], "SIGNED_OUT announced once");
@@ -2255,7 +2335,7 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
           const outcome = await pendingSignOut;
           assert.deepEqual(
             outcome,
-            { signedOutLocally: false, serverRevoked: false, replaced: true },
+            { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false },
             `${replacementCase.name}: reported replacement without signing out locally`,
           );
           assert.equal(
@@ -2270,6 +2350,214 @@ test("Condition 2 (pinned client): deliberate sign-out is truthful during non-te
         }
       });
     }
+  });
+
+  await t.test("(d) refused persistent removal (throwing OR silent no-op) with readable storage and expired access token reports retryable local failure, announces no SIGNED_OUT, preserves backoff for fresh instance, and succeeds on retry", async () => {
+    for (const refusalKind of ["throws", "silent-noop"]) {
+      const expiredJwt = makeSignedJwt({ sub: "user-1", sessionId: `sid-refused-${refusalKind}`, sig: "sig-ref-1" });
+      const expiredStored = makeStoredSession({ accessToken: expiredJwt, refreshToken: "rt-ref-1", expired: true });
+      const base = memoryStorage({ [TEST_STORAGE_KEY]: expiredStored });
+      let refuseRemove = true;
+      const flakyRemoveStorage = {
+        ...base,
+        get length() { return base.length; },
+        key(i) { return base.key(i); },
+        getItem(k) { return base.getItem(k); },
+        setItem(k, v) { base.setItem(k, v); },
+        removeItem(k) {
+          if (refuseRemove && k === TEST_STORAGE_KEY) {
+            if (refusalKind === "throws") {
+              throw new DOMException("SecurityError", "SecurityError");
+            }
+            return;
+          }
+          base.removeItem(k);
+        },
+      };
+      const locks = createFifoLocks();
+      const events = [];
+      let refreshCalls = 0;
+      let serverHealthy = false;
+
+      const fetchImpl = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/token")) {
+          refreshCalls += 1;
+          if (!serverHealthy) {
+            return new Response(JSON.stringify({ code: "over_request_rate_limit" }), {
+              status: 429,
+              headers: { "content-type": "application/json", "x-supabase-api-version": "2024-01-01", "retry-after": "60" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              access_token: makeSignedJwt({ sub: "user-1", sessionId: `sid-refused-${refusalKind}`, sig: "sig-ref-recovered" }),
+              refresh_token: "rt-ref-recovered",
+              expires_in: 3600,
+              token_type: "bearer",
+              user: { id: "user-1", aud: "authenticated" },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage: flakyRemoveStorage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await assert.rejects(() => session.verifiedSession(), AuthRecoveryRequired);
+          assert.equal(refreshCalls, 1);
+          assert.ok(base.entries.has(TEST_BACKOFF_KEY), `${refusalKind}: backoff recorded`);
+
+          // Attempt sign-out while persistent removal is refused.
+          const failedOutcome = await session.signOut({
+            expected: { userId: "user-1", sessionId: `sid-refused-${refusalKind}` },
+          });
+          assert.deepEqual(
+            failedOutcome,
+            { signedOutLocally: false, serverRevoked: false, replaced: false, retry: true },
+            `${refusalKind}: reports retryable local failure`,
+          );
+          assert.deepEqual(events, [], `${refusalKind}: announces zero SIGNED_OUT events on failed removal`);
+          assert.equal(base.entries.get(TEST_STORAGE_KEY), expiredStored, `${refusalKind}: slot still present in readable storage`);
+          assert.ok(base.entries.has(TEST_BACKOFF_KEY), `${refusalKind}: backoff preserved when removal failed`);
+
+          // Even if the server recovers during the active backoff window, a FRESH instance sees
+          // AuthRecoveryRequired with zero wire calls (never silently handed a signed-in session).
+          serverHealthy = true;
+          const freshWhileRefused = makeRealSession();
+          try {
+            await assert.rejects(() => freshWhileRefused.verifiedSession(), AuthRecoveryRequired);
+            assert.equal(refreshCalls, 1, `${refusalKind}: fresh instance respected preserved backoff with zero wire calls`);
+          } finally {
+            await freshWhileRefused.quiesce();
+          }
+
+          // Once persistent removal is allowed again, retrying signOut() confirms removal on read-back,
+          // announces SIGNED_OUT once, and a fresh instance stays signed out.
+          refuseRemove = false;
+          const retryOutcome = await session.signOut({
+            expected: { userId: "user-1", sessionId: `sid-refused-${refusalKind}` },
+          });
+          assert.deepEqual(
+            retryOutcome,
+            { signedOutLocally: true, serverRevoked: false, replaced: false, retry: false },
+            `${refusalKind}: retry confirms durable local sign-out`,
+          );
+          assert.equal(base.entries.get(TEST_STORAGE_KEY) ?? null, null, `${refusalKind}: slot confirmed removed`);
+          assert.equal(base.entries.has(TEST_BACKOFF_KEY), false, `${refusalKind}: backoff cleared once removal confirmed`);
+          assert.deepEqual(events, [{ event: "SIGNED_OUT", sess: null }], `${refusalKind}: SIGNED_OUT announced once on confirmed retry`);
+
+          const freshAfterRetry = makeRealSession();
+          try {
+            assert.equal(await freshAfterRetry.verifiedSession(), null, `${refusalKind}: fresh instance is signed out after confirmed retry`);
+            assert.equal(refreshCalls, 1, `${refusalKind}: zero extra wire calls after confirmed sign-out`);
+          } finally {
+            await freshAfterRetry.quiesce();
+          }
+        } finally {
+          await session.quiesce();
+        }
+      });
+    }
+  });
+
+  await t.test("(e) same-person replacement during a HELD server logout call preserves replacement locally, sends initiating bearer with local scope, and reports the real server result", async () => {
+    for (const logoutStatus of [204, 500]) {
+      const login1Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-held-1", sig: "sig-held-1" });
+      const login1Stored = makeStoredSession({ accessToken: login1Jwt, refreshToken: "rt-held-1", expired: false, userId: "user-1" });
+      const login2Jwt = makeSignedJwt({ sub: "user-1", sessionId: "sid-held-2", sig: "sig-held-2" });
+      const login2Stored = makeStoredSession({ accessToken: login2Jwt, refreshToken: "rt-held-2", expired: false, userId: "user-1" });
+
+      const storage = memoryStorage({ [TEST_STORAGE_KEY]: login1Stored });
+      const locks = createFifoLocks();
+      const events = [];
+      const logoutRequests = [];
+      let logoutStartedResolve;
+      const logoutStarted = new Promise((r) => { logoutStartedResolve = r; });
+      let releaseLogout;
+      const logoutHold = new Promise((r) => { releaseLogout = r; });
+
+      const fetchImpl = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/auth/v1/logout")) {
+          logoutRequests.push({
+            url,
+            scope: new URL(url).searchParams.get("scope"),
+            auth: new Headers(init?.headers).get("authorization"),
+          });
+          logoutStartedResolve();
+          await logoutHold;
+          return logoutStatus === 204
+            ? new Response(null, { status: 204 })
+            : new Response(JSON.stringify({ msg: "server error" }), { status: 500, headers: { "content-type": "application/json" } });
+        }
+        if (url.includes("/auth/v1/user")) {
+          return new Response(JSON.stringify({ id: "user-1", aud: "authenticated" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      };
+
+      await withBrowserEnv({ storage, locks, fetchImpl }, async () => {
+        const session = makeRealSession();
+        session.client.auth.onAuthStateChange((event, sess) => events.push({ event, sess }));
+        try {
+          await session.client.auth.initialize();
+          await settleLockIdle(locks);
+          events.length = 0;
+
+          const pendingSignOut = session.signOut({ expected: { userId: "user-1", sessionId: "sid-held-1" } });
+          await logoutStarted;
+
+          // Same-person replacement arrives in storage while the initiating login's logout call is in flight.
+          storage.entries.set(TEST_STORAGE_KEY, login2Stored);
+          releaseLogout();
+
+          const outcome = await pendingSignOut;
+          assert.deepEqual(
+            outcome,
+            {
+              signedOutLocally: false,
+              serverRevoked: logoutStatus === 204,
+              replaced: true,
+              retry: false,
+            },
+            `status ${logoutStatus}: reports replacement while preserving real serverRevoked`,
+          );
+          assert.equal(logoutRequests.length, 1, "exactly one server logout request sent");
+          assert.equal(logoutRequests[0].scope, "local", "ordinary sign-out sent local scope (never revokes same-person replacement)");
+          assert.equal(logoutRequests[0].auth, `Bearer ${login1Jwt}`, "server logout used the initiating login's bearer token");
+          assert.equal(storage.entries.get(TEST_STORAGE_KEY), login2Stored, "same-person replacement login survived locally");
+          assert.deepEqual(events, [], "zero SIGNED_OUT events announced over replacement login");
+
+          const verified = await session.verifiedSession();
+          assert.equal(verified?.access_token, login2Jwt, "replacement login remains verifiable");
+        } finally {
+          releaseLogout?.();
+          await session.quiesce();
+        }
+      });
+    }
+  });
+
+  await t.test("(f) LiveDashboard single-account sign-out paths both pass local scope, render retryable error on local failure, and distinguish unconfirmed remote sign-out", async () => {
+    const dashboardPath = fileURLToPath(new URL("../components/app/LiveDashboard.astro", import.meta.url));
+    const dashboardSrc = await readFile(dashboardPath, "utf8");
+    assert.match(
+      dashboardSrc,
+      /const attemptReauthSignOut = async[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(attemptReauthSignOut\);[\s\S]*?!signOutRes\.serverRevoked/,
+      "re-authentication sign-out path passes local scope, surfaces retryable error on local failure, and handles unconfirmed server revocation",
+    );
+    assert.match(
+      dashboardSrc,
+      /const attemptSingleSignOut = async[\s\S]*?scope:\s*"local"[\s\S]*?if \(signOutRes && !signOutRes\.signedOutLocally\) \{\s*renderSignOutError\(attemptSingleSignOut\);[\s\S]*?if \(signOutRes && !signOutRes\.serverRevoked\)/,
+      "ordinary Sign out click passes local scope, surfaces retryable error on local failure, and distinguishes unconfirmed server revocation",
+    );
   });
 });
 

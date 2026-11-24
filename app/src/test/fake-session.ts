@@ -431,7 +431,7 @@ export function createFakeSessionHarness(
     },
     async signOut() {
       current = null;
-      return { signedOutLocally: true, serverRevoked: true, replaced: false };
+      return { signedOutLocally: true, serverRevoked: true, replaced: false, retry: false };
     },
     async quiesce() {
       quiesceCalls += 1;

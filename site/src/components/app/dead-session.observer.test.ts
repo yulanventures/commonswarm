@@ -509,8 +509,12 @@ test("saved web sessions survive transient verification/refresh and reload; term
             if(mode==='storage-explicit-logout')check(!(await api.auth.refreshSession()).error,'logout must cancel a real pending successor');
             if(mode==='storage-removal-retry'){
               Storage.prototype.removeItem=function(){throw new DOMException('Fixture denial','SecurityError');};
-              check(!(await api.auth.signOut({scope:'local'})).error,'logout with denied persistent removal');
-              check(await cs.currentSession()===null,'denied removal keeps memory signed out');
+              let signedOutDuringRefusal=false;
+              const sub=api.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')signedOutDuringRefusal=true;});
+              const failedRes=await cs.signOut({userId:${JSON.stringify(userId)},loginId:'',sessionId:null,scope:'local'});
+              sub.data.subscription.unsubscribe();
+              check(Boolean(failedRes)&&failedRes.signedOutLocally===false&&failedRes.retry===true&&failedRes.replaced===false,'denied persistent removal reports retryable local failure');
+              check(!signedOutDuringRefusal,'denied persistent removal does not announce SIGNED_OUT');
               check(localStorage.getItem('sb-127-auth-token')!==null,'fixture must leave old persistent credential when removal is denied');
               Storage.prototype.removeItem=nativeRemove;
             }

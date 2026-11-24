@@ -55,12 +55,13 @@ export const REFRESH_BACKOFF_FLOOR_MS = 1_000;
 export const REFRESH_BACKOFF_BASE_MS = 2_000;
 export const REFRESH_BACKOFF_CAP_MS = 60_000;
 /**
- * Sanity ceiling for server-supplied `Retry-After` deadlines (15 minutes).
- * `REFRESH_BACKOFF_CAP_MS` caps only the client exponential backoff; a valid
- * server `Retry-After` longer than 60s gates the wire for its full duration up
- * to this ceiling so a malformed header cannot lock a credential out indefinitely.
+ * Maximum interval between screen-level recovery rechecks reported on
+ * `AuthRecoveryRequired.retryAfter` (15 minutes). The wire gate itself honours
+ * the full valid server `Retry-After` deadline stored in the backoff record;
+ * callers may recheck sooner and the wire gate still refuses until that full
+ * server deadline elapses.
  */
-export const REFRESH_RETRY_AFTER_CEILING_MS = 15 * 60 * 1_000;
+export const RECOVERY_RECHECK_MAX_MS = 15 * 60 * 1_000;
 
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -143,7 +144,11 @@ function parseRetryAfterMs(header: string | null, now: number): number | null {
   if (!trimmed) return null;
   if (/^\d+$/.test(trimmed)) {
     const secs = Number(trimmed);
-    if (Number.isFinite(secs)) return secs * 1000;
+    const ms = secs * 1000;
+    if (Number.isFinite(secs) && Number.isFinite(ms) && Number.isFinite(now + ms)) {
+      return ms;
+    }
+    return null;
   }
   const dateMs = Date.parse(trimmed);
   if (Number.isFinite(dateMs)) {
@@ -347,7 +352,7 @@ export interface CreateBrowserSessionOptions {
 }
 
 export interface BrowserSignOutOptions {
-  /** Scope forwarded to `/auth/v1/logout` when a usable access token exists (defaults to `"global"`). */
+  /** Scope forwarded to `/auth/v1/logout` when a usable access token exists (defaults to `"local"`). */
   scope?: "global" | "local" | "others";
   /** Optional initiating login identity captured at click time. */
   expected?: {
@@ -357,12 +362,14 @@ export interface BrowserSignOutOptions {
 }
 
 export interface BrowserSignOutResult {
-  /** True iff the initiating login's local browser credential is cleared (or was already absent). */
+  /** True iff the initiating login's local browser credential is confirmed cleared (or absent). */
   readonly signedOutLocally: boolean;
   /** True iff GoTrue confirmed server-side logout (2xx) for the initiating login's access token. */
   readonly serverRevoked: boolean;
   /** True iff another login replaced the initiating login before sign-out ran; replacement left intact. */
   readonly replaced: boolean;
+  /** True iff durable local removal failed or could not be confirmed; caller should keep view retired and offer retry. */
+  readonly retry: boolean;
 }
 
 export interface BrowserSession {
@@ -549,11 +556,19 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     return persistentStorage ?? null;
   }
 
+  function hasPersistentStorage(): boolean {
+    try {
+      return Boolean(globalThis.localStorage);
+    } catch {
+      return true;
+    }
+  }
+
   function readPersistentAuthItem(key: string): string | null | undefined {
     try { return globalThis.localStorage?.getItem(key); } catch { return undefined; }
   }
 
-  function parseBackoffRecord(raw: string | null, now: number): RefreshBackoffRecord | null {
+  function parseBackoffRecord(raw: string | null): RefreshBackoffRecord | null {
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw) as {
@@ -576,7 +591,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       }
       return {
         gen: parsed.gen,
-        nextAttemptAt: Math.min(parsed.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS),
+        nextAttemptAt: parsed.nextAttemptAt,
         attempts: parsed.attempts,
       };
     } catch {
@@ -584,7 +599,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     }
   }
 
-  function clampedMemoryBackoff(expectedGen: string | null, now: number): RefreshBackoffRecord | null {
+  function matchingMemoryBackoff(expectedGen: string | null): RefreshBackoffRecord | null {
     if (!memoryBackoff) return null;
     if (!expectedGen || memoryBackoff.gen !== expectedGen) {
       memoryBackoff = null;
@@ -593,9 +608,35 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     }
     return {
       gen: memoryBackoff.gen,
-      nextAttemptAt: Math.min(memoryBackoff.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS),
+      nextAttemptAt: memoryBackoff.nextAttemptAt,
       attempts: memoryBackoff.attempts,
     };
+  }
+
+  function mergeSameGenBackoff(
+    disk: RefreshBackoffRecord,
+    local: RefreshBackoffRecord,
+  ): RefreshBackoffRecord {
+    return {
+      gen: disk.gen,
+      nextAttemptAt: Math.max(disk.nextAttemptAt, local.nextAttemptAt),
+      attempts: Math.max(disk.attempts, local.attempts),
+    };
+  }
+
+  function writeBackoffRecordLocked(record: RefreshBackoffRecord): boolean {
+    if (activeLockToken === null) return false;
+    const serialized = JSON.stringify(record);
+    try {
+      const storage = globalThis.localStorage;
+      if (storage) {
+        storage.setItem(backoffStorageKey, serialized);
+        if (readPersistentAuthItem(backoffStorageKey) === serialized) {
+          return true;
+        }
+      }
+    } catch { /* readable-but-write-refused storage still honours memoryBackoff */ }
+    return false;
   }
 
   // Condition 1: ALL mutations of the shared durable backoff record happen ONLY under
@@ -613,26 +654,26 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   /**
    * Read-only view of the active backoff record for `expectedGen`.
    * Never mutates `localStorage`; treats a mismatched or corrupt disk entry as ignorable
-   * until the next locked attempt cleans it up. Preserves a same-generation in-memory
-   * fallback when storage is readable but the preceding write was refused.
+   * until the next locked attempt cleans it up. Preserves the stronger same-generation
+   * in-memory deadline when storage is readable but a newer write was refused, and never
+   * shortens a parsed server deadline on read.
    */
   function readBackoffRecord(expectedGen: string | null): RefreshBackoffRecord | null {
-    const now = Date.now();
     const raw = readPersistentAuthItem(backoffStorageKey);
     if (raw === undefined) {
-      return clampedMemoryBackoff(expectedGen, now);
+      return matchingMemoryBackoff(expectedGen);
     }
     if (raw === null) {
       if (memoryBackoffWriteRefused) {
-        return clampedMemoryBackoff(expectedGen, now);
+        return matchingMemoryBackoff(expectedGen);
       }
       memoryBackoff = null;
       return null;
     }
-    const parsed = parseBackoffRecord(raw, now);
+    const parsed = parseBackoffRecord(raw);
     if (!parsed || !expectedGen || parsed.gen !== expectedGen) {
       if (memoryBackoffWriteRefused) {
-        return clampedMemoryBackoff(expectedGen, now);
+        return matchingMemoryBackoff(expectedGen);
       }
       if (!expectedGen || (memoryBackoff && memoryBackoff.gen !== expectedGen)) {
         memoryBackoff = null;
@@ -640,14 +681,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       return null;
     }
     if (memoryBackoffWriteRefused && memoryBackoff && memoryBackoff.gen === expectedGen) {
-      const localClamped = Math.min(memoryBackoff.nextAttemptAt, now + REFRESH_RETRY_AFTER_CEILING_MS);
-      const merged: RefreshBackoffRecord = {
-        gen: parsed.gen,
-        nextAttemptAt: Math.max(parsed.nextAttemptAt, localClamped),
-        attempts: Math.max(parsed.attempts, memoryBackoff.attempts),
-      };
+      const merged = mergeSameGenBackoff(parsed, memoryBackoff);
       memoryBackoff = merged;
-      if (parsed.nextAttemptAt >= localClamped) {
+      if (parsed.nextAttemptAt >= merged.nextAttemptAt && parsed.attempts >= merged.attempts) {
         memoryBackoffWriteRefused = false;
       }
       return merged;
@@ -669,40 +705,23 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     const now = Date.now();
     const existing = readBackoffRecord(gen);
     const attempts = (existing?.attempts ?? 0) + 1;
-    // Cap only the exponential part at REFRESH_BACKOFF_CAP_MS (60s); honour a valid
-    // server Retry-After longer than 60s up to REFRESH_RETRY_AFTER_CEILING_MS (15m).
+    // Cap only the exponential part at REFRESH_BACKOFF_CAP_MS (60s); honour any
+    // valid server Retry-After deadline in full on the wire gate.
     const expDelay = Math.min(
       REFRESH_BACKOFF_BASE_MS * (2 ** Math.min(attempts - 1, 10)),
       REFRESH_BACKOFF_CAP_MS,
     );
     const retryAfterMs = parseRetryAfterMs(retryAfterHeader, now);
-    const boundedRetryAfterMs =
-      retryAfterMs !== null ? Math.min(retryAfterMs, REFRESH_RETRY_AFTER_CEILING_MS) : null;
     const rawDelay =
-      boundedRetryAfterMs !== null ? Math.max(expDelay, boundedRetryAfterMs) : expDelay;
-    const delayMs = Math.min(
-      Math.max(rawDelay, REFRESH_BACKOFF_FLOOR_MS),
-      REFRESH_RETRY_AFTER_CEILING_MS,
-    );
+      retryAfterMs !== null ? Math.max(expDelay, retryAfterMs) : expDelay;
+    const delayMs = Math.max(rawDelay, REFRESH_BACKOFF_FLOOR_MS);
     const record: RefreshBackoffRecord = {
       gen,
       nextAttemptAt: now + delayMs,
       attempts,
     };
     memoryBackoff = record;
-    memoryBackoffWriteRefused = true;
-    if (activeLockToken !== null) {
-      const serialized = JSON.stringify(record);
-      try {
-        const storage = globalThis.localStorage;
-        if (storage) {
-          storage.setItem(backoffStorageKey, serialized);
-          if (readPersistentAuthItem(backoffStorageKey) === serialized) {
-            memoryBackoffWriteRefused = false;
-          }
-        }
-      } catch { /* readable-but-write-refused storage still honours memoryBackoff */ }
-    }
+    memoryBackoffWriteRefused = !writeBackoffRecordLocked(record);
     return record;
   }
 
@@ -712,23 +731,47 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       return;
     }
     const raw = readPersistentAuthItem(backoffStorageKey);
+    const localMatching =
+      currentGen !== null && memoryBackoff && memoryBackoff.gen === currentGen
+        ? memoryBackoff
+        : null;
     if (raw === null) {
-      if (!memoryBackoffWriteRefused || !currentGen || memoryBackoff?.gen !== currentGen) {
-        memoryBackoff = null;
-        memoryBackoffWriteRefused = false;
+      if (memoryBackoffWriteRefused && localMatching) {
+        memoryBackoff = localMatching;
+        memoryBackoffWriteRefused = !writeBackoffRecordLocked(localMatching);
+        return;
       }
+      memoryBackoff = null;
+      memoryBackoffWriteRefused = false;
       return;
     }
     if (raw === undefined) {
-      if (memoryBackoff && (currentGen === null || memoryBackoff.gen !== currentGen)) {
+      if (!localMatching) {
         memoryBackoff = null;
         memoryBackoffWriteRefused = false;
       }
       return;
     }
-    const parsed = parseBackoffRecord(raw, Date.now());
+    const parsed = parseBackoffRecord(raw);
     if (!parsed || currentGen === null || parsed.gen !== currentGen) {
-      clearBackoffRecordLocked();
+      try { globalThis.localStorage?.removeItem(backoffStorageKey); } catch { /* ignore storage errors */ }
+      if (localMatching) {
+        memoryBackoff = localMatching;
+        memoryBackoffWriteRefused = !writeBackoffRecordLocked(localMatching);
+      } else {
+        memoryBackoff = null;
+        memoryBackoffWriteRefused = false;
+      }
+      return;
+    }
+    if (localMatching) {
+      const merged = mergeSameGenBackoff(parsed, localMatching);
+      memoryBackoff = merged;
+      if (parsed.nextAttemptAt >= merged.nextAttemptAt && parsed.attempts >= merged.attempts) {
+        memoryBackoffWriteRefused = false;
+      } else {
+        memoryBackoffWriteRefused = !writeBackoffRecordLocked(merged);
+      }
       return;
     }
     memoryBackoff = parsed;
@@ -825,7 +868,9 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     const cred = session === undefined ? currentStoredSession() : session;
     if (!cred) return undefined;
     const record = readBackoffRecord(credentialGenerationKey(cred));
-    return record && record.nextAttemptAt > Date.now() ? record.nextAttemptAt : undefined;
+    const now = Date.now();
+    if (!record || record.nextAttemptAt <= now) return undefined;
+    return Math.min(record.nextAttemptAt, now + RECOVERY_RECHECK_MAX_MS);
   }
 
   const onStorage = (event: StorageEvent): void => {
@@ -856,10 +901,28 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   }
 
   function removePersistentAuthItem(key: string): void {
-    // Explicit logout and matching terminal proof still remove persistent auth,
-    // even when the write probe failed.
+    // Auxiliary keys (PKCE verifiers, -user cache) still attempt best-effort removal.
     try { globalThis.localStorage?.removeItem(key); }
     catch { persistentStorage = null; }
+  }
+
+  function removePersistentAuthItemConfirmed(key: string): boolean {
+    let storage: Storage | null | undefined;
+    try {
+      storage = globalThis.localStorage;
+    } catch {
+      persistentStorage = null;
+      return false;
+    }
+    if (!storage) return true;
+    try {
+      storage.removeItem(key);
+    } catch {
+      persistentStorage = null;
+      return false;
+    }
+    // Confirm durable removal by reading the slot back.
+    return readPersistentAuthItem(key) === null;
   }
 
   // Readable disk remains untouched when writes fail; memory holds the current
@@ -933,15 +996,23 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
           throw new AuthRetryableFetchError("Sign-in changed during verification", 0);
         }
       }
+      importedStorageKeys.add(key);
       if (key === effectiveStorageKey()) {
         if (activeRefreshAttempt) activeRefreshAttempt.commitGuardReadArmed = false;
+        if (!removePersistentAuthItemConfirmed(key)) {
+          // Persistent removal failed or could not be confirmed by reading the slot back.
+          // Abort before GoTrueClient._removeSession() can announce SIGNED_OUT, and keep
+          // memory/backoff intact so retries and fresh instances never believe removal succeeded.
+          throw new AuthRetryableFetchError("Could not remove saved sign-in from browser storage", 0);
+        }
         clearBackoffRecordLocked();
+      } else {
+        removePersistentAuthItem(key);
       }
-      importedStorageKeys.add(key);
       pendingStorageWrites.delete(key);
       removedStorageKeys.add(key);
       authMemory.delete(key);
-      removePersistentAuthItem(key);
+      diskSnapshots.set(key, null);
     },
   };
 
@@ -1046,11 +1117,17 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         if (!hasTrackedLockedAttempt) {
           return makeDiscardResponse(false, requestRefresh);
         }
-        // Condition 2: if storage already holds a different credential than the request token,
-        // abandon without touching the network or recording backoff.
-        if (savedCredential !== null && requestRefresh !== null && savedCredential.refresh_token !== requestRefresh) {
+        // Condition 3: require the managed slot (or current in-memory managed credential when
+        // disk is unreadable) to hold a session whose refresh token matches the parsed request
+        // token. Discard before the network when empty, unreadable without memory, unparseable,
+        // or mismatched.
+        if (
+          savedCredential === null ||
+          requestRefresh === null ||
+          savedCredential.refresh_token !== requestRefresh
+        ) {
           reconcileBackoffOnDiskLocked(storedGen);
-          return makeDiscardResponse(true, requestRefresh);
+          return makeDiscardResponse(savedCredential !== null, requestRefresh);
         }
         // Clean up any stale/mismatched backoff record on disk under the active lock.
         reconcileBackoffOnDiskLocked(storedGen);
@@ -1058,9 +1135,6 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
         // exit immediately through the discard path with zero network I/O and zero lock sleep.
         const existingBackoff = readBackoffRecord(storedGen);
         if (
-          savedCredential !== null &&
-          requestRefresh !== null &&
-          savedCredential.refresh_token === requestRefresh &&
           existingBackoff &&
           Date.now() < existingBackoff.nextAttemptAt
         ) {
@@ -1292,8 +1366,8 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   // through our fan-out so no subscription starts an implicit unlocked session load.
   authClient._emitInitialSession = async () => {};
 
-  function makeUntrackedRefreshDiscardResult(): { data: null; error: Error } {
-    const discarded = new AuthRetryableFetchError("Refresh attempt refused outside active session lock", 0);
+  function makeRefreshDiscardResult(message: string): { data: null; error: Error } {
+    const discarded = new AuthRetryableFetchError(message, 0);
     discarded.name = "AuthRefreshDiscardedError";
     return { data: null, error: discarded };
   }
@@ -1302,17 +1376,31 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
   const origRefreshAccessToken = authClient._refreshAccessToken!.bind(client.auth);
   authClient._callRefreshToken = async (refreshToken: string) => {
     const lockToken = activeLockToken;
-    // Condition 3: refuse any refresh attempt outside this client's active tracked lock.
+    // Condition 3: refuse any refresh attempt outside this client's active tracked lock,
+    // or when the managed slot does not hold a credential matching `refreshToken`.
     // Ends immediately through the discard error shape with zero wire requests, zero
     // storage mutations, zero events, and without arming the commit-guard read marker.
     if (quiesced || lockToken === null || authClient.lockAcquired !== true) {
-      return makeUntrackedRefreshDiscardResult();
+      return makeRefreshDiscardResult("Refresh attempt refused outside active session lock");
+    }
+    const currentCred = currentStoredSession();
+    const currentGen = credentialGenerationKey(currentCred);
+    if (
+      currentCred === null ||
+      typeof refreshToken !== "string" ||
+      refreshToken.length === 0 ||
+      currentCred.refresh_token !== refreshToken
+    ) {
+      reconcileBackoffOnDiskLocked(currentGen);
+      lastDiscardedRefreshToken =
+        typeof refreshToken === "string" && refreshToken.length > 0 ? refreshToken : null;
+      return makeRefreshDiscardResult("Refresh attempt refused without matching managed credential");
     }
     // Re-entrant call while a refresh is already active under this lock dedupes via
     // GoTrue's `refreshingDeferred`; preserve the outermost attempt scope.
     if (activeRefreshAttempt !== null) {
       if (activeRefreshAttempt.lockToken !== lockToken) {
-        return makeUntrackedRefreshDiscardResult();
+        return makeRefreshDiscardResult("Refresh attempt refused outside active session lock");
       }
       return origCallRefreshToken(refreshToken);
     }
@@ -1529,11 +1617,12 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
 
   async function signOut(signOutOptions?: BrowserSignOutOptions): Promise<BrowserSignOutResult> {
     if (quiesced) {
-      return { signedOutLocally: false, serverRevoked: false, replaced: false };
+      return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: false };
     }
     deadSession = false;
-    const scope = signOutOptions?.scope ?? "global";
+    const scope = signOutOptions?.scope ?? "local";
     const targetKey = effectiveStorageKey();
+    const initialDisk = readPersistentAuthItem(targetKey);
     const initialRaw = readAuthItem(targetKey);
     const initialCred = savedSession(initialRaw);
     const expectedUserId = signOutOptions?.expected?.userId?.trim() || initialCred?.user?.id?.trim() || null;
@@ -1556,37 +1645,43 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     };
 
     if (initialCred !== null && !matchesInitiatingLogin(initialCred)) {
-      return { signedOutLocally: false, serverRevoked: false, replaced: true };
+      return { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false };
     }
-    if (initialCred === null) {
-      return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false };
+    if (initialCred === null && (initialDisk === null || !hasPersistentStorage())) {
+      return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false, retry: false };
     }
 
     if (verifiedAuthClient.initializePromise) {
       await Promise.resolve(verifiedAuthClient.initializePromise).catch(() => undefined);
     }
     if (quiesced) {
-      return { signedOutLocally: false, serverRevoked: false, replaced: false };
+      return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: false };
     }
 
     return await verifiedAuthClient._acquireLock!(-1, async () => {
       if (quiesced) {
-        return { signedOutLocally: false, serverRevoked: false, replaced: false };
+        return { signedOutLocally: false, serverRevoked: false, replaced: false, retry: false };
       }
+      const diskBeforeLogout = readPersistentAuthItem(targetKey);
       const rawBeforeLogout = readAuthItem(targetKey);
       const credBeforeLogout = savedSession(rawBeforeLogout);
-      if (credBeforeLogout === null) {
+      if (credBeforeLogout === null && (diskBeforeLogout === null || !hasPersistentStorage())) {
         clearBackoffRecordLocked();
         deadSession = false;
-        return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false };
+        return { signedOutLocally: scope !== "others", serverRevoked: false, replaced: false, retry: false };
       }
-      if (!matchesInitiatingLogin(credBeforeLogout)) {
-        return { signedOutLocally: false, serverRevoked: false, replaced: true };
+      if (credBeforeLogout !== null && !matchesInitiatingLogin(credBeforeLogout)) {
+        return { signedOutLocally: false, serverRevoked: false, replaced: true, retry: false };
       }
 
       let serverRevoked = false;
-      const accessToken = credBeforeLogout.access_token;
-      if (typeof accessToken === "string" && accessToken.length > 0 && isUnexpiredSession(credBeforeLogout)) {
+      const accessToken = credBeforeLogout?.access_token;
+      if (
+        credBeforeLogout !== null &&
+        typeof accessToken === "string" &&
+        accessToken.length > 0 &&
+        isUnexpiredSession(credBeforeLogout)
+      ) {
         try {
           const { error } = await verifiedAuthClient.admin!.signOut!(accessToken, scope);
           if (!error) {
@@ -1598,38 +1693,53 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       }
 
       if (quiesced) {
-        return { signedOutLocally: false, serverRevoked, replaced: false };
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: false };
       }
       if (scope === "others") {
-        return { signedOutLocally: false, serverRevoked, replaced: false };
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: false };
       }
 
+      const diskBeforeRemove = readPersistentAuthItem(targetKey);
       const rawBeforeRemove = readAuthItem(targetKey);
       const credBeforeRemove = savedSession(rawBeforeRemove);
-      if (credBeforeRemove === null) {
+      if (credBeforeRemove === null && (diskBeforeRemove === null || !hasPersistentStorage())) {
         clearBackoffRecordLocked();
         deadSession = false;
-        return { signedOutLocally: true, serverRevoked, replaced: false };
+        return { signedOutLocally: true, serverRevoked, replaced: false, retry: false };
       }
-      if (!matchesInitiatingLogin(credBeforeRemove)) {
-        return { signedOutLocally: false, serverRevoked, replaced: true };
+      if (credBeforeRemove !== null && !matchesInitiatingLogin(credBeforeRemove)) {
+        return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
       }
 
       // Guard local removal with removalSnapshot so _removeSession aborts before
-      // mutating storage or announcing SIGNED_OUT if a peer replaces the slot.
+      // mutating storage or announcing SIGNED_OUT if a peer replaces the slot,
+      // and confirm durable persistent removal on read-back before reporting local success.
       removalSnapshot = rawBeforeRemove;
       try {
         await verifiedAuthClient._removeSession!();
       } catch {
         removalSnapshot = null;
+        const diskAfter = readPersistentAuthItem(targetKey);
         const afterCred = savedSession(readAuthItem(targetKey));
         if (afterCred !== null && !matchesInitiatingLogin(afterCred)) {
-          return { signedOutLocally: false, serverRevoked, replaced: true };
+          return { signedOutLocally: false, serverRevoked, replaced: true, retry: false };
         }
-        return { signedOutLocally: afterCred === null, serverRevoked, replaced: false };
+        const confirmedGone = afterCred === null && (diskAfter === null || !hasPersistentStorage());
+        if (confirmedGone) {
+          deadSession = false;
+          return { signedOutLocally: true, serverRevoked, replaced: false, retry: false };
+        }
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
+      }
+      const diskAfterRemove = readPersistentAuthItem(targetKey);
+      const confirmedGone =
+        savedSession(readAuthItem(targetKey)) === null &&
+        (diskAfterRemove === null || !hasPersistentStorage());
+      if (!confirmedGone) {
+        return { signedOutLocally: false, serverRevoked, replaced: false, retry: true };
       }
       deadSession = false;
-      return { signedOutLocally: true, serverRevoked, replaced: false };
+      return { signedOutLocally: true, serverRevoked, replaced: false, retry: false };
     });
   }
 

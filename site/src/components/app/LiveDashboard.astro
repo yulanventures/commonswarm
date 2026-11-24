@@ -3391,7 +3391,45 @@ import "../../styles/kylon-image-viewer.css";
       window.requestAnimationFrame(() => panel.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }));
     };
 
+    let pendingSignOutRetry: (() => Promise<void>) | null = null;
+
+    const resetWorkspaceErrorCopy = (): void => {
+      pendingSignOutRetry = null;
+      const target = panel("workspace-error");
+      const eyebrow = target?.querySelector<HTMLElement>(".dashboard__eyebrow");
+      if (eyebrow) {
+        eyebrow.textContent = "Workspace check interrupted";
+        eyebrow.hidden = false;
+      }
+      const title = one<HTMLElement>("#dashboard-workspace-error-title");
+      if (title) title.textContent = "Your workspaces could not load.";
+      const message = one<HTMLElement>("[data-workspace-error]");
+      if (message) message.hidden = false;
+    };
+
+    const renderSignOutError = (retryAction: () => Promise<void>): void => {
+      pendingSignOutRetry = retryAction;
+      authRecoveryActive = false;
+      const target = panel("workspace-error");
+      const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
+      if (account) account.hidden = true;
+      for (const button of target?.querySelectorAll<HTMLButtonElement>("[data-signout]") ?? []) {
+        button.hidden = true;
+      }
+      const eyebrow = target?.querySelector<HTMLElement>(".dashboard__eyebrow");
+      if (eyebrow) eyebrow.hidden = true;
+      const title = one<HTMLElement>("#dashboard-workspace-error-title");
+      if (title) title.textContent = "CommonSwarm could not sign you out on this device.";
+      const message = one<HTMLElement>("[data-workspace-error]");
+      if (message) {
+        message.textContent = "";
+        message.hidden = true;
+      }
+      showPanel("workspace-error");
+    };
+
     const renderWorkspaceError = (value: Session, error: unknown): void => {
+      resetWorkspaceErrorCopy();
       const account = panel("workspace-error")?.querySelector<HTMLElement>(".dashboard__account-line");
       if (account) account.hidden = false;
       for (const button of panel("workspace-error")?.querySelectorAll<HTMLButtonElement>("[data-signout]") ?? []) {
@@ -10987,17 +11025,45 @@ import "../../styles/kylon-image-viewer.css";
               return;
             }
           } else {
-            const signOutRes = await signOut({
-              userId: ownerRenderedUserId || session.user.id,
-              loginId: ownerLoginId,
-              sessionId: ownerLoginId || sessionIdFromAccessToken(session.access_token),
-              scope: "local",
-            });
-            session = null;
-            if (signOutRes?.replaced) {
-              if (!authReloadQueued) runBoot();
-              return;
-            }
+            const ownerExpectedUserId = ownerRenderedUserId || session.user.id;
+            const ownerExpectedSessionId = ownerLoginId || sessionIdFromAccessToken(session.access_token);
+            const attemptReauthSignOut = async (): Promise<void> => {
+              const signOutRes = await signOut({
+                userId: ownerExpectedUserId,
+                loginId: ownerLoginId,
+                sessionId: ownerExpectedSessionId,
+                scope: "local",
+              });
+              session = null;
+              if (signOutRes?.replaced) {
+                pendingSignOutRetry = null;
+                if (!authReloadQueued) runBoot();
+                return;
+              }
+              if (signOutRes && !signOutRes.signedOutLocally) {
+                renderSignOutError(attemptReauthSignOut);
+                return;
+              }
+              pendingSignOutRetry = null;
+              showAuthView("choices");
+              showPanel("signed-out");
+              const emailInput = one<HTMLInputElement>("#dashboard-email");
+              if (emailInput && userEmail) emailInput.value = userEmail;
+              authError(
+                signOutRes && !signOutRes.serverRevoked
+                  ? "Signed out on this device. Sign in again to confirm agent admin access."
+                  : "Sign in again to confirm agent admin access.",
+              );
+              window.requestAnimationFrame(() => {
+                const focusField =
+                  emailInput && emailInput.value.trim()
+                    ? one<HTMLInputElement>("#dashboard-password") ?? emailInput
+                    : emailInput;
+                focusField?.focus({ preventScroll: true });
+              });
+            };
+            await attemptReauthSignOut();
+            return;
           }
           showAuthView("choices");
           showPanel("signed-out");
@@ -20653,6 +20719,7 @@ import "../../styles/kylon-image-viewer.css";
       }
 
       authRecoveryActive = false;
+      pendingSignOutRetry = null;
       sampleMode = false;
       for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open], [data-password-open]")) button.hidden = false;
       setLoading("Checking your sign-in…");
@@ -20770,6 +20837,7 @@ import "../../styles/kylon-image-viewer.css";
         if (bootVersion !== bootGeneration) return;
         pendingSwitchFocusReturn = false;
         if (error instanceof AuthRecoveryRequired) {
+          resetWorkspaceErrorCopy();
           authRecoveryActive = true;
           const target = panel("workspace-error");
           const account = target?.querySelector<HTMLElement>(".dashboard__account-line");
@@ -21144,23 +21212,41 @@ import "../../styles/kylon-image-viewer.css";
           forgetAddAgent(addAgentStore(), signingOutUserId);
         }
         teardownActiveAccountView();
-        const signOutRes = await signOut(
-          signingOutUserId || signingOutSessionId
-            ? {
-                userId: signingOutUserId,
-                loginId: signingOutSessionId,
-                sessionId: signingOutSessionId || null,
-              }
-            : null,
-        );
+        const attemptSingleSignOut = async (): Promise<void> => {
+          const signOutRes = await signOut(
+            signingOutUserId || signingOutSessionId
+              ? {
+                  userId: signingOutUserId,
+                  loginId: signingOutSessionId,
+                  sessionId: signingOutSessionId || null,
+                  scope: "local",
+                }
+              : {
+                  userId: "",
+                  loginId: "",
+                  sessionId: null,
+                  scope: "local",
+                },
+          );
+          if (signOutRes?.replaced) {
+            pendingSignOutRetry = null;
+            if (!authReloadQueued) runBoot();
+            return;
+          }
+          session = null;
+          if (signOutRes && !signOutRes.signedOutLocally) {
+            renderSignOutError(attemptSingleSignOut);
+            return;
+          }
+          pendingSignOutRetry = null;
+          showAuthView("choices");
+          showPanel("signed-out");
+          if (signOutRes && !signOutRes.serverRevoked) {
+            authError("Signed out on this device. Could not reach the server to confirm remote sign-out.");
+          }
+        };
+        await attemptSingleSignOut();
         button.disabled = false;
-        if (signOutRes?.replaced) {
-          if (!authReloadQueued) runBoot();
-          return;
-        }
-        session = null;
-        showAuthView("choices");
-        showPanel("signed-out");
       });
     }
 
@@ -24203,7 +24289,18 @@ import "../../styles/kylon-image-viewer.css";
     one<HTMLButtonElement>("[data-retry-workspace]")?.addEventListener("click", () => {
       if (activeWorkspaceId) void openWorkspace(activeWorkspaceId);
     });
-    one<HTMLButtonElement>("[data-retry-workspaces]")?.addEventListener("click", () => {
+    one<HTMLButtonElement>("[data-retry-workspaces]")?.addEventListener("click", async () => {
+      if (pendingSignOutRetry) {
+        const retry = pendingSignOutRetry;
+        const retryBtn = one<HTMLButtonElement>("[data-retry-workspaces]");
+        if (retryBtn) retryBtn.disabled = true;
+        try {
+          await retry();
+        } finally {
+          if (retryBtn) retryBtn.disabled = false;
+        }
+        return;
+      }
       runBoot();
     });
     one<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", () => {
@@ -24560,6 +24657,7 @@ import "../../styles/kylon-image-viewer.css";
         resetWorkspaceSessionState();
         requestVersion += 1;
         authRecoveryActive = false;
+        if (typeof pendingSignOutRetry !== "undefined") pendingSignOutRetry = null;
       }
       if (authReloadQueued) return;
       authReloadQueued = true;
