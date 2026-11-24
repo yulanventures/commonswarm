@@ -742,15 +742,20 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
   }
 });
 
-test("parity omits /next by default, and --check-next walks /next, requires security headers and no-cache HTML, and rejects third-party origins", async () => {
+test("parity omits /next by default, and --check-next walks /next, /next/, and /next/index.html with a browser user agent, requires security headers and no-cache HTML, and rejects third-party origins", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-next-parity-"));
-  let omitCsp = false;
-  let injectThirdParty = false;
+  let omitCspPath: string | null = null;
+  let injectThirdPartyPath: string | null = null;
+  let badStatusPath: string | null = null;
   let missingNext = false;
   const requestedPaths: string[] = [];
+  const nextUserAgents = new Map<string, string | undefined>();
   const server = createServer((request, response) => {
     const url = request.url ?? "/";
     requestedPaths.push(url);
+    if (url === "/next" || url.startsWith("/next/")) {
+      nextUserAgents.set(url, request.headers["user-agent"]);
+    }
     if (url === "/page") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
       response.end("<!doctype html><p>ok</p>");
@@ -762,13 +767,14 @@ test("parity omits /next by default, and --check-next walks /next, requires secu
       return;
     }
     const nextSec = {
-      ...(omitCsp ? {} : { "content-security-policy": "frame-ancestors 'none'" }),
+      ...(omitCspPath === url ? {} : { "content-security-policy": "frame-ancestors 'none'" }),
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     };
-    if (url === "/next") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...nextSec });
-      const extra = injectThirdParty ? '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' : "";
+    if (url === "/next" || url === "/next/" || url === "/next/index.html") {
+      const status = badStatusPath === url ? 503 : 200;
+      response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", ...nextSec });
+      const extra = injectThirdPartyPath === url ? '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' : "";
       response.end(`<!doctype html><head>${extra}<script type="module" src="/next/assets/index-abc.js"></script><link rel="stylesheet" href="/next/assets/index-abc.css"></head>`);
       return;
     }
@@ -804,28 +810,46 @@ test("parity omits /next by default, and --check-next walks /next, requires secu
     // Default (without --check-next): never probes /next and does not require its headers or presence.
     missingNext = true;
     requestedPaths.length = 0;
+    nextUserAgents.clear();
     const defaultPassed = await execFileAsync(process.execPath, baseArgs, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
     assert.match(defaultPassed.stdout, /Parity passed for 1 routes/);
     assert.equal(requestedPaths.some((p) => p === "/next" || p.startsWith("/next/")), false);
 
-    // Explicit --check-next: probes /next and every referenced asset and enforces headers.
+    // Explicit --check-next: probes /next, /next/, /next/index.html, and every referenced asset with a browser UA.
     missingNext = false;
     requestedPaths.length = 0;
+    nextUserAgents.clear();
     const args = [...baseArgs, "--check-next"];
     const passed = await execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 });
-    assert.match(passed.stdout, /Parity passed for 5 routes/);
-    assert.equal(requestedPaths.includes("/next"), true);
+    assert.match(passed.stdout, /Parity passed for 7 routes/);
+    for (const expectedPath of ["/next", "/next/", "/next/index.html", "/next/assets/index-abc.js", "/next/assets/index-abc.css", "/next/fonts/inter-latin.woff2"]) {
+      assert.equal(requestedPaths.includes(expectedPath), true, `expected request for ${expectedPath}`);
+      assert.match(nextUserAgents.get(expectedPath) ?? "", /^Mozilla\/5\.0\b/, `expected browser User-Agent on ${expectedPath}`);
+    }
 
-    omitCsp = true;
+    for (const path of ["/next", "/next/", "/next/index.html"]) {
+      omitCspPath = path;
+      await assert.rejects(
+        execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
+        (error: unknown) => {
+          assert.match((error as { stderr?: string }).stderr ?? "", new RegExp(`${path.replace(/\./g, "\\.")}: content-security-policy expected`));
+          return true;
+        },
+      );
+      omitCspPath = null;
+    }
+
+    badStatusPath = "/next/";
     await assert.rejects(
       execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
       (error: unknown) => {
-        assert.match((error as { stderr?: string }).stderr ?? "", /\/next: content-security-policy expected/);
+        assert.match((error as { stderr?: string }).stderr ?? "", /\/next\/: status expected 200, got 503/);
         return true;
       },
     );
-    omitCsp = false;
-    injectThirdParty = true;
+    badStatusPath = null;
+
+    injectThirdPartyPath = "/next/index.html";
     await assert.rejects(
       execFileAsync(process.execPath, args, { cwd: fixture, encoding: "utf8", timeout: 10_000 }),
       (error: unknown) => {
@@ -833,6 +857,7 @@ test("parity omits /next by default, and --check-next walks /next, requires secu
         return true;
       },
     );
+    injectThirdPartyPath = null;
   } finally {
     await new Promise<void>((resolveClose, rejectClose) => {
       server.close((error) => error ? rejectClose(error) : resolveClose());

@@ -585,7 +585,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         response = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, tokens.access_token, initialized.result.protocolVersion);
         assert.equal(response.status, 200);
         const listed = await response.json();
-        // Must match supabase/functions/mcp/tools.ts; hosted-tool-pins.test.ts guards this plain-JS list.
+        // Must match supabase/functions/mcp/tools.ts. Nothing guards this list automatically: update it whenever a hosted core tool is added.
         const expectedTools = ['ask', 'channel_ls', 'channel_read', 'check', 'claim_seat', 'conversation_read', 'conversations', 'dm', 'file_get', 'file_ls', 'file_put', 'mark_read', 'members', 'note', 'react', 'reply', 'reraise', 'roster', 'seat_list', 'seat_release', 'thread', 'whoami', 'working_on'];
         assert.equal(listed.result.tools.length, expectedTools.length);
         assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,

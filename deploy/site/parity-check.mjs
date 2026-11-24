@@ -62,16 +62,23 @@ const policyByExtension = new Map(
 const cloudflareStaticExtensions = new Set([".css", ".js", ".png", ".svg", ".woff2"]);
 const vercelCacheControl = "public, max-age=0, must-revalidate";
 const cloudflareBrowserCacheControl = "public, max-age=14400, must-revalidate"; // measured through Cloudflare 2026-09-16
+const browserUserAgent =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-async function get(url, hostOverride) {
+async function get(url, hostOverride, extraHeaders) {
   const waitMs = Math.max(0, nextRequestAt - Date.now());
   if (waitMs > 0) await new Promise((done) => setTimeout(done, waitMs));
   nextRequestAt = Date.now() + requestIntervalMs;
   return new Promise((resolveRequest, rejectRequest) => {
     const transport = url.protocol === "https:" ? https : http;
+    const headers = {
+      "user-agent": browserUserAgent,
+      ...(hostOverride ? { host: hostOverride } : {}),
+      ...extraHeaders,
+    };
     const request = transport.request(url, {
       method: "GET",
-      headers: hostOverride ? { host: hostOverride } : undefined,
+      headers,
       servername: hostOverride?.split(":", 1)[0],
       ca,
     }, (response) => {
@@ -225,6 +232,7 @@ while (fingerprintedQueue.length > 0) {
   }
 }
 
+let checkedNextHtmlCount = 0;
 let checkedNextAssetsCount = 0;
 if (checkNext) {
   const nextSecurityHeaders = {
@@ -270,47 +278,54 @@ if (checkNext) {
       }
     }
   };
-  try {
-    const nextResponse = await get(new URL("/next", baseUrl), host);
-    if (nextResponse.statusCode !== 200) {
-      differences.push(`/next: status expected 200, got ${nextResponse.statusCode}`);
-    }
-    const ct = nextResponse.headers["content-type"] ?? "";
-    if (!ct.startsWith("text/html")) {
-      differences.push(`/next: content-type expected text/html, got ${JSON.stringify(ct)}`);
-    }
-    checkNextHeaders("/next", nextResponse.headers, "no-cache");
-    const nextAssets = new Set();
-    collectNextAssets(nextResponse.body, "/next/index.html", nextAssets);
-    if (nextAssets.size === 0) {
-      differences.push("/next: exposed no /next/ assets; preview asset graph was not reached");
-    }
-    const queue = [...nextAssets].sort();
-    const seen = new Set();
-    while (queue.length > 0) {
-      const assetPath = queue.shift();
-      if (seen.has(assetPath)) continue;
-      seen.add(assetPath);
-      try {
-        const assetRes = await get(new URL(assetPath, baseUrl), host);
-        if (assetRes.statusCode !== 200) {
-          differences.push(`${assetPath}: status expected 200, got ${assetRes.statusCode}`);
-        }
-        const wantCache = assetPath.startsWith("/next/assets/") ? "public, max-age=31536000, immutable" : null;
-        checkNextHeaders(assetPath, assetRes.headers, wantCache);
-        const deps = new Set();
-        collectNextAssets(assetRes.body, assetPath, deps);
-        for (const dep of deps) {
-          if (!seen.has(dep) && !queue.includes(dep)) queue.push(dep);
-        }
-      } catch (error) {
-        differences.push(`${assetPath}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+  const nextAssets = new Set();
+  for (const nextPath of ["/next", "/next/", "/next/index.html"]) {
+    checkedNextHtmlCount += 1;
+    try {
+      const nextResponse = await get(new URL(nextPath, baseUrl), host, {
+        accept: "text/html,application/xhtml+xml",
+      });
+      if (nextResponse.statusCode !== 200) {
+        differences.push(`${nextPath}: status expected 200, got ${nextResponse.statusCode}`);
       }
+      const ct = nextResponse.headers["content-type"] ?? "";
+      if (!ct.startsWith("text/html")) {
+        differences.push(`${nextPath}: content-type expected text/html, got ${JSON.stringify(ct)}`);
+      }
+      checkNextHeaders(nextPath, nextResponse.headers, "no-cache");
+      const pathAssets = new Set();
+      collectNextAssets(nextResponse.body, "/next/index.html", pathAssets);
+      if (pathAssets.size === 0) {
+        differences.push(`${nextPath}: exposed no /next/ assets; preview asset graph was not reached`);
+      }
+      for (const asset of pathAssets) nextAssets.add(asset);
+    } catch (error) {
+      differences.push(`${nextPath}: request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    checkedNextAssetsCount = seen.size;
-  } catch (error) {
-    differences.push(`/next: request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const queue = [...nextAssets].sort();
+  const seen = new Set();
+  while (queue.length > 0) {
+    const assetPath = queue.shift();
+    if (seen.has(assetPath)) continue;
+    seen.add(assetPath);
+    try {
+      const assetRes = await get(new URL(assetPath, baseUrl), host);
+      if (assetRes.statusCode !== 200) {
+        differences.push(`${assetPath}: status expected 200, got ${assetRes.statusCode}`);
+      }
+      const wantCache = assetPath.startsWith("/next/assets/") ? "public, max-age=31536000, immutable" : null;
+      checkNextHeaders(assetPath, assetRes.headers, wantCache);
+      const deps = new Set();
+      collectNextAssets(assetRes.body, assetPath, deps);
+      for (const dep of deps) {
+        if (!seen.has(dep) && !queue.includes(dep)) queue.push(dep);
+      }
+    } catch (error) {
+      differences.push(`${assetPath}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  checkedNextAssetsCount = seen.size;
 }
 
 if (allowedDifferences.length > 0) {
@@ -320,7 +335,7 @@ if (allowedDifferences.length > 0) {
 }
 
 const fingerprintedRouteCount = checkedFingerprintedPaths.size * 2;
-const routeCount = reference.routes.length + fingerprintedRouteCount + (checkNext ? 1 + checkedNextAssetsCount : 0);
+const routeCount = reference.routes.length + fingerprintedRouteCount + (checkNext ? checkedNextHtmlCount + checkedNextAssetsCount : 0);
 if (differences.length > 0) {
   console.error(`Parity failed with ${differences.length} difference(s):`);
   for (const difference of differences) console.error(`- ${difference}`);

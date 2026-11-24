@@ -187,6 +187,17 @@ check /404                             404 "text/html"               page  reval
 check /next-other                      404 "text/html"               page  revalidate none
 check /next/deep/missing               404 "text/html"               page  revalidate next
 
+rm -rf "$site/next/index.html" "$site/next/fonts"
+echo "--- post-rollback state (retained /next/assets/*, no /next/index.html or /next/fonts): /next pages return 404; retained assets return 200"
+check /next                            404 "text/html"               page  revalidate next
+check /next/                           404 "text/html"               page  revalidate next
+check /next/index.html                 404 "text/html"               page  revalidate next
+check /next/assets/index-Ab12Cd34.js   200 "application/javascript"  file  immutable  next
+check /next/assets/index-Ef56Gh78.css  200 "text/css"                file  immutable  next
+check /next/assets/                    404 "text/plain"              plain revalidate next
+check /next/assets/missing.Zz99Yy88.js  404 "text/plain"             plain revalidate next
+check /next/fonts/inter-latin.woff2    404 "text/plain"              plain revalidate next
+
 rm -rf "$site/next"
 echo "--- the release has no /next: /next returns the site's normal 404"
 check /next                            404 "text/html"               page  revalidate next

@@ -51,12 +51,24 @@ for route in / /app; do
   assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = "$expected"
 done
 if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then
-  STEP=http-next; status=$(probe /next); printf 'CHECK step=%s http=%s\n' "$STEP" "$status"
-  assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = '@@NEXT_SHA@@'
-  assert next-csp has_next_csp
-  assert next-nosniff has_header '^x-content-type-options:[[:space:]]*nosniff[[:space:]]*$'
-  assert next-referrer has_header '^referrer-policy:[[:space:]]*no-referrer[[:space:]]*$'
-  assert next-cache has_header '^cache-control:[[:space:]]*no-cache[[:space:]]*$'
+  next_ua='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  for next_route in /next /next/ /next/index.html; do
+    for next_mode in release-check browser-compressed browser-identity; do
+      STEP=http-next; : > "$B/probe.headers"
+      case "$next_mode" in
+        release-check) status=$(probe "$next_route");;
+        browser-compressed) status=$(curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 -A "$next_ua" -H 'Accept: text/html,application/xhtml+xml' -H 'Cache-Control: no-cache' -D "$B/probe.headers" -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$next_route");;
+        browser-identity) status=$(curl --silent --show-error --max-time 20 --max-filesize 16777216 -A "$next_ua" -H 'Accept: text/html,application/xhtml+xml' -H 'Accept-Encoding: identity' -H 'Cache-Control: no-cache' -D "$B/probe.headers" -o "$B/probe.html" -w '%{http_code}' "https://commonswarm.com$next_route");;
+      esac
+      printf 'CHECK step=%s path=%s mode=%s http=%s\n' "$STEP" "$next_route" "$next_mode" "$status"
+      assert httpstatus test "$status" = 200; assert httphash test "$(hash "$B/probe.html")" = '@@NEXT_SHA@@'
+      assert next-content-type has_header '^content-type:[[:space:]]*text/html([[:space:]]*;.*)?[[:space:]]*$'
+      assert next-csp has_next_csp
+      assert next-nosniff has_header '^x-content-type-options:[[:space:]]*nosniff[[:space:]]*$'
+      assert next-referrer has_header '^referrer-policy:[[:space:]]*no-referrer[[:space:]]*$'
+      assert next-cache has_header '^cache-control:[[:space:]]*no-cache[[:space:]]*$'
+    done
+  done
   for asset in @@NEXT_ASSETS@@; do
     STEP=http-next-asset; status=$(probe "$asset"); printf 'CHECK step=%s path=%s http=%s\n' "$STEP" "$asset" "$status"
     assert httpstatus test "$status" = 200; assert next-asset-hash test "$(hash "$B/probe.html")" = "$(hash "$N$asset")"

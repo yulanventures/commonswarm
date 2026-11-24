@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
+import { gzipSync } from 'node:zlib';
 const exec = promisify(execFile);
 const repo = resolve(import.meta.dirname, '../..');
 const validator = join(repo, 'deploy/site/validate-site-env.mjs');
@@ -657,15 +658,166 @@ test('probe-next-ingress.sh and finalize-release.sh share one exact effective CS
   }
 });
 
+test('probe-next-ingress.sh --expect-sha verifies three paths, compressed and identity, browser UA, exact hash, and all required headers', async () => {
+  const probeScript = join(repo, 'deploy/site/probe-next-ingress.sh');
+  const htmlBody = Buffer.from(syntheticNextHtml(), 'utf8');
+  const htmlSha = hash(htmlBody);
+  const injectedBody = Buffer.from(syntheticNextHtml() + '<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>', 'utf8');
+
+  let statusMode = 200;
+  let targetPath: string | null = null;
+  let corruptEncoding: 'compressed' | 'identity' | null = null;
+  let dropHeader: 'content-type' | 'csp' | 'nosniff' | 'referrer' | 'cache-control' | null = null;
+  let overrideContentType: string | null = null;
+  let overrideCacheControl: string | null = null;
+  const seen: Array<{ path: string; ua: string; accept: string; ae: string }> = [];
+
+  const server = createServer((req, res) => {
+    const urlPath = req.url ?? '/';
+    const ua = String(req.headers['user-agent'] ?? '');
+    const accept = String(req.headers.accept ?? '');
+    const ae = String(req.headers['accept-encoding'] ?? '');
+    seen.push({ path: urlPath, ua, accept, ae });
+
+    const isIdentity = ae.trim().toLowerCase() === 'identity';
+    const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+    const faultHere = targetPath === null || targetPath === urlPath;
+
+    const headers: Record<string, string | string[]> = {};
+    if (!(faultHere && dropHeader === 'content-type')) {
+      headers['content-type'] = (faultHere && overrideContentType) ? overrideContentType : 'text/html; charset=utf-8';
+    }
+    if (!(faultHere && dropHeader === 'csp')) {
+      headers['content-security-policy'] = "frame-ancestors 'none'";
+    }
+    if (!(faultHere && dropHeader === 'nosniff')) {
+      headers['x-content-type-options'] = 'nosniff';
+    }
+    if (!(faultHere && dropHeader === 'referrer')) {
+      headers['referrer-policy'] = 'no-referrer';
+    }
+    if (!(faultHere && dropHeader === 'cache-control')) {
+      headers['cache-control'] = (faultHere && overrideCacheControl) ? overrideCacheControl : 'no-cache';
+    }
+
+    const body = faultHere && (
+      (corruptEncoding === 'compressed' && isCompressed) ||
+      (corruptEncoding === 'identity' && isIdentity)
+    ) ? injectedBody : htmlBody;
+
+    const payload = isCompressed ? gzipSync(body) : body;
+    if (isCompressed) headers['content-encoding'] = 'gzip';
+    res.writeHead(faultHere ? statusMode : 200, headers);
+    res.end(payload);
+  });
+
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    // Reject invalid --expect-sha CLI values fail-closed (exit 2).
+    for (const badArgs of [
+      [baseUrl, '--expect-sha'],
+      [baseUrl, '--expect-sha', ''],
+      [baseUrl, '--expect-sha', 'not-a-sha'],
+      [baseUrl, '--expect-sha', htmlSha.toUpperCase()],
+      ['--expect-sha', htmlSha, '--expect-sha', htmlSha, baseUrl],
+    ]) {
+      await assert.rejects(exec('bash', [probeScript, ...badArgs]), (error: unknown) => {
+        assert.equal((error as { code: number }).code, 2);
+        return true;
+      });
+    }
+
+    // Pass case: all three paths x both encodings with browser UA and Accept: text/html.
+    seen.length = 0;
+    const passed = await exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]);
+    assert.match(passed.stdout, /PASS probe-next-ingress/);
+    assert.equal(seen.length, 6);
+    for (const path of ['/next', '/next/', '/next/index.html']) {
+      const forPath = seen.filter(r => r.path === path);
+      assert.equal(forPath.length, 2, path);
+      assert.ok(forPath.every(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html')), path);
+      assert.ok(forPath.some(r => r.ae.toLowerCase().includes('gzip') && r.ae.trim().toLowerCase() !== 'identity'), `${path} compressed`);
+      assert.ok(forPath.some(r => r.ae.trim().toLowerCase() === 'identity'), `${path} identity`);
+    }
+
+    // Flag-before-URL ordering also works.
+    const passedAlt = await exec('bash', [probeScript, `--expect-sha=${htmlSha}`, baseUrl]);
+    assert.match(passedAlt.stdout, /PASS probe-next-ingress/);
+
+    // Body mismatch under compression only (identity clean) and under identity only (compression clean).
+    for (const encoding of ['compressed', 'identity'] as const) {
+      for (const path of ['/next', '/next/', '/next/index.html']) {
+        targetPath = path;
+        corruptEncoding = encoding;
+        await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+          const stderr = (error as { stderr: string }).stderr;
+          assert.match(stderr, new RegExp(`FAIL path=${path.replace(/\./g, '\\.')} encoding=${encoding} status=200 reason=body-sha-mismatch`), `${encoding} on ${path}`);
+          return true;
+        });
+      }
+    }
+    corruptEncoding = null;
+
+    // Non-200 (including 404, which preview-off accepts) fails under --expect-sha.
+    for (const badStatus of [404, 302] as const) {
+      statusMode = badStatus;
+      targetPath = '/next/';
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        assert.match((error as { stderr: string }).stderr, new RegExp(`FAIL path=/next/ encoding=compressed status=${badStatus} reason=unexpected-status`));
+        return true;
+      });
+    }
+    statusMode = 200;
+
+    // Each missing or wrong required header fails with its specific reason.
+    const headerCases: Array<{
+      name: string;
+      path: string;
+      drop?: 'content-type' | 'csp' | 'nosniff' | 'referrer' | 'cache-control';
+      ct?: string;
+      cc?: string;
+      reason: RegExp;
+    }> = [
+      { name: 'missing-content-type', path: '/next', drop: 'content-type', reason: /reason=content-type-mismatch/ },
+      { name: 'wrong-content-type', path: '/next/', ct: 'text/plain; charset=utf-8', reason: /reason=content-type-mismatch/ },
+      { name: 'missing-csp', path: '/next/index.html', drop: 'csp', reason: /reason=missing-csp/ },
+      { name: 'missing-nosniff', path: '/next', drop: 'nosniff', reason: /reason=missing-nosniff/ },
+      { name: 'missing-referrer', path: '/next/', drop: 'referrer', reason: /reason=missing-referrer-policy/ },
+      { name: 'missing-cache-control', path: '/next/index.html', drop: 'cache-control', reason: /reason=cache-control-mismatch/ },
+      { name: 'wrong-cache-control', path: '/next/', cc: 'public, max-age=0, must-revalidate', reason: /reason=cache-control-mismatch/ },
+    ];
+    for (const row of headerCases) {
+      targetPath = row.path;
+      dropHeader = row.drop ?? null;
+      overrideContentType = row.ct ?? null;
+      overrideCacheControl = row.cc ?? null;
+      await assert.rejects(exec('bash', [probeScript, baseUrl, '--expect-sha', htmlSha]), (error: unknown) => {
+        assert.match((error as { stderr: string }).stderr, row.reason, row.name);
+        return true;
+      });
+    }
+    dropHeader = null;
+    overrideContentType = null;
+    overrideCacheControl = null;
+  } finally {
+    await new Promise<void>(r => server.close(() => r()));
+  }
+});
+
 test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls back failures and drift`, { skip: !linuxProof }, async () => {
   const curl = (await exec('which', ['curl'])).stdout.trim();
   const nextVariants = new Set([
-    'next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive',
+    'next-success', 'next-status', 'next-slash-status', 'next-body', 'next-index-body',
+    'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type',
+    'next-header', 'next-header-duplicate-directive',
     'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status',
     'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index',
     'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy',
   ]);
-  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
+  for (const variant of ['success', 'next-success', 'root-status', 'app-status', 'root-body', 'app-body', 'next-status', 'next-slash-status', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status', 'next-preflip-missing-root', 'next-preflip-missing-slash', 'next-preflip-missing-index', 'next-preflip-duplicate-directive', 'next-preflip-two-headers', 'next-preflip-longer-policy', 'curl-failure', 'asset-drift', 'current-drift', 'artifact-pin', 'build-pin', 'closed-pipe', 'closed-pipe-failure', 'find-failure', 'flip-failure', 'missing-old', 'rollback-status', 'hup', 'unchanged-unhealthy']) {
     const useNext = nextVariants.has(variant);
     const packet = await prepare(`run-${variant}`, undefined, useNext ? await artifactDirWithNext() : undefined);
     const site = join(root, `site-${variant}`), old = join(site, 'releases/old');
@@ -674,6 +826,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
     await symlink('releases/old', join(site, 'current')); await mkdir(join(site, 'releases/reserve'));
     const oldProbes = new Set<string>();
     const newProbes = new Set<string>();
+    const newNextRequests: Array<{ path: string; ua: string; accept: string; ae: string }> = [];
     let unhealthyOldApp = false;
     let notifyHeld!: () => void, releaseHeld!: () => void;
     const probeHeld = new Promise<void>(r => { notifyHeld = r; });
@@ -682,18 +835,27 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       if (variant === 'closed-pipe-failure' && (await readlink(join(site, 'current'))) !== 'releases/old') { res.writeHead(503); res.end(); return; }
       if (variant === 'rollback-status') { res.writeHead(503); res.end(); return; }
       const urlPath = req.url ?? '/';
+      const ua = String(req.headers['user-agent'] ?? '');
+      const accept = String(req.headers.accept ?? '');
+      const ae = String(req.headers['accept-encoding'] ?? '');
       const isNew = (await readlink(join(site, 'current'))) !== 'releases/old';
+      const isNextHtml = urlPath === '/next' || urlPath === '/next/' || urlPath === '/next/index.html';
       if (isNew && variant === 'hup') { notifyHeld(); await probeReleased; }
-      if (isNew) newProbes.add(urlPath);
+      if (isNew) {
+        newProbes.add(urlPath);
+        if (isNextHtml) newNextRequests.push({ path: urlPath, ua, accept, ae });
+      }
       if (!isNew) oldProbes.add(urlPath);
       if (!isNew && unhealthyOldApp && urlPath === '/app') { res.writeHead(503); res.end(); return; }
       if (isNew && variant === 'root-status' && urlPath === '/') { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === 'app-status' && urlPath === '/app') { res.writeHead(503); res.end('unavailable'); return; }
       if (isNew && variant === 'next-status' && urlPath === '/next') { res.writeHead(503); res.end('unavailable'); return; }
-      if (isNew && variant === 'next-asset-status' && urlPath.startsWith('/next/')) { res.writeHead(404); res.end('missing'); return; }
+      if (isNew && variant === 'next-slash-status' && urlPath === '/next/') { res.writeHead(503); res.end('unavailable'); return; }
+      if (isNew && variant === 'next-asset-status' && urlPath.startsWith('/next/') && !isNextHtml) { res.writeHead(404); res.end('missing'); return; }
       if (isNew && variant === 'root-body' && urlPath === '/') { res.end('wrong HTML'); return; }
       if (isNew && variant === 'app-body' && urlPath === '/app') { res.end('wrong HTML'); return; }
       if (isNew && variant === 'next-body' && urlPath === '/next') { res.end('wrong HTML'); return; }
+      if (isNew && variant === 'next-index-body' && urlPath === '/next/index.html') { res.end('wrong HTML'); return; }
       const route = urlPath === '/app' ? 'app/index.html' : (urlPath === '/next' || urlPath === '/next/') ? 'next/index.html' : urlPath === '/' ? 'index.html' : urlPath.replace(/^\//, '');
       const nextCspOverride = (): string[] | undefined => {
         if (!isNew) {
@@ -724,13 +886,32 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
             ...cspHeader,
             'x-content-type-options': 'nosniff',
             'referrer-policy': 'no-referrer',
-            ...(isNew && urlPath === '/next' ? { 'cache-control': 'no-cache' } : {}),
+            ...(isNew && isNextHtml ? {
+              'content-type': variant === 'next-index-content-type' && urlPath === '/next/index.html'
+                ? 'text/plain; charset=utf-8'
+                : 'text/html; charset=utf-8',
+              'cache-control': variant === 'next-slash-cache' && urlPath === '/next/'
+                ? 'public, max-age=0, must-revalidate'
+                : 'no-cache',
+            } : {}),
           }
         : {};
       try {
-        const body = await readFile(join(site, 'current', route));
+        let body = await readFile(join(site, 'current', route));
+        const isIdentity = ae.trim().toLowerCase() === 'identity';
+        const isCompressed = !isIdentity && ae.toLowerCase().includes('gzip');
+        if (isNew && isNextHtml) {
+          if (variant === 'next-browser-ua-inject' && ua.startsWith('Mozilla/')) {
+            body = Buffer.concat([body, Buffer.from('<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>')]);
+          }
+          if (variant === 'next-identity-inject' && isIdentity) {
+            body = Buffer.concat([body, Buffer.from('<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>')]);
+          }
+        }
+        const payload = isNew && isNextHtml && isCompressed ? gzipSync(body) : body;
+        if (isNew && isNextHtml && isCompressed) nextHeaders['content-encoding'] = 'gzip';
         res.writeHead(200, nextHeaders);
-        res.end(body);
+        res.end(payload);
       } catch { res.writeHead(404, nextHeaders); res.end(); }
     });
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const address = server.address(); assert.ok(address && typeof address === 'object');
@@ -759,8 +940,15 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(completed.stdout, ''); assert.equal(completed.stderr, '');
         const deployLog = await readFile(join(packet, 'hostrun.log'), 'utf8');
         assert.match(deployLog, useNext ? /PASS deploy .* NEXT=1/ : /PASS deploy .* NEXT=0/);
-        if (useNext) assert.ok(newProbes.has('/next'), 'preview-on release must probe /next');
-        else assert.equal([...newProbes].some(p => p === '/next' || p.startsWith('/next/')), false, 'preview-off release must not probe /next');
+        if (useNext) {
+          for (const p of ['/next', '/next/', '/next/index.html']) {
+            assert.ok(newProbes.has(p), `preview-on release must probe ${p}`);
+            const forPath = newNextRequests.filter(r => r.path === p);
+            assert.ok(forPath.some(r => r.ua.startsWith('CommonSwarmReleaseCheck/')), `${p} release-check UA`);
+            assert.ok(forPath.some(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html') && r.ae.toLowerCase().includes('gzip') && r.ae.trim().toLowerCase() !== 'identity'), `${p} browser compressed`);
+            assert.ok(forPath.some(r => r.ua.startsWith('Mozilla/5.0 ') && r.accept.includes('text/html') && r.ae.trim().toLowerCase() === 'identity'), `${p} browser identity`);
+          }
+        } else assert.equal([...newProbes].some(p => p === '/next' || p.startsWith('/next/')), false, 'preview-off release must not probe /next');
         const current = await readlink(join(site, 'current')); assert.notEqual(current, 'releases/old');
         assert.equal(await readFile(join(site, 'current/_astro/retained.js'), 'utf8'), 'old asset');
         if (variant === 'missing-old') {
@@ -804,15 +992,17 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
           } finally { clearTimeout(timer!); releaseHeld(); await exited; }
         } else await assert.rejects(run());
         const output = await readFile(join(packet, 'hostrun.log'), 'utf8');
-        if (['root-status', 'app-status', 'next-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
-        if (['root-body', 'app-body', 'next-body'].includes(variant)) assert.match(output, /assertion=httphash/);
+        if (['root-status', 'app-status', 'next-status', 'next-slash-status', 'next-asset-status'].includes(variant)) assert.match(output, /assertion=httpstatus/);
+        if (['root-body', 'app-body', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject'].includes(variant)) assert.match(output, /assertion=httphash/);
+        if (variant === 'next-slash-cache') assert.match(output, /assertion=next-cache/);
+        if (variant === 'next-index-content-type') assert.match(output, /assertion=next-content-type/);
         if (variant === 'next-header' || variant.startsWith('next-header-')) assert.match(output, /assertion=next-csp/);
         if (variant.startsWith('next-preflip-')) {
           assert.match(output, /assertion=preflip-next-csp/);
           assert.doesNotMatch(output, /PASS rollback/);
           assert.equal(newProbes.size, 0, 'pre-flip ingress failure must refuse before switching');
         }
-        if (['root-status', 'app-status', 'next-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
+        if (['root-status', 'app-status', 'next-status', 'next-slash-status', 'next-asset-status', 'root-body', 'app-body', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'curl-failure', 'closed-pipe-failure', 'hup'].includes(variant)) assert.match(output, /PASS rollback/);
         if (variant === 'asset-drift') assert.match(output, /Refusing site refresh: asset byte collision/);
         if (variant === 'current-drift') assert.match(output, /assertion=exact-old-link/);
         if (variant === 'artifact-pin') assert.match(output, /assertion=artifactSHA/);
@@ -823,7 +1013,7 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
         assert.equal(await readlink(join(site, 'current')), variant === 'current-drift' ? 'releases/reserve' : 'releases/old');
       }
       if (['success', 'closed-pipe', 'closed-pipe-failure', 'missing-old', 'root-status', 'app-status', 'root-body', 'app-body', 'curl-failure', 'hup', 'unchanged-unhealthy'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app']);
-      if (['next-success', 'next-status', 'next-body', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
+      if (['next-success', 'next-status', 'next-slash-status', 'next-body', 'next-index-body', 'next-browser-ua-inject', 'next-identity-inject', 'next-slash-cache', 'next-index-content-type', 'next-header', 'next-header-duplicate-directive', 'next-header-two-headers', 'next-header-longer-policy', 'next-asset-status'].includes(variant)) assert.deepEqual([...oldProbes].sort(), ['/', '/app', '/next', '/next/', '/next/index.html']);
       assert.equal((await stat(join(packet, 'hostrun.log'))).mode & 0o777, 0o600);
       assert.ok((await readdir(join(site, 'releases'))).includes('reserve'));
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
