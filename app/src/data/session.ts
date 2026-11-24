@@ -23,6 +23,7 @@ import {
   createFenceTracker,
   extractLoginIdentity,
   sameLoginIdentity,
+  type Fence,
   type LoginIdentity,
 } from './fence';
 
@@ -94,7 +95,7 @@ export interface SessionGate {
   onLoginPurge(listener: LoginPurgeListener): () => void;
   onSynchronousViewRetire(listener: SynchronousViewRetireListener): () => void;
   acquireAccessToken(): Promise<AcquiredAccessToken | null>;
-  handleUnauthorized(): void;
+  handleUnauthorized(fence: Fence, loginIdentity?: LoginIdentity | null): boolean;
   handlePagehide(): void;
   handlePageshow(persisted: boolean): void;
   reverify(): Promise<void>;
@@ -246,11 +247,15 @@ export function createSessionGate(
   const failClosedSignedOut = (): void => {
     if (state.status === 'closed') return;
     gateGeneration += 1;
-    hiddenByPagehide = false;
+    // Do NOT clear `hiddenByPagehide`: a sign-out arriving while the page is hidden
+    // may retire the state, while keeping verification and private paint latched until `pageshow`.
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'signed_out' };
     runPurgeSynchronously(nextGen);
     emit();
+    if (hiddenByPagehide) {
+      runSynchronousViewRetire();
+    }
   };
 
   const closeFailClosed = (reason: SessionClosedReason): void => {
@@ -261,6 +266,7 @@ export function createSessionGate(
     detachAndQuiesceClient();
     runPurgeSynchronously(nextGen);
     emit();
+    runSynchronousViewRetire();
   };
 
   const checkClosedBeforeSession = (
@@ -285,16 +291,26 @@ export function createSessionGate(
       return;
     }
     gateGeneration += 1;
-    hiddenByPagehide = false;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'checking' };
     runPurgeSynchronously(nextGen);
     emit();
+    if (hiddenByPagehide) {
+      // Keep pagehide latched until `pageshow`: retire state without verifying, fetching, or painting.
+      runSynchronousViewRetire();
+      return;
+    }
     void reverify();
   };
 
   const reverify = async (): Promise<void> => {
-    if (disposed || !browserSession || !deployment || state.status === 'closed') {
+    if (
+      disposed ||
+      hiddenByPagehide ||
+      !browserSession ||
+      !deployment ||
+      state.status === 'closed'
+    ) {
       return;
     }
 
@@ -313,7 +329,7 @@ export function createSessionGate(
     try {
       session = await capturedSession.currentSession();
     } catch {
-      if (disposed || gateGeneration !== capturedGateGen) return;
+      if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) return;
       const postClosed = checkClosedBeforeSession(capturedDeployment.url);
       if (postClosed) {
         closeFailClosed(postClosed);
@@ -323,7 +339,7 @@ export function createSessionGate(
       return;
     }
 
-    if (disposed || gateGeneration !== capturedGateGen) return;
+    if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) return;
 
     // Re-run all closed-gate checks at publication, not only at startup.
     const postClosed = checkClosedBeforeSession(capturedDeployment.url);
@@ -552,6 +568,7 @@ export function createSessionGate(
   const acquireAccessToken = async (): Promise<AcquiredAccessToken | null> => {
     if (
       disposed ||
+      hiddenByPagehide ||
       !browserSession ||
       !deployment ||
       state.status !== 'authenticated'
@@ -576,7 +593,7 @@ export function createSessionGate(
     let session: Session | null;
     try {
       const { data, error } = await capturedSession.client.auth.getSession();
-      if (disposed || gateGeneration !== capturedGateGen) {
+      if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) {
         return null;
       }
       if (error || !data.session) {
@@ -590,7 +607,7 @@ export function createSessionGate(
       }
       session = data.session;
     } catch {
-      if (disposed || gateGeneration !== capturedGateGen) {
+      if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) {
         return null;
       }
       const postClosed = checkClosedBeforeSession(capturedDeployment.url);
@@ -602,7 +619,7 @@ export function createSessionGate(
       return null;
     }
 
-    if (disposed || gateGeneration !== capturedGateGen) {
+    if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) {
       return null;
     }
 
@@ -642,13 +659,33 @@ export function createSessionGate(
     };
   };
 
-  const handleUnauthorized = (): void => {
-    if (disposed || !browserSession || state.status === 'closed') return;
+  const handleUnauthorized = (
+    fence: Fence,
+    loginIdentity?: LoginIdentity | null,
+  ): boolean => {
+    if (
+      disposed ||
+      !browserSession ||
+      hiddenByPagehide ||
+      state.status !== 'authenticated'
+    ) {
+      return false;
+    }
+    if (
+      !fenceTracker.isCurrent(fence, {
+        ...(loginIdentity !== undefined ? { loginIdentity } : {}),
+        requireActiveWorkspace: false,
+        requireActiveConversation: false,
+      })
+    ) {
+      return false;
+    }
     const session = browserSession;
     // Synchronously retire in-memory state and let the shared session run locked verification
     // without touching stored credentials outside the shared module's guarded path.
     failClosedSignedOut();
     void session.verifiedSession().catch(() => undefined);
+    return true;
   };
 
   const dispose = (): void => {

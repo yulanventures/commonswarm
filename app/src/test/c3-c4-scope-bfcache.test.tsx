@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
+import { deploymentOriginHash } from '../../../shared/browser-session/index.js';
 import { AppRoutes } from '../App';
 import {
   CONVERSATION_UNAVAILABLE_TEXT,
@@ -847,5 +848,333 @@ describe('C4: synchronous pagehide retirement before browser history snapshot + 
 
     controller.dispose();
     gate.dispose();
+  });
+
+  it('pagehide stays latched across intervening auth, storage, sign-out, and visibilitychange events until pageshow, with visibility-hidden and bfcache-restore controls', async () => {
+    const originalVisibilityState = Object.getOwnPropertyDescriptor(
+      document,
+      'visibilityState',
+    );
+    const setVisibilityState = (value: 'visible' | 'hidden') => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => value,
+      });
+    };
+
+    const session1 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-1' });
+    const session2 = makeFakeSession({ userId: 'user-1', sessionId: 'sid-2' });
+    const storageKey = 'sb-api-auth-token';
+    const storage = createFakeStorage({ [storageKey]: JSON.stringify(session1) });
+
+    let activeSession: typeof session1 | null = session1;
+    let currentSessionCalls = 0;
+    let heldReverify: ReturnType<typeof createDeferred<typeof session1 | null>> | null =
+      null;
+
+    const harness = createFakeSessionHarness(session1, {
+      onFrom(call) {
+        if (call.target === 'workspaces') {
+          return {
+            data: [
+              {
+                workspace_id: WS_1,
+                name:
+                  activeSession?.access_token === session2.access_token
+                    ? 'Replacement Org'
+                    : 'Top Secret Org',
+              },
+            ],
+            error: null,
+            status: 200,
+          };
+        }
+        if (call.target === 'member_profiles') {
+          return {
+            data: [
+              {
+                user_id: 'user-1',
+                display_name:
+                  activeSession?.access_token === session2.access_token
+                    ? 'Alice Replacement'
+                    : 'Private Alice',
+                role: 'owner',
+              },
+            ],
+            error: null,
+            status: 200,
+          };
+        }
+        return { data: [], error: null, status: 200 };
+      },
+      onRpc(call) {
+        if (call.target === 'home_overview') {
+          return {
+            data: {
+              viewer_user_id: 'user-1',
+              generated_at: NOW_ISO,
+              workspaces: [],
+            },
+            error: null,
+            status: 200,
+          };
+        }
+        if (call.target === 'decision_queue') {
+          return {
+            data: {
+              workspace_id: WS_1,
+              generated_at: NOW_ISO,
+              total: 0,
+              truncated: false,
+              asks: [],
+            },
+            error: null,
+            status: 200,
+          };
+        }
+        if (call.target === 'waiting_todos_page') {
+          return {
+            data: {
+              workspace_id: WS_1,
+              generated_at: NOW_ISO,
+              total: 0,
+              truncated: false,
+              todos: [],
+            },
+            error: null,
+            status: 200,
+          };
+        }
+        return { data: null, error: null, status: 200 };
+      },
+      onFetch(_input, init) {
+        const auth = new Headers(init?.headers).get('authorization');
+        return new Response(
+          JSON.stringify({
+            conversations: [
+              makeConv({
+                kind: 'public_channel',
+                channel_id: CONV_GEN,
+                slug:
+                  auth === `Bearer ${session2.access_token}`
+                    ? 'sid2-channel'
+                    : 'secret-channel',
+              }),
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    harness.setCurrentSessionHandler(() => {
+      currentSessionCalls += 1;
+      return heldReverify ? heldReverify.promise : Promise.resolve(activeSession);
+    });
+
+    const queryClient = createAppQueryClient();
+    const gate = createSessionGate({
+      runtimeConfig: { status: 'configured', url: DEPLOY_URL, anonKey: ANON_KEY },
+      multiAccountEnabled: false,
+      hasWebLocks: () => true,
+      storage,
+      createSession: () => harness.browserSession,
+      fetchImpl: harness.fetchImpl,
+    });
+    const controller = createDataController(gate, queryClient);
+
+    try {
+      setVisibilityState('visible');
+      render(
+        <MemoryRouter initialEntries={['/channels/launch']}>
+          <AppRoutes controller={controller} />
+        </MemoryRouter>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Top Secret Org')).toBeInTheDocument();
+        expect(screen.getByText('secret-channel')).toBeInTheDocument();
+      });
+
+      const dispatchStorageFor = (key: string | null, newValue: string | null) => {
+        const ev = new Event('storage');
+        Object.defineProperty(ev, 'key', { value: key });
+        Object.defineProperty(ev, 'newValue', { value: newValue });
+        Object.defineProperty(ev, 'storageArea', { value: storage });
+        window.dispatchEvent(ev);
+      };
+
+      // 1. Visibility-hidden control (WITHOUT pagehide): live replacement notification still revalidates normally.
+      setVisibilityState('hidden');
+      window.dispatchEvent(new Event('visibilitychange'));
+      activeSession = session2;
+      harness.setSession(session2);
+      storage.setItem(storageKey, JSON.stringify(session2));
+      act(() => {
+        harness.emitAuthChange('SIGNED_IN', session2);
+      });
+      await waitFor(() => {
+        expect(screen.getByText('Replacement Org')).toBeInTheDocument();
+        expect(screen.getByText('sid2-channel')).toBeInTheDocument();
+      });
+      expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-2');
+
+      // Switch back to session1 while visible before entering the pagehide latch test.
+      setVisibilityState('visible');
+      window.dispatchEvent(new Event('visibilitychange'));
+      activeSession = session1;
+      harness.setSession(session1);
+      storage.setItem(storageKey, JSON.stringify(session1));
+      act(() => {
+        harness.emitAuthChange('SIGNED_IN', session1);
+      });
+      await waitFor(() => {
+        expect(screen.getByText('Top Secret Org')).toBeInTheDocument();
+        expect(screen.getByText('secret-channel')).toBeInTheDocument();
+      });
+
+      // 2. Dispatch pagehide: synchronously retires private view and latches hidden state.
+      const pagehideEv = new Event('pagehide');
+      Object.defineProperty(pagehideEv, 'persisted', { value: true });
+      window.dispatchEvent(pagehideEv);
+
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+      expect(document.body.textContent).not.toContain('secret-channel');
+      expect(screen.getByTestId('session-checking-screen')).toBeInTheDocument();
+
+      const verifyCallsAtPagehide = currentSessionCalls;
+      const wireCallsAtPagehide = harness.wireCalls.length;
+
+      // 3. Deliver same-login auth + storage notifications while hidden: NO verify, NO publish, NO fetch, NO paint.
+      await act(async () => {
+        harness.emitAuthChange('TOKEN_REFRESHED', session1);
+        harness.emitAuthChange('SIGNED_IN', session1);
+        dispatchStorageFor(storageKey, JSON.stringify(session1));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(currentSessionCalls).toBe(verifyCallsAtPagehide);
+      expect(gate.state.status).not.toBe('authenticated');
+      expect(harness.wireCalls.length).toBe(wireCallsAtPagehide);
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+
+      // 4. Deliver replacement-login (session2) auth + storage notifications while hidden: STILL suspended.
+      activeSession = session2;
+      storage.setItem(storageKey, JSON.stringify(session2));
+      await act(async () => {
+        harness.emitAuthChange('SIGNED_IN', session2);
+        dispatchStorageFor(storageKey, JSON.stringify(session2));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(currentSessionCalls).toBe(verifyCallsAtPagehide);
+      expect(gate.state.status).not.toBe('authenticated');
+      expect(harness.wireCalls.length).toBe(wireCallsAtPagehide);
+      expect(document.body.textContent).not.toContain('Replacement Org');
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+
+      // 5. Deliver SIGNED_OUT while hidden (retires to signed_out WITHOUT clearing pagehide latch),
+      //    then another SIGNED_IN + storage event + visibilitychange back to visible (still NO pageshow).
+      await act(async () => {
+        harness.emitAuthChange('SIGNED_OUT', null);
+        await Promise.resolve();
+      });
+      expect(gate.state).toEqual({ status: 'signed_out' });
+      expect(document.body.textContent).not.toContain('Replacement Org');
+
+      await act(async () => {
+        harness.emitAuthChange('SIGNED_IN', session2);
+        dispatchStorageFor(storageKey, JSON.stringify(session2));
+        setVisibilityState('hidden');
+        window.dispatchEvent(new Event('visibilitychange'));
+        setVisibilityState('visible');
+        window.dispatchEvent(new Event('visibilitychange'));
+        await gate.reverify();
+        await Promise.resolve();
+      });
+      expect(currentSessionCalls).toBe(verifyCallsAtPagehide);
+      expect(gate.state.status).not.toBe('authenticated');
+      expect(harness.wireCalls.length).toBe(wireCallsAtPagehide);
+      expect(document.body.textContent).not.toContain('Replacement Org');
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+
+      // 6. bfcache-restore control (pageshow persisted: true): unlatches, keeps private view absent
+      //    while verification is held, then verifies and paints ONLY the current login (session2).
+      heldReverify = createDeferred<typeof session1 | null>();
+      const pageshowPersisted = new Event('pageshow');
+      Object.defineProperty(pageshowPersisted, 'persisted', { value: true });
+      act(() => {
+        window.dispatchEvent(pageshowPersisted);
+      });
+      expect(currentSessionCalls).toBe(verifyCallsAtPagehide + 1);
+      expect(screen.getByTestId('session-checking-screen')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain('Replacement Org');
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+
+      await act(async () => {
+        heldReverify!.resolve(session2);
+        heldReverify = null;
+      });
+      await waitFor(() => {
+        expect(screen.getByText('Replacement Org')).toBeInTheDocument();
+        expect(screen.getByText('sid2-channel')).toBeInTheDocument();
+      });
+      expect(gate.fenceTracker.loginIdentity?.sessionId).toBe('sid-2');
+      expect(screen.queryByText('Top Secret Org')).not.toBeInTheDocument();
+
+      // 7. Non-persisted pageshow control after pagehide + intervening SIGNED_OUT:
+      //    failClosedSignedOut() kept hiddenByPagehide latched, so pageshow (persisted: false) still revalidates.
+      window.dispatchEvent(new Event('pagehide'));
+      expect(document.body.textContent).not.toContain('Replacement Org');
+      act(() => {
+        harness.emitAuthChange('SIGNED_OUT', null);
+      });
+      expect(gate.state).toEqual({ status: 'signed_out' });
+      const verifyBeforeNonPersisted = currentSessionCalls;
+
+      activeSession = session1;
+      harness.setSession(session1);
+      const pageshowNonPersisted = new Event('pageshow');
+      Object.defineProperty(pageshowNonPersisted, 'persisted', { value: false });
+      act(() => {
+        window.dispatchEvent(pageshowNonPersisted);
+      });
+      expect(currentSessionCalls).toBe(verifyBeforeNonPersisted + 1);
+      await waitFor(() => {
+        expect(screen.getByText('Top Secret Org')).toBeInTheDocument();
+        expect(screen.getByText('secret-channel')).toBeInTheDocument();
+      });
+
+      // 8. Multi-account closure arriving during pagehide closes the preview immediately and stays closed on pageshow.
+      window.dispatchEvent(new Event('pagehide'));
+      expect(document.body.textContent).not.toContain('Top Secret Org');
+      const verifyBeforeClose = currentSessionCalls;
+      const wireBeforeClose = harness.wireCalls.length;
+      const maKey = `commonswarm:accounts:v1:${deploymentOriginHash(DEPLOY_URL)}`;
+      storage.setItem(maKey, '{"version":1,"accounts":[]}');
+      act(() => {
+        dispatchStorageFor(maKey, '{"version":1,"accounts":[]}');
+      });
+      expect(gate.state).toEqual({ status: 'closed', reason: 'multi_account_in_use' });
+      expect(screen.getByTestId('closed-screen')).toBeInTheDocument();
+      expect(harness.quiesceCalls).toBe(1);
+
+      const pageshowAfterClose = new Event('pageshow');
+      Object.defineProperty(pageshowAfterClose, 'persisted', { value: true });
+      act(() => {
+        window.dispatchEvent(pageshowAfterClose);
+      });
+      expect(gate.state).toEqual({ status: 'closed', reason: 'multi_account_in_use' });
+      expect(currentSessionCalls).toBe(verifyBeforeClose);
+      expect(harness.wireCalls.length).toBe(wireBeforeClose);
+    } finally {
+      if (originalVisibilityState) {
+        Object.defineProperty(document, 'visibilityState', originalVisibilityState);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+      controller.dispose();
+      gate.dispose();
+    }
   });
 });

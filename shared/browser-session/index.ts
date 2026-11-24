@@ -694,22 +694,54 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       dispose?: () => Promise<void>;
       stopAutoRefresh?: () => Promise<void>;
       initializePromise?: Promise<unknown> | null;
+      autoRefreshToken?: boolean;
+      lock?: unknown;
     };
-    const sdkDispose =
+    // Prevent a still-pending `_initialize()` from arming a new auto-refresh interval
+    // or 0ms tick timeout when its `finally` block calls `_handleVisibilityChange()`,
+    // and prevent post-init untracked `onAuthStateChange` `_emitInitialSession` IIFEs
+    // (`GoTrueClient.ts:4319-4330`) or any other callback on this closed instance from
+    // acquiring the shared Web Lock after `quiesce()` begins.
+    if ("autoRefreshToken" in authApi) {
+      authApi.autoRefreshToken = false;
+    }
+    if ("lock" in authApi) {
+      authApi.lock = null;
+    }
+    const runSdkDispose = (): Promise<void> =>
       typeof authApi.dispose === "function"
         ? authApi.dispose()
         : typeof authApi.stopAutoRefresh === "function"
           ? authApi.stopAutoRefresh()
           : Promise.resolve();
 
+    // Immediate teardown closes BroadcastChannel, clears auth listeners, and stops any
+    // already-registered visibility listener or auto-refresh timer right away.
+    const initialDispose = runSdkDispose();
+
+    // `_initialize()` unconditionally calls `_handleVisibilityChange()` in its `finally`
+    // (`GoTrueClient.ts`), which attaches a new `visibilitychange` listener on `window`
+    // and (if auto-refresh is still enabled) starts `_startAutoRefresh()` without awaiting it.
+    // Wait for `initializePromise` to settle, flush microtasks in the same turn so any
+    // unawaited `_startAutoRefresh()` finishes assigning its timer handles, then dispose again.
+    const initTeardown = (async () => {
+      if (!authApi.initializePromise) return;
+      await Promise.allSettled([authApi.initializePromise]);
+      await Promise.resolve();
+      await Promise.resolve();
+      await runSdkDispose();
+    })();
+
     quiescePromise = (async () => {
       await Promise.allSettled([
-        sdkDispose,
-        ...(authApi.initializePromise ? [authApi.initializePromise] : []),
+        initialDispose,
+        initTeardown,
         ...activeAuthFetches,
         ...(activeStorageRetry ? [activeStorageRetry] : []),
         ...(restSessionCheck ? [restSessionCheck] : []),
       ]);
+      // Final idempotent teardown after every in-flight operation has settled.
+      await runSdkDispose();
       // Allow any SDK lock callback catching our abort/quiesce error to finish its finally block.
       await Promise.resolve();
     })();
