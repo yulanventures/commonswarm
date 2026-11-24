@@ -19,11 +19,19 @@ key='e30.'+base64.urlsafe_b64encode(b'{"role":"anon"}').decode().rstrip('=')+'.f
 pub=dict(PUBLIC_SUPABASE_URL='https://api.commonswarm.com',PUBLIC_SUPABASE_ANON_KEY=key,PUBLIC_H0_LINK_JOIN='0')
 html=f'<meta name="commonswarm:url" content="{pub["PUBLIC_SUPABASE_URL"]}"><meta name="commonswarm:anon-key" content="{key}"><p>fixture</p>'.encode()
 csp="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.commonswarm.com wss://api.commonswarm.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
-next_html=(f'<!doctype html><html lang="en"><head><meta charset="UTF-8" />'
-           f'<meta http-equiv="Content-Security-Policy" content="{csp}" />'
-           f'<meta name="commonswarm:url" content="{pub["PUBLIC_SUPABASE_URL"]}" />'
-           f'<meta name="commonswarm:anon-key" content="{key}" />'
-           f'<script type="module" src="/next/assets/index-fixture.js"></script></head><body></body></html>').encode()
+next_html=(
+    '<!doctype html>\n'
+    '<html lang="en" class="dark">\n'
+    '  <head>\n'
+    '    <meta charset="UTF-8" />\n'
+    f'    <meta http-equiv="Content-Security-Policy" content="{csp}" />\n'
+    f'    <meta name="commonswarm:url" content="{pub["PUBLIC_SUPABASE_URL"]}" />\n'
+    f'    <meta name="commonswarm:anon-key" content="{key}" />\n'
+    '    <script type="module" src="/next/assets/index-fixture.js"></script>\n'
+    '  </head>\n'
+    '  <body></body>\n'
+    '</html>\n'
+).encode()
 def archive(path,entries,pax=None):
     with tarfile.open(path,'w',format=tarfile.PAX_FORMAT if pax else tarfile.USTAR_FORMAT,pax_headers=pax) as tar:
         for name,data in entries.items():

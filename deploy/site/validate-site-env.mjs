@@ -62,20 +62,31 @@ function parseAttrs(raw, tag = '', rejectDuplicates = false) {
 }
 function validateNextHtml(html, entries, publicConfig) {
   check(!html.includes('InNlcnZpY2Vfcm9sZSI') && !/"role"\s*:\s*"service_role"/.test(html), 'next/index.html contains service_role marker');
-  const noComments = html.replace(/<!--[\s\S]*?-->/g, '');
-  const heads = [...noComments.matchAll(/<head\b[^>]*>([\s\S]*?)<\/head\s*>/gi)];
-  check(heads.length === 1, 'next/index.html requires a single <head>');
-  const headInner = heads[0][1].replace(/<(script|style|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, m => m.slice(0, m.indexOf('>') + 1));
-  const headTags = [...headInner.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)].map(m => {
-    const tag = m[1].toLowerCase();
-    return { tag, attrs: parseAttrs(m[2], tag, true) };
-  });
-  check(headTags.length >= 2, 'next/index.html <head> missing charset or Content-Security-Policy');
-  check(headTags[0].tag === 'meta' && headTags[0].attrs.has('charset') && headTags[0].attrs.get('charset').trim().length > 0,
-    'next/index.html <head> must start with <meta charset>');
-  check(headTags[1].tag === 'meta' && headTags[1].attrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
-    'next/index.html Content-Security-Policy meta must be the first element in <head> after charset');
-  const rawCsp = headTags[1].attrs.get('content') ?? '';
+  // Pin the canonical emitted preamble from byte 0 through charset and CSP so no text,
+  // comment, BOM, non-ASCII whitespace, or element can close <head> early (browsers ignore
+  // <meta http-equiv="Content-Security-Policy"> outside <head>).
+  // Keep in sync with app/index.html and app/vite.config.ts (enforced by tests/p1-cli/site-artifact.test.ts).
+  const preambleHeadPrefix =
+    '<!doctype html>\n' +
+    '<html lang="en" class="dark">\n' +
+    '  <head>\n' +
+    '    <meta charset="UTF-8" />\n' +
+    '    ';
+  check(
+    html.startsWith(preambleHeadPrefix),
+    'next/index.html must begin with the canonical preamble through <meta charset="UTF-8" />',
+  );
+  const preamblePolicyMatch = /^<meta\b((?:"[^"]*"|'[^']*'|[^'">])*)>/.exec(html.slice(preambleHeadPrefix.length));
+  check(
+    preamblePolicyMatch !== null,
+    'next/index.html Content-Security-Policy meta must be the first element in <head> after charset',
+  );
+  const preambleCspAttrs = parseAttrs(preamblePolicyMatch[1], 'meta', true);
+  check(
+    preambleCspAttrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
+    'next/index.html Content-Security-Policy meta must be the first element in <head> after charset',
+  );
+  const rawCsp = preambleCspAttrs.get('content') ?? '';
   check(rawCsp.length > 0, 'next/index.html CSP content must not be empty');
   check(!/[^\x20-\x7e]/.test(rawCsp), 'next/index.html CSP contains non-ASCII or control character');
   const apiOrigin = new URL(publicConfig.PUBLIC_SUPABASE_URL);
@@ -113,6 +124,26 @@ function validateNextHtml(html, entries, publicConfig) {
     const actual = directives.get(name);
     check(actual === expected, `next/index.html CSP directive ${name} mismatch: expected "${expected}", got "${actual}"`);
   }
+  const expectedCsp = [...expectedCspDirectives].map(([name, value]) => `${name} ${value}`).join('; ');
+  const expectedPreamble = `${preambleHeadPrefix}<meta http-equiv="Content-Security-Policy" content="${expectedCsp}" />\n`;
+  check(
+    html.startsWith(expectedPreamble),
+    'next/index.html preamble must match the canonical emitted doctype, html, head, charset, and Content-Security-Policy sequence',
+  );
+
+  const noComments = html.replace(/<!--[\s\S]*?-->/g, '');
+  const heads = [...noComments.matchAll(/<head\b[^>]*>([\s\S]*?)<\/head\s*>/gi)];
+  check(heads.length === 1, 'next/index.html requires a single <head>');
+  const headInner = heads[0][1].replace(/<(script|style|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, m => m.slice(0, m.indexOf('>') + 1));
+  const headTags = [...headInner.matchAll(/<([a-z][\w:-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)].map(m => {
+    const tag = m[1].toLowerCase();
+    return { tag, attrs: parseAttrs(m[2], tag, true) };
+  });
+  check(headTags.length >= 2, 'next/index.html <head> missing charset or Content-Security-Policy');
+  check(headTags[0].tag === 'meta' && headTags[0].attrs.has('charset') && headTags[0].attrs.get('charset').trim().length > 0,
+    'next/index.html <head> must start with <meta charset>');
+  check(headTags[1].tag === 'meta' && headTags[1].attrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
+    'next/index.html Content-Security-Policy meta must be the first element in <head> after charset');
 
   const docMarkup = noComments.replace(/<(script|style)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (m, _t, body) => {
     check(body.trim() === '', 'next/index.html must not contain inline script or style');
