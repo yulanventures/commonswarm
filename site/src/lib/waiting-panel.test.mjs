@@ -15,7 +15,8 @@ import {
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
-import { answerChoice, answerPlainAsk, plainAskReplyCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { answerChoice, answerPlainAsk, client, dismissWaitingItem, dismissWaitingItemCommand, plainAskReplyCommand, restoreWaitingItem, restoreWaitingItemCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { createWaitingDismissalController } from "./waiting-dismissal.ts";
 import { parseDecisionQueue, parseWaitingArchivedPage, parseWaitingTodosQueue } from "./home/client.ts";
 
 class FakeNode {
@@ -1350,12 +1351,16 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     return new Response(JSON.stringify(nextBody), { status: nextStatus, headers: { "content-type": "application/json" } });
   };
   const fakeSession = {
-    access_token: "synthetic-a",
+    access_token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${Buffer.from(JSON.stringify({ sub: "u-a", session_id: "sess-a" })).toString("base64url")}.sig`,
     refresh_token: "synthetic-refresh-a",
     token_type: "bearer",
     expires_in: 3600,
     user: { id: "u-a" },
   };
+  const supa = client();
+  assert.ok(supa, "authoritative client initialized for guarded action test");
+  const origGetSession = supa.auth.getSession.bind(supa.auth);
+  supa.auth.getSession = async () => ({ data: { session: fakeSession }, error: null });
   try {
     // 1. Pre-retired guard blocks dispatch with zero HTTP calls for both wrappers.
     const choiceBlocked = await answerChoice(fakeSession, "cmd-1", "ws-1", "sig-1", false, { optionIds: ["yes"], otherText: null }, { isAlive: () => false });
@@ -1384,6 +1389,8 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     assert.deepEqual(plainOk, { ok: true });
     assert.equal(calls.length, 2);
   } finally {
+    supa.auth.getSession = origGetSession;
+    try { await supa.auth.stopAutoRefresh(); } catch { /* ignore */ }
     globalThis.document = prevDocument;
     globalThis.fetch = prevFetch;
   }
@@ -1654,4 +1661,858 @@ test("Waiting on you Archived view: decoder validation, scope/redaction isolatio
   assert.ok(host.querySelector('[data-waiting-archived-state="empty"]'), "empty state appears after archive is exhausted");
   assert.equal(host.querySelector(".cs-waiting-panel__state-text").textContent, "No archived items in #garden.");
   assert.equal(host.querySelector("[data-waiting-archived-more]"), null);
+});
+
+test("Waiting panel Dismiss, in-place Undo, failure recovery, and Archived Dismissed with Restore", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "general", channelId: null, label: "#general" };
+  const ask1 = {
+    id: "ask-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: null, ownerFirstName: null, ownerInitial: "", yours: false, tint: "sage", hosted: false, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent",
+    fromId: "a-1",
+    what: "Approve deploy?",
+    when: "1m ago",
+    createdAt: "2026-11-23T10:00:00Z",
+    until: "9999-12-31T23:59:59Z",
+    choices: { options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }], multi: false },
+  };
+  const plain1 = {
+    id: "plain-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation: { kind: "general" },
+    channelLabel: "#general",
+    from: ask1.from,
+    fromKind: "agent",
+    fromId: "a-1",
+    what: "Legacy plain ask?",
+    when: "2m ago",
+    createdAt: "2026-11-23T09:59:00Z",
+    until: "9999-12-31T23:59:59Z",
+  };
+  const todo1 = {
+    id: "todo-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Call electrician",
+    state: "open",
+    dueOn: null,
+    reason: "assigned",
+    href: "/app?w=ws-1&todo=todo-1",
+    canMarkDone: true,
+    placement: "general",
+    channelId: null,
+  };
+  const review1 = {
+    id: "todo-review-1",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Scout roof inspection",
+    state: "open",
+    dueOn: null,
+    reason: "request",
+    href: "/app?w=ws-1&todo=todo-review-1",
+    canMarkDone: false,
+    placement: "general",
+    channelId: null,
+  };
+
+  let items = [ask1];
+  let plainAsks = [plain1];
+  let todos = [todo1, review1];
+  let placeholders = [];
+  const dismissedCalls = [];
+  const undoCalls = [];
+  const restoreCalls = [];
+
+  const renderActive = () => {
+    const count = items.length + plainAsks.length + todos.length;
+    renderWaitingPanel(host, {
+      tab: "active",
+      scope: "channel",
+      place,
+      items,
+      plainAsks,
+      todos,
+      dismissedPlaceholders: placeholders,
+      counts: {
+        channel: { min: count, complete: true },
+        workspace: { min: count, complete: true },
+        all: { min: count, complete: true },
+      },
+      loading: false,
+      complete: true,
+      failed: false,
+      statusMessage: "",
+      statusSeq: 0,
+    }, {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onDismissAsk: (item) => {
+        dismissedCalls.push(["ask", item.id]);
+        items = items.filter(i => i.id !== item.id);
+        placeholders = [{ key: `ask:${item.id}`, itemKind: "ask", itemId: item.id, cardId: item.id, workspaceId: item.workspaceId, position: 0 }];
+        renderActive();
+      },
+      onDismissPlainAsk: (item) => {
+        dismissedCalls.push(["plain", item.id]);
+        plainAsks = plainAsks.filter(i => i.id !== item.id);
+        renderActive();
+      },
+      onDismissTodo: (item) => {
+        dismissedCalls.push([item.reason === "request" ? "review" : "todo", item.id]);
+        todos = todos.filter(t => t.id !== item.id);
+        renderActive();
+      },
+      onUndoDismiss: (ph) => {
+        undoCalls.push(ph.key);
+        placeholders = placeholders.map(p => (p.key === ph.key ? { ...p, pendingUndo: true } : p));
+        renderActive();
+      },
+      onRestoreArchived: (item) => {
+        restoreCalls.push(item.itemKey);
+      },
+    });
+  };
+
+  renderActive();
+
+  // Every card kind renders a real <button> labeled "Dismiss", and plain asks KEEP "Clear as stale".
+  const dismissButtons = host.querySelectorAll("[data-waiting-dismiss]");
+  assert.equal(dismissButtons.length, 4);
+  for (const btn of dismissButtons) {
+    assert.equal(btn.tagName, "BUTTON");
+    assert.equal(btn.textContent, "Dismiss");
+  }
+  assert.deepEqual(dismissButtons.map(b => b.dataset.waitingDismiss), ["ask", "todo", "review", "ask"]);
+  assert.ok(host.querySelector('[data-waiting-plain-stale="plain-1"]'), "plain ask keeps Clear as stale alongside Dismiss");
+
+  // Clicking Dismiss removes the card, updates count, and shows "Dismissed" + "Undo" in place (with zero item content).
+  dismissButtons[0].click();
+  assert.deepEqual(dismissedCalls, [["ask", "ask-1"]]);
+  assert.equal(host.querySelector('[data-waiting-card="ask-1"]'), null);
+  const dismissedRow = host.querySelector('[data-waiting-dismissed="ask:ask-1"]');
+  assert.ok(dismissedRow);
+  assert.equal(dismissedRow.querySelector(".cs-waiting-dismissed__label").textContent, "Dismissed");
+  assert.equal(dismissedRow.textContent.includes(ask1.what), false, "Dismissed row renders no content from the item");
+  const undoBtn = dismissedRow.querySelector('[data-waiting-undo="ask:ask-1"]');
+  assert.ok(undoBtn);
+  assert.equal(undoBtn.tagName, "BUTTON");
+  assert.equal(undoBtn.textContent, "Undo");
+  assert.equal(host.querySelector("[data-waiting-scope]").options[0].textContent, "This channel (3)");
+
+  // Focus helper targets the in-place Undo button.
+  focusWaitingPanelAfterAction(host, { kind: "dismissed", dismissedKey: "ask:ask-1" });
+  assert.strictEqual(doc.activeElement, undoBtn);
+
+  // Clicking Undo switches the row to "Undoing…" and does NOT re-insert the card itself before reload.
+  undoBtn.click();
+  assert.deepEqual(undoCalls, ["ask:ask-1"]);
+  assert.equal(host.querySelector('[data-waiting-card="ask-1"]'), null);
+  const undoingBtn = host.querySelector('[data-waiting-undo="ask:ask-1"]');
+  assert.ok(undoingBtn);
+  assert.equal(undoingBtn.textContent, "Undoing…");
+  assert.equal(undoingBtn.getAttribute("aria-disabled"), "true");
+
+  // Card reappears only after the server reload supplies it and removes the placeholder.
+  placeholders = [];
+  items = [ask1];
+  renderActive();
+  assert.ok(host.querySelector('[data-waiting-card="ask-1"]'));
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-1"]'), null);
+  assert.equal(host.querySelector("[data-waiting-scope]").options[0].textContent, "This channel (4)");
+
+  // Failed non-404 dismiss reloads card with role="alert" error treatment.
+  items = [{ ...ask1, choices: { ...ask1.choices, error: "Could not dismiss. Try again." } }];
+  placeholders = [];
+  renderActive();
+  const restoredCard = host.querySelector('[data-waiting-card="ask-1"]');
+  assert.ok(restoredCard);
+  assert.ok(restoredCard.textContent.includes("Could not dismiss. Try again."));
+
+  // Dismissing the LAST remaining card still renders the in-place "Dismissed · Undo" row (not empty state).
+  items = [];
+  plainAsks = [];
+  todos = [];
+  placeholders = [{ key: "ask:ask-1", itemKind: "ask", itemId: "ask-1", cardId: "ask-1", workspaceId: "ws-1", position: 0 }];
+  renderActive();
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-1"]'));
+  assert.equal(host.querySelector('[data-waiting-state="empty"]'), null);
+
+  // Archived tab parses and renders outcome_kind="dismissed" with muted tone and "Restore" button.
+  const parsedArchived = parseWaitingArchivedPage({
+    workspace_id: "ws-1",
+    generated_at: "2026-11-23T12:00:00Z",
+    total: 1,
+    truncated: false,
+    items: [{
+      item_key: "ask:11111111-2222-4333-8444-555555555555",
+      kind: "ask",
+      id: "11111111-2222-4333-8444-555555555555",
+      todo_id: null,
+      ask_kind: "choice",
+      title: "Approve deploy?",
+      from: { kind: "agent", id: "a-1", name: "Scout" },
+      outcome_kind: "dismissed",
+      outcome_text: "Dismissed",
+      archived_at: "2026-11-23T11:55:00Z",
+      answered_by: { kind: "user", id: "u-1", name: "Alice", by_viewer: true },
+      placement: "general",
+      channel_id: null,
+      conversation_id: null,
+      conversation_kind: "general",
+    }],
+  }, "ws-1");
+  assert.equal(parsedArchived.items[0].outcome_kind, "dismissed");
+  const mappedArchived = mapWaitingArchivedEntry(parsedArchived.items[0], {
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    channelLabel: "#general",
+    href: "/app?w=ws-1&m=11111111-2222-4333-8444-555555555555",
+    viewerId: "u-1",
+    now: Date.parse("2026-11-23T12:00:00Z"),
+  });
+
+  renderWaitingPanel(host, {
+    tab: "archived",
+    scope: "workspace",
+    place,
+    items: [],
+    archived: {
+      items: [mappedArchived],
+      counts: { channel: { min: 1, complete: true }, workspace: { min: 1, complete: true }, all: { min: 1, complete: true } },
+      loading: false, loadingMore: false, complete: true, failed: false, hasMore: false,
+    },
+    counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+    loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
+  }, {
+    onScopeChange: () => {},
+    onClose: () => {},
+    onRetryLoad: () => {},
+    onSubmitChoice: () => {},
+    onRetryChoice: () => {},
+    onDraftChoice: () => {},
+    onRestoreArchived: (item) => restoreCalls.push(item.itemKey),
+  });
+
+  const outcome = host.querySelector('[data-waiting-archived-outcome="dismissed"]');
+  assert.ok(outcome);
+  assert.equal(outcome.dataset.outcomeTone, "muted");
+  assert.equal(outcome.querySelector(".cs-waiting-archived__answer").textContent, "Dismissed");
+  const restoreBtn = host.querySelector(`[data-waiting-archived-restore="${mappedArchived.itemKey}"]`);
+  assert.ok(restoreBtn);
+  assert.equal(restoreBtn.tagName, "BUTTON");
+  assert.equal(restoreBtn.textContent, "Restore");
+  restoreBtn.click();
+  assert.deepEqual(restoreCalls, [mappedArchived.itemKey]);
+
+  // Wire command builders match server contract.
+  assert.deepEqual(dismissWaitingItemCommand("review", "offer-1"), {
+    kind: "dismiss_waiting_item",
+    item_kind: "review",
+    item_id: "offer-1",
+  });
+  assert.deepEqual(restoreWaitingItemCommand("todo", "todo-1"), {
+    kind: "restore_waiting_item",
+    item_kind: "todo",
+    item_id: "todo-1",
+  });
+  assert.equal(typeof dismissWaitingItem, "function");
+  assert.equal(typeof restoreWaitingItem, "function");
+});
+
+test("C3 dismissal controller: Undo reloads without inserting a saved card; access loss retires rows and fences late refusals; unchanged-access control restores after reload", async () => {
+  const { doc } = makeFakeDoc(false);
+  const host = doc.createElement("aside");
+  doc.root.append(host);
+  const place = { workspaceId: "ws-1", workspaceName: "Home", kind: "all", channelId: null, label: "All channels" };
+  const placeKey = "ws-1:all::::";
+
+  const makeChoiceAsk = (id, what, conversation) => ({
+    id,
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    conversation,
+    channelLabel: conversation.kind === "channel" ? "#secret" : conversation.kind === "dm" ? "DM" : "#general",
+    from: { id: "a-1", name: "Scout", label: "Scout", nestedLabel: "Scout", ownerId: "u-1", ownerFirstName: "Alice", ownerInitial: "A", yours: true, tint: "amber", hosted: true, state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } } },
+    fromKind: "agent",
+    fromId: "a-1",
+    what,
+    when: "1m",
+    createdAt: "2026-11-23T12:00:00Z",
+    until: "2026-11-24T12:00:00Z",
+    choices: { multi: false, options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+  });
+
+  const dmAsk = makeChoiceAsk("ask-dm", "Secret DM question?", { kind: "dm", partnerKind: "person", partnerId: "u-2", conversationId: "conv-dm" });
+  const privAsk = makeChoiceAsk("ask-priv", "Private channel question?", { kind: "channel", channelId: "ch-priv" });
+  const genAsk = makeChoiceAsk("ask-gen", "General question?", { kind: "general" });
+
+  // Server-backed fixture lists (mutated only to simulate authoritative server state).
+  let serverAsks = [dmAsk, privAsk, genAsk];
+  let clientAsks = [...serverAsks];
+  let cardErrors = new Map();
+  let statusMessage = "";
+  let statusSeq = 0;
+  let reloadCount = 0;
+
+  let nextDismiss = () => Promise.resolve({ ok: true, itemKind: "ask", itemId: "", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+  let nextRestore = () => Promise.resolve({ ok: true, itemKind: "ask", itemId: "", restored: true, restoredAt: "2026-11-23T12:02:00Z" });
+
+  let ctrl;
+  const render = () => {
+    const items = clientAsks.map(item => (cardErrors.has(item.id)
+      ? { ...item, choices: { ...item.choices, error: cardErrors.get(item.id) } }
+      : item));
+    renderWaitingPanel(host, {
+      tab: "active",
+      scope: "workspace",
+      place,
+      items,
+      plainAsks: [],
+      todos: [],
+      dismissedPlaceholders: ctrl.placeholdersFor(placeKey, "workspace"),
+      counts: {
+        channel: { min: items.length, complete: true },
+        workspace: { min: items.length, complete: true },
+        all: { min: items.length, complete: true },
+      },
+      loading: false,
+      complete: true,
+      failed: false,
+      statusMessage,
+      statusSeq,
+    }, {
+      onScopeChange: () => {},
+      onClose: () => {},
+      onRetryLoad: () => {},
+      onSubmitChoice: () => {},
+      onRetryChoice: () => {},
+      onDraftChoice: () => {},
+      onDismissAsk: (item) => void ctrl.dismiss({
+        slotKind: "ask",
+        itemKind: "ask",
+        itemId: item.id,
+        cardId: item.id,
+        workspaceId: item.workspaceId,
+        channelId: item.conversation.kind === "channel" ? item.conversation.channelId : null,
+        conversationId: item.conversation.kind === "dm" || item.conversation.kind === "group_dm" ? item.conversation.conversationId ?? null : null,
+        placementKind: item.conversation.kind,
+        position: 0,
+        placeKey,
+        scope: "workspace",
+      }),
+      onUndoDismiss: (ph) => void ctrl.undo(ph.key),
+    });
+  };
+
+  ctrl = createWaitingDismissalController({
+    sendDismiss: (ws, kind, id) => nextDismiss(ws, kind, id),
+    sendRestore: (ws, kind, id) => nextRestore(ws, kind, id),
+    isAlive: () => true,
+    removeCardFromClient: (target) => {
+      clientAsks = clientAsks.filter(i => i.id !== target.cardId);
+      cardErrors.delete(target.cardId);
+    },
+    onRetireAccessLoss: (ev) => {
+      if (ev.kind === "conversation") {
+        clientAsks = clientAsks.filter(i => !(i.conversation.kind === "dm" && i.conversation.conversationId === ev.conversationId));
+      } else if (ev.kind === "channel") {
+        clientAsks = clientAsks.filter(i => !(i.conversation.kind === "channel" && i.conversation.channelId === ev.channelId));
+      }
+    },
+    reloadWaiting: async () => {
+      reloadCount += 1;
+      const pending = ctrl.pendingDismissCardIds("ws-1");
+      clientAsks = serverAsks.filter(i => !pending.has(i.id));
+      render();
+    },
+    invalidateArchived: () => {},
+    setCardError: (_slot, id, msg) => { cardErrors.set(id, msg); },
+    setStatusError: (msg) => { statusMessage = msg; statusSeq += 1; },
+    setArchivedError: () => {},
+    clearArchivedError: () => {},
+    render,
+  });
+
+  render();
+
+  // 1. Held Dismiss refusal arriving AFTER authoritative DM conversation loss paints NOTHING (no card, no row, no error).
+  let settleDmDismiss;
+  nextDismiss = () => new Promise(resolve => { settleDmDismiss = resolve; });
+  const dmDismissPromise = ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: dmAsk.id, cardId: dmAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: "conv-dm", placementKind: "dm",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), "in-place Dismissed row shown while in flight");
+  assert.equal(host.textContent.includes(dmAsk.what), false, "DM question text is gone from DOM");
+
+  // Authoritative conversation loss happens BEFORE Dismiss settles!
+  serverAsks = serverAsks.filter(i => i.id !== dmAsk.id);
+  const retired = ctrl.retireForConversation("ws-1", "conv-dm", null);
+  assert.equal(retired, true);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), null, "Dismissed row retired synchronously");
+  assert.equal(host.querySelector('[data-waiting-card="ask-dm"]'), null);
+
+  // Late refusal (even a 500 or 404) settles -> fenced out, paints nothing, sets no error!
+  const reloadsBeforeLateRefusal = reloadCount;
+  settleDmDismiss({ ok: false, status: 500, error: "server_error", message: "Should never appear" });
+  await dmDismissPromise;
+  assert.equal(reloadCount, reloadsBeforeLateRefusal, "retired dismiss settlement is ignored");
+  assert.equal(host.querySelector('[data-waiting-card="ask-dm"]'), null);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-dm"]'), null);
+  assert.equal(cardErrors.has(dmAsk.id), false);
+  assert.equal(host.textContent.includes(dmAsk.what), false);
+
+  // 2. Undo refused (404) after private-channel loss paints NOTHING.
+  nextDismiss = async () => {
+    serverAsks = serverAsks.filter(i => i.id !== privAsk.id);
+    return { ok: true, itemKind: "ask", itemId: privAsk.id, dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" };
+  };
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: privAsk.id, cardId: privAsk.id,
+    workspaceId: "ws-1", channelId: "ch-priv", conversationId: null, placementKind: "channel",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-priv"]'));
+
+  let settlePrivUndo;
+  nextRestore = () => new Promise(resolve => { settlePrivUndo = resolve; });
+  const privUndoPromise = ctrl.undo("ask:ask-priv");
+  // While Undo waits, row shows "Undoing…" and does NOT insert privAsk!
+  assert.equal(host.querySelector('[data-waiting-undo="ask:ask-priv"]').textContent, "Undoing…");
+  assert.equal(host.querySelector('[data-waiting-card="ask-priv"]'), null);
+  await Promise.resolve();
+
+  // Server refuses restore with 404 (caller removed from private channel); reload returns no privAsk.
+  settlePrivUndo({ ok: false, status: 404, error: "not_found", message: "Waiting item not found." });
+  await privUndoPromise;
+  assert.equal(host.querySelector('[data-waiting-card="ask-priv"]'), null);
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-priv"]'), null);
+  assert.equal(statusMessage, "", "404 refusal reloads silently with no error");
+  assert.equal(host.textContent.includes(privAsk.what), false);
+
+  // 3. Unchanged-access control (#general ask): Dismiss, then Undo -> shows "Undoing…", inserts nothing itself,
+  //    then restores the card ONLY after server reload returns it.
+  nextDismiss = async () => {
+    serverAsks = serverAsks.filter(i => i.id !== genAsk.id);
+    return { ok: true, itemKind: "ask", itemId: genAsk.id, dismissed: true, dismissedAt: "2026-11-23T12:03:00Z" };
+  };
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null);
+  assert.ok(host.querySelector('[data-waiting-dismissed="ask:ask-gen"]'));
+
+  let settleGenUndo;
+  nextRestore = () => new Promise(resolve => { settleGenUndo = resolve; });
+  const reloadsBeforeUndo = reloadCount;
+  const genUndoPromise = ctrl.undo("ask:ask-gen");
+  assert.equal(host.querySelector('[data-waiting-undo="ask:ask-gen"]').textContent, "Undoing…");
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null, "Undo inserts nothing before server reload");
+  await Promise.resolve();
+
+  // Server accepts restore and includes genAsk on the subsequent reload.
+  serverAsks = [genAsk];
+  settleGenUndo({ ok: true, itemKind: "ask", itemId: genAsk.id, restored: true, restoredAt: "2026-11-23T12:04:00Z" });
+  await genUndoPromise;
+  assert.ok(reloadCount > reloadsBeforeUndo, "Undo triggers authoritative server reload");
+  assert.ok(host.querySelector('[data-waiting-card="ask-gen"]'), "unchanged-access control card reappears after reload");
+  assert.equal(host.querySelector('[data-waiting-dismissed="ask:ask-gen"]'), null);
+
+  // 4. Failed Dismiss (non-404) reloads from server with error treatment (never re-inserting a saved card);
+  //    404 Dismiss reloads silently with no error.
+  nextDismiss = async () => ({ ok: false, status: 500, error: "server_error", message: "Server busy." });
+  const reloadsBefore500 = reloadCount;
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(reloadCount > reloadsBefore500);
+  assert.equal(cardErrors.get(genAsk.id), "Server busy.");
+  assert.ok(host.querySelector('[data-waiting-card="ask-gen"]').textContent.includes("Server busy."));
+
+  cardErrors.clear();
+  serverAsks = [];
+  nextDismiss = async () => ({ ok: false, status: 404, error: "not_found", message: "Waiting item not found." });
+  const reloadsBefore404 = reloadCount;
+  await ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: genAsk.id, cardId: genAsk.id,
+    workspaceId: "ws-1", channelId: null, conversationId: null, placementKind: "general",
+    position: 0, placeKey, scope: "workspace",
+  });
+  assert.ok(reloadCount > reloadsBefore404);
+  assert.equal(cardErrors.has(genAsk.id), false, "404 dismiss reloads with no error");
+  assert.equal(host.querySelector('[data-waiting-card="ask-gen"]'), null);
+});
+
+test("waiting-dismissal controller (C3): passes scoped action lifetime guard to send ports and bumps workspaceAccessGeneration", async () => {
+  const capturedGuards = [];
+  let pendingResolve = null;
+  const ctrl = createWaitingDismissalController({
+    sendDismiss: (_ws, _kind, _id, isAlive) => {
+      capturedGuards.push({ op: "dismiss", isAlive });
+      return new Promise(resolve => { pendingResolve = resolve; });
+    },
+    sendRestore: (_ws, _kind, _id, isAlive) => {
+      capturedGuards.push({ op: "restore", isAlive });
+      return new Promise(resolve => { pendingResolve = resolve; });
+    },
+    isAlive: () => true,
+    removeCardFromClient: () => {},
+    reloadWaiting: () => {},
+    invalidateArchived: () => {},
+    setCardError: () => {},
+    setStatusError: () => {},
+    setArchivedError: () => {},
+    clearArchivedError: () => {},
+    render: () => {},
+  });
+
+  const ws1Before = ctrl.workspaceAccessGeneration("ws-1");
+  const ws2Before = ctrl.workspaceAccessGeneration("ws-2");
+
+  const dismissP = ctrl.dismiss({
+    slotKind: "ask", itemKind: "ask", itemId: "ask-dm", cardId: "ask-dm",
+    workspaceId: "ws-1", channelId: null, conversationId: "conv-dm", placementKind: "dm",
+    position: 0, placeKey: "ws-1:general", scope: "workspace",
+  });
+  assert.equal(capturedGuards.length, 1);
+  assert.equal(capturedGuards[0].isAlive(), true, "guard starts alive");
+
+  // Unrelated channel loss in ws-2 leaves ws-1 DM guard alive and ws-1 generation unchanged.
+  ctrl.retireForChannel("ws-2", "ch-other");
+  assert.equal(capturedGuards[0].isAlive(), true);
+  assert.equal(ctrl.workspaceAccessGeneration("ws-1"), ws1Before);
+  assert.ok(ctrl.workspaceAccessGeneration("ws-2") > ws2Before);
+
+  // Losing conv-dm retires the in-flight guard synchronously and bumps ws-1 generation.
+  ctrl.retireForConversation("ws-1", "conv-dm", null);
+  assert.equal(capturedGuards[0].isAlive(), false, "conversation loss retires in-flight transport guard");
+  assert.ok(ctrl.workspaceAccessGeneration("ws-1") > ws1Before);
+  pendingResolve({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await dismissP;
+
+  // Archived Restore also passes a scoped lifetime guard retired by channel loss.
+  const restoreP = ctrl.restoreArchived({
+    itemKey: "ask:ask-priv", kind: "ask", id: "ask-priv", todoId: null, askKind: "choice",
+    workspaceId: "ws-1", workspaceName: "Home", title: "Secret?", from: null,
+    outcomeKind: "dismissed", outcomeText: "Dismissed", archivedAt: "2026-11-23T12:00:00Z",
+    when: "now", answeredBy: null, placement: "channel", channelId: "ch-priv",
+    conversationId: null, conversationKind: null, channelLabel: "#secret", href: null,
+  });
+  assert.equal(capturedGuards.length, 2);
+  assert.equal(capturedGuards[1].isAlive(), true);
+  ctrl.retireForChannel("ws-1", "ch-priv");
+  assert.equal(capturedGuards[1].isAlive(), false, "channel loss retires Archived Restore transport guard");
+  pendingResolve({ ok: false, status: 0, error: "operation_retired", message: "Action cancelled." });
+  await restoreP;
+});
+
+test("waiting-dismissal controller (C3): attempt ownership prevents retired Dismiss, Undo, and Archived Restore from touching fresh overlapping attempts across all settlement forms", async () => {
+  const outcomes = [
+    { label: "success", dismiss: { ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" }, restore: { ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:00:00Z" } },
+    { label: "404", dismiss: { ok: false, status: 404, error: "not_found", message: "Not found." }, restore: { ok: false, status: 404, error: "not_found", message: "Not found." } },
+    { label: "error", dismiss: { ok: false, status: 500, error: "server_error", message: "Stale 500." }, restore: { ok: false, status: 500, error: "server_error", message: "Stale 500." } },
+    { label: "retired", dismiss: { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." }, restore: { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." } },
+  ];
+
+  const makeTarget = () => ({
+    slotKind: "ask",
+    itemKind: "ask",
+    itemId: "ask-1",
+    cardId: "ask-1",
+    workspaceId: "ws-1",
+    channelId: null,
+    conversationId: null,
+    placementKind: "general",
+    position: 0,
+    placeKey: "ws-1:general",
+    scope: "workspace",
+  });
+
+  const makeArchived = () => ({
+    itemKey: "ask:ask-1",
+    kind: "ask",
+    id: "ask-1",
+    todoId: null,
+    askKind: "choice",
+    workspaceId: "ws-1",
+    workspaceName: "Home",
+    title: "Question?",
+    from: null,
+    outcomeKind: "dismissed",
+    outcomeText: "Dismissed",
+    archivedAt: "2026-11-23T12:00:00Z",
+    when: "now",
+    answeredBy: null,
+    placement: "general",
+    channelId: null,
+    conversationId: null,
+    conversationKind: null,
+    channelLabel: "#general",
+    href: null,
+  });
+
+  // 1. Dismiss overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const dispatches = [];
+    const resolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: (_ws, _kind, itemId) => {
+        dispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { resolvers.push(resolve); });
+      },
+      sendRestore: async () => outcome.restore,
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const pA = ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(dispatches.length, 1);
+
+    // Same-person login replacement retires login 1 synchronously.
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.has("ask:ask-1"), false);
+
+    // Fresh Dismiss B for the SAME item starts under login 2.
+    const pB = ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), true);
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Dismiss(${outcome.label}): B dispatched once`);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    resolvers[0](outcome.dismiss);
+    await pA;
+
+    assert.equal(ctrl.has("ask:ask-1"), true, `Dismiss(${outcome.label}): B row must remain`);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), true, `Dismiss(${outcome.label}): B must remain pending`);
+    assert.equal(renders, rendersBeforeA, `Dismiss(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `Dismiss(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `Dismiss(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `Dismiss(${outcome.label}): A must set no error`);
+    assert.equal(dispatches.filter(d => d.loginGen === 2).length, 1, `Dismiss(${outcome.label}): B still dispatched exactly once`);
+
+    resolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:01:00Z" });
+    await pB;
+    assert.equal(ctrl.has("ask:ask-1"), true);
+    assert.equal(ctrl.pendingDismissCardIds("ws-1").has("ask-1"), false);
+  }
+
+  // 2. Undo overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const restoreDispatches = [];
+    const restoreResolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: async () => ({ ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" }),
+      sendRestore: (_ws, _kind, itemId) => {
+        restoreDispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { restoreResolvers.push(resolve); });
+      },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    await ctrl.dismiss(makeTarget());
+    const undoA = ctrl.undo("ask:ask-1");
+    await Promise.resolve();
+    assert.equal(restoreDispatches.length, 1);
+
+    // Same-person login replacement retires login 1 synchronously.
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.has("ask:ask-1"), false);
+
+    // Fresh Dismiss + Undo B for the SAME item starts under login 2.
+    await ctrl.dismiss(makeTarget());
+    const undoB = ctrl.undo("ask:ask-1");
+    await Promise.resolve();
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `Undo(${outcome.label}): B dispatched once`);
+    assert.equal(ctrl.placeholdersFor("ws-1:general", "workspace")[0]?.pendingUndo, true);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    restoreResolvers[0](outcome.restore);
+    await undoA;
+
+    assert.equal(ctrl.has("ask:ask-1"), true, `Undo(${outcome.label}): B row must remain`);
+    assert.equal(ctrl.placeholdersFor("ws-1:general", "workspace")[0]?.pendingUndo, true, `Undo(${outcome.label}): B must stay pendingUndo`);
+    assert.equal(renders, rendersBeforeA, `Undo(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `Undo(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `Undo(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `Undo(${outcome.label}): A must set no error`);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `Undo(${outcome.label}): B still dispatched exactly once`);
+
+    restoreResolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:01:00Z" });
+    await undoB;
+    assert.equal(ctrl.has("ask:ask-1"), false);
+  }
+
+  // 3. Archived Restore overlap for every settlement form (success, 404, error, retired).
+  for (const outcome of outcomes) {
+    let loginGen = 1;
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    const restoreDispatches = [];
+    const restoreResolvers = [];
+    const ctrl = createWaitingDismissalController({
+      captureAccountGuard: () => {
+        const pinnedGen = loginGen;
+        return () => loginGen === pinnedGen;
+      },
+      sendDismiss: async () => outcome.dismiss,
+      sendRestore: (_ws, _kind, itemId) => {
+        restoreDispatches.push({ loginGen, itemId });
+        return new Promise(resolve => { restoreResolvers.push(resolve); });
+      },
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    const restoreA = ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true);
+    assert.equal(restoreDispatches.length, 1);
+
+    loginGen += 1;
+    ctrl.retireAll();
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+
+    const restoreB = ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `ArchivedRestore(${outcome.label}): B dispatched once`);
+
+    const rendersBeforeA = renders;
+    const reloadsBeforeA = reloads;
+    const invalidationsBeforeA = invalidations;
+    restoreResolvers[0](outcome.restore);
+    await restoreA;
+
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), true, `ArchivedRestore(${outcome.label}): B marker must remain`);
+    assert.equal(renders, rendersBeforeA, `ArchivedRestore(${outcome.label}): A must not repaint`);
+    assert.equal(reloads, reloadsBeforeA, `ArchivedRestore(${outcome.label}): A must not reload`);
+    assert.equal(invalidations, invalidationsBeforeA, `ArchivedRestore(${outcome.label}): A must not invalidate`);
+    assert.deepEqual(errors, [], `ArchivedRestore(${outcome.label}): A must set no error`);
+    assert.equal(restoreDispatches.filter(d => d.loginGen === 2).length, 1, `ArchivedRestore(${outcome.label}): B still dispatched exactly once`);
+
+    restoreResolvers[1]({ ok: true, itemKind: "ask", itemId: "ask-1", restored: true, restoredAt: "2026-11-23T12:01:00Z" });
+    await restoreB;
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+  }
+
+  // 4. Still-owned cancelled attempts (Dismiss, Undo, Archived Restore) clear their own visual pending
+  //    indicator with no stale error and no data reload/invalidation.
+  {
+    const retiredResult = { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
+    let renders = 0;
+    let reloads = 0;
+    let invalidations = 0;
+    const errors = [];
+    let nextDismissResult = retiredResult;
+    let nextRestoreResult = retiredResult;
+    const ctrl = createWaitingDismissalController({
+      sendDismiss: async () => nextDismissResult,
+      sendRestore: async () => nextRestoreResult,
+      isAlive: () => true,
+      removeCardFromClient: () => {},
+      reloadWaiting: () => { reloads += 1; },
+      invalidateArchived: () => { invalidations += 1; },
+      setCardError: (_slot, _id, msg) => errors.push(msg),
+      setStatusError: (msg) => errors.push(msg),
+      setArchivedError: (_key, msg) => errors.push(msg),
+      clearArchivedError: () => {},
+      render: () => { renders += 1; },
+    });
+
+    // Still-owned cancelled Dismiss clears its row + re-renders indicator, zero error/reload.
+    await ctrl.dismiss(makeTarget());
+    assert.equal(ctrl.has("ask:ask-1"), false);
+    assert.equal(renders, 2, "optimistic render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
+
+    // Still-owned cancelled Undo clears its "Undoing…" row + re-renders indicator, zero error/reload.
+    nextDismissResult = { ok: true, itemKind: "ask", itemId: "ask-1", dismissed: true, dismissedAt: "2026-11-23T12:00:00Z" };
+    await ctrl.dismiss(makeTarget());
+    renders = 0;
+    reloads = 0;
+    invalidations = 0;
+    await ctrl.undo("ask:ask-1");
+    assert.equal(ctrl.has("ask:ask-1"), false);
+    assert.equal(renders, 2, "Undoing… render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
+
+    // Still-owned cancelled Archived Restore clears its "Restoring…" marker + re-renders indicator, zero error/reload.
+    renders = 0;
+    await ctrl.restoreArchived(makeArchived());
+    assert.equal(ctrl.isArchivedRestoring("ask:ask-1"), false);
+    assert.equal(renders, 2, "Restoring… render + pending-indicator clear render");
+    assert.equal(reloads, 0);
+    assert.equal(invalidations, 0);
+    assert.deepEqual(errors, []);
+  }
 });

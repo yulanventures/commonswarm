@@ -61,6 +61,8 @@ export {
   type Deployment,
 };
 import { authProvider } from "./auth-providers.js";
+import { decodeJwtClaims, sessionIdFromAccessToken } from "./jwt-claims.js";
+export { decodeJwtClaims, sessionIdFromAccessToken };
 import {
   AccountManager,
   AccountSessionRuntime,
@@ -128,6 +130,7 @@ import {
   type ConversationActionResult,
   type ConversationHistoryOptions,
   type ConversationHistoryResult,
+  type ConversationKind,
   type ConversationMemberRef,
   type ConversationNotifyLevel,
   type ConversationOpenResult,
@@ -1343,7 +1346,40 @@ export async function postCommand(
     command,
     ...extra,
   });
-  let credential = session;
+  const guarded = Boolean(isAlive);
+  const pinnedSessionId = guarded ? sessionIdFromAccessToken(session.access_token) : null;
+  const matchesPinnedLogin = (candidate: Session | null | undefined): candidate is Session =>
+    Boolean(
+      candidate &&
+      candidate.user.id === session.user.id &&
+      pinnedSessionId &&
+      sessionIdFromAccessToken(candidate.access_token) === pinnedSessionId,
+    );
+  let credential: Session;
+  if (guarded) {
+    if (!pinnedSessionId) {
+      return retiredResult();
+    }
+    const existingClient = cachedSession?.client ?? null;
+    if (!existingClient) {
+      return retiredResult();
+    }
+    let initial: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
+    try {
+      initial = await boundedAuth(existingClient.auth.getSession());
+    } catch {
+      return retiredResult();
+    }
+    if (isCancelled() || initial.error || !matchesPinnedLogin(initial.data.session)) {
+      return retiredResult();
+    }
+    credential = initial.data.session;
+  } else {
+    credential = session;
+  }
+  if (isCancelled()) {
+    return retiredResult();
+  }
   const deadline = requestDeadline();
   const fetchSignal = signal ? AbortSignal.any([deadline.controller.signal, signal]) : deadline.controller.signal;
   try {
@@ -1361,6 +1397,9 @@ export async function postCommand(
         body: wireBody,
         signal: fetchSignal,
       });
+      if (isCancelled()) {
+        return retiredResult();
+      }
       const text = await response.text();
       if (isCancelled()) {
         return retiredResult();
@@ -1374,6 +1413,42 @@ export async function postCommand(
       if (response.status === 401 && body.error === "unauthenticated") {
         if (isCancelled()) {
           return retiredResult();
+        }
+        if (guarded) {
+          const c = cachedSession?.client ?? null;
+          if (!c) return retiredResult();
+          if (attempt !== 0) throw new AuthRecoveryRequired();
+          let recovered: Awaited<ReturnType<SupabaseClient["auth"]["getSession"]>>;
+          try {
+            recovered = await boundedAuth(c.auth.getSession());
+          } catch {
+            return retiredResult();
+          }
+          if (isCancelled() || recovered.error || !matchesPinnedLogin(recovered.data.session)) {
+            return retiredResult();
+          }
+          const active = recovered.data.session;
+          if (!sameCredentials(active, credential)) {
+            credential = active;
+          } else {
+            if (isCancelled()) {
+              return retiredResult();
+            }
+            let refreshed: Awaited<ReturnType<SupabaseClient["auth"]["refreshSession"]>>;
+            try {
+              refreshed = await boundedAuth(c.auth.refreshSession());
+            } catch {
+              return retiredResult();
+            }
+            if (isCancelled() || refreshed.error || !matchesPinnedLogin(refreshed.data.session)) {
+              return retiredResult();
+            }
+            credential = refreshed.data.session;
+          }
+          if (isCancelled()) {
+            return retiredResult();
+          }
+          continue;
         }
         const c = client();
         if (!c || attempt !== 0) throw new AuthRecoveryRequired();
@@ -1393,6 +1468,9 @@ export async function postCommand(
         if (!sameCredentials(active, credential)) {
           credential = active;
         } else {
+          if (isCancelled()) {
+            return retiredResult();
+          }
           // refreshSession() reads the CURRENT token under the SDK lock; never
           // pass the rejected caller's possibly superseded refresh token.
           const refreshed = await boundedAuth(c.auth.refreshSession());
@@ -1413,6 +1491,9 @@ export async function postCommand(
             throw new AuthRecoveryRequired();
           }
           credential = refreshed.data.session;
+        }
+        if (isCancelled()) {
+          return retiredResult();
         }
         continue;
       }
@@ -5449,4 +5530,97 @@ export type { ReviewCheckRecord, ReviewChecksReadOutcome, ReviewCheckVerdict, St
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */
 export function uuid(): string {
   return crypto.randomUUID();
+}
+
+export type WaitingDismissalItemKind = "ask" | "todo" | "review";
+
+export type WaitingDismissalResult =
+  | { ok: true; itemKind: WaitingDismissalItemKind; itemId: string; dismissed?: boolean; restored?: boolean; dismissedAt?: string | null; restoredAt?: string | null }
+  | { ok: false; status: number; error: string | null; message: string };
+
+const WAITING_DISMISS_FAILED = "Could not dismiss. Try again.";
+const WAITING_RESTORE_FAILED = "Could not restore. Try again.";
+
+export function dismissWaitingItemCommand(itemKind: WaitingDismissalItemKind, itemId: string): Record<string, unknown> {
+  return { kind: "dismiss_waiting_item", item_kind: itemKind, item_id: itemId };
+}
+
+export function restoreWaitingItemCommand(itemKind: WaitingDismissalItemKind, itemId: string): Record<string, unknown> {
+  return { kind: "restore_waiting_item", item_kind: itemKind, item_id: itemId };
+}
+
+/** Per-person dismissal of one Waiting on you item (ask, todo, or review offer). */
+export async function dismissWaitingItem(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+  options?: {
+    pinned?: PinnedAccountContext | null;
+    accountWideWorkspace?: boolean;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<WaitingDismissalResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    dismissWaitingItemCommand(itemKind, itemId),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    return {
+      ok: true,
+      itemKind,
+      itemId,
+      dismissed: true,
+      dismissedAt: typeof body.dismissed_at === "string" ? body.dismissed_at : null,
+    };
+  }
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : WAITING_DISMISS_FAILED;
+  return { ok: false, status, error, message };
+}
+
+/** Per-person restore of a dismissed Waiting on you item (ask, todo, or review offer). */
+export async function restoreWaitingItem(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+  options?: {
+    pinned?: PinnedAccountContext | null;
+    accountWideWorkspace?: boolean;
+    isAlive?: () => boolean;
+    signal?: AbortSignal;
+  },
+): Promise<WaitingDismissalResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    restoreWaitingItemCommand(itemKind, itemId),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    undefined,
+    options,
+  );
+  if (status === 200 && body.status === "accepted") {
+    return {
+      ok: true,
+      itemKind,
+      itemId,
+      restored: body.restored === true,
+      restoredAt: typeof body.restored_at === "string" ? body.restored_at : null,
+    };
+  }
+  const error = typeof body.error === "string" ? body.error : null;
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : WAITING_RESTORE_FAILED;
+  return { ok: false, status, error, message };
 }

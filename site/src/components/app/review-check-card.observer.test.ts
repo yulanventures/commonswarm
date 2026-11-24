@@ -467,10 +467,12 @@ function installReviewCardFixture() {
     return Response.json({ error: "unexpected_fixture_request" }, { status: 404 });
   };
 
+  const syntheticJwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+    btoa(JSON.stringify({ sub: owner, session_id: "sess-owner-1" })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "") + ".sig";
   localStorage.setItem(
     "sb-api-auth-token",
     JSON.stringify({
-      access_token: "synthetic-human",
+      access_token: syntheticJwt,
       refresh_token: "synthetic-refresh",
       token_type: "bearer",
       expires_in: 3600,

@@ -137,6 +137,7 @@ export class HomeCommandRefused extends Error {
 interface HomeCommandPinOptions {
   pinnedOverride?: PinnedAccountContext | null;
   accountRouted?: boolean;
+  isAlive?: () => boolean;
 }
 
 async function householdTool(
@@ -169,7 +170,13 @@ async function householdTool(
     { kind: 'household_tool', tool, arguments: toolArgs },
     workspaceExtra(workspaceId),
     unknownOutcome,
-    accountRouted ? { pinned, accountWideWorkspace: true } : pinned,
+    accountRouted || pinOptions.isAlive
+      ? {
+          pinned,
+          ...(accountRouted ? { accountWideWorkspace: true } : {}),
+          ...(pinOptions.isAlive ? { isAlive: pinOptions.isAlive } : {}),
+        }
+      : pinned,
   );
   if (pinned && !isCurrent(pinned)) {
     throw new HomeCommandRefused('workspace_access_refused');
@@ -316,7 +323,7 @@ export function parseWaitingTodosQueue(data: unknown, workspaceId: Uuid): Waitin
 }
 
 const WAITING_ARCHIVED_KINDS = new Set<WaitingArchivedKind>(['ask', 'todo', 'review']);
-const WAITING_ARCHIVED_OUTCOMES = new Set<WaitingArchivedOutcomeKind>(['answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined']);
+const WAITING_ARCHIVED_OUTCOMES = new Set<WaitingArchivedOutcomeKind>(['answered', 'cleared_stale', 'done', 'dropped', 'accepted', 'declined', 'dismissed']);
 const WAITING_ARCHIVED_PLACEMENTS = new Set<WaitingArchivedPlacement>(['channel', 'general', 'dm', 'group_dm', 'workspace', 'redacted']);
 
 function waitingArchivedEntry(value: unknown): WaitingArchivedEntry {
@@ -430,12 +437,13 @@ export function createHomeServer(
   session: Session,
   deps: Partial<HomeServerDeps> = {},
   pinnedOverride?: PinnedAccountContext | null,
-  options?: { accountRouted?: boolean },
+  options?: { accountRouted?: boolean; isAlive?: () => boolean },
 ): HomeServer {
   const resolved = { ...defaultDeps(), ...deps };
   const pinOptions: HomeCommandPinOptions = {
     pinnedOverride,
     accountRouted: options?.accountRouted === true,
+    ...(options?.isAlive ? { isAlive: options.isAlive } : {}),
   };
   const resolvePinnedClient = (): { c: SupabaseClient; pinned: PinnedAccountContext | null } => {
     if (isMultiAccountEnabled()) {

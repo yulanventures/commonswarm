@@ -123,7 +123,7 @@ export interface WaitingTodosQueue {
   workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; todos: WaitingTodoEntry[];
 }
 export type WaitingArchivedKind = 'ask' | 'todo' | 'review';
-export type WaitingArchivedOutcomeKind = 'answered' | 'cleared_stale' | 'done' | 'dropped' | 'accepted' | 'declined';
+export type WaitingArchivedOutcomeKind = 'answered' | 'cleared_stale' | 'done' | 'dropped' | 'accepted' | 'declined' | 'dismissed';
 export type WaitingArchivedPlacement = 'channel' | 'general' | 'dm' | 'group_dm' | 'workspace' | 'redacted';
 export interface WaitingArchivedActor {
   kind: 'agent' | 'user';

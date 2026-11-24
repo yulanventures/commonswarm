@@ -827,7 +827,10 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   // A person's own channel read position (its own handler, not the reducer). Agents use channel_read.
   "mark_channel_read",
   // A channel's lead is a person's setting, as the workspace lead is (a channel command, not the reducer).
-  "set_channel_lead"
+  "set_channel_lead",
+  // Per-person Waiting on you dismissals (its own command module, never available to agents).
+  "dismiss_waiting_item",
+  "restore_waiting_item"
 ]);
 function isAgentScopeDenylisted(scope) {
   const words = scopeWords(scope);
