@@ -22,9 +22,16 @@
  *  (e) Back / history-cache (bfcache) restore in `/next` observes a real `pageshow` with
  *      `persisted === true` (failing explicitly with CDP diagnostics if reloaded instead),
  *      paints zero old private content before revalidation settles, then paints the fresh read.
+ *  (f) Back from cross-site navigation while `/next` holds an accepted, OPEN Phoenix-compatible
+ *      realtime WebSocket (both same-login and login-change-while-away variants): observes and
+ *      logs whether the browser restored from bfcache or performed a full reload, and asserts
+ *      the full security invariants (socket closed in the leave phase, zero old private paint,
+ *      no bearer-carrying or phx_join frames on the old socket after pagehide with optional
+ *      bearer-free phx_leave, and only current-login topics/bearer after Back) for whichever
+ *      outcome occurs.
  *
  * Deadlock safety: never hold a token-refresh or user-verification response while asking a peer
- * tab to acquire the same Web Lock. Scenarios (a), (b1), (b2), and (e) release auth holds well
+ * tab to acquire the same Web Lock. Scenarios (a), (b1), (b2), (e), and (f) release auth holds well
  * below the 4s `authFetch` timeout; (b2) closes the tab holding the intentional 30s refresh
  * cooldown before verifying fresh sign-in on the preserved replacement; (c) holds only post-token
  * data responses so the session Web Lock is completely free during peer sign-out and re-sign-in.
@@ -37,7 +44,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { Browser, BrowserContext, Page, Route } from "playwright-core";
+import type { Browser, BrowserContext, Page, Route, WebSocketRoute } from "playwright-core";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { launchPlaywrightChromium } from "../../../tests/chrome.js";
 import { sessionStorageKeyForDeployment } from "../../../../shared/browser-session/index.js";
@@ -64,6 +71,23 @@ const USER_A = {
   identities: [],
   created_at: "2026-11-01T00:00:00.000Z",
   updated_at: "2026-11-23T12:00:00.000Z",
+  is_anonymous: false,
+};
+
+const USER_B = {
+  id: "22222222-2222-4222-8222-222222222222",
+  aud: "authenticated",
+  role: "authenticated",
+  email: "teammate@example.test",
+  email_confirmed_at: "2026-11-01T00:00:00.000Z",
+  phone: "",
+  confirmed_at: "2026-11-01T00:00:00.000Z",
+  last_sign_in_at: "2026-11-23T12:05:00.000Z",
+  app_metadata: { provider: "email", providers: ["email"] },
+  user_metadata: { full_name: "Blake Member" },
+  identities: [],
+  created_at: "2026-11-01T00:00:00.000Z",
+  updated_at: "2026-11-23T12:05:00.000Z",
   is_anonymous: false,
 };
 
@@ -97,17 +121,37 @@ function makeSessionPayload(options: {
   sessionId: string;
   refreshToken: string;
   expired?: boolean;
+  user?: typeof USER_A;
 }) {
+  const user = options.user ?? USER_A;
   const now = Math.floor(Date.now() / 1000);
   const expOffset = options.expired ? -60 : 3600;
   return {
-    access_token: makeJwt(USER_A.id, USER_A.email, options.sessionId, expOffset),
+    access_token: makeJwt(user.id, user.email, options.sessionId, expOffset),
     refresh_token: options.refreshToken,
     expires_in: 3600,
     expires_at: now + expOffset,
     token_type: "bearer",
-    user: USER_A,
+    user,
   };
+}
+
+function decodeJwtClaims(token: string | null | undefined): { sid: string | null; sub: string | null } {
+  if (!token) return { sid: null, sub: null };
+  const parts = token.split(".");
+  if (parts.length !== 3) return { sid: null, sub: null };
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as {
+      session_id?: unknown;
+      sub?: unknown;
+    };
+    return {
+      sid: typeof payload.session_id === "string" ? payload.session_id : null,
+      sub: typeof payload.sub === "string" ? payload.sub : null,
+    };
+  } catch {
+    return { sid: null, sub: null };
+  }
 }
 
 function decodeSidFromAuthHeader(authHeader: string | undefined): string {
@@ -219,13 +263,255 @@ interface ScenarioConfig {
   onDecisionQueue?: (body: Record<string, unknown>, sid: string) => Promise<{ status: number; body: unknown }>;
   /** Workspaces list returned by GET /rest/v1/workspaces */
   workspaces?: Array<{ id: string; name: string }>;
+  /** Optional per-session workspaces override for GET /rest/v1/workspaces and home_overview */
+  workspacesForSid?: (sid: string) => Array<{ id: string; name: string }>;
+  /** Optional per-session user override for home_overview */
+  userForSid?: (sid: string) => typeof USER_A;
+  /** Optional custom handler for wss://api.commonswarm.com/** (defaults to closing immediately) */
+  onWebSocket?: (ws: WebSocketRoute) => void;
 }
+
+interface RecordedSocketFrame {
+  readonly socketId: number;
+  readonly ts: number;
+  readonly phase: string;
+  readonly topic: string;
+  readonly event: string;
+  readonly joinRef: string | null;
+  readonly ref: string | null;
+  readonly hasBearer: boolean;
+  readonly bearer: string | null;
+  readonly bearerSid: string | null;
+  readonly bearerSub: string | null;
+  readonly raw: string;
+}
+
+interface RecordedSocket {
+  readonly id: number;
+  readonly url: string;
+  readonly openedAt: number;
+  readonly openedPhase: string;
+  closed: boolean;
+  closedAt: number | null;
+  closedPhase: string | null;
+  closedCode: number | undefined;
+  closedReason: string | undefined;
+  closeNotifications: number;
+  readonly closedSignal: Signal<void>;
+  readonly frames: RecordedSocketFrame[];
+}
+
+function createPhoenixSocketRecorder(getPhase: () => string) {
+  let nextSocketId = 0;
+  const sockets: RecordedSocket[] = [];
+
+  const handleWebSocket = (ws: WebSocketRoute): void => {
+    const id = ++nextSocketId;
+    const record: RecordedSocket = {
+      id,
+      url: ws.url(),
+      openedAt: Date.now(),
+      openedPhase: getPhase(),
+      closed: false,
+      closedAt: null,
+      closedPhase: null,
+      closedCode: undefined,
+      closedReason: undefined,
+      closeNotifications: 0,
+      closedSignal: createSignal<void>(),
+      frames: [],
+    };
+    sockets.push(record);
+
+    ws.onMessage((rawMessage) => {
+      const rawText = typeof rawMessage === "string" ? rawMessage : rawMessage.toString("utf8");
+      let format: "v2" | "v1" | "unknown" = "unknown";
+      let joinRef: string | null = null;
+      let ref: string | null = null;
+      let topic = "<unparsed>";
+      let event = "<unparsed>";
+      let payload: unknown = null;
+
+      try {
+        const parsed = JSON.parse(rawText) as unknown;
+        if (Array.isArray(parsed) && parsed.length >= 5) {
+          format = "v2";
+          joinRef = parsed[0] == null ? null : String(parsed[0]);
+          ref = parsed[1] == null ? null : String(parsed[1]);
+          topic = typeof parsed[2] === "string" ? parsed[2] : String(parsed[2] ?? "");
+          event = typeof parsed[3] === "string" ? parsed[3] : String(parsed[3] ?? "");
+          payload = parsed[4];
+        } else if (parsed && typeof parsed === "object") {
+          format = "v1";
+          const obj = parsed as Record<string, unknown>;
+          joinRef = obj.join_ref == null ? null : String(obj.join_ref);
+          ref = obj.ref == null ? null : String(obj.ref);
+          topic = typeof obj.topic === "string" ? obj.topic : String(obj.topic ?? "");
+          event = typeof obj.event === "string" ? obj.event : String(obj.event ?? "");
+          payload = obj.payload;
+        }
+      } catch {
+        // Keep raw text in frame record for diagnostics.
+      }
+
+      const payloadObj =
+        payload && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : null;
+      const bearer =
+        payloadObj && typeof payloadObj.access_token === "string" && payloadObj.access_token.length > 0
+          ? payloadObj.access_token
+          : null;
+      const claims = decodeJwtClaims(bearer);
+
+      record.frames.push({
+        socketId: id,
+        ts: Date.now(),
+        phase: getPhase(),
+        topic,
+        event,
+        joinRef,
+        ref,
+        hasBearer: bearer !== null,
+        bearer,
+        bearerSid: claims.sid,
+        bearerSub: claims.sub,
+        raw: rawText,
+      });
+
+      if (record.closed) return;
+
+      const replyOk = (replyJoinRef: string | null) => {
+        const replyPayload = { status: "ok", response: {} };
+        const serialized =
+          format === "v1"
+            ? JSON.stringify({ join_ref: replyJoinRef, ref, topic, event: "phx_reply", payload: replyPayload })
+            : JSON.stringify([replyJoinRef, ref, topic, "phx_reply", replyPayload]);
+        try {
+          ws.send(serialized);
+        } catch {
+          // Socket may already be closing.
+        }
+      };
+
+      if (event === "phx_join") {
+        replyOk(joinRef);
+      } else if (event === "heartbeat" && topic === "phoenix") {
+        replyOk(null);
+      } else if (event === "phx_leave") {
+        replyOk(joinRef);
+      }
+    });
+
+    ws.onClose((code, reason) => {
+      record.closeNotifications += 1;
+      if (!record.closed) {
+        record.closed = true;
+        record.closedAt = Date.now();
+        record.closedPhase = getPhase();
+        record.closedCode = code;
+        record.closedReason = reason;
+        record.closedSignal.resolve();
+        // Acknowledge the close so Playwright's mock WebSocket transitions from CLOSING to CLOSED.
+        void ws.close({ code: code ?? 1000, reason: reason ?? "" }).catch(() => undefined);
+      }
+    });
+  };
+
+  const summary = () =>
+    sockets.map((s) => ({
+      id: s.id,
+      url: s.url,
+      openedAt: s.openedAt,
+      openedPhase: s.openedPhase,
+      closed: s.closed,
+      closedAt: s.closedAt,
+      closedPhase: s.closedPhase,
+      closedCode: s.closedCode,
+      closeNotifications: s.closeNotifications,
+      frames: s.frames.map((f) => ({
+        ts: f.ts,
+        phase: f.phase,
+        topic: f.topic,
+        event: f.event,
+        hasBearer: f.hasBearer,
+        bearerSid: f.bearerSid,
+        bearerSub: f.bearerSub,
+      })),
+    }));
+
+  return { sockets, handleWebSocket, summary };
+}
+
+function formatBfcacheNotRestoredReasons(
+  cdpEvents: Array<Record<string, unknown>>,
+  navReasons: unknown,
+): string {
+  const reasons: string[] = [];
+  for (const ev of cdpEvents) {
+    const explanations = ev.notRestoredExplanations;
+    if (Array.isArray(explanations)) {
+      for (const item of explanations) {
+        if (item && typeof item === "object") {
+          const rec = item as { reason?: unknown; context?: unknown };
+          if (typeof rec.reason === "string" && rec.reason.length > 0) {
+            const ctx = typeof rec.context === "string" && rec.context.length > 0 ? `(${rec.context})` : "";
+            reasons.push(`${rec.reason}${ctx}`);
+          }
+        }
+      }
+    }
+  }
+  if (reasons.length === 0 && navReasons != null) {
+    reasons.push(`nav:${JSON.stringify(navReasons)}`);
+  }
+  return reasons.length > 0 ? [...new Set(reasons)].join(",") : "unknown";
+}
+
+// Page init script for scenario (f) (plain string so esbuild never injects Node-only __name helpers).
+// Captures pagehide/pageshow phase and every WebSocket.prototype.close() call made by the page so
+// a restored bfcache document carries an in-page witness of when the app closed its socket.
+const WS_CLOSE_OBSERVER_INIT_SCRIPT = `(() => {
+  if (window.__wsCloseObserverInstalled) return;
+  window.__wsCloseObserverInstalled = true;
+  window.__wsLifecyclePhase = "active";
+  window.__wsPagehideTs = null;
+  window.__wsCloseLog = [];
+  window.addEventListener("pagehide", function () {
+    window.__wsLifecyclePhase = "pagehide";
+    window.__wsPagehideTs = Date.now();
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden" && window.__wsLifecyclePhase === "active") {
+      window.__wsLifecyclePhase = "hidden";
+    }
+  }, true);
+  window.addEventListener("pageshow", function (ev) {
+    if (ev && ev.persisted) {
+      window.__wsLifecyclePhase = "pageshow";
+    }
+  }, true);
+  const proto = typeof WebSocket === "function" ? WebSocket.prototype : null;
+  if (proto && typeof proto.close === "function") {
+    const origClose = proto.close;
+    proto.close = function (code, reason) {
+      window.__wsCloseLog.push({
+        url: typeof this.url === "string" ? this.url : "",
+        readyStateBefore: this.readyState,
+        phase: window.__wsLifecyclePhase,
+        ts: Date.now(),
+      });
+      return origClose.apply(this, arguments);
+    };
+  }
+})();`;
 
 function makeConversation(options: {
   id: string;
   slug: string;
   kind?: "general" | "public_channel" | "private_channel";
   joined?: boolean;
+  userId?: string;
 }) {
   return {
     conversation_id: options.id,
@@ -237,7 +523,7 @@ function makeConversation(options: {
     joined: options.joined ?? true,
     generation: 1,
     members: [
-      { kind: "user", id: USER_A.id, joined_at: NOW_ISO, left_at: null },
+      { kind: "user", id: options.userId ?? USER_A.id, joined_at: NOW_ISO, left_at: null },
     ],
     notify_level: "everything",
     starred: false,
@@ -249,9 +535,12 @@ function makeConversation(options: {
   };
 }
 
-function buildHomeOverview(workspaces: Array<{ id: string; name: string }>) {
+function buildHomeOverview(
+  workspaces: Array<{ id: string; name: string }>,
+  user: typeof USER_A = USER_A,
+) {
   return {
-    viewer_user_id: USER_A.id,
+    viewer_user_id: user.id,
     generated_at: NOW_ISO,
     workspaces: workspaces.map((ws) => ({
       workspace_id: ws.id,
@@ -262,8 +551,8 @@ function buildHomeOverview(workspaces: Array<{ id: string; name: string }>) {
       content: null,
       people: [
         {
-          user_id: USER_A.id,
-          display_name: "Alex Owner",
+          user_id: user.id,
+          display_name: user.user_metadata.full_name,
           role: "owner",
           is_viewer: true,
           agents: [],
@@ -274,7 +563,7 @@ function buildHomeOverview(workspaces: Array<{ id: string; name: string }>) {
   };
 }
 
-test("served /app and /next two-tab coexistence: single-use refresh, stale terminal guard, held private retirement, and anti-framing", { timeout: 180_000 }, async () => {
+test("served /app and /next two-tab coexistence: single-use refresh, stale terminal guard, held private retirement, and anti-framing", { timeout: 180_000 }, async (t) => {
   const siteRoot = resolve(import.meta.dirname, "../../..");
   const repoRoot = resolve(siteRoot, "..");
   const siteDist = join(siteRoot, "dist");
@@ -478,6 +767,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       };
 
       await context.routeWebSocket("wss://api.commonswarm.com/**", (ws) => {
+        if (scenario.onWebSocket) {
+          scenario.onWebSocket(ws);
+          return;
+        }
         ws.close();
       });
 
@@ -627,7 +920,8 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         }
 
         if (url.pathname === "/rest/v1/workspaces" && method === "GET") {
-          const rows = defaultWorkspaces.map((ws) => ({
+          const workspacesForReq = scenario.workspacesForSid ? scenario.workspacesForSid(sid) : defaultWorkspaces;
+          const rows = workspacesForReq.map((ws) => ({
             workspace_id: ws.id,
             org_id: ORG_1,
             org_display_name: "Alpha Org",
@@ -640,7 +934,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           return;
         }
         if (url.pathname === "/rest/v1/rpc/home_overview" && method === "POST") {
-          await fulfillJson(route, entry, 200, buildHomeOverview(defaultWorkspaces), "home_overview");
+          const workspacesForReq = scenario.workspacesForSid ? scenario.workspacesForSid(sid) : defaultWorkspaces;
+          const userForReq = scenario.userForSid ? scenario.userForSid(sid) : USER_A;
+          await fulfillJson(route, entry, 200, buildHomeOverview(workspacesForReq, userForReq), "home_overview");
           return;
         }
         if (url.pathname === "/rest/v1/rpc/decision_queue" && method === "POST") {
@@ -2146,6 +2442,852 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         if (awayServerV6) {
           awayServerV6.closeAllConnections();
           await new Promise<void>((r) => awayServerV6.close(() => r()));
+        }
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LIMIT OF THIS SCENARIO: the browser test tool routes WebSockets through an in-page stand-in, not a
+    // native socket. So an "outcome=restored" here does NOT show that a real browser keeps a page with a
+    // native realtime socket in its back-forward cache (an open native WebSocket is a known blocker).
+    // What this scenario proves is what the app does around the transition, in either outcome. Whether a
+    // real browser restores or reloads has to be read from the served preview (the navigation entry's
+    // notRestoredReasons), not from this test.
+    // (f) Back from cross-site navigation while /next holds an OPEN realtime socket:
+    //     - Same browser launch options and cross-site /away server as (e)
+    //     - Routes wss://api.commonswarm.com/** to a minimal Phoenix-compatible responder
+    //       that accepts and holds the socket open, replies ok to phx_join and heartbeat,
+    //       and records every frame sent by the page (topic, event, bearer)
+    //     - Asserts the socket is open and both joins were sent BEFORE navigating away
+    //     - Accepts EITHER browser outcome (bfcache restored OR full reload), prints which
+    //       occurred (`[next-back-open-socket] outcome=restored` or `outcome=reloaded reasons=...`),
+    //       and asserts the full security invariants for that outcome
+    //     - Runs both (f1) same-login and (f2) login-change-while-away variants
+    // ═══════════════════════════════════════════════════════════════════════════
+    {
+      const awayHandlerF = (req: IncomingMessage, res: ServerResponse) => {
+        const reqUrl = new URL(req.url ?? "/", "http://localhost");
+        if (reqUrl.pathname === "/away") {
+          res.writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "public, max-age=0, must-revalidate",
+          });
+          res.end('<!doctype html><html><head><meta charset="utf-8"><title>Away</title></head><body><h1>Away</h1></body></html>');
+          return;
+        }
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("not found");
+      };
+      const awayServerF = createServer(awayHandlerF);
+      await new Promise<void>((r) => awayServerF.listen(0, "127.0.0.1", r));
+      const awayPortF = (awayServerF.address() as AddressInfo).port;
+      let awayServerFV6: ReturnType<typeof createServer> | null = null;
+      try {
+        const v6 = createServer(awayHandlerF);
+        await new Promise<void>((resolveV6, rejectV6) => {
+          v6.once("error", rejectV6);
+          v6.listen({ host: "::1", port: awayPortF, ipv6Only: true }, () => {
+            v6.off("error", rejectV6);
+            resolveV6();
+          });
+        });
+        awayServerFV6 = v6;
+      } catch {
+        // IPv6 loopback unavailable or port occupied on ::1; IPv4 127.0.0.1 still serves localhost.
+      }
+      const awayOriginF = `http://localhost:${awayPortF}`;
+
+      const openSocketBrowser = await launchPlaywrightChromium(chromium, {
+        enableBfcache: true,
+        extraArgs: ["--enable-bfcache"],
+      });
+
+      try {
+        const variants = [
+          {
+            name: "same-login" as const,
+            beforeUser: USER_A,
+            afterUser: USER_A,
+            beforeSid: "sid-f1-open-socket",
+            afterSid: "sid-f1-open-socket",
+            beforeRefreshToken: "rt-f1-1",
+            afterRefreshToken: "rt-f1-2",
+            beforeWs: { id: WS_1, name: "Alpha Vault" },
+            afterWs: { id: WS_1, name: "Alpha Vault" },
+            beforePrivateSlug: "secret-f1-before",
+            afterPrivateSlug: "fresh-f1-after",
+            changeLoginWhileAway: false,
+          },
+          {
+            name: "login-change" as const,
+            beforeUser: USER_A,
+            afterUser: USER_B,
+            beforeSid: "sid-f2-login-1",
+            afterSid: "sid-f2-login-2",
+            beforeRefreshToken: "rt-f2-1",
+            afterRefreshToken: "rt-f2-2",
+            beforeWs: { id: WS_1, name: "Alpha Vault" },
+            afterWs: { id: WS_2, name: "Bravo Vault" },
+            beforePrivateSlug: "secret-f2-login1-room",
+            afterPrivateSlug: "fresh-f2-login2-room",
+            changeLoginWhileAway: true,
+          },
+        ];
+
+        for (const variant of variants) {
+          let wsPhase = "before-leave";
+          const recorder = createPhoenixSocketRecorder(() => wsPhase);
+          const beforeSession = makeSessionPayload({
+            sessionId: variant.beforeSid,
+            refreshToken: variant.beforeRefreshToken,
+            user: variant.beforeUser,
+          });
+          const afterSession = variant.changeLoginWhileAway
+            ? makeSessionPayload({
+                sessionId: variant.afterSid,
+                refreshToken: variant.afterRefreshToken,
+                user: variant.afterUser,
+              })
+            : beforeSession;
+
+          const beforeTopics = new Set([
+            `realtime:cswarm-signals:${variant.beforeWs.id}`,
+            `realtime:cswarm-member:${variant.beforeWs.id}:${variant.beforeUser.id}`,
+          ]);
+          const afterTopics = new Set([
+            `realtime:cswarm-signals:${variant.afterWs.id}`,
+            `realtime:cswarm-member:${variant.afterWs.id}:${variant.afterUser.id}`,
+          ]);
+
+          let readPass = 1;
+          let holdRevalidateUser = false;
+          let revalidateUserSid: string | null = null;
+          const revalidateUserHit = createSignal<void>();
+          const releaseRevalidateUser = createSignal<void>();
+
+          const scenario: ScenarioConfig = {
+            name: `f-open-socket-back-${variant.name}`,
+            validRefreshToken: variant.beforeRefreshToken,
+            nextRefreshToken: variant.afterRefreshToken,
+            activeSessionIds: new Set([variant.beforeSid]),
+            workspacesForSid: (sid) =>
+              variant.changeLoginWhileAway && sid === variant.afterSid
+                ? [variant.afterWs]
+                : [variant.beforeWs],
+            userForSid: (sid) =>
+              variant.changeLoginWhileAway && sid === variant.afterSid
+                ? variant.afterUser
+                : variant.beforeUser,
+            onWebSocket: recorder.handleWebSocket,
+            async onUserCheck(sid) {
+              if (!scenario.activeSessionIds.has(sid)) {
+                return {
+                  status: 403,
+                  body: { code: "session_not_found", error_code: "session_not_found", msg: "Session not found" },
+                };
+              }
+              if (holdRevalidateUser) {
+                holdRevalidateUser = false;
+                revalidateUserSid = sid;
+                revalidateUserHit.resolve();
+                await releaseRevalidateUser.promise;
+              }
+              const user = variant.changeLoginWhileAway && sid === variant.afterSid
+                ? variant.afterUser
+                : variant.beforeUser;
+              return { status: 200, body: user };
+            },
+            async onEdgeRead(reqBody, sid) {
+              if (reqBody.resource === "conversations") {
+                const isAfter = readPass === 2 || (variant.changeLoginWhileAway && sid === variant.afterSid);
+                const ws = isAfter ? variant.afterWs : variant.beforeWs;
+                const user = isAfter ? variant.afterUser : variant.beforeUser;
+                const privateSlug = isAfter ? variant.afterPrivateSlug : variant.beforePrivateSlug;
+                const privateId = isAfter ? CONV_SECRET_2 : CONV_SECRET_1;
+                const generalId = ws.id === WS_2 ? CONV_GEN_2 : CONV_GEN_1;
+                return {
+                  status: 200,
+                  body: {
+                    conversations: [
+                      makeConversation({ id: generalId, slug: "general", kind: "general", userId: user.id }),
+                      makeConversation({
+                        id: privateId,
+                        slug: privateSlug,
+                        kind: "private_channel",
+                        joined: true,
+                        userId: user.id,
+                      }),
+                    ],
+                  },
+                };
+              }
+              if (reqBody.resource === "conversation_history") {
+                return { status: 200, body: { signals: [], has_more: false, mentions: [], reactions: [] } };
+              }
+              if (reqBody.resource === "seat_admin_status") return { status: 200, body: { enabled: false } };
+              if (reqBody.resource === "pending_access") return { status: 200, body: { pending: [], agents: [] } };
+              if (reqBody.resource === "review_checks") return { status: 200, body: { checks: [] } };
+              return { status: 200, body: { grants: [], invitations: [] } };
+            },
+          };
+
+          await withTwoTabScenario(
+            scenario,
+            async (ctx) => {
+              ctx.setStep(`f-${variant.name}-seed-and-boot-next`);
+              await ctx.seedStorage(beforeSession);
+              // Single open tab in this context so RelatedActiveContentsExist never blocks bfcache.
+              const tabB = await ctx.context.newPage();
+              await tabB.addInitScript(WS_CLOSE_OBSERVER_INIT_SCRIPT);
+              ctx.attachPageDiagnostics("tabB", tabB);
+              const pages = { tabB };
+
+              const cdp = await ctx.context.newCDPSession(tabB);
+              const bfcacheNotUsed: Array<Record<string, unknown>> = [];
+              await cdp.send("Page.enable");
+              cdp.on("Page.backForwardCacheNotUsed", (ev) => {
+                bfcacheNotUsed.push(ev as unknown as Record<string, unknown>);
+              });
+
+              const openSocketDiag = async (extra: Record<string, unknown> = {}) => {
+                const navHistory = await cdp
+                  .send("Page.getNavigationHistory")
+                  .catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+                return JSON.stringify(
+                  {
+                    variant: variant.name,
+                    wsPhase,
+                    origin,
+                    awayOrigin: awayOriginF,
+                    sockets: recorder.summary(),
+                    bfcacheNotUsed,
+                    navHistory,
+                    ...extra,
+                    diagnostics: JSON.parse(await ctx.dumpDiagnostics(pages)),
+                  },
+                  null,
+                  2,
+                );
+              };
+
+              try {
+                await tabB.goto(`${origin}/next`);
+                await ctx.waitForNextSignedIn(tabB, variant.beforePrivateSlug, pages);
+
+                // (1) Assert the realtime socket is accepted, held OPEN, and BOTH phx_join frames
+                //     carrying the initial login's bearer were sent BEFORE navigating away.
+                ctx.setStep(`f-${variant.name}-wait-for-open-socket-and-joins`);
+                await ctx.waitFor(
+                  "realtime socket open with both initial phx_join frames sent",
+                  () => {
+                    const sock = recorder.sockets[0];
+                    if (!sock || sock.closed) return false;
+                    const joinedTopics = new Set(
+                      sock.frames
+                        .filter((f) => f.event === "phx_join" && f.hasBearer)
+                        .map((f) => f.topic),
+                    );
+                    return [...beforeTopics].every((topic) => joinedTopics.has(topic));
+                  },
+                  pages,
+                );
+
+                const preSocket = recorder.sockets[0]!;
+                assert.equal(
+                  preSocket.closed,
+                  false,
+                  `Pre-navigation realtime socket must remain OPEN before leaving:\n${await openSocketDiag()}`,
+                );
+                const preJoins = preSocket.frames.filter((f) => f.event === "phx_join");
+                assert.ok(
+                  preJoins.length >= 2,
+                  `Expected at least 2 pre-navigation phx_join frames:\n${await openSocketDiag()}`,
+                );
+                for (const joinFrame of preJoins) {
+                  assert.ok(
+                    beforeTopics.has(joinFrame.topic),
+                    `Unexpected pre-navigation join topic ${joinFrame.topic}:\n${await openSocketDiag()}`,
+                  );
+                  assert.equal(
+                    joinFrame.hasBearer,
+                    true,
+                    `Pre-navigation phx_join must carry bearer:\n${await openSocketDiag()}`,
+                  );
+                  assert.equal(
+                    joinFrame.bearer,
+                    beforeSession.access_token,
+                    `Pre-navigation phx_join must carry initial login bearer:\n${await openSocketDiag()}`,
+                  );
+                  assert.equal(joinFrame.bearerSid, variant.beforeSid);
+                  assert.equal(joinFrame.bearerSub, variant.beforeUser.id);
+                }
+
+                // Wait until initial HTTP fetches and Web Locks settle so only the open realtime
+                // connection differentiates this scenario from (e).
+                ctx.setStep(`f-${variant.name}-wait-for-http-and-locks-settled`);
+                await ctx.waitFor(
+                  "initial /next HTTP requests and Web Locks settled before leaving",
+                  async () => {
+                    if (ctx.getInFlightApiRequests() > 0) return false;
+                    const lockBusy = await tabB
+                      .evaluate(async () => {
+                        const q = await navigator.locks.query();
+                        return (q.held?.length ?? 0) > 0 || (q.pending?.length ?? 0) > 0;
+                      })
+                      .catch(() => true);
+                    return !lockBusy;
+                  },
+                  pages,
+                );
+                await new Promise((r) => setTimeout(r, 150));
+
+                // Re-confirm the socket is still OPEN right before leaving (cannot pass vacuously).
+                assert.equal(
+                  preSocket.closed,
+                  false,
+                  `Pre-navigation realtime socket closed prematurely before navigating away:\n${await openSocketDiag()}`,
+                );
+
+                // Install transition observer (no named inner functions inside evaluate).
+                ctx.setStep(`f-${variant.name}-install-transition-observer`);
+                await tabB.evaluate(() => {
+                  type TransitionSnapshot = {
+                    type: string;
+                    ts: number;
+                    persisted: boolean;
+                    hasVisiblePrivateRoot: boolean;
+                    hasCheckingScreen: boolean;
+                    bodyText: string;
+                  };
+                  const log: TransitionSnapshot[] = [];
+                  (window as unknown as { __bfcacheLog?: TransitionSnapshot[] }).__bfcacheLog = log;
+                  for (const [eventName, label, capture] of [
+                    ["pagehide", "pagehide", false],
+                    ["pageshow", "pageshow:capture", true],
+                    ["pageshow", "pageshow:bubble", false],
+                  ] as const) {
+                    window.addEventListener(
+                      eventName,
+                      (ev) => {
+                        const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                        const checking = document.querySelector('[data-testid="session-checking-screen"]');
+                        log.push({
+                          type: label,
+                          ts: Date.now(),
+                          persisted: (ev as PageTransitionEvent).persisted,
+                          hasVisiblePrivateRoot: Boolean(root && !root.hidden),
+                          hasCheckingScreen: Boolean(checking),
+                          bodyText: (document.body?.innerText ?? "").slice(0, 600),
+                        });
+                      },
+                      capture,
+                    );
+                  }
+                });
+
+                // (2) Navigate away cross-site exactly as (e) does.
+                ctx.setStep(`f-${variant.name}-navigate-away-cross-site`);
+                wsPhase = "during-leave";
+                await tabB.goto(`${awayOriginF}/away`, { waitUntil: "load" });
+                await ctx.waitFor(
+                  "Tab B landed on cross-site /away",
+                  () =>
+                    tabB
+                      .evaluate((expected: string) => location.href.startsWith(expected), `${awayOriginF}/away`)
+                      .catch(() => false),
+                  pages,
+                );
+
+                // Observe that the pre-navigation socket was closed during the leave phase.
+                // A phx_leave frame is NOT required: retireAndCleanupSession clears sendBuffer,
+                // closes the socket, and disposes the client (`app/src/data/live.ts`); whether
+                // a phx_leave reaches the wire before close is incidental. If one appears, it
+                // must carry no bearer.
+                ctx.setStep(`f-${variant.name}-observe-pre-socket-closed`);
+                await ctx.waitForSignal("pre-navigation realtime socket close", preSocket.closedSignal, pages);
+                assert.equal(
+                  preSocket.closed,
+                  true,
+                  `Pre-navigation socket must be closed after leaving /next:\n${await openSocketDiag()}`,
+                );
+                assert.ok(
+                  preSocket.closedAt !== null,
+                  `Pre-navigation socket close timestamp must be recorded:\n${await openSocketDiag()}`,
+                );
+                assert.equal(
+                  preSocket.closedPhase,
+                  "during-leave",
+                  `Pre-navigation socket close must be observed in the leave phase (got "${preSocket.closedPhase}"):\n${await openSocketDiag()}`,
+                );
+                for (const leaveFrame of preSocket.frames.filter((f) => f.phase === "during-leave")) {
+                  assert.equal(
+                    leaveFrame.hasBearer,
+                    false,
+                    `No frame sent after pagehide may carry a bearer:\n${await openSocketDiag({ leaveFrame })}`,
+                  );
+                  assert.equal(
+                    leaveFrame.raw.includes(beforeSession.access_token),
+                    false,
+                    `No frame sent after pagehide may contain the prior bearer token:\n${await openSocketDiag({ leaveFrame })}`,
+                  );
+                  assert.notEqual(
+                    leaveFrame.event,
+                    "phx_join",
+                    `No phx_join frame may be sent on the old socket after pagehide:\n${await openSocketDiag({ leaveFrame })}`,
+                  );
+                  if (leaveFrame.event === "phx_leave") {
+                    assert.ok(
+                      beforeTopics.has(leaveFrame.topic),
+                      `Optional phx_leave frame targeted unexpected topic "${leaveFrame.topic}":\n${await openSocketDiag({ leaveFrame })}`,
+                    );
+                  } else {
+                    assert.equal(
+                      leaveFrame.event,
+                      "heartbeat",
+                      `Unexpected frame event "${leaveFrame.event}" sent on old socket during leave:\n${await openSocketDiag({ leaveFrame })}`,
+                    );
+                  }
+                }
+
+                wsPhase = "away";
+                const preSocketFrameCountBeforeBack = preSocket.frames.length;
+
+                // (4) Variant with a login change while away: replace stored session with Login 2.
+                if (variant.changeLoginWhileAway) {
+                  ctx.setStep(`f-${variant.name}-replace-session-while-away`);
+                  scenario.activeSessionIds.delete(variant.beforeSid);
+                  scenario.activeSessionIds.add(variant.afterSid);
+                  scenario.validRefreshToken = variant.afterRefreshToken;
+                  await ctx.seedStorage(afterSession);
+                }
+
+                // Arm fresh read and revalidation hold BEFORE going Back.
+                readPass = 2;
+                holdRevalidateUser = true;
+                wsPhase = "after-back";
+                const apiCountBeforeBack = ctx.apiLog.length;
+
+                ctx.setStep(`f-${variant.name}-history-back-from-away`);
+                const navHistoryBeforeBack = await cdp.send("Page.getNavigationHistory");
+                const prevEntry = navHistoryBeforeBack.entries[navHistoryBeforeBack.currentIndex - 1];
+                assert.ok(
+                  prevEntry && prevEntry.url.startsWith(`${origin}/next`),
+                  `Expected /next history entry before Back:\n${await openSocketDiag({ navHistoryBeforeBack })}`,
+                );
+                await cdp.send("Page.navigateToHistoryEntry", { entryId: prevEntry.id });
+
+                await ctx.waitFor(
+                  "Tab B returned to /next via Back (restored or reloaded)",
+                  () =>
+                    tabB
+                      .evaluate(() => {
+                        if (!location.pathname.startsWith("/next")) return false;
+                        const log = (window as unknown as { __bfcacheLog?: Array<{ type: string }> }).__bfcacheLog;
+                        if (Array.isArray(log)) {
+                          return log.some((entry) => entry.type === "pageshow:bubble");
+                        }
+                        return document.readyState === "complete";
+                      })
+                      .catch(() => false),
+                  pages,
+                );
+
+                const backObservation = await tabB.evaluate(() => {
+                  type TransitionSnapshot = {
+                    type: string;
+                    ts: number;
+                    persisted: boolean;
+                    hasVisiblePrivateRoot: boolean;
+                    hasCheckingScreen: boolean;
+                    bodyText: string;
+                  };
+                  type WsCloseEntry = {
+                    url: string;
+                    readyStateBefore: number;
+                    phase: string;
+                    ts: number;
+                  };
+                  const w = window as unknown as {
+                    __bfcacheLog?: TransitionSnapshot[];
+                    __wsCloseLog?: WsCloseEntry[];
+                    __wsPagehideTs?: number | null;
+                  };
+                  const nav = performance.getEntriesByType("navigation")[0] as
+                    | (PerformanceNavigationTiming & { notRestoredReasons?: unknown })
+                    | undefined;
+                  const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                  const checking = document.querySelector('[data-testid="session-checking-screen"]');
+                  return {
+                    log: w.__bfcacheLog ?? null,
+                    wsCloseLog: Array.isArray(w.__wsCloseLog) ? w.__wsCloseLog : [],
+                    wsPagehideTs: typeof w.__wsPagehideTs === "number" ? w.__wsPagehideTs : null,
+                    navType: nav?.type ?? null,
+                    notRestoredReasons: nav?.notRestoredReasons ?? null,
+                    liveHasVisiblePrivateRoot: Boolean(root && !root.hidden),
+                    liveHasCheckingScreen: Boolean(checking),
+                    liveBodyText: (document.body?.innerText ?? "").slice(0, 600),
+                  };
+                });
+
+                // (3) Branch on actual browser outcome: BOTH Restored and Reloaded are valid passes,
+                //     each with its own required assertions and explicit CI log line.
+                const restoredLog = Array.isArray(backObservation.log) ? backObservation.log : null;
+
+                if (restoredLog) {
+                  const pagehideSnap = restoredLog.find((e) => e.type === "pagehide");
+                  const pageshowCapture = restoredLog.find((e) => e.type === "pageshow:capture");
+                  const pageshowBubble = restoredLog.find((e) => e.type === "pageshow:bubble");
+
+                  assert.equal(
+                    pageshowCapture?.persisted,
+                    true,
+                    `Expected restored pageshow:capture event.persisted === true:\n${await openSocketDiag({ backObservation })}`,
+                  );
+                  assert.equal(
+                    pageshowBubble?.persisted,
+                    true,
+                    `Expected restored pageshow:bubble event.persisted === true:\n${await openSocketDiag({ backObservation })}`,
+                  );
+
+                  // Zero old private content at pagehide, pageshow:capture, and pageshow:bubble.
+                  for (const [label, snap] of [
+                    ["pagehide", pagehideSnap],
+                    ["pageshow:capture", pageshowCapture],
+                    ["pageshow:bubble", pageshowBubble],
+                  ] as const) {
+                    assert.ok(snap, `Missing ${label} transition snapshot:\n${await openSocketDiag({ backObservation })}`);
+                    assert.equal(
+                      snap.hasVisiblePrivateRoot,
+                      false,
+                      `Old private-view-root was visible at ${label}:\n${await openSocketDiag({ backObservation })}`,
+                    );
+                    assert.equal(
+                      snap.bodyText.includes(variant.beforePrivateSlug),
+                      false,
+                      `Old private channel painted at ${label}:\n${await openSocketDiag({ backObservation })}`,
+                    );
+                    assert.equal(
+                      snap.bodyText.includes(variant.beforeWs.name),
+                      false,
+                      `Old workspace label painted at ${label}:\n${await openSocketDiag({ backObservation })}`,
+                    );
+                  }
+
+                  // Assert the app itself closed the pre-navigation socket during leave (in-page witness),
+                  // without pinning a specific pre-close readyState (retireAndCleanupSession closes in
+                  // both connected and non-connected branches, and visibilitychange->hidden may precede pagehide).
+                  const appPagehideClose = backObservation.wsCloseLog.find(
+                    (entry) =>
+                      entry.url.startsWith("wss://api.commonswarm.com/realtime/v1") &&
+                      (entry.phase === "pagehide" || entry.phase === "hidden"),
+                  );
+                  assert.ok(
+                    appPagehideClose,
+                    `Expected app to call WebSocket.close() on the realtime socket during pagehide/leave:\n${await openSocketDiag({ backObservation })}`,
+                  );
+                  assert.ok(
+                    pageshowCapture && appPagehideClose.ts <= pageshowCapture.ts,
+                    `Expected pre-navigation socket close (${appPagehideClose.ts}) at or before pageshow:capture (${pageshowCapture?.ts}):\n${await openSocketDiag({ backObservation })}`,
+                  );
+                  if (appPagehideClose.phase === "pagehide" && backObservation.wsPagehideTs !== null) {
+                    assert.ok(
+                      appPagehideClose.ts >= backObservation.wsPagehideTs,
+                      `Expected pre-navigation socket close (${appPagehideClose.ts}) after pagehide start (${backObservation.wsPagehideTs}):\n${await openSocketDiag({ backObservation })}`,
+                    );
+                  }
+
+                  // Hold revalidation GET /auth/v1/user briefly and assert zero old private paint.
+                  ctx.setStep(`f-${variant.name}-restored-wait-revalidation-hold`);
+                  await ctx.waitForSignal("restored pageshow revalidation GET /auth/v1/user", revalidateUserHit, pages);
+                  const duringRevalidation = await tabB.evaluate(() => ({
+                    privateRootCount: document.querySelectorAll('[data-testid="private-view-root"]').length,
+                    checkingCount: document.querySelectorAll('[data-testid="session-checking-screen"]').length,
+                    bodyText: (document.body?.innerText ?? "").slice(0, 600),
+                  }));
+                  releaseRevalidateUser.resolve();
+
+                  t.diagnostic(
+                    `[next-back-open-socket] outcome=restored variant=${variant.name} ` +
+                    `closePhase=${appPagehideClose.phase} nodeClosePhase=${preSocket.closedPhase ?? "unknown"}`,
+                  );
+
+                  assert.equal(
+                    duringRevalidation.privateRootCount,
+                    0,
+                    `private-view-root must stay unmounted while restored revalidation is pending:\n${await openSocketDiag({ backObservation, duringRevalidation })}`,
+                  );
+                  assert.equal(
+                    duringRevalidation.checkingCount,
+                    1,
+                    `session-checking-screen must render while restored revalidation is pending:\n${await openSocketDiag({ backObservation, duringRevalidation })}`,
+                  );
+                  assert.equal(
+                    duringRevalidation.bodyText.includes(variant.beforePrivateSlug),
+                    false,
+                    `Old private channel leaked during restored revalidation:\n${await openSocketDiag({ backObservation, duringRevalidation })}`,
+                  );
+                  assert.equal(
+                    duringRevalidation.bodyText.includes(variant.beforeWs.name),
+                    false,
+                    `Old workspace label leaked during restored revalidation:\n${await openSocketDiag({ backObservation, duringRevalidation })}`,
+                  );
+                } else {
+                  // Reloaded (full navigation; pageshow.persisted was false).
+                  // Hold the fresh document's own gate GET /auth/v1/user briefly and prove nothing
+                  // private is painted and no post-Back socket frames are sent before the gate completes.
+                  ctx.setStep(`f-${variant.name}-reloaded-wait-fresh-gate-hold`);
+                  await ctx.waitForSignal("reloaded fresh document gate GET /auth/v1/user", revalidateUserHit, pages);
+                  const duringFreshGate = await tabB.evaluate(() => ({
+                    privateRootCount: document.querySelectorAll('[data-testid="private-view-root"]').length,
+                    checkingCount: document.querySelectorAll('[data-testid="session-checking-screen"]').length,
+                    bodyText: (document.body?.innerText ?? "").slice(0, 600),
+                  }));
+                  const postBackFramesBeforeGate = recorder.sockets.flatMap((s) =>
+                    s.frames.filter((f) => f.phase === "after-back"),
+                  );
+                  releaseRevalidateUser.resolve();
+
+                  if (bfcacheNotUsed.length === 0) {
+                    await new Promise((r) => setTimeout(r, 50));
+                  }
+                  const reasonsText = formatBfcacheNotRestoredReasons(
+                    bfcacheNotUsed,
+                    backObservation.notRestoredReasons,
+                  );
+                  t.diagnostic(
+                    `[next-back-open-socket] outcome=reloaded reasons=${reasonsText} variant=${variant.name}`,
+                  );
+
+                  assert.equal(
+                    preSocket.closed,
+                    true,
+                    `Pre-navigation socket must be closed on reload:\n${await openSocketDiag({ backObservation, reasonsText })}`,
+                  );
+                  assert.equal(
+                    preSocket.closedPhase,
+                    "during-leave",
+                    `Pre-navigation socket close must have been observed in the leave phase on reload:\n${await openSocketDiag({ backObservation, reasonsText })}`,
+                  );
+                  assert.equal(
+                    duringFreshGate.privateRootCount,
+                    0,
+                    `Fresh reloaded document must not mount private-view-root before its gate completes:\n${await openSocketDiag({ backObservation, duringFreshGate, reasonsText })}`,
+                  );
+                  assert.equal(
+                    duringFreshGate.checkingCount,
+                    1,
+                    `Fresh reloaded document must render session-checking-screen while its gate is pending:\n${await openSocketDiag({ backObservation, duringFreshGate, reasonsText })}`,
+                  );
+                  for (const forbidden of [
+                    variant.beforePrivateSlug,
+                    variant.beforeWs.name,
+                    variant.afterPrivateSlug,
+                    variant.afterWs.name,
+                  ]) {
+                    assert.equal(
+                      duringFreshGate.bodyText.includes(forbidden),
+                      false,
+                      `Fresh reloaded document painted private text "${forbidden}" before gate completion:\n${await openSocketDiag({ backObservation, duringFreshGate, reasonsText })}`,
+                    );
+                  }
+                  assert.equal(
+                    postBackFramesBeforeGate.length,
+                    0,
+                    `Fresh reloaded document sent realtime frames before gate completion:\n${await openSocketDiag({ backObservation, postBackFramesBeforeGate, reasonsText })}`,
+                  );
+                }
+
+                // Revalidation / fresh gate must have verified the CURRENT login.
+                assert.equal(
+                  revalidateUserSid,
+                  variant.afterSid,
+                  `Post-Back GET /auth/v1/user must use current login sid "${variant.afterSid}" (saw "${revalidateUserSid}"):\n${await openSocketDiag()}`,
+                );
+
+                // Wait for the fresh read to paint AND a NEW post-Back realtime socket to join both current topics.
+                ctx.setStep(`f-${variant.name}-wait-fresh-paint-and-new-socket`);
+                await ctx.waitForNextSignedIn(tabB, variant.afterPrivateSlug, pages);
+                await ctx.waitFor(
+                  "new post-Back realtime socket opened with current login phx_join frames",
+                  () => {
+                    const postSockets = recorder.sockets.filter(
+                      (s) => s.id !== preSocket.id && s.openedPhase === "after-back",
+                    );
+                    if (postSockets.length === 0) return false;
+                    const joinedTopics = new Set(
+                      postSockets.flatMap((s) =>
+                        s.frames.filter((f) => f.event === "phx_join").map((f) => f.topic),
+                      ),
+                    );
+                    return [...afterTopics].every((topic) => joinedTopics.has(topic));
+                  },
+                  pages,
+                );
+                // Short settle so any stray frame on the old socket or with an old bearer would surface.
+                await new Promise((r) => setTimeout(r, 100));
+
+                const freshText = await tabB.evaluate(() => document.body.innerText ?? "");
+                assert.equal(
+                  freshText.includes(variant.afterPrivateSlug),
+                  true,
+                  `Fresh read "${variant.afterPrivateSlug}" must paint after Back:\n${await openSocketDiag()}`,
+                );
+                assert.equal(
+                  freshText.includes(variant.afterWs.name),
+                  true,
+                  `Current workspace "${variant.afterWs.name}" must paint after Back:\n${await openSocketDiag()}`,
+                );
+                assert.equal(
+                  freshText.includes(variant.beforePrivateSlug),
+                  false,
+                  `Pre-Back private channel "${variant.beforePrivateSlug}" must not survive after Back:\n${await openSocketDiag()}`,
+                );
+                if (variant.changeLoginWhileAway) {
+                  assert.equal(
+                    freshText.includes(variant.beforeWs.name),
+                    false,
+                    `First login workspace "${variant.beforeWs.name}" must not paint after login change:\n${await openSocketDiag()}`,
+                  );
+                }
+
+                // Assert on the old pre-navigation socket after pagehide:
+                // - NO frame carrying a bearer and NO phx_join at all (phx_leave is allowed if bearer-free,
+                //   never required);
+                // - ZERO frames of any kind while away or after Back.
+                const preSocketPostLeaveFrames = preSocket.frames.filter((f) => f.phase !== "before-leave");
+                for (const frame of preSocketPostLeaveFrames) {
+                  assert.equal(
+                    frame.hasBearer,
+                    false,
+                    `Old socket sent a bearer-carrying frame after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                  assert.equal(
+                    frame.raw.includes(beforeSession.access_token) ||
+                      frame.raw.includes(afterSession.access_token),
+                    false,
+                    `Old socket leaked a bearer token after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                  assert.notEqual(
+                    frame.event,
+                    "phx_join",
+                    `Old socket sent phx_join after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                }
+                assert.equal(
+                  preSocket.frames.length,
+                  preSocketFrameCountBeforeBack,
+                  `Old pre-navigation socket sent frames while away or after Back:\n${await openSocketDiag()}`,
+                );
+                assert.equal(
+                  preSocket.frames.filter((f) => f.phase === "away" || f.phase === "after-back").length,
+                  0,
+                  `Old socket must send zero frames while away or after Back:\n${await openSocketDiag()}`,
+                );
+                assert.equal(
+                  preSocket.frames.filter(
+                    (f) =>
+                      f.ts > preSocket.closedAt! &&
+                      (f.phase !== "during-leave" || f.hasBearer || f.event === "phx_join"),
+                  ).length,
+                  0,
+                  `Old socket sent forbidden frame after close timestamp:\n${await openSocketDiag()}`,
+                );
+
+                // Assert a NEW socket opened after Back and EVERY frame on EVERY socket after Back
+                // carries ONLY the current login's topics and bearer.
+                const postSockets = recorder.sockets.filter(
+                  (s) => s.id !== preSocket.id && s.openedPhase === "after-back",
+                );
+                assert.ok(
+                  postSockets.length >= 1,
+                  `Expected a NEW realtime socket after Back (distinct from preSocket #${preSocket.id}):\n${await openSocketDiag()}`,
+                );
+                const allFramesAfterBack = recorder.sockets.flatMap((s) =>
+                  s.frames.filter((f) => f.phase === "after-back"),
+                );
+                assert.ok(
+                  allFramesAfterBack.length >= 2,
+                  `Expected at least 2 post-Back frames (both phx_join frames):\n${await openSocketDiag()}`,
+                );
+                const postJoinFrames = allFramesAfterBack.filter((f) => f.event === "phx_join");
+                assert.ok(
+                  postJoinFrames.length >= 2,
+                  `Expected at least 2 post-Back phx_join frames:\n${await openSocketDiag()}`,
+                );
+
+                for (const frame of allFramesAfterBack) {
+                  assert.notEqual(
+                    frame.socketId,
+                    preSocket.id,
+                    `Post-Back frame was sent on the pre-navigation socket:\n${await openSocketDiag({ frame })}`,
+                  );
+                  if (frame.event === "heartbeat") {
+                    assert.equal(frame.topic, "phoenix");
+                    assert.equal(frame.hasBearer, false);
+                  } else {
+                    assert.ok(
+                      afterTopics.has(frame.topic),
+                      `Post-Back frame topic "${frame.topic}" does not belong to current login:\n${await openSocketDiag({ frame })}`,
+                    );
+                  }
+                  if (frame.hasBearer || frame.event === "phx_join" || frame.event === "access_token") {
+                    assert.equal(
+                      frame.hasBearer,
+                      true,
+                      `Post-Back ${frame.event} frame must carry a bearer:\n${await openSocketDiag({ frame })}`,
+                    );
+                    assert.equal(
+                      frame.bearer,
+                      afterSession.access_token,
+                      `Post-Back frame carried wrong bearer:\n${await openSocketDiag({ frame })}`,
+                    );
+                    assert.equal(frame.bearerSid, variant.afterSid);
+                    assert.equal(frame.bearerSub, variant.afterUser.id);
+                  }
+                  if (variant.changeLoginWhileAway) {
+                    assert.equal(
+                      frame.topic.includes(variant.beforeWs.id),
+                      false,
+                      `Post-Back frame topic leaked first login workspace id:\n${await openSocketDiag({ frame })}`,
+                    );
+                    assert.equal(
+                      frame.topic.includes(variant.beforeUser.id),
+                      false,
+                      `Post-Back frame topic leaked first login user id:\n${await openSocketDiag({ frame })}`,
+                    );
+                    assert.equal(
+                      frame.raw.includes(beforeSession.access_token),
+                      false,
+                      `Post-Back frame leaked first login bearer token:\n${await openSocketDiag({ frame })}`,
+                    );
+                  }
+                }
+
+                if (variant.changeLoginWhileAway) {
+                  const staleApiAfterBack = ctx.apiLog
+                    .slice(apiCountBeforeBack)
+                    .filter((e) => e.sid === variant.beforeSid);
+                  assert.equal(
+                    staleApiAfterBack.length,
+                    0,
+                    `Post-Back HTTP requests leaked first login sid "${variant.beforeSid}":\n${await openSocketDiag({ staleApiAfterBack })}`,
+                  );
+                }
+              } finally {
+                releaseRevalidateUser.resolve();
+                await cdp.detach().catch(() => undefined);
+              }
+            },
+            openSocketBrowser,
+          );
+        }
+      } finally {
+        await openSocketBrowser.close();
+        awayServerF.closeAllConnections();
+        await new Promise<void>((r) => awayServerF.close(() => r()));
+        if (awayServerFV6) {
+          awayServerFV6.closeAllConnections();
+          await new Promise<void>((r) => awayServerFV6.close(() => r()));
         }
       }
     }
