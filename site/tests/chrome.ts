@@ -263,12 +263,21 @@ async function launchAttempts(
  *  bundled headless shell from findChrome(), the shared password-store, keychain and sandbox flags,
  *  and Playwright's own throwaway profile. Callers pass the dynamically imported `chromium`. */
 export async function launchPlaywrightChromium<Browser>(
-  chromium: { launch(options: { headless: true; executablePath: string; args: string[] }): Promise<Browser> },
+  chromium: {
+    launch(options: {
+      headless: true;
+      executablePath: string;
+      args: string[];
+      ignoreDefaultArgs?: string[];
+    }): Promise<Browser>;
+  },
+  options?: { readonly enableBfcache?: boolean },
 ): Promise<Browser> {
   requireBrowserTests();
   return await chromium.launch({
     headless: true,
     executablePath: await findChrome(),
     args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox"],
+    ...(options?.enableBfcache ? { ignoreDefaultArgs: ["--disable-back-forward-cache"] } : {}),
   });
 }

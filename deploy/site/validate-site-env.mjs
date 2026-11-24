@@ -69,13 +69,36 @@ function validateNextHtml(html, entries, publicConfig) {
   check(headTags[1].tag === 'meta' && headTags[1].attrs.get('http-equiv')?.toLowerCase() === 'content-security-policy',
     'next/index.html Content-Security-Policy meta must be the first element in <head> after charset');
   const csp = (headTags[1].attrs.get('content') ?? '').trim();
-  const directives = new Map(csp.split(';').map(s => s.trim()).filter(Boolean).map(d => {
-    const [name, ...rest] = d.split(/\s+/);
-    return [name.toLowerCase(), rest.join(' ')];
-  }));
-  check(directives.get('default-src') === "'self'", 'next/index.html CSP must lock default-src to self');
-  check(directives.get('frame-src') === "'none'", 'next/index.html CSP must include frame-src none');
+  const apiOrigin = new URL(publicConfig.PUBLIC_SUPABASE_URL);
+  // Keep in sync with PRODUCTION_CSP in app/vite.config.ts (enforced by tests/p1-cli/site-artifact.test.ts).
+  const expectedCspDirectives = new Map([
+    ['default-src', "'self'"],
+    ['script-src', "'self'"],
+    ['style-src', "'self'"],
+    ['font-src', "'self'"],
+    ['img-src', "'self' blob: data:"],
+    ['connect-src', `'self' ${apiOrigin.origin} wss://${apiOrigin.host}`],
+    ['object-src', "'none'"],
+    ['base-uri', "'none'"],
+    ['form-action', "'none'"],
+    ['frame-src', "'none'"],
+  ]);
   check(!/unsafe-inline|unsafe-eval/i.test(csp), 'next/index.html CSP must not allow unsafe-inline or unsafe-eval');
+  const directives = new Map();
+  for (const rawDirective of csp.split(';')) {
+    const trimmed = rawDirective.trim();
+    if (!trimmed) continue;
+    const [rawName, ...rest] = trimmed.split(/\s+/);
+    const name = rawName.toLowerCase();
+    check(!directives.has(name), `next/index.html CSP contains duplicate directive: ${name}`);
+    check(expectedCspDirectives.has(name), `next/index.html CSP contains unexpected directive: ${name}`);
+    directives.set(name, rest.join(' '));
+  }
+  for (const [name, expected] of expectedCspDirectives) {
+    check(directives.has(name), `next/index.html CSP missing required directive: ${name}`);
+    const actual = directives.get(name);
+    check(actual === expected, `next/index.html CSP directive ${name} mismatch: expected "${expected}", got "${actual}"`);
+  }
 
   const docMarkup = noComments.replace(/<(script|style)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (m, _t, body) => {
     check(body.trim() === '', 'next/index.html must not contain inline script or style');
@@ -130,7 +153,6 @@ function validateNextHtml(html, entries, publicConfig) {
   assertAnonJwt(anonKeys[0]);
   check(anonKeys[0] === publicConfig.PUBLIC_SUPABASE_ANON_KEY, 'next/index.html built public configuration mismatch');
 
-  const apiOrigin = new URL(publicConfig.PUBLIC_SUPABASE_URL);
   const allowedOrigins = new Set([apiOrigin.origin, `wss://${apiOrigin.host}`]);
   for (const originMatch of noComments.matchAll(/(?:https?|wss?):\/\/[^\s"'<>);,]+|(?:^|[\s"'=(])(\/\/[a-z0-9][^\s"'<>);,]*)/gi)) {
     const candidate = (originMatch[1] ?? originMatch[0]).trim();

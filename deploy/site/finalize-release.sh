@@ -35,6 +35,13 @@ STEP=html; assert indexSHA test "$(hash "$N/index.html")" = '@@ROOT_SHA@@'; asse
 if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then assert nextSHA test "$(hash "$N/next/index.html")" = '@@NEXT_SHA@@'; fi
 STEP=assets-and-freshness; python3 "$B/refresh-site.py" "$OLD" "$N"
 find "$N" -type d -exec chmod 755 {} +; find "$N" -type f -exec chmod 644 {} +
+if [[ '@@INCLUDE_NEXT@@' == 1 ]]; then
+  for next_route in /next /next/ /next/index.html; do
+    STEP=preflip-next-ingress; status=$(probe "$next_route"); printf 'CHECK step=%s path=%s http=%s\n' "$STEP" "$next_route" "$status"
+    assert preflip-next-status test "$status" = 404 -o "$status" = 200
+    assert preflip-next-csp has_header "^content-security-policy:.*frame-ancestors[[:space:]]+'none'"
+  done
+fi
 STEP=preflip; assert exact-old-link test "$(readlink "$S/current")" = "$(cat "$B/old.link")"; FLIPPED=1
 STEP=flip; flip "$N"
 for route in / /app; do

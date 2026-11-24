@@ -10,8 +10,8 @@
  * Proves:
  *  (a) Overlapping token refresh in both tabs spends the single-use refresh token once and
  *      neither tab is signed out.
- *  (b) A stale terminal refresh failure in one tab does not remove a replacement login stored
- *      by the other tab.
+ *  (b1/b2) A stale terminal verification (GET /user 403) or stale terminal refresh failure
+ *      (POST /token 400) in one tab does not remove a replacement login stored by the other tab.
  *  (c) A private response held in `/next` stays retired after Tab A signs out, after the same
  *      person signs in again (new session_id), and after a workspace refusal: nothing private
  *      is painted and no stale request is sent.
@@ -19,11 +19,15 @@
  *      (also verified against `deploy/site/commonswarm-site.caddy`, since this local test
  *      server is Node HTTP rather than Caddy) and a host page attempting to frame `/next`
  *      gets nothing.
+ *  (e) Back / history-cache (bfcache) restore in `/next` observes a real `pageshow` with
+ *      `persisted === true` (failing explicitly with CDP diagnostics if reloaded instead),
+ *      paints zero old private content before revalidation settles, then paints the fresh read.
  *
- * Deadlock safety: never hold a token-refresh response while asking the peer tab to acquire
- * the same Web Lock. Scenarios (a) and (b) release refresh holds well below the 4s `authFetch`
- * timeout, and scenario (c) holds only post-token data responses so the session Web Lock is
- * completely free during peer sign-out and re-sign-in.
+ * Deadlock safety: never hold a token-refresh or user-verification response while asking a peer
+ * tab to acquire the same Web Lock. Scenarios (a), (b1), (b2), and (e) release auth holds well
+ * below the 4s `authFetch` timeout; (b2) closes the tab holding the intentional 30s refresh
+ * cooldown before verifying fresh sign-in on the preserved replacement; (c) holds only post-token
+ * data responses so the session Web Lock is completely free during peer sign-out and re-sign-in.
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -33,9 +37,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { BrowserContext, Page, Route } from "playwright-core";
-import { browserTest as test, launchPlaywrightChromium } from "../../../tests/chrome.js";
+import type { Browser, BrowserContext, Page, Route } from "playwright-core";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { launchPlaywrightChromium } from "../../../tests/chrome.js";
 import { sessionStorageKeyForDeployment } from "../../../../shared/browser-session/index.js";
+import { awaitSignal, createSignal, type Signal, type WaitableSignal } from "../../lib/await-signal.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -175,19 +181,6 @@ async function ensureBuiltPreviewDist(repoRoot: string, siteDist: string): Promi
   return appDist;
 }
 
-interface Deferred<T = void> {
-  readonly promise: Promise<T>;
-  resolve: (value: T) => void;
-}
-
-function createDeferred<T = void>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
-
 interface ApiEvent {
   readonly ts: number;
   readonly method: string;
@@ -202,6 +195,8 @@ interface ScenarioConfig {
   validRefreshToken: string;
   nextRefreshToken: string;
   activeSessionIds: Set<string>;
+  /** Optional hook to handle GET /auth/v1/user */
+  onUserCheck?: (sid: string) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Optional hook to handle POST /auth/v1/token?grant_type=refresh_token */
   onRefresh?: (refreshToken: string) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** Session issued on POST /auth/v1/token?grant_type=password */
@@ -299,6 +294,13 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         return;
       }
 
+      if (pathname === "/away") {
+        // Cache-Control must NOT be no-store so the browser stays eligible for back-forward cache.
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate" });
+        res.end("<!doctype html><html><head><meta charset=\"utf-8\"><title>Away</title></head><body><h1>Away</h1></body></html>");
+        return;
+      }
+
       if (pathname === "/frame-host") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         res.end(
@@ -377,6 +379,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         apiLog: ApiEvent[];
         counters: { refreshes: number; rejectedRefreshes: number; userChecks: number; logouts: number };
         consoleErrors: string[];
+        getInFlightApiRequests: () => number;
         setStep: (s: string) => void;
         attachPageDiagnostics: (label: string, p: Page) => void;
         dumpDiagnostics: (pages: Record<string, Page | null>) => Promise<string>;
@@ -386,17 +389,25 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           pages: Record<string, Page | null>,
           timeoutMs?: number,
         ) => Promise<void>;
+        waitForSignal: (
+          label: string,
+          signals: WaitableSignal | Record<string, WaitableSignal>,
+          pages: Record<string, Page | null>,
+          timeoutMs?: number,
+        ) => Promise<void>;
         seedStorage: (sessionObj: ReturnType<typeof makeSessionPayload> | null) => Promise<void>;
         readStorage: (p: Page) => Promise<{ refresh_token?: string; access_token?: string; user?: { id?: string } } | null>;
         waitForAppSignedIn: (p: Page, pages: Record<string, Page | null>) => Promise<void>;
         waitForNextSignedIn: (p: Page, expectedText: string, pages: Record<string, Page | null>) => Promise<void>;
         signOutFromApp: (p: Page, pages: Record<string, Page | null>) => Promise<void>;
       }) => Promise<void>,
+      targetBrowser: Browser = browser,
     ): Promise<void> {
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await targetBrowser.newContext({ viewport: { width: 1280, height: 900 } });
       const apiLog: ApiEvent[] = [];
       const consoleErrors: string[] = [];
       const counters = { refreshes: 0, rejectedRefreshes: 0, userChecks: 0, logouts: 0 };
+      let inFlightApiRequests = 0;
       let currentStep = `${scenario.name}:init`;
       const defaultWorkspaces = scenario.workspaces ?? [
         { id: WS_1, name: "Alpha Vault" },
@@ -429,6 +440,8 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       });
 
       await context.route("https://api.commonswarm.com/**", async (route) => {
+        inFlightApiRequests += 1;
+        try {
         const req = route.request();
         const url = new URL(req.url());
         const method = req.method().toUpperCase();
@@ -454,6 +467,11 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         }
         if (url.pathname === "/auth/v1/user" && method === "GET") {
           counters.userChecks += 1;
+          if (scenario.onUserCheck) {
+            const out = await scenario.onUserCheck(sid);
+            await fulfillJson(route, out.status, out.body, sid, `user-hook(${out.status})`);
+            return;
+          }
           if (!scenario.activeSessionIds.has(sid)) {
             await fulfillJson(
               route,
@@ -688,6 +706,9 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           return;
         }
         await fulfillJson(route, 404, { error: "not_found" }, sid, "unknown");
+        } finally {
+          inFlightApiRequests -= 1;
+        }
       });
 
       const attachPageDiagnostics = (label: string, p: Page) => {
@@ -756,6 +777,33 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         }
         const diag = await dumpDiagnostics(pages);
         throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label}\nDiagnostics:\n${diag}`);
+      };
+
+      const waitForSignal = async (
+        label: string,
+        signals: WaitableSignal | Record<string, WaitableSignal>,
+        pages: Record<string, Page | null>,
+        timeoutMs = 20_000,
+      ): Promise<void> => {
+        const entries: Array<[string, WaitableSignal]> =
+          "promise" in signals
+            ? [[label, signals as WaitableSignal]]
+            : Object.entries(signals);
+        const settled = await awaitSignal(
+          entries.map(([, sig]) => sig.promise),
+          timeoutMs,
+        );
+        if (settled) return;
+        const signalStates = Object.fromEntries(
+          entries.map(([name, sig]) => [name, sig.resolved ? "resolved" : "pending"]),
+        );
+        const diag = await dumpDiagnostics(pages);
+        throw new Error(
+          `Timed out after ${timeoutMs}ms waiting for signal "${label}"\n` +
+          `Signal states: ${JSON.stringify(signalStates)}\n` +
+          `In-flight API requests: ${inFlightApiRequests}\n` +
+          `Diagnostics:\n${diag}`,
+        );
       };
 
       const seedStorage = async (sessionObj: ReturnType<typeof makeSessionPayload> | null): Promise<void> => {
@@ -837,10 +885,12 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           apiLog,
           counters,
           consoleErrors,
+          getInFlightApiRequests: () => inFlightApiRequests,
           setStep: (s) => { currentStep = `${scenario.name}:${s}`; },
           attachPageDiagnostics,
           dumpDiagnostics,
           waitFor,
+          waitForSignal,
           seedStorage,
           readStorage,
           waitForAppSignedIn,
@@ -858,8 +908,8 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
     // ═══════════════════════════════════════════════════════════════════════════
     {
       const sidA = "sid-overlap-1";
-      const firstRefreshHit = createDeferred<void>();
-      const releaseFirstRefresh = createDeferred<void>();
+      const firstRefreshHit = createSignal<void>();
+      const releaseFirstRefresh = createSignal<void>();
       const scenario: ScenarioConfig = {
         name: "a-overlapping-refresh",
         validRefreshToken: "rt-overlap-1",
@@ -896,9 +946,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         await Promise.all([tabA.goto(`${origin}/app`), tabB.goto(`${origin}/next`)]);
 
         ctx.setStep("wait-for-first-refresh-and-peer-lock-contention");
-        await ctx.waitFor("first refresh to hit scripted API", async () => {
-          return await Promise.race([firstRefreshHit.promise.then(() => true), Promise.resolve(false)]);
-        }, pages);
+        await ctx.waitForSignal("first refresh to hit scripted API", firstRefreshHit, pages);
 
         // Give the peer tab up to 600ms (well below authFetch's 4000ms timeout!) to queue on lock:sb-api-auth-token.
         const overlapDeadline = Date.now() + 600;
@@ -929,17 +977,106 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // (b) Stale terminal refresh failure in one tab does not remove a replacement
-    //     login stored by the other tab.
+    // (b1) Stale terminal verification (GET /auth/v1/user 403 session_not_found)
+    //      in Tab B does not remove a replacement login stored by Tab A, releases
+    //      the shared Web Lock immediately, and both tabs adopt the replacement.
+    // ═══════════════════════════════════════════════════════════════════════════
+    {
+      const staleSid = "sid-stale-user-1";
+      const replacementSid = "sid-replacement-user-2";
+      const staleUserHit = createSignal<void>();
+      const releaseStaleUser = createSignal<void>();
+
+      const scenario: ScenarioConfig = {
+        name: "b1-stale-terminal-user-preserves-replacement",
+        validRefreshToken: "rt-replacement-u2",
+        nextRefreshToken: "rt-replacement-u3",
+        activeSessionIds: new Set([replacementSid]),
+        async onUserCheck(sid) {
+          if (sid === staleSid) {
+            staleUserHit.resolve();
+            await releaseStaleUser.promise;
+            return {
+              status: 403,
+              body: { code: "session_not_found", error_code: "session_not_found", msg: "Session not found" },
+            };
+          }
+          if (scenario.activeSessionIds.has(sid)) {
+            return { status: 200, body: USER_A };
+          }
+          return {
+            status: 403,
+            body: { code: "session_not_found", error_code: "session_not_found", msg: "Session not found" },
+          };
+        },
+      };
+
+      await withTwoTabScenario(scenario, async (ctx) => {
+        ctx.setStep("seed-stale-unexpired-session");
+        await ctx.seedStorage(makeSessionPayload({ sessionId: staleSid, refreshToken: "rt-stale-u1", expired: false }));
+
+        const tabA = await ctx.context.newPage();
+        const tabB = await ctx.context.newPage();
+        ctx.attachPageDiagnostics("tabA", tabA);
+        ctx.attachPageDiagnostics("tabB", tabB);
+        const pages = { tabA, tabB };
+
+        await tabA.goto(`${origin}/seed`);
+        ctx.setStep("boot-tabB-with-stale-session");
+        await tabB.goto(`${origin}/next`);
+
+        await ctx.waitForSignal("Tab B stale GET /auth/v1/user to reach API", staleUserHit, pages);
+
+        // While Tab B holds the stale getUser() verification in flight, Tab A stores the replacement login
+        // directly in shared localStorage (firing a real cross-tab StorageEvent without blocking on Tab B's lock).
+        ctx.setStep("tabA-stores-replacement-login");
+        const replacementPayload = makeSessionPayload({
+          sessionId: replacementSid,
+          refreshToken: "rt-replacement-u2",
+          expired: false,
+        });
+        await tabA.evaluate(
+          ({ key, val }: { key: string; val: string }) => {
+            localStorage.setItem(key, val);
+          },
+          { key: STORAGE_KEY, val: JSON.stringify(replacementPayload) },
+        );
+        await new Promise((r) => setTimeout(r, 80));
+
+        ctx.setStep("release-stale-terminal-user-403");
+        releaseStaleUser.resolve();
+
+        // Both tabs adopt/keep the replacement login immediately (no 30s refresh cooldown on GET /user).
+        await tabA.goto(`${origin}/app`);
+        await ctx.waitForAppSignedIn(tabA, pages);
+        await ctx.waitForNextSignedIn(tabB, "Alpha Vault", pages);
+
+        const stored = await ctx.readStorage(tabA);
+        assert.equal(
+          stored?.refresh_token,
+          "rt-replacement-u2",
+          `Stale terminal user check must NOT remove replacement login:\n${await ctx.dumpDiagnostics(pages)}`,
+        );
+        assert.equal(await tabB.locator('[data-testid="signed-out-screen"]').count(), 0, "Tab B must remain signed in on replacement login");
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // (b2) Stale terminal refresh failure (400 refresh_token_not_found) in Tab B
+    //      does not remove a replacement login stored by Tab A and does not retry
+    //      the stale token. Because authFetch holds a 30s single-flight refresh
+    //      cooldown inside Tab B's Web Lock after a changed-storage refresh error,
+    //      we assert storage preservation first and then close Tab B to release its
+    //      cooldown lock before verifying fresh /app and /next sign-in on it.
     // ═══════════════════════════════════════════════════════════════════════════
     {
       const staleSid = "sid-stale-1";
       const replacementSid = "sid-replacement-2";
-      const staleRefreshHit = createDeferred<void>();
-      const releaseStaleRefresh = createDeferred<void>();
+      const staleRefreshHit = createSignal<void>();
+      const releaseStaleRefresh = createSignal<void>();
 
       const scenario: ScenarioConfig = {
-        name: "b-stale-terminal-preserves-replacement",
+        name: "b2-stale-terminal-refresh-preserves-replacement",
         validRefreshToken: "rt-replacement-2",
         nextRefreshToken: "rt-replacement-3",
         activeSessionIds: new Set([replacementSid]),
@@ -963,23 +1100,18 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         ctx.setStep("seed-stale-expired-session");
         await ctx.seedStorage(makeSessionPayload({ sessionId: staleSid, refreshToken: "rt-stale-1", expired: true }));
 
-        // Open a peer tab on the same origin first (does not touch the Web Lock yet) and Tab B on /next.
         const tabA = await ctx.context.newPage();
         const tabB = await ctx.context.newPage();
         ctx.attachPageDiagnostics("tabA", tabA);
         ctx.attachPageDiagnostics("tabB", tabB);
-        const pages = { tabA, tabB };
+        const pages: Record<string, Page | null> = { tabA, tabB };
 
         await tabA.goto(`${origin}/seed`);
         ctx.setStep("boot-tabB-with-expired-stale-session");
         await tabB.goto(`${origin}/next`);
 
-        await ctx.waitFor("Tab B stale refresh to reach API", async () => {
-          return await Promise.race([staleRefreshHit.promise.then(() => true), Promise.resolve(false)]);
-        }, pages);
+        await ctx.waitForSignal("Tab B stale refresh to reach API", staleRefreshHit, pages);
 
-        // While Tab B holds the stale refresh in flight, Tab A stores the replacement login
-        // directly in shared localStorage (firing a real cross-tab StorageEvent without blocking on Tab B's lock).
         ctx.setStep("tabA-stores-replacement-login");
         const replacementPayload = makeSessionPayload({
           sessionId: replacementSid,
@@ -992,24 +1124,40 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           },
           { key: STORAGE_KEY, val: JSON.stringify(replacementPayload) },
         );
-        // Let the cross-tab StorageEvent deliver to Tab B before the stale refresh returns its terminal 400.
         await new Promise((r) => setTimeout(r, 80));
 
         ctx.setStep("release-stale-terminal-refresh-400");
         releaseStaleRefresh.resolve();
+        // Wait past GoTrue's initial 200ms retry attempt so any unguarded removal or retry would have fired.
+        await new Promise((r) => setTimeout(r, 500));
 
-        // Now navigate Tab A to /app and confirm BOTH tabs adopt/keep the replacement login!
-        await tabA.goto(`${origin}/app`);
-        await ctx.waitForAppSignedIn(tabA, pages);
-        await ctx.waitForNextSignedIn(tabB, "Alpha Vault", pages);
-
-        const stored = await ctx.readStorage(tabA);
+        const storedAfterStale400 = await ctx.readStorage(tabA);
         assert.equal(
-          stored?.refresh_token,
+          storedAfterStale400?.refresh_token,
           "rt-replacement-2",
           `Stale terminal refresh must NOT remove replacement login:\n${await ctx.dumpDiagnostics(pages)}`,
         );
-        assert.equal(await tabB.locator('[data-testid="signed-out-screen"]').count(), 0, "Tab B must remain signed in on replacement login");
+        assert.equal(
+          ctx.counters.rejectedRefreshes,
+          1,
+          `Stale refresh must NOT hammer GoTrue after replacement:\n${await ctx.dumpDiagnostics(pages)}`,
+        );
+
+        // Close Tab B to release its intentional 30s refresh-cooldown Web Lock, then prove
+        // both /app and /next boot cleanly on the preserved replacement login.
+        ctx.setStep("close-cooldown-tab-and-verify-replacement-usable");
+        await tabB.close();
+        pages.tabB = null;
+        const tabB2 = await ctx.context.newPage();
+        ctx.attachPageDiagnostics("tabB2", tabB2);
+        pages.tabB2 = tabB2;
+
+        await Promise.all([tabA.goto(`${origin}/app`), tabB2.goto(`${origin}/next`)]);
+        await ctx.waitForAppSignedIn(tabA, pages);
+        await ctx.waitForNextSignedIn(tabB2, "Alpha Vault", pages);
+
+        const storedFinal = await ctx.readStorage(tabA);
+        assert.equal(storedFinal?.refresh_token, "rt-replacement-2", "Preserved replacement login must remain intact");
       });
     }
 
@@ -1023,8 +1171,8 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
       const sid2 = "sid-c-login-2";
       const sid3 = "sid-c-login-3";
       let holdWs2ForSid: string | null = null;
-      let heldWs2Hit: Deferred<void> | null = null;
-      let releaseHeldWs2: Deferred<void> | null = null;
+      let heldWs2Hit: Signal<void> | null = null;
+      let releaseHeldWs2: Signal<void> | null = null;
       let secretSlugForHeld = "secret-c1-vault";
       let nextPasswordSession = () => makeSessionPayload({ sessionId: sid2, refreshToken: "rt-c-2" });
 
@@ -1091,12 +1239,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         ctx.setStep("c1-hold-ws2-private-response");
         holdWs2ForSid = sid1;
         secretSlugForHeld = "secret-c1-signout-only";
-        heldWs2Hit = createDeferred<void>();
-        releaseHeldWs2 = createDeferred<void>();
+        heldWs2Hit = createSignal<void>();
+        releaseHeldWs2 = createSignal<void>();
         await tabB.click('button[aria-label="Beta Vault workspace"]');
-        await ctx.waitFor("held WS_2 conversations request (c1)", async () => {
-          return await Promise.race([heldWs2Hit!.promise.then(() => true), Promise.resolve(false)]);
-        }, pages);
+        await ctx.waitForSignal("held WS_2 conversations request (c1)", heldWs2Hit, pages);
 
         // Sign out from Tab A (/app).
         ctx.setStep("c1-tabA-sign-out");
@@ -1144,12 +1290,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
         ctx.setStep("c2-hold-ws2-private-response-sid2");
         holdWs2ForSid = sid2;
         secretSlugForHeld = "secret-c2-sid2-only";
-        heldWs2Hit = createDeferred<void>();
-        releaseHeldWs2 = createDeferred<void>();
+        heldWs2Hit = createSignal<void>();
+        releaseHeldWs2 = createSignal<void>();
         await tabB.click('button[aria-label="Beta Vault workspace"]');
-        await ctx.waitFor("held WS_2 conversations request (c2)", async () => {
-          return await Promise.race([heldWs2Hit!.promise.then(() => true), Promise.resolve(false)]);
-        }, pages);
+        await ctx.waitForSignal("held WS_2 conversations request (c2)", heldWs2Hit, pages);
 
         // Sign out and sign back in as the SAME person (USER_A) with NEW session_id sid3!
         ctx.setStep("c2-same-user-signout-and-resignin-sid3");
@@ -1194,10 +1338,10 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
     // ═══════════════════════════════════════════════════════════════════════════
     {
       const sidRefusal = "sid-c3-refusal";
-      const ws2ConvHit = createDeferred<void>();
-      const ws2ConvRelease = createDeferred<void>();
-      const ws2DecisionHit = createDeferred<void>();
-      const ws2DecisionRelease = createDeferred<void>();
+      const ws2ConvHit = createSignal<void>();
+      const ws2ConvRelease = createSignal<void>();
+      const ws2DecisionHit = createSignal<void>();
+      const ws2DecisionRelease = createSignal<void>();
       let ws2RequestsAfterRefusal = 0;
       let refusedWs2 = false;
 
@@ -1269,13 +1413,11 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
 
         ctx.setStep("c3-select-ws2-and-hold-both-conversations-and-decision-queue");
         await tabB.click('button[aria-label="Revoked Vault workspace"]');
-        await ctx.waitFor("WS_2 conversations and decision_queue both in flight", async () => {
-          const [c, d] = await Promise.all([
-            Promise.race([ws2ConvHit.promise.then(() => true), Promise.resolve(false)]),
-            Promise.race([ws2DecisionHit.promise.then(() => true), Promise.resolve(false)]),
-          ]);
-          return c && d;
-        }, pages);
+        await ctx.waitForSignal(
+          "WS_2 conversations and decision_queue both in flight",
+          { ws2ConvHit, ws2DecisionHit },
+          pages,
+        );
 
         ctx.setStep("c3-deliver-workspace-refusal-first");
         ws2DecisionRelease.resolve();
@@ -1368,6 +1510,316 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
           `framed /next must trigger zero authenticated API requests:\n${await ctx.dumpDiagnostics(pages)}`,
         );
       });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // (e) Back / history-cache (bfcache) restore in /next:
+    //     - Uses Chromium with --disable-back-forward-cache stripped via chrome.ts
+    //     - Must observe a REAL persisted pageshow (event.persisted === true);
+    //       fails explicitly with CDP notRestoredExplanations if reloaded instead
+    //     - Asserts zero old private content painted on pagehide, on pageshow
+    //       capture (before pageshow JS runs), and while revalidation is held
+    //     - Releases revalidation and asserts the fresh read paints
+    // ═══════════════════════════════════════════════════════════════════════════
+    {
+      const bfcacheBrowser = await launchPlaywrightChromium(chromium, { enableBfcache: true });
+      try {
+        const sidBf = "sid-e-bfcache";
+        let readPass = 1;
+        let holdRevalidateUser = false;
+        const revalidateUserHit = createSignal<void>();
+        const releaseRevalidateUser = createSignal<void>();
+
+        const scenario: ScenarioConfig = {
+          name: "e-bfcache-back-revalidation",
+          validRefreshToken: "rt-e-1",
+          nextRefreshToken: "rt-e-2",
+          activeSessionIds: new Set([sidBf]),
+          async onUserCheck(sid) {
+            if (!scenario.activeSessionIds.has(sid)) {
+              return {
+                status: 403,
+                body: { code: "session_not_found", error_code: "session_not_found", msg: "Session not found" },
+              };
+            }
+            if (holdRevalidateUser) {
+              holdRevalidateUser = false;
+              revalidateUserHit.resolve();
+              await releaseRevalidateUser.promise;
+            }
+            return { status: 200, body: USER_A };
+          },
+          async onEdgeRead(reqBody) {
+            if (reqBody.resource === "conversations") {
+              const privateSlug = readPass === 1 ? "secret-bfcache-before" : "fresh-bfcache-after";
+              const privateId = readPass === 1 ? CONV_SECRET_1 : CONV_SECRET_2;
+              return {
+                status: 200,
+                body: {
+                  conversations: [
+                    makeConversation({ id: CONV_GEN_1, slug: "alpha-general", kind: "general" }),
+                    makeConversation({ id: privateId, slug: privateSlug, kind: "private_channel", joined: true }),
+                  ],
+                },
+              };
+            }
+            if (reqBody.resource === "conversation_history") {
+              return { status: 200, body: { signals: [], has_more: false, mentions: [], reactions: [] } };
+            }
+            if (reqBody.resource === "seat_admin_status") return { status: 200, body: { enabled: false } };
+            if (reqBody.resource === "pending_access") return { status: 200, body: { pending: [], agents: [] } };
+            if (reqBody.resource === "review_checks") return { status: 200, body: { checks: [] } };
+            return { status: 200, body: { grants: [], invitations: [] } };
+          },
+        };
+
+        await withTwoTabScenario(
+          scenario,
+          async (ctx) => {
+            ctx.setStep("e-seed-and-boot-single-tab-next");
+            await ctx.seedStorage(makeSessionPayload({ sessionId: sidBf, refreshToken: "rt-e-1" }));
+            // Single open tab in this context so RelatedActiveContentsExist never blocks bfcache.
+            const tabB = await ctx.context.newPage();
+            ctx.attachPageDiagnostics("tabB", tabB);
+            const pages = { tabB };
+
+            const cdp = await ctx.context.newCDPSession(tabB);
+            const bfcacheNotUsed: Array<Record<string, unknown>> = [];
+            await cdp.send("Page.enable");
+            cdp.on("Page.backForwardCacheNotUsed", (ev) => {
+              bfcacheNotUsed.push(ev as unknown as Record<string, unknown>);
+            });
+
+            try {
+              await tabB.goto(`${origin}/next`);
+              await ctx.waitForNextSignedIn(tabB, "secret-bfcache-before", pages);
+
+              // Wait until every initial fetch and Web Lock has settled so Chromium will not
+              // reject bfcache for OutstandingNetworkRequestFetch or WebLocks.
+              ctx.setStep("e-wait-for-bfcache-eligibility");
+              await ctx.waitFor(
+                "initial /next requests and Web Locks settled before leaving",
+                async () => {
+                  if (ctx.getInFlightApiRequests() > 0) return false;
+                  const lockBusy = await tabB
+                    .evaluate(async (lockName: string) => {
+                      const q = await navigator.locks.query();
+                      return (
+                        (q.held?.some((l) => l.name === lockName) ?? false) ||
+                        (q.pending?.some((l) => l.name === lockName) ?? false)
+                      );
+                    }, LOCK_NAME)
+                    .catch(() => true);
+                  return !lockBusy;
+                },
+                pages,
+              );
+              await new Promise((r) => setTimeout(r, 150));
+
+              // Record pagehide and pageshow (capture BEFORE app's pageshow handler, and bubble AFTER).
+              // Deliberately registers NO unload or beforeunload listener.
+              ctx.setStep("e-install-bfcache-transition-observer");
+              await tabB.evaluate(() => {
+                type TransitionSnapshot = {
+                  type: string;
+                  persisted: boolean;
+                  hasVisiblePrivateRoot: boolean;
+                  hasCheckingScreen: boolean;
+                  bodyText: string;
+                };
+                const log: TransitionSnapshot[] = [];
+                (window as unknown as { __bfcacheLog?: TransitionSnapshot[] }).__bfcacheLog = log;
+                const record = (type: string, persisted: boolean) => {
+                  const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                  const checking = document.querySelector('[data-testid="session-checking-screen"]');
+                  log.push({
+                    type,
+                    persisted,
+                    hasVisiblePrivateRoot: Boolean(root && !root.hidden),
+                    hasCheckingScreen: Boolean(checking),
+                    bodyText: (document.body?.innerText ?? "").slice(0, 600),
+                  });
+                };
+                window.addEventListener("pagehide", (ev) => {
+                  record("pagehide", ev.persisted);
+                });
+                window.addEventListener(
+                  "pageshow",
+                  (ev) => {
+                    record("pageshow:capture", ev.persisted);
+                  },
+                  true,
+                );
+                window.addEventListener("pageshow", (ev) => {
+                  record("pageshow:bubble", ev.persisted);
+                });
+              });
+
+              // Navigate away to a clean same-origin page (Cache-Control: public, max-age=0, must-revalidate).
+              ctx.setStep("e-navigate-away");
+              await tabB.goto(`${origin}/away`, { waitUntil: "load" });
+              await ctx.waitFor(
+                "Tab B landed on /away",
+                () => tabB.evaluate(() => location.pathname === "/away").catch(() => false),
+                pages,
+              );
+
+              // Arm revalidation hold and switch fresh sidebar data BEFORE going Back.
+              readPass = 2;
+              holdRevalidateUser = true;
+
+              ctx.setStep("e-history-back-from-away");
+              await tabB.evaluate(() => {
+                window.history.back();
+              });
+
+              await ctx.waitFor(
+                "Tab B returned to /next via history.back()",
+                () =>
+                  tabB
+                    .evaluate(() => {
+                      if (!location.pathname.startsWith("/next")) return false;
+                      const log = (window as unknown as { __bfcacheLog?: Array<{ type: string }> }).__bfcacheLog;
+                      if (Array.isArray(log)) {
+                        return log.some((entry) => entry.type === "pageshow:bubble");
+                      }
+                      // If Chromium did a full reload instead of bfcache restore, stop waiting so we fail explicitly.
+                      return document.readyState === "complete";
+                    })
+                    .catch(() => false),
+                pages,
+              );
+
+              const backObservation = await tabB.evaluate(() => {
+                type TransitionSnapshot = {
+                  type: string;
+                  persisted: boolean;
+                  hasVisiblePrivateRoot: boolean;
+                  hasCheckingScreen: boolean;
+                  bodyText: string;
+                };
+                const log = (window as unknown as { __bfcacheLog?: TransitionSnapshot[] }).__bfcacheLog ?? null;
+                const nav = performance.getEntriesByType("navigation")[0] as
+                  | (PerformanceNavigationTiming & { notRestoredReasons?: unknown })
+                  | undefined;
+                const root = document.querySelector<HTMLElement>('[data-testid="private-view-root"]');
+                const checking = document.querySelector('[data-testid="session-checking-screen"]');
+                return {
+                  log,
+                  navType: nav?.type ?? null,
+                  notRestoredReasons: nav?.notRestoredReasons ?? null,
+                  liveHasVisiblePrivateRoot: Boolean(root && !root.hidden),
+                  liveHasCheckingScreen: Boolean(checking),
+                  liveBodyText: (document.body?.innerText ?? "").slice(0, 600),
+                };
+              });
+
+              const bfcacheDiag = async () =>
+                JSON.stringify(
+                  {
+                    backObservation,
+                    bfcacheNotUsed,
+                    diagnostics: JSON.parse(await ctx.dumpDiagnostics(pages)),
+                  },
+                  null,
+                  2,
+                );
+
+              assert.ok(
+                Array.isArray(backObservation.log),
+                `Browser performed a full reload instead of restoring /next from bfcache (pageshow.persisted was never observed):\n${await bfcacheDiag()}`,
+              );
+              const pagehideSnap = backObservation.log.find((e) => e.type === "pagehide");
+              const pageshowCapture = backObservation.log.find((e) => e.type === "pageshow:capture");
+              const pageshowBubble = backObservation.log.find((e) => e.type === "pageshow:bubble");
+
+              assert.equal(
+                pageshowCapture?.persisted,
+                true,
+                `Expected real bfcache restore with pageshow event.persisted === true:\n${await bfcacheDiag()}`,
+              );
+              assert.equal(
+                pageshowBubble?.persisted,
+                true,
+                `Expected pageshow bubble event.persisted === true:\n${await bfcacheDiag()}`,
+              );
+
+              // Zero old private content on pagehide, on pageshow:capture (BEFORE app pageshow JS runs), and on pageshow:bubble.
+              for (const [label, snap] of [
+                ["pagehide", pagehideSnap],
+                ["pageshow:capture", pageshowCapture],
+                ["pageshow:bubble", pageshowBubble],
+              ] as const) {
+                assert.ok(snap, `Missing ${label} transition snapshot:\n${await bfcacheDiag()}`);
+                assert.equal(
+                  snap.hasVisiblePrivateRoot,
+                  false,
+                  `Old private-view-root was visible at ${label}:\n${await bfcacheDiag()}`,
+                );
+                assert.equal(
+                  snap.bodyText.includes("secret-bfcache-before"),
+                  false,
+                  `Old private channel painted at ${label}:\n${await bfcacheDiag()}`,
+                );
+                assert.equal(
+                  snap.bodyText.includes("Alpha Vault"),
+                  false,
+                  `Old private workspace painted at ${label}:\n${await bfcacheDiag()}`,
+                );
+              }
+
+              // Confirm persisted pageshow triggered real revalidation and that ZERO old private content
+              // is painted while revalidation is held (release quickly, well below authFetch's 4000ms timeout).
+              ctx.setStep("e-wait-for-held-revalidation-and-assert-zero-old-paint");
+              await ctx.waitForSignal("bfcache pageshow revalidation GET /auth/v1/user", revalidateUserHit, pages);
+              const duringRevalidation = await tabB.evaluate(() => ({
+                privateRootCount: document.querySelectorAll('[data-testid="private-view-root"]').length,
+                checkingCount: document.querySelectorAll('[data-testid="session-checking-screen"]').length,
+                bodyText: (document.body?.innerText ?? "").slice(0, 600),
+              }));
+              releaseRevalidateUser.resolve();
+
+              assert.equal(
+                duringRevalidation.privateRootCount,
+                0,
+                `private-view-root must stay unmounted before bfcache revalidation settles:\n${await bfcacheDiag()}`,
+              );
+              assert.equal(
+                duringRevalidation.checkingCount,
+                1,
+                `session-checking-screen must render while bfcache revalidation is pending:\n${await bfcacheDiag()}`,
+              );
+              assert.equal(
+                duringRevalidation.bodyText.includes("secret-bfcache-before"),
+                false,
+                `Old private channel leaked while bfcache revalidation was pending:\n${await bfcacheDiag()}`,
+              );
+              assert.equal(
+                duringRevalidation.bodyText.includes("Alpha Vault"),
+                false,
+                `Old workspace label leaked while bfcache revalidation was pending:\n${await bfcacheDiag()}`,
+              );
+
+              // Now the fresh read must paint fresh-bfcache-after without reviving secret-bfcache-before.
+              ctx.setStep("e-wait-for-fresh-read-paint");
+              await ctx.waitForNextSignedIn(tabB, "fresh-bfcache-after", pages);
+              const freshText = await tabB.evaluate(() => document.body.innerText ?? "");
+              assert.equal(freshText.includes("fresh-bfcache-after"), true, "Fresh read must paint after bfcache revalidation");
+              assert.equal(
+                freshText.includes("secret-bfcache-before"),
+                false,
+                `Old pre-bfcache private channel survived after fresh read:\n${await bfcacheDiag()}`,
+              );
+            } finally {
+              releaseRevalidateUser.resolve();
+              await cdp.detach().catch(() => undefined);
+            }
+          },
+          bfcacheBrowser,
+        );
+      } finally {
+        await bfcacheBrowser.close();
+      }
     }
   } finally {
     await browser.close();

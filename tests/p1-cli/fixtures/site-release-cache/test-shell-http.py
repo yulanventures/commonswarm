@@ -22,21 +22,28 @@ checks=[]
 class Handler(http.server.SimpleHTTPRequestHandler):
     fail_app=False
     omit_next_csp=False
+    omit_preflip_csp_path=None
     send_next_headers=False
     seen_paths=[]
     def log_message(self,*args): pass
+    def _is_candidate(self):
+        return Path(self.directory).resolve().name == 'candidate'
     def end_headers(self):
-        if self.send_next_headers and (self.path == '/next' or self.path.startswith('/next/')):
-            if not self.omit_next_csp:
+        raw_path = getattr(self, '_raw_path', self.path)
+        if self.send_next_headers and (raw_path == '/next' or raw_path.startswith('/next/')):
+            omit_postflip = self.omit_next_csp and self._is_candidate()
+            omit_preflip = self.omit_preflip_csp_path == raw_path and not self._is_candidate()
+            if not omit_postflip and not omit_preflip:
                 self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
-            if self.path in ('/next', '/next/', '/next/index.html'):
+            if raw_path in ('/next', '/next/', '/next/index.html') and self._is_candidate():
                 self.send_header('Cache-Control', 'no-cache')
         super().end_headers()
     def do_GET(self):
+        self._raw_path = self.path
         self.seen_paths.append(self.path)
-        if self.fail_app and self.path=='/app' and (Path(self.directory).resolve().name=='candidate'):
+        if self.fail_app and self.path=='/app' and self._is_candidate():
             self.send_error(503); return
         if self.path == '/app': self.path = '/app/'
         if self.path == '/next': self.path = '/next/'
@@ -48,7 +55,7 @@ def get(url,date=None):
             return r.status,r.headers.get('Last-Modified')
     except urllib.error.HTTPError as e: return e.code,e.headers.get('Last-Modified')
 
-def scenario(baseline=False, automatic=False, failure=None, rollback_failure=None, include_next=False, missing_next_csp=False):
+def scenario(baseline=False, automatic=False, failure=None, rollback_failure=None, include_next=False, missing_next_csp=False, missing_preflip_csp_path=None):
     with tempfile.TemporaryDirectory(prefix='site-shell-http-') as tmp:
         root=Path(tmp).resolve(); site=root/'site'; old=site/'releases/old'; reserve=root/'reserve'; reserve.mkdir()
         (old/'_astro').mkdir(parents=True); (old/'app').mkdir()
@@ -73,6 +80,7 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
         if failure=='future': os.utime(old/'index.html',(now+60,now+60))
         Handler.fail_app=automatic
         Handler.omit_next_csp=missing_next_csp
+        Handler.omit_preflip_csp_path=missing_preflip_csp_path
         Handler.send_next_headers=include_next
         Handler.seen_paths=[]
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(site/'current')))
@@ -93,6 +101,13 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
             prior=get(url+'/app/')[1]
             Handler.seen_paths.clear()
             r=run('deploy')
+            if missing_preflip_csp_path:
+                assert r.returncode!=0 and (site/'current').resolve()==old,(missing_preflip_csp_path,r.returncode)
+                log=(reserve/'hostrun.log').read_text()
+                assert 'assertion=preflip-next-csp' in log, log
+                assert 'PASS rollback' not in log, log
+                checks.append(f'full shell preflip missing CSP on {missing_preflip_csp_path}: refused before switch, old live retained')
+                return
             if failure:
                 assert r.returncode!=0 and (site/'current').resolve()==old,(failure,r.returncode)
                 checks.append(f'full shell {failure}: fails before flip, old live retained'); return
@@ -116,7 +131,11 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
             if not baseline:
                 log=(reserve/'hostrun.log').read_text()
                 if include_next:
-                    assert '/next' in Handler.seen_paths and '/next/assets/next-app.js' in Handler.seen_paths
+                    for p in ('/next', '/next/', '/next/index.html', '/next/assets/next-app.js'):
+                        assert p in Handler.seen_paths, (p, Handler.seen_paths)
+                    assert 'CHECK step=preflip-next-ingress path=/next http=404' in log, log
+                    assert 'CHECK step=preflip-next-ingress path=/next/ http=404' in log, log
+                    assert 'CHECK step=preflip-next-ingress path=/next/index.html http=404' in log, log
                     assert 'PASS deploy revision=fixture H0=1 NEXT=1' in log
                 else:
                     assert not any(p == '/next' or p.startswith('/next/') for p in Handler.seen_paths), Handler.seen_paths
@@ -150,7 +169,7 @@ def scenario(baseline=False, automatic=False, failure=None, rollback_failure=Non
                 assert 'PASS rollback unchanged' in (reserve/'hostrun.log').read_text()
                 for name in ['old.js','new.js','chunks/dynamic.js','new.css']: assert get(url+'/_astro/'+name)[0]==200
                 if include_next:
-                    checks.append('full NEW deploy/explicit rollback/repeated rollback (next=1): /next probed, conditional 200, both graphs + next assets 200, unchanged PASS')
+                    checks.append('full NEW deploy/explicit rollback/repeated rollback (next=1): preflip + postflip /next probed, conditional 200, both graphs + next assets 200, unchanged PASS')
                 else:
                     checks.append('full NEW deploy/explicit rollback/repeated rollback (default next=0): no /next probe, conditional 200, both graphs 200, unchanged PASS')
         finally:
@@ -161,6 +180,8 @@ scenario(include_next=True)
 scenario(automatic=True, include_next=False)
 scenario(automatic=True, include_next=True)
 scenario(include_next=True, missing_next_csp=True)
+for missing_path in ['/next', '/next/', '/next/index.html']:
+    scenario(include_next=True, missing_preflip_csp_path=missing_path)
 for failure in ['collision','symlink','future']: scenario(failure=failure)
 for failure in ['collision','symlink','future']: scenario(rollback_failure=failure)
 print(json.dumps({'passed':True,'checks':checks,'ceiling':'macOS HTTP fixture with real rendered templates/helper; only paths/host/root guard/HTTP origin and GNU mv adaptation changed; no Caddy/Cloudflare or production execution'},indent=2))
