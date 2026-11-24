@@ -3911,9 +3911,12 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     let restoreInFlight = 0;
     let maxRestoreInFlight = 0;
     let resolveLookups = 0;
+    let undoStartedCallbacks = 0;
     let undoFinishedCallbacks = 0;
     const sentRestores = [];
     const restoreResolvers = [];
+    const bodyEl = doc.createElement("body");
+    doc.root.append(bodyEl);
     let ctrl;
 
     const render = () => {
@@ -3937,6 +3940,10 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
         onDismissAllStop: () => ctrl.stopBatch(),
         onDismissAllUndo: () => void ctrl.undoBatch(),
       });
+      // Mirror real browser behavior: removing a focused node drops activeElement to document.body.
+      if (doc.activeElement && !doc.activeElement.isConnected) {
+        doc.activeElement = bodyEl;
+      }
     };
 
     ctrl = createWaitingDismissalController({
@@ -3985,9 +3992,15 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
       setCardError: () => {}, setStatusError: () => {}, setArchivedError: () => {}, clearArchivedError: () => {},
       render,
       onBatchFinished: () => focusWaitingPanelAfterAction(host, { kind: "batch-done" }),
+      onBatchUndoStarted: () => {
+        undoStartedCallbacks += 1;
+        focusWaitingPanelAfterAction(host, { kind: "batch-undoing" });
+      },
       onBatchUndoFinished: () => {
         undoFinishedCallbacks += 1;
-        focusWaitingPanelAfterAction(host, { kind: "batch-undone" });
+        if (!doc.activeElement || doc.activeElement === bodyEl || host.contains(doc.activeElement)) {
+          focusWaitingPanelAfterAction(host, { kind: "batch-undone" });
+        }
       },
     });
 
@@ -4012,8 +4025,13 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     assert.equal(undoBtn.textContent, "Undo");
     assert.strictEqual(doc.activeElement, undoBtn, "focus moves to batch Undo button when available");
 
-    // Click Undo: chunk 1 (first 3) dispatched in exact order, max 3 in flight.
+    // Click Undo: chunk 1 (first 3) dispatched in exact order, max 3 in flight,
+    // and focus stays inside the panel on the live-region status row (never dropped to body).
     const undoP = ctrl.undoBatch();
+    assert.equal(undoStartedCallbacks, 1, "onBatchUndoStarted fires synchronously when Undo begins");
+    assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-batch-result]"), "focus moves to batch result status row when Undo button is removed");
+    assert.equal(doc.activeElement?.getAttribute("tabindex"), "-1");
+    assert.ok(doc.activeElement?.isConnected && host.contains(doc.activeElement), "focus stays connected inside panel while Undoing");
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(maxRestoreInFlight, 3);
     assert.deepEqual(sentRestores, [
@@ -4031,6 +4049,7 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     restoreResolvers[2]();
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(host.querySelector("[data-waiting-batch-result-label]")?.textContent, "Undoing 3 of 5");
+    assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-batch-result]"), "focus stays on status row across progress updates");
     assert.equal(maxRestoreInFlight, 3);
     assert.deepEqual(sentRestores, [
       { ws: "ws-1", kind: "ask", id: "ask-1", dismissal: UUID_1 },
@@ -4041,8 +4060,8 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     ]);
     assert.equal(resolveLookups, 0, "review undo uses pinned offer id without looking up offer");
 
-    // Resolve chunk 2 -> reload completes, row goes away, focus returns to panel's first control.
-    doc.activeElement = null;
+    // Resolve chunk 2 -> reload completes, row goes away (dropping status row focus to body),
+    // and onBatchUndoFinished moves focus to the first restored item's primary control inside the panel.
     restoreResolvers[3]();
     restoreResolvers[4]();
     await undoP;
@@ -4050,7 +4069,10 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     assert.equal(ctrl.batchState(), null, "result row disappears when all recorded items restored");
     assert.equal(host.querySelector("[data-waiting-batch-result]"), null);
     assert.equal(undoFinishedCallbacks, 1);
-    assert.ok(doc.activeElement && host.contains(doc.activeElement), "focus returns inside panel after Undo reload");
+    const firstRestoredControl = host.querySelector('[data-waiting-card="ask-1"]')?.querySelector('[data-decision-option="yes"]');
+    assert.ok(firstRestoredControl, "expected first restored ask option button");
+    assert.strictEqual(doc.activeElement, firstRestoredControl, "focus lands on first restored item's primary control after full Undo reload");
+    assert.ok(doc.activeElement?.isConnected && host.contains(doc.activeElement), "focus stays inside panel after Undo reload");
     assert.equal(host.querySelectorAll("[data-waiting-card]").length, 2, "both choice asks restored");
     assert.equal(host.querySelectorAll("[data-waiting-plain-ask]").length, 1, "plain ask restored");
     assert.equal(host.querySelectorAll("[data-waiting-todo]").length, 2, "todo and pinned review restored");
@@ -4058,6 +4080,7 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     // One-shot: calling undoBatch again sends nothing.
     await ctrl.undoBatch();
     assert.equal(sentRestores.length, 5);
+    bodyEl.remove();
   }
 
   // 3. Reviewer C1 ordering (a): item already dismissed in another tab before batch (created: false) is NEVER restored by Undo.
@@ -4127,17 +4150,29 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
 
   // 4. Reviewer C1 ordering (b): item dismissed by batch, then restored and dismissed again elsewhere ->
   //    Undo gets 404 for that item, leaves replacement dismissal alone, row reads "Restored 2 of 3" with no button,
-  //    and clears on withdrawal triggers (including restoreArchived).
+  //    focus moves to status row on Undo start and to first restored item's control (or panel scope if list empty)
+  //    after partial restore, and clears on withdrawal triggers (including restoreArchived).
   {
     const activeDismissals = new Map();
     const sentRestores = [];
+    const partialAsksAll = [makeAsk("b1", "Q1"), makeAsk("b2", "Q2"), makeAsk("b3", "Q3")];
+    let clientAsks = [...partialAsksAll];
+    let partialUndoStarted = 0;
+    let partialUndoFinished = 0;
+    const bodyEl = doc.createElement("body");
+    const composerOutside = doc.createElement("textarea");
+    doc.root.append(bodyEl, composerOutside);
     let ctrl;
     const render = () => {
       renderWaitingPanel(host, {
         tab: "active", scope: "workspace", place,
-        items: [], plainAsks: [], todos: [], dismissedPlaceholders: [],
+        items: clientAsks, plainAsks: [], todos: [], dismissedPlaceholders: [],
         dismissBatch: ctrl.batchState(),
-        counts: { channel: { min: 0, complete: true }, workspace: { min: 0, complete: true }, all: { min: 0, complete: true } },
+        counts: {
+          channel: { min: clientAsks.length, complete: true },
+          workspace: { min: clientAsks.length, complete: true },
+          all: { min: clientAsks.length, complete: true },
+        },
         loading: false, complete: true, failed: false, statusMessage: "", statusSeq: 0,
       }, {
         onScopeChange: () => {}, onClose: () => {}, onRetryLoad: () => {},
@@ -4148,6 +4183,9 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
         onDismissAllStop: () => ctrl.stopBatch(),
         onDismissAllUndo: () => void ctrl.undoBatch(),
       });
+      if (doc.activeElement && !doc.activeElement.isConnected) {
+        doc.activeElement = bodyEl;
+      }
     };
     const batchInstances = new Map([["b1", UUID_1], ["b2", UUID_2], ["b3", UUID_3]]);
     ctrl = createWaitingDismissalController({
@@ -4165,13 +4203,28 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
         return { ok: true, itemKind: kind, itemId: id, restored: true };
       },
       isAlive: () => true,
-      removeCardFromClient: () => {},
+      removeCardFromClient: (target) => {
+        clientAsks = clientAsks.filter((a) => a.id !== target.cardId);
+      },
       isItemListed: () => false,
-      reloadWaitingBatch: async () => {},
+      reloadWaitingBatch: async () => {
+        clientAsks = partialAsksAll.filter((a) => !activeDismissals.has(a.id));
+        render();
+      },
       reloadWaiting: async () => {},
       invalidateArchived: () => {},
       setCardError: () => {}, setStatusError: () => {}, setArchivedError: () => {}, clearArchivedError: () => {},
       render,
+      onBatchUndoStarted: () => {
+        partialUndoStarted += 1;
+        focusWaitingPanelAfterAction(host, { kind: "batch-undoing" });
+      },
+      onBatchUndoFinished: () => {
+        partialUndoFinished += 1;
+        if (!doc.activeElement || doc.activeElement === bodyEl || host.contains(doc.activeElement)) {
+          focusWaitingPanelAfterAction(host, { kind: "batch-undone" });
+        }
+      },
     });
     const targets = ["b1", "b2", "b3"].map((id) => ({
       slotKind: "ask", itemKind: "ask", itemId: id, cardId: id, workspaceId: "ws-1",
@@ -4183,7 +4236,14 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     // Elsewhere: b2 is restored and dismissed again with a brand-new instance UUID_OTHER.
     activeDismissals.set("b2", UUID_OTHER);
 
-    await ctrl.undoBatch();
+    // Even if desktop composer outside the panel had focus before clicking Undo (e.g. mouse click on Safari or .click()),
+    // onBatchUndoStarted pulls focus into the panel's status row and onBatchUndoFinished lands on the first restored item.
+    composerOutside.focus();
+    const partialUndoP = ctrl.undoBatch();
+    assert.equal(partialUndoStarted, 1);
+    assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-batch-result]"), "Undo start moves focus into panel status row");
+    assert.ok(doc.activeElement?.isConnected && host.contains(doc.activeElement));
+    await partialUndoP;
     assert.deepEqual(sentRestores, [
       { kind: "ask", id: "b1", dismissal: UUID_1 },
       { kind: "ask", id: "b2", dismissal: UUID_2 },
@@ -4196,6 +4256,19 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     const row = host.querySelector("[data-waiting-batch-result]");
     assert.equal(row?.querySelector("[data-waiting-batch-result-label]")?.textContent, "Restored 2 of 3");
     assert.equal(row?.querySelectorAll("button").length, 0, "partial restored row has no button");
+    assert.equal(partialUndoFinished, 1);
+    assert.strictEqual(
+      doc.activeElement,
+      host.querySelector('[data-waiting-card="b1"]')?.querySelector('[data-decision-option="yes"]'),
+      "partial restore moves focus to first restored item's primary control",
+    );
+    assert.ok(doc.activeElement?.isConnected && host.contains(doc.activeElement));
+
+    // Empty-list fallback after Undo: when no cards remain after reload, focus lands on the panel's scope control.
+    clientAsks = [];
+    render();
+    focusWaitingPanelAfterAction(host, { kind: "batch-undone" });
+    assert.strictEqual(doc.activeElement, host.querySelector("[data-waiting-scope]"), "empty list after Undo focuses panel scope control");
 
     // Restoring something else from Archived withdraws the result row.
     await ctrl.restoreArchived({
@@ -4204,6 +4277,8 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
       archivedAt: "2026-11-23T12:00:00Z", when: "1m", placement: "general",
     });
     assert.equal(ctrl.batchState(), null, "restoring another item withdraws the batch result row");
+    bodyEl.remove();
+    composerOutside.remove();
   }
 
   // 5. Retirement mid-Undo (C3): same-person new sign-in (no sign-out), workspace loss,
@@ -4325,6 +4400,7 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     let currentScope = "workspace";
     let currentWorkspaceId = "ws-1";
     let renders = 0;
+    let undoStartedCalls = 0;
     let undoFocusCalls = 0;
     const reloadResolvers = [];
     const restoreResolvers = [];
@@ -4385,6 +4461,10 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
       invalidateArchived: () => {},
       setCardError: () => {}, setStatusError: () => {}, setArchivedError: () => {}, clearArchivedError: () => {},
       render,
+      onBatchUndoStarted: () => {
+        undoStartedCalls += 1;
+        focusWaitingPanelAfterAction(host, { kind: "batch-undoing" });
+      },
       onBatchUndoFinished: () => {
         undoFocusCalls += 1;
         focusWaitingPanelAfterAction(host, { kind: "batch-undone" });
@@ -4453,5 +4533,20 @@ test("Dismiss all Undo (C1 + C3): transport parsing, instance-bound recording, o
     assert.equal(undoFocusCalls, 0, "retired Undo 2 must not move focus");
     assert.strictEqual(doc.activeElement, sentinel2, "successor focus untouched");
     assert.deepEqual(ctrl.batchState(), { phase: "confirm", total: 2 }, "successor batch stays intact");
+
+    // Part iii: Batch whose panel lifetime already changed before Undo is clicked retires cleanly with zero focus move.
+    holdRestores = false;
+    await ctrl.beginBatchConfirm({ scope: "workspace", placeKey, workspaceIds: ["ws-1"], targets: t1 });
+    await ctrl.confirmBatch();
+    const sentinel3 = doc.createElement("button");
+    doc.root.append(sentinel3);
+    sentinel3.focus();
+    const startedBeforeStale = undoStartedCalls;
+    panelLifetime += 1;
+    await ctrl.undoBatch();
+    assert.equal(undoStartedCalls, startedBeforeStale, "retired Undo must not call onBatchUndoStarted");
+    assert.equal(undoFocusCalls, 0, "retired Undo must not call onBatchUndoFinished");
+    assert.strictEqual(doc.activeElement, sentinel3, "retired Undo must not move focus");
+    sentinel3.remove();
   }
 });

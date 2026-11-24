@@ -174,6 +174,7 @@ export interface WaitingDismissalPorts {
   onBatchCancelled?: () => void;
   onBatchStarted?: () => void;
   onBatchFinished?: () => void;
+  onBatchUndoStarted?: () => void;
   onBatchUndoFinished?: () => void;
 }
 
@@ -929,6 +930,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         retireBatchInternal(false);
         return;
       }
+      ports.onBatchUndoStarted?.();
 
       const touchedWorkspaces = new Set<string>();
       let restoredCount = 0;

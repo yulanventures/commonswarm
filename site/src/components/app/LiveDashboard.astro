@@ -8079,15 +8079,13 @@ import "../../styles/kylon-image-viewer.css";
       },
       onBatchCancelled: () => {
         const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
-          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-cancel" });
         }
       },
       onBatchStarted: () => {
         const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
-          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-running" });
         }
       },
@@ -8096,6 +8094,12 @@ import "../../styles/kylon-image-viewer.css";
         if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
           (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-done" });
+        }
+      },
+      onBatchUndoStarted: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-undoing" });
         }
       },
       onBatchUndoFinished: () => {
