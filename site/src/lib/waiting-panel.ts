@@ -127,7 +127,9 @@ export type WaitingDismissBatchVM =
   | { phase: "loading" }
   | { phase: "confirm"; total: number }
   | { phase: "running"; processed: number; total: number; stopping: boolean }
-  | { phase: "done"; doneCount: number; total: number };
+  | { phase: "done"; doneCount: number; total: number; canUndo?: true }
+  | { phase: "undoing"; processed: number; total: number }
+  | { phase: "restored"; restoredCount: number; total: number };
 
 export interface WaitingArchivedItem {
   itemKey: string;
@@ -243,6 +245,7 @@ export interface WaitingPanelHandlers {
   onDismissAllConfirm?: () => void;
   onDismissAllCancel?: () => void;
   onDismissAllStop?: () => void;
+  onDismissAllUndo?: () => void;
   onOpenCatchUp?: (href: string) => void;
   onStartSurvey?: () => void;
   surveyHandlers?: WaitingSurveyHandlers;
@@ -1325,7 +1328,7 @@ export function renderWaitingPanel(
   if (controlsEl) controlsEl.hidden = Boolean(vm.survey);
 
   const activeBatch = activeTab === "active" && !vm.survey ? (vm.dismissBatch ?? null) : null;
-  const batchBusyHeader = activeBatch?.phase === "running";
+  const batchBusyHeader = activeBatch?.phase === "running" || activeBatch?.phase === "undoing";
   const reviewBtn = root.querySelector<HTMLButtonElement>("[data-waiting-review-start]");
   if (reviewBtn) {
     const showReview = !vm.survey && activeTab === "active" && !batchBusyHeader && vm.items.length >= 2 && Boolean(handlers.onStartSurvey);
@@ -1340,7 +1343,7 @@ export function renderWaitingPanel(
   if (batchControls) {
     const visibleItemCount = vm.items.length + (vm.plainAsks?.length ?? 0) + (vm.todos?.length ?? 0);
     const canOfferDismissAll =
-      !vm.survey && activeTab === "active" && visibleItemCount >= 2 && Boolean(handlers.onDismissAllStart);
+      !vm.survey && activeTab === "active" && !batchBusyHeader && visibleItemCount >= 2 && Boolean(handlers.onDismissAllStart);
     const headerMode =
       activeBatch?.phase === "loading"
         ? "loading"
@@ -1496,7 +1499,9 @@ export function renderWaitingPanel(
   const plainAsks = vm.plainAsks ?? [];
   const todos = vm.todos ?? [];
   const dismissedPlaceholders = vm.dismissedPlaceholders ?? [];
-  const showBatchResult = activeBatch !== null && activeBatch.phase === "done";
+  const showBatchResult =
+    activeBatch !== null &&
+    (activeBatch.phase === "done" || activeBatch.phase === "undoing" || activeBatch.phase === "restored");
   const batchRunning = activeBatch !== null && activeBatch.phase === "running";
   if (
     vm.items.length === 0 &&
@@ -1622,7 +1627,7 @@ export function renderWaitingPanel(
   }
 
   type ActiveRenderSlot =
-    | { slotKind: "batch-result"; key: string; item: Extract<WaitingDismissBatchVM, { phase: "done" }> }
+    | { slotKind: "batch-result"; key: string; item: Extract<WaitingDismissBatchVM, { phase: "done" | "undoing" | "restored" }> }
     | { slotKind: "ask"; key: string; item: WaitingAskItem }
     | { slotKind: "todo"; key: string; item: WaitingTodoItem }
     | { slotKind: "plain"; key: string; item: WaitingPlainAskItem }
@@ -1642,7 +1647,7 @@ export function renderWaitingPanel(
       item: placeholder,
     });
   }
-  if (showBatchResult && activeBatch.phase === "done") {
+  if (showBatchResult && (activeBatch.phase === "done" || activeBatch.phase === "undoing" || activeBatch.phase === "restored")) {
     orderedSlots.unshift({
       slotKind: "batch-result",
       key: "batch-result",
@@ -1680,13 +1685,20 @@ export function renderWaitingPanel(
     if (slot.slotKind === "batch-result") {
       const batchRow = slot.item;
       const labelText =
-        batchRow.doneCount === batchRow.total
-          ? `Dismissed ${batchRow.doneCount}`
-          : `Dismissed ${batchRow.doneCount} of ${batchRow.total}`;
+        batchRow.phase === "undoing"
+          ? `Undoing ${batchRow.processed} of ${batchRow.total}`
+          : batchRow.phase === "restored"
+            ? `Restored ${batchRow.restoredCount} of ${batchRow.total}`
+            : batchRow.doneCount === batchRow.total
+              ? `Dismissed ${batchRow.doneCount}`
+              : `Dismissed ${batchRow.doneCount} of ${batchRow.total}`;
+      const showUndo = batchRow.phase === "done" && batchRow.canUndo === true && Boolean(handlers.onDismissAllUndo);
       if (!card) {
         const built = node(doc, "div", "cs-waiting-card cs-waiting-card--dismissed cs-waiting-batch-result");
         built.setAttribute("role", "status");
         built.setAttribute("aria-live", "polite");
+        built.tabIndex = -1;
+        built.setAttribute("tabindex", "-1");
         built.dataset.waitingBatchResult = batchRow.phase;
         const label = node(doc, "span", "cs-waiting-dismissed__label", labelText);
         label.dataset.waitingBatchResultLabel = "";
@@ -1697,6 +1709,18 @@ export function renderWaitingPanel(
         card.dataset.waitingBatchResult = batchRow.phase;
         const label = card.querySelector<HTMLElement>("[data-waiting-batch-result-label]");
         if (label && label.textContent !== labelText) label.textContent = labelText;
+      }
+      let undoBtn = card.querySelector<HTMLButtonElement>("[data-waiting-batch-undo]");
+      if (showUndo) {
+        if (!undoBtn) {
+          undoBtn = node(doc, "button", "cs-waiting-dismissed__undo", "Undo");
+          undoBtn.type = "button";
+          undoBtn.dataset.waitingBatchUndo = "";
+          card.append(undoBtn);
+        }
+        undoBtn.onclick = () => handlers.onDismissAllUndo?.();
+      } else {
+        undoBtn?.remove();
       }
     } else if (slot.slotKind === "ask") {
       const sig = cardSignature(slot.item, vm.scope, canDismissAsk);
@@ -2021,7 +2045,9 @@ export interface WaitingFocusHint {
     | "batch-confirm"
     | "batch-cancel"
     | "batch-running"
-    | "batch-done";
+    | "batch-done"
+    | "batch-undoing"
+    | "batch-undone";
   todoId?: string;
   signalId?: string;
   dismissedKey?: string;
@@ -2050,6 +2076,20 @@ export function focusWaitingPanelAfterAction(
   if (hint.kind === "batch-running") {
     const stopBtn = container.querySelector<HTMLElement>("[data-waiting-dismiss-all-stop]");
     if (stopBtn) return focusEl(stopBtn);
+  }
+  if (hint.kind === "batch-done") {
+    const undoBtn = container.querySelector<HTMLElement>("[data-waiting-batch-undo]");
+    if (undoBtn) return focusEl(undoBtn);
+  }
+  if (hint.kind === "batch-undoing") {
+    const resultRow = container.querySelector<HTMLElement>("[data-waiting-batch-result]");
+    if (resultRow) {
+      if (resultRow.getAttribute("tabindex") === null) {
+        resultRow.tabIndex = -1;
+        resultRow.setAttribute("tabindex", "-1");
+      }
+      return focusEl(resultRow);
+    }
   }
   if (hint.kind === "dismissed" && hint.dismissedKey) {
     const undo = Array.from(container.querySelectorAll<HTMLElement>("[data-waiting-undo]"))
@@ -2108,9 +2148,9 @@ export function focusWaitingPanelAfterAction(
       nextCard.querySelector<HTMLElement>("[data-waiting-todo-done]")
       ?? nextCard.querySelector<HTMLElement>("[data-waiting-todo-retry]")
       ?? nextCard.querySelector<HTMLElement>("[data-waiting-todo-open]")
-      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("button")).find(btn => !(btn as HTMLButtonElement).disabled)
+      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("button")).find(btn => !btn.hidden && !(btn as HTMLButtonElement).disabled)
       ?? nextCard.querySelector<HTMLElement>("a")
-      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("input")).find(inp => !(inp as HTMLInputElement).disabled);
+      ?? Array.from(nextCard.querySelectorAll<HTMLElement>("input")).find(inp => !inp.hidden && !(inp as HTMLInputElement).disabled);
     if (control) return focusEl(control);
   }
   const emptyAll = container.querySelector<HTMLElement>("[data-waiting-empty-all]");

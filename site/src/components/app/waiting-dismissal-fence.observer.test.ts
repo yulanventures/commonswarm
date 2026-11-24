@@ -132,11 +132,14 @@ function installWaitingDismissalFenceFixture() {
     holdDismissAtIndex: 0,
     holdNextRestoreCommand: false,
     holdNextChoiceCommand: false,
+    emitDismissalInstance: scenario === "batch-dismiss-undo",
+    activeDismissals: {} as Record<string, string>,
+    dismissalSeq: 0,
     heldDismisses,
     heldRestores,
     heldChoices,
     dismissCommands: [] as Array<{ command_id: string; item_id: string; bearer: string }>,
-    restoreCommands: [] as Array<{ command_id: string; item_id: string; bearer: string }>,
+    restoreCommands: [] as Array<{ command_id: string; item_id: string; dismissal: string | null; bearer: string }>,
     choiceCommands: [] as Array<{ command_id: string; signal_id: string; bearer: string }>,
     holdNextQueue: false,
     queueHeld: false,
@@ -611,6 +614,18 @@ function installWaitingDismissalFenceFixture() {
         if (outcome) return Response.json(outcome.body, { status: outcome.status });
       }
       if (!f.dismissedIds.includes(itemId)) f.dismissedIds.push(itemId);
+      let extra: Record<string, unknown> = {};
+      if (f.emitDismissalInstance) {
+        const existing = f.activeDismissals[itemId];
+        if (existing) {
+          extra = { created: false, dismissal: existing };
+        } else {
+          f.dismissalSeq += 1;
+          const instance = "dddddddd-dddd-4ddd-8ddd-" + String(f.dismissalSeq).padStart(12, "0");
+          f.activeDismissals[itemId] = instance;
+          extra = { created: true, dismissal: instance };
+        }
+      }
       f.log.push("dismiss-ok:" + itemId);
       return Response.json({
         status: "accepted",
@@ -619,14 +634,17 @@ function installWaitingDismissalFenceFixture() {
         item_kind: body.command.item_kind,
         item_id: itemId,
         dismissed: true,
+        ...extra,
         dismissed_at: new Date().toISOString(),
       });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "restore_waiting_item") {
       const itemId = String(body.command.item_id ?? "");
+      const dismissal = typeof body.command.dismissal === "string" ? body.command.dismissal : null;
       const entry = {
         command_id: String(body.command_id ?? ""),
         item_id: itemId,
+        dismissal,
         bearer: request.headers.get("authorization") ?? "",
       };
       f.restoreCommands.push(entry);
@@ -643,6 +661,15 @@ function installWaitingDismissalFenceFixture() {
         });
         f.log.push("restore-released:" + itemId);
         if (outcome) return Response.json(outcome.body, { status: outcome.status });
+      }
+      if (dismissal !== null) {
+        if (f.activeDismissals[itemId] !== dismissal) {
+          f.log.push("restore-404:" + itemId);
+          return Response.json({ error: "not_found", message: "Waiting item not found." }, { status: 404 });
+        }
+        delete f.activeDismissals[itemId];
+      } else {
+        delete f.activeDismissals[itemId];
       }
       f.dismissedIds = f.dismissedIds.filter((id: string) => id !== itemId);
       f.log.push("restore-ok:" + itemId);
@@ -1543,6 +1570,56 @@ async function observeWaitingDismissalFence() {
       return;
     }
 
+    // 9c. Batch "Dismiss all" with server dismissal instances -> "Dismissed 5" + Undo ->
+    //     Undo restores all 5 with their exact instances and the list shows all 5 again.
+    if (f.scenario === "batch-dismiss-undo") {
+      await openPanelWorkspaceScope(false);
+      await wait(() => f.batchAskIds.every((id: string) => shown(card(id))) && shown(panel()?.querySelector("[data-waiting-dismiss-all]")),
+        "5 asks and Dismiss all control rendered");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all]")!.click();
+      await wait(() =>
+        panel()?.querySelector("[data-waiting-batch-prompt]")?.textContent === "Dismiss all 5?" &&
+        panel()?.querySelector("[data-waiting-batch-note]")?.textContent === "You can restore items one by one from Archived." &&
+        panel()?.querySelector("[data-waiting-dismiss-all-confirm]")?.textContent === "Dismiss 5",
+        "in-place Dismiss all 5? confirm opened");
+      panel()!.querySelector<HTMLButtonElement>("[data-waiting-dismiss-all-confirm]")!.click();
+      await wait(() =>
+        f.dismissCommands.length === 5 &&
+        shown(panel()?.querySelector("[data-waiting-batch-result]")) &&
+        shown(panel()?.querySelector("[data-waiting-batch-undo]")),
+        "all 5 dismissed with instances and batch result row with Undo shown");
+      const resultRow = panel()!.querySelector("[data-waiting-batch-result]")!;
+      check(resultRow.querySelector("[data-waiting-batch-result-label]")?.textContent === "Dismissed 5",
+        "expected Dismissed 5 result row");
+      const undoBtn = resultRow.querySelector<HTMLButtonElement>("[data-waiting-batch-undo]")!;
+      check(undoBtn.textContent === "Undo", "expected Undo button on batch result row");
+      check(f.batchAskIds.every((id: string) => !card(id)), "all 5 cards removed from list");
+      check(f.restoreCommands.length === 0, "no restore before clicking Undo");
+
+      const expectedInstances: Record<string, string> = {};
+      for (const id of f.batchAskIds) {
+        const inst = f.activeDismissals[id];
+        check(typeof inst === "string" && inst.length > 0, "expected dismissal instance recorded for " + id);
+        expectedInstances[id] = inst;
+      }
+
+      undoBtn.click();
+      await wait(() =>
+        f.restoreCommands.length === 5 &&
+        !panel()?.querySelector("[data-waiting-batch-result]") &&
+        f.batchAskIds.every((id: string) => shown(card(id))),
+        "Undo restored all 5 items with their instances and cleared the result row");
+      check(
+        f.restoreCommands.every((cmd: { item_id: string; dismissal: string | null }, idx: number) =>
+          cmd.item_id === f.batchAskIds[idx] && cmd.dismissal === expectedInstances[cmd.item_id]),
+        "every restore command must send the exact dismissal instance in order: " + JSON.stringify(f.restoreCommands),
+      );
+      check(f.dismissedIds.length === 0, "all 5 dismissals cleared on server");
+      check(Boolean(panel()?.contains(document.activeElement)), "focus must stay inside the panel after Undo reload");
+      document.documentElement.dataset.fenceObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+
     throw new Error("unknown scenario: " + f.scenario);
   } catch (error) {
     document.documentElement.dataset.fenceObservation = JSON.stringify({
@@ -1665,10 +1742,11 @@ test("Waiting dismissal C3 (mounted Dashboard): retired Dismiss, Undo, Archived 
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });
 
-test("Waiting dismissal batch (mounted Dashboard): Dismiss all stops with zero further dispatches on same-person replacement login, and clean control dismisses five with no batch Undo", { timeout: 180_000 }, async () => {
+test("Waiting dismissal batch (mounted Dashboard): Dismiss all stops with zero further dispatches on same-person replacement login, Undo restores five with their instances, and old-server control shows Dismissed 5 with no Undo", { timeout: 180_000 }, async () => {
   const outcomes = await runFenceScenarios([
     "batch-dismiss-login-swap",
     "batch-dismiss-control",
+    "batch-dismiss-undo",
   ]);
   assert.deepEqual(failures(outcomes), [], JSON.stringify(outcomes));
 });

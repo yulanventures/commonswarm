@@ -8001,13 +8001,14 @@ import "../../styles/kylon-image-viewer.css";
           isAlive,
         });
       },
-      sendRestore: async (workspaceId, itemKind, itemId, actionAlive) => {
+      sendRestore: async (workspaceId, itemKind, itemId, actionAlive, dismissal) => {
         const ctx = waitingActionContext();
         if (!ctx || (actionAlive && !actionAlive())) {
           return { ok: false, status: 0, error: "operation_retired", message: "Action cancelled." };
         }
         const isAlive = (): boolean => ctx.isAlive() && (!actionAlive || actionAlive());
         return restoreWaitingItem(ctx.activeSession, uuid(), workspaceId, itemKind, itemId, {
+          ...(dismissal !== undefined ? { dismissal } : {}),
           pinned: ctx.pinned,
           accountWideWorkspace: true,
           isAlive,
@@ -8139,15 +8140,13 @@ import "../../styles/kylon-image-viewer.css";
       },
       onBatchCancelled: () => {
         const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
-          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-cancel" });
         }
       },
       onBatchStarted: () => {
         const panelNow = one<HTMLElement>("[data-waiting-panel]");
-        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
-          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-running" });
         }
       },
@@ -8156,6 +8155,19 @@ import "../../styles/kylon-image-viewer.css";
         if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
           (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
           waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-done" });
+        }
+      },
+      onBatchUndoStarted: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen()) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-undoing" });
+        }
+      },
+      onBatchUndoFinished: () => {
+        const panelNow = one<HTMLElement>("[data-waiting-panel]");
+        if (panelNow && waitingPanelMod && waitingSurface?.isOpen() &&
+          (!document.activeElement || document.activeElement === document.body || panelNow.contains(document.activeElement))) {
+          waitingPanelMod.focusWaitingPanelAfterAction(panelNow, { kind: "batch-undone" });
         }
       },
     });
@@ -8584,6 +8596,7 @@ import "../../styles/kylon-image-viewer.css";
           onDismissAllConfirm: () => void waitingDismissalCtrl.confirmBatch(),
           onDismissAllCancel: () => waitingDismissalCtrl.cancelBatchConfirm(),
           onDismissAllStop: () => waitingDismissalCtrl.stopBatch(),
+          onDismissAllUndo: () => void waitingDismissalCtrl.undoBatch(),
           onOpenCatchUp: (href) => {
             clearWaitingStatus();
             waitingSurface?.close(false);
