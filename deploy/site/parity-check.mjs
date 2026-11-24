@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 
 function usage() {
-  console.error("Usage: node deploy/site/parity-check.mjs <base-url> [--host <host>] [--ca <file>] [--reference <file>] [--allow-cloudflare-browser-ttl]");
+  console.error("Usage: node deploy/site/parity-check.mjs <base-url> [--host <host>] [--ca <file>] [--reference <file>] [--allow-cloudflare-browser-ttl] [--check-next]");
   process.exitCode = 2;
 }
 
@@ -19,11 +19,16 @@ let host;
 let caPath;
 let referencePath = resolve(here, "vercel-reference.json");
 let allowCloudflareBrowserTtl = false;
+let checkNext = false;
 
 while (args.length > 0) {
   const flag = args.shift();
   if (flag === "--allow-cloudflare-browser-ttl") {
     allowCloudflareBrowserTtl = true;
+    continue;
+  }
+  if (flag === "--check-next") {
+    checkNext = true;
     continue;
   }
   const value = args.shift();
@@ -220,6 +225,94 @@ while (fingerprintedQueue.length > 0) {
   }
 }
 
+let checkedNextAssetsCount = 0;
+if (checkNext) {
+  const nextSecurityHeaders = {
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  };
+  const checkNextHeaders = (path, headers, wantCache) => {
+    for (const [name, want] of Object.entries(nextSecurityHeaders)) {
+      const actual = headers[name] ?? null;
+      if (actual !== want) {
+        differences.push(`${path}: ${name} expected ${JSON.stringify(want)}, got ${JSON.stringify(actual)}`);
+      }
+    }
+    if (wantCache) {
+      const actualCache = headers["cache-control"] ?? null;
+      if (actualCache !== wantCache) {
+        differences.push(`${path}: cache-control expected ${JSON.stringify(wantCache)}, got ${JSON.stringify(actualCache)}`);
+      }
+    }
+  };
+  const collectNextAssets = (source, documentPath, target) => {
+    const docUrl = new URL(documentPath, baseUrl);
+    const ext = extname(docUrl.pathname);
+    const patterns = ext === ".css"
+      ? [/url\(\s*["']?([^"')\s]+)["']?\s*\)/gi]
+      : ext === ".js"
+        ? [/(?:\bfrom\s*|\bimport\s*\(\s*)["'](\.[^"']+\.(?:js|css|woff2))["']/g]
+        : [/(?:src|href)=["']([^"'<>]+)["']/gi];
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) {
+        const ref = match[1].trim();
+        if (/^(?:data:|blob:|#)/i.test(ref)) continue;
+        let resolved;
+        try { resolved = new URL(ref, docUrl); } catch { continue; }
+        if (resolved.origin !== docUrl.origin) {
+          differences.push(`${documentPath}: references third-party origin ${ref}`);
+          continue;
+        }
+        if (resolved.pathname.startsWith("/next/")) {
+          target.add(resolved.pathname);
+        }
+      }
+    }
+  };
+  try {
+    const nextResponse = await get(new URL("/next", baseUrl), host);
+    if (nextResponse.statusCode !== 200) {
+      differences.push(`/next: status expected 200, got ${nextResponse.statusCode}`);
+    }
+    const ct = nextResponse.headers["content-type"] ?? "";
+    if (!ct.startsWith("text/html")) {
+      differences.push(`/next: content-type expected text/html, got ${JSON.stringify(ct)}`);
+    }
+    checkNextHeaders("/next", nextResponse.headers, "no-cache");
+    const nextAssets = new Set();
+    collectNextAssets(nextResponse.body, "/next/index.html", nextAssets);
+    if (nextAssets.size === 0) {
+      differences.push("/next: exposed no /next/ assets; preview asset graph was not reached");
+    }
+    const queue = [...nextAssets].sort();
+    const seen = new Set();
+    while (queue.length > 0) {
+      const assetPath = queue.shift();
+      if (seen.has(assetPath)) continue;
+      seen.add(assetPath);
+      try {
+        const assetRes = await get(new URL(assetPath, baseUrl), host);
+        if (assetRes.statusCode !== 200) {
+          differences.push(`${assetPath}: status expected 200, got ${assetRes.statusCode}`);
+        }
+        const wantCache = assetPath.startsWith("/next/assets/") ? "public, max-age=31536000, immutable" : null;
+        checkNextHeaders(assetPath, assetRes.headers, wantCache);
+        const deps = new Set();
+        collectNextAssets(assetRes.body, assetPath, deps);
+        for (const dep of deps) {
+          if (!seen.has(dep) && !queue.includes(dep)) queue.push(dep);
+        }
+      } catch (error) {
+        differences.push(`${assetPath}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    checkedNextAssetsCount = seen.size;
+  } catch (error) {
+    differences.push(`/next: request failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 if (allowedDifferences.length > 0) {
   console.log(
     `Allowed ${allowedDifferences.length} Cloudflare browser-TTL rewrite(s) on static-extension files.`,
@@ -227,7 +320,7 @@ if (allowedDifferences.length > 0) {
 }
 
 const fingerprintedRouteCount = checkedFingerprintedPaths.size * 2;
-const routeCount = reference.routes.length + fingerprintedRouteCount;
+const routeCount = reference.routes.length + fingerprintedRouteCount + (checkNext ? 1 + checkedNextAssetsCount : 0);
 if (differences.length > 0) {
   console.error(`Parity failed with ${differences.length} difference(s):`);
   for (const difference of differences) console.error(`- ${difference}`);
