@@ -15,7 +15,7 @@ import {
   renderWaitingPanel,
 } from "./waiting-panel.ts";
 import { buildWaitingButton, syncWaitingButtonToggle, updateWaitingButton } from "./waiting-count.ts";
-import { answerChoice, answerPlainAsk, dismissWaitingItem, dismissWaitingItemCommand, plainAskReplyCommand, restoreWaitingItem, restoreWaitingItemCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
+import { answerChoice, answerPlainAsk, client, dismissWaitingItem, dismissWaitingItemCommand, plainAskReplyCommand, restoreWaitingItem, restoreWaitingItemCommand, STALE_ASK_CLOSE_BODY } from "./commonswarm.ts";
 import { createWaitingDismissalController } from "./waiting-dismissal.ts";
 import { parseDecisionQueue, parseWaitingArchivedPage, parseWaitingTodosQueue } from "./home/client.ts";
 
@@ -1357,6 +1357,10 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     expires_in: 3600,
     user: { id: "u-a" },
   };
+  const supa = client();
+  assert.ok(supa, "authoritative client initialized for guarded action test");
+  const origGetSession = supa.auth.getSession.bind(supa.auth);
+  supa.auth.getSession = async () => ({ data: { session: fakeSession }, error: null });
   try {
     // 1. Pre-retired guard blocks dispatch with zero HTTP calls for both wrappers.
     const choiceBlocked = await answerChoice(fakeSession, "cmd-1", "ws-1", "sig-1", false, { optionIds: ["yes"], otherText: null }, { isAlive: () => false });
@@ -1385,6 +1389,8 @@ test("answerChoice and answerPlainAsk forward isAlive to fence dispatch and 401 
     assert.deepEqual(plainOk, { ok: true });
     assert.equal(calls.length, 2);
   } finally {
+    supa.auth.getSession = origGetSession;
+    try { await supa.auth.stopAutoRefresh(); } catch { /* ignore */ }
     globalThis.document = prevDocument;
     globalThis.fetch = prevFetch;
   }

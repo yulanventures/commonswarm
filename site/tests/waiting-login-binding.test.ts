@@ -865,7 +865,7 @@ test("LiveDashboard sendWaitingPanelChoice and sendWaitingPlainAsk enforce attem
   assert.equal(refreshes, 0, "still-owned cancelled plain ask triggers no data refresh");
 });
 
-test("direct (non-VM) guarded postCommand uses existing cachedSession.client without creating one prematurely", async () => {
+test("direct (non-VM) guarded postCommand retires with zero POSTs when no client exists without creating one, and verifies via existing cachedSession.client", async () => {
   const login1Initial = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 1 });
   const login1Rotated = makeJwt({ sub: OWNER, session_id: "sess-direct-1", rev: 2 });
   const login2Other = makeJwt({ sub: OWNER, session_id: "sess-direct-2", rev: 1 });
@@ -876,7 +876,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
   const sentBearers: string[] = [];
   const origFetch = globalThis.fetch;
   configureMultiAccountForTesting({
-    deployment: { url: "https://api.test.invalid", anonKey: "synthetic-public-key" },
+    deployment: { url: "https://no-client-sentinel.test.invalid", anonKey: "sentinel-public-key" },
   });
   globalThis.fetch = (async (input, init) => {
     const req = new Request(input, init);
@@ -887,7 +887,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
   let initializedClient: ReturnType<typeof directClient> = null;
   let origGetSession: NonNullable<ReturnType<typeof directClient>>["auth"]["getSession"] | null = null;
   try {
-    // 1. Before client() is ever created, guarded postCommand must not throw or create a client.
+    // 1. Before client() is ever created, guarded postCommand retires with operation_retired, zero POSTs, and does not create a client.
     const beforeClient = await directPostCommand(
       initialSession as never,
       "cmd-direct-no-client",
@@ -896,12 +896,22 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
       undefined,
       { isAlive: () => true },
     );
-    assert.equal(beforeClient.status, 200);
-    assert.deepEqual(sentBearers, [`Bearer ${login1Initial}`]);
+    assert.equal(beforeClient.status, 0);
+    assert.equal(beforeClient.body.error, "operation_retired");
+    assert.equal(sentBearers.length, 0, "guarded postCommand must dispatch zero POSTs when no authoritative client exists");
 
     // 2. Once client() exists (real cachedSession.client), guarded postCommand calls its auth.getSession().
+    // Changing deployment first proves step 1 did not create and cache a client on the sentinel URL.
+    configureMultiAccountForTesting({
+      deployment: { url: "https://api.test.invalid", anonKey: "synthetic-public-key" },
+    });
     initializedClient = directClient();
     assert.ok(initializedClient, "direct client() initialized");
+    assert.equal(
+      (initializedClient as unknown as { supabaseUrl?: string }).supabaseUrl,
+      "https://api.test.invalid",
+      "step 1 must not have created cachedSession.client",
+    );
     origGetSession = initializedClient.auth.getSession.bind(initializedClient.auth);
 
     let fakeSession = rotatedSession;
@@ -921,7 +931,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
     );
     assert.equal(getSessionCalls, 1, "guarded acquisition must call cachedSession.client.auth.getSession()");
     assert.equal(rotatedRes.status, 200);
-    assert.equal(sentBearers[1], `Bearer ${login1Rotated}`);
+    assert.deepEqual(sentBearers, [`Bearer ${login1Rotated}`]);
 
     // 3. Different session_id from cachedSession.client.auth.getSession() retires silently with 0 dispatches.
     fakeSession = otherLoginSession;
@@ -936,7 +946,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
     assert.equal(getSessionCalls, 2);
     assert.equal(swappedRes.status, 0);
     assert.equal(swappedRes.body.error, "operation_retired");
-    assert.equal(sentBearers.length, 2, "must not dispatch when direct client returns a different login");
+    assert.equal(sentBearers.length, 1, "must not dispatch when direct client returns a different login");
 
     // 4. Empty session from shared-session acquisition retires without falling back to the supplied token.
     fakeSession = null as never;
@@ -951,7 +961,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
     assert.equal(getSessionCalls, 3);
     assert.equal(emptyRes.status, 0);
     assert.equal(emptyRes.body.error, "operation_retired");
-    assert.equal(sentBearers.length, 2, "must never fall back to supplied token when shared session returns null");
+    assert.equal(sentBearers.length, 1, "must never fall back to supplied token when shared session returns null");
 
     // 5. Acquisition error or throw retires without falling back to the supplied token.
     initializedClient.auth.getSession = (async () => {
@@ -969,7 +979,7 @@ test("direct (non-VM) guarded postCommand uses existing cachedSession.client wit
     assert.equal(getSessionCalls, 4);
     assert.equal(errRes.status, 0);
     assert.equal(errRes.body.error, "operation_retired");
-    assert.equal(sentBearers.length, 2, "must never fall back to supplied token when shared session errors");
+    assert.equal(sentBearers.length, 1, "must never fall back to supplied token when shared session errors");
   } finally {
     if (initializedClient && origGetSession) {
       initializedClient.auth.getSession = origGetSession;
