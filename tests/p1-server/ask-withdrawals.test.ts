@@ -381,7 +381,7 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
       const views = await readWaitingViewsAs(wsId, user.id);
       assert.equal((views.dq as { total: number }).total, 1, `${label} dq=${JSON.stringify(views.dq)}`);
       assert.equal((views.dqp as { total: number }).total, 1, `${label} dqp=${JSON.stringify(views.dqp)}`);
-      assert.equal(views.wsOverview?.waiting_count, 1, `${label} ho=${JSON.stringify(views.wsOverview)}`);
+      assert.equal((views.wsOverview?.needs_you as { asks: unknown[] } | undefined)?.asks.length, 1, `${label} ho=${JSON.stringify(views.wsOverview)}`);
     }
 
     // 2. Uniform 404 for unknown UUID, another agent of the same owner (AgentB), owner, and admin; stranger gets 403 at workspace gate.
@@ -470,7 +470,7 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
       const views = await readWaitingViewsAs(wsId, user.id);
       assert.equal((views.dq as { total: number }).total, 0, `${label} dq=${JSON.stringify(views.dq)}`);
       assert.equal((views.dqp as { total: number }).total, 0, `${label} dqp=${JSON.stringify(views.dqp)}`);
-      assert.equal(views.wsOverview?.waiting_count, 0, `${label} ho=${JSON.stringify(views.wsOverview)}`);
+      assert.equal((views.wsOverview?.needs_you as { asks: unknown[] } | undefined)?.asks.length, 0, `${label} ho=${JSON.stringify(views.wsOverview)}`);
       const archived = (views.wa as { items: Array<Row> }).items.filter((i) => i.item_key === `ask:${multiAskId}`);
       assert.equal(archived.length, 1, `${label} archived=${JSON.stringify(views.wa)}`);
       assert.equal(archived[0]!.outcome_kind, "withdrawn", `${label} archived[0]=${JSON.stringify(archived[0])}`);
