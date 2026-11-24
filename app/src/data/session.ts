@@ -58,6 +58,7 @@ export interface AcquiredAccessToken {
 export type SessionListener = () => void;
 export type LoginPurgeListener = (loginGeneration: number) => void;
 export type SynchronousViewRetireListener = () => void;
+export type TokenRefreshListener = () => void;
 
 export interface SessionGateDependencies {
   /** Override document used to read `<meta>` runtime config. */
@@ -88,12 +89,14 @@ export interface SessionGate {
   readonly loginGeneration: number;
   readonly client: SupabaseClient | null;
   readonly deployment: { readonly url: string; readonly anonKey: string } | null;
+  readonly isHidden: boolean;
   readonly fenceTracker: FenceTracker;
   readonly fetchImpl: typeof fetch;
   getSnapshot(): SessionSnapshot;
   subscribe(listener: SessionListener): () => void;
   onLoginPurge(listener: LoginPurgeListener): () => void;
   onSynchronousViewRetire(listener: SynchronousViewRetireListener): () => void;
+  onTokenRefresh(listener: TokenRefreshListener): () => void;
   acquireAccessToken(): Promise<AcquiredAccessToken | null>;
   handleUnauthorized(fence: Fence, loginIdentity?: LoginIdentity | null): boolean;
   handlePagehide(): void;
@@ -159,6 +162,7 @@ export function createSessionGate(
   const listeners = new Set<SessionListener>();
   const purgeListeners = new Set<LoginPurgeListener>();
   const viewRetireListeners = new Set<SynchronousViewRetireListener>();
+  const tokenRefreshListeners = new Set<TokenRefreshListener>();
   const fetchImpl: typeof fetch =
     deps.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 
@@ -219,6 +223,16 @@ export function createSessionGate(
     }
   };
 
+  const runTokenRefreshListeners = (): void => {
+    for (const listener of [...tokenRefreshListeners]) {
+      try {
+        listener();
+      } catch {
+        // Isolate subscriber errors.
+      }
+    }
+  };
+
   const detachAndQuiesceClient = (): void => {
     authSubscription?.unsubscribe();
     authSubscription = null;
@@ -233,6 +247,29 @@ export function createSessionGate(
     if (typeof sessionToQuiesce.quiesce === 'function') {
       void sessionToQuiesce.quiesce().catch(() => undefined);
     } else {
+      const realtime = (
+        sessionToQuiesce.client as unknown as {
+          removeAllChannels?: () => Promise<unknown>;
+          realtime?: {
+            removeAllChannels?: () => Promise<unknown>;
+            disconnect?: () => Promise<unknown>;
+          };
+        }
+      );
+      if (typeof realtime?.removeAllChannels === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.removeAllChannels!())
+          .catch(() => undefined);
+      } else if (typeof realtime?.realtime?.removeAllChannels === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.realtime!.removeAllChannels!())
+          .catch(() => undefined);
+      }
+      if (typeof realtime?.realtime?.disconnect === 'function') {
+        void Promise.resolve()
+          .then(() => realtime.realtime!.disconnect!())
+          .catch(() => undefined);
+      }
       const auth = sessionToQuiesce.client?.auth as
         | { dispose?: () => Promise<void>; stopAutoRefresh?: () => Promise<void> }
         | undefined;
@@ -423,11 +460,13 @@ export function createSessionGate(
       return;
     }
 
-    // Same login (refresh of same session_id while authenticated): keep state intact.
+    // Same login (refresh of same session_id while authenticated): keep state intact
+    // and notify live realtime generations to refresh their bearer through the fenced path.
     if (
       state.status === 'authenticated' &&
       sameLoginIdentity(fenceTracker.loginIdentity, nextIdentity)
     ) {
+      runTokenRefreshListeners();
       return;
     }
 
@@ -543,7 +582,9 @@ export function createSessionGate(
               state.status === 'authenticated' &&
               sameLoginIdentity(fenceTracker.loginIdentity, nextIdentity)
             ) {
-              // Token refresh of the same verified login: keep gateGeneration, loginGeneration, and cache intact.
+              // Token refresh of the same verified login: keep gateGeneration, loginGeneration, and cache intact,
+              // and notify live realtime generations to update their bearer through the fenced path.
+              runTokenRefreshListeners();
               return;
             }
 
@@ -696,6 +737,7 @@ export function createSessionGate(
     listeners.clear();
     purgeListeners.clear();
     viewRetireListeners.clear();
+    tokenRefreshListeners.clear();
   };
 
   return {
@@ -713,6 +755,9 @@ export function createSessionGate(
     },
     get deployment() {
       return deployment;
+    },
+    get isHidden() {
+      return hiddenByPagehide;
     },
     fenceTracker,
     fetchImpl,
@@ -735,6 +780,12 @@ export function createSessionGate(
       viewRetireListeners.add(listener);
       return () => {
         viewRetireListeners.delete(listener);
+      };
+    },
+    onTokenRefresh(listener) {
+      tokenRefreshListeners.add(listener);
+      return () => {
+        tokenRefreshListeners.delete(listener);
       };
     },
     acquireAccessToken,

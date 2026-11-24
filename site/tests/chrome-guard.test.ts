@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  allowedChromePath, browserSkipMessage, browserTest, buildChromeArgs, findChrome,
-  findChromeFromCandidates, launchChrome, playwrightCachePaths, requireBrowserTests,
+  ALLOWED_PLAYWRIGHT_EXTRA_ARGS, allowedChromePath, browserSkipMessage, browserTest,
+  buildChromeArgs, buildPlaywrightLaunchOptions, findChrome, findChromeFromCandidates,
+  launchChrome, playwrightCachePaths, requireBrowserTests,
 } from "./chrome.js";
 
 const forbiddenBrowser = "/Applications/ChromeGuardFake.app/Contents/MacOS/ChromeGuardFake";
@@ -315,5 +316,50 @@ test("launcher uses the normal process model only for explicit CI markers", asyn
       else process.env[key] = saved[key];
     }
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Playwright launcher options keep shared safety flags and allowlist only navigation-cache extras", () => {
+  assert.deepEqual(buildPlaywrightLaunchOptions(), {
+    args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox"],
+  });
+  assert.deepEqual(buildPlaywrightLaunchOptions({ enableBfcache: true }), {
+    args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox", "--enable-bfcache"],
+    ignoreDefaultArgs: ["--disable-back-forward-cache"],
+  });
+  assert.deepEqual(
+    buildPlaywrightLaunchOptions({ enableBfcache: true, extraArgs: ["--enable-bfcache"] }),
+    {
+      args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox", "--enable-bfcache"],
+      ignoreDefaultArgs: ["--disable-back-forward-cache"],
+    },
+  );
+  assert.deepEqual(
+    buildPlaywrightLaunchOptions({ extraArgs: ["--enable-features=BackForwardCache"] }),
+    {
+      args: [
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--no-sandbox",
+        "--enable-features=BackForwardCache",
+      ],
+    },
+  );
+  assert.deepEqual([...ALLOWED_PLAYWRIGHT_EXTRA_ARGS].sort(), [
+    "--enable-bfcache",
+    "--enable-features=BackForwardCache",
+  ]);
+  for (const disallowed of [
+    "--disable-web-security",
+    "--user-data-dir=/tmp/caller-profile",
+    "--remote-debugging-port=9222",
+    "--headless=old",
+    "--enable-features=BackForwardCache,OtherFeature",
+  ]) {
+    assert.throws(
+      () => buildPlaywrightLaunchOptions({ extraArgs: [disallowed] }),
+      /disallowed Playwright launch arg/u,
+      disallowed,
+    );
   }
 });

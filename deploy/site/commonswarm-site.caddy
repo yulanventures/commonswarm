@@ -18,12 +18,23 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 			Cache-Control "public, max-age=0, must-revalidate"
 		}
 
-		# Astro names every file under /_astro/ after a hash of its contents, so a name never
-		# changes what it holds: the browser may keep it for a year without asking again.
-		# Pages, fonts and everything else keep the rule above. A miss resets this in
+		# Astro names every file under /_astro/ and Vite names every file under /next/assets/ after a hash
+		# of its contents, so a name never changes what it holds: the browser may keep it for a year without
+		# asking again. Pages, fonts and everything else keep the rule above. A miss resets this in
 		# handle_errors, so a 404 for a hashed name is never kept.
-		@hashed path /_astro/*
+		@hashed path /_astro/* /next/assets/*
 		header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+		# Preview app security headers apply to every response under /next (HTML, assets, fonts, and errors)
+		# and nowhere else. Preview HTML is never cached; hashed preview assets keep the long-lived rule above.
+		@next path /next /next/*
+		header @next {
+			Content-Security-Policy "frame-ancestors 'none'"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+		}
+		@nextHtml path /next /next/ /next/index.html /next/index.html/
+		header @nextHtml Cache-Control "no-cache"
 
 		# Vercel treats a slash after a file name as the file itself. Remove that
 		# slash before MIME matching and file lookup. This also turns a missing
@@ -84,7 +95,7 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 		# A release that has no /404.html also keeps the plain answer, so this block and the
 		# site can ship in either order.
 		@notFoundPage {
-			expression `({http.error.status_code} == 404 || {http.error.status_code} == 400) && !{http.request.orig_uri.path}.matches("^/(_astro|fonts)/") && ({http.request.orig_uri.path}.matches("\\.html?/?$") || !{http.request.orig_uri.path}.matches("\\.[^/.]+/?$"))`
+			expression `({http.error.status_code} == 404 || {http.error.status_code} == 400) && !{http.request.orig_uri.path}.matches("^/(_astro|fonts|next/assets|next/fonts)/") && ({http.request.orig_uri.path}.matches("\\.html?/?$") || !{http.request.orig_uri.path}.matches("\\.[^/.]+/?$"))`
 			file /404.html
 		}
 		handle @notFoundPage {

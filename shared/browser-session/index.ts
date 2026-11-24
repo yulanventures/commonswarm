@@ -715,9 +715,56 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
           ? authApi.stopAutoRefresh()
           : Promise.resolve();
 
-    // Immediate teardown closes BroadcastChannel, clears auth listeners, and stops any
-    // already-registered visibility listener or auto-refresh timer right away.
+    const runRealtimeTeardown = (): Promise<void> => {
+      const realtimeApi = (
+        client as unknown as {
+          getChannels?: () => unknown[];
+          removeAllChannels?: () => Promise<unknown>;
+          realtime?: {
+            getChannels?: () => unknown[];
+            removeAllChannels?: () => Promise<unknown>;
+            disconnect?: () => Promise<unknown>;
+            isConnected?: () => boolean;
+            isConnecting?: () => boolean;
+            connectionState?: () => string;
+          };
+        }
+      );
+      const rt = realtimeApi.realtime;
+      const channels =
+        typeof realtimeApi.getChannels === "function"
+          ? realtimeApi.getChannels()
+          : typeof rt?.getChannels === "function"
+            ? rt.getChannels()
+            : [];
+      const hasSocketActivity =
+        (Array.isArray(channels) && channels.length > 0) ||
+        Boolean(rt?.isConnected?.()) ||
+        Boolean(rt?.isConnecting?.()) ||
+        (typeof rt?.connectionState === "function" && rt.connectionState() !== "closed");
+      if (!hasSocketActivity) {
+        return Promise.resolve();
+      }
+      try {
+        if (typeof realtimeApi.removeAllChannels === "function") {
+          return Promise.resolve(realtimeApi.removeAllChannels()).then(() => undefined, () => undefined);
+        }
+        if (typeof rt?.removeAllChannels === "function") {
+          return Promise.resolve(rt.removeAllChannels()).then(() => undefined, () => undefined);
+        }
+        if (typeof rt?.disconnect === "function") {
+          return Promise.resolve(rt.disconnect()).then(() => undefined, () => undefined);
+        }
+      } catch {
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    };
+
+    // Immediate teardown closes BroadcastChannel, clears auth listeners, drops realtime channels/sockets,
+    // and stops any already-registered visibility listener or auto-refresh timer right away.
     const initialDispose = runSdkDispose();
+    const initialRealtimeTeardown = runRealtimeTeardown();
 
     // `_initialize()` unconditionally calls `_handleVisibilityChange()` in its `finally`
     // (`GoTrueClient.ts`), which attaches a new `visibilitychange` listener on `window`
@@ -735,6 +782,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
     quiescePromise = (async () => {
       await Promise.allSettled([
         initialDispose,
+        initialRealtimeTeardown,
         initTeardown,
         ...activeAuthFetches,
         ...(activeStorageRetry ? [activeStorageRetry] : []),
@@ -742,6 +790,7 @@ export function createBrowserSession(options: CreateBrowserSessionOptions): Crea
       ]);
       // Final idempotent teardown after every in-flight operation has settled.
       await runSdkDispose();
+      await runRealtimeTeardown();
       // Allow any SDK lock callback catching our abort/quiesce error to finish its finally block.
       await Promise.resolve();
     })();

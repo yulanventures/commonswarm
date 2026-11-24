@@ -30,12 +30,16 @@ cleanup() {
 trap cleanup EXIT
 
 site="$work/site"
-mkdir -p "$site/guides/x" "$site/_astro" "$site/fonts" "$site/skills/cswarm"
+mkdir -p "$site/guides/x" "$site/_astro" "$site/fonts" "$site/skills/cswarm" "$site/next/assets" "$site/next/fonts"
 printf '<!doctype html><title>home</title>home\n' > "$site/index.html"
 printf '<!doctype html><title>guide</title>guide\n' > "$site/guides/x/index.html"
 printf 'console.log(1)\n' > "$site/_astro/a.Ab12Cd34.js"
 printf 'a{}\n' > "$site/_astro/b.Ef56Gh78.css"
 printf 'font\n' > "$site/fonts/x.woff2"
+printf '<!doctype html><title>next</title>next\n' > "$site/next/index.html"
+printf 'console.log("next")\n' > "$site/next/assets/index-Ab12Cd34.js"
+printf '.next{}\n' > "$site/next/assets/index-Ef56Gh78.css"
+printf 'font\n' > "$site/next/fonts/inter-latin.woff2"
 printf '# api\n' > "$site/api.md"
 printf 'llms\n' > "$site/llms.txt"
 printf '# skill\n' > "$site/skills/cswarm/SKILL.md"
@@ -78,13 +82,16 @@ pid=$!
 for _ in $(seq 1 50); do local_curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.1; done
 
 failures=0
-# check <path> <status> <content-type prefix> <body: file|page|plain> <cache: revalidate|immutable>
+# check <path> <status> <content-type prefix> <body: file|page|plain> <cache: revalidate|immutable|no-cache> [sec: none|next]
 check() {
-  local path="$1" want_status="$2" want_type="$3" want_body="$4" want_cache="$5"
-  local status type cache body got_body got_cache
+  local path="$1" want_status="$2" want_type="$3" want_body="$4" want_cache="$5" want_sec="${6:-none}"
+  local status type cache csp nosniff referrer body got_body got_cache got_sec
   status="$(local_curl -s -D "$work/headers" -o "$work/body" -w '%{http_code}' "http://127.0.0.1:$port$path")"
   type="$(tr -d '\r' < "$work/headers" | awk -F': ' 'tolower($1)=="content-type"{print $2}')"
   cache="$(tr -d '\r' < "$work/headers" | awk -F': ' 'tolower($1)=="cache-control"{print $2}')"
+  csp="$(tr -d '\r' < "$work/headers" | awk -F': ' 'tolower($1)=="content-security-policy"{print $2}')"
+  nosniff="$(tr -d '\r' < "$work/headers" | awk -F': ' 'tolower($1)=="x-content-type-options"{print $2}')"
+  referrer="$(tr -d '\r' < "$work/headers" | awk -F': ' 'tolower($1)=="referrer-policy"{print $2}')"
   body="$(head -c 200 "$work/body")"
   case "$body" in
     *"Page not found"*) got_body=page ;;
@@ -94,66 +101,98 @@ check() {
   case "$cache" in
     "public, max-age=0, must-revalidate") got_cache=revalidate ;;
     "public, max-age=31536000, immutable") got_cache=immutable ;;
+    "no-cache") got_cache=no-cache ;;
     *) got_cache="other($cache)" ;;
   esac
-  if [ "$status" = "$want_status" ] && [ "${type#"$want_type"}" != "$type" ] && [ "$got_body" = "$want_body" ] && [ "$got_cache" = "$want_cache" ]; then
-    printf 'ok    %-34s %s %-28s %-5s %s\n' "$path" "$status" "$type" "$got_body" "$got_cache"
+  if [ "$csp" = "frame-ancestors 'none'" ] && [ "$nosniff" = "nosniff" ] && [ "$referrer" = "no-referrer" ]; then
+    got_sec=next
+  elif [ -z "$csp" ] && [ -z "$nosniff" ] && [ -z "$referrer" ]; then
+    got_sec=none
   else
-    printf 'FAIL  %-34s got %s | %s | %s | %s   want %s | %s | %s | %s\n' "$path" "$status" "$type" "$got_body" "$got_cache" "$want_status" "$want_type" "$want_body" "$want_cache"
+    got_sec="other(csp=$csp,nosniff=$nosniff,ref=$referrer)"
+  fi
+  if [ "$status" = "$want_status" ] && [ "${type#"$want_type"}" != "$type" ] && [ "$got_body" = "$want_body" ] && [ "$got_cache" = "$want_cache" ] && [ "$got_sec" = "$want_sec" ]; then
+    printf 'ok    %-36s %s %-28s %-5s %-10s %s\n' "$path" "$status" "$type" "$got_body" "$got_cache" "$got_sec"
+  else
+    printf 'FAIL  %-36s got %s | %s | %s | %s | %s   want %s | %s | %s | %s | %s\n' "$path" "$status" "$type" "$got_body" "$got_cache" "$got_sec" "$want_status" "$want_type" "$want_body" "$want_cache" "$want_sec"
     failures=$((failures + 1))
   fi
 }
 
 real_files() {
-  check /                              200 "text/html"               file  revalidate
-  check /guides/x                      200 "text/html"               file  revalidate
-  check /guides/x/                     200 "text/html"               file  revalidate
-  check /api.md                        200 "text/markdown"           file  revalidate
-  check /llms.txt                      200 "text/plain"              file  revalidate
-  check /sitemap.xml                   200 "application/xml"         file  revalidate
-  check /fonts/x.woff2                 200 "font/woff2"              file  revalidate
-  check /_astro/a.Ab12Cd34.js          200 "application/javascript"  file  immutable
-  check /_astro/b.Ef56Gh78.css         200 "text/css"                file  immutable
+  check /                                200 "text/html"               file  revalidate none
+  check /guides/x                        200 "text/html"               file  revalidate none
+  check /guides/x/                       200 "text/html"               file  revalidate none
+  check /api.md                          200 "text/markdown"           file  revalidate none
+  check /llms.txt                        200 "text/plain"              file  revalidate none
+  check /sitemap.xml                     200 "application/xml"         file  revalidate none
+  check /fonts/x.woff2                   200 "font/woff2"              file  revalidate none
+  check /_astro/a.Ab12Cd34.js            200 "application/javascript"  file  immutable  none
+  check /_astro/b.Ef56Gh78.css           200 "text/css"                file  immutable  none
+  check /next                            200 "text/html"               file  no-cache   next
+  check /next/                           200 "text/html"               file  no-cache   next
+  check /next/index.html                 200 "text/html"               file  no-cache   next
+  check /next/assets/index-Ab12Cd34.js   200 "application/javascript"  file  immutable  next
+  check /next/assets/index-Ef56Gh78.css  200 "text/css"                file  immutable  next
+  check /next/fonts/inter-latin.woff2    200 "font/woff2"              file  revalidate next
 }
 # A miss that is not asking for a page: always the plain answer, never HTML, never kept.
 file_misses() {
-  check /missing.js                    404 "text/plain"              plain revalidate
-  check /docs/missing.md               404 "text/plain"              plain revalidate
-  check /skills/cswarm/OTHER.md        404 "text/plain"              plain revalidate
-  check /missing.txt                   404 "text/plain"              plain revalidate
-  check /missing.json                  404 "text/plain"              plain revalidate
-  check /missing.xml                   404 "text/plain"              plain revalidate
-  check /missing.png                   404 "text/plain"              plain revalidate
-  check /install.sh                    404 "text/plain"              plain revalidate
-  check /api.md/                       200 "text/markdown"           file  revalidate
-  check /missing.md/                   404 "text/plain"              plain revalidate
-  check /_astro/missing.Zz99Yy88.js    404 "text/plain"              plain revalidate
-  check /_astro/missing.Zz99Yy88.css   404 "text/plain"              plain revalidate
-  check /_astro/                       404 "text/plain"              plain revalidate
-  check /_astro/nodots                 404 "text/plain"              plain revalidate
-  check /fonts/missing.woff2           404 "text/plain"              plain revalidate
-  check /fonts/nodots                  404 "text/plain"              plain revalidate
-  check /.env                          404 "text/plain"              plain revalidate
+  check /missing.js                      404 "text/plain"              plain revalidate none
+  check /docs/missing.md                 404 "text/plain"              plain revalidate none
+  check /skills/cswarm/OTHER.md          404 "text/plain"              plain revalidate none
+  check /missing.txt                     404 "text/plain"              plain revalidate none
+  check /missing.json                    404 "text/plain"              plain revalidate none
+  check /missing.xml                     404 "text/plain"              plain revalidate none
+  check /missing.png                     404 "text/plain"              plain revalidate none
+  check /install.sh                      404 "text/plain"              plain revalidate none
+  check /api.md/                         200 "text/markdown"           file  revalidate none
+  check /missing.md/                     404 "text/plain"              plain revalidate none
+  check /_astro/missing.Zz99Yy88.js      404 "text/plain"              plain revalidate none
+  check /_astro/missing.Zz99Yy88.css     404 "text/plain"              plain revalidate none
+  check /_astro/                         404 "text/plain"              plain revalidate none
+  check /_astro/nodots                   404 "text/plain"              plain revalidate none
+  check /fonts/missing.woff2             404 "text/plain"              plain revalidate none
+  check /fonts/nodots                    404 "text/plain"              plain revalidate none
+  check /.env                            404 "text/plain"              plain revalidate none
+  check /next/assets/missing.Zz99Yy88.js  404 "text/plain"             plain revalidate next
+  check /next/assets/missing.Zz99Yy88.css 404 "text/plain"             plain revalidate next
+  check /next/assets/                    404 "text/plain"              plain revalidate next
+  check /next/assets/nodots              404 "text/plain"              plain revalidate next
+  check /next/fonts/missing.woff2        404 "text/plain"              plain revalidate next
+  check /next/fonts/nodots               404 "text/plain"              plain revalidate next
+  check /next/.env                       404 "text/plain"              plain revalidate next
 }
 
 echo "--- the release has no /404.html: every miss is the plain answer"
 real_files
 file_misses
-check /nope                            404 "text/plain"              plain revalidate
-check /nope/deep/er/                   404 "text/plain"              plain revalidate
+check /nope                            404 "text/plain"              plain revalidate none
+check /nope/deep/er/                   404 "text/plain"              plain revalidate none
+check /next-other                      404 "text/plain"              plain revalidate none
+check /next/deep/missing               404 "text/plain"              plain revalidate next
 
 printf '<!doctype html><title>Page not found</title><h1>We cannot find that page.</h1>\n' > "$site/404.html"
 echo "--- the release has /404.html: page requests get it with status 404; file requests do not"
 real_files
 file_misses
-check /nope                            404 "text/html"               page  revalidate
-check /nope/                           404 "text/html"               page  revalidate
-check /nope/deep/er                    404 "text/html"               page  revalidate
-check /guides/missing                  404 "text/html"               page  revalidate
-check /old-page.html                   404 "text/html"               page  revalidate
-check /v1.2/guide                      404 "text/html"               page  revalidate
-check /api.md/extra                    404 "text/html"               page  revalidate
-check /404                             404 "text/html"               page  revalidate
+check /nope                            404 "text/html"               page  revalidate none
+check /nope/                           404 "text/html"               page  revalidate none
+check /nope/deep/er                    404 "text/html"               page  revalidate none
+check /guides/missing                  404 "text/html"               page  revalidate none
+check /old-page.html                   404 "text/html"               page  revalidate none
+check /v1.2/guide                      404 "text/html"               page  revalidate none
+check /api.md/extra                    404 "text/html"               page  revalidate none
+check /404                             404 "text/html"               page  revalidate none
+check /next-other                      404 "text/html"               page  revalidate none
+check /next/deep/missing               404 "text/html"               page  revalidate next
+
+rm -rf "$site/next"
+echo "--- the release has no /next: /next returns the site's normal 404"
+check /next                            404 "text/html"               page  revalidate next
+check /next/                           404 "text/html"               page  revalidate next
+check /next/index.html                 404 "text/html"               page  revalidate next
+check /next/assets/index-Ab12Cd34.js   404 "text/plain"              plain revalidate next
 
 
 # --- The TLS block, on its own listener with throwaway certificates -------------------------------------------
