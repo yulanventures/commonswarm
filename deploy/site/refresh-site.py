@@ -27,17 +27,36 @@ def prepare(live, target):
         if not (root / '_astro').is_dir():
             raise ValueError('assets directory required')
     pending = []
-    for source in (live / '_astro').rglob('*'):
-        dest = target / '_astro' / source.relative_to(live / '_astro')
-        if source.is_dir():
-            if dest.exists() and not dest.is_dir():
+
+    def collect_assets(rel_path):
+        live_assets = live / rel_path
+        target_assets = target / rel_path
+        if not live_assets.exists():
+            return
+        if not live_assets.is_dir():
+            raise ValueError('asset directory collision')
+        parent = target
+        for part in Path(rel_path).parts:
+            parent = parent / part
+            if parent.exists() and not parent.is_dir():
                 raise ValueError('asset directory collision')
-        else:
-            if dest.exists():
-                if not dest.is_file() or source.read_bytes() != dest.read_bytes():
-                    raise ValueError('asset byte collision')
+        for source in live_assets.rglob('*'):
+            dest = target_assets / source.relative_to(live_assets)
+            if source.is_dir():
+                if dest.exists() and not dest.is_dir():
+                    raise ValueError('asset directory collision')
             else:
-                pending.append((source, dest))
+                if dest.exists():
+                    if not dest.is_file() or source.read_bytes() != dest.read_bytes():
+                        raise ValueError('asset byte collision')
+                else:
+                    pending.append((source, dest))
+
+    collect_assets('_astro')
+    if (live / 'next').exists():
+        if not (live / 'next').is_dir():
+            raise ValueError('asset directory collision')
+        collect_assets(Path('next') / 'assets')
     html = list(target.rglob('*.html'))
     served = list(live.rglob('*.html'))
     if not html or not served:
@@ -67,8 +86,51 @@ def prepare(live, target):
         raise ValueError('HTML freshness clock invalid')
 
 
+EXPECTED_NEXT_CSP = b"frame-ancestors 'none'"
+
+
+def check_next_csp(headers_path):
+    """Require a single exact Content-Security-Policy header on the final HTTP response block."""
+    raw = Path(headers_path).read_bytes()
+    lines = [line[:-1] if line.endswith(b'\r') else line for line in raw.split(b'\n')]
+    status_indices = [
+        idx for idx, line in enumerate(lines)
+        if line.startswith(b'HTTP/') and len(line) > 5 and 48 <= line[5] <= 57
+    ]
+    if not status_indices:
+        return 'invalid-http-headers'
+    final_lines = lines[status_indices[-1] + 1:]
+    csp_values = []
+    last_header = None
+    for line in final_lines:
+        if line == b'':
+            break
+        if line[:1] in (b' ', b'\t'):
+            if last_header == b'content-security-policy':
+                return 'invalid-http-headers'
+            continue
+        name, sep, value = line.partition(b':')
+        if not sep or not name:
+            return 'invalid-http-headers'
+        last_header = name.lower()
+        if last_header == b'content-security-policy':
+            csp_values.append(value)
+    if len(csp_values) == 0:
+        return 'missing-csp'
+    if len(csp_values) > 1:
+        return 'multiple-csp'
+    if csp_values[0].strip(b' \t') != EXPECTED_NEXT_CSP:
+        return 'csp-mismatch'
+    return None
+
+
 if __name__ == '__main__':
     try:
-        prepare(*sys.argv[1:])
+        if len(sys.argv) == 3 and sys.argv[1] == '--check-next-csp':
+            reason = check_next_csp(sys.argv[2])
+            if reason is not None:
+                sys.exit(reason)
+        else:
+            prepare(*sys.argv[1:])
     except Exception as error:
         sys.exit('Refusing site refresh: ' + str(error))

@@ -1,11 +1,14 @@
 import {
   QueryClient,
   QueryClientProvider,
+  useInfiniteQuery,
   useQuery,
+  type InfiniteData,
 } from '@tanstack/react-query';
 import {
   createContext,
   createElement,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -16,15 +19,20 @@ import { appActions, getSnapshot as getStoreSnapshot, useAppStore } from '../sto
 import {
   adaptAgents,
   adaptChannels,
+  adaptConversationHeader,
+  adaptConversationMessages,
   adaptDirectMessages,
   adaptPeople,
   adaptWaitingCount,
   adaptWorkspaces,
+  type RealConversationHeader,
 } from './adapter';
 import {
+  ConversationNotFoundError,
   readAgentPresence,
   readAgentPrincipals,
   readAgentWakePath,
+  readConversationHistory,
   readConversations,
   readDecisionQueue,
   readHomeOverview,
@@ -33,17 +41,22 @@ import {
   readWorkspaces,
   type AgentPrincipalRow,
   type AgentWakePathRow,
+  type ConversationHistoryPage,
   type MemberProfileRow,
   type MyWorkspace,
 } from './api';
 import type { AgentPresenceRow } from './contracts/agent-presence';
-import type { ConversationSummary } from './contracts/conversations';
+import type {
+  ConversationCursor,
+  ConversationSummary,
+} from './contracts/conversations';
 import type {
   DecisionQueue,
   HomeOverview,
   WaitingTodosQueue,
 } from './contracts/home-contract';
 import { StaleFenceError, type Fence } from './fence';
+import { createWorkspaceLiveManager } from './live';
 import {
   createSessionGate,
   type SessionGate,
@@ -52,10 +65,13 @@ import {
 import type {
   Agent,
   Channel,
+  ConversationMessage,
   Person,
   SidebarDirectMessage,
   Workspace,
 } from './types';
+
+export const CONVERSATION_PAGE_SIZE = 50;
 
 export const WORKSPACE_UNAVAILABLE_TEXT = "This workspace isn't available.";
 export const CONVERSATION_UNAVAILABLE_TEXT =
@@ -431,6 +447,7 @@ export function createDataController(
     const previous = sessionGate.fenceTracker.activeWorkspaceId;
     if (previous && previous !== normalized) {
       abortMatching((op) => op.workspaceId === previous);
+      dropRealtimeMatching((sub) => sub.workspaceId === previous);
     }
     sessionGate.fenceTracker.setActiveWorkspace(normalized);
     appActions.selectWorkspace(normalized);
@@ -604,6 +621,99 @@ export interface RealSidebarViewModel {
   readonly selectConversation: (conversationId: string) => void;
 }
 
+async function fetchWorkspaces(
+  controller: DataController,
+  signal: AbortSignal | undefined,
+): Promise<MyWorkspace[]> {
+  const { sessionGate } = controller;
+  const fence = sessionGate.fenceTracker.capture({
+    workspaceId: null,
+    conversationId: null,
+  });
+  const list = await controller.runFenced(
+    fence,
+    signal,
+    (s) => readWorkspaces(sessionGate, { fence, signal: s }),
+    'workspaces',
+  );
+  if (!sessionGate.fenceTracker.isCurrent(fence)) {
+    throw new StaleFenceError();
+  }
+  const filteredList = list.filter(
+    (ws) => !sessionGate.fenceTracker.isWorkspaceRevoked(ws.id),
+  );
+  const currentSelected = getStoreSnapshot().selectedWorkspaceId;
+  if (
+    currentSelected !== null &&
+    !filteredList.some((ws) => ws.id.toLowerCase() === currentSelected)
+  ) {
+    controller.evictWorkspaceScope(currentSelected);
+  }
+  return filteredList;
+}
+
+function fetchWorkspaceConversations(
+  controller: DataController,
+  workspaceId: string,
+  signal: AbortSignal | undefined,
+): Promise<ConversationSummary[]> {
+  const { sessionGate } = controller;
+  const fence = sessionGate.fenceTracker.capture({
+    workspaceId,
+    conversationId: null,
+  });
+  return (async () => {
+    const list = await controller.runFenced(
+      fence,
+      signal,
+      (s) =>
+        readConversations(sessionGate, workspaceId, {
+          fence,
+          signal: s,
+          includeArchived: false,
+        }),
+      'conversations',
+    );
+    if (!sessionGate.fenceTracker.isCurrent(fence)) {
+      throw new StaleFenceError();
+    }
+
+    // Authoritative loss check: any previously known private channel or DM missing
+    // or returned with `joined: false` is evicted synchronously with its Waiting/review/overview caches.
+    const accessiblePrivateIds = new Set(
+      list
+        .filter((conv) => isPrivateOrDirect(conv) && conv.joined)
+        .map((conv) => conv.conversationId.toLowerCase()),
+    );
+    const storeSnap = getStoreSnapshot();
+    const previouslyKnown = storeSnap.knownPrivateConversationIds;
+    const activeConv =
+      sessionGate.fenceTracker.activeConversationId ??
+      (storeSnap.selectedConversation?.workspaceId === workspaceId.toLowerCase()
+        ? storeSnap.selectedConversation.conversationId
+        : null);
+    const lostIds = new Set<string>();
+    for (const prevId of previouslyKnown) {
+      if (!accessiblePrivateIds.has(prevId)) {
+        lostIds.add(prevId);
+      }
+    }
+    for (const conv of list) {
+      if (isPrivateOrDirect(conv) && !conv.joined) {
+        lostIds.add(conv.conversationId.toLowerCase());
+      }
+    }
+    for (const lostId of lostIds) {
+      controller.evictConversationScope(workspaceId, lostId, {
+        markUnavailable: activeConv === lostId,
+      });
+    }
+    appActions.setKnownPrivateConversationIds([...accessiblePrivateIds]);
+
+    return list.filter((conv) => !isPrivateOrDirect(conv) || conv.joined);
+  })();
+}
+
 export function useRealSidebarData(): RealSidebarViewModel {
   const controller = useDataController();
   const { sessionGate } = controller;
@@ -620,32 +730,7 @@ export function useRealSidebarData(): RealSidebarViewModel {
   const workspacesQuery = useQuery<MyWorkspace[]>({
     queryKey: queryKeys.workspaces(loginGen),
     enabled: isAuthenticated,
-    queryFn: async ({ signal }) => {
-      const fence = sessionGate.fenceTracker.capture({
-        workspaceId: null,
-        conversationId: null,
-      });
-      const list = await controller.runFenced(
-        fence,
-        signal,
-        (s) => readWorkspaces(sessionGate, { fence, signal: s }),
-        'workspaces',
-      );
-      if (!sessionGate.fenceTracker.isCurrent(fence)) {
-        throw new StaleFenceError();
-      }
-      const filteredList = list.filter(
-        (ws) => !sessionGate.fenceTracker.isWorkspaceRevoked(ws.id),
-      );
-      const currentSelected = getStoreSnapshot().selectedWorkspaceId;
-      if (
-        currentSelected !== null &&
-        !filteredList.some((ws) => ws.id.toLowerCase() === currentSelected)
-      ) {
-        controller.evictWorkspaceScope(currentSelected);
-      }
-      return filteredList;
-    },
+    queryFn: ({ signal }) => fetchWorkspaces(controller, signal),
   });
 
   const overviewQuery = useQuery<HomeOverview | null>({
@@ -726,63 +811,8 @@ export function useRealSidebarData(): RealSidebarViewModel {
       workspaceGen,
     ),
     enabled: workspaceEnabled,
-    queryFn: async ({ signal }) => {
-      const wsId = effectiveWorkspaceId!;
-      const fence = sessionGate.fenceTracker.capture({
-        workspaceId: wsId,
-        conversationId: null,
-      });
-      const list = await controller.runFenced(
-        fence,
-        signal,
-        (s) =>
-          readConversations(sessionGate, wsId, {
-            fence,
-            signal: s,
-            includeArchived: false,
-          }),
-        'conversations',
-      );
-      if (!sessionGate.fenceTracker.isCurrent(fence)) {
-        throw new StaleFenceError();
-      }
-
-      // Authoritative loss check: any previously known private channel or DM missing
-      // or returned with `joined: false` is evicted synchronously with its Waiting/review/overview caches.
-      const accessiblePrivateIds = new Set(
-        list
-          .filter((conv) => isPrivateOrDirect(conv) && conv.joined)
-          .map((conv) => conv.conversationId.toLowerCase()),
-      );
-      const storeSnap = getStoreSnapshot();
-      const previouslyKnown = storeSnap.knownPrivateConversationIds;
-      const activeConv =
-        sessionGate.fenceTracker.activeConversationId ??
-        (storeSnap.selectedConversation?.workspaceId === wsId.toLowerCase()
-          ? storeSnap.selectedConversation.conversationId
-          : null);
-      const lostIds = new Set<string>();
-      for (const prevId of previouslyKnown) {
-        if (!accessiblePrivateIds.has(prevId)) {
-          lostIds.add(prevId);
-        }
-      }
-      for (const conv of list) {
-        if (isPrivateOrDirect(conv) && !conv.joined) {
-          lostIds.add(conv.conversationId.toLowerCase());
-        }
-      }
-      for (const lostId of lostIds) {
-        controller.evictConversationScope(wsId, lostId, {
-          markUnavailable: activeConv === lostId,
-        });
-      }
-      appActions.setKnownPrivateConversationIds([...accessiblePrivateIds]);
-
-      return list.filter(
-        (conv) => !isPrivateOrDirect(conv) || conv.joined,
-      );
-    },
+    queryFn: ({ signal }) =>
+      fetchWorkspaceConversations(controller, effectiveWorkspaceId!, signal),
   });
 
   const agentsQuery = useQuery<AgentsBundle>({
@@ -1084,5 +1114,614 @@ export function useRealSidebarData(): RealSidebarViewModel {
     selectConversation: (conversationId: string) => {
       controller.selectConversation(effectiveWorkspaceId, conversationId);
     },
+  };
+}
+
+/**
+ * Re-read ONLY the newest page of the open conversation through the fenced transport
+ * and merge it into `pages[0]` of its infinite query cache (preserving already-loaded
+ * older pages). On 404 / `conversation_not_found`, retires the conversation synchronously.
+ */
+export async function refreshConversationNewestPage(
+  controller: DataController,
+  workspaceId: string,
+  conversationId: string,
+): Promise<void> {
+  const { sessionGate, queryClient } = controller;
+  const normWs = workspaceId.toLowerCase();
+  const normConv = conversationId.toLowerCase();
+  const fence = sessionGate.fenceTracker.capture({
+    workspaceId: normWs,
+    conversationId: normConv,
+  });
+  if (!sessionGate.fenceTracker.isCurrent(fence)) return;
+
+  const loginGen = fence.loginGeneration;
+  const wsGen = fence.workspaceGeneration;
+  const convGen = fence.conversationGeneration;
+
+  let page: ConversationHistoryPage;
+  try {
+    page = await controller.runFenced(
+      fence,
+      undefined,
+      (s) =>
+        readConversationHistory(sessionGate, normWs, normConv, {
+          fence,
+          signal: s,
+          limit: CONVERSATION_PAGE_SIZE,
+          includeMentions: true,
+        }),
+      'conversation',
+    );
+  } catch (error) {
+    if (error instanceof ConversationNotFoundError) {
+      if (sessionGate.fenceTracker.isCurrent(fence)) {
+        controller.handleConversationNotFound(normWs, normConv);
+      }
+      return;
+    }
+    return;
+  }
+
+  // Final fence check immediately before writing to cache.
+  if (!sessionGate.fenceTracker.isCurrent(fence)) return;
+
+  const key = queryKeys.conversationMessages(
+    loginGen,
+    normWs,
+    wsGen,
+    normConv,
+    convGen,
+  );
+  queryClient.setQueryData<
+    InfiniteData<ConversationHistoryPage, ConversationCursor | null>
+  >(key, (existing) => {
+    if (!existing || existing.pages.length === 0) {
+      return {
+        pages: [page],
+        pageParams: [null],
+      };
+    }
+    return {
+      pages: [page, ...existing.pages.slice(1)],
+      pageParams: [null, ...existing.pageParams.slice(1)],
+    };
+  });
+}
+
+/**
+ * Execute one authorized live-update refresh for the active workspace:
+ * re-reads the conversations list (unread counts + membership) and, when a real
+ * conversation is open in this workspace, re-reads its newest page.
+ */
+export async function refreshWorkspaceLive(
+  controller: DataController,
+  workspaceId: string,
+): Promise<void> {
+  const { sessionGate, queryClient } = controller;
+  const normWs = workspaceId.toLowerCase();
+  const wsFence = sessionGate.fenceTracker.capture({
+    workspaceId: normWs,
+    conversationId: null,
+  });
+  if (
+    !sessionGate.fenceTracker.isCurrent(wsFence, {
+      requireActiveWorkspace: true,
+      requireActiveConversation: false,
+    })
+  ) {
+    return;
+  }
+
+  const loginGen = wsFence.loginGeneration;
+  const wsGen = wsFence.workspaceGeneration;
+  const convListKey = queryKeys.workspaceConversations(loginGen, normWs, wsGen);
+
+  const activeConvId = sessionGate.fenceTracker.activeConversationId;
+  const storeSnap = getStoreSnapshot();
+  const convKey = activeConvId ? `${normWs}:${activeConvId}` : null;
+  const cachedList =
+    queryClient.getQueryData<ConversationSummary[]>(convListKey);
+  const activeConvInList =
+    activeConvId !== null &&
+    convKey !== null &&
+    !storeSnap.revokedConversationKeys.includes(convKey) &&
+    !(
+      storeSnap.unavailableConversation?.workspaceId === normWs &&
+      storeSnap.unavailableConversation?.conversationId === activeConvId
+    ) &&
+    Boolean(
+      cachedList?.some(
+        (conv) =>
+          conv.conversationId.toLowerCase() === activeConvId &&
+          (!isPrivateOrDirect(conv) || conv.joined),
+      ),
+    );
+
+  const tasks: Promise<unknown>[] = [
+    queryClient
+      .refetchQueries({ queryKey: convListKey, exact: true })
+      .catch(() => undefined),
+  ];
+
+  if (activeConvInList && activeConvId) {
+    tasks.push(refreshConversationNewestPage(controller, normWs, activeConvId));
+  }
+
+  await Promise.allSettled(tasks);
+}
+
+/**
+ * Mount the workspace live-update subscription (private realtime topics with
+ * 2s fallback poll + backoff) for the active authenticated workspace.
+ */
+export function useWorkspaceLiveUpdates(workspaceId: string | null): void {
+  const controller = useDataController();
+  const { sessionGate } = controller;
+  const snapshot = useSessionSnapshot();
+  const unavailableWorkspaceId = useAppStore((s) => s.unavailableWorkspaceId);
+  const revokedWorkspaceIds = useAppStore((s) => s.revokedWorkspaceIds);
+
+  const isAuthenticated =
+    snapshot.state.status === 'authenticated' && snapshot.userId !== null;
+  const loginGen = snapshot.loginGeneration;
+  const normalizedWs = workspaceId ? workspaceId.toLowerCase() : null;
+  const wsGen =
+    normalizedWs !== null
+      ? sessionGate.fenceTracker.getWorkspaceGeneration(normalizedWs)
+      : 0;
+  const enabled =
+    isAuthenticated &&
+    !sessionGate.isHidden &&
+    normalizedWs !== null &&
+    unavailableWorkspaceId === null &&
+    !revokedWorkspaceIds.includes(normalizedWs) &&
+    !sessionGate.fenceTracker.isWorkspaceRevoked(normalizedWs);
+
+  useEffect(() => {
+    if (!enabled || !normalizedWs) return;
+
+    const manager = createWorkspaceLiveManager({
+      sessionGate,
+      workspaceId: normalizedWs,
+      onRefresh: () => refreshWorkspaceLive(controller, normalizedWs),
+    });
+
+    const unregister = controller.registerRealtimeSubscription(
+      () => {
+        manager.dispose();
+      },
+      { workspaceId: normalizedWs },
+    );
+
+    return () => {
+      unregister();
+      manager.dispose();
+    };
+  }, [controller, sessionGate, enabled, normalizedWs, loginGen, wsGen]);
+}
+
+export type RealConversationViewModel =
+  | { readonly status: 'workspace_unavailable' }
+  | { readonly status: 'unavailable' }
+  | { readonly status: 'loading_list' }
+  | { readonly status: 'list_error'; readonly retry: () => void }
+  | {
+      readonly status: 'ready';
+      readonly workspaceId: string;
+      readonly conversationId: string;
+      readonly header: RealConversationHeader;
+      readonly messages: readonly ConversationMessage[];
+      readonly channelAgents: readonly Agent[];
+      readonly loading: boolean;
+      readonly error: boolean;
+      readonly retry: () => void;
+      readonly hasOlder: boolean;
+      readonly loadingOlder: boolean;
+      readonly loadOlder: () => void;
+    };
+
+/**
+ * Real-data view model for a channel or direct message addressed by `routeParam`
+ * (canonical conversation id).
+ *
+ * - Never issues a `conversation_history` request for an id absent from the person's
+ *   conversations list (shows uniform unavailable instead, preventing existence oracles).
+ * - Infinite query keyed by `(loginGen, workspaceId, wsGen, conversationId, convGen)`
+ *   with a fresh fence captured on every page request.
+ * - Authoritative 404 or removal from the conversations list retires messages, cursors,
+ *   and selection synchronously and paints the uniform unavailable state.
+ */
+export function useRealConversationData(
+  routeParam: string | undefined,
+): RealConversationViewModel {
+  const controller = useDataController();
+  const { sessionGate, queryClient } = controller;
+  const snapshot = useSessionSnapshot();
+  const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId);
+  const unavailableWorkspaceId = useAppStore((s) => s.unavailableWorkspaceId);
+  const revokedWorkspaceIds = useAppStore((s) => s.revokedWorkspaceIds);
+  const unavailableConversation = useAppStore((s) => s.unavailableConversation);
+  const revokedConversationKeys = useAppStore((s) => s.revokedConversationKeys);
+
+  const isAuthenticated =
+    snapshot.state.status === 'authenticated' && snapshot.userId !== null;
+  const loginGen = snapshot.loginGeneration;
+
+  // Read workspaces & conversations via the same shared query keys used by the sidebar.
+  const workspacesQuery = useQuery<MyWorkspace[]>({
+    queryKey: queryKeys.workspaces(loginGen),
+    enabled: isAuthenticated,
+    queryFn: ({ signal }) => fetchWorkspaces(controller, signal),
+  });
+
+  const rawWorkspaces = useMemo(
+    () =>
+      (workspacesQuery.data ?? []).filter(
+        (ws) =>
+          !revokedWorkspaceIds.includes(ws.id.toLowerCase()) &&
+          !sessionGate.fenceTracker.isWorkspaceRevoked(ws.id),
+      ),
+    [workspacesQuery.data, revokedWorkspaceIds, sessionGate.fenceTracker],
+  );
+
+  const activeWorkspaceId =
+    unavailableWorkspaceId !== null
+      ? null
+      : selectedWorkspaceId !== null &&
+          !revokedWorkspaceIds.includes(selectedWorkspaceId)
+        ? selectedWorkspaceId
+        : (sessionGate.fenceTracker.activeWorkspaceId ??
+          rawWorkspaces[0]?.id ??
+          null);
+
+  if (
+    isAuthenticated &&
+    activeWorkspaceId !== null &&
+    sessionGate.fenceTracker.activeWorkspaceId !== activeWorkspaceId
+  ) {
+    sessionGate.fenceTracker.setActiveWorkspace(activeWorkspaceId);
+  }
+
+  const wsGen =
+    activeWorkspaceId !== null
+      ? sessionGate.fenceTracker.getWorkspaceGeneration(activeWorkspaceId)
+      : 0;
+  const workspaceEnabled =
+    isAuthenticated &&
+    activeWorkspaceId !== null &&
+    unavailableWorkspaceId === null &&
+    !revokedWorkspaceIds.includes(activeWorkspaceId);
+
+  const conversationsQuery = useQuery<ConversationSummary[]>({
+    queryKey: queryKeys.workspaceConversations(
+      loginGen,
+      activeWorkspaceId ?? '',
+      wsGen,
+    ),
+    enabled: workspaceEnabled,
+    queryFn: ({ signal }) =>
+      fetchWorkspaceConversations(controller, activeWorkspaceId!, signal),
+  });
+
+  const membersQuery = useQuery<MemberProfileRow[]>({
+    queryKey: queryKeys.workspaceMembers(
+      loginGen,
+      activeWorkspaceId ?? '',
+      wsGen,
+    ),
+    enabled: workspaceEnabled,
+    queryFn: async ({ signal }) => {
+      const wsId = activeWorkspaceId!;
+      const fence = sessionGate.fenceTracker.capture({
+        workspaceId: wsId,
+        conversationId: null,
+      });
+      return controller.runFenced(
+        fence,
+        signal,
+        (s) => readMemberProfiles(sessionGate, wsId, { fence, signal: s }),
+        'members',
+      );
+    },
+  });
+
+  const agentsQuery = useQuery<AgentsBundle>({
+    queryKey: queryKeys.workspaceAgents(
+      loginGen,
+      activeWorkspaceId ?? '',
+      wsGen,
+    ),
+    enabled: workspaceEnabled,
+    queryFn: async ({ signal }) => {
+      const wsId = activeWorkspaceId!;
+      const fence = sessionGate.fenceTracker.capture({
+        workspaceId: wsId,
+        conversationId: null,
+      });
+      return controller.runFenced(
+        fence,
+        signal,
+        async (s) => {
+          const principals = await readAgentPrincipals(sessionGate, wsId, {
+            fence,
+            signal: s,
+          });
+          const [presence, wakePath] = await Promise.all([
+            readAgentPresence(sessionGate, wsId, { fence, signal: s }).catch(
+              (error) => {
+                if (error instanceof StaleFenceError || s.aborted) throw error;
+                return null;
+              },
+            ),
+            readAgentWakePath(sessionGate, wsId, { fence, signal: s }).catch(
+              (error) => {
+                if (error instanceof StaleFenceError || s.aborted) throw error;
+                return null;
+              },
+            ),
+          ]);
+          if (!sessionGate.fenceTracker.isCurrent(fence)) {
+            throw new StaleFenceError();
+          }
+          return { principals, presence, wakePath };
+        },
+        'agents',
+      );
+    },
+  });
+
+  const normalizedParam = routeParam?.trim().toLowerCase() ?? null;
+
+  // Match strictly by canonical conversation id in the person's loaded conversations list.
+  const matchedConversation = useMemo(() => {
+    if (!conversationsQuery.data || !normalizedParam) return null;
+    const found = conversationsQuery.data.find(
+      (conv) => conv.conversationId.toLowerCase() === normalizedParam,
+    );
+    if (!found) return null;
+    if (isPrivateOrDirect(found) && !found.joined) return null;
+    return found;
+  }, [conversationsQuery.data, normalizedParam]);
+
+  const resolvedConversationId = matchedConversation
+    ? matchedConversation.conversationId.toLowerCase()
+    : null;
+
+  const isRevokedOrUnavailable =
+    activeWorkspaceId !== null &&
+    normalizedParam !== null &&
+    ((unavailableConversation !== null &&
+      unavailableConversation.workspaceId === activeWorkspaceId &&
+      unavailableConversation.conversationId === normalizedParam) ||
+      revokedConversationKeys.includes(`${activeWorkspaceId}:${normalizedParam}`));
+
+  const conversationCanFetch =
+    workspaceEnabled &&
+    activeWorkspaceId !== null &&
+    resolvedConversationId !== null &&
+    !isRevokedOrUnavailable;
+
+  // Synchronously bind activeConversationId on the fence tracker before useInfiniteQuery
+  // captures the page fence so the very first page read is pinned to this conversation.
+  if (
+    conversationCanFetch &&
+    sessionGate.fenceTracker.activeConversationId !== resolvedConversationId
+  ) {
+    sessionGate.fenceTracker.setActiveConversation(resolvedConversationId);
+  }
+
+  useEffect(() => {
+    if (!isAuthenticated || !activeWorkspaceId) return;
+    const targetId = isRevokedOrUnavailable
+      ? normalizedParam
+      : resolvedConversationId;
+    controller.selectConversation(activeWorkspaceId, targetId);
+    return () => {
+      if (
+        targetId !== null &&
+        sessionGate.fenceTracker.activeConversationId === targetId
+      ) {
+        controller.selectConversation(activeWorkspaceId, null);
+      }
+    };
+  }, [
+    controller,
+    sessionGate.fenceTracker,
+    isAuthenticated,
+    activeWorkspaceId,
+    resolvedConversationId,
+    isRevokedOrUnavailable,
+    normalizedParam,
+  ]);
+
+  const convGen =
+    resolvedConversationId !== null
+      ? sessionGate.fenceTracker.getConversationGeneration(resolvedConversationId)
+      : 0;
+
+  const historyQuery = useInfiniteQuery<
+    ConversationHistoryPage,
+    Error,
+    InfiniteData<ConversationHistoryPage, ConversationCursor | null>,
+    ReturnType<typeof queryKeys.conversationMessages>,
+    ConversationCursor | null
+  >({
+    queryKey: queryKeys.conversationMessages(
+      loginGen,
+      activeWorkspaceId ?? '',
+      wsGen,
+      resolvedConversationId ?? '',
+      convGen,
+    ),
+    enabled: conversationCanFetch,
+    initialPageParam: null,
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore ? lastPage.nextBefore : undefined,
+    queryFn: async ({ pageParam, signal }) => {
+      const wsId = activeWorkspaceId!;
+      const convId = resolvedConversationId!;
+      // Capture a fresh fence when EACH page request starts.
+      const fence = sessionGate.fenceTracker.capture({
+        workspaceId: wsId,
+        conversationId: convId,
+      });
+      try {
+        return await controller.runFenced(
+          fence,
+          signal,
+          (s) =>
+            readConversationHistory(sessionGate, wsId, convId, {
+              fence,
+              signal: s,
+              ...(pageParam ? { before: pageParam } : {}),
+              limit: CONVERSATION_PAGE_SIZE,
+              includeMentions: true,
+            }),
+          'conversation',
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          if (sessionGate.fenceTracker.isCurrent(fence)) {
+            controller.handleConversationNotFound(wsId, convId);
+          }
+          throw new StaleFenceError('Conversation retired.');
+        }
+        throw error;
+      }
+    },
+  });
+
+  // Pre-paint fence check for this conversation.
+  const paintFence = sessionGate.fenceTracker.capture({
+    workspaceId: activeWorkspaceId,
+    conversationId: resolvedConversationId,
+  });
+  const canPaintConversation =
+    conversationCanFetch && sessionGate.fenceTracker.isCurrent(paintFence);
+
+  const header = useMemo(() => {
+    if (!canPaintConversation || !matchedConversation || !snapshot.userId) {
+      return null;
+    }
+    const authoritativeSummary =
+      historyQuery.data?.pages[0]?.conversation ?? matchedConversation;
+    return adaptConversationHeader(
+      authoritativeSummary,
+      snapshot.userId,
+      membersQuery.data ?? [],
+      agentsQuery.data?.principals ?? [],
+    );
+  }, [
+    canPaintConversation,
+    matchedConversation,
+    historyQuery.data,
+    snapshot.userId,
+    membersQuery.data,
+    agentsQuery.data,
+  ]);
+
+  const messages = useMemo(() => {
+    if (!canPaintConversation || !historyQuery.data) return [];
+    return adaptConversationMessages({
+      pages: historyQuery.data.pages,
+      members: membersQuery.data ?? [],
+      agents: agentsQuery.data?.principals ?? [],
+    });
+  }, [
+    canPaintConversation,
+    historyQuery.data,
+    membersQuery.data,
+    agentsQuery.data,
+  ]);
+
+  const channelAgents = useMemo(() => {
+    if (!canPaintConversation || !activeWorkspaceId || !header || !agentsQuery.data) {
+      return [];
+    }
+    if (header.memberAgentIds.length === 0) return [];
+    const allowed = new Set(header.memberAgentIds);
+    const matchingPrincipals = agentsQuery.data.principals.filter((p) =>
+      allowed.has(p.principalId.toLowerCase()),
+    );
+    if (matchingPrincipals.length === 0) return [];
+    const overviewGen = sessionGate.fenceTracker.overviewGeneration;
+    const overview = queryClient.getQueryData<HomeOverview | null>(
+      queryKeys.homeOverview(loginGen, overviewGen),
+    );
+    const waiting = queryClient.getQueryData<WaitingBundle | null>(
+      queryKeys.workspaceWaiting(loginGen, activeWorkspaceId, wsGen, overviewGen),
+    );
+    return adaptAgents({
+      workspaceId: activeWorkspaceId,
+      principals: matchingPrincipals,
+      presence: agentsQuery.data.presence,
+      wakePath: agentsQuery.data.wakePath,
+      overview: overview ?? null,
+      decisionQueue: waiting?.decisionQueue ?? null,
+    });
+  }, [
+    canPaintConversation,
+    activeWorkspaceId,
+    header,
+    agentsQuery.data,
+    sessionGate.fenceTracker,
+    queryClient,
+    loginGen,
+    wsGen,
+  ]);
+
+  const loadOlder = useCallback(() => {
+    if (historyQuery.hasNextPage && !historyQuery.isFetchingNextPage) {
+      void historyQuery.fetchNextPage();
+    }
+  }, [historyQuery]);
+
+  const retryHistory = useCallback(() => {
+    void historyQuery.refetch();
+  }, [historyQuery]);
+
+  const retryList = useCallback(() => {
+    if (workspacesQuery.isError) void workspacesQuery.refetch();
+    if (conversationsQuery.isError) void conversationsQuery.refetch();
+  }, [workspacesQuery, conversationsQuery]);
+
+  if (unavailableWorkspaceId !== null) {
+    return { status: 'workspace_unavailable' };
+  }
+
+  if (isRevokedOrUnavailable) {
+    return { status: 'unavailable' };
+  }
+
+  if (
+    workspacesQuery.isPending ||
+    (workspaceEnabled && conversationsQuery.isPending)
+  ) {
+    return { status: 'loading_list' };
+  }
+
+  if (workspacesQuery.isError || conversationsQuery.isError) {
+    return { status: 'list_error', retry: retryList };
+  }
+
+  if (!activeWorkspaceId || !resolvedConversationId || !header) {
+    return { status: 'unavailable' };
+  }
+
+  return {
+    status: 'ready',
+    workspaceId: activeWorkspaceId,
+    conversationId: resolvedConversationId,
+    header,
+    messages,
+    channelAgents,
+    loading: historyQuery.isPending,
+    error: historyQuery.isError,
+    retry: retryHistory,
+    hasOlder: Boolean(historyQuery.hasNextPage),
+    loadingOlder: historyQuery.isFetchingNextPage,
+    loadOlder,
   };
 }

@@ -1,6 +1,7 @@
 import type {
   AgentPrincipalRow,
   AgentWakePathRow,
+  ConversationHistoryPage,
   MemberProfileRow,
   MyWorkspace,
 } from './api';
@@ -24,12 +25,20 @@ import {
   formatSeatAgo,
   formatSeatElapsed,
 } from './contracts/seat-status';
+import {
+  groupSignalThreads,
+  todoIdFromAbout,
+  type Signal,
+} from './contracts/signals';
 import type {
   Agent,
   AgentState,
   AvatarTone,
   Channel,
+  ConversationMessage,
+  MessageCardKind,
   Person,
+  ResolvedMention,
   SidebarDirectMessage,
   Workspace,
 } from './types';
@@ -327,4 +336,243 @@ export function adaptWaitingCount(
 ): number | null {
   if (!decisionQueue || !waitingTodos) return null;
   return decisionQueue.total + waitingTodos.total;
+}
+
+function formatMessageClock(
+  iso: string,
+  locale?: string,
+  timeZone?: string,
+): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date(ms));
+  } catch {
+    return '';
+  }
+}
+
+const REVIEW_ABOUT_RE = /^(?:review_check|review-check|review):/i;
+
+function classifyMessageCard(
+  signal: Pick<Signal, 'kind' | 'about'>,
+): {
+  cardKind: MessageCardKind | null;
+  cardLabel: 'Asked' | 'Review requested' | 'To-do' | null;
+} {
+  if (signal.kind === 'todo' || todoIdFromAbout(signal.about) !== null) {
+    return { cardKind: 'todo', cardLabel: 'To-do' };
+  }
+  if (
+    signal.kind === 'review_check' ||
+    signal.kind === 'review' ||
+    (signal.about !== null && REVIEW_ABOUT_RE.test(signal.about))
+  ) {
+    return { cardKind: 'review_requested', cardLabel: 'Review requested' };
+  }
+  if (signal.kind === 'ask') {
+    return { cardKind: 'asked', cardLabel: 'Asked' };
+  }
+  return { cardKind: null, cardLabel: null };
+}
+
+export interface AdaptConversationMessagesInput {
+  readonly pages: readonly ConversationHistoryPage[];
+  readonly members: readonly MemberProfileRow[];
+  readonly agents: readonly AgentPrincipalRow[];
+  readonly locale?: string;
+  readonly timeZone?: string;
+}
+
+/**
+ * Merge paginated `conversation_history` pages (newest page first in TanStack InfiniteData)
+ * into chronological oldest-first `ConversationMessage[]` with resolved authors, resolved
+ * mentions, thread reply counts, and quiet card labels (no actions).
+ *
+ * Truth rules:
+ * - Unknown authors and unknown mention targets are shown as "Unknown" (never guessed).
+ * - Redacted / deleted messages render the server's own `body` verbatim.
+ * - Thread replies collapse under their root when the root is present, showing reply count;
+ *   orphan replies stay visible as their own row so nothing is dropped.
+ */
+export function adaptConversationMessages(
+  input: AdaptConversationMessagesInput,
+): ConversationMessage[] {
+  const memberById = new Map(
+    input.members.map((m) => [m.userId.toLowerCase(), m]),
+  );
+  const agentById = new Map(
+    input.agents.map((a) => [a.principalId.toLowerCase(), a]),
+  );
+
+  // Deduplicate across pages: `pages[0]` is newest, so iterate from oldest to newest
+  // so fresher copies overwrite older overlapping copies.
+  const byId = new Map<string, Signal>();
+  for (let i = input.pages.length - 1; i >= 0; i -= 1) {
+    const page = input.pages[i];
+    if (!page) continue;
+    for (const signal of page.messages) {
+      byId.set(signal.id.toLowerCase(), signal);
+    }
+  }
+
+  const orderedSignals = [...byId.values()].sort((left, right) => {
+    const leftMs = Date.parse(left.createdAt);
+    const rightMs = Date.parse(right.createdAt);
+    if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+      return leftMs - rightMs;
+    }
+    if (left.createdAt !== right.createdAt) {
+      return left.createdAt < right.createdAt ? -1 : 1;
+    }
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
+
+  const groups = groupSignalThreads(orderedSignals);
+
+  return groups.map(({ root, replies }) => {
+    const fromId = root.from.toLowerCase();
+    const isAgent = root.fromKind === 'agent';
+
+    let authorName = 'Unknown';
+    let avatarLabel = '?';
+    let avatarTone: AvatarTone = isAgent
+      ? (AGENT_TONES[hashIndex(fromId, AGENT_TONES.length)] ?? 'purple')
+      : (PERSON_TONES[hashIndex(fromId, PERSON_TONES.length)] ?? 'maya');
+
+    if (isAgent) {
+      const agent = agentById.get(fromId);
+      if (agent && agent.name.trim()) {
+        authorName = agent.name.trim();
+        avatarLabel = firstInitial(authorName);
+      }
+    } else if (root.fromKind === 'user') {
+      const member = memberById.get(fromId);
+      if (member && member.name.trim()) {
+        authorName = member.name.trim();
+        avatarLabel = personInitials(authorName);
+      }
+    }
+
+    const mentions: ResolvedMention[] = [];
+    const seenMentionKeys = new Set<string>();
+    for (const rawMention of root.mentions ?? []) {
+      const mentionId = rawMention.id.toLowerCase();
+      const key = `${rawMention.kind}:${mentionId}`;
+      if (seenMentionKeys.has(key)) continue;
+      seenMentionKeys.add(key);
+
+      if (rawMention.kind === 'agent') {
+        const target = agentById.get(mentionId);
+        const name = target?.name.trim() || 'Unknown';
+        mentions.push({
+          id: mentionId,
+          kind: 'agent',
+          name,
+          tone: AGENT_TONES[hashIndex(mentionId, AGENT_TONES.length)] ?? 'purple',
+          source: rawMention.source,
+        });
+      } else {
+        const target = memberById.get(mentionId);
+        const name = target?.name.trim() || 'Unknown';
+        mentions.push({
+          id: mentionId,
+          kind: 'person',
+          name,
+          tone:
+            PERSON_TONES[hashIndex(mentionId, PERSON_TONES.length)] ?? 'maya',
+          source: rawMention.source,
+        });
+      }
+    }
+
+    const { cardKind, cardLabel } = classifyMessageCard(root);
+
+    return {
+      id: root.id,
+      authorType: isAgent ? 'agent' : 'person',
+      authorId: fromId,
+      authorName,
+      avatarLabel,
+      avatarTone,
+      createdAt: root.createdAt,
+      timeLabel: formatMessageClock(root.createdAt, input.locale, input.timeZone),
+      body: root.body,
+      mentions,
+      replyCount: replies.length,
+      cardKind,
+      cardLabel,
+      isThreadReply: root.threadRootId !== null,
+      threadRootId: root.threadRootId,
+    };
+  });
+}
+
+export interface RealConversationHeader {
+  readonly id: string;
+  readonly kind: ConversationSummary['kind'];
+  readonly isChannel: boolean;
+  readonly isPrivate: boolean;
+  readonly title: string;
+  readonly peopleCount: number;
+  readonly agentCount: number;
+  readonly hasMemberCounts: boolean;
+  readonly memberAgentIds: readonly string[];
+}
+
+export function adaptConversationHeader(
+  conv: ConversationSummary,
+  viewerUserId: string,
+  members: readonly MemberProfileRow[],
+  agents: readonly AgentPrincipalRow[],
+): RealConversationHeader {
+  const isChannel = isChannelKind(conv.kind);
+  const memberNames = new Map(
+    members.map((m) => [m.userId.toLowerCase(), m.name]),
+  );
+  const agentNames = new Map(
+    agents.map((a) => [a.principalId.toLowerCase(), a.name]),
+  );
+
+  const lookupName = (member: ConversationMemberRef): string | null => {
+    const id = member.id.toLowerCase();
+    return member.kind === 'agent'
+      ? (agentNames.get(id) ?? null)
+      : (memberNames.get(id) ?? null);
+  };
+
+  let title: string;
+  if (conv.kind === 'general') {
+    title = 'general';
+  } else if (isChannel) {
+    title =
+      conv.slug && conv.slug.trim().length > 0
+        ? conv.slug.trim()
+        : conv.conversationId;
+  } else {
+    title = conversationTitle(conv, viewerUserId.toLowerCase(), lookupName);
+  }
+
+  const liveMembers = conv.members.filter((m) => !m.leftAt);
+  const peopleCount = liveMembers.filter((m) => m.kind === 'user').length;
+  const memberAgentIds = liveMembers
+    .filter((m) => m.kind === 'agent')
+    .map((m) => m.id.toLowerCase());
+
+  return {
+    id: conv.conversationId,
+    kind: conv.kind,
+    isChannel,
+    isPrivate: conv.kind === 'private_channel',
+    title,
+    peopleCount,
+    agentCount: memberAgentIds.length,
+    hasMemberCounts: liveMembers.length > 0,
+    memberAgentIds,
+  };
 }

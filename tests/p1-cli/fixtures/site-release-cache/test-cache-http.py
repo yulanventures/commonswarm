@@ -98,6 +98,29 @@ with tempfile.TemporaryDirectory(prefix='site-cache-http-') as tmp:
         assert r.returncode!=0 and 'clock did not advance within 2 seconds' in r.stderr
         assert (root/'current').resolve()==old
         results.append('NEW frozen wall clock hits real monotonic 2-second guard; live retained')
+        # First preview rollout (old has NO next/, new HAS next/assets/*), then rollback to old (no next/index.html), then next->next rollout.
+        pre_next, with_next, with_next_v2 = root/'pre-next', root/'with-next', root/'with-next-v2'
+        for rel, tag, has_next in [(pre_next, 'p0', False), (with_next, 'p1', True), (with_next_v2, 'p2', True)]:
+            (rel/'_astro').mkdir(parents=True)
+            (rel/'index.html').write_text(f'<p>{tag}</p>')
+            (rel/'_astro'/f'{tag}.js').write_text(tag)
+            if has_next:
+                (rel/'next/assets').mkdir(parents=True)
+                (rel/'next/index.html').write_text(f'<script src="/next/assets/{tag}.js"></script>')
+                (rel/'next/assets'/f'{tag}.js').write_text(f'next-{tag}')
+        refresh(pre_next, with_next)
+        assert (with_next/'next/assets/p1.js').read_text() == 'next-p1'
+        refresh(with_next, pre_next)
+        assert not (pre_next/'next/index.html').exists()
+        assert (pre_next/'next/assets/p1.js').read_text() == 'next-p1'
+        refresh(with_next, with_next_v2)
+        assert (with_next_v2/'next/assets/p1.js').read_text() == 'next-p1'
+        assert (with_next_v2/'next/assets/p2.js').read_text() == 'next-p2'
+        bad_next = root/'bad-next-collision'
+        shutil.copytree(with_next_v2, bad_next)
+        (bad_next/'next/assets/p1.js').write_text('colliding bytes')
+        refresh(with_next, bad_next, ok=False)
+        results.append('NEW next/assets retained across first rollout, rollback to no-next release, next-to-next rollout, and collision refused')
     finally:
         server.shutdown(); server.server_close(); thread.join()
 print(json.dumps({'passed':True, 'checks':results, 'ceiling':'local Python HTTP origin; no production Caddy/Cloudflare or full shell lifecycle exercised'},indent=2))

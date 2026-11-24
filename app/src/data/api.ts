@@ -8,10 +8,18 @@ import {
   type ChannelCreationPolicy,
 } from './contracts/channels';
 import {
+  buildConversationHistoryRequest,
   buildListConversationsRequest,
+  parseConversationHistoryResponse,
   parseConversationsListOutcome,
+  type ConversationCursor,
+  type ConversationHistoryOptions,
   type ConversationSummary,
 } from './contracts/conversations';
+import {
+  parseConversationHistoryMessageRow,
+  type Signal,
+} from './contracts/signals';
 import type {
   DecisionQueue,
   HomeOverview,
@@ -42,6 +50,21 @@ export class ApiReadError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+export class ConversationNotFoundError extends Error {
+  override name = 'ConversationNotFoundError';
+  constructor(message = "This conversation isn't available in this workspace.") {
+    super(message);
+  }
+}
+
+export interface ConversationHistoryPage {
+  readonly conversation: ConversationSummary;
+  readonly messages: Signal[];
+  readonly hasMore: boolean;
+  readonly nextBefore: ConversationCursor | null;
+  readonly nextAfter: ConversationCursor | null;
 }
 
 export interface MyWorkspace {
@@ -502,6 +525,158 @@ export async function readConversations(
     throw new ApiReadError(outcome.message, response.status, 'unsupported');
   }
   throw new ApiDecodeError(outcome.message);
+}
+
+function isValidOptionalCursor(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.created_at === 'string' &&
+    Number.isFinite(Date.parse(value.created_at)) &&
+    typeof value.id === 'string' &&
+    value.id.trim().length > 0
+  );
+}
+
+/**
+ * Edge `POST /functions/v1/read` with `{ resource: "conversation_history", ... }`.
+ * Strict fail-closed decoding: any malformed row, cursor, or mismatched conversation
+ * throws `ApiDecodeError` (never a partial render). 404 / `conversation_not_found`
+ * throws `ConversationNotFoundError`.
+ */
+export async function readConversationHistory(
+  sessionGate: SessionGate,
+  workspaceId: string,
+  conversationId: string,
+  options: ReadOptions & ConversationHistoryOptions,
+): Promise<ConversationHistoryPage> {
+  const {
+    fence,
+    signal,
+    before,
+    after,
+    limit = 50,
+    includeMentions = true,
+    includeReactions = false,
+  } = options;
+  const auth = await acquireForDispatch(sessionGate, fence, signal);
+  const payload = buildConversationHistoryRequest(workspaceId, conversationId, {
+    ...(before ? { before } : {}),
+    ...(after ? { after } : {}),
+    limit,
+    includeMentions,
+    includeReactions,
+  });
+  const endpoint = `${auth.url.replace(/\/+$/, '')}/functions/v1/read`;
+
+  const response = await fencedFetch(
+    sessionGate,
+    fence,
+    auth,
+    endpoint,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+    signal,
+  );
+
+  assertStillCurrent(sessionGate, fence, auth, signal);
+
+  if (response.status === 401) {
+    if (sessionGate.handleUnauthorized(fence, auth.identity)) {
+      throw new SessionExpired();
+    }
+    throw new StaleFenceError();
+  }
+
+  // Classify a current 404 from its HTTP status alone before awaiting or decoding the body
+  // so a stalled or malformed 404 body immediately retires the conversation with the
+  // existing uniform unavailable outcome.
+  if (response.status === 404) {
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      // Ignore stream cancellation failures; status alone retires the conversation.
+    }
+    throw new ConversationNotFoundError();
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    assertStillCurrent(sessionGate, fence, auth, signal);
+    throw new ApiDecodeError('conversation_history_malformed');
+  }
+
+  assertStillCurrent(sessionGate, fence, auth, signal);
+
+  if (!isRecord(raw)) {
+    throw new ApiDecodeError('conversation_history_malformed');
+  }
+
+  if (raw.error === 'conversation_not_found') {
+    throw new ConversationNotFoundError();
+  }
+
+  if (response.status !== 200) {
+    throw new ApiReadError(
+      typeof raw.message === 'string' && raw.message.trim()
+        ? raw.message.trim()
+        : `CommonSwarm could not load this conversation (HTTP ${response.status}).`,
+      response.status,
+      typeof raw.error === 'string' ? raw.error : undefined,
+    );
+  }
+
+  // Reject non-object items in `messages` before calling the shared decoder so malformed
+  // items can never be silently filtered out into a partial render.
+  if (
+    !Array.isArray(raw.messages) ||
+    !raw.messages.every((entry) => isRecord(entry)) ||
+    (raw.has_more !== undefined && typeof raw.has_more !== 'boolean') ||
+    !isValidOptionalCursor(raw.next_before) ||
+    !isValidOptionalCursor(raw.next_after)
+  ) {
+    throw new ApiDecodeError('conversation_history_malformed');
+  }
+
+  let parsed;
+  try {
+    parsed = parseConversationHistoryResponse(
+      response.status,
+      raw,
+      parseConversationHistoryMessageRow,
+    );
+  } catch {
+    throw new ApiDecodeError('conversation_history_malformed');
+  }
+
+  if (!parsed.ok) {
+    if (parsed.code === 'conversation_not_found') {
+      throw new ConversationNotFoundError(parsed.message);
+    }
+    throw new ApiDecodeError(parsed.message);
+  }
+
+  if (
+    parsed.conversation.conversationId.toLowerCase() !==
+    conversationId.toLowerCase()
+  ) {
+    throw new ApiDecodeError('conversation_history_id_mismatch');
+  }
+
+  return {
+    conversation: parsed.conversation,
+    messages: parsed.messages,
+    hasMore: parsed.hasMore,
+    nextBefore: parsed.nextBefore,
+    nextAfter: parsed.nextAfter,
+  };
 }
 
 /**

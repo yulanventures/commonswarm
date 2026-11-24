@@ -7,12 +7,13 @@ const route = caddy.slice(caddy.indexOf("route {"), caddy.indexOf("handle_errors
 const errors = caddy.slice(caddy.indexOf("handle_errors {"));
 
 test("only content-hashed files are kept without asking again", () => {
-  // Everything starts as revalidate-every-time; the one exception comes after it and names /_astro/ alone.
+  // Everything starts as revalidate-every-time; the one exception comes after it and names /_astro/ and /next/assets/.
   const everything = route.indexOf('Cache-Control "public, max-age=0, must-revalidate"');
   const hashed = route.indexOf('header @hashed Cache-Control "public, max-age=31536000, immutable"');
   assert.ok(everything >= 0 && hashed > everything, "the hashed rule must come after the default so it wins");
-  assert.match(route, /@hashed path \/_astro\/\*\n/u);
+  assert.match(route, /@hashed path \/_astro\/\* \/next\/assets\/\*\n/u);
   assert.equal(route.match(/immutable/gu)?.length, 1, "no other path may be marked immutable");
+  assert.match(route, /@nextHtml path \/next \/next\/ \/next\/index\.html \/next\/index\.html\/\n\t\theader @nextHtml Cache-Control "no-cache"\n/u);
 });
 
 test("an error is never kept, even for a hashed name", () => {

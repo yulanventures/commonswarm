@@ -84,6 +84,29 @@ export interface FakeBackendHandlers {
   onFrom?: (call: RecordedPostgrestCall) => Promise<PostgrestResponse> | PostgrestResponse;
   onRpc?: (call: RecordedPostgrestCall) => Promise<PostgrestResponse> | PostgrestResponse;
   onFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> | Response;
+  enableRealtime?: boolean;
+  realtimeEndpointUrl?: string;
+  onRealtimeSetAuth?: (token: string | null | undefined) => Promise<void> | void;
+}
+
+export interface FakeRealtimeChannelRecord {
+  readonly topic: string;
+  readonly opts: unknown;
+  removed: boolean;
+  emitBroadcast(payload?: unknown): void;
+  emitStatus(status: string): void;
+}
+
+export interface FakeRealtimeController {
+  readonly setAuthCalls: Array<string | null | undefined>;
+  readonly channels: FakeRealtimeChannelRecord[];
+  readonly activeChannels: () => FakeRealtimeChannelRecord[];
+  removeChannelCalls: number;
+  removeAllChannelsCalls: number;
+  disconnectCalls: number;
+  connected: boolean;
+  emitHint(payload?: unknown, topicFilter?: string): void;
+  emitStatus(status: string, topicFilter?: string): void;
 }
 
 export interface RecordedWireFetchCall {
@@ -101,6 +124,7 @@ export interface FakeSessionHarness {
   postgrestCalls: RecordedPostgrestCall[];
   fetchCalls: RecordedWireFetchCall[];
   wireCalls: RecordedWireFetchCall[];
+  realtime: FakeRealtimeController | null;
   quiesceCalls: number;
   setSession(next: Session | null): void;
   setGetSessionHandler(
@@ -128,6 +152,59 @@ export function createFakeSessionHarness(
   const postgrestCalls: RecordedPostgrestCall[] = [];
   const fetchCalls: RecordedWireFetchCall[] = [];
   const wireCalls: RecordedWireFetchCall[] = [];
+
+  const rtSetAuthCalls: Array<string | null | undefined> = [];
+  const rtChannels: FakeRealtimeChannelRecord[] = [];
+  const rtChannelMap = new Map<object, FakeRealtimeChannelRecord>();
+  let rtRemoveChannelCalls = 0;
+  let rtRemoveAllChannelsCalls = 0;
+  let rtDisconnectCalls = 0;
+  let rtConnected = false;
+
+  const realtimeController: FakeRealtimeController | null =
+    handlers.enableRealtime
+      ? {
+          setAuthCalls: rtSetAuthCalls,
+          channels: rtChannels,
+          activeChannels: () => rtChannels.filter((c) => !c.removed),
+          get removeChannelCalls() {
+            return rtRemoveChannelCalls;
+          },
+          set removeChannelCalls(v: number) {
+            rtRemoveChannelCalls = v;
+          },
+          get removeAllChannelsCalls() {
+            return rtRemoveAllChannelsCalls;
+          },
+          set removeAllChannelsCalls(v: number) {
+            rtRemoveAllChannelsCalls = v;
+          },
+          get disconnectCalls() {
+            return rtDisconnectCalls;
+          },
+          set disconnectCalls(v: number) {
+            rtDisconnectCalls = v;
+          },
+          get connected() {
+            return rtConnected;
+          },
+          set connected(v: boolean) {
+            rtConnected = v;
+          },
+          emitHint(payload = { v: 1 }, topicFilter?: string) {
+            for (const ch of [...rtChannels]) {
+              if (topicFilter && !ch.topic.includes(topicFilter)) continue;
+              ch.emitBroadcast(payload);
+            }
+          },
+          emitStatus(status: string, topicFilter?: string) {
+            for (const ch of [...rtChannels]) {
+              if (topicFilter && !ch.topic.includes(topicFilter)) continue;
+              ch.emitStatus(status);
+            }
+          },
+        }
+      : null;
 
   function createQueryBuilder(
     kind: 'from' | 'rpc',
@@ -245,6 +322,96 @@ export function createFakeSessionHarness(
         authListeners.clear();
       },
     },
+    ...(handlers.enableRealtime
+      ? {
+          channel(name: string, opts: unknown) {
+            let broadcastCb: ((msg: unknown) => void) | null = null;
+            let statusCb: ((status: string) => void) | null = null;
+            const record: FakeRealtimeChannelRecord = {
+              topic: name,
+              opts,
+              removed: false,
+              emitBroadcast(payload = { v: 1 }) {
+                broadcastCb?.(payload);
+              },
+              emitStatus(status: string) {
+                statusCb?.(status);
+              },
+            };
+            rtChannels.push(record);
+            rtConnected = true;
+            const channelObj = {
+              on(
+                _type: string,
+                _filter: { event: string },
+                cb: (msg: unknown) => void,
+              ) {
+                broadcastCb = cb;
+                return channelObj;
+              },
+              subscribe(cb: (status: string) => void) {
+                statusCb = cb;
+                return channelObj;
+              },
+            };
+            rtChannelMap.set(channelObj, record);
+            return channelObj;
+          },
+          async removeChannel(ch: object) {
+            rtRemoveChannelCalls += 1;
+            const rec = rtChannelMap.get(ch);
+            if (rec) rec.removed = true;
+            if (rtChannels.every((c) => c.removed)) {
+              rtConnected = false;
+            }
+            return 'ok';
+          },
+          getChannels() {
+            return rtChannels.filter((c) => !c.removed);
+          },
+          async removeAllChannels() {
+            rtRemoveAllChannelsCalls += 1;
+            for (const c of rtChannels) c.removed = true;
+            rtConnected = false;
+            return [];
+          },
+          realtime: {
+            async setAuth(token?: string | null) {
+              rtSetAuthCalls.push(token);
+              await handlers.onRealtimeSetAuth?.(token);
+            },
+            endpointURL() {
+              return (
+                handlers.realtimeEndpointUrl ??
+                'wss://api.commonswarm.com/realtime/v1/websocket'
+              );
+            },
+            getChannels() {
+              return rtChannels.filter((c) => !c.removed);
+            },
+            isConnected() {
+              return rtConnected;
+            },
+            isConnecting() {
+              return false;
+            },
+            connectionState() {
+              return rtConnected ? 'open' : 'closed';
+            },
+            async removeAllChannels() {
+              rtRemoveAllChannelsCalls += 1;
+              for (const c of rtChannels) c.removed = true;
+              rtConnected = false;
+              return [];
+            },
+            async disconnect() {
+              rtDisconnectCalls += 1;
+              rtConnected = false;
+              return 'ok';
+            },
+          },
+        }
+      : {}),
   } as unknown as SupabaseClient;
 
   const browserSession: BrowserSession = {
@@ -268,6 +435,12 @@ export function createFakeSessionHarness(
     async quiesce() {
       quiesceCalls += 1;
       authListeners.clear();
+      if (handlers.enableRealtime) {
+        rtRemoveAllChannelsCalls += 1;
+        for (const c of rtChannels) c.removed = true;
+        rtDisconnectCalls += 1;
+        rtConnected = false;
+      }
     },
   };
 
@@ -408,6 +581,7 @@ export function createFakeSessionHarness(
     postgrestCalls,
     fetchCalls,
     wireCalls,
+    realtime: realtimeController,
     get quiesceCalls() {
       return quiesceCalls;
     },

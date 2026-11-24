@@ -10,13 +10,23 @@ import {
   AppDataProvider,
   useDataController,
   useSessionSnapshot,
+  useWorkspaceLiveUpdates,
   type DataController,
 } from './data/queries';
 import { AgentSessionScreen } from './screens/AgentSessionScreen';
 import { ChannelScreen } from './screens/ChannelScreen';
 import { PhoneHomeScreen } from './screens/PhoneHomeScreen';
 import { WaitingScreen } from './screens/WaitingScreen';
-import { appActions } from './store/appStore';
+import { appActions, useAppStore } from './store/appStore';
+
+function AuthenticatedLiveBridge() {
+  const { sessionGate } = useDataController();
+  const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId);
+  const activeWorkspaceId =
+    selectedWorkspaceId ?? sessionGate.fenceTracker.activeWorkspaceId;
+  useWorkspaceLiveUpdates(activeWorkspaceId);
+  return null;
+}
 
 function GatedRoutes() {
   const { sessionGate } = useDataController();
@@ -81,6 +91,7 @@ function GatedRoutes() {
         data-testid="private-view-root"
         className="h-full w-full"
       >
+        <AuthenticatedLiveBridge />
         {routes}
       </div>
     );
