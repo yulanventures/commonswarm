@@ -25,9 +25,10 @@
  *  (f) Back from cross-site navigation while `/next` holds an accepted, OPEN Phoenix-compatible
  *      realtime WebSocket (both same-login and login-change-while-away variants): observes and
  *      logs whether the browser restored from bfcache or performed a full reload, and asserts
- *      the full security invariants (socket closed at pagehide, zero old private paint, zero
- *      post-pagehide frames on the old socket, and only current-login topics/bearer after Back)
- *      for whichever outcome occurs.
+ *      the full security invariants (socket closed in the leave phase, zero old private paint,
+ *      no bearer-carrying or phx_join frames on the old socket after pagehide with optional
+ *      bearer-free phx_leave, and only current-login topics/bearer after Back) for whichever
+ *      outcome occurs.
  *
  * Deadlock safety: never hold a token-refresh or user-verification response while asking a peer
  * tab to acquire the same Web Lock. Scenarios (a), (b1), (b2), (e), and (f) release auth holds well
@@ -480,6 +481,11 @@ const WS_CLOSE_OBSERVER_INIT_SCRIPT = `(() => {
     window.__wsLifecyclePhase = "pagehide";
     window.__wsPagehideTs = Date.now();
   }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden" && window.__wsLifecyclePhase === "active") {
+      window.__wsLifecyclePhase = "hidden";
+    }
+  }, true);
   window.addEventListener("pageshow", function (ev) {
     if (ev && ev.persisted) {
       window.__wsLifecyclePhase = "pageshow";
@@ -557,7 +563,7 @@ function buildHomeOverview(
   };
 }
 
-test("served /app and /next two-tab coexistence: single-use refresh, stale terminal guard, held private retirement, and anti-framing", { timeout: 180_000 }, async () => {
+test("served /app and /next two-tab coexistence: single-use refresh, stale terminal guard, held private retirement, and anti-framing", { timeout: 180_000 }, async (t) => {
   const siteRoot = resolve(import.meta.dirname, "../../..");
   const repoRoot = resolve(siteRoot, "..");
   const siteDist = join(siteRoot, "dist");
@@ -2792,7 +2798,11 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                   pages,
                 );
 
-                // Observe that the pre-navigation socket was closed during navigation away.
+                // Observe that the pre-navigation socket was closed during the leave phase.
+                // A phx_leave frame is NOT required: retireAndCleanupSession clears sendBuffer,
+                // closes the socket, and disposes the client (`app/src/data/live.ts`); whether
+                // a phx_leave reaches the wire before close is incidental. If one appears, it
+                // must carry no bearer.
                 ctx.setStep(`f-${variant.name}-observe-pre-socket-closed`);
                 await ctx.waitForSignal("pre-navigation realtime socket close", preSocket.closedSignal, pages);
                 assert.equal(
@@ -2804,27 +2814,39 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                   preSocket.closedAt !== null,
                   `Pre-navigation socket close timestamp must be recorded:\n${await openSocketDiag()}`,
                 );
-                const leaveTopics = new Set(
-                  preSocket.frames
-                    .filter((f) => f.event === "phx_leave")
-                    .map((f) => f.topic),
+                assert.equal(
+                  preSocket.closedPhase,
+                  "during-leave",
+                  `Pre-navigation socket close must be observed in the leave phase (got "${preSocket.closedPhase}"):\n${await openSocketDiag()}`,
                 );
-                for (const topic of beforeTopics) {
-                  assert.ok(
-                    leaveTopics.has(topic),
-                    `Expected app teardown to send phx_leave for ${topic} at pagehide:\n${await openSocketDiag()}`,
-                  );
-                }
                 for (const leaveFrame of preSocket.frames.filter((f) => f.phase === "during-leave")) {
                   assert.equal(
                     leaveFrame.hasBearer,
                     false,
-                    `No frame sent during pagehide teardown may carry a bearer:\n${await openSocketDiag()}`,
+                    `No frame sent after pagehide may carry a bearer:\n${await openSocketDiag({ leaveFrame })}`,
                   );
-                  assert.ok(
-                    leaveFrame.event === "phx_leave" || leaveFrame.event === "heartbeat",
-                    `Unexpected frame event "${leaveFrame.event}" sent on old socket during pagehide:\n${await openSocketDiag()}`,
+                  assert.equal(
+                    leaveFrame.raw.includes(beforeSession.access_token),
+                    false,
+                    `No frame sent after pagehide may contain the prior bearer token:\n${await openSocketDiag({ leaveFrame })}`,
                   );
+                  assert.notEqual(
+                    leaveFrame.event,
+                    "phx_join",
+                    `No phx_join frame may be sent on the old socket after pagehide:\n${await openSocketDiag({ leaveFrame })}`,
+                  );
+                  if (leaveFrame.event === "phx_leave") {
+                    assert.ok(
+                      beforeTopics.has(leaveFrame.topic),
+                      `Optional phx_leave frame targeted unexpected topic "${leaveFrame.topic}":\n${await openSocketDiag({ leaveFrame })}`,
+                    );
+                  } else {
+                    assert.equal(
+                      leaveFrame.event,
+                      "heartbeat",
+                      `Unexpected frame event "${leaveFrame.event}" sent on old socket during leave:\n${await openSocketDiag({ leaveFrame })}`,
+                    );
+                  }
                 }
 
                 wsPhase = "away";
@@ -2951,22 +2973,23 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                     );
                   }
 
-                  // Assert the app itself closed the pre-navigation socket at pagehide (in-page witness).
+                  // Assert the app itself closed the pre-navigation socket during leave (in-page witness),
+                  // without pinning a specific pre-close readyState (retireAndCleanupSession closes in
+                  // both connected and non-connected branches, and visibilitychange->hidden may precede pagehide).
                   const appPagehideClose = backObservation.wsCloseLog.find(
                     (entry) =>
                       entry.url.startsWith("wss://api.commonswarm.com/realtime/v1") &&
-                      entry.phase === "pagehide" &&
-                      entry.readyStateBefore === 1,
+                      (entry.phase === "pagehide" || entry.phase === "hidden"),
                   );
                   assert.ok(
                     appPagehideClose,
-                    `Expected app to call WebSocket.close() on the OPEN realtime socket during pagehide:\n${await openSocketDiag({ backObservation })}`,
+                    `Expected app to call WebSocket.close() on the realtime socket during pagehide/leave:\n${await openSocketDiag({ backObservation })}`,
                   );
                   assert.ok(
                     pageshowCapture && appPagehideClose.ts <= pageshowCapture.ts,
                     `Expected pre-navigation socket close (${appPagehideClose.ts}) at or before pageshow:capture (${pageshowCapture?.ts}):\n${await openSocketDiag({ backObservation })}`,
                   );
-                  if (backObservation.wsPagehideTs !== null) {
+                  if (appPagehideClose.phase === "pagehide" && backObservation.wsPagehideTs !== null) {
                     assert.ok(
                       appPagehideClose.ts >= backObservation.wsPagehideTs,
                       `Expected pre-navigation socket close (${appPagehideClose.ts}) after pagehide start (${backObservation.wsPagehideTs}):\n${await openSocketDiag({ backObservation })}`,
@@ -2983,7 +3006,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                   }));
                   releaseRevalidateUser.resolve();
 
-                  console.log(
+                  t.diagnostic(
                     `[next-back-open-socket] outcome=restored variant=${variant.name} ` +
                     `closePhase=${appPagehideClose.phase} nodeClosePhase=${preSocket.closedPhase ?? "unknown"}`,
                   );
@@ -3031,7 +3054,7 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                     bfcacheNotUsed,
                     backObservation.notRestoredReasons,
                   );
-                  console.log(
+                  t.diagnostic(
                     `[next-back-open-socket] outcome=reloaded reasons=${reasonsText} variant=${variant.name}`,
                   );
 
@@ -3039,6 +3062,11 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                     preSocket.closed,
                     true,
                     `Pre-navigation socket must be closed on reload:\n${await openSocketDiag({ backObservation, reasonsText })}`,
+                  );
+                  assert.equal(
+                    preSocket.closedPhase,
+                    "during-leave",
+                    `Pre-navigation socket close must have been observed in the leave phase on reload:\n${await openSocketDiag({ backObservation, reasonsText })}`,
                   );
                   assert.equal(
                     duringFreshGate.privateRootCount,
@@ -3122,11 +3150,33 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                   );
                 }
 
-                // Assert ZERO frames were ever sent on the old socket after pagehide.
+                // Assert on the old pre-navigation socket after pagehide:
+                // - NO frame carrying a bearer and NO phx_join at all (phx_leave is allowed if bearer-free,
+                //   never required);
+                // - ZERO frames of any kind while away or after Back.
+                const preSocketPostLeaveFrames = preSocket.frames.filter((f) => f.phase !== "before-leave");
+                for (const frame of preSocketPostLeaveFrames) {
+                  assert.equal(
+                    frame.hasBearer,
+                    false,
+                    `Old socket sent a bearer-carrying frame after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                  assert.equal(
+                    frame.raw.includes(beforeSession.access_token) ||
+                      frame.raw.includes(afterSession.access_token),
+                    false,
+                    `Old socket leaked a bearer token after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                  assert.notEqual(
+                    frame.event,
+                    "phx_join",
+                    `Old socket sent phx_join after pagehide:\n${await openSocketDiag({ frame })}`,
+                  );
+                }
                 assert.equal(
                   preSocket.frames.length,
                   preSocketFrameCountBeforeBack,
-                  `Old pre-navigation socket sent frames after pagehide/away:\n${await openSocketDiag()}`,
+                  `Old pre-navigation socket sent frames while away or after Back:\n${await openSocketDiag()}`,
                 );
                 assert.equal(
                   preSocket.frames.filter((f) => f.phase === "away" || f.phase === "after-back").length,
@@ -3134,9 +3184,13 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
                   `Old socket must send zero frames while away or after Back:\n${await openSocketDiag()}`,
                 );
                 assert.equal(
-                  preSocket.frames.filter((f) => f.ts > preSocket.closedAt!).length,
+                  preSocket.frames.filter(
+                    (f) =>
+                      f.ts > preSocket.closedAt! &&
+                      (f.phase !== "during-leave" || f.hasBearer || f.event === "phx_join"),
+                  ).length,
                   0,
-                  `Old socket must send zero frames after close timestamp:\n${await openSocketDiag()}`,
+                  `Old socket sent forbidden frame after close timestamp:\n${await openSocketDiag()}`,
                 );
 
                 // Assert a NEW socket opened after Back and EVERY frame on EVERY socket after Back
