@@ -15,12 +15,14 @@
 --      waiting dismissal/restore/replay all inherit this automatically.
 --   5. swarm_read.my_open_asks lists only the caller's own open asks (person via JWT claims,
 --      agent via agent token hash or verified agent_principal_id claim), capped and keyset-paged,
---      returning id, created_at, until, addressee names, where label, first 120 chars of body,
---      and aggregate dismissal count/flag (never naming which addressee dismissed).
+--      returning id, created_at, until, addressee names, where label, and first 120 chars of body
+--      (never exposing addressee dismissals).
 --   6. swarm.waiting_dismissals gains dismissal_id uuid (unique per dismissal instance) so
 --      swarm.dismiss_waiting_item reports created (true|false) and dismissal (uuid instance),
 --      and swarm.restore_waiting_item(ws, user, kind, id, expected_dismissal_id) restores only
 --      when the active dismissal matches expected_dismissal_id (or any active dismissal when NULL).
+--   7. swarm_read.waiting_todos_page includes offer_id on rows whose reason is 'request' (and
+--      omits the offer_id key on other rows) so reviews can participate in Dismiss all.
 SET search_path = swarm, pg_catalog, public;
 
 CREATE TABLE swarm.ask_withdrawals (
@@ -279,7 +281,7 @@ BEGIN
     RETURN jsonb_build_object('status', 'invalid_request');
   END IF;
 
-  -- Serialize with concurrent answer_choice and concurrent withdraw/replace on the same ask.
+  -- Serialize with concurrent replies (plain or choice) and concurrent withdraw/replace on the same ask.
   PERFORM pg_advisory_xact_lock(
     hashtextextended('answer_choice:' || p_workspace_id::text || ':' || p_signal_id::text, 0)
   );
@@ -637,9 +639,7 @@ BEGIN
               THEN 'DM'
             ELSE '#general'
           END,
-          'body_preview', pg_catalog.left(p.body, 120),
-          'dismissed_by_any', (dism.cnt > 0),
-          'dismissed_count', dism.cnt
+          'body_preview', pg_catalog.left(p.body, 120)
         )
         ORDER BY p.created_at ASC, p.id ASC
       ),
@@ -697,16 +697,7 @@ BEGIN
         )
       END
     ) AS names
-  ) AS addr
-  CROSS JOIN LATERAL (
-    SELECT count(*)::integer AS cnt
-    FROM swarm.waiting_dismissals AS wd
-    WHERE wd.workspace_id = p.workspace_id
-      AND wd.item_kind = 'ask'
-      AND wd.item_id = p.id
-      AND wd.restored_at IS NULL
-      AND swarm.waiting_ask_eligible(p.workspace_id, wd.user_id, p.id, read_at)
-  ) AS dism;
+  ) AS addr;
 
   RETURN jsonb_build_object(
     'workspace_id', p_workspace_id,
@@ -925,5 +916,159 @@ ALTER FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid) OWNER TO swarm
 REVOKE ALL ON FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm.restore_waiting_item(uuid, uuid, text, uuid) TO swarm_command;
+
+-- Latest prior definition: 20261124000001_waiting_dismissals.sql
+-- Include offer_id on rows whose reason is 'request' (and omit the key on other rows).
+CREATE OR REPLACE FUNCTION swarm_read.waiting_todos_page(
+ p_workspace_id uuid,
+ p_limit integer DEFAULT 50,
+ p_after_state_at timestamptz DEFAULT NULL,
+ p_after_todo_id uuid DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+ claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+ viewer uuid;
+ read_at timestamptz := statement_timestamp();
+ page_limit integer;
+ total integer;
+ has_more boolean;
+ rows jsonb;
+BEGIN
+ -- A person's own session only. Reject agent claims and invalid sub UUIDs.
+ IF claims IS NULL OR claims->>'role' IS DISTINCT FROM 'authenticated' OR claims ? 'agent_principal_id'
+  OR coalesce(claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+  RETURN NULL;
+ END IF;
+ viewer := (claims->>'sub')::uuid;
+
+ IF p_workspace_id IS NULL OR NOT swarm.is_member(p_workspace_id, viewer) THEN
+  RETURN NULL;
+ END IF;
+ IF (p_after_state_at IS NULL) <> (p_after_todo_id IS NULL) THEN
+  RAISE EXCEPTION 'waiting_todos_page cursor requires both p_after_state_at and p_after_todo_id' USING ERRCODE = '22023';
+ END IF;
+
+ -- Match home_overview's exact household read gate (live member, shared boundary, confirmed role).
+ IF NOT swarm.household_human_can_read(p_workspace_id, viewer) THEN
+  RETURN jsonb_build_object(
+   'workspace_id', p_workspace_id,
+   'generated_at', read_at,
+   'total', 0,
+   'truncated', false,
+   'todos', '[]'::jsonb
+  );
+ END IF;
+
+ page_limit := greatest(1, least(coalesce(p_limit, 50), 100));
+
+ WITH candidate_todos AS MATERIALIZED (
+  SELECT
+   t.todo_id,
+   t.title,
+   t.state,
+   t.due_on,
+   t.state_at,
+   t.origin_placement,
+   t.origin_channel_id,
+   t.origin_conversation_id,
+   t.offer_id,
+   reason.kind AS reason,
+   CASE
+    WHEN reason.kind = 'request' THEN t.offer_principal
+    WHEN reason.kind IN ('hold', 'agent_removed') THEN t.assignee_principal
+    ELSE NULL
+   END AS agent_id
+  FROM swarm.household_todos t
+  CROSS JOIN LATERAL (
+   SELECT swarm.waiting_todo_reason(t.workspace_id, viewer, t.todo_id) AS kind
+  ) reason
+  WHERE t.workspace_id = p_workspace_id
+   AND t.state IN ('open', 'doing')
+   AND reason.kind IS NOT NULL
+   AND NOT EXISTS (
+    SELECT 1 FROM swarm.waiting_dismissals wd
+    WHERE wd.workspace_id = t.workspace_id
+     AND wd.user_id = viewer
+     AND wd.restored_at IS NULL
+     AND (
+      (reason.kind = 'request' AND wd.item_kind = 'review' AND wd.item_id = t.offer_id)
+      OR (reason.kind <> 'request' AND wd.item_kind = 'todo' AND wd.item_id = t.todo_id)
+     )
+   )
+ ), anchor AS (
+  SELECT coalesce(
+   (SELECT c.state_at FROM candidate_todos c WHERE c.todo_id = p_after_todo_id),
+   p_after_state_at
+  ) AS state_at
+ ), page_probe AS MATERIALIZED (
+  SELECT c.*
+  FROM candidate_todos c, anchor a
+  WHERE p_after_todo_id IS NULL
+   OR c.state_at < a.state_at
+   OR (c.state_at = a.state_at AND c.todo_id > p_after_todo_id)
+  ORDER BY c.state_at DESC, c.todo_id ASC
+  LIMIT page_limit + 1
+ ), page AS (
+  SELECT * FROM page_probe
+  ORDER BY state_at DESC, todo_id ASC
+  LIMIT page_limit
+ )
+ SELECT
+  (SELECT count(*) FROM candidate_todos)::integer,
+  (SELECT count(*) > page_limit FROM page_probe),
+  coalesce(jsonb_agg(jsonb_build_object(
+   'todo_id', p.todo_id,
+   'title', p.title,
+   'state', p.state,
+   'due_on', p.due_on,
+   'reason', p.reason,
+   'agent_id', p.agent_id,
+   'state_at', p.state_at,
+   'placement', vis.placement,
+   'channel_id', vis.channel_id,
+   'conversation_id', vis.conversation_id
+  ) || CASE
+   WHEN p.reason = 'request' THEN jsonb_build_object('offer_id', p.offer_id)
+   ELSE '{}'::jsonb
+  END ORDER BY p.state_at DESC, p.todo_id ASC), '[]'::jsonb)
+ INTO total, has_more, rows
+ FROM page p
+ CROSS JOIN LATERAL (
+  SELECT
+   (p.origin_placement = 'channel'
+    AND p.origin_channel_id IS NOT NULL
+    AND swarm.claims_can_access_channel(p_workspace_id, p.origin_channel_id)) AS can_channel,
+   (p.origin_placement IN ('dm', 'group_dm')
+    AND p.origin_conversation_id IS NOT NULL
+    AND swarm.actor_can_access_direct_conversation(p_workspace_id, p.origin_conversation_id, p.origin_placement, 'user', viewer)) AS can_direct
+ ) access
+ CROSS JOIN LATERAL (
+  SELECT
+   CASE
+    WHEN access.can_channel THEN 'channel'
+    WHEN access.can_direct THEN p.origin_placement
+    WHEN p.origin_placement = 'general' THEN 'general'
+    ELSE 'workspace'
+   END AS placement,
+   CASE WHEN access.can_channel THEN p.origin_channel_id ELSE NULL END AS channel_id,
+   CASE WHEN access.can_direct THEN p.origin_conversation_id ELSE NULL END AS conversation_id
+ ) vis;
+
+ RETURN jsonb_build_object(
+  'workspace_id', p_workspace_id,
+  'generated_at', read_at,
+  'total', coalesce(total, 0),
+  'truncated', coalesce(has_more, false),
+  'todos', coalesce(rows, '[]'::jsonb)
+ );
+END;
+$$;
+
+ALTER FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid)
+ FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm_read.waiting_todos_page(uuid, integer, timestamptz, uuid) TO authenticated;
 
 RESET search_path;

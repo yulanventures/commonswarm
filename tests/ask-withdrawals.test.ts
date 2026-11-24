@@ -28,7 +28,7 @@ import {
   hostedToolError,
 } from "../supabase/functions/mcp/tool-errors.js";
 import { MCP_TOOLS, STDIO_MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
-import { formatOpenAsksTable } from "../src/cli.js";
+import { commandHelpLines, formatOpenAsksTable } from "../src/cli.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../src/cloud/agent-credential-input.js";
 import { parseAgentConnection, saveAgentProfile } from "../src/cloud/agent-profile.js";
 
@@ -194,9 +194,26 @@ test("local and hosted MCP tool tables expose withdraw, asks_open, and ask.super
     },
   });
   assert.equal(outSuperseded.superseded_signal_id, ASK_ID);
+
+  // Privacy invariant: the word "dismiss" must never occur in asks_open tool definitions/schemas.
+  const localAsksOpen = MCP_TOOLS.find((t) => t.name === "asks_open");
+  const stdioAsksOpen = STDIO_MCP_TOOLS.find((t) => t.name === "asks_open");
+  const hostedAsksOpen = HOSTED_TOOL_TABLE.find((t) => t.name === "asks_open");
+  assert.ok(localAsksOpen && stdioAsksOpen && hostedAsksOpen);
+  for (const [label, def] of [
+    ["local MCP asks_open", localAsksOpen],
+    ["stdio MCP asks_open", stdioAsksOpen],
+    ["hosted MCP asks_open", hostedAsksOpen],
+  ] as const) {
+    assert.doesNotMatch(
+      JSON.stringify(def),
+      /dismiss/i,
+      `${label} must not mention or expose dismissals`,
+    );
+  }
 });
 
-test("formatOpenAsksTable renders empty state and compact open-asks table", () => {
+test("formatOpenAsksTable renders empty state and compact open-asks table without dismissal info", () => {
   assert.equal(
     formatOpenAsksTable({
       workspace_id: WS_ID,
@@ -221,8 +238,6 @@ test("formatOpenAsksTable renders empty state and compact open-asks table", () =
           addressees: ["Owner"],
           where: "#general",
           body_preview: "Should we ship the release today?",
-          dismissed_by_any: true,
-          dismissed_count: 1,
         },
       ],
     },
@@ -232,8 +247,21 @@ test("formatOpenAsksTable renders empty state and compact open-asks table", () =
   assert.match(rendered, /2h/);
   assert.match(rendered, /to:Owner/);
   assert.match(rendered, /#general/);
-  assert.match(rendered, /\[dismissed by 1\]/);
   assert.match(rendered, /Should we ship the release today\?/);
+  assert.doesNotMatch(rendered, /dismiss/i, "CLI open-asks row must never mention dismissals");
+});
+
+test("ask help gives accurate descriptions for withdraw and open without --attach text", () => {
+  const help = commandHelpLines("ask");
+  const lines = help.split("\n");
+  const withdrawIdx = lines.findIndex((line) => line.includes("cswarm ask withdraw "));
+  const openIdx = lines.findIndex((line) => line.includes("cswarm ask open "));
+  assert.notEqual(withdrawIdx, -1, help);
+  assert.notEqual(openIdx, -1, help);
+  assert.equal(lines[withdrawIdx + 1]?.trim(), "Withdraw an open ask you sent.");
+  assert.equal(lines[openIdx + 1]?.trim(), "List your own open asks.");
+  assert.doesNotMatch(lines[withdrawIdx + 1] ?? "", /--attach/);
+  assert.doesNotMatch(lines[openIdx + 1] ?? "", /--attach/);
 });
 
 test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against mocked edge", async () => {
@@ -310,8 +338,6 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
                 addressees: ["Alice"],
                 where: "DM",
                 body_preview: "Updated question?",
-                dismissed_by_any: false,
-                dismissed_count: 0,
               },
             ],
           });
@@ -374,12 +400,22 @@ test("CLI ask withdraw, ask --supersedes, and ask open work end-to-end against m
     const openTable = await runCli(["ask", "open", "--profile", profilePath]);
     assert.match(openTable.stdout, /55555555-5555-4555-8555-555555555555/);
     assert.match(openTable.stdout, /Updated question\?/);
+    assert.doesNotMatch(openTable.stdout, /dismiss/i);
 
     const openJson = await runCli(["ask", "open", "--json", "--profile", profilePath]);
+    assert.doesNotMatch(openJson.stdout, /dismiss/i);
     const parsed = JSON.parse(openJson.stdout) as { asks: Array<{ signal_id: string }> };
     assert.equal(parsed.asks.length, 1);
     assert.equal(parsed.asks[0]!.signal_id, NEW_ASK_ID);
     assert.ok(reads.some((r) => r.resource === "my_open_asks"));
+
+    // 4. cswarm ask withdraw --help and cswarm ask open --help
+    const wdHelp = await runCli(["ask", "withdraw", "--help"]);
+    assert.match(wdHelp.stdout, /Withdraw an open ask you sent\./);
+    assert.match(wdHelp.stdout, /List your own open asks\./);
+    const openHelp = await runCli(["ask", "open", "--help"]);
+    assert.match(openHelp.stdout, /Withdraw an open ask you sent\./);
+    assert.match(openHelp.stdout, /List your own open asks\./);
   } finally {
     process.env.HOME = previousHome;
     await new Promise<void>((resolve) => server.close(() => resolve()));

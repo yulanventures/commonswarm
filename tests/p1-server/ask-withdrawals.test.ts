@@ -19,7 +19,10 @@
  *      - Private-channel ask withdrawal tags audit_log with the private channel (invisible to outside admin/owner
  *        in swarm_read.audit_log) and never leaks to non-members in Archived.
  *      - my_open_asks lists only the caller's own open asks (local agent token & human JWT), excludes
- *        withdrawn/replaced/answered asks, and reports dismissed_by_any / dismissed_count without naming dismissers.
+ *        withdrawn/replaced/answered asks, and reveals nothing about addressee dismissals (page before
+ *        and after addressee dismissal is byte-identical modulo generated_at).
+ *      - waiting_todos_page includes offer_id on request rows (matching dismiss_waiting_item('review', ...))
+ *        and omits the offer_id key completely on non-request (e.g. assigned) to-do rows.
  *      - HezSec C1 dismissal instance binding: dismiss twice returns created=true then created=false with same
  *        dismissal UUID; restore with current dismissal succeeds; re-dismiss returns a new dismissal UUID;
  *        restore with stale first dismissal returns uniform 404 and leaves the dismissal active; restore without
@@ -137,10 +140,11 @@ async function readWaitingViewsAs(wsId: string, userId: string) {
     await tx`SET LOCAL ROLE authenticated`;
     const [dq] = await tx<{ r: Row }[]>`SELECT swarm_read.decision_queue(${wsId}::uuid) AS r`;
     const [dqp] = await tx<{ r: Row }[]>`SELECT swarm_read.decision_queue_page(${wsId}::uuid, NULL, NULL) AS r`;
+    const [wt] = await tx<{ r: Row }[]>`SELECT swarm_read.waiting_todos_page(${wsId}::uuid, 50, NULL, NULL) AS r`;
     const [wa] = await tx<{ r: Row }[]>`SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 50, NULL, NULL) AS r`;
     const [ho] = await tx<{ r: { workspaces: Array<{ workspace_id: string } & Row> } }[]>`SELECT swarm_read.home_overview() AS r`;
     const wsOverview = ho!.r.workspaces.find((w) => w.workspace_id === wsId) ?? null;
-    return { dq: dq!.r, dqp: dqp!.r, wa: wa!.r, wsOverview };
+    return { dq: dq!.r, dqp: dqp!.r, wt: wt!.r, wa: wa!.r, wsOverview };
   });
 }
 
@@ -152,6 +156,9 @@ async function cleanupWorkspaceFixture(
     await txClean`SET LOCAL session_replication_role = replica`;
     await txClean`DELETE FROM swarm.ask_withdrawals WHERE workspace_id = ${wsId}::uuid`;
     await txClean`DELETE FROM swarm.waiting_dismissals WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_todos WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_member_content_roles WHERE workspace_id = ${wsId}::uuid`;
+    await txClean`DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id = ${wsId}::uuid`;
     await txClean`DELETE FROM swarm.ui_actions WHERE workspace_id = ${wsId}::uuid`;
     await txClean`DELETE FROM swarm.ask_reraises WHERE workspace_id = ${wsId}::uuid`;
     await txClean`DELETE FROM swarm.ask_choices WHERE workspace_id = ${wsId}::uuid`;
@@ -411,7 +418,11 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
     });
     assert.equal(strangerWithdraw.status, 403, respDiag("strangerWithdraw", strangerWithdraw));
 
-    // 3. Addressee1 dismisses multiAskId -> my_open_asks for AgentA reports dismissed_by_any=true, dismissed_count=1 without naming anyone.
+    // 3. Addressee1 dismisses multiAskId -> my_open_asks for AgentA is byte-identical (modulo generated_at)
+    //    before and after dismissal, and never mentions dismissals.
+    const openForABefore = await sendRead(agentAToken, { resource: "my_open_asks", workspace_id: wsId });
+    assert.equal(openForABefore.status, 200, respDiag("openForABefore", openForABefore));
+
     const dismissMulti = await sendCommand(addressee1.jwt, wsId, {
       kind: "dismiss_waiting_item",
       item_kind: "ask",
@@ -423,13 +434,21 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
 
     const openForA = await sendRead(agentAToken, { resource: "my_open_asks", workspace_id: wsId });
     assert.equal(openForA.status, 200, respDiag("openForA", openForA));
+    assert.equal(
+      JSON.stringify({ ...openForA.body, generated_at: null }),
+      JSON.stringify({ ...openForABefore.body, generated_at: null }),
+      `my_open_asks must be byte-identical before vs after addressee dismissal: before=${JSON.stringify(openForABefore.body)} after=${JSON.stringify(openForA.body)}`,
+    );
+    assert.doesNotMatch(JSON.stringify(openForA.body), /dismiss/i, respDiag("openForA", openForA));
     const asksA = openForA.body.asks as Array<Row>;
     assert.equal(asksA.length, 1, respDiag("openForA", openForA));
     assert.equal(asksA[0]!.signal_id, multiAskId, respDiag("openForA", openForA));
-    assert.equal(asksA[0]!.dismissed_by_any, true, respDiag("openForA", openForA));
-    assert.equal(asksA[0]!.dismissed_count, 1, respDiag("openForA", openForA));
     assert.deepEqual(asksA[0]!.addressees, ["AddrOne", "AddrTwo"], respDiag("openForA", openForA));
-    assert.equal(Object.hasOwn(asksA[0]!, "dismissed_by"), false, "must not expose who dismissed");
+    assert.deepEqual(
+      Object.keys(asksA[0]!).sort(),
+      ["addressees", "body_preview", "created_at", "signal_id", "until", "where"],
+      respDiag("openForA", openForA),
+    );
 
     // AgentB sees ZERO open asks of its own.
     const openForB = await sendRead(agentBToken, { resource: "my_open_asks", workspace_id: wsId });
@@ -473,7 +492,26 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
     `;
     assert.equal(Number(wdCount!.cnt), 1, `expected 1 ask_withdrawals row, got ${wdCount!.cnt}`);
 
-    // 6. Withdrawn ask cannot be answered (plain reply 403), dismissed (404), restored (404), or re-raised (409 ask_withdrawn).
+    // 6. Withdrawn ask cannot be answered (plain reply refused identically to an expired ask and creates no signal),
+    //    dismissed (404), restored (404), or re-raised (409 ask_withdrawn).
+    const expiredAskId = randomUUID();
+    await sql`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, created_at, until)
+      VALUES (
+        ${expiredAskId}::uuid,
+        ${wsId}::uuid,
+        ${agentAId}::uuid,
+        'agent',
+        ${addressee2.id}::uuid,
+        'ask',
+        'Expired control ask?',
+        statement_timestamp() - interval '2 minutes',
+        statement_timestamp() - interval '1 minute'
+      )
+    `;
+    const [signalsBeforeWithdrawnReply] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt FROM swarm.signals WHERE workspace_id = ${wsId}::uuid
+    `;
     const replyWithdrawn = await sendCommand(addressee2.jwt, wsId, {
       kind: "post_signal",
       signal_kind: "note",
@@ -483,8 +521,30 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
       about: null,
       body: "Late reply",
     });
+    const [signalsAfterWithdrawnReply] = await sql<{ cnt: string }[]>`
+      SELECT count(*)::text AS cnt FROM swarm.signals WHERE workspace_id = ${wsId}::uuid
+    `;
+    assert.equal(
+      signalsAfterWithdrawnReply!.cnt,
+      signalsBeforeWithdrawnReply!.cnt,
+      "plain reply to withdrawn ask must create no signal",
+    );
+    const replyExpired = await sendCommand(addressee2.jwt, wsId, {
+      kind: "post_signal",
+      signal_kind: "note",
+      to_user_id: null,
+      to_agent_principal_id: null,
+      in_reply_to: expiredAskId,
+      about: null,
+      body: "Late reply",
+    });
     assert.equal(replyWithdrawn.status, 403, respDiag("replyWithdrawn", replyWithdrawn));
     assert.equal(replyWithdrawn.body.error, "forbidden", respDiag("replyWithdrawn", replyWithdrawn));
+    assert.deepEqual(
+      replyWithdrawn,
+      replyExpired,
+      `plain reply to withdrawn ask must match expired ask refusal: withdrawn=${respDiag("replyWithdrawn", replyWithdrawn)} expired=${respDiag("replyExpired", replyExpired)}`,
+    );
 
     const dismissWithdrawn = await sendCommand(addressee2.jwt, wsId, {
       kind: "dismiss_waiting_item",
@@ -763,6 +823,75 @@ test("served command + read edge: ask withdrawal, replace, my_open_asks, privacy
 
     const viewsRestored = await readWaitingViewsAs(wsId, addressee1.id);
     assert.equal((viewsRestored.dq as { total: number }).total, 1, `unbound restore must restore item: ${JSON.stringify(viewsRestored.dq)}`);
+
+    // 14. waiting_todos_page carries offer_id on request rows (matching dismiss_waiting_item('review', ...))
+    //     and omits the offer_id key entirely on non-request (assigned) to-do rows.
+    const assignedTodoId = randomUUID();
+    const reviewTodoId = randomUUID();
+    const reviewOfferId = randomUUID();
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose)
+        VALUES (${wsId}::uuid, 'shared')
+      `;
+      await tx`
+        INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+        VALUES
+          (${wsId}::uuid, ${addressee1.id}::uuid, 'editor', ${randomUUID()}::uuid, statement_timestamp()),
+          (${wsId}::uuid, ${owner.id}::uuid, 'editor', ${randomUUID()}::uuid, statement_timestamp())
+      `;
+      await tx`
+        INSERT INTO swarm.household_todos (
+          workspace_id, todo_id, version, title, notes, state,
+          created_by_user, created_at, assignee_user, assigned_by_user, assigned_at,
+          gate_kind, state_by_user, state_at, comment_count, last_seq
+        ) VALUES (
+          ${wsId}::uuid, ${assignedTodoId}::uuid, 1, 'Assigned task', '', 'open',
+          ${owner.id}::uuid, statement_timestamp(), ${addressee1.id}::uuid, ${owner.id}::uuid, statement_timestamp(),
+          'none', ${owner.id}::uuid, statement_timestamp(), 0, 1
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.household_todos (
+          workspace_id, todo_id, version, title, notes, state,
+          created_by_user, created_at, offer_id, offer_principal, offer_decider,
+          offer_start, offer_gate, offer_by_user, offered_at,
+          gate_kind, state_by_user, state_at, comment_count, last_seq
+        ) VALUES (
+          ${wsId}::uuid, ${reviewTodoId}::uuid, 1, 'Review task', '', 'open',
+          ${owner.id}::uuid, statement_timestamp(), ${reviewOfferId}::uuid, ${agentAId}::uuid, ${addressee1.id}::uuid,
+          'queue', '{"kind":"none"}'::jsonb, ${owner.id}::uuid, statement_timestamp(),
+          'none', ${owner.id}::uuid, statement_timestamp(), 0, 2
+        )
+      `;
+    });
+
+    const todoViewsBefore = await readWaitingViewsAs(wsId, addressee1.id);
+    const todoRows = (todoViewsBefore.wt as { todos: Array<Row> }).todos;
+    const requestRow = todoRows.find((row) => row.todo_id === reviewTodoId);
+    const assignedRow = todoRows.find((row) => row.todo_id === assignedTodoId);
+    assert.ok(requestRow, `missing request row in waiting_todos_page: ${JSON.stringify(todoViewsBefore.wt)}`);
+    assert.ok(assignedRow, `missing assigned row in waiting_todos_page: ${JSON.stringify(todoViewsBefore.wt)}`);
+    assert.equal(requestRow.reason, "request");
+    assert.equal(requestRow.offer_id, reviewOfferId);
+    assert.equal(assignedRow.reason, "assigned");
+    assert.equal(
+      Object.hasOwn(assignedRow, "offer_id"),
+      false,
+      `assigned to-do row must not carry offer_id key: ${JSON.stringify(assignedRow)}`,
+    );
+
+    const dismissReview = await sendCommand(addressee1.jwt, wsId, {
+      kind: "dismiss_waiting_item",
+      item_kind: "review",
+      item_id: requestRow.offer_id as string,
+    });
+    assert.equal(dismissReview.status, 200, respDiag("dismissReview", dismissReview));
+    assert.equal(dismissReview.body.dismissed, true, respDiag("dismissReview", dismissReview));
+
+    const todoViewsAfter = await readWaitingViewsAs(wsId, addressee1.id);
+    const remainingIds = (todoViewsAfter.wt as { todos: Array<Row> }).todos.map((row) => row.todo_id);
+    assert.deepEqual(remainingIds, [assignedTodoId], `dismissed review must leave waiting_todos_page: ${JSON.stringify(todoViewsAfter.wt)}`);
   } finally {
     await cleanupWorkspaceFixture(wsId, [owner.id, adminUser.id, addressee1.id, addressee2.id, stranger.id]);
   }

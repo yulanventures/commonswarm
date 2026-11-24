@@ -60,12 +60,25 @@ SELECT
     SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)')
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+      AND position('waiting_dismissals' IN p.prosrc) = 0
+      AND position('dismiss' IN lower(p.prosrc)) = 0
   )
   AND has_function_privilege('authenticated', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND has_function_privilege('swarm_read', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('public', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
   AND NOT has_function_privilege('swarm_command', 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)', 'EXECUTE')
+  AND EXISTS (
+    SELECT 1 FROM pg_proc p
+    WHERE p.oid = to_regprocedure('swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)')
+      AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
+      AND position('''offer_id''' IN p.prosrc) > 0
+  )
+  AND has_function_privilege('authenticated', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('public', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_read', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
+  AND NOT has_function_privilege('swarm_command', 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)', 'EXECUTE')
   AND EXISTS (
     SELECT 1 FROM pg_proc p
     WHERE p.oid = to_regprocedure('swarm.dismiss_waiting_item(uuid,uuid,text,uuid)')

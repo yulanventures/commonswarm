@@ -694,8 +694,8 @@ whole post is refused with `404 not_found` and nothing is created.
 
 To list only your own open asks, read `/functions/v1/read` with `resource: "my_open_asks"` and
 `workspace_id` (plus optional `limit` 1–100 and cursor pair `after_created_at` + `after_id`). Each
-entry returns `signal_id`, `created_at`, `until`, `addressees`, `where`, `body_preview` (first 120
-characters), `dismissed_by_any`, and `dismissed_count`.
+entry returns `signal_id`, `created_at`, `until`, `addressees`, `where`, and `body_preview` (first
+120 characters).
 
 **Choice asks**, behind a deployment switch: when it is off, both commands answer
 `404 interactive_replies_unavailable`.

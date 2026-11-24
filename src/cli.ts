@@ -4969,8 +4969,7 @@ export function formatOpenAsksTable(page: MyOpenAsksPage, nowMs: number = Date.n
       (ask.body_preview.split(/\r?\n/u)[0] ?? "").replace(/\s+/gu, " ").trim(),
       "",
     );
-    const dismissed = ask.dismissed_count > 0 ? `  [dismissed by ${ask.dismissed_count}]` : "";
-    return `${ask.signal_id}  ${age}  to:${to}  ${where}  ${firstLine}${dismissed}`;
+    return `${ask.signal_id}  ${age}  to:${to}  ${where}  ${firstLine}`;
   });
   if (page.truncated && page.asks.length > 0) {
     const last = page.asks[page.asks.length - 1]!;
@@ -12763,13 +12762,13 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       post: commandVariant("post", traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), [
         `cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--parent <signal-id>] [--supersedes <ask-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`,
         `cswarm ask ${signalBody} [--to <member>] [--channel <name>] [--supersedes <ask-id>] --option "<label>[::description]" --option "<label>[::description]" [--option ...] [--recommended <n|id>] [--multi] [--about <ref>] [--wait <seconds>] [--json]  # 2..6 options (--choice <label> also works); a person answers with a click or Other text`,
-      ]),
+      ], "Post an ask. Use --attach to add files."),
       withdraw: commandVariant("withdraw", traced("runAskWithdraw", runAskWithdraw), [
         "cswarm ask withdraw <ask-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]",
-      ]),
+      ], "Withdraw an open ask you sent."),
       open: commandVariant("open", traced("runAskOpen", runAskOpen), [
         "cswarm ask open [--limit <1-100>] [--after-created-at <iso> --after-id <uuid>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]",
-      ]),
+      ], "List your own open asks."),
     }, (args) => {
       const first = args.positionals[1];
       if (first === "withdraw" && !args.has("body-file") && !args.has("body-stdin")) return "withdraw";
@@ -12786,7 +12785,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       }
       return "post";
     }),
-    description: "Post an ask, withdraw an open ask, or list your open asks.",
+    description: "Post an ask, withdraw one you sent, or list your open asks.",
     mutates: true,
     flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "supersedes", "wait", "limit", "after-created-at", "after-id"],
     cliOnlyFlags: ["attach", "choice", "option", "recommended", "multi", "mention"],

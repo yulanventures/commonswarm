@@ -1770,8 +1770,6 @@ export interface MyOpenAsk {
   addressees: string[];
   where: string;
   body_preview: string;
-  dismissed_by_any: boolean;
-  dismissed_count: number;
 }
 
 export interface MyOpenAsksPage {
@@ -1791,11 +1789,7 @@ function parseMyOpenAsk(value: unknown): MyOpenAsk {
     !Array.isArray(row.addressees) ||
     !row.addressees.every((name) => typeof name === "string") ||
     typeof row.where !== "string" ||
-    typeof row.body_preview !== "string" ||
-    typeof row.dismissed_by_any !== "boolean" ||
-    typeof row.dismissed_count !== "number" ||
-    !Number.isSafeInteger(row.dismissed_count) ||
-    row.dismissed_count < 0
+    typeof row.body_preview !== "string"
   ) {
     throw new SignalMalformedError("my_open_asks returned a malformed ask row");
   }
@@ -1806,8 +1800,6 @@ function parseMyOpenAsk(value: unknown): MyOpenAsk {
     addressees: row.addressees as string[],
     where: row.where,
     body_preview: row.body_preview,
-    dismissed_by_any: row.dismissed_by_any,
-    dismissed_count: row.dismissed_count,
   };
 }
 

@@ -2,6 +2,8 @@
 DO $proof$
 DECLARE
   v_autoclear_src text;
+  v_open_asks_src text;
+  v_waiting_todos_src text;
 BEGIN
   IF EXISTS (
     SELECT 1 FROM swarm.ask_withdrawals aw
@@ -40,5 +42,21 @@ BEGIN
   IF position('ask_withdrawals' IN coalesce(v_autoclear_src, '')) = 0
      OR position('Replaced by a newer question' IN coalesce(v_autoclear_src, '')) = 0 THEN
     RAISE EXCEPTION 'waiting_ask_autoclear_status missing withdrawn/replaced branches' USING ERRCODE = '55000';
+  END IF;
+  SELECT prosrc INTO v_open_asks_src
+  FROM pg_proc
+  WHERE oid = 'swarm_read.my_open_asks(uuid,integer,timestamp with time zone,uuid,bytea)'::regprocedure;
+  IF position('waiting_dismissals' IN coalesce(v_open_asks_src, '')) > 0
+     OR position('dismiss' IN lower(coalesce(v_open_asks_src, ''))) > 0 THEN
+    RAISE EXCEPTION 'my_open_asks must not expose dismissal state' USING ERRCODE = '55000';
+  END IF;
+  IF swarm_read.waiting_todos_page(NULL, 50, NULL, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION 'waiting_todos_page failed null fail-closed check' USING ERRCODE = '55000';
+  END IF;
+  SELECT prosrc INTO v_waiting_todos_src
+  FROM pg_proc
+  WHERE oid = 'swarm_read.waiting_todos_page(uuid,integer,timestamp with time zone,uuid)'::regprocedure;
+  IF position('''offer_id''' IN coalesce(v_waiting_todos_src, '')) = 0 THEN
+    RAISE EXCEPTION 'waiting_todos_page missing offer_id projection for request rows' USING ERRCODE = '55000';
   END IF;
 END $proof$;

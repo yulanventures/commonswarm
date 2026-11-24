@@ -144,7 +144,7 @@ export const CORE_TOOL_TABLE = [
   {
     name: "asks_open", effect: "read", title: "List this seat's open asks",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "List open asks this seat sent in the workspace (signal_id, created_at, addressees, where, first 120 chars of body, and whether any addressee has dismissed it). Page with after_created_at and after_id.",
+    description: "List open asks this seat sent in the workspace (signal_id, created_at, until, addressees, where, and first 120 chars of body). Page with after_created_at and after_id.",
     annotations: { title: "List this seat's open asks", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, limit: integer(1, 100), after_created_at: isoTimestamp, after_id: uuid }, ["seat"]),
   },

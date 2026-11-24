@@ -14685,6 +14685,9 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
   // No channel is resolved yet: the replay row takes its tags from the stored success.
   const replay = await choiceLedgerReplay(tx, route, auth, ctx, command, undefined);
   if (replay !== null) return replay;
+  if (command.supersedes !== undefined) {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${command.supersedes}`}, 0))`;
+  }
   const ask: SignalCommand = {
     kind: "post_signal", signal_kind: "ask", body: command.body, to_user_id: command.to_user_id,
     to_agent_principal_id: null, in_reply_to: null, about: command.about,
@@ -18438,16 +18441,16 @@ async function handleTransaction(
             message: "Someone left this group. Choose different recipients to send this message." } });
         }
       }
-      /* A reply to a choice ask takes the same per-ask lock answer_choice holds, so a typed reply
-       * and a click can't both count as the first answer. Other posts are untouched. */
-      if (typeof command.in_reply_to === "string") {
-        const [choiceAsk] = await tx<{ signal_id: string }[]>`
-          SELECT signal_id FROM swarm.ask_choices
-          WHERE workspace_id = ${route.workspaceId}::uuid AND signal_id = ${command.in_reply_to}::uuid
-        `;
-        if (choiceAsk !== undefined) {
-          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${choiceAsk.signal_id}`}, 0))`;
-        }
+      /* Any reply or ask replacement takes the same per-ask lock answer_choice and withdraw_ask
+       * hold before the reference lookup and rate-bucket writes, so a reply cannot race with a
+       * choice click or sender withdrawal (and supersede takes it in the same lock order). */
+      const askLockId = typeof command.in_reply_to === "string"
+        ? command.in_reply_to.toLowerCase()
+        : typeof command.supersedes === "string"
+        ? command.supersedes.toLowerCase()
+        : null;
+      if (askLockId !== null) {
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${askLockId}`}, 0))`;
       }
       const namedTarget = await resolveSignalWriteTarget(
         tx,
