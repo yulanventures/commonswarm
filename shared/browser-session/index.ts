@@ -83,8 +83,6 @@ export function sessionIdFromAccessToken(accessToken: string | null | undefined)
       } else {
         json = binary;
       }
-    } else if (typeof Buffer !== "undefined") {
-      json = Buffer.from(padded, "base64").toString("utf8");
     } else {
       return null;
     }
