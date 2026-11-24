@@ -637,6 +637,7 @@ import "../../styles/kylon-invitation-inbox.css";
 
 <script>
   import {
+    AuthRecoveryRequired,
     bootstrapMultiAccountAuth,
     currentSession,
     client,
@@ -824,19 +825,32 @@ import "../../styles/kylon-invitation-inbox.css";
        until the dashboard has loaded so it does not jump. */
     if(dashboard)new MutationObserver(()=>paint()).observe(dashboard,{attributes:true,attributeFilter:['data-state']});
     let authGeneration=0;
+    let recoveryPending=false;
     onAuthChange((event,session)=>{
-      if(event==='SIGNED_OUT'||account!==(session?.user.id??null)){++authGeneration;controller.setAccount(null);if(dialog.open)dialog.close();account=session?.user.id??null;
-        const version=authGeneration;queueMicrotask(()=>{if(version===authGeneration)setAccount(account);});}
+      const nextAccount=session?.user.id??null;
+      if(event==='SIGNED_OUT'||account!==nextAccount){
+        ++authGeneration;recoveryPending=false;controller.setAccount(null);if(dialog.open)dialog.close();account=nextAccount;
+        const version=authGeneration;queueMicrotask(()=>{if(version===authGeneration)setAccount(account);});
+        return;
+      }
+      if((event==='TOKEN_REFRESHED'||event==='SIGNED_IN')&&account&&(recoveryPending||lastView?.recoveryPending||lastView?.failed)){
+        recoveryPending=false;
+        void controller.load();
+      }
     });
     onAccountForcedTeardown(()=>{
-      ++authGeneration;controller.setAccount(null);if(dialog.open)dialog.close();account=null;
+      ++authGeneration;recoveryPending=false;controller.setAccount(null);if(dialog.open)dialog.close();account=null;
     });
     const version=authGeneration;
     void (isMultiAccountEnabled()
       ? bootstrapMultiAccountAuth(window.location, window.history).catch(()=>null)
       : Promise.resolve(null))
       .then(()=>currentSession())
-      .then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);})
-      .catch(()=>{setAccount(null);});
+      .then(session=>{if(version===authGeneration){recoveryPending=false;setAccount(session?.user.id??null);}})
+      .catch((error)=>{
+        if(version!==authGeneration)return;
+        if(error instanceof AuthRecoveryRequired){recoveryPending=true;return;}
+        setAccount(null);
+      });
   }
 </script>

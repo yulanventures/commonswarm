@@ -4,6 +4,7 @@ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router';
 import {
   ClosedScreen,
   SessionCheckingScreen,
+  SessionRecoveryScreen,
   SignedOutScreen,
 } from './components/SessionGateScreens';
 import {
@@ -71,6 +72,15 @@ function GatedRoutes() {
   }
   if (snapshot.state.status === 'checking') {
     return <SessionCheckingScreen />;
+  }
+  if (snapshot.state.status === 'recovery') {
+    return (
+      <SessionRecoveryScreen
+        onRetry={() => {
+          void sessionGate.reverify();
+        }}
+      />
+    );
   }
 
   const routes = (

@@ -52,12 +52,16 @@ import {
   sameCredentials,
   terminalRefreshCodes,
   type BrowserSession,
+  type BrowserSignOutOptions,
+  type BrowserSignOutResult,
   type Deployment,
 } from "../../../shared/browser-session/index.js";
 export {
   AuthRecoveryRequired,
   SessionExpired,
   isRestSessionEnded,
+  type BrowserSignOutOptions,
+  type BrowserSignOutResult,
   type Deployment,
 };
 import { authProvider } from "./auth-providers.js";
@@ -239,12 +243,16 @@ export function deployment(): Deployment | null {
 }
 
 let cachedSession: BrowserSession | null = null;
+let cachedUnsupportedSdk = false;
+let testSingleAccountFactory: typeof createBrowserSession | null = null;
 
 function singleAccountSession(): BrowserSession | null {
   if (cachedSession) return cachedSession;
+  if (cachedUnsupportedSdk) return null;
   const d = deployment();
   if (!d) return null;
-  const created = createBrowserSession({
+  const factory = testSingleAccountFactory ?? createBrowserSession;
+  const created = factory({
     url: d.url,
     anonKey: d.anonKey,
     detectSessionInUrl: true,
@@ -257,9 +265,32 @@ function singleAccountSession(): BrowserSession | null {
       AuthRetryableFetchError,
     },
   });
-  if (!created.ok) return null;
+  if (!created.ok) {
+    if (created.reason === "unsupported_sdk") {
+      cachedUnsupportedSdk = true;
+    }
+    return null;
+  }
   cachedSession = created;
   return cachedSession;
+}
+
+/** Test-only override for single-account deployment/factory (cleared by resetSingleAccountForTesting). */
+export function configureSingleAccountForTesting(options: {
+  deployment: Deployment;
+  createSession?: typeof createBrowserSession;
+}): void {
+  resetSingleAccountForTesting();
+  testDeploymentOverride = options.deployment;
+  testSingleAccountFactory = options.createSession ?? null;
+}
+
+/** Test-only reset for the cached single-account session. */
+export function resetSingleAccountForTesting(): void {
+  cachedSession = null;
+  cachedUnsupportedSdk = false;
+  testDeploymentOverride = null;
+  testSingleAccountFactory = null;
 }
 
 type ForcedTeardownDetail = {
@@ -496,7 +527,10 @@ export function currentSession(): Promise<Session | null> {
     });
   }
   const session = singleAccountSession();
-  if (!session) return Promise.resolve(null);
+  if (!session) {
+    if (cachedUnsupportedSdk) return Promise.reject(new AuthRecoveryRequired());
+    return Promise.resolve(null);
+  }
   return session.currentSession();
 }
 
@@ -1074,12 +1108,35 @@ export async function signOutAllBrowserAccounts(): Promise<SignOutAllResult | nu
   return mgr.signOutAllAccounts();
 }
 
-export async function signOut(expected?: { userId: string; loginId: string } | null): Promise<void> {
+export async function signOut(
+  expected?: {
+    userId: string;
+    loginId: string;
+    sessionId?: string | null;
+    refreshToken?: string | null;
+    scope?: BrowserSignOutOptions["scope"];
+  } | null,
+): Promise<BrowserSignOutResult | null> {
   if (isMultiAccountEnabled()) {
     await signOutActiveAccount(expected ?? null);
-    return;
+    return null;
   }
-  await singleAccountSession()?.signOut();
+  const single = singleAccountSession();
+  if (!single) return null;
+  return await single.signOut({
+    ...(expected?.scope ? { scope: expected.scope } : {}),
+    ...(expected !== undefined
+      ? {
+          expected: expected
+            ? {
+                userId: expected.userId || null,
+                sessionId: expected.sessionId ?? (expected.loginId || null),
+                refreshToken: expected.refreshToken ?? null,
+              }
+            : null,
+        }
+      : {}),
+  });
 }
 
 export class NoDeployment extends Error {

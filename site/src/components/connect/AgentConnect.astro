@@ -147,6 +147,8 @@ const {
   import {
     NoDeployment,
     agentAccessStatuses,
+    AuthRecoveryRequired,
+    SessionExpired,
     currentSession,
     isMultiAccountEnabled,
     onAccountForcedTeardown,
@@ -537,7 +539,28 @@ const {
         return;
       }
 
-      const session = await currentSession();
+      let session;
+      try {
+        session = await currentSession();
+      } catch (error) {
+        if (version !== this.#loadVersion) return;
+        if (error instanceof SessionExpired) {
+          this.#blocked(
+            "Sign in first",
+            "Only a signed-in person can create an assistant key. Sign in, and this step will " +
+              "be waiting.",
+          );
+          return;
+        }
+        this.#blocked(
+          "Couldn't check your sign-in",
+          error instanceof AuthRecoveryRequired
+            ? error.message
+            : "CommonSwarm could not check your sign-in. Try again.",
+          true,
+        );
+        return;
+      }
       if (version !== this.#loadVersion) return;
       if (!session) {
         this.#blocked(
@@ -683,7 +706,26 @@ const {
         return;
       }
 
-      const session = await currentSession();
+      let session;
+      try {
+        session = await currentSession();
+      } catch (error) {
+        if (request.intent !== this.#intentGeneration || (pinned && !pinned.isCurrent(this.#workspaceId))) {
+          this.#abandon();
+          return;
+        }
+        if (error instanceof SessionExpired) {
+          this.#blocked(
+            "Your sign-in expired",
+            "No key was created. Sign in again and come back to this step.",
+          );
+          this.#failed("Your sign-in expired. No key was created.", named);
+          return;
+        }
+        this.#state("ready");
+        this.#failed(this.#explain(error), named);
+        return;
+      }
       if (request.intent !== this.#intentGeneration || (pinned && !pinned.isCurrent(this.#workspaceId))) {
         this.#abandon();
         return;
@@ -827,6 +869,12 @@ const {
       }
       if (error instanceof MintOutcomeUnknown) {
         return "CommonSwarm could not confirm whether this step finished. Reload the page and look at what already exists before trying again.";
+      }
+      if (error instanceof AuthRecoveryRequired) {
+        return error.message;
+      }
+      if (error instanceof SessionExpired) {
+        return "Your sign-in expired. No key was created.";
       }
       if (error instanceof NoDeployment) {
         return "Open commonswarm.com/app and continue on the live site.";

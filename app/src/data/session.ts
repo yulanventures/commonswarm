@@ -8,6 +8,7 @@ import {
   type SupabaseClient,
 } from '@supabase/supabase-js';
 import {
+  AuthRecoveryRequired,
   MULTI_ACCOUNT_ENABLED,
   createBrowserSession,
   multiAccountInUse,
@@ -30,6 +31,7 @@ import {
 export type SessionClosedReason =
   | 'invalid_config'
   | 'locks_unavailable'
+  | 'unsupported_sdk'
   | 'multi_account_flag'
   | 'multi_account_in_use'
   | 'multi_account_unknown';
@@ -38,8 +40,15 @@ export type SessionGateState =
   | { readonly status: 'sample' }
   | { readonly status: 'closed'; readonly reason: SessionClosedReason }
   | { readonly status: 'checking' }
+  | { readonly status: 'recovery'; readonly retryAt: number | null }
   | { readonly status: 'signed_out' }
   | { readonly status: 'authenticated' };
+
+const RECOVERY_BACKOFF_INITIAL_MS = 2_000;
+const RECOVERY_BACKOFF_MAX_MS = 30_000;
+const RECOVERY_RETRY_AFTER_MIN_MS = 250;
+const RECOVERY_RETRY_AFTER_MAX_MS = 60_000;
+const RECOVERY_RETRY_AFTER_CUSHION_MS = 50;
 
 export interface SessionSnapshot {
   readonly state: SessionGateState;
@@ -187,6 +196,15 @@ export function createSessionGate(
   let disposed = false;
   let hiddenByPagehide = false;
   let authSubscription: { unsubscribe(): void } | null = null;
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let recoveryAttempts = 0;
+
+  const clearRecoveryTimer = (): void => {
+    if (recoveryTimer !== null) {
+      clearTimeout(recoveryTimer);
+      recoveryTimer = null;
+    }
+  };
 
   let cachedSnapshot: SessionSnapshot;
 
@@ -283,6 +301,8 @@ export function createSessionGate(
 
   const failClosedSignedOut = (): void => {
     if (state.status === 'closed') return;
+    clearRecoveryTimer();
+    recoveryAttempts = 0;
     gateGeneration += 1;
     // Do NOT clear `hiddenByPagehide`: a sign-out arriving while the page is hidden
     // may retire the state, while keeping verification and private paint latched until `pageshow`.
@@ -295,7 +315,58 @@ export function createSessionGate(
     }
   };
 
+  const enterRecovery = (retryAfter?: number): void => {
+    if (disposed || state.status === 'closed') return;
+    clearRecoveryTimer();
+    gateGeneration += 1;
+    const nextGen = fenceTracker.forceLoginLoss();
+    const hasRetryAfter =
+      typeof retryAfter === 'number' &&
+      Number.isFinite(retryAfter) &&
+      retryAfter > 0;
+    if (!hasRetryAfter) {
+      recoveryAttempts += 1;
+    }
+    const fallbackDelay = Math.min(
+      RECOVERY_BACKOFF_MAX_MS,
+      RECOVERY_BACKOFF_INITIAL_MS * 2 ** Math.max(0, recoveryAttempts - 1),
+    );
+    const delayMs = hasRetryAfter
+      ? Math.min(
+          RECOVERY_RETRY_AFTER_MAX_MS,
+          Math.max(
+            RECOVERY_RETRY_AFTER_MIN_MS,
+            retryAfter - Date.now() + RECOVERY_RETRY_AFTER_CUSHION_MS,
+          ),
+        )
+      : fallbackDelay;
+    const retryAt = Date.now() + delayMs;
+    state = { status: 'recovery', retryAt };
+    rebuildSnapshot();
+    runPurgeSynchronously(nextGen);
+    emit();
+    if (hiddenByPagehide) {
+      runSynchronousViewRetire();
+      return;
+    }
+    const scheduledGateGen = gateGeneration;
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null;
+      if (
+        disposed ||
+        hiddenByPagehide ||
+        gateGeneration !== scheduledGateGen ||
+        state.status !== 'recovery'
+      ) {
+        return;
+      }
+      void reverify();
+    }, delayMs);
+  };
+
   const closeFailClosed = (reason: SessionClosedReason): void => {
+    clearRecoveryTimer();
+    recoveryAttempts = 0;
     gateGeneration += 1;
     hiddenByPagehide = false;
     const nextGen = fenceTracker.forceLoginLoss();
@@ -327,6 +398,8 @@ export function createSessionGate(
       closeFailClosed(closedReason);
       return;
     }
+    clearRecoveryTimer();
+    recoveryAttempts = 0;
     gateGeneration += 1;
     const nextGen = fenceTracker.forceLoginLoss();
     state = { status: 'checking' };
@@ -357,6 +430,7 @@ export function createSessionGate(
       return;
     }
 
+    clearRecoveryTimer();
     const capturedGateGen = ++gateGeneration;
     const expectedLoginGenAtStart = fenceTracker.loginGeneration;
     const capturedSession = browserSession;
@@ -365,11 +439,20 @@ export function createSessionGate(
     let session: Session | null;
     try {
       session = await capturedSession.currentSession();
-    } catch {
+    } catch (error) {
       if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) return;
       const postClosed = checkClosedBeforeSession(capturedDeployment.url);
       if (postClosed) {
         closeFailClosed(postClosed);
+        return;
+      }
+      if (
+        error instanceof AuthRecoveryRequired ||
+        (error instanceof Error && error.name === 'AuthRecoveryRequired')
+      ) {
+        enterRecovery(
+          error instanceof AuthRecoveryRequired ? error.retryAfter : undefined,
+        );
         return;
       }
       failClosedSignedOut();
@@ -393,6 +476,8 @@ export function createSessionGate(
       ) {
         failClosedSignedOut();
       } else {
+        clearRecoveryTimer();
+        recoveryAttempts = 0;
         state = { status: 'signed_out' };
         emit();
       }
@@ -408,6 +493,8 @@ export function createSessionGate(
       return;
     }
 
+    clearRecoveryTimer();
+    recoveryAttempts = 0;
     const reconciled = fenceTracker.reconcileSession(session);
     if (
       reconciled.changed ||
@@ -482,6 +569,7 @@ export function createSessionGate(
     // Synchronously retire requests, caches, store, and mounted private DOM BEFORE the browser
     // can snapshot this page into history / back-forward cache. Do not start network verification
     // while leaving; `pageshow` triggers revalidation on return.
+    clearRecoveryTimer();
     hiddenByPagehide = true;
     gateGeneration += 1;
     const nextGen = fenceTracker.forceLoginLoss();
@@ -495,6 +583,8 @@ export function createSessionGate(
     if (disposed || (!persisted && !hiddenByPagehide)) return;
     if (!browserSession || !deployment || state.status === 'closed') return;
     // Keep private state retired until verified current-login data settles.
+    clearRecoveryTimer();
+    recoveryAttempts = 0;
     hiddenByPagehide = false;
     const closedReason = checkClosedBeforeSession(deployment.url);
     if (closedReason) {
@@ -539,7 +629,13 @@ export function createSessionGate(
         sdk: deps.sdk ?? defaultSdk(),
       });
       if (!created.ok) {
-        state = { status: 'closed', reason: 'locks_unavailable' };
+        state = {
+          status: 'closed',
+          reason:
+            created.reason === 'unsupported_sdk'
+              ? 'unsupported_sdk'
+              : 'locks_unavailable',
+        };
       } else {
         browserSession = created;
         deployment = { url: runtimeConfig.url, anonKey: runtimeConfig.anonKey };
@@ -641,19 +737,35 @@ export function createSessionGate(
         const postClosed = checkClosedBeforeSession(capturedDeployment.url);
         if (postClosed) {
           closeFailClosed(postClosed);
+        } else if (
+          error &&
+          (error instanceof AuthRecoveryRequired ||
+            error instanceof AuthRetryableFetchError ||
+            error.name === 'AuthRefreshDiscardedError' ||
+            error.name === 'AuthRecoveryRequired')
+        ) {
+          retireAndRevalidate();
         } else {
           failClosedSignedOut();
         }
         return null;
       }
       session = data.session;
-    } catch {
+    } catch (error) {
       if (disposed || hiddenByPagehide || gateGeneration !== capturedGateGen) {
         return null;
       }
       const postClosed = checkClosedBeforeSession(capturedDeployment.url);
       if (postClosed) {
         closeFailClosed(postClosed);
+      } else if (
+        error instanceof AuthRecoveryRequired ||
+        error instanceof AuthRetryableFetchError ||
+        (error instanceof Error &&
+          (error.name === 'AuthRefreshDiscardedError' ||
+            error.name === 'AuthRecoveryRequired'))
+      ) {
+        retireAndRevalidate();
       } else {
         failClosedSignedOut();
       }
@@ -732,6 +844,7 @@ export function createSessionGate(
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
+    clearRecoveryTimer();
     gateGeneration += 1;
     detachAndQuiesceClient();
     listeners.clear();
