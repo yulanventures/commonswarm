@@ -22,6 +22,11 @@ import type {
 
 export type WaitingFilter = 'open' | 'archived';
 
+export interface ScopedConversationId {
+  readonly workspaceId: string;
+  readonly conversationId: string;
+}
+
 export interface AppState {
   agents: Agent[];
   channels: Channel[];
@@ -33,6 +38,13 @@ export interface AppState {
   addAgentDialogOpen: boolean;
   addAgentDraft: AddAgentDraft;
   announcement: string;
+  selectedWorkspaceId: string | null;
+  selectedConversation: ScopedConversationId | null;
+  unavailableWorkspaceId: string | null;
+  revokedWorkspaceIds: string[];
+  unavailableConversation: ScopedConversationId | null;
+  revokedConversationKeys: string[];
+  knownPrivateConversationIds: string[];
 }
 
 type Listener = () => void;
@@ -56,6 +68,13 @@ function createInitialState(): AppState {
     addAgentDialogOpen: false,
     addAgentDraft: { ...DEFAULT_ADD_AGENT_DRAFT },
     announcement: '',
+    selectedWorkspaceId: null,
+    selectedConversation: null,
+    unavailableWorkspaceId: null,
+    revokedWorkspaceIds: [],
+    unavailableConversation: null,
+    revokedConversationKeys: [],
+    knownPrivateConversationIds: [],
   };
 }
 
@@ -458,5 +477,160 @@ export const appActions = {
     }));
 
     return id;
+  },
+
+  selectWorkspace(workspaceId: string | null): void {
+    const normalized = workspaceId ? workspaceId.toLowerCase() : null;
+    setState((prev) => {
+      if (normalized !== null && prev.revokedWorkspaceIds.includes(normalized)) {
+        // Selecting a revoked workspace must never clear its unavailable state.
+        return {
+          ...prev,
+          selectedWorkspaceId: normalized,
+          selectedConversation: null,
+          unavailableWorkspaceId: normalized,
+          unavailableConversation: null,
+          knownPrivateConversationIds: [],
+        };
+      }
+      const sameWorkspace = prev.selectedWorkspaceId === normalized;
+      return {
+        ...prev,
+        selectedWorkspaceId: normalized,
+        selectedConversation: sameWorkspace ? prev.selectedConversation : null,
+        unavailableWorkspaceId: null,
+        unavailableConversation: sameWorkspace
+          ? prev.unavailableConversation
+          : null,
+        knownPrivateConversationIds: sameWorkspace
+          ? prev.knownPrivateConversationIds
+          : [],
+      };
+    });
+  },
+
+  selectConversation(
+    workspaceId: string | null,
+    conversationId: string | null,
+  ): void {
+    const normWs = workspaceId ? workspaceId.toLowerCase() : null;
+    const normConv = conversationId ? conversationId.toLowerCase() : null;
+    setState((prev) => {
+      if (!normWs || !normConv) {
+        if (prev.selectedConversation === null) return prev;
+        return {
+          ...prev,
+          selectedConversation: null,
+        };
+      }
+      const nextSelection: ScopedConversationId = {
+        workspaceId: normWs,
+        conversationId: normConv,
+      };
+      const convKey = `${normWs}:${normConv}`;
+      const isRevoked = prev.revokedConversationKeys.includes(convKey);
+      const nextUnavailable = isRevoked
+        ? nextSelection
+        : prev.unavailableConversation;
+      if (
+        prev.selectedConversation?.workspaceId === normWs &&
+        prev.selectedConversation?.conversationId === normConv &&
+        prev.unavailableConversation?.workspaceId ===
+          nextUnavailable?.workspaceId &&
+        prev.unavailableConversation?.conversationId ===
+          nextUnavailable?.conversationId
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedConversation: nextSelection,
+        unavailableConversation: nextUnavailable,
+      };
+    });
+  },
+
+  markWorkspaceUnavailable(workspaceId: string): void {
+    const normalized = workspaceId.toLowerCase();
+    setState((prev) => ({
+      ...prev,
+      selectedConversation: null,
+      unavailableWorkspaceId: normalized,
+      revokedWorkspaceIds: prev.revokedWorkspaceIds.includes(normalized)
+        ? prev.revokedWorkspaceIds
+        : [...prev.revokedWorkspaceIds, normalized],
+      unavailableConversation: null,
+      knownPrivateConversationIds: [],
+    }));
+  },
+
+  markConversationUnavailable(
+    workspaceId: string,
+    conversationId: string,
+  ): void {
+    const normWs = workspaceId.toLowerCase();
+    const normConv = conversationId.toLowerCase();
+    const key = `${normWs}:${normConv}`;
+    setState((prev) => ({
+      ...prev,
+      unavailableConversation: {
+        workspaceId: normWs,
+        conversationId: normConv,
+      },
+      revokedConversationKeys: prev.revokedConversationKeys.includes(key)
+        ? prev.revokedConversationKeys
+        : [...prev.revokedConversationKeys, key],
+      knownPrivateConversationIds: prev.knownPrivateConversationIds.filter(
+        (id) => id !== normConv,
+      ),
+    }));
+  },
+
+  recordConversationRevoked(workspaceId: string, conversationId: string): void {
+    const normWs = workspaceId.toLowerCase();
+    const normConv = conversationId.toLowerCase();
+    const key = `${normWs}:${normConv}`;
+    setState((prev) => ({
+      ...prev,
+      revokedConversationKeys: prev.revokedConversationKeys.includes(key)
+        ? prev.revokedConversationKeys
+        : [...prev.revokedConversationKeys, key],
+      knownPrivateConversationIds: prev.knownPrivateConversationIds.filter(
+        (id) => id !== normConv,
+      ),
+    }));
+  },
+
+  clearUnavailableConversation(): void {
+    setState((prev) =>
+      prev.unavailableConversation === null
+        ? prev
+        : { ...prev, unavailableConversation: null },
+    );
+  },
+
+  setKnownPrivateConversationIds(ids: readonly string[]): void {
+    const normalized = ids.map((id) => id.toLowerCase());
+    setState((prev) => ({
+      ...prev,
+      knownPrivateConversationIds: normalized,
+    }));
+  },
+
+  /**
+   * Synchronously reset every store slice that holds server-derived state.
+   * Called on login-generation changes and bfcache retirement before any await.
+   */
+  resetServerState(): void {
+    setState((prev) => ({
+      ...prev,
+      selectedWorkspaceId: null,
+      selectedConversation: null,
+      unavailableWorkspaceId: null,
+      revokedWorkspaceIds: [],
+      unavailableConversation: null,
+      revokedConversationKeys: [],
+      knownPrivateConversationIds: [],
+    }));
   },
 };

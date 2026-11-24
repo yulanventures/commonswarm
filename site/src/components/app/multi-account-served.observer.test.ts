@@ -15,7 +15,7 @@
  *  - C6 & Designer #4: Served /invite provider redirect callback preserving ?resume=, review fallback to B,
  *        identity-change notice ("You’re now joining as ... Review this invitation again."), and fresh confirmation gate
  *
- * Production MULTI_ACCOUNT_ENABLED remains false in site/src/lib/multi-account.ts;
+ * Production MULTI_ACCOUNT_ENABLED remains false in shared/browser-session/index.ts;
  * ONLY the ephemeral in-memory esbuild test bundle enables it for this browser run.
  */
 import assert from "node:assert/strict";
@@ -153,7 +153,7 @@ async function renderServedMultiAccountPage(
   const enableFlagPlugin: Plugin = {
     name: "enable-multi-account-flag-in-test-bundle",
     setup(builder) {
-      builder.onLoad({ filter: /\/site\/src\/lib\/multi-account\.ts$/ }, async (args) => {
+      builder.onLoad({ filter: /\/shared\/browser-session\/index\.ts$/ }, async (args) => {
         const src = await readFile(args.path, "utf8");
         assert.ok(src.includes("export const MULTI_ACCOUNT_ENABLED = false;"), "source flag must remain false");
         return {

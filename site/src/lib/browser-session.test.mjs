@@ -290,3 +290,200 @@ test("shared browser-session PostgREST refusal schedules locked verification, ne
   const body = source.slice(source.indexOf("function checkSessionAfterRestRefusal"), source.indexOf("const authFetch"));
   assert.doesNotMatch(body, /signOut|removeItem|_removeSession/, "removal happens only inside the SDK's verified check");
 });
+
+test("quiesce stops background listeners/timers and settles a held refresh under the shared lock without modifying localStorage", async () => {
+  const storedSession = JSON.stringify({
+    access_token: "at-initial",
+    refresh_token: "rt-initial",
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) - 60,
+    token_type: "bearer",
+    user: { id: "user-1" },
+  });
+  const storage = memoryStorage({ "sb-api-auth-token": storedSession });
+  const prevStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const prevFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+
+  let lockHeld = false;
+  let lockReleaseCount = 0;
+  const fakeLocks = {
+    async request(name, _opts, cb) {
+      while (lockHeld) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      lockHeld = true;
+      try {
+        return await cb({ name });
+      } finally {
+        lockHeld = false;
+        lockReleaseCount += 1;
+      }
+    },
+  };
+
+  let refreshStartedResolve;
+  const refreshStarted = new Promise((r) => { refreshStartedResolve = r; });
+  let releaseRefreshFetch;
+  const refreshFetchHeld = new Promise((r) => { releaseRefreshFetch = r; });
+  let abortedOnQuiesce = false;
+  let signedOutBroadcast = false;
+
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/auth/v1/token")) {
+      refreshStartedResolve();
+      init?.signal?.addEventListener("abort", () => {
+        abortedOnQuiesce = true;
+      });
+      await refreshFetchHeld;
+      return new Response(JSON.stringify({
+        access_token: "at-rotated",
+        refresh_token: "rt-rotated",
+        expires_in: 3600,
+        token_type: "bearer",
+        user: { id: "user-1" },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ id: "user-1" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    await withNavigatorLocks(fakeLocks, async () => {
+      const result = createBrowserSession({
+        url: "https://api.commonswarm.com",
+        anonKey: "anon-key",
+        detectSessionInUrl: false,
+        allowProcessLockFallback: false,
+        sdk: {
+          createClient,
+          navigatorLock,
+          processLock,
+          isAuthSessionMissingError,
+          AuthRetryableFetchError,
+        },
+      });
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+      result.client.auth.onAuthStateChange((event) => {
+        if (event === "SIGNED_OUT") signedOutBroadcast = true;
+      });
+
+      // Trigger getSession() on an expired token so GoTrue enters a refresh under the Web Lock.
+      const pendingGetSession = result.client.auth.getSession().catch(() => null);
+      await refreshStarted;
+      assert.equal(lockHeld, true, "refresh holds the shared Web Lock");
+
+      // Quiesce while the refresh HTTP request is still held.
+      const quiesceDone = result.quiesce();
+      assert.equal(abortedOnQuiesce, true, "quiesce aborts the in-flight auth fetch signal");
+
+      // Now let the mock fetch resolve with rotated tokens (simulating a transport that ignores abort).
+      releaseRefreshFetch();
+      await quiesceDone;
+      await pendingGetSession;
+
+      assert.equal(lockHeld, false, "shared Web Lock is released after quiesce settles");
+      assert.ok(lockReleaseCount >= 1);
+      assert.equal(signedOutBroadcast, false, "quiesce never emits SIGNED_OUT");
+      assert.equal(
+        storage.entries.get("sb-api-auth-token"),
+        storedSession,
+        "peer's stored login in localStorage is untouched by quiesce",
+      );
+      assert.equal(
+        storage.ops.some((op) => op.startsWith("remove:") || op.startsWith("set:")),
+        false,
+        "quiesce performs zero localStorage writes or removals",
+      );
+
+      // A successor client can cleanly acquire the same lock after quiesce.
+      let successorAcquired = false;
+      await fakeLocks.request("lock:sb-api-auth-token", {}, async () => {
+        successorAcquired = true;
+      });
+      assert.equal(successorAcquired, true);
+    });
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevStorage) Object.defineProperty(globalThis, "localStorage", prevStorage);
+    else delete globalThis.localStorage;
+  }
+});
+
+test("quiesce cancels pending and in-flight storage retries without writing to localStorage or rescheduling", async () => {
+  const initialStored = JSON.stringify({
+    access_token: "at-peer",
+    refresh_token: "rt-peer",
+    user: { id: "user-1" },
+  });
+  let blockWrites = true;
+  const entries = new Map([["sb-api-auth-token", initialStored]]);
+  let setCallsAfterUnblock = 0;
+  const flakyStorage = {
+    get length() { return entries.size; },
+    key(index) { return [...entries.keys()][index] ?? null; },
+    getItem(key) { return entries.get(key) ?? null; },
+    setItem(key, value) {
+      if (blockWrites) throw new Error("QuotaExceededError");
+      if (!key.startsWith("commonswarm-storage-")) setCallsAfterUnblock += 1;
+      entries.set(key, value);
+    },
+    removeItem(key) { entries.delete(key); },
+    clear() { entries.clear(); },
+  };
+  const prevStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: flakyStorage });
+
+  let capturedStorage;
+  const fakeLocks = { request: async (name, _opts, cb) => cb({ name }) };
+
+  try {
+    await withNavigatorLocks(fakeLocks, async () => {
+      const result = createBrowserSession({
+        url: "https://api.commonswarm.com",
+        anonKey: "anon-key",
+        detectSessionInUrl: false,
+        allowProcessLockFallback: false,
+        sdk: {
+          createClient: (url, key, opts) => {
+            capturedStorage = opts?.auth?.storage;
+            return createClient(url, key, opts);
+          },
+          navigatorLock,
+          processLock,
+          isAuthSessionMissingError,
+          AuthRetryableFetchError,
+        },
+      });
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+
+      // Seed a failed write so scheduleStorageRetry() arms its retry timer.
+      capturedStorage.getItem("sb-api-auth-token");
+      capturedStorage.setItem("sb-api-auth-token", JSON.stringify({
+        access_token: "at-delayed",
+        refresh_token: "rt-delayed",
+        user: { id: "user-1" },
+      }));
+
+      // Quiesce before the retry timer fires, then unblock storage writes.
+      await result.quiesce();
+      blockWrites = false;
+
+      // Calling setItem/removeItem after quiesce throws AuthRetryableFetchError and does not touch storage.
+      assert.throws(() => {
+        capturedStorage.setItem("sb-api-auth-token", "{}");
+      }, AuthRetryableFetchError);
+      assert.throws(() => {
+        capturedStorage.removeItem("sb-api-auth-token");
+      }, AuthRetryableFetchError);
+
+      assert.equal(setCallsAfterUnblock, 0, "quiesced retry must not write to localStorage");
+      assert.equal(entries.get("sb-api-auth-token"), initialStored, "peer session remains intact");
+    });
+  } finally {
+    if (prevStorage) Object.defineProperty(globalThis, "localStorage", prevStorage);
+    else delete globalThis.localStorage;
+  }
+});

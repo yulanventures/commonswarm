@@ -87,6 +87,12 @@ export function SessionHeader({ agent }: SessionHeaderProps) {
               : PHONE_STATE_TEXT[agent.state]}
           </span>
         </div>
+        <span
+          data-testid="sample-data-marker"
+          className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+        >
+          Sample data
+        </span>
       </header>
     );
   }
@@ -118,6 +124,13 @@ export function SessionHeader({ agent }: SessionHeaderProps) {
           className={`size-dot-xs rounded-full ${pill.dot}`}
         />
         {pill.label(agent.stateElapsed)}
+      </span>
+
+      <span
+        data-testid="sample-data-marker"
+        className="shrink-0 rounded-tag border border-border bg-elevated px-1.5 py-0.5 text-2xs font-medium text-ink-muted"
+      >
+        Sample data
       </span>
 
       <div className="flex-1" />
