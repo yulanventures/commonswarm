@@ -104,7 +104,7 @@ interface ArchivedItemRow {
   ask_kind: "choice" | "plain" | null;
   title: string;
   from: { kind: "agent" | "user"; id: string; name: string | null } | null;
-  outcome_kind: "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined";
+  outcome_kind: "answered" | "cleared_stale" | "done" | "dropped" | "accepted" | "declined" | "withdrawn" | "dismissed" | "agent_removed" | "sender_left" | "channel_archived" | "expired";
   outcome_text: string;
   archived_at: string;
   answered_by: { kind: "agent" | "user"; id: string; name: string | null; by_viewer: boolean } | null;
@@ -749,6 +749,22 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
       `;
       await tx`SET LOCAL session_replication_role = origin`;
 
+      // Before revoking Scout's seat (asks are NOT auto-cleared), unauthorized answers stay absent from Archived.
+      await tx`SAVEPOINT sp_live_canon_check`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: viewerId })}, true)`;
+      await tx`SET LOCAL ROLE authenticated`;
+      const [viewerLivePage] = await tx<{ r: WaitingArchivedPagePayload | null }[]>`
+        SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 100, NULL, NULL) AS r
+      `;
+      assert.ok(viewerLivePage?.r);
+      const viewerLiveKeys = new Set(viewerLivePage.r.items.map((i) => i.item_key));
+      assert.equal(viewerLiveKeys.has(`ask:${crossDmAskId}`), false, "live ask answered in Maya-Scout DM stays absent for viewer");
+      assert.equal(viewerLiveKeys.has(`ask:${crossUiAskId}`), false, "live choice ask with DM reply stays absent for viewer");
+      assert.equal(viewerLiveKeys.has(`ask:${legacyRevokedAgentAskId}`), false, "live ask with unmapped agent-only reply stays absent for viewer");
+      assert.equal(viewerLiveKeys.has(`ask:${openAskId}`), false, "live open ask stays absent");
+      assert.equal(viewerLivePage.r.total, expectedTotal + 1, "live viewer total includes only crossPrivAskId");
+      await tx`ROLLBACK TO SAVEPOINT sp_live_canon_check`;
+
       // Revoke Scout's workspace seat (simulating ended canonical oversight, where legacy swarm_read.signals still admitted owner reads!).
       await tx`
         UPDATE swarm.agent_workspace_memberships
@@ -756,7 +772,8 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         WHERE workspace_id = ${wsId}::uuid AND principal_id = ${scoutAgentId}::uuid
       `;
 
-      // Viewer must NOT see crossDmAskId, crossUiAskId, or legacyRevokedAgentAskId (neither in items, total, nor outcome text).
+      // After revoking Scout's seat, every visible ask from Scout with NO viewer-visible answer falls through
+      // to the generic 'agent_removed' cleared row (indistinguishable from an unanswered ask; zero answer data).
       await tx`SAVEPOINT sp_viewer_canon_check`;
       await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: viewerId })}, true)`;
       await tx`SET LOCAL ROLE authenticated`;
@@ -764,30 +781,30 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 100, NULL, NULL) AS r
       `;
       assert.ok(viewerCanonPage?.r);
-      const viewerCanonKeys = new Set(viewerCanonPage.r.items.map((i) => i.item_key));
-      assert.equal(viewerCanonKeys.has(`ask:${crossDmAskId}`), false, "viewer must not see ask answered in Maya-Scout DM");
-      assert.equal(viewerCanonKeys.has(`ask:${crossUiAskId}`), false, "viewer must not see ui_action whose reply lives in Maya-Scout DM");
-      assert.equal(viewerCanonKeys.has(`ask:${legacyRevokedAgentAskId}`), false, "viewer must not see unmapped reply addressed only to revoked Scout");
-      const viewerCanonJson = JSON.stringify(viewerCanonPage.r);
+      const viewerCanon = viewerCanonPage.r;
+      const viewerCanonByKey = new Map(viewerCanon.items.map((i) => [i.item_key, i]));
+      for (const clearedAskId of [openAskId, crossDmAskId, crossUiAskId, legacyRevokedAgentAskId]) {
+        const matches = viewerCanon.items.filter((i) => i.item_key === `ask:${clearedAskId}`);
+        assert.equal(matches.length, 1, `ask:${clearedAskId} appears once as generic agent_removed`);
+        assert.equal(matches[0]!.outcome_kind, "agent_removed");
+        assert.equal(matches[0]!.outcome_text, "Agent removed");
+        assert.equal(matches[0]!.answered_by, null);
+      }
+      assert.equal(viewerCanonByKey.get(`ask:${crossPrivAskId}`)?.outcome_kind, "answered");
+      const viewerCanonJson = JSON.stringify(viewerCanon);
       assert.equal(viewerCanonJson.includes("SECRET_MAYA_SCOUT_DM_ANSWER"), false);
       assert.equal(viewerCanonJson.includes("SECRET_UI_ACTION_DM_ANSWER"), false);
       assert.equal(viewerCanonJson.includes("Secret Choice Label"), false);
       assert.equal(viewerCanonJson.includes("SECRET_LEGACY_AGENT_ONLY_ANSWER"), false);
-      // Revoking Scout's seat auto-clears openAskId as 'agent_removed' while keeping all 3 unauthorized
-      // answered asks excluded (answered asks never fall back to autocleared_asks).
-      assert.equal(viewerCanonKeys.has(`ask:${openAskId}`), true, "open ask from removed agent appears as agent_removed");
       assert.equal(
-        viewerCanonPage.r.items.find((i) => i.item_key === `ask:${openAskId}`)?.outcome_kind,
-        "agent_removed",
-      );
-      assert.equal(
-        viewerCanonPage.r.total,
-        expectedTotal + 2,
-        "viewer total includes ONLY crossPrivAskId (viewer IS in #private-vault) plus auto-cleared openAskId, excluding all 3 unauthorized answers",
+        viewerCanon.total,
+        expectedTotal + 5,
+        "viewer total includes crossPrivAskId (answered) plus openAskId and the 3 hidden-answer asks as generic agent_removed rows",
       );
       await tx`ROLLBACK TO SAVEPOINT sp_viewer_canon_check`;
 
-      // Maya (NOT in #private-vault) must NOT see crossPrivAskId, while she DOES see crossDmAskId and crossUiAskId (she is in Maya-Scout DM!).
+      // Maya (NOT in #private-vault) sees crossPrivAskId only as a generic 'agent_removed' row with zero vault answer text,
+      // while she sees crossDmAskId and crossUiAskId once each as 'answered' (she is in Maya-Scout DM!).
       await tx`SAVEPOINT sp_maya_canon_check`;
       await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: mayaId })}, true)`;
       await tx`SET LOCAL ROLE authenticated`;
@@ -795,11 +812,16 @@ test("waiting_archived_page returns answered asks, completed/dropped todos, and 
         SELECT swarm_read.waiting_archived_page(${wsId}::uuid, 100, NULL, NULL) AS r
       `;
       assert.ok(mayaCanonPage?.r);
-      const mayaCanonKeys = new Set(mayaCanonPage.r.items.map((i) => i.item_key));
-      assert.equal(mayaCanonKeys.has(`ask:${crossPrivAskId}`), false, "Maya must not see ask whose answer lives in #private-vault");
+      const mayaCrossPriv = mayaCanonPage.r.items.filter((i) => i.item_key === `ask:${crossPrivAskId}`);
+      assert.equal(mayaCrossPriv.length, 1, "Maya sees crossPrivAskId once as generic agent_removed");
+      assert.equal(mayaCrossPriv[0]!.outcome_kind, "agent_removed");
+      assert.equal(mayaCrossPriv[0]!.outcome_text, "Agent removed");
+      assert.equal(mayaCrossPriv[0]!.answered_by, null);
       assert.equal(JSON.stringify(mayaCanonPage.r).includes("SECRET_VAULT_ONLY_ANSWER"), false);
-      assert.equal(mayaCanonKeys.has(`ask:${crossDmAskId}`), true, "Maya sees her own authorized DM answer");
-      assert.equal(mayaCanonKeys.has(`ask:${crossUiAskId}`), true, "Maya sees her own authorized ui_action DM answer");
+      assert.equal(mayaCanonPage.r.items.filter((i) => i.item_key === `ask:${crossDmAskId}`).length, 1);
+      assert.equal(mayaCanonPage.r.items.find((i) => i.item_key === `ask:${crossDmAskId}`)?.outcome_kind, "answered");
+      assert.equal(mayaCanonPage.r.items.filter((i) => i.item_key === `ask:${crossUiAskId}`).length, 1);
+      assert.equal(mayaCanonPage.r.items.find((i) => i.item_key === `ask:${crossUiAskId}`)?.outcome_kind, "answered");
       await tx`ROLLBACK TO SAVEPOINT sp_maya_canon_check`;
       await tx`ROLLBACK TO SAVEPOINT sp_answer_canonical`;
 

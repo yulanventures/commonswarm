@@ -688,3 +688,386 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
     if (err !== ROLLBACK_WITNESS) throw err;
   }
 });
+
+test("private directed reply or private completed choice never alters another addressee's Archived page, total, or cursor once auto-cleared", async () => {
+  const tBase = Date.parse("2026-11-23T12:00:00.000Z");
+  const ts = (offsetSec: number) => new Date(tBase + offsetSec * 1000).toISOString();
+
+  type ArchivedPage = WaitingSnapshot["wa"];
+
+  async function readArchivedPage(
+    tx: postgres.TransactionSql,
+    wsId: string,
+    userId: string,
+    limit: number,
+    afterAt: string | null = null,
+    afterKey: string | null = null,
+  ): Promise<ArchivedPage> {
+    await tx`SAVEPOINT sp_read_wa_c1`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", sub: userId })}, true)`;
+    await tx`SET LOCAL ROLE authenticated`;
+    const [wa] = await tx<{ r: ArchivedPage }[]>`
+      SELECT swarm_read.waiting_archived_page(
+        ${wsId}::uuid,
+        ${limit},
+        ${afterAt}::timestamptz,
+        ${afterKey}::text
+      ) AS r
+    `;
+    await tx`ROLLBACK TO SAVEPOINT sp_read_wa_c1`;
+    return wa!.r;
+  }
+
+  function normalizeRow(item: ArchivedPage["items"][number]) {
+    const from = item.from as { kind: string; name: string | null } | null;
+    const answeredBy = item.answered_by as { kind: string; name: string | null; by_viewer: boolean } | null;
+    return {
+      kind: item.kind,
+      ask_kind: item.ask_kind,
+      title: item.title,
+      from: from ? { kind: from.kind, name: from.name } : null,
+      outcome_kind: item.outcome_kind,
+      outcome_text: item.outcome_text,
+      archived_at: Date.parse(item.archived_at),
+      answered_by: answeredBy ? { kind: answeredBy.kind, name: answeredBy.name, by_viewer: answeredBy.by_viewer } : null,
+      placement: item.placement,
+      conversation_kind: item.conversation_kind,
+    };
+  }
+
+  async function seedMirrorWorkspace(tx: postgres.TransactionSql, includePrivateAnswers: boolean) {
+    const wsId = randomUUID();
+    const addresseeAId = randomUUID();
+    const addresseeBId = randomUUID();
+    const departingAskerId = randomUUID();
+    const liveAgentId = randomUUID();
+    const openChId = randomUUID();
+    const archivedChId = randomUUID();
+
+    const expDirectedAskId = randomUUID();
+    const senderLeftDirectedAskId = randomUUID();
+    const expHiddenChoiceAskId = randomUUID();
+    const archivedChHiddenChoiceAskId = randomUUID();
+    const visibleAnswerExpiredAskId = randomUUID();
+
+    await tx`
+      INSERT INTO auth.users (id, email)
+      VALUES
+        (${addresseeAId}::uuid, ${`c1-a-${addresseeAId}@example.test`}),
+        (${addresseeBId}::uuid, ${`c1-b-${addresseeBId}@example.test`}),
+        (${departingAskerId}::uuid, ${`c1-d-${departingAskerId}@example.test`})
+    `;
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES
+        (${addresseeAId}::uuid, 'AddresseeA'),
+        (${addresseeBId}::uuid, 'AddresseeB'),
+        (${departingAskerId}::uuid, 'DepartingAsker')
+    `;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${wsId}::uuid, 'C1MirrorWS', ${addresseeAId}::uuid)`;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES
+        (${wsId}::uuid, ${addresseeAId}::uuid, 'owner'),
+        (${wsId}::uuid, ${addresseeBId}::uuid, 'member'),
+        (${wsId}::uuid, ${departingAskerId}::uuid, 'member')
+    `;
+    await tx`
+      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${liveAgentId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'C1Agent')
+    `;
+    await tx`
+      INSERT INTO swarm.channels (channel_id, workspace_id, slug, visibility, created_by_principal, created_by_kind)
+      VALUES
+        (${openChId}::uuid, ${wsId}::uuid, 'c1-open', 'open', ${addresseeAId}::uuid, 'user'),
+        (${archivedChId}::uuid, ${wsId}::uuid, 'c1-archived', 'open', ${addresseeAId}::uuid, 'user')
+    `;
+
+    await tx`SET CONSTRAINTS ALL DEFERRED`;
+    await tx`SET LOCAL ROLE swarm_command`;
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until)
+      VALUES
+        (${expDirectedAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-300)}::timestamptz),
+        (${senderLeftDirectedAskId}::uuid, ${wsId}::uuid, ${departingAskerId}::uuid, 'user', ${addresseeAId}::uuid, 'ask', 'Sender-left ask with directed DM reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z'),
+        (${expHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired choice ask with directed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-250)}::timestamptz),
+        (${archivedChHiddenChoiceAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Archived-channel choice ask with DM reply?', ${archivedChId}::uuid, ${ts(-600)}::timestamptz, '9999-12-31T23:59:59Z'),
+        (${visibleAnswerExpiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${addresseeAId}::uuid, 'ask', 'Expired ask with visible unaddressed reply?', ${openChId}::uuid, ${ts(-600)}::timestamptz, ${ts(-150)}::timestamptz)
+    `;
+    for (const askId of [
+      expDirectedAskId,
+      senderLeftDirectedAskId,
+      expHiddenChoiceAskId,
+      archivedChHiddenChoiceAskId,
+      visibleAnswerExpiredAskId,
+    ]) {
+      await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES
+          (${askId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 0),
+          (${askId}::uuid, ${wsId}::uuid, ${addresseeBId}::uuid, 1)
+      `;
+    }
+    for (const choiceAskId of [expHiddenChoiceAskId, archivedChHiddenChoiceAskId]) {
+      await tx`
+        INSERT INTO swarm.ask_choices (signal_id, workspace_id, multi, options)
+        VALUES (
+          ${choiceAskId}::uuid,
+          ${wsId}::uuid,
+          false,
+          ${tx.json([
+            { id: "opt_secret", label: "SECRET_CHOICE_LABEL" },
+            { id: "opt_alt", label: "Alternate option" },
+          ])}::jsonb
+        )
+      `;
+    }
+
+    // Visible-answer control: unaddressed reply in openChId (audience = 'conversation', readable by both A and B).
+    await tx`
+      INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, channel_id, created_at, until)
+      VALUES (
+        ${randomUUID()}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'user', ${visibleAnswerExpiredAskId}::uuid,
+        'note', 'Public answer both can read', ${openChId}::uuid, ${ts(-180)}::timestamptz, '9999-12-31T23:59:59Z'
+      )
+    `;
+
+    if (includePrivateAnswers) {
+      const expDirectedReplyId = randomUUID();
+      const senderLeftDmReplyId = randomUUID();
+      const expHiddenChoiceReplyId = randomUUID();
+      const archivedChChoiceReplyId = randomUUID();
+
+      // 1. Directed reply in openChId (to_agent_principal_id = liveAgentId -> audience = 'addressed', hidden from B).
+      // 2. Directed DM reply to departingAskerId (channel_id = NULL -> 1:1 DM {A, departingAsker}, hidden from B).
+      // 3. Completed choice with directed reply in openChId (audience = 'addressed', hidden from B).
+      // 4. Completed choice with directed DM reply (channel_id = NULL -> 1:1 DM {A, liveAgent}, hidden from B).
+      await tx`
+        INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id,
+          in_reply_to, kind, body, channel_id, created_at, until
+        ) VALUES
+          (${expDirectedReplyId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'user', NULL, ${liveAgentId}::uuid,
+           ${expDirectedAskId}::uuid, 'note', 'SECRET_DIRECTED_EXPIRY_REPLY', ${openChId}::uuid, ${ts(-400)}::timestamptz, '9999-12-31T23:59:59Z'),
+          (${senderLeftDmReplyId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'user', ${departingAskerId}::uuid, NULL,
+           ${senderLeftDirectedAskId}::uuid, 'note', 'SECRET_DIRECTED_DM_REPLY', NULL, ${ts(-390)}::timestamptz, '9999-12-31T23:59:59Z'),
+          (${expHiddenChoiceReplyId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'user', NULL, ${liveAgentId}::uuid,
+           ${expHiddenChoiceAskId}::uuid, 'note', 'SECRET_CHOICE_REPLY_BODY', ${openChId}::uuid, ${ts(-380)}::timestamptz, '9999-12-31T23:59:59Z'),
+          (${archivedChChoiceReplyId}::uuid, ${wsId}::uuid, ${addresseeAId}::uuid, 'user', NULL, ${liveAgentId}::uuid,
+           ${archivedChHiddenChoiceAskId}::uuid, 'note', 'SECRET_ARCHIVED_CH_CHOICE_BODY', NULL, ${ts(-370)}::timestamptz, '9999-12-31T23:59:59Z')
+      `;
+      await tx`
+        INSERT INTO swarm.ui_actions (
+          action_id, workspace_id, signal_id, actor_user_id, option_id, option_ids, other_text,
+          state, reply_signal_id, created_at, completed_at
+        ) VALUES
+          (${randomUUID()}::uuid, ${wsId}::uuid, ${expHiddenChoiceAskId}::uuid, ${addresseeAId}::uuid,
+           'opt_secret', ARRAY['opt_secret']::text[], 'SECRET_CHOICE_OTHER',
+           'completed', ${expHiddenChoiceReplyId}::uuid, ${ts(-380)}::timestamptz, ${ts(-380)}::timestamptz),
+          (${randomUUID()}::uuid, ${wsId}::uuid, ${archivedChHiddenChoiceAskId}::uuid, ${addresseeAId}::uuid,
+           'opt_secret', ARRAY['opt_secret']::text[], NULL,
+           'completed', ${archivedChChoiceReplyId}::uuid, ${ts(-370)}::timestamptz, ${ts(-370)}::timestamptz)
+      `;
+    }
+
+    await tx`RESET ROLE`;
+    await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+
+    // Trigger sender_left (ts(-200)) and channel_archived (ts(-220)) identically in both workspaces.
+    await tx`
+      UPDATE swarm.memberships
+      SET revoked_at = ${ts(-200)}::timestamptz
+      WHERE workspace_id = ${wsId}::uuid AND user_id = ${departingAskerId}::uuid
+    `;
+    await tx`
+      UPDATE swarm.channels
+      SET archived_at = ${ts(-220)}::timestamptz
+      WHERE workspace_id = ${wsId}::uuid AND channel_id = ${archivedChId}::uuid
+    `;
+    await tx`SELECT swarm.conversation_for_channel(${wsId}::uuid, ${archivedChId}::uuid)`;
+
+    return {
+      wsId,
+      addresseeAId,
+      addresseeBId,
+      liveAgentId,
+      openChId,
+      expDirectedAskId,
+      senderLeftDirectedAskId,
+      expHiddenChoiceAskId,
+      archivedChHiddenChoiceAskId,
+      visibleAnswerExpiredAskId,
+    };
+  }
+
+  try {
+    await sql.begin(async (tx) => {
+      const priv = await seedMirrorWorkspace(tx, true);
+      const ctrl = await seedMirrorWorkspace(tx, false);
+
+      // 1. Compare B's full Archived page between the privately-answered workspace and the never-answered control.
+      const bPrivFull = await readArchivedPage(tx, priv.wsId, priv.addresseeBId, 50);
+      const bCtrlFull = await readArchivedPage(tx, ctrl.wsId, ctrl.addresseeBId, 50);
+
+      assert.equal(bPrivFull.total, 5);
+      assert.equal(bPrivFull.total, bCtrlFull.total, "B's total must match the never-answered control");
+      assert.equal(bPrivFull.truncated, bCtrlFull.truncated);
+      assert.deepEqual(
+        bPrivFull.items.map(normalizeRow),
+        bCtrlFull.items.map(normalizeRow),
+        "B's Archived items must match the never-answered control field for field",
+      );
+
+      // Verify each specific cleared outcome, timestamp, and absence of answer data for B.
+      const bByKey = new Map(bPrivFull.items.map((i) => [i.item_key, i]));
+      const bExpDir = bByKey.get(`ask:${priv.expDirectedAskId}`);
+      assert.ok(bExpDir);
+      assert.equal(bExpDir.outcome_kind, "expired");
+      assert.equal(bExpDir.outcome_text, "Expired");
+      assert.equal(Date.parse(bExpDir.archived_at), Date.parse(ts(-300)));
+      assert.equal(bExpDir.answered_by, null);
+
+      const bSenderLeft = bByKey.get(`ask:${priv.senderLeftDirectedAskId}`);
+      assert.ok(bSenderLeft);
+      assert.equal(bSenderLeft.outcome_kind, "sender_left");
+      assert.equal(bSenderLeft.outcome_text, "Sender left");
+      assert.equal(Date.parse(bSenderLeft.archived_at), Date.parse(ts(-200)));
+      assert.equal(bSenderLeft.answered_by, null);
+
+      const bExpChoice = bByKey.get(`ask:${priv.expHiddenChoiceAskId}`);
+      assert.ok(bExpChoice);
+      assert.equal(bExpChoice.outcome_kind, "expired");
+      assert.equal(bExpChoice.outcome_text, "Expired");
+      assert.equal(Date.parse(bExpChoice.archived_at), Date.parse(ts(-250)));
+      assert.equal(bExpChoice.answered_by, null);
+
+      const bArchivedChChoice = bByKey.get(`ask:${priv.archivedChHiddenChoiceAskId}`);
+      assert.ok(bArchivedChChoice);
+      assert.equal(bArchivedChChoice.outcome_kind, "channel_archived");
+      assert.equal(bArchivedChChoice.outcome_text, "Channel archived");
+      assert.equal(Date.parse(bArchivedChChoice.archived_at), Date.parse(ts(-220)));
+      assert.equal(bArchivedChChoice.answered_by, null);
+
+      // Visible-answer control: unaddressed reply wins ONCE for B even though the ask also expired.
+      const bVisibleMatches = bPrivFull.items.filter((i) => i.item_key === `ask:${priv.visibleAnswerExpiredAskId}`);
+      assert.equal(bVisibleMatches.length, 1, "visible answer must appear once for B, not also as expired");
+      assert.equal(bVisibleMatches[0]!.outcome_kind, "answered");
+      assert.equal(bVisibleMatches[0]!.outcome_text, "Public answer both can read");
+      assert.equal(Date.parse(bVisibleMatches[0]!.archived_at), Date.parse(ts(-180)));
+      assert.equal(bVisibleMatches[0]!.answered_by?.by_viewer, false);
+
+      // Zero secret answer content anywhere in B's response.
+      const bJson = JSON.stringify(bPrivFull);
+      for (const secret of [
+        "SECRET_DIRECTED_EXPIRY_REPLY",
+        "SECRET_DIRECTED_DM_REPLY",
+        "SECRET_CHOICE_LABEL",
+        "SECRET_CHOICE_OTHER",
+        "SECRET_CHOICE_REPLY_BODY",
+        "SECRET_ARCHIVED_CH_CHOICE_BODY",
+      ]) {
+        assert.equal(bJson.includes(secret), false, `B's Archived page must never leak ${secret}`);
+      }
+
+      // 2. Compare B's keyset cursor pagination (limit = 2) page-for-page against the never-answered control.
+      let pAfterAt: string | null = null;
+      let pAfterKey: string | null = null;
+      let cAfterAt: string | null = null;
+      let cAfterKey: string | null = null;
+      let pageCount = 0;
+      for (;;) {
+        pageCount += 1;
+        assert.ok(pageCount <= 5, "pagination must terminate in 3 pages");
+        const pPage = await readArchivedPage(tx, priv.wsId, priv.addresseeBId, 2, pAfterAt, pAfterKey);
+        const cPage = await readArchivedPage(tx, ctrl.wsId, ctrl.addresseeBId, 2, cAfterAt, cAfterKey);
+        assert.equal(pPage.total, cPage.total, `page ${pageCount} total matches control`);
+        assert.equal(pPage.truncated, cPage.truncated, `page ${pageCount} truncated matches control`);
+        assert.deepEqual(
+          pPage.items.map(normalizeRow),
+          cPage.items.map(normalizeRow),
+          `page ${pageCount} items match control`,
+        );
+        if (!pPage.truncated) break;
+        const pLast = pPage.items[pPage.items.length - 1]!;
+        const cLast = cPage.items[cPage.items.length - 1]!;
+        assert.equal(Date.parse(pLast.archived_at), Date.parse(cLast.archived_at), `page ${pageCount} cursor timestamp matches control`);
+        pAfterAt = pLast.archived_at;
+        pAfterKey = pLast.item_key;
+        cAfterAt = cLast.archived_at;
+        cAfterKey = cLast.item_key;
+      }
+      assert.equal(pageCount, 3, "5 rows at limit 2 span 3 cursor pages");
+
+      // 3. Addressee A sees ALL 5 asks as 'answered', ONCE each (never duplicated as cleared).
+      const aPrivFull = await readArchivedPage(tx, priv.wsId, priv.addresseeAId, 50);
+      assert.equal(aPrivFull.total, 5);
+      const expectedForA: Array<[string, string, number]> = [
+        [priv.expDirectedAskId, "SECRET_DIRECTED_EXPIRY_REPLY", Date.parse(ts(-400))],
+        [priv.senderLeftDirectedAskId, "SECRET_DIRECTED_DM_REPLY", Date.parse(ts(-390))],
+        [priv.expHiddenChoiceAskId, "SECRET_CHOICE_LABEL · SECRET_CHOICE_OTHER", Date.parse(ts(-380))],
+        [priv.archivedChHiddenChoiceAskId, "SECRET_CHOICE_LABEL", Date.parse(ts(-370))],
+        [priv.visibleAnswerExpiredAskId, "Public answer both can read", Date.parse(ts(-180))],
+      ];
+      for (const [askId, expectedText, expectedAt] of expectedForA) {
+        const matches = aPrivFull.items.filter((i) => i.item_key === `ask:${askId}`);
+        assert.equal(matches.length, 1, `ask:${askId} must appear exactly once for A`);
+        assert.equal(matches[0]!.outcome_kind, "answered");
+        assert.equal(matches[0]!.outcome_text, expectedText);
+        assert.equal(Date.parse(matches[0]!.archived_at), expectedAt);
+        assert.equal(matches[0]!.answered_by?.by_viewer, true);
+      }
+
+      // 4. Live queue rule unchanged: an unexpired ask privately answered by A still leaves B's Waiting on you
+      //    (via global swarm.ask_answered) without appearing in B's Archived until it auto-clears.
+      const liveDirectedAskId = randomUUID();
+      await tx`SET CONSTRAINTS ALL DEFERRED`;
+      await tx`SET LOCAL ROLE swarm_command`;
+      await tx`
+        INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, channel_id, created_at, until)
+        VALUES (
+          ${liveDirectedAskId}::uuid, ${priv.wsId}::uuid, ${priv.liveAgentId}::uuid, 'agent',
+          ${priv.addresseeAId}::uuid, 'ask', 'Unexpired ask with directed reply?', ${priv.openChId}::uuid,
+          ${ts(-100)}::timestamptz, '9999-12-31T23:59:59Z'
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES
+          (${liveDirectedAskId}::uuid, ${priv.wsId}::uuid, ${priv.addresseeAId}::uuid, 0),
+          (${liveDirectedAskId}::uuid, ${priv.wsId}::uuid, ${priv.addresseeBId}::uuid, 1)
+      `;
+      await tx`
+        INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, to_agent_principal_id,
+          in_reply_to, kind, body, channel_id, created_at, until
+        ) VALUES (
+          ${randomUUID()}::uuid, ${priv.wsId}::uuid, ${priv.addresseeAId}::uuid, 'user', ${priv.liveAgentId}::uuid,
+          ${liveDirectedAskId}::uuid, 'note', 'SECRET_LIVE_DIRECTED_REPLY', ${priv.openChId}::uuid,
+          ${ts(-90)}::timestamptz, '9999-12-31T23:59:59Z'
+        )
+      `;
+      await tx`RESET ROLE`;
+      await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+
+      const bLiveSnap = await readAllFiveAs(tx, priv.wsId, priv.addresseeBId);
+      assert.equal(bLiveSnap.dq.total, 0, "global ask_answered still clears live decision_queue for B");
+      assert.equal(bLiveSnap.dqp.total, 0, "global ask_answered still clears live decision_queue_page for B");
+      assert.equal(bLiveSnap.wsOverview!.needs_you.asks.length, 0, "global ask_answered still clears home_overview for B");
+      assert.equal(
+        bLiveSnap.wa.items.some((i) => i.item_key === `ask:${liveDirectedAskId}`),
+        false,
+        "unexpired ask with private answer stays out of B's Archived until an auto-clear condition holds",
+      );
+      const aLiveSnap = await readAllFiveAs(tx, priv.wsId, priv.addresseeAId);
+      assert.equal(
+        aLiveSnap.wa.items.filter((i) => i.item_key === `ask:${liveDirectedAskId}`).length,
+        1,
+        "A sees the live privately-answered ask once in Archived",
+      );
+
+      throw ROLLBACK_WITNESS;
+    });
+  } catch (err) {
+    if (err !== ROLLBACK_WITNESS) throw err;
+  }
+});

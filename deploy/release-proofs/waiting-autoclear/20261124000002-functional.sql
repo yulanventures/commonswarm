@@ -27,7 +27,8 @@ BEGIN
   FROM pg_proc
   WHERE oid = 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)'::regprocedure;
   IF position('waiting_ask_autoclear_status' IN coalesce(v_archived_src, '')) = 0
-     OR position('withdrawn' IN coalesce(v_archived_src, '')) = 0 THEN
-    RAISE EXCEPTION 'waiting_archived_page missing autoclear or withdrawn outcomes' USING ERRCODE = '55000';
+     OR position('withdrawn' IN coalesce(v_archived_src, '')) = 0
+     OR position('ask_answered' IN coalesce(v_archived_src, '')) > 0 THEN
+    RAISE EXCEPTION 'waiting_archived_page missing autoclear/withdrawn or references global ask_answered' USING ERRCODE = '55000';
   END IF;
 END $proof$;

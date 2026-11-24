@@ -14,7 +14,8 @@
 --      so home_overview agrees with decision_queue (another addressee's answer, non-self-reply,
 --      live DM/group-DM membership and audience visibility, and all auto-clear rules).
 --   4. swarm_read.waiting_archived_page adds autocleared_asks (under identical visibility and
---      redaction gates, excluding already-answered asks) and includes withdrawn review offers
+--      redaction gates, excluding only asks already present in archived_asks so hidden answers
+--      cannot alter another viewer's Archived page) and includes withdrawn review offers
 --      ('withdrawn' / 'Withdrawn') in archived_reviews.
 SET search_path = swarm, pg_catalog, public;
 
@@ -545,7 +546,7 @@ BEGIN
  can_read_todos := swarm.household_human_can_read(p_workspace_id, viewer);
  page_limit := greatest(1, least(coalesce(p_limit, 30), 100));
 
- WITH archived_asks AS (
+ WITH archived_asks AS MATERIALIZED (
   SELECT
    'ask:' || s.id::text AS item_key,
    'ask'::text AS kind,
@@ -1204,13 +1205,9 @@ BEGIN
      WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id = viewer
     )
    )
-   AND NOT swarm.ask_answered(s.workspace_id, s.id)
-   AND NOT EXISTS (
-    SELECT 1 FROM swarm.ui_actions ua
-    WHERE ua.workspace_id = s.workspace_id
-     AND ua.signal_id = s.id
-     AND ua.state = 'completed'
-   )
+   -- Single viewer-visible answer definition shared with archived_asks:
+   -- an answer the viewer cannot independently read never suppresses an otherwise visible cleared row.
+   AND NOT EXISTS (SELECT 1 FROM archived_asks aa WHERE aa.id = s.id)
    AND (
     s.channel_id IS NULL
     OR swarm.actor_can_access_channel(p_workspace_id, s.channel_id, 'user', viewer)

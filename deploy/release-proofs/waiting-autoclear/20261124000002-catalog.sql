@@ -37,6 +37,7 @@ SELECT
       AND p.prosecdef AND p.proowner = 'swarm_admin'::regrole
       AND position('waiting_ask_autoclear_status' IN p.prosrc) > 0
       AND position('withdrawn' IN p.prosrc) > 0
+      AND position('ask_answered' IN p.prosrc) = 0
   )
   AND has_function_privilege('authenticated', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'swarm_read.waiting_archived_page(uuid,integer,timestamp with time zone,text)', 'EXECUTE')
