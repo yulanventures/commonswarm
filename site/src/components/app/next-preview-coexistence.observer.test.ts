@@ -2441,6 +2441,12 @@ test("served /app and /next two-tab coexistence: single-use refresh, stale termi
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // LIMIT OF THIS SCENARIO: the browser test tool routes WebSockets through an in-page stand-in, not a
+    // native socket. So an "outcome=restored" here does NOT show that a real browser keeps a page with a
+    // native realtime socket in its back-forward cache (an open native WebSocket is a known blocker).
+    // What this scenario proves is what the app does around the transition, in either outcome. Whether a
+    // real browser restores or reloads has to be read from the served preview (the navigation entry's
+    // notRestoredReasons), not from this test.
     // (f) Back from cross-site navigation while /next holds an OPEN realtime socket:
     //     - Same browser launch options and cross-site /away server as (e)
     //     - Routes wss://api.commonswarm.com/** to a minimal Phoenix-compatible responder
