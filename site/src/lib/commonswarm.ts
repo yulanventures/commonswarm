@@ -5534,8 +5534,26 @@ export function uuid(): string {
 
 export type WaitingDismissalItemKind = "ask" | "todo" | "review";
 
+const WAITING_DISMISSAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseWaitingDismissalInstanceId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return WAITING_DISMISSAL_UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
 export type WaitingDismissalResult =
-  | { ok: true; itemKind: WaitingDismissalItemKind; itemId: string; dismissed?: boolean; restored?: boolean; dismissedAt?: string | null; restoredAt?: string | null }
+  | {
+    ok: true;
+    itemKind: WaitingDismissalItemKind;
+    itemId: string;
+    dismissed?: boolean;
+    created?: boolean;
+    dismissal?: string;
+    restored?: boolean;
+    dismissedAt?: string | null;
+    restoredAt?: string | null;
+  }
   | { ok: false; status: number; error: string | null; message: string };
 
 const WAITING_DISMISS_FAILED = "Could not dismiss. Try again.";
@@ -5545,8 +5563,20 @@ export function dismissWaitingItemCommand(itemKind: WaitingDismissalItemKind, it
   return { kind: "dismiss_waiting_item", item_kind: itemKind, item_id: itemId };
 }
 
-export function restoreWaitingItemCommand(itemKind: WaitingDismissalItemKind, itemId: string): Record<string, unknown> {
-  return { kind: "restore_waiting_item", item_kind: itemKind, item_id: itemId };
+export function restoreWaitingItemCommand(
+  itemKind: WaitingDismissalItemKind,
+  itemId: string,
+  dismissal?: string | null,
+): Record<string, unknown> {
+  if (dismissal === undefined || dismissal === null) {
+    return { kind: "restore_waiting_item", item_kind: itemKind, item_id: itemId };
+  }
+  return {
+    kind: "restore_waiting_item",
+    item_kind: itemKind,
+    item_id: itemId,
+    dismissal: dismissal.trim().toLowerCase(),
+  };
 }
 
 /** Per-person dismissal of one Waiting on you item (ask, todo, or review offer). */
@@ -5572,11 +5602,14 @@ export async function dismissWaitingItem(
     options,
   );
   if (status === 200 && body.status === "accepted") {
+    const dismissal = parseWaitingDismissalInstanceId(body.dismissal);
     return {
       ok: true,
       itemKind,
       itemId,
       dismissed: true,
+      ...(typeof body.created === "boolean" ? { created: body.created } : {}),
+      ...(dismissal !== null ? { dismissal } : {}),
       dismissedAt: typeof body.dismissed_at === "string" ? body.dismissed_at : null,
     };
   }
@@ -5595,16 +5628,25 @@ export async function restoreWaitingItem(
   itemKind: WaitingDismissalItemKind,
   itemId: string,
   options?: {
+    dismissal?: string | null;
     pinned?: PinnedAccountContext | null;
     accountWideWorkspace?: boolean;
     isAlive?: () => boolean;
     signal?: AbortSignal;
   },
 ): Promise<WaitingDismissalResult> {
+  let boundDismissal: string | undefined;
+  if (options?.dismissal !== undefined && options.dismissal !== null) {
+    const parsed = parseWaitingDismissalInstanceId(options.dismissal);
+    if (parsed === null) {
+      return { ok: false, status: 400, error: "invalid_request", message: WAITING_RESTORE_FAILED };
+    }
+    boundDismissal = parsed;
+  }
   const { status, body } = await postCommand(
     session,
     commandId,
-    restoreWaitingItemCommand(itemKind, itemId),
+    restoreWaitingItemCommand(itemKind, itemId, boundDismissal),
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     undefined,
     options,

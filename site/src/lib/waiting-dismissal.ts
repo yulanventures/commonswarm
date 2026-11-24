@@ -9,7 +9,7 @@
  *   Dismissed rows, survey pointers, and pending actions, and fences late async settlements via
  *   per-row retirement and a monotonic access generation counter.
  */
-import type { WaitingDismissalItemKind, WaitingDismissalResult } from "./commonswarm";
+import { parseWaitingDismissalInstanceId, type WaitingDismissalItemKind, type WaitingDismissalResult } from "./commonswarm";
 import type { WaitingArchivedItem, WaitingDismissBatchVM, WaitingDismissedPlaceholder, WaitingScope } from "./waiting-panel";
 
 export type WaitingDismissSlotKind = "ask" | "plain" | "todo";
@@ -86,6 +86,14 @@ interface BatchNotFoundCandidate {
   readonly cardId: string;
 }
 
+/** Minimal metadata recorded for one dismissal created by a batch. Holds NO item text. */
+interface BatchUndoRecord {
+  readonly workspaceId: string;
+  readonly itemKind: WaitingDismissalItemKind;
+  readonly itemId: string;
+  readonly dismissal: string;
+}
+
 interface WaitingDismissBatchInternal {
   readonly attemptId: number;
   readonly batchGen: number;
@@ -96,11 +104,13 @@ interface WaitingDismissBatchInternal {
   readonly capturedGlobalGen: number;
   readonly capturedWsGens: ReadonlyMap<string, number>;
   readonly capturedPanelLifetime: number | null;
-  phase: "loading" | "confirm" | "running" | "done";
+  phase: "loading" | "confirm" | "running" | "done" | "undoing" | "restored";
   targets: readonly WaitingDismissBatchTarget[];
+  undoEntries: BatchUndoRecord[];
   total: number;
   processed: number;
   doneCount: number;
+  restoredCount: number;
   stopping: boolean;
   retired: boolean;
 }
@@ -133,6 +143,7 @@ export interface WaitingDismissalPorts {
     itemKind: WaitingDismissalItemKind,
     itemId: string,
     isAlive?: () => boolean,
+    dismissal?: string,
   ) => Promise<WaitingDismissalResult>;
   resolveReviewOfferId?: (workspaceId: string, todoId: string, isAlive?: () => boolean) => Promise<string | null>;
   /** Optional snapshot of the caller's account/auth lifetime captured at the moment the person acts. */
@@ -163,6 +174,7 @@ export interface WaitingDismissalPorts {
   onBatchCancelled?: () => void;
   onBatchStarted?: () => void;
   onBatchFinished?: () => void;
+  onBatchUndoFinished?: () => void;
 }
 
 export interface WaitingDismissalController {
@@ -178,6 +190,7 @@ export interface WaitingDismissalController {
   beginBatchConfirm(input: WaitingDismissBatchBeginInput): Promise<void>;
   cancelBatchConfirm(): void;
   confirmBatch(): Promise<void>;
+  undoBatch(): Promise<void>;
   stopBatch(): void;
   retireBatch(renderIfChanged?: boolean): boolean;
   dismiss(target: WaitingDismissTarget): Promise<void>;
@@ -267,8 +280,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
   const ownsBatch = (batch: WaitingDismissBatchInternal): boolean =>
     activeBatch === batch && activeBatch.attemptId === batch.attemptId && activeBatch.batchGen === batch.batchGen;
 
-  const isBatchAlive = (batch: WaitingDismissBatchInternal): boolean => {
-    if (batch.retired || !ownsBatch(batch)) return false;
+  const isBatchContextAlive = (batch: WaitingDismissBatchInternal): boolean => {
     if (!ports.isAlive() || !batch.accountAlive()) return false;
     if (globalGen !== batch.capturedGlobalGen) return false;
     if (
@@ -294,6 +306,9 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     return true;
   };
 
+  const isBatchAlive = (batch: WaitingDismissBatchInternal): boolean =>
+    !batch.retired && ownsBatch(batch) && isBatchContextAlive(batch);
+
   const clearBatchRows = (batchAttemptId: number): void => {
     for (const [key, row] of rows.entries()) {
       if (row.batchAttemptId === batchAttemptId) {
@@ -309,6 +324,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     let changed = false;
     if (current) {
       current.retired = true;
+      current.undoEntries = [];
       activeBatch = null;
       changed = true;
     }
@@ -414,10 +430,12 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
   };
 
   type BatchItemOutcome =
-    | { kind: "dismissed" }
+    | { kind: "dismissed"; undoEntry?: BatchUndoRecord }
     | { kind: "not_found"; candidate: BatchNotFoundCandidate }
     | { kind: "failed" }
     | { kind: "retired" };
+
+  type BatchUndoItemOutcome = "restored" | "not_restored" | "retired";
 
   const runBatchDismissItem = async (
     batch: WaitingDismissBatchInternal,
@@ -493,7 +511,18 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
       ports.removeCardFromClient({ ...target, itemId: pinnedItemId, position: 0, placeKey: batch.placeKey, scope: batch.scope });
       batch.processed += 1;
       ports.render();
-      return { kind: "dismissed" };
+      const dismissal = result.created === true ? parseWaitingDismissalInstanceId(result.dismissal) : null;
+      return dismissal !== null
+        ? {
+            kind: "dismissed",
+            undoEntry: {
+              workspaceId: target.workspaceId,
+              itemKind: target.itemKind,
+              itemId: pinnedItemId,
+              dismissal,
+            },
+          }
+        : { kind: "dismissed" };
     }
 
     deleteOwnedRow(key, row);
@@ -510,6 +539,47 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     batch.processed += 1;
     ports.render();
     return { kind: "failed" };
+  };
+
+  const runBatchUndoItem = async (
+    batch: WaitingDismissBatchInternal,
+    entry: BatchUndoRecord,
+    touchedWorkspaces: Set<string>,
+  ): Promise<BatchUndoItemOutcome> => {
+    if (!isBatchAlive(batch)) return "retired";
+    const dismissal = parseWaitingDismissalInstanceId(entry.dismissal);
+    if (!dismissal) {
+      batch.processed += 1;
+      ports.render();
+      return "not_restored";
+    }
+    touchedWorkspaces.add(entry.workspaceId);
+
+    const alive = createActionAlive(
+      entry.workspaceId,
+      null,
+      null,
+      true,
+      () => isBatchAlive(batch),
+    );
+    if (!alive()) return "retired";
+
+    let result: WaitingDismissalResult;
+    try {
+      result = await ports.sendRestore(entry.workspaceId, entry.itemKind, entry.itemId, alive, dismissal);
+    } catch {
+      result = { ok: false, status: 0, error: null, message: "Could not restore. Try again." };
+    }
+    if (!ownsBatch(batch) || !alive() || isRetiredResult(result)) {
+      return "retired";
+    }
+
+    batch.processed += 1;
+    ports.render();
+    if (result.ok && result.restored !== false) {
+      return "restored";
+    }
+    return "not_restored";
   };
 
   return {
@@ -572,10 +642,25 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           stopping: batch.stopping,
         };
       }
+      if (batch.phase === "undoing") {
+        return {
+          phase: "undoing",
+          processed: batch.processed,
+          total: batch.total,
+        };
+      }
+      if (batch.phase === "restored") {
+        return {
+          phase: "restored",
+          restoredCount: batch.restoredCount,
+          total: batch.total,
+        };
+      }
       return {
         phase: "done",
         doneCount: batch.doneCount,
         total: batch.total,
+        ...(batch.undoEntries.length > 0 ? { canUndo: true as const } : {}),
       };
     },
 
@@ -587,7 +672,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
     async beginBatchConfirm(input: WaitingDismissBatchBeginInput): Promise<void> {
       if (!ports.isAlive()) return;
-      if (activeBatch && activeBatch.phase === "running") return;
+      if (activeBatch && (activeBatch.phase === "running" || activeBatch.phase === "undoing") && isBatchAlive(activeBatch)) return;
       const hadPrev = retireBatchInternal(false);
 
       const attemptId = newAttemptId();
@@ -613,9 +698,11 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
           capturedPanelLifetime,
           phase: "loading",
           targets: [],
+          undoEntries: [],
           total: 0,
           processed: 0,
           doneCount: 0,
+          restoredCount: 0,
           stopping: false,
           retired: false,
         };
@@ -678,9 +765,11 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         capturedPanelLifetime,
         phase: "confirm",
         targets: sanitized,
+        undoEntries: [],
         total: sanitized.length,
         processed: 0,
         doneCount: 0,
+        restoredCount: 0,
         stopping: false,
         retired: false,
       };
@@ -711,12 +800,14 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
       batch.phase = "running";
       batch.processed = 0;
+      batch.undoEntries = [];
       batch.stopping = false;
       ports.render();
       if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
       ports.onBatchStarted?.();
 
       const notFoundCandidates: BatchNotFoundCandidate[] = [];
+      const undoEntries: BatchUndoRecord[] = [];
       const touchedWorkspaces = new Set<string>();
       let dismissedCount = 0;
       let retired = false;
@@ -739,6 +830,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         for (const outcome of outcomes) {
           if (outcome.kind === "dismissed") {
             dismissedCount += 1;
+            if (outcome.undoEntry) undoEntries.push(outcome.undoEntry);
           } else if (outcome.kind === "not_found") {
             notFoundCandidates.push(outcome.candidate);
           }
@@ -772,10 +864,130 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
         }
       }
       batch.doneCount = dismissedCount + gone404Count;
+      batch.undoEntries = undoEntries;
       batch.phase = "done";
       ports.render();
       if (!ownsBatch(batch) || !isBatchAlive(batch)) return;
       ports.onBatchFinished?.();
+    },
+
+    async undoBatch(): Promise<void> {
+      const prev = activeBatch;
+      if (!prev || prev.phase !== "done" || prev.undoEntries.length === 0) return;
+      if (!isBatchAlive(prev)) {
+        retireBatchInternal(false);
+        return;
+      }
+
+      const entries: BatchUndoRecord[] = prev.undoEntries.map((entry) => ({
+        workspaceId: entry.workspaceId,
+        itemKind: entry.itemKind,
+        itemId: entry.itemId,
+        dismissal: entry.dismissal,
+      }));
+      prev.retired = true;
+      prev.undoEntries = [];
+
+      const attemptId = newAttemptId();
+      const currentBatchGen = (batchGen += 1);
+      const accountAlive = ports.captureAccountGuard ? ports.captureAccountGuard() : ports.isAlive;
+      const capturedPanelLifetime = ports.getPanelLifetime ? ports.getPanelLifetime() : null;
+      const wsSet = new Set<string>(prev.workspaceIds);
+      for (const entry of entries) {
+        const normWs = normId(entry.workspaceId);
+        if (normWs) wsSet.add(normWs);
+      }
+      const wsGens = new Map<string, number>();
+      for (const normWs of wsSet) {
+        wsGens.set(normWs, workspaceAnyLossGens.get(normWs) ?? 0);
+      }
+
+      const undoBatch: WaitingDismissBatchInternal = {
+        attemptId,
+        batchGen: currentBatchGen,
+        scope: prev.scope,
+        placeKey: prev.placeKey,
+        workspaceIds: wsSet,
+        accountAlive,
+        capturedGlobalGen: globalGen,
+        capturedWsGens: wsGens,
+        capturedPanelLifetime,
+        phase: "undoing",
+        targets: [],
+        undoEntries: [],
+        total: entries.length,
+        processed: 0,
+        doneCount: 0,
+        restoredCount: 0,
+        stopping: false,
+        retired: false,
+      };
+      activeBatch = undoBatch;
+      ports.render();
+      if (!ownsBatch(undoBatch)) return;
+      if (!isBatchAlive(undoBatch)) {
+        retireBatchInternal(false);
+        return;
+      }
+
+      const touchedWorkspaces = new Set<string>();
+      let restoredCount = 0;
+      let retired = false;
+
+      for (let start = 0; start < entries.length; start += BATCH_CONCURRENCY) {
+        if (!isBatchAlive(undoBatch)) {
+          retired = true;
+          break;
+        }
+        const chunk = entries.slice(start, start + BATCH_CONCURRENCY);
+        const outcomes = await Promise.all(
+          chunk.map((entry) => runBatchUndoItem(undoBatch, entry, touchedWorkspaces)),
+        );
+        if (!ownsBatch(undoBatch)) return;
+        if (!isBatchAlive(undoBatch) || outcomes.some((o) => o === "retired")) {
+          retired = true;
+          break;
+        }
+        for (const outcome of outcomes) {
+          if (outcome === "restored") restoredCount += 1;
+        }
+      }
+
+      if (!ownsBatch(undoBatch)) return;
+      if (retired || !isBatchAlive(undoBatch)) {
+        retireBatchInternal(false);
+        return;
+      }
+
+      for (const wsId of touchedWorkspaces) {
+        ports.invalidateArchived(wsId);
+      }
+      await reloadBatchWorkspaces(touchedWorkspaces);
+
+      if (!ownsBatch(undoBatch)) return;
+      if (!isBatchAlive(undoBatch)) {
+        retireBatchInternal(false);
+        return;
+      }
+
+      if (restoredCount === entries.length) {
+        const settledGen = (batchGen += 1);
+        undoBatch.retired = true;
+        undoBatch.undoEntries = [];
+        activeBatch = null;
+        ports.render();
+        if (batchGen !== settledGen || activeBatch !== null || !isBatchContextAlive(undoBatch)) return;
+        ports.onBatchUndoFinished?.();
+        return;
+      }
+
+      undoBatch.restoredCount = restoredCount;
+      undoBatch.total = entries.length;
+      undoBatch.undoEntries = [];
+      undoBatch.phase = "restored";
+      ports.render();
+      if (!ownsBatch(undoBatch) || !isBatchAlive(undoBatch)) return;
+      ports.onBatchUndoFinished?.();
     },
 
     stopBatch(): void {
@@ -792,7 +1004,7 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     async dismiss(target: WaitingDismissTarget): Promise<void> {
       if (!ports.isAlive()) return;
       if (activeBatch) {
-        if (activeBatch.phase === "running") return;
+        if ((activeBatch.phase === "running" || activeBatch.phase === "undoing") && isBatchAlive(activeBatch)) return;
         retireBatchInternal(false);
       }
       const key = `${target.slotKind}:${target.cardId}`;
@@ -917,6 +1129,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
     async undo(key: string): Promise<void> {
       const row = rows.get(key);
       if (!row || row.retired || row.pendingUndo || !ports.isAlive()) return;
+      if (activeBatch) {
+        if ((activeBatch.phase === "running" || activeBatch.phase === "undoing") && isBatchAlive(activeBatch)) return;
+        retireBatchInternal(false);
+      }
 
       const undoAttemptId = newAttemptId();
       row.pendingUndo = true;
@@ -973,6 +1189,10 @@ export function createWaitingDismissalController(ports: WaitingDismissalPorts): 
 
     async restoreArchived(item: WaitingArchivedItem): Promise<void> {
       if (item.outcomeKind !== "dismissed" || archivedRestoring.has(item.itemKey) || !ports.isAlive()) return;
+      if (activeBatch) {
+        if ((activeBatch.phase === "running" || activeBatch.phase === "undoing") && isBatchAlive(activeBatch)) return;
+        retireBatchInternal(false);
+      }
 
       const attemptId = newAttemptId();
       const entry: ArchivedRestoreEntry = {
