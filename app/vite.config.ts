@@ -8,7 +8,7 @@ declare const process: {
 };
 
 const PRODUCTION_CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.commonswarm.com wss://api.commonswarm.com; object-src 'none'; base-uri 'none'; form-action 'none'";
+  "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.commonswarm.com wss://api.commonswarm.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
 
 function escapeHtmlAttr(value: string): string {
   return value
@@ -54,27 +54,31 @@ function commonSwarmHtmlPlugin(command: 'build' | 'serve', mode: string): Plugin
     transformIndexHtml: {
       order: 'pre',
       handler(html) {
-        const lines: string[] = [];
+        let out = html;
 
         if (command === 'build') {
-          lines.push(
-            `    <meta http-equiv="Content-Security-Policy" content="${PRODUCTION_CSP}" />`,
+          const charsetTag = /(<meta\s+charset="[^"]*"\s*\/?>)/i;
+          if (!charsetTag.test(out)) {
+            throw new Error(
+              'app/index.html must declare <meta charset="..."> so Content-Security-Policy can be placed immediately after it.',
+            );
+          }
+          out = out.replace(
+            charsetTag,
+            `$1\n    <meta http-equiv="Content-Security-Policy" content="${PRODUCTION_CSP}" />`,
           );
         }
 
         const runtimeConfig = resolvePublicConfig(mode);
         if (runtimeConfig) {
-          lines.push(
+          const metaLines = [
             `    <meta name="commonswarm:url" content="${escapeHtmlAttr(runtimeConfig.url)}" />`,
             `    <meta name="commonswarm:anon-key" content="${escapeHtmlAttr(runtimeConfig.anonKey)}" />`,
-          );
+          ];
+          out = out.replace('  </head>', `${metaLines.join('\n')}\n  </head>`);
         }
 
-        if (lines.length === 0) {
-          return html;
-        }
-
-        return html.replace('  </head>', `${lines.join('\n')}\n  </head>`);
+        return out;
       },
     },
   };

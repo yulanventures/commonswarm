@@ -521,6 +521,10 @@ jobs:
         run: |
           set -o pipefail
           npm ci --prefix site
+          if [ -f app/package.json ]; then
+            npm ci --prefix app
+            npm --prefix app run build
+          fi
           (cd site && bash "$RUNNER_TEMP/install-playwright-shell.sh")
           npm --prefix site run build
           # Runner CHROME_BIN may name installed Chrome; discover the bundled shell instead.

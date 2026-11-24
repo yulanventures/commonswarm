@@ -27,3 +27,33 @@ test("the isolated check strips that block for plain HTTP and proves it on its o
   assert.ok(curls.length > 0);
   for (const line of curls) assert.match(line, /local_curl|curl --noproxy '\*'/u, line.trim());
 });
+
+test("the web server applies preview security headers and no-cache HTML strictly under /next, and check-site-caddy.sh covers them", async () => {
+  const caddy = await read("../../deploy/site/commonswarm-site.caddy");
+  const check = await read("../../deploy/site/check-site-caddy.sh");
+
+  assert.match(
+    caddy,
+    /\n\t\t@next path \/next \/next\/\*\n\t\theader @next \{\n\t\t\tContent-Security-Policy "frame-ancestors 'none'"\n\t\t\tX-Content-Type-Options "nosniff"\n\t\t\tReferrer-Policy "no-referrer"\n\t\t\}\n/u,
+  );
+  assert.match(
+    caddy,
+    /\n\t\t@nextHtml path \/next \/next\/ \/next\/index\.html \/next\/index\.html\/\n\t\theader @nextHtml Cache-Control "no-cache"\n/u,
+  );
+  // Anti-framing header must appear once, scoped solely to @next (never globally).
+  assert.equal(caddy.match(/frame-ancestors 'none'/gu)?.length, 1);
+  assert.equal(caddy.match(/X-Content-Type-Options/gu)?.length, 1);
+  assert.equal(caddy.match(/Referrer-Policy/gu)?.length, 1);
+
+  for (const expectedCase of [
+    'check /next                            200 "text/html"               file  no-cache   next',
+    'check /next/                           200 "text/html"               file  no-cache   next',
+    'check /next/assets/index-Ab12Cd34.js   200 "application/javascript"  file  immutable  next',
+    'check /next/assets/missing.Zz99Yy88.js  404 "text/plain"             plain revalidate next',
+    'check /                                200 "text/html"               file  revalidate none',
+    'check /next-other                      404 "text/html"               page  revalidate none',
+    'check /next                            404 "text/html"               page  revalidate next',
+  ]) {
+    assert.ok(check.includes(expectedCase), `check-site-caddy.sh missing case: ${expectedCase}`);
+  }
+});
