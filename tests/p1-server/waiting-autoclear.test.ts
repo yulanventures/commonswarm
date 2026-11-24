@@ -349,6 +349,7 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
   const wsId = randomUUID();
   const liveAgentId = randomUUID();
   const revokedAgentId = randomUUID();
+  const leftDmRevokedAgentId = randomUUID();
   const seatRemovedAgentId = randomUUID();
   const ownerLeftAgentId = randomUUID();
   const bobAgentId = randomUUID();
@@ -421,6 +422,7 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
         VALUES
           (${liveAgentId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'LiveScout'),
           (${revokedAgentId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'RevokedBot'),
+          (${leftDmRevokedAgentId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'LeftDmRevokedBot'),
           (${seatRemovedAgentId}::uuid, ${wsId}::uuid, ${aliceId}::uuid, 'SeatRemovedBot'),
           (${ownerLeftAgentId}::uuid, ${wsId}::uuid, ${carolId}::uuid, 'CarolBot'),
           (${bobAgentId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'BobBot')
@@ -448,13 +450,13 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
           (${privChLostId}::uuid, ${wsId}::uuid, 'user', ${bobId}::uuid, ${bobId}::uuid, 'user'),
           (${privChLostId}::uuid, ${wsId}::uuid, 'user', ${aliceId}::uuid, ${bobId}::uuid, 'user')
       `;
-      // DM conversations: Alice<->Bob (live sender) and Alice<->RevokedBot (agent later revoked after Alice leaves)
+      // DM conversations: Alice<->Bob (live sender) and Alice<->LeftDmRevokedBot (separate agent from RevokedBot so leaving this DM does not also leave the Alice<->RevokedBot DM holding revokedAgentAskId & dismissedThenRevokedAskId)
       const [dmOpen] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
         SELECT swarm.conversation_open(${wsId}::uuid, 'user', ${bobId}::uuid, ARRAY[${aliceId}]::uuid[], ARRAY[]::uuid[], false) AS r
       `;
       const actualDmConvId = dmOpen!.r.conversation.conversation_id;
       const [dmRevokedOpen] = await tx<{ r: { conversation: { conversation_id: string } } }[]>`
-        SELECT swarm.conversation_open(${wsId}::uuid, 'user', ${aliceId}::uuid, ARRAY[]::uuid[], ARRAY[${revokedAgentId}]::uuid[], false) AS r
+        SELECT swarm.conversation_open(${wsId}::uuid, 'user', ${aliceId}::uuid, ARRAY[]::uuid[], ARRAY[${leftDmRevokedAgentId}]::uuid[], false) AS r
       `;
       const actualDmRevokedConvId = dmRevokedOpen!.r.conversation.conversation_id;
 
@@ -478,7 +480,7 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
           (${archivedPrivUnreadableAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET archived private ask?', ${privChUnreadableId}::uuid, ${ts(-490)}::timestamptz, '9999-12-31T23:59:59Z'),
           (${lostPrivChAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET lost private ask?', ${privChLostId}::uuid, ${ts(-480)}::timestamptz, '9999-12-31T23:59:59Z'),
           (${leftDmAskId}::uuid, ${wsId}::uuid, ${bobId}::uuid, 'user', ${aliceId}::uuid, 'ask', 'SECRET left DM ask?', NULL, ${ts(-470)}::timestamptz, '9999-12-31T23:59:59Z'),
-          (${leftDmRevokedAskId}::uuid, ${wsId}::uuid, ${revokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'SECRET left DM revoked agent ask?', NULL, ${ts(-465)}::timestamptz, '9999-12-31T23:59:59Z'),
+          (${leftDmRevokedAskId}::uuid, ${wsId}::uuid, ${leftDmRevokedAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'SECRET left DM revoked agent ask?', NULL, ${ts(-465)}::timestamptz, '9999-12-31T23:59:59Z'),
           (${expiredAskId}::uuid, ${wsId}::uuid, ${liveAgentId}::uuid, 'agent', ${aliceId}::uuid, 'ask', 'Explicit short horizon ask?', NULL, ${ts(-460)}::timestamptz, ${ts(-400)}::timestamptz)
       `;
       await tx`
@@ -612,8 +614,8 @@ test("every Slice 2 rule clears Waiting and counts, agrees across decision_queue
       await tx`RESET ROLE`;
       await tx`SET CONSTRAINTS ALL IMMEDIATE`;
 
-      // Rule 2: revoke revokedAgentId globally, revoke seatRemovedAgentId workspace seat, and revoke Carol (owner of ownerLeftAgentId & sender of senderLeftAskId -> also triggers Rule 3!).
-      await tx`UPDATE swarm.agent_principals SET revoked_at = ${ts(-280)}::timestamptz WHERE principal_id = ${revokedAgentId}::uuid`;
+      // Rule 2: revoke revokedAgentId & leftDmRevokedAgentId globally, revoke seatRemovedAgentId workspace seat, and revoke Carol (owner of ownerLeftAgentId & sender of senderLeftAskId -> also triggers Rule 3!).
+      await tx`UPDATE swarm.agent_principals SET revoked_at = ${ts(-280)}::timestamptz WHERE principal_id IN (${revokedAgentId}::uuid, ${leftDmRevokedAgentId}::uuid)`;
       await tx`UPDATE swarm.agent_workspace_memberships SET revoked_at = ${ts(-270)}::timestamptz WHERE workspace_id = ${wsId}::uuid AND principal_id = ${seatRemovedAgentId}::uuid`;
       await tx`UPDATE swarm.memberships SET revoked_at = ${ts(-260)}::timestamptz WHERE workspace_id = ${wsId}::uuid AND user_id = ${carolId}::uuid`;
 
