@@ -419,10 +419,10 @@ describe('Adapter and real-data sidebar rendering', () => {
     expect(peopleList.querySelector('.bg-working')).toBeNull();
     expect(peopleList.querySelector('.border-offline')).toBeNull();
 
-    // "Sample data" marker is in the conversation header, not in the workspace sidebar.
-    expect(screen.getByTestId('sample-data-marker')).toHaveTextContent(
-      'Sample data',
-    );
+    // In real-data mode, "Sample data" is gone from the channel view, and an unknown
+    // route id ('launch') renders the uniform unavailable state without probing the server.
+    expect(screen.queryByTestId('sample-data-marker')).not.toBeInTheDocument();
+    expect(screen.getByTestId('conversation-unavailable')).toBeInTheDocument();
 
     // Switching workspace switches scope and fence.
     await user.click(screen.getByRole('button', { name: 'Beta workspace' }));
@@ -558,7 +558,11 @@ describe('Adapter and real-data sidebar rendering', () => {
     expect(screen.queryByText('Alice')).not.toBeInTheDocument();
 
     corruptConversations = false;
-    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await user.click(
+      within(screen.getByTestId('sidebar-error')).getByRole('button', {
+        name: 'Retry',
+      }),
+    );
 
     await waitFor(() => {
       expect(screen.getByText('general')).toBeInTheDocument();
